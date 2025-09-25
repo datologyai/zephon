@@ -1,0 +1,44 @@
+name: Linting
+
+on:
+  push:
+    branches:
+    - main
+    - release/*
+  pull_request:
+    branches:
+    - main
+    - release/*
+  workflow_call:
+  workflow_dispatch: {}
+defaults:
+  run:
+    working-directory: .
+jobs:
+  linting:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Single Python version for linting - no need for matrix
+    env:
+      PYTHON_VERSION: "3.12"
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Install dependencies
+      run: |
+        uv sync --group dev
+    - name: Run ruff format check
+      run: |
+        uv run ruff format --check . --exclude zephon/_version.py --exclude docs/
+    - name: Run ruff lint
+      run: |
+        uv run ruff check . --exclude zephon/_version.py --exclude docs/
+    - name: Run pyright type check
+      run: |
+        uv run pyright

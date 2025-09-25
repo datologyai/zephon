@@ -1,0 +1,41 @@
+name: Security
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch: {}
+
+jobs:
+  dependency-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Export locked requirements (no dev)
+      run: |
+        uv export --no-dev --no-hashes --format requirements-txt > requirements.txt
+    - name: Run safety check (no install)
+      run: |
+        uvx --from safety safety check -r requirements.txt --json --output safety-report.json || true
+    - name: Upload safety report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: safety-report
+        path: safety-report.json
+        retention-days: 30

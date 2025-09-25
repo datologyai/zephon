@@ -1,0 +1,44 @@
+name: Installation
+
+on:
+  push:
+    branches:
+    - main
+    - release/*
+  pull_request:
+    branches:
+    - main
+    - release/*
+  workflow_dispatch: {}
+jobs:
+  zephon-Install:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    env:
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    strategy:
+      matrix:
+        python_version:
+        - "3.10"
+        - "3.11"
+        - "3.12"
+        # Matrix kept for compatibility but simplified since using uv sync
+        install_version:
+        - ""
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python_version }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Setup
+      run: |
+        set -exuo pipefail
+        uv sync --all-extras
+    - name: Run import
+      id: tests
+      run: |
+        set -exuo pipefail
+        uv run python -c "import zephon"

@@ -1,0 +1,200 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zephon"
+description = "High-performance, modular, multimodal-first data loader"
+authors = [{name = "Datology Team", email = "team@datology.ai"}]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["pytorch", "datasets", "streaming", "cloud", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dynamic = ["version"]
+
+dependencies = [
+    "numpy>=1.21.5",
+]
+
+[project.optional-dependencies]
+parquet = [
+    "pyarrow>=12.0.0",  # For Parquet format support
+]
+vortex = [
+    "vortex-data>=0.52.1; python_version >= '3.11'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4,<8",
+    "ruff>=0.1.0",
+    "pyright>=1.1.0",
+    "pre-commit>=3.0.0",
+]
+test = [
+    "pytest>=8.0.0",
+]
+docs = [
+    "sphinx>=7.0.0",
+    "furo>=2023.0.0",
+    "myst-parser>=2.0.0",
+    "sphinx-copybutton>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/datologyai/zephon"
+Documentation = "https://zephon.readthedocs.io"
+Repository = "https://github.com/datologyai/zephon"
+Issues = "https://github.com/datologyai/zephon/issues"
+
+[tool.setuptools]
+packages = ["zephon"]
+
+[tool.setuptools.package-data]
+zephon = ["py.typed"]
+
+[tool.setuptools_scm]
+write_to = "zephon/_version.py"
+
+# ruff
+[tool.ruff.lint]
+select = [
+    "C4",
+    "D", # pydocstyle
+    "I", # isort for import ordering
+    "LOG",
+    "PERF",
+    "PLE",
+    "UP006",
+    "F401",
+]
+extend-safe-fixes = [
+    "UP006",
+]
+ignore = [
+    "C408",
+    "D102",
+    "D105",
+    "D107",
+    "D203", # default ignore
+    "D212", # default ignore
+    "D213", # default ignore
+    "D401",
+    "D404", # default ignore
+    "D417", # ruff only rulecode
+    "E501",
+    "E722",
+    "E741",
+    "PERF2",
+    "PERF4",
+]
+
+[tool.ruff]
+target-version = "py310"
+exclude = [
+    "build/**",
+    "docs/**",
+    "node_modules/**",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["zephon"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+include = ["zephon/**"]
+exclude = [
+    "build/**",
+    "node_modules/**",
+    "docs/**",
+    "scripts/**",
+    "packaging/**",
+]
+pythonVersion = "3.12"
+
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
+reportGeneralTypeIssues = "warning"
+reportArgumentType = "warning"
+reportAssignmentType = "warning"
+reportOptionalMemberAccess = "warning"
+reportAttributeAccessIssue = "warning"
+reportIndexIssue = "warning"
+reportCallIssue = "warning"
+reportUnnecessaryIsInstance = "warning"
+reportMissingTypeStubs = "none"
+reportIncompatibleMethodOverride = "none"
+reportIncompatibleVariableOverride = "error"
+reportUnusedImport = "error"
+reportUnusedClass = "warning"
+reportUnusedFunction = "warning"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+reportWildcardImportFromLibrary = "error"
+reportUntypedFunctionDecorator = "warning"
+reportPrivateImportUsage = "warning"
+reportUndefinedVariable = "error"
+strictParameterNoneValue = true
+reportPropertyTypeMismatch = "error"
+reportUntypedNamedTuple = "error"
+reportUnnecessaryCast = "error"
+reportInvalidTypeVarUse = "error"
+reportOverlappingOverload = "error"
+reportUninitializedInstanceVariable = "error"
+reportInvalidStringEscapeSequence = "error"
+reportMissingParameterType = "warning"
+reportCallInDefaultInitializer = "none"
+reportUnnecessaryComparison = "warning"
+reportSelfClsParameterName = "error"
+reportImplicitStringConcatenation = "warning"
+reportInvalidStubStatement = "error"
+reportIncompleteStub = "error"
+reportUnsupportedDunderAll = "error"
+reportUnusedCoroutine = "error"
+
+# Pytest
+[tool.pytest.ini_options]
+addopts = "--strict-markers -ra --tb=native --color=yes"
+markers = [
+    "world_size(val)",
+    "remote",
+]
+filterwarnings = [
+    'ignore:ExtraArgumentWarning',
+    'ignore:DistributedDefaultValueWarning',
+    'ignore:NoDistributedWarning',
+    'ignore:Deterministic mode is activated:UserWarning',
+    'ignore:SubsetNumBatchesWarning',
+    'ignore:No optimizer:UserWarning',
+    'ignore:No scheduler:UserWarning',
+    'ignore::DeprecationWarning:tensorboard',
+]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://api.pyx.dev/simple/pypi"
