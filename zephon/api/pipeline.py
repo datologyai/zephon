@@ -1,0 +1,202 @@
+# Copyright 2025 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
+"""User-facing pipeline wrapper that layers ergonomics atop core planning."""
+
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias
+
+
+class _IterableDatasetProto(Protocol):
+    def __iter__(self) -> Iterator[Any]: ...
+
+
+class _DatasetProto(_IterableDatasetProto, Protocol):
+    def __len__(self) -> int: ...
+
+    def __getitem__(self, index: int) -> Any: ...
+
+
+if TYPE_CHECKING:
+    try:
+        from torch.utils.data import Dataset as _TorchDataset
+        from torch.utils.data import IterableDataset as _TorchIterableDataset
+    except Exception:  # typing fallback when torch absent
+        _TorchIterableDataset = _IterableDatasetProto
+        _TorchDataset = _DatasetProto
+else:
+    _TorchIterableDataset = _IterableDatasetProto
+    _TorchDataset = _DatasetProto
+
+TorchIterableDatasetType: TypeAlias = _TorchIterableDataset  # pyright: ignore[reportInvalidTypeForm]
+TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidTypeForm]
+
+from zephon.core.engine import Engine, RuntimeOptions
+from zephon.core.graph import Graph, Plan
+from zephon.core.planner import Planner
+from zephon.io import IndexedShardStore
+from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
+from zephon.utils import buffered_iterable
+from zephon.work import WorkSource
+
+
+class Pipeline:
+    """Fluent builder that compiles user ops into an executable pipeline."""
+
+    def __init__(self, work_source: WorkSource, store: IndexedShardStore) -> None:
+        self.ws = work_source
+        self.store = store
+        self._graph = Graph()
+        self._plan: Plan | None = None
+        self._engine: Engine | None = None
+        self._options = RuntimeOptions()
+        self._tail = self._graph.add("fetch", FetchOp(), placement="local")
+
+    def decode_text(
+        self, parallelism: Optional[int] = None, **kwargs: Any
+    ) -> "Pipeline":
+        node = self._graph.add(
+            "decode_text",
+            DecodeText(**kwargs),
+            self._tail,
+            placement="local",
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    def tokenize(
+        self,
+        tokenizer: Any | None = None,
+        tokenizer_id: str | None = None,
+        *,
+        field: str = "text",
+        add_attention_mask: bool = True,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        op = TokenizeText(
+            tokenizer, tokenizer_id, field=field, add_attention_mask=add_attention_mask
+        )
+        node = self._graph.add(
+            "tokenize", op, self._tail, placement=placement, parallelism=parallelism
+        )
+        self._tail = node
+        return self
+
+    def materialize(
+        self, placement: str = "auto", parallelism: Optional[int] = None
+    ) -> "Pipeline":
+        node = self._graph.add(
+            "materialize",
+            Materialize(),
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    def batch(
+        self,
+        global_batch: int,
+        dp_world: int,
+        *,
+        drop_last: bool = True,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        op = Batch(global_batch, dp_world, drop_last=drop_last)
+        node = self._graph.add(
+            "batch", op, self._tail, placement=placement, parallelism=parallelism
+        )
+        self._tail = node
+        return self
+
+    def options(self, **hints: Any) -> "Pipeline":
+        for key, value in hints.items():
+            if hasattr(self._options, key):
+                setattr(self._options, key, value)
+        return self
+
+    def _ensure(self) -> None:
+        if self._plan is None:
+            plan = Planner().make_plan(self._graph)
+            self._plan = plan
+            self._engine = Engine(
+                plan, {"shard_store": self.store}, self._options, self.ws
+            )
+
+    def to_torch_dataset(self) -> TorchIterableDatasetType:
+        try:
+            from torch.utils.data import IterableDataset
+        except ModuleNotFoundError as exc:
+            msg = "to_torch_dataset requires 'torch' to be installed."
+            raise RuntimeError(msg) from exc
+
+        pipeline = self
+
+        class _Dataset(IterableDataset):
+            def __iter__(self) -> Iterator[Any]:
+                yield from pipeline
+
+        return _Dataset()
+
+    def to_indexable_torch_dataset(self) -> TorchDatasetType:
+        if not self.is_indexable:
+            raise RuntimeError(
+                "Pipeline is not indexable; cannot build a Map-style Dataset."
+            )
+        try:
+            from torch.utils.data import Dataset
+        except ModuleNotFoundError as exc:
+            msg = "to_indexable_torch_dataset requires 'torch' to be installed."
+            raise RuntimeError(msg) from exc
+
+        pipeline = self
+
+        class _Dataset(Dataset):
+            def __len__(self) -> int:
+                return len(pipeline.ws)
+
+            def __getitem__(self, index: int) -> Any:
+                sample_id = pipeline.ws.sample_id_at(index)
+                return pipeline._eval_one(sample_id)
+
+        return _Dataset()
+
+    @property
+    def is_indexable(self) -> bool:
+        self._ensure()
+        assert self._plan is not None
+        supports = getattr(self.ws, "supports_indexing", lambda: False)()
+        return self._plan.indexable and supports
+
+    def __iter__(self) -> Iterator[Any]:
+        self._ensure()
+        assert self._engine is not None
+        iterator = self._engine.build_iter()
+        final_prefetch = self._options.prefetch_batches or 0
+        if final_prefetch > 0:
+            iterator = buffered_iterable(iterator, final_prefetch)
+        try:
+            yield from iterator
+        finally:
+            self._engine.close()
+
+    def explain(self) -> str:
+        self._ensure()
+        assert self._plan is not None
+        # Compose static plan plus execution graph.
+        parts: list[str] = [self._plan.explain]
+        if self._engine is not None:
+            runtime = self._engine.explain()
+            if runtime:
+                parts.append("")
+                parts.append("Execution Graph:")
+                parts.append(runtime)
+        return "\n".join(parts)
+
+    def _eval_one(self, sample_id: Any) -> Any:
+        self._ensure()
+        assert self._engine is not None
+        return self._engine.eval_one(sample_id)
