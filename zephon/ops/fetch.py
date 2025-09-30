@@ -8,22 +8,41 @@ from typing import Optional
 from zephon.core.constants import Element, SampleId, SampleMeta, SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
-from zephon.io import IndexedShardStore
+from zephon.io import InMemoryDatasetStore, InMemoryMultiDatasetStore
 
 
 class FetchOp(DefaultFinalize):
-    """Load sample payloads from an `IndexedShardStore`."""
+    """Load sample payloads from a `MultiDatasetShardStore`."""
 
     def __init__(self, buf: Optional[Buffering] = None) -> None:
-        self._store: IndexedShardStore | None = None
+        self._store: InMemoryMultiDatasetStore | None = None
         self._buffering = buf or Buffering(max_batch=64, max_latency_ms=5)
 
     def setup(self, ctx: OpContext) -> None:
-        store = ctx.get("shard_store")
-        if store is None:
-            msg = "FetchOp requires 'shard_store' in context"
-            raise RuntimeError(msg)
-        self._store = store
+        datasets_by_id = ctx.get("datasets_by_id")
+        if not datasets_by_id:
+            raise RuntimeError(
+                "FetchOp requires 'datasets_by_id' in context (provided by WorkSource)"
+            )
+        # Build a multi-dataset store from dataset descriptors.
+        # TODO(jwills): Here we would like to build a cache-backed store like in mosaic.
+        # Not sure how the mosaic store handles multiple datasets, right now we index sampels by dataset id -> shard id -> sample id
+        # So this code is bound to change and only works for in-memory testing ATM.
+        views: dict[int, InMemoryDatasetStore] = {}
+        for ds_id, ds in dict(datasets_by_id).items():
+            backend = ds.backend  # type: ignore[attr-defined]
+            kind = backend.get("kind") if isinstance(backend, dict) else None
+            if kind == "inmem":
+                shards = backend.get("shards", {})
+                views[int(ds_id)] = InMemoryDatasetStore(shards)
+            elif kind == "mds":
+                # Not implemented yet: require mosaicml-streaming or custom backend.
+                raise RuntimeError(
+                    "MDS backend not available in FetchOp. Install a reader or implement a store."
+                )
+            else:
+                raise RuntimeError(f"Unknown dataset backend kind: {kind}")
+        self._store = InMemoryMultiDatasetStore(views)
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, parallelism=16)
@@ -34,8 +53,10 @@ class FetchOp(DefaultFinalize):
     def process_one(self, elem: Element) -> list[Element]:
         assert self._store is not None
         sample_id: SampleId = elem
-        shard = self._store.open(sample_id[0])
-        row = shard[sample_id[1]]
+        dataset_id, shard_id, sample_idx = sample_id
+        view = self._store.for_dataset(dataset_id)
+        shard = view.open(shard_id)
+        row = shard[sample_idx]
         meta = SampleMeta(sample_id=sample_id)
         return [SampleRecord(meta=meta, payload=row)]
 
@@ -43,8 +64,10 @@ class FetchOp(DefaultFinalize):
         assert self._store is not None
         outputs: list[Element] = []
         for sample_id in elems:
-            shard = self._store.open(sample_id[0])
-            row = shard[sample_id[1]]
+            dataset_id, shard_id, sample_idx = sample_id
+            view = self._store.for_dataset(dataset_id)
+            shard = view.open(shard_id)
+            row = shard[sample_idx]
             meta = SampleMeta(sample_id=sample_id)
             outputs.append(SampleRecord(meta=meta, payload=row))
         return outputs

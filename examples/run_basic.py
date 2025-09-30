@@ -6,8 +6,8 @@
 from collections import Counter
 
 from zephon.api import Pipeline as PublicPipeline
-from zephon.io import InMemoryShard, InMemoryShardStore
-from zephon.work import StaticWorkSource
+from zephon.io import Dataset, InMemoryShard
+from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 
 def build_pipeline() -> PublicPipeline:
@@ -28,11 +28,17 @@ def build_pipeline() -> PublicPipeline:
             ]
         ),
     }
-    store = InMemoryShardStore(shards)
-    index = {shard_id: len(shard) for shard_id, shard in shards.items()}
-    ws = StaticWorkSource(index, chunk_size=1, seed=42, shuffle=False)
+    ds = Dataset.from_dict("demo", shards)
+    # TODO(MaxiBoether): remove need to call .weights
+    ws = StaticMixtureWorkSource(
+        [ds],
+        mixture=MixtureSpec({"demo": 1.0}).weights,
+        chunk_size=1,
+        seed=42,
+        shuffle_shards=False,
+    )
 
-    pipe = PublicPipeline(ws, store).decode_text()
+    pipe = PublicPipeline(ws).decode_text()
 
     pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=1)
     pipe = pipe.batch(global_batch=10, dp_world=1, drop_last=False)

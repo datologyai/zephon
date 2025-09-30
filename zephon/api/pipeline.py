@@ -33,7 +33,6 @@ TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidType
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
-from zephon.io import IndexedShardStore
 from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
 from zephon.utils import buffered_iterable
 from zephon.work import WorkSource
@@ -42,9 +41,8 @@ from zephon.work import WorkSource
 class Pipeline:
     """Fluent builder that compiles user ops into an executable pipeline."""
 
-    def __init__(self, work_source: WorkSource, store: IndexedShardStore) -> None:
+    def __init__(self, work_source: WorkSource) -> None:
         self.ws = work_source
-        self.store = store
         self._graph = Graph()
         self._plan: Plan | None = None
         self._engine: Engine | None = None
@@ -122,9 +120,7 @@ class Pipeline:
         if self._plan is None:
             plan = Planner().make_plan(self._graph)
             self._plan = plan
-            self._engine = Engine(
-                plan, {"shard_store": self.store}, self._options, self.ws
-            )
+            self._engine = Engine(plan, {}, self._options, self.ws)
 
     def to_torch_dataset(self) -> TorchIterableDatasetType:
         try:

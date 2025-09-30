@@ -6,9 +6,10 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+DatasetId = int
 ShardId = int
 LocalSampleId = int
-SampleId = tuple[ShardId, LocalSampleId]
+SampleId = tuple[DatasetId, ShardId, LocalSampleId]
 
 
 @dataclass(frozen=True)

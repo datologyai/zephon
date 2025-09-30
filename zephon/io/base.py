@@ -3,7 +3,7 @@
 
 """Shard interfaces and in-memory helpers for feeding pipelines."""
 
-from typing import Protocol
+from typing import Mapping, Protocol
 
 
 class RandomAccessShard(Protocol):
@@ -16,10 +16,16 @@ class RandomAccessShard(Protocol):
     def close(self) -> None: ...
 
 
-class IndexedShardStore(Protocol):
-    """Factory that opens shards by identifier."""
+class DatasetShardView(Protocol):
+    """Shards belonging to a specific dataset."""
 
     def open(self, shard_id: int) -> RandomAccessShard: ...
+
+
+class MultiDatasetShardStore(Protocol):
+    """Shard store that spans multiple datasets."""
+
+    def for_dataset(self, dataset_id: int) -> DatasetShardView: ...
 
 
 class InMemoryShard:
@@ -38,11 +44,21 @@ class InMemoryShard:
         return None
 
 
-class InMemoryShardStore:
-    """Dictionary-backed shard store exposing the protocol surface."""
+class InMemoryDatasetStore(DatasetShardView):
+    """Dictionary-backed shard view for a single dataset."""
 
-    def __init__(self, shards: dict[int, InMemoryShard]):
-        self._shards = shards
+    def __init__(self, shards: Mapping[int, InMemoryShard]):
+        self._shards = dict(shards)
 
     def open(self, shard_id: int) -> RandomAccessShard:
         return self._shards[shard_id]
+
+
+class InMemoryMultiDatasetStore(MultiDatasetShardStore):
+    """Simple multi-dataset store backed by in-memory shard views."""
+
+    def __init__(self, datasets: Mapping[int, DatasetShardView]):
+        self._datasets = dict(datasets)
+
+    def for_dataset(self, dataset_id: int) -> DatasetShardView:
+        return self._datasets[dataset_id]

@@ -9,7 +9,12 @@ from typing import Any, Iterable, Iterator, Optional
 from zephon.core.constants import Element, SampleId
 from zephon.core.graph import Plan
 from zephon.runners.threads import ThreadStageRunner
-from zephon.work import WorkSource
+from zephon.work import (
+    ComponentOrder,
+    MixtureReadConfig,
+    MixtureReadMode,
+    WorkSource,
+)
 
 
 def inside_torch_worker() -> bool:
@@ -35,6 +40,11 @@ class RuntimeOptions:
     prefetch_batches: int | None = None
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
+    mixture_config: MixtureReadConfig | None = None
+    mixture_mode: MixtureReadMode | str | None = None
+    mixture_seed: int | None = None
+    mixture_precompute: bool = False
+    mixture_within_component: ComponentOrder | str = ComponentOrder.AS_IS
 
 
 class Engine:
@@ -45,7 +55,9 @@ class Engine:
     ) -> None:
         """Initialize stage runners and prepare to stream work items."""
         self._plan = plan
-        self._ctx = ctx
+        base_ctx = dict(ctx)
+        base_ctx["datasets_by_id"] = work.datasets_by_id
+        self._ctx = base_ctx
         self._opts = opts
         if self._opts.deterministic:
             # TODO(MaxiBoether): there most likely is a difference between determinism (same setting) and elastic scalability.
@@ -54,6 +66,7 @@ class Engine:
             raise NotImplementedError("Deterministic mode not implemented yet.")
 
         self._work = work
+        self._mixture_config = self._resolve_mixture_config()
         self._runners: list[Any] = []
         self._build_runners()
 
@@ -162,23 +175,49 @@ class Engine:
             else:
                 raise ValueError(f"Unknown runner '{chosen}'")
 
+    def _resolve_mixture_config(self) -> MixtureReadConfig | None:
+        # TODO(MaxiBoether): Do we need a resolve function?
+        cfg = self._opts.mixture_config
+        if cfg is not None:
+            return cfg
+        within = self._opts.mixture_within_component
+        within_component = ComponentOrder(within)
+        mode_opt = self._opts.mixture_mode
+        mode_enum: MixtureReadMode | None
+        if isinstance(mode_opt, str):
+            mode_enum = MixtureReadMode(mode_opt)
+        else:
+            mode_enum = mode_opt
+        if (
+            mode_enum is None
+            and self._opts.mixture_seed is None
+            and not self._opts.mixture_precompute
+            and within_component is ComponentOrder.AS_IS
+        ):
+            return None
+        return MixtureReadConfig(
+            mode=mode_enum,
+            seed=self._opts.mixture_seed,
+            precompute=self._opts.mixture_precompute,
+            within_component=within_component,
+        )
+
     def _source_stream(self) -> Iterator[Element]:
         """Yield sample identifiers from the backing work source."""
         while True:
             chunk = self._work.next_chunk()
+            # TODO(MaxiBoether): potentially forward hint about shards somehow?
             if chunk is None:
                 break
-            for sample_id in chunk.sample_ids:
-                yield sample_id
+
+            yield from chunk.iter_samples(self._mixture_config)
 
     def build_iter(self) -> Iterator[Element]:
         """Return an iterator that threads the work stream through all stages."""
-        # TODO(MaxiBoether): Change the way we iterate over the chunks to respect (implicit) mixtures and maybe implement sub-chunk concept for parallel data fetching.
         stream_iter: Iterable[Element] = self._source_stream()
         for runner in self._runners:  # Construct overall pipeline by chaining runners
             stream_iter = runner.run(stream_iter)
-        for element in stream_iter:
-            yield element
+        yield from stream_iter
 
     def eval_one(self, sample_id: SampleId) -> Element:
         """Synchronously evaluate a single element through every stage runner."""

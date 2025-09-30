@@ -4,15 +4,21 @@
 """In-memory shard abstractions used by Zephon examples and tests."""
 
 from zephon.io.base import (
-    IndexedShardStore,
+    DatasetShardView,
+    InMemoryDatasetStore,
+    InMemoryMultiDatasetStore,
     InMemoryShard,
-    InMemoryShardStore,
+    MultiDatasetShardStore,
     RandomAccessShard,
 )
+from zephon.io.dataset import Dataset
 
 __all__ = [
-    "IndexedShardStore",
+    "Dataset",
+    "DatasetShardView",
+    "InMemoryDatasetStore",
+    "InMemoryMultiDatasetStore",
     "InMemoryShard",
-    "InMemoryShardStore",
+    "MultiDatasetShardStore",
     "RandomAccessShard",
 ]
