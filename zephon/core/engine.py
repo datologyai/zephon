@@ -10,9 +10,7 @@ from zephon.core.constants import Element, SampleId
 from zephon.core.graph import Plan
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
-    ComponentOrder,
     MixtureReadConfig,
-    MixtureReadMode,
     WorkSource,
 )
 
@@ -41,10 +39,6 @@ class RuntimeOptions:
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
     mixture_config: MixtureReadConfig | None = None
-    mixture_mode: MixtureReadMode | str | None = None
-    mixture_seed: int | None = None
-    mixture_precompute: bool = False
-    mixture_within_component: ComponentOrder | str = ComponentOrder.AS_IS
 
 
 class Engine:
@@ -66,7 +60,6 @@ class Engine:
             raise NotImplementedError("Deterministic mode not implemented yet.")
 
         self._work = work
-        self._mixture_config = self._resolve_mixture_config()
         self._runners: list[Any] = []
         self._build_runners()
 
@@ -175,33 +168,6 @@ class Engine:
             else:
                 raise ValueError(f"Unknown runner '{chosen}'")
 
-    def _resolve_mixture_config(self) -> MixtureReadConfig | None:
-        # TODO(MaxiBoether): Do we need a resolve function?
-        cfg = self._opts.mixture_config
-        if cfg is not None:
-            return cfg
-        within = self._opts.mixture_within_component
-        within_component = ComponentOrder(within)
-        mode_opt = self._opts.mixture_mode
-        mode_enum: MixtureReadMode | None
-        if isinstance(mode_opt, str):
-            mode_enum = MixtureReadMode(mode_opt)
-        else:
-            mode_enum = mode_opt
-        if (
-            mode_enum is None
-            and self._opts.mixture_seed is None
-            and not self._opts.mixture_precompute
-            and within_component is ComponentOrder.AS_IS
-        ):
-            return None
-        return MixtureReadConfig(
-            mode=mode_enum,
-            seed=self._opts.mixture_seed,
-            precompute=self._opts.mixture_precompute,
-            within_component=within_component,
-        )
-
     def _source_stream(self) -> Iterator[Element]:
         """Yield sample identifiers from the backing work source."""
         while True:
@@ -210,7 +176,7 @@ class Engine:
             if chunk is None:
                 break
 
-            yield from chunk.iter_samples(self._mixture_config)
+            yield from chunk.iter_samples(self._opts.mixture_config)
 
     def build_iter(self) -> Iterator[Element]:
         """Return an iterator that threads the work stream through all stages."""

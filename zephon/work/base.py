@@ -3,8 +3,6 @@
 
 """Abstract base definitions for work sources and chunks."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterator, Mapping, MutableMapping, Protocol, Sequence
@@ -15,7 +13,6 @@ from zephon.work.mixture import MixtureSpec
 
 MixtureComponent = str
 SamplesPerComponent = MutableMapping[MixtureComponent, list[SampleId]]
-MixtureWeights = dict[MixtureComponent, float]
 
 
 class MixtureReadMode(str, Enum):
@@ -36,7 +33,7 @@ class ComponentOrder(str, Enum):
 class MixtureReadConfig:
     """Reader configuration controlling deterministic traversal of a chunk."""
 
-    mode: MixtureReadMode | None = None
+    mode: MixtureReadMode = MixtureReadMode.WEIGHTED_ROUND_ROBIN
     seed: int | None = None
     precompute: bool = False  # Whether to pre-compute sample order. Might cause performance spikes when requesting the first item.
     within_component: ComponentOrder = (
@@ -44,14 +41,12 @@ class MixtureReadConfig:
     )  # how to yield samples within the same component.
 
 
-@dataclass(frozen=True)
-class _ResolvedMixtureConfig:  # TODO(MaxiBoether): can we dynamically define this class
-    """Internal variant of ``MixtureReadConfig`` with defaults resolved."""
-
-    mode: MixtureReadMode | None
-    seed: int | None
-    precompute: bool
-    within_component: ComponentOrder
+@dataclass
+class _Bucket:
+    name: str
+    items: Sequence[SampleId]  # for trivial concatenate
+    it: Iterator[SampleId]  # for streaming
+    weight: float
 
 
 @dataclass
@@ -59,40 +54,20 @@ class WorkChunk:
     """Bundle of sample identifiers handed to the engine for processing.
 
     ``components`` stores each mixture component (for example, ``"German"``) and
-    the ordered sample identifiers that belong to it.  The insertion order of the
-    mapping is used as a stable tie-breaker whenever behaviour depends on
-    component ordering (for instance, within the weighted round-robin iterator).
+    the ordered sample identifiers that belong to it.  Mapping insertion order is used
+    as a stable tie-breaker whenever behaviour depends on component ordering.
     """
 
     components: SamplesPerComponent
     seed: int | None = None
-    explicit_mixture: MixtureWeights | None = None
 
     ### INTERNAL ATTRIBUTES ###
-    _mixture_cache: MixtureWeights | None = field(init=False, default=None, repr=False)
     _order_cache: list[SampleId] | None = field(init=False, default=None, repr=False)
-    _order_cache_config: _ResolvedMixtureConfig | None = field(
-        init=False, default=None, repr=False
-    )
-    _shards_cache: set[tuple[int, int]] | None = field(
-        init=False, default=None, repr=False
-    )
+    _order_cache_key: tuple | None = field(init=False, default=None, repr=False)
     _component_order: tuple[MixtureComponent, ...] = field(init=False, repr=False)
     _total_samples: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        components: dict[MixtureComponent, list[SampleId]] = {}
-        for (
-            component,
-            sample_ids,
-        ) in (
-            self.components.items()
-        ):  # TODO(MaxiBoether): why? doesnt this literally clone the list
-            components[component] = list(sample_ids)
-        self.components = components
-        # NOTE: component iteration order follows the original mapping insertion
-        # order emitted by the WorkSource.  Consumers rely on this for
-        # deterministic tie-breaking when weights alone are insufficient.
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
 
@@ -103,269 +78,221 @@ class WorkChunk:
         yield from self.iter_samples()
 
     @property
-    def mixture(self) -> MixtureWeights:
-        if self._mixture_cache is None:
-            self._mixture_cache = self._compute_mixture()
-        return dict(self._mixture_cache)  # returning a copy necessary?
+    def mixture(self) -> Mapping[str, float]:
+        """Return normalized mixture weights for the *active* components."""
+        comps = [c for c in self._component_order if self.components.get(c)]
+        if not comps:
+            return {}
 
-    @property
-    def shards(self) -> set[tuple[int, int]]:
-        if self._shards_cache is None:
-            shard_keys: set[tuple[int, int]] = set()
-            for sample_ids in self.components.values():
-                shard_keys.update(
-                    (sample_id[0], sample_id[1]) for sample_id in sample_ids
-                )
-            self._shards_cache = shard_keys
-        return set(self._shards_cache)
+        # Otherwise derive from counts (skip empty buckets so MixtureSpec stays >0).
+        counts = {c: len(self.components[c]) for c in comps}
+        return MixtureSpec(counts).normalized
 
-    @property
-    def sample_ids(self) -> list[SampleId]:
-        return self.materialize_order()
+    def _resolve_config(self, config: MixtureReadConfig | None) -> MixtureReadConfig:
+        """Return an effective config with defaults applied (no mutation of input)."""
+        base = config or MixtureReadConfig()
+        # Fill seed from chunk if missing.
+        seed = base.seed if base.seed is not None else self.seed
+        # If you want a dynamic default (None for single-component), keep mode as-is here
+        # and change MixtureReadConfig.mode to Optional[MixtureReadMode] with default None.
+        return MixtureReadConfig(
+            mode=base.mode,
+            seed=seed,
+            precompute=base.precompute,
+            within_component=base.within_component,
+        )
 
     def iter_samples(
         self, config: MixtureReadConfig | None = None
     ) -> Iterator[SampleId]:
-        resolved = self._resolve_config(config)  # should we cache this?
-        if resolved.precompute:
-            yield from self.materialize_order(config)
-            return
-        yield from self._iter_streaming(resolved)
+        cfg = self._resolve_config(config)
 
-    def materialize_order(
-        self, config: MixtureReadConfig | None = None
-    ) -> list[SampleId]:  # maybe this should be a cached property instead?
-        resolved = self._resolve_config(config, force_precompute=True)
-        if self._order_cache is not None and self._order_cache_config == resolved:
-            return list(self._order_cache)  # copy necesary?
-        order = list(self._iter_streaming(resolved))
+        if cfg.precompute:
+            yield from self.materialize_order(cfg)
+            return
+
+        if self._total_samples == 0:
+            return
+
+        yield from self._iter_streaming(cfg)
+
+    def materialize_order(self, config: MixtureReadConfig) -> list[SampleId]:
+        key = (config.mode, config.seed, config.within_component)
+
+        if self._order_cache is not None and self._order_cache_key == key:
+            return self._order_cache
+
+        # Populate cache
+        no_precompute_cfg = MixtureReadConfig(
+            mode=config.mode,
+            seed=config.seed,
+            precompute=False,
+            within_component=config.within_component,
+        )  # avoid recursion
+        order = list(self.iter_samples(no_precompute_cfg))
         self._order_cache = order
-        self._order_cache_config = resolved
-        return list(order)
+        self._order_cache_key = key
+
+        return self._order_cache
 
     def sample_at(
         self, index: int, config: MixtureReadConfig | None = None
     ) -> SampleId:
-        order = self.materialize_order(config)
-        return order[index]
+        cfg = self._resolve_config(config)
+        return self.materialize_order(cfg)[index]
 
-    def _resolve_config(
-        self,
-        config: MixtureReadConfig | None,
-        *,
-        force_precompute: bool = False,
-    ) -> _ResolvedMixtureConfig:
-        default_mode = (
-            MixtureReadMode.WEIGHTED_ROUND_ROBIN
-            if self._has_multiple_components
-            else None
-        )
-        cfg = config or MixtureReadConfig()
-        mode = cfg.mode if cfg.mode is not None else default_mode
-        seed = cfg.seed if cfg.seed is not None else self.seed
-        precompute = cfg.precompute or force_precompute
-        return _ResolvedMixtureConfig(
-            mode=mode,
-            seed=seed,
-            precompute=precompute,
-            within_component=cfg.within_component,
-        )
-
-    def _iter_streaming(self, config: _ResolvedMixtureConfig) -> Iterator[SampleId]:
+    def _iter_streaming(self, config: MixtureReadConfig) -> Iterator[SampleId]:
         if not self._total_samples:
             return
-        buckets = self._prepare_buckets(config)
+
+        buckets = self._build_buckets(config.seed, config.within_component)
         if not buckets:
             return
-        if config.mode is None:
-            if not self._has_multiple_components:
-                print(
-                    "You have more than 1 component. Are you sure you want trivial emitting?"
-                )
-            yield from self._emit_trivial(buckets)
-        elif config.mode is MixtureReadMode.WEIGHTED_RANDOM:
+
+        # Single-bucket fast path (covers both None/WRR/Random cases)
+        if len(buckets) == 1:
+            yield from buckets[0].items
+            return
+
+        if config.mode is MixtureReadMode.WEIGHTED_RANDOM:
             yield from self._emit_weighted_random(buckets, config.seed)
         elif config.mode is MixtureReadMode.WEIGHTED_ROUND_ROBIN:
             yield from self._emit_weighted_round_robin(buckets)
         else:
             raise ValueError(f"Unsupported mixture read mode: {config.mode}")
 
-    def _prepare_buckets(
-        self, config: _ResolvedMixtureConfig
-    ) -> list[tuple[MixtureComponent, Sequence[SampleId], float]]:
-        buckets: list[tuple[MixtureComponent, Sequence[SampleId], float]] = []
-        mixture = self.mixture
-        seed = config.seed
-        for position, component in enumerate(self._component_order):
-            items = self.components.get(component, [])
+    def _build_buckets(
+        self,
+        seed: int | None,
+        within_component: ComponentOrder,
+    ) -> list[_Bucket]:
+        from random import Random
+
+        mix = self.mixture
+        if not mix:
+            return []
+
+        rng = Random()
+        buckets: list[_Bucket] = []
+        for pos, name in enumerate(self._component_order):
+            items = self.components.get(name, [])
             if not items:
                 continue
-            if config.within_component is ComponentOrder.SHUFFLE:
-                from random import Random
+            seq: list[SampleId]
 
+            if within_component is ComponentOrder.SHUFFLE:
+                seq = list(items)
                 effective_seed = seed if seed is not None else self.seed
-                rand = Random()
                 if effective_seed is not None:
-                    rand.seed((effective_seed << 16) + position)
-                shuffled = list(items)
-                rand.shuffle(shuffled)
-                entries: Sequence[SampleId] = shuffled
+                    rng.seed((effective_seed << 16) + pos)
+                rng.shuffle(seq)
             else:
-                entries = items
-            weight = mixture.get(component, 0.0)
-            buckets.append((component, entries, weight))
-        return buckets
+                seq = items
 
-    def _emit_trivial(
-        self, buckets: list[tuple[MixtureComponent, Sequence[SampleId], float]]
-    ) -> Iterator[SampleId]:
-        for _, items, _ in buckets:
-            yield from items
+            buckets.append(
+                _Bucket(name=name, items=seq, it=iter(seq), weight=mix[name])
+            )
+
+        return buckets
 
     # further modes: just random next sample (random without weights), trivial round robin
     def _emit_weighted_random(
-        self,
-        buckets: list[tuple[MixtureComponent, Sequence[SampleId], float]],
-        seed: int | None,
+        self, buckets: list[_Bucket], seed: int | None
     ) -> Iterator[SampleId]:
         from random import Random
 
-        rng = Random(seed)
-        positions = {component: 0 for component, _, _ in buckets}
-        active = [
-            (component, list(items), weight)
-            for component, items, weight in buckets
-            if items and weight > 0.0
-        ]
+        active = list(buckets)
         if not active:
-            yield from self._emit_trivial(buckets)
             return
-        total_weight = sum(weight for _, _, weight in active)
+
+        weights = [b.weight for b in active]
+        rng = Random(seed)
+
         while active:
-            # this is basically a random choice with weights we can simplify this.
-            pick = rng.random() * total_weight
-            cumulative = 0.0
-            chosen_index = 0
-            for idx, (component, _, weight) in enumerate(active):
-                cumulative += weight
-                if pick <= cumulative:
-                    chosen_index = idx
-                    break
-            # we could similar to mixtera have one iterator per bucket and just yield the next one instead of keeping track of offsets here
-            component, items, weight = active[chosen_index]
-            offset = positions[component]
-            yield items[offset]
-            offset += 1
-            positions[component] = offset
-            if offset >= len(items):
-                total_weight -= weight
-                del active[chosen_index]
-                positions.pop(component, None)
-                if total_weight <= 0:
-                    active = []
-            if not active:
-                break
+            # pick a bucket index according to its weight
+            idx = rng.choices(range(len(active)), weights=weights, k=1)[0]
+            b = active[idx]
+            try:
+                yield next(b.it)
+            except StopIteration:
+                # drop exhausted bucket and its weight
+                del active[idx]
+                del weights[idx]
 
-    def _emit_weighted_round_robin(
-        self,
-        buckets: list[tuple[MixtureComponent, Sequence[SampleId], float]],
-    ) -> Iterator[SampleId]:
-        import math
+    def _emit_weighted_round_robin(self, buckets: list[_Bucket]) -> Iterator[SampleId]:
+        """
+        Smooth Weighted Round Robin (SWRR), streaming.
 
-        positions = {component: 0 for component, _, _ in buckets}
-        active_components: list[tuple[MixtureComponent, Sequence[SampleId], float]] = [
-            (component, items, weight)
-            for component, items, weight in buckets
-            if items and weight > 0.0
-        ]
-        if not active_components:
-            yield from self._emit_trivial(buckets)
+        Intuition:
+        - Each component 'c' has a fixed weight W[c].
+        - We maintain a score C[c] (starts at 0). On each step:
+            1) For all active c: C[c] += W[c]
+            2) Pick component k with maximum C[k] (ties → earlier component wins)
+            3) Emit one sample from k
+            4) C[k] -= sum(W[active])   # subtract *total* so k's score drops back
+
+        Properties:
+        - Over time, emits in proportion to weights.
+        - Deterministic given insertion order and inputs.
+        - O(N) work per emitted sample (N = #active components).
+
+        Edge cases:
+        - If a bucket runs out of items, we remove it and decrease the total weight.
+        - Floating point drift can make 'total' slightly negative; we clamp to 0.0.
+        - If total reaches 0 (e.g., only empty/removed weights remain), we just drain
+            the remaining iterators in insertion order.
+        """
+        # Filter/fast paths
+        active = [b for b in buckets if b.weight > 0.0]
+        if not active:
             return
-        weights = {component: weight for component, _, weight in active_components}
-        items_lookup = {component: items for component, items, _ in active_components}
-        current = dict.fromkeys(weights, 0.0)
-        total_weight = sum(weights.values())
-        order = [component for component, _, _ in buckets if component in weights]
-        if total_weight <= 0:
-            yield from self._emit_trivial(buckets)
+        if len(active) == 1:
+            yield from active[0].items
             return
+
+        # Stable tie-breaker: remember original order index
+        index = {b.name: i for i, b in enumerate(active)}
+
+        # Per-component state
+        weights = {b.name: float(b.weight) for b in active}
+        iters = {b.name: b.it for b in active}
+        current = {b.name: 0.0 for b in active}
+
+        total = sum(weights.values())
+        # (Should be > 0.0 because we filtered, assert defensively)
+        assert total > 0.0, "No positive weights in WRR"
+
         while weights:
-            chosen_component: MixtureComponent | None = None
-            chosen_value = -math.inf
-            for component in order:
-                if component not in weights:
-                    continue
-                current_value = current[component] + weights[component]
-                current[component] = current_value
-                if current_value > chosen_value:
-                    chosen_component = component
-                    chosen_value = current_value
-            assert chosen_component is not None
-            current[chosen_component] -= total_weight
-            items = items_lookup[chosen_component]
-            offset = positions[chosen_component]
-            yield items[offset]
-            offset += 1
-            positions[chosen_component] = offset
-            if offset >= len(items):
-                weight = weights.pop(chosen_component)
-                current.pop(chosen_component, None)
-                total_weight -= weight
-                items_lookup.pop(chosen_component, None)
-                active_components = [
-                    bucket
-                    for bucket in active_components
-                    if bucket[0] != chosen_component
-                ]
-                if total_weight <= 0:
-                    for component in order:
-                        if component in weights:
-                            remaining = items_lookup.get(
-                                component, self.components[component]
-                            )
-                            yield from remaining[positions[component] :]
+            # 1) Everyone accrues their weight
+            for name in list(weights.keys()):
+                current[name] += weights[name]
+
+            # 2) Pick the argmax score; break ties by original order (smaller index wins)
+            chosen_name = max(weights.keys(), key=lambda n: (current[n], -index[n]))
+
+            # 3) Emit one item; reduce its score by the total
+            current[chosen_name] -= total
+            it = iters[chosen_name]
+            try:
+                yield next(it)
+                continue  # still active → next round
+            except StopIteration:
+                # 4) Exhausted: remove chosen bucket
+                w = weights.pop(chosen_name)
+                iters.pop(chosen_name, None)
+                current.pop(chosen_name, None)
+                total -= w
+
+                # Guard against tiny negative due to FP rounding
+                if total < 0.0:
+                    total = 0.0
+
+                # If no total weight left, just drain what's left linearly
+                if total == 0.0:
+                    for n in sorted(iters.keys(), key=lambda n: index[n]):
+                        for x in iters[n]:
+                            yield x
                     break
-
-    def _compute_mixture(self) -> MixtureWeights:
-        if self.explicit_mixture is not None:
-            spec = MixtureSpec(self.explicit_mixture)
-            components = list(self._component_order)
-            spec.validate_for(components)
-            mixture = spec.normalized_for(components)
-            # Ensure zero-weight components don't carry samples.
-            zero_components = {
-                component
-                for component in components
-                if mixture.get(component, 0.0) == 0.0 and self.components.get(component)
-            }
-            if zero_components:
-                missing = ", ".join(sorted(zero_components))
-                raise ValueError(
-                    "Explicit mixture weight must be positive for components with samples: "
-                    + missing
-                )
-            return {
-                component: mixture[component]
-                for component in components
-                if component in mixture and mixture[component] > 0.0
-            }  # i dont think this manual handling here is necessary if we assume that normalize already validates and fixes the mixture.
-        counts = {
-            component: len(self.components.get(component, ()))
-            for component in self._component_order
-        }
-        total_count = sum(counts.values())
-        if total_count == 0:
-            return {}
-        return {
-            component: counts[component] / total_count
-            for component in self._component_order
-            if counts[component] > 0
-        }  # cant we use the normalize logic here as well? i think we can drastically simplify this.
-
-    @property  # cached?
-    def _has_multiple_components(self) -> bool:
-        active = sum(1 for items in self.components.values() if items)
-        return active > 1
 
 
 class WorkSource(Protocol):
