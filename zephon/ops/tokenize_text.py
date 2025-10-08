@@ -37,7 +37,7 @@ class TokenizeText(DefaultFinalize):
                 self.tok = _fallback_tokenizer()
             else:
                 try:
-                    from transformers import AutoTokenizer  # type: ignore
+                    from transformers import AutoTokenizer
 
                     self.tok = AutoTokenizer.from_pretrained(self.tokenizer_id)
                 except Exception as exc:  # noqa: BLE001

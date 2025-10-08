@@ -6,7 +6,7 @@
 import queue
 import threading
 from collections.abc import Iterable, Iterator
-from typing import Generator, TypeVar
+from typing import Generator, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -16,8 +16,11 @@ def buffered_iterable(source: Iterable[T], capacity: int) -> Iterator[T]:
     if capacity <= 0:
         return iter(source)
 
-    q: "queue.Queue[object]" = queue.Queue(maxsize=capacity)
-    sentinel = object()
+    class _Sentinel:
+        pass
+
+    sentinel: _Sentinel = _Sentinel()
+    q: "queue.Queue[T | _Sentinel]" = queue.Queue(maxsize=capacity)
     stop_event = threading.Event()
     exc_holder: list[BaseException] = []
 
@@ -53,7 +56,7 @@ def buffered_iterable(source: Iterable[T], capacity: int) -> Iterator[T]:
                 item = q.get()
                 if item is sentinel:
                     break
-                yield item  # type: ignore[misc]
+                yield cast(T, item)
         finally:
             stop_event.set()
             thread.join()

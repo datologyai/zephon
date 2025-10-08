@@ -3,8 +3,6 @@
 
 """Mixture-aware work source with shard-respecting traversal."""
 
-from __future__ import annotations
-
 import math
 import random
 import warnings

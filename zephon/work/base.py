@@ -310,5 +310,5 @@ class WorkSource(Protocol):
 
     def sample_id_at(self, index: int) -> SampleId: ...
 
-    @property  # TODO(MaxiBoether): Can we use this decorator in a Protocol?
+    @property
     def datasets_by_id(self) -> Mapping[int, Dataset]: ...

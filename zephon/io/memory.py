@@ -1,31 +1,8 @@
-# Copyright 2025 DatologyAI
-# SPDX-License-Identifier: Apache-2.0
+"""In-memory implementations of shard protocols."""
 
-"""Shard interfaces and in-memory helpers for feeding pipelines."""
+from typing import Mapping
 
-from typing import Mapping, Protocol
-
-
-class RandomAccessShard(Protocol):
-    """A shard that supports len/index style random access."""
-
-    def __getitem__(self, index: int) -> dict[str, object]: ...
-
-    def __len__(self) -> int: ...
-
-    def close(self) -> None: ...
-
-
-class DatasetShardView(Protocol):
-    """Shards belonging to a specific dataset."""
-
-    def open(self, shard_id: int) -> RandomAccessShard: ...
-
-
-class MultiDatasetShardStore(Protocol):
-    """Shard store that spans multiple datasets."""
-
-    def for_dataset(self, dataset_id: int) -> DatasetShardView: ...
+from .protocols import DatasetShardView, MultiDatasetShardStore, RandomAccessShard
 
 
 class InMemoryShard:
@@ -47,7 +24,7 @@ class InMemoryShard:
 class InMemoryDatasetStore(DatasetShardView):
     """Dictionary-backed shard view for a single dataset."""
 
-    def __init__(self, shards: Mapping[int, InMemoryShard]):
+    def __init__(self, shards: Mapping[int, RandomAccessShard]):
         self._shards = dict(shards)
 
     def open(self, shard_id: int) -> RandomAccessShard:
@@ -62,3 +39,10 @@ class InMemoryMultiDatasetStore(MultiDatasetShardStore):
 
     def for_dataset(self, dataset_id: int) -> DatasetShardView:
         return self._datasets[dataset_id]
+
+
+__all__ = [
+    "InMemoryDatasetStore",
+    "InMemoryMultiDatasetStore",
+    "InMemoryShard",
+]

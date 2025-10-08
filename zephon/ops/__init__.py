@@ -9,7 +9,6 @@ from zephon.ops.fetch import FetchOp
 from zephon.ops.materialize import Materialize
 from zephon.ops.tokenize_text import TokenizeText
 
-# TODO(MaxiBoether): Shuffle buffer
 __all__ = [
     "Batch",
     "DecodeText",

@@ -27,6 +27,7 @@ dynamic = ["version"]
 
 dependencies = [
     "numpy>=1.21.5",
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]

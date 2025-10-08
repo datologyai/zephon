@@ -29,10 +29,9 @@ def build_pipeline() -> PublicPipeline:
         ),
     }
     ds = Dataset.from_dict("demo", shards)
-    # TODO(MaxiBoether): remove need to call .weights
     ws = StaticMixtureWorkSource(
         [ds],
-        mixture=MixtureSpec({"demo": 1.0}).weights,
+        mixture=MixtureSpec({"demo": 1.0}),
         chunk_size=1,
         seed=42,
         shuffle_shards=False,

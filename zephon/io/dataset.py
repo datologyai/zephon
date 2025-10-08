@@ -1,19 +1,13 @@
-"""User-facing dataset descriptors and detectors.
+"""User-facing dataset descriptors and detectors."""
 
-Datasets in Zephon are lightweight descriptors — not readers. They expose
-structural information (name, optional path, shard_index) and backend metadata
-that the runtime uses later to construct an internal shard store inside the
-FetchOp. A ``Dataset`` never performs IO or opens shards by itself.
-"""
-
-from __future__ import annotations
-
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from zephon.io.base import RandomAccessShard
+from zephon.io.formats import ensure_builtin_formats
+from zephon.io.formats.base import get_format
+from zephon.io.protocols import RandomAccessShard
+from zephon.io.storage import LocalFSBackend
 
 
 @dataclass(frozen=True)
@@ -28,7 +22,8 @@ class Dataset:
     - ``path``: original filesystem path if file-backed, otherwise ``None``
 
     Backend kinds used by the internal store builder:
-    - "mds": {"path": str}
+    - "mds": {"path": str, "shards": metadata}
+    - "jsonl": {"path": str, "shards": metadata}
     - "inmem": {"shards": dict[int, RandomAccessShard]}
 
     Note: this class does not expose any method to fetch rows; IO is delegated
@@ -52,72 +47,50 @@ class Dataset:
             path: Filesystem directory containing the dataset.
             fmt: Optional explicit format. When ``None``, auto-detects.
 
-        Supported formats: ``"mds"`` (Mosaic MDS). Detection checks for
-        ``index.json`` under ``path``. The method parses ``index.json`` to
-        materialize the ``shard_index`` but does not instantiate any reader.
+        Supported formats:
+        - ``"mds"`` directories containing ``index.json``
+        - ``"jsonl"`` directories where ``*.jsonl`` files act as shards
 
         Returns:
-            Dataset: a descriptor with ``backend={"kind": "mds", "path": path}``.
+            Dataset: a descriptor populated with shard counts and backend
+            metadata for later IO.
 
         Raises:
             FileNotFoundError: if ``path`` does not exist.
-            ValueError: if ``path`` is not a directory, format is unsupported,
-                or the index is missing/invalid.
+            ValueError: if ``path`` is not a directory or format unsupported.
         """
+        # TODO(MaxiBoether): What if this is a cloud path? Right now hard coded to local FS.
+
         root = Path(path)
         if not root.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {root}")
         if not root.is_dir():
             raise ValueError(f"Dataset path must be a directory: {root}")
 
+        root = root.resolve()
+
         kind = fmt
         if kind is None:
-            # Auto-detect MDS via presence of index.json
             if (root / "index.json").is_file():
                 kind = "mds"
-        if kind != "mds":
+            elif any(p.suffix == ".jsonl" for p in root.iterdir() if p.is_file()):
+                kind = "jsonl"
+
+        if kind not in {"mds", "jsonl"}:
             raise ValueError(f"Unsupported dataset format at path: {root}")
 
-        # Parse MDS index.json to compute shard_index
-        # TODO(MaxiBoether): maybe do this lazily in worksource?
-        index_path = root / "index.json"
-        try:
-            data = json.loads(index_path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise ValueError(f"Missing MDS index: {index_path}") from exc
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Failed to parse MDS index: {index_path}") from exc
-        shards = data.get("shards")
-        if not isinstance(shards, list):
-            raise ValueError("MDS index missing 'shards' list")
-        shard_index: dict[int, int] = {}
-        for shard_id, entry in enumerate(shards):
-            samples = entry.get("samples")
-            if samples is None:
-                raise ValueError(f"Shard {shard_id} missing 'samples' count")
-            try:
-                count = int(samples)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Shard {shard_id} has invalid sample count: {samples}"
-                ) from exc
-            shard_index[shard_id] = count
-        backend = {"kind": "mds", "path": str(root)}
+        ensure_builtin_formats()
+        handler = get_format(kind)
+        storage = LocalFSBackend(
+            root=root
+        )  # TODO(follow up PR): Implement cloud storage backend.
+        shard_index, shard_meta = handler.discover(str(root), storage)
+        backend = {"kind": kind, "path": str(root), "shards": shard_meta}
         return cls(name=name, shard_index=shard_index, backend=backend, path=str(root))
 
     @classmethod
     def from_dict(cls, name: str, shards: Mapping[int, RandomAccessShard]) -> "Dataset":
-        """Construct an in-memory dataset descriptor.
-
-        Args:
-            name: Logical dataset name used in mixtures and debugging.
-            shards: Mapping of ``shard_id -> RandomAccessShard`` where each
-                shard supports ``__len__`` and ``__getitem__``.
-
-        The returned descriptor includes a ``backend={"kind": "inmem",
-        "shards": ...}``, which the runtime uses to build an in-memory store
-        inside FetchOp. No copying of rows occurs; the mapping is retained.
-        """
+        """Construct an in-memory dataset descriptor."""
         shard_index = {int(sid): int(len(shard)) for sid, shard in shards.items()}
         backend: Mapping[str, object] = {"kind": "inmem", "shards": dict(shards)}
         return cls(name=name, shard_index=shard_index, backend=backend, path=None)

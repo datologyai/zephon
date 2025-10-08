@@ -33,6 +33,7 @@ TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidType
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
+from zephon.io.options import StoreOptions
 from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
 from zephon.utils import buffered_iterable
 from zephon.work import WorkSource
@@ -111,8 +112,14 @@ class Pipeline:
         return self
 
     def options(self, **hints: Any) -> "Pipeline":
+        # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
         for key, value in hints.items():
-            if hasattr(self._options, key):
+            if not hasattr(self._options, key):
+                continue
+            if key == "io_options":
+                new_opts = StoreOptions.from_any(value)
+                self._options.io_options = self._options.io_options.merge(new_opts)
+            else:
                 setattr(self._options, key, value)
         return self
 
@@ -120,7 +127,7 @@ class Pipeline:
         if self._plan is None:
             plan = Planner().make_plan(self._graph)
             self._plan = plan
-            self._engine = Engine(plan, {}, self._options, self.ws)
+            self._engine = Engine(plan, self._options, self.ws)
 
     def to_torch_dataset(self) -> TorchIterableDatasetType:
         try:

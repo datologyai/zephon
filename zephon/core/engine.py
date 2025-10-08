@@ -8,6 +8,7 @@ from typing import Any, Iterable, Iterator, Optional
 
 from zephon.core.constants import Element, SampleId
 from zephon.core.graph import Plan
+from zephon.io.options import StoreOptions
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
     MixtureReadConfig,
@@ -39,18 +40,19 @@ class RuntimeOptions:
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
     mixture_config: MixtureReadConfig | None = None
+    io_options: StoreOptions = field(default_factory=StoreOptions)
 
 
 class Engine:
     """Bind a `Plan` to concrete runners and orchestrate streaming execution."""
 
-    def __init__(
-        self, plan: Plan, ctx: dict[str, Any], opts: RuntimeOptions, work: WorkSource
-    ) -> None:
+    def __init__(self, plan: Plan, opts: RuntimeOptions, work: WorkSource) -> None:
         """Initialize stage runners and prepare to stream work items."""
         self._plan = plan
-        base_ctx = dict(ctx)
-        base_ctx["datasets_by_id"] = work.datasets_by_id
+        base_ctx: dict[str, Any] = {
+            "datasets_by_id": work.datasets_by_id,
+            "io_options": opts.io_options,
+        }
         self._ctx = base_ctx
         self._opts = opts
         if self._opts.deterministic:

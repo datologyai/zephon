@@ -17,10 +17,9 @@ def build_pipeline() -> PublicPipeline:
     dataset_a = Dataset.from_dict("alpha", {0: shards[0], 2: shards[2]})
     dataset_b = Dataset.from_dict("beta", {1: shards[1]})
 
-    # TODO(MaxiBoether): remove need to call .weights
     work_source = StaticMixtureWorkSource(
         datasets=[dataset_a, dataset_b],
-        mixture=MixtureSpec({"alpha": 0.25, "beta": 0.75}).weights,
+        mixture=MixtureSpec({"alpha": 0.25, "beta": 0.75}),
         chunk_size=4,
         seed=99,
     )

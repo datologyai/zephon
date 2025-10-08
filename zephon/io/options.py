@@ -1,0 +1,64 @@
+# Copyright 2025 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
+"""Configuration helpers for IO store construction."""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+@dataclass
+class CacheOptions:
+    """User-configurable knobs that control cache behaviour."""
+
+    enabled: bool = False
+    root: str | Path = Path("~/.cache/zephon").expanduser()
+    limit_bytes: int | None = None
+    keep_zip: bool = False
+    validate_hash: str | None = None
+    download_retry: int = 2
+    download_timeout: float = 60.0
+    open_retry_attempts: int = 5
+    open_retry_initial_backoff: float = 0.1
+    open_retry_max_backoff: float = 2.0
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "CacheOptions":
+        if obj is None or obj is False:
+            return cls()
+        if isinstance(obj, CacheOptions):
+            return obj
+        if isinstance(obj, dict):
+            return cls(**obj)
+        raise TypeError(f"Cannot interpret cache options from {obj!r}")
+
+    def merge(self, other: "CacheOptions") -> "CacheOptions":
+        """Return a new options object with ``other`` overriding ``self``."""
+        merged = {**self.__dict__, **other.__dict__}
+        return CacheOptions(**merged)
+
+
+@dataclass
+class StoreOptions:
+    """Top-level IO store options passed to FetchOp."""
+
+    cache: CacheOptions = field(default_factory=CacheOptions)
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "StoreOptions":
+        if obj is None:
+            return cls()
+        if isinstance(obj, StoreOptions):
+            return obj
+        if isinstance(obj, dict):
+            cache_cfg = obj.get("cache")
+            return cls(cache=CacheOptions.from_any(cache_cfg))
+        raise TypeError(f"Cannot interpret store options from {obj!r}")
+
+    def merge(self, other: "StoreOptions") -> "StoreOptions":
+        """Return a new options object with ``other`` overriding ``self``."""
+        return StoreOptions(cache=self.cache.merge(other.cache))
+
+
+__all__ = ["CacheOptions", "StoreOptions"]

@@ -8,14 +8,17 @@ from typing import Optional
 from zephon.core.constants import Element, SampleId, SampleMeta, SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
-from zephon.io import InMemoryDatasetStore, InMemoryMultiDatasetStore
+from zephon.io import build_multi_dataset_store
+from zephon.io.options import StoreOptions
+from zephon.io.protocols import MultiDatasetShardStore
 
 
 class FetchOp(DefaultFinalize):
     """Load sample payloads from a `MultiDatasetShardStore`."""
 
     def __init__(self, buf: Optional[Buffering] = None) -> None:
-        self._store: InMemoryMultiDatasetStore | None = None
+        self._store: MultiDatasetShardStore | None = None
+        self._file_store = None
         self._buffering = buf or Buffering(max_batch=64, max_latency_ms=5)
 
     def setup(self, ctx: OpContext) -> None:
@@ -24,25 +27,8 @@ class FetchOp(DefaultFinalize):
             raise RuntimeError(
                 "FetchOp requires 'datasets_by_id' in context (provided by WorkSource)"
             )
-        # Build a multi-dataset store from dataset descriptors.
-        # TODO(jwills): Here we would like to build a cache-backed store like in mosaic.
-        # Not sure how the mosaic store handles multiple datasets, right now we index sampels by dataset id -> shard id -> sample id
-        # So this code is bound to change and only works for in-memory testing ATM.
-        views: dict[int, InMemoryDatasetStore] = {}
-        for ds_id, ds in dict(datasets_by_id).items():
-            backend = ds.backend  # type: ignore[attr-defined]
-            kind = backend.get("kind") if isinstance(backend, dict) else None
-            if kind == "inmem":
-                shards = backend.get("shards", {})
-                views[int(ds_id)] = InMemoryDatasetStore(shards)
-            elif kind == "mds":
-                # Not implemented yet: require mosaicml-streaming or custom backend.
-                raise RuntimeError(
-                    "MDS backend not available in FetchOp. Install a reader or implement a store."
-                )
-            else:
-                raise RuntimeError(f"Unknown dataset backend kind: {kind}")
-        self._store = InMemoryMultiDatasetStore(views)
+        store_options = StoreOptions.from_any(ctx.get("io_options"))
+        self._store = build_multi_dataset_store(datasets_by_id, options=store_options)
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, parallelism=16)
