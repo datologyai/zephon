@@ -78,6 +78,9 @@ class JsonlFormat(FormatHandler):
             full = os.path.join(path, name)
             stats = storage.stat(full)
             size = int(stats.get("size", 0))
+            # TODO(MaxiBoether): Counting lines by opening every shard is expensive on
+            # remote/cloud storage. Consider storing counts in metadata or lazily
+            # computing lengths during shard open.
             count = 0
             with storage.open(full, "r", encoding="utf-8") as handle:
                 for line in handle:

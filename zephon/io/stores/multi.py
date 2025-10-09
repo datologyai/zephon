@@ -13,7 +13,7 @@ from zephon.io.protocols import (
     RandomAccessShard,
 )
 from zephon.io.resolvers import CacheManager, DirectResolver, ShardResolver
-from zephon.io.storage import LocalFSBackend, StorageBackend
+from zephon.io.storage import LocalFSBackend, RouterStorageBackend, StorageBackend
 from zephon.io.stores.file_backed import FileBackedDatasetShardView
 from zephon.io.stores.registry import DatasetStoreRegistry
 
@@ -31,11 +31,11 @@ def build_multi_dataset_store(
     """
     store_opts = StoreOptions.from_any(options)
 
-    if storage is None:
-        storage = LocalFSBackend(root=Path("/"))
-
     resolver: ShardResolver
     if store_opts.cache.enabled:
+        # Default to router for discovery and cache-backed downloads; for direct
+        # (no-cache) runs we still require local files.
+        storage = RouterStorageBackend() if storage is None else storage
         cache_root = Path(store_opts.cache.root).expanduser()
         cache_manager = CacheManager(
             cache_root,
@@ -48,10 +48,9 @@ def build_multi_dataset_store(
         )
         resolver = cache_manager
     else:
-        if not isinstance(storage, LocalFSBackend):
-            raise ValueError(
-                f"Storage is of type {type(storage)}, but needs to be local filesystem without caching!"
-            )
+        # No need for RouterStorageBackend in the no-cache case.
+        storage = LocalFSBackend(root=Path("/")) if storage is None else storage
+        assert isinstance(storage, LocalFSBackend)
         resolver = DirectResolver(
             storage,
             validate_hash=store_opts.cache.validate_hash,

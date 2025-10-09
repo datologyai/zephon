@@ -14,7 +14,31 @@ _COPY_CHUNK_SIZE = 8 * 1024 * 1024
 
 @dataclass
 class LocalFSBackend(StorageBackend):
-    """Backend that operates on the local filesystem."""
+    """Backend that operates on the local filesystem.
+
+    The ``root`` attribute acts as a base directory only for relative paths
+    passed to this backend. If a path provided to ``open``, ``exists``,
+    ``download``, ``listdir``, or ``stat`` is absolute, ``root`` is ignored and
+    the absolute path is used as-is.
+
+    Notes:
+    - In most Zephon flows this backend is constructed with ``root=Path("/")``
+      (either directly or via the router). That default does not set or imply
+      a dataset root; dataset locations are carried separately through
+      :class:`zephon.io.types.ShardLocator` via its ``root`` field, which is
+      typically an absolute filesystem path (or a cloud URI handled by the
+      router) originating from ``Dataset.from_path(...)``.
+    - Setting a different ``root`` is useful when you intentionally want all
+      relative paths to be resolved under a specific directory, e.g. mounting a
+      dataset tree at ``/mnt/datasets`` and then calling ``open("foo/bar.txt")``.
+
+    Examples:
+        >>> backend = LocalFSBackend(root=Path("/mnt"))
+        >>> backend._abspath("foo.txt")  # relative → joined under root
+        PosixPath('/mnt/foo.txt')
+        >>> backend._abspath("/var/log/x")  # absolute → root is ignored
+        PosixPath('/var/log/x')
+    """
 
     root: Path
 

@@ -2,7 +2,8 @@ version = 1
 revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
-    "python_full_version >= '3.11'",
+    "python_full_version >= '3.13'",
+    "python_full_version >= '3.11' and python_full_version < '3.13'",
     "python_full_version < '3.11'",
 ]
 
@@ -47,6 +48,43 @@ dependencies = [
 sdist = { url = "https://files.astralhosted.com/public/85/2e/3e5079847e653b1f6dc647aa24549d68c6addb4c595cc0d902d1b19308ad/beautifulsoup4-4.13.5.tar.gz", hash = "sha256:5e70131382930e7c3de33450a2f54a63d5e4b19386eab43a5b34d594268f3695", size = 622954, upload-time = "2025-08-24T14:06:13Z" }
 wheels = [
     { url = "https://files.astralhosted.com/public/04/eb/f4151e0c7377a6e08a38108609ba5cede57986802757848688aeedd1b9e8/beautifulsoup4-4.13.5-py3-none-any.whl", hash = "sha256:642085eaa22233aceadff9c69651bc51e8bf3f874fb6d7104ece2beb24b47c4a", size = 105113, upload-time = "2025-08-24T14:06:14Z", zstd = { hash = "sha256:3c80b43fcc53b0419033a20f9b8b4071c86bd2df6cd76ab37875c5db9faa861d", size = 79661 } },
+]
+
+[[package]]
+name = "boto3"
+version = "1.40.48"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.astralhosted.com/public/aa/32/187aa2a09b385f12a32b02179892b7fa566844f68c0e478099a2102c7c62/boto3-1.40.48.tar.gz", hash = "sha256:b993bbef91f3796f0ae69b2a310a6cef41a06348ed80961f0ebc804680d8e9a4", size = 111611, upload-time = "2025-10-08T19:24:24Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/1f/48/e451965569ae420164bd2b59c04eef8320a29f6b4721bfefa82ee1d1dae1/boto3-1.40.48-py3-none-any.whl", hash = "sha256:8a5fb8b5509cd5ddaf3d1d1f0385c974038b47492ca25f3414042676d188f635", size = 139346, upload-time = "2025-10-08T19:24:22Z", zstd = { hash = "sha256:d92d734b2eea950e6f100f52298c3c35b9047891916d9d84b997d541a0c62cb3", size = 71223 } },
+]
+
+[[package]]
+name = "botocore"
+version = "1.40.48"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.astralhosted.com/public/05/20/c71c9417bd2fc37bfef48df1ee8f1178b832ee3c12c4459663dfeb2c00d4/botocore-1.40.48.tar.gz", hash = "sha256:18bed348ce707aa896065b424f36a0b8d542fa6810e9165618e105b1abf34e7e", size = 14403422, upload-time = "2025-10-08T19:24:13Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/c0/da/1f1427b166880c7820ac362eee7da62f6e24e246c60ea9f0d72d77296ce2/botocore-1.40.48-py3-none-any.whl", hash = "sha256:34795305bb5aa670befcbdc936fd144a0af5db5323d78e7245dbd6aa246bf3db", size = 14073863, upload-time = "2025-10-08T19:24:09Z", zstd = { hash = "sha256:77c7d051966c74bf72479805bcb2811dfeaa7f66c32d9e8fd0e600afdb4dd323", size = 13102828 } },
+]
+
+[[package]]
+name = "cachetools"
+version = "6.2.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+sdist = { url = "https://files.astralhosted.com/public/9d/61/e4fad8155db4a04bfb4734c7c8ff0882f078f24294d42798b3568eb63bff/cachetools-6.2.0.tar.gz", hash = "sha256:38b328c0889450f05f5e120f56ab68c8abaf424e1275522b138ffc93253f7e32", size = 30988, upload-time = "2025-08-25T18:57:30Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/6c/56/3124f61d37a7a4e7cc96afc5492c78ba0cb551151e530b54669ddd1436ef/cachetools-6.2.0-py3-none-any.whl", hash = "sha256:1c76a8960c0041fcc21097e357f882197c79da0dbff766e7317890a65d7d8ba6", size = 11276, upload-time = "2025-08-25T18:57:29Z", zstd = { hash = "sha256:654f315ab89da87fa41c9f1fe69b22b04dd5e9c2aed47d53e0a48858c7f191a1", size = 8845 } },
 ]
 
 [[package]]
@@ -301,6 +339,125 @@ wheels = [
 ]
 
 [[package]]
+name = "google-api-core"
+version = "2.26.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "google-auth" },
+    { name = "googleapis-common-protos" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.astralhosted.com/public/32/ea/e7b6ac3c7b557b728c2d0181010548cbbdd338e9002513420c5a354fa8df/google_api_core-2.26.0.tar.gz", hash = "sha256:e6e6d78bd6cf757f4aee41dcc85b07f485fbb069d5daa3afb126defba1e91a62", size = 166369, upload-time = "2025-10-08T21:37:38Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/77/ad/f73cf9fe9bd95918502b270e3ddb8764e4c900b3bbd7782b90c56fac14bb/google_api_core-2.26.0-py3-none-any.whl", hash = "sha256:2b204bd0da2c81f918e3582c48458e24c11771f987f6258e6e227212af78f3ed", size = 162505, upload-time = "2025-10-08T21:37:36Z", zstd = { hash = "sha256:36a6d11963a33a77578e0926b4a40ab8a5cc558cafcb502759466d7e8639a687", size = 79506 } },
+]
+
+[[package]]
+name = "google-auth"
+version = "2.41.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "pyasn1-modules" },
+    { name = "rsa" },
+]
+sdist = { url = "https://files.astralhosted.com/public/a8/af/5129ce5b2f9688d2fa49b463e544972a7c82b0fdb50980dafee92e121d9f/google_auth-2.41.1.tar.gz", hash = "sha256:b76b7b1f9e61f0cb7e88870d14f6a94aeef248959ef6992670efee37709cbfd2", size = 292284, upload-time = "2025-09-30T22:51:26Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/be/a4/7319a2a8add4cc352be9e3efeff5e2aacee917c85ca2fa1647e29089983c/google_auth-2.41.1-py2.py3-none-any.whl", hash = "sha256:754843be95575b9a19c604a848a41be03f7f2afd8c019f716dc1f51ee41c639d", size = 221302, upload-time = "2025-09-30T22:51:24Z", zstd = { hash = "sha256:bf5bbfbea944658e9d3702de8e927c95465414a3009d396fbc542bcf0b69724e", size = 109710 } },
+]
+
+[[package]]
+name = "google-cloud-core"
+version = "2.4.3"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "google-api-core" },
+    { name = "google-auth" },
+]
+sdist = { url = "https://files.astralhosted.com/public/d6/b8/2b53838d2acd6ec6168fd284a990c76695e84c65deee79c9f3a4276f6b4f/google_cloud_core-2.4.3.tar.gz", hash = "sha256:1fab62d7102844b278fe6dead3af32408b1df3eb06f5c7e8634cbd40edc4da53", size = 35861, upload-time = "2025-03-10T21:05:39Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/40/86/bda7241a8da2d28a754aad2ba0f6776e35b67e37c36ae0c45d49370f1014/google_cloud_core-2.4.3-py2.py3-none-any.whl", hash = "sha256:5130f9f4c14b4fafdff75c79448f9495cfade0d8775facf1b09c3bf67e027f6e", size = 29348, upload-time = "2025-03-10T21:05:38Z", zstd = { hash = "sha256:53c9ea3c7c3313dd5f0b7e34c5eea4b8dc780670d0e095f713c31eea966ca437", size = 20844 } },
+]
+
+[[package]]
+name = "google-cloud-storage"
+version = "3.4.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "google-api-core" },
+    { name = "google-auth" },
+    { name = "google-cloud-core" },
+    { name = "google-crc32c" },
+    { name = "google-resumable-media" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.astralhosted.com/public/bd/ef/7cefdca67a6c8b3af0ec38612f9e78e5a9f6179dd91352772ae1a9849246/google_cloud_storage-3.4.1.tar.gz", hash = "sha256:6f041a297e23a4b485fad8c305a7a6e6831855c208bcbe74d00332a909f82268", size = 17238203, upload-time = "2025-10-08T18:43:39Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/83/6e/b47d83d3a35231c6232566341b0355cce78fd4e6988a7343725408547b2c/google_cloud_storage-3.4.1-py3-none-any.whl", hash = "sha256:972764cc0392aa097be8f49a5354e22eb47c3f62370067fb1571ffff4a1c1189", size = 290142, upload-time = "2025-10-08T18:43:37Z", zstd = { hash = "sha256:7121f86c821bb1b7256a63ea53731ccec3813e5b7b04e3eebb3d64c49da0001d", size = 162112 } },
+]
+
+[[package]]
+name = "google-crc32c"
+version = "1.7.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+sdist = { url = "https://files.astralhosted.com/public/19/ae/87802e6d9f9d69adfaedfcfd599266bf386a54d0be058b532d04c794f76d/google_crc32c-1.7.1.tar.gz", hash = "sha256:2bff2305f98846f3e825dbeec9ee406f89da7962accdb29356e4eadc251bd472", size = 14495, upload-time = "2025-03-26T14:29:13Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/eb/69/b1b05cf415df0d86691d6a8b4b7e60ab3a6fb6efb783ee5cd3ed1382bfd3/google_crc32c-1.7.1-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:b07d48faf8292b4db7c3d64ab86f950c2e94e93a11fd47271c28ba458e4a0d76", size = 30467, upload-time = "2025-03-26T14:31:12Z", zstd = { hash = "sha256:8028d321dd619f373934e7b411bff236b87550a68abdf1b82f47c59cc1866664", size = 19422 } },
+    { url = "https://files.astralhosted.com/public/44/3d/92f8928ecd671bd5b071756596971c79d252d09b835cdca5a44177fa87aa/google_crc32c-1.7.1-cp310-cp310-macosx_12_0_x86_64.whl", hash = "sha256:7cc81b3a2fbd932a4313eb53cc7d9dde424088ca3a0337160f35d91826880c1d", size = 30311, upload-time = "2025-03-26T14:53:14Z", zstd = { hash = "sha256:1df09f35ff28454261b3d8f1f7ca9251fd17662ff58fc9ba4398461dfe2fcafe", size = 19289 } },
+    { url = "https://files.astralhosted.com/public/33/42/c2d15a73df79d45ed6b430b9e801d0bd8e28ac139a9012d7d58af50a385d/google_crc32c-1.7.1-cp310-cp310-manylinux_2_12_x86_64.manylinux2010_x86_64.whl", hash = "sha256:1c67ca0a1f5b56162951a9dae987988679a7db682d6f97ce0f6381ebf0fbea4c", size = 37889, upload-time = "2025-03-26T14:41:28Z", zstd = { hash = "sha256:0a60465b8b2b01a6360989236b1726c3dcc76b048eacdb85835d72ad90bfe338", size = 30988 } },
+    { url = "https://files.astralhosted.com/public/57/ea/ac59c86a3c694afd117bb669bde32aaf17d0de4305d01d706495f09cbf19/google_crc32c-1.7.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:fc5319db92daa516b653600794d5b9f9439a9a121f3e162f94b0e1891c7933cb", size = 33028, upload-time = "2025-03-26T14:41:29Z", zstd = { hash = "sha256:3c543fa3ac5e428fa15744347bb08bf3cfdd64110e869c822bb71631244e9aab", size = 25348 } },
+    { url = "https://files.astralhosted.com/public/60/44/87e77e8476767a4a93f6cf271157c6d948eacec63688c093580af13b04be/google_crc32c-1.7.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dcdf5a64adb747610140572ed18d011896e3b9ae5195f2514b7ff678c80f1603", size = 38026, upload-time = "2025-03-26T14:41:30Z", zstd = { hash = "sha256:7a6b7e740701e1dd84479a4cf8c226f7c7bcc067dfe547481e2091bff0908ed8", size = 31275 } },
+    { url = "https://files.astralhosted.com/public/c8/bf/21ac7bb305cd7c1a6de9c52f71db0868e104a5b573a4977cd9d0ff830f82/google_crc32c-1.7.1-cp310-cp310-win_amd64.whl", hash = "sha256:754561c6c66e89d55754106739e22fdaa93fafa8da7221b29c8b8e8270c6ec8a", size = 33476, upload-time = "2025-03-26T14:29:09Z", zstd = { hash = "sha256:b352738ca2185ead8097692ae61aec5bddc2153b3af86f59c4de662e25c0b330", size = 26425 } },
+    { url = "https://files.astralhosted.com/public/f7/94/220139ea87822b6fdfdab4fb9ba81b3fff7ea2c82e2af34adc726085bffc/google_crc32c-1.7.1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:6fbab4b935989e2c3610371963ba1b86afb09537fd0c633049be82afe153ac06", size = 30468, upload-time = "2025-03-26T14:32:52Z", zstd = { hash = "sha256:3651f64a5c807c38b63e88541315864cbf2eab1cd827e30b790bd0864de94121", size = 19430 } },
+    { url = "https://files.astralhosted.com/public/94/97/789b23bdeeb9d15dc2904660463ad539d0318286d7633fe2760c10ed0c1c/google_crc32c-1.7.1-cp311-cp311-macosx_12_0_x86_64.whl", hash = "sha256:ed66cbe1ed9cbaaad9392b5259b3eba4a9e565420d734e6238813c428c3336c9", size = 30313, upload-time = "2025-03-26T14:57:39Z", zstd = { hash = "sha256:fc9a062c62a00a06f69bfedb02784699524fee312e257a5665b83bdc03a9f289", size = 19282 } },
+    { url = "https://files.astralhosted.com/public/81/b8/976a2b843610c211e7ccb3e248996a61e87dbb2c09b1499847e295080aec/google_crc32c-1.7.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ee6547b657621b6cbed3562ea7826c3e11cab01cd33b74e1f677690652883e77", size = 33048, upload-time = "2025-03-26T14:41:31Z", zstd = { hash = "sha256:4073d8bc3a31b6c3eecc7e1a864727ca5f7f2fa25220c1e799445204e27eab2c", size = 25344 } },
+    { url = "https://files.astralhosted.com/public/c9/16/a3842c2cf591093b111d4a5e2bfb478ac6692d02f1b386d2a33283a19dc9/google_crc32c-1.7.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d68e17bad8f7dd9a49181a1f5a8f4b251c6dbc8cc96fb79f1d321dfd57d66f53", size = 32669, upload-time = "2025-03-26T14:41:31Z", zstd = { hash = "sha256:37cf25304305b1df14cbaa2dc77edc039ee39a263e25176424f92d657fab77d1", size = 26246 } },
+    { url = "https://files.astralhosted.com/public/04/17/ed9aba495916fcf5fe4ecb2267ceb851fc5f273c4e4625ae453350cfd564/google_crc32c-1.7.1-cp311-cp311-win_amd64.whl", hash = "sha256:6335de12921f06e1f774d0dd1fbea6bf610abe0887a1638f64d694013138be5d", size = 33476, upload-time = "2025-03-26T14:29:10Z", zstd = { hash = "sha256:33e37362c185b16de8243a5e5fa60df1a476d84e3e54f43867a99689ea0f4ccc", size = 26414 } },
+    { url = "https://files.astralhosted.com/public/dd/b7/787e2453cf8639c94b3d06c9d61f512234a82e1d12d13d18584bd3049904/google_crc32c-1.7.1-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:2d73a68a653c57281401871dd4aeebbb6af3191dcac751a76ce430df4d403194", size = 30470, upload-time = "2025-03-26T14:34:32Z", zstd = { hash = "sha256:95511f5697ff9b24f34dfac84c3e8a21b8626db5b0e9bc833a5407de87a03fc1", size = 19485 } },
+    { url = "https://files.astralhosted.com/public/ed/b4/6042c2b0cbac3ec3a69bb4c49b28d2f517b7a0f4a0232603c42c58e22b44/google_crc32c-1.7.1-cp312-cp312-macosx_12_0_x86_64.whl", hash = "sha256:22beacf83baaf59f9d3ab2bbb4db0fb018da8e5aebdce07ef9f09fce8220285e", size = 30315, upload-time = "2025-03-26T15:01:55Z", zstd = { hash = "sha256:eb928e985bd9fefd71c24a6916892e9fcba086a781b924e4189625ebbb31e308", size = 19276 } },
+    { url = "https://files.astralhosted.com/public/29/ad/01e7a61a5d059bc57b702d9ff6a18b2585ad97f720bd0a0dbe215df1ab0e/google_crc32c-1.7.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:19eafa0e4af11b0a4eb3974483d55d2d77ad1911e6cf6f832e1574f6781fd337", size = 33180, upload-time = "2025-03-26T14:41:32Z", zstd = { hash = "sha256:60386ffed5b1282e8e5bcb4ff25834fb8c66a7fe817a64baf3062af0f83b291d", size = 25498 } },
+    { url = "https://files.astralhosted.com/public/3b/a5/7279055cf004561894ed3a7bfdf5bf90a53f28fadd01af7cd166e88ddf16/google_crc32c-1.7.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b6d86616faaea68101195c6bdc40c494e4d76f41e07a37ffdef270879c15fb65", size = 32794, upload-time = "2025-03-26T14:41:33Z", zstd = { hash = "sha256:1ad593f143a5424a038f79a7a61b722101791a01ac44d0fb810cf0530aa13654", size = 26468 } },
+    { url = "https://files.astralhosted.com/public/0f/d6/77060dbd140c624e42ae3ece3df53b9d811000729a5c821b9fd671ceaac6/google_crc32c-1.7.1-cp312-cp312-win_amd64.whl", hash = "sha256:b7491bdc0c7564fcf48c0179d2048ab2f7c7ba36b84ccd3a3e1c3f7a72d3bba6", size = 33477, upload-time = "2025-03-26T14:29:11Z", zstd = { hash = "sha256:d64bf3d2e342781c1e0d49030fc8dee0b85f6f26653a0808c90cfa9558a88f75", size = 26386 } },
+    { url = "https://files.astralhosted.com/public/8b/72/b8d785e9184ba6297a8620c8a37cf6e39b81a8ca01bb0796d7cbb28b3386/google_crc32c-1.7.1-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:df8b38bdaf1629d62d51be8bdd04888f37c451564c2042d36e5812da9eff3c35", size = 30467, upload-time = "2025-03-26T14:36:07Z", zstd = { hash = "sha256:4298cc740e1b65accdaea1055d6b25274fffdca77e3b44c9a3ff8bcb6b74c4f1", size = 19524 } },
+    { url = "https://files.astralhosted.com/public/34/25/5f18076968212067c4e8ea95bf3b69669f9fc698476e5f5eb97d5b37999f/google_crc32c-1.7.1-cp313-cp313-macosx_12_0_x86_64.whl", hash = "sha256:e42e20a83a29aa2709a0cf271c7f8aefaa23b7ab52e53b322585297bb94d4638", size = 30309, upload-time = "2025-03-26T15:06:15Z", zstd = { hash = "sha256:5f3b98bde5ba64e651c4772584c9bcbb067af86774e999b9eb69cdde5ebac320", size = 19284 } },
+    { url = "https://files.astralhosted.com/public/92/83/9228fe65bf70e93e419f38bdf6c5ca5083fc6d32886ee79b450ceefd1dbd/google_crc32c-1.7.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:905a385140bf492ac300026717af339790921f411c0dfd9aa5a9e69a08ed32eb", size = 33133, upload-time = "2025-03-26T14:41:34Z", zstd = { hash = "sha256:9c877c2d9dae6a60995af161fed8e7cc71225f61f857956cb618522ef1bf2fdb", size = 25441 } },
+    { url = "https://files.astralhosted.com/public/c3/ca/1ea2fd13ff9f8955b85e7956872fdb7050c4ace8a2306a6d177edb9cf7fe/google_crc32c-1.7.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b211ddaf20f7ebeec5c333448582c224a7c90a9d98826fbab82c0ddc11348e6", size = 32773, upload-time = "2025-03-26T14:41:35Z", zstd = { hash = "sha256:d2491f37d708380e0367d81f737d2e310d4ee3636d8518f659d3c452415f8822", size = 26321 } },
+    { url = "https://files.astralhosted.com/public/89/32/a22a281806e3ef21b72db16f948cad22ec68e4bdd384139291e00ff82fe2/google_crc32c-1.7.1-cp313-cp313-win_amd64.whl", hash = "sha256:0f99eaa09a9a7e642a61e06742856eec8b19fc0037832e03f941fe7cf0c8e4db", size = 33475, upload-time = "2025-03-26T14:29:12Z", zstd = { hash = "sha256:a8533b0247c2faa1c0ec8c7e5121e2139688da62604415affc50b4af3cd8ffa2", size = 26381 } },
+    { url = "https://files.astralhosted.com/public/b8/c5/002975aff514e57fc084ba155697a049b3f9b52225ec3bc0f542871dd524/google_crc32c-1.7.1-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:32d1da0d74ec5634a05f53ef7df18fc646666a25efaaca9fc7dcfd4caf1d98c3", size = 33243, upload-time = "2025-03-26T14:41:36Z", zstd = { hash = "sha256:9be16beaadefd309d3a2667a5ac786202d3ebc10a4bde372613e90b4cda139e4", size = 25511 } },
+    { url = "https://files.astralhosted.com/public/61/cb/c585282a03a0cea70fcaa1bf55d5d702d0f2351094d663ec3be1c6c67c52/google_crc32c-1.7.1-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e10554d4abc5238823112c2ad7e4560f96c7bf3820b202660373d769d9e6e4c9", size = 32870, upload-time = "2025-03-26T14:41:37Z", zstd = { hash = "sha256:5ba42ef49ac5d75d179830a66cd0b8a17674e2df92028162c6613aa529e46bf0", size = 26517 } },
+    { url = "https://files.astralhosted.com/public/0b/43/31e57ce04530794917dfe25243860ec141de9fadf4aa9783dffe7dac7c39/google_crc32c-1.7.1-pp310-pypy310_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a8e9afc74168b0b2232fb32dd202c93e46b7d5e4bf03e66ba5dc273bb3559589", size = 28242, upload-time = "2025-03-26T14:41:43Z", zstd = { hash = "sha256:ce9188e70c11aa80e4efeba1c863979052127be987999ddd080669cbbfca9295", size = 20944 } },
+    { url = "https://files.astralhosted.com/public/eb/f3/8b84cd4e0ad111e63e30eb89453f8dd308e3ad36f42305cf8c202461cdf0/google_crc32c-1.7.1-pp310-pypy310_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fa8136cc14dd27f34a3221c0f16fd42d8a40e4778273e61a3c19aedaa44daf6b", size = 28049, upload-time = "2025-03-26T14:41:45Z", zstd = { hash = "sha256:c7910cb68a5d7b146a9ef30f74783f4dde69b2c96f6239cec88d634de2c9d69b", size = 21892 } },
+    { url = "https://files.astralhosted.com/public/16/1b/1693372bf423ada422f80fd88260dbfd140754adb15cbc4d7e9a68b1cb8e/google_crc32c-1.7.1-pp311-pypy311_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:85fef7fae11494e747c9fd1359a527e5970fc9603c90764843caabd3a16a0a48", size = 28241, upload-time = "2025-03-26T14:41:46Z", zstd = { hash = "sha256:1cb0dcb6c45764a3e3e9a7dda120445fd559fee72e9b6fba59fc1bf93788ce50", size = 20946 } },
+    { url = "https://files.astralhosted.com/public/fd/3c/2a19a60a473de48717b4efb19398c3f914795b64a96cf3fbe82588044f78/google_crc32c-1.7.1-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6efb97eb4369d52593ad6f75e7e10d053cf00c48983f7a973105bc70b0ac4d82", size = 28048, upload-time = "2025-03-26T14:41:47Z", zstd = { hash = "sha256:23388a717efa929baedfcf9bb2ed19cfd53911ee32ef2c2ce881182bf26ab036", size = 21900 } },
+]
+
+[[package]]
+name = "google-resumable-media"
+version = "2.7.2"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "google-crc32c" },
+]
+sdist = { url = "https://files.astralhosted.com/public/58/5a/0efdc02665dca14e0837b62c8a1a93132c264bd02054a15abb2218afe0ae/google_resumable_media-2.7.2.tar.gz", hash = "sha256:5280aed4629f2b60b847b0d42f9857fd4935c11af266744df33d8074cae92fe0", size = 2163099, upload-time = "2024-08-07T22:20:39Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/82/35/b8d3baf8c46695858cb9d8835a53baa1eeb9906ddaf2f728a5f5b640fd1e/google_resumable_media-2.7.2-py2.py3-none-any.whl", hash = "sha256:3ce7551e9fe6d99e9a126101d2536612bb73486721951e9562fee0f90c6ababa", size = 81251, upload-time = "2024-08-07T22:20:36Z", zstd = { hash = "sha256:dd99a198127715abb57bebd7bc4cc571cd147b205d4137d17c0a0e4eaadd5066", size = 34783 } },
+]
+
+[[package]]
+name = "googleapis-common-protos"
+version = "1.70.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.astralhosted.com/public/39/24/33db22342cf4a2ea27c9955e6713140fedd51e8b141b5ce5260897020f1a/googleapis_common_protos-1.70.0.tar.gz", hash = "sha256:0e1b44e0ea153e6594f9f394fef15193a68aaaea2d843f83e2742717ca753257", size = 145903, upload-time = "2025-04-14T10:17:03Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/86/f1/62a193f0227cf15a920390abe675f386dec35f7ae3ffe6da582d3ade42c7/googleapis_common_protos-1.70.0-py3-none-any.whl", hash = "sha256:b8bfcca8c25a2bb253e0e0b0adaf8c00773e5e6af6fd92397576680b807e0fd8", size = 294530, upload-time = "2025-04-14T10:17:01Z", zstd = { hash = "sha256:2f7f5c6b212baf2e9c2e679a12128147e7331e32b74ae0e29fcbd9df82560f6c", size = 119754 } },
+]
+
+[[package]]
 name = "identify"
 version = "2.6.14"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -346,6 +503,15 @@ dependencies = [
 sdist = { url = "https://files.astralhosted.com/public/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02Z" }
 wheels = [
     { url = "https://files.astralhosted.com/public/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00Z", zstd = { hash = "sha256:45511c89a855f26ddf67135429bcfadb010b019bc6239469639f60dea09de5fc", size = 103871 } },
+]
+
+[[package]]
+name = "jmespath"
+version = "1.0.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+sdist = { url = "https://files.astralhosted.com/public/00/2a/e867e8531cf3e36b41201936b7fa7ba7b5702dbef42922193f05c8976cd6/jmespath-1.0.1.tar.gz", hash = "sha256:90261b206d6defd58fdd5e85f478bf633a2901798906be2ad389150c5c60edbe", size = 25843, upload-time = "2022-06-17T18:00:12Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/31/b4/b9b800c45527aadd64d5b442f9b932b00648617eb5d63d2c7a6587b7cafc/jmespath-1.0.1-py3-none-any.whl", hash = "sha256:02e2e4cc71b5bcab88332eebf907519190dd9e6e82107fa7f83b1003a6252980", size = 20256, upload-time = "2022-06-17T18:00:10Z", zstd = { hash = "sha256:d9bba07dea8829ed19ed0736e730e4be40de41cd8a0e37e8d82cbeaae8d1249d", size = 16653 } },
 ]
 
 [[package]]
@@ -536,7 +702,8 @@ name = "numpy"
 version = "2.3.3"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
 resolution-markers = [
-    "python_full_version >= '3.11'",
+    "python_full_version >= '3.13'",
+    "python_full_version >= '3.11' and python_full_version < '3.13'",
 ]
 sdist = { url = "https://files.astralhosted.com/public/d0/19/95b3d357407220ed24c139018d2518fab0a61a948e68286a25f1a4d049ff/numpy-2.3.3.tar.gz", hash = "sha256:ddc7c39727ba62b80dfdbedf400d1c10ddfa8eefbd7ec8dcb118be8b56d31029", size = 20576648, upload-time = "2025-09-09T16:54:12Z" }
 wheels = [
@@ -659,6 +826,18 @@ wheels = [
 ]
 
 [[package]]
+name = "proto-plus"
+version = "1.26.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.astralhosted.com/public/f4/ac/87285f15f7cce6d4a008f33f1757fb5a13611ea8914eb58c3d0d26243468/proto_plus-1.26.1.tar.gz", hash = "sha256:21a515a4c4c0088a773899e23c7bbade3d18f9c66c73edd4c7ee3816bc96a012", size = 56142, upload-time = "2025-03-10T15:54:39Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/4e/6d/280c4c2ce28b1593a19ad5239c8b826871fc6ec275c21afc8e1820108039/proto_plus-1.26.1-py3-none-any.whl", hash = "sha256:13285478c2dcf2abb829db158e1047e2f1e8d63a077d94263c2b88b043c75a66", size = 50163, upload-time = "2025-03-10T15:54:37Z", zstd = { hash = "sha256:4fa14ee0abff845d9ae9bce1dc99b82814cd8ae804c85e680a523a028850ecc5", size = 30542 } },
+]
+
+[[package]]
 name = "protobuf"
 version = "6.32.1"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -716,6 +895,27 @@ wheels = [
 ]
 
 [[package]]
+name = "pyasn1"
+version = "0.6.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+sdist = { url = "https://files.astralhosted.com/public/ba/e9/01f1a64245b89f039897cb0130016d79f77d52669aae6ee7b159a6c4c018/pyasn1-0.6.1.tar.gz", hash = "sha256:6f580d2bdd84365380830acf45550f2511469f673cb4a5ae3857a3170128b034", size = 145322, upload-time = "2024-09-10T22:41:43Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/c8/f1/d6a797abb14f6283c0ddff96bbdd46937f64122b8c925cab503dd37f8214/pyasn1-0.6.1-py3-none-any.whl", hash = "sha256:0d632f46f2ba09143da3a8afe9e33fb6f92fa2320ab7e886e2d0f7672af84629", size = 83135, upload-time = "2024-09-11T16:00:36Z", zstd = { hash = "sha256:a7f0a6170ec23461707160ed6de51dd22f2614800da9018c533331478ad9c59d", size = 54159 } },
+]
+
+[[package]]
+name = "pyasn1-modules"
+version = "0.4.2"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.astralhosted.com/public/e9/e6/78ebbb10a8c8e4b61a59249394a4a594c1a7af95593dc933a349c8d00964/pyasn1_modules-0.4.2.tar.gz", hash = "sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6", size = 307892, upload-time = "2025-03-28T02:41:22Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl", hash = "sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a", size = 181259, upload-time = "2025-03-28T02:41:19Z", zstd = { hash = "sha256:d650ee59e7e9605fda399d1c8f5937eb4e2470a81a47c16d407c4ac7740fb525", size = 81961 } },
+]
+
+[[package]]
 name = "pygments"
 version = "2.19.2"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -767,6 +967,18 @@ dependencies = [
 sdist = { url = "https://files.astralhosted.com/public/5e/f7/c933acc76f5208b3b00089573cf6a2bc26dc80a8aece8f52bb7d6b1855ca/pytest_cov-7.0.0.tar.gz", hash = "sha256:33c97eda2e049a0c5298e91f519302a1334c26ac65c1a483d6206fd458361af1", size = 54328, upload-time = "2025-09-09T10:57:02Z" }
 wheels = [
     { url = "https://files.astralhosted.com/public/ee/49/1377b49de7d0c1ce41292161ea0f721913fa8722c19fb9c1e3aa0367eecb/pytest_cov-7.0.0-py3-none-any.whl", hash = "sha256:3b8e9558b16cc1479da72058bdecf8073661c7f57f7d3c5f22a1c23507f2d861", size = 22424, upload-time = "2025-09-09T10:57:00Z", zstd = { hash = "sha256:c3091e498b9dd9945ad2548d4c01144d426620e75517296c82b52edccf7f0029", size = 19116 } },
+]
+
+[[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.astralhosted.com/public/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:19Z", zstd = { hash = "sha256:b5cfdad7be7720fa48850428983914db07c32d757469e0b34c3e56701e51ee69", size = 213453 } },
 ]
 
 [[package]]
@@ -838,6 +1050,18 @@ wheels = [
 ]
 
 [[package]]
+name = "rsa"
+version = "4.9.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.astralhosted.com/public/da/8a/22b7beea3ee0d44b1916c0c1cb0ee3af23b700b6da9f04991899d0c555d4/rsa-4.9.1.tar.gz", hash = "sha256:e7bdbfdb5497da4c07dfd35530e1a902659db6ff241e39d9953cad06ebd0ae75", size = 29034, upload-time = "2025-04-16T09:51:18Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/64/8d/0133e4eb4beed9e425d9a98ed6e081a55d195481b7632472be1af08d2f6b/rsa-4.9.1-py3-none-any.whl", hash = "sha256:68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762", size = 34696, upload-time = "2025-04-16T09:51:17Z", zstd = { hash = "sha256:a6b9c6b7536a404ac642f5baeb7f080c451a2478ec79414e0a3bfa3d5fb154bc", size = 23158 } },
+]
+
+[[package]]
 name = "ruff"
 version = "0.13.1"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -861,6 +1085,27 @@ wheels = [
     { url = "https://files.astralhosted.com/public/37/54/6177a0dc10bce6f43e392a2192e6018755473283d0cf43cc7e6afc182aea/ruff-0.13.1-py3-none-win32.whl", hash = "sha256:55e9efa692d7cb18580279f1fbb525146adc401f40735edf0aaeabd93099f9a0", size = 12178448, upload-time = "2025-09-18T19:52:35Z", zstd = { hash = "sha256:763aee75ab5bcd486c24d2c74ca2fea6ef675f8cf39c894329e8902d0f8481b1", size = 9015793 } },
     { url = "https://files.astralhosted.com/public/64/51/c6a3a33d9938007b8bdc8ca852ecc8d810a407fb513ab08e34af12dc7c24/ruff-0.13.1-py3-none-win_amd64.whl", hash = "sha256:3a3fb595287ee556de947183489f636b9f76a72f0fa9c028bdcabf5bab2cc5e5", size = 13286458, upload-time = "2025-09-18T19:52:38Z", zstd = { hash = "sha256:164d5abe1480b269b8f5c5e167c5e23970277419341fcef54d7cba05fbe968c7", size = 9632901 } },
     { url = "https://files.astralhosted.com/public/fd/04/afc078a12cf68592345b1e2d6ecdff837d286bac023d7a22c54c7a698c5b/ruff-0.13.1-py3-none-win_arm64.whl", hash = "sha256:c0bae9ffd92d54e03c2bf266f466da0a65e145f298ee5b5846ed435f6a00518a", size = 12437893, upload-time = "2025-09-18T19:52:41Z", zstd = { hash = "sha256:f3f8d3fcb2cd6299aed2a4dbf941ece2a900cb48744e2f9fea25eadcbafec62d", size = 9051473 } },
+]
+
+[[package]]
+name = "s3transfer"
+version = "0.14.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.astralhosted.com/public/62/74/8d69dcb7a9efe8baa2046891735e5dfe433ad558ae23d9e3c14c633d1d58/s3transfer-0.14.0.tar.gz", hash = "sha256:eff12264e7c8b4985074ccce27a3b38a485bb7f7422cc8046fee9be4983e4125", size = 151547, upload-time = "2025-09-09T19:23:31Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/48/f0/ae7ca09223a81a1d890b2557186ea015f6e0502e9b8cb8e1813f1d8cfa4e/s3transfer-0.14.0-py3-none-any.whl", hash = "sha256:ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456", size = 85712, upload-time = "2025-09-09T19:23:30Z", zstd = { hash = "sha256:b7a85e517bf64da17f52774bb1d42d3236ec6c3f64b5f52cb432418fe84c4405", size = 57822 } },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+sdist = { url = "https://files.astralhosted.com/public/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26Z", zstd = { hash = "sha256:0a4075c51788534f8c2f28c6847326d988ae0bef607521eea7641dfdd1beb27c", size = 9590 } },
 ]
 
 [[package]]
@@ -917,7 +1162,8 @@ name = "sphinx"
 version = "8.2.3"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
 resolution-markers = [
-    "python_full_version >= '3.11'",
+    "python_full_version >= '3.13'",
+    "python_full_version >= '3.11' and python_full_version < '3.13'",
 ]
 dependencies = [
     { name = "alabaster", marker = "python_full_version >= '3.11'" },
@@ -1048,37 +1294,37 @@ wheels = [
 name = "tomli"
 version = "2.2.1"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
-sdist = { url = "https://files.astralhosted.com/public/18/87/302344fed471e44a87289cf4967697d07e532f2421fdaf868a303cbae4ff/tomli-2.2.1.tar.gz", hash = "sha256:cd45e1dc79c835ce60f7404ec8119f2eb06d38b1deba146f07ced3bbc44505ff", size = 17175, upload-time = "2024-11-27T22:38:37Z" }
+sdist = { url = "https://files.astralhosted.com/public/18/87/302344fed471e44a87289cf4967697d07e532f2421fdaf868a303cbae4ff/tomli-2.2.1.tar.gz", hash = "sha256:cd45e1dc79c835ce60f7404ec8119f2eb06d38b1deba146f07ced3bbc44505ff", size = 17175, upload-time = "2024-11-27T22:38:36Z" }
 wheels = [
-    { url = "https://files.astralhosted.com/public/43/ca/75707e6efa2b37c77dadb324ae7d9571cb424e61ea73fad7c56c2d14527f/tomli-2.2.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:678e4fa69e4575eb77d103de3df8a895e1591b48e740211bd1067378c69e8249", size = 131077, upload-time = "2024-11-27T22:37:55Z", zstd = { hash = "sha256:d5cdb73f8a8fb053a9a4c6eef0a4d28d3a972d4030fab9a9527a28e9e9010d85", size = 106526 } },
-    { url = "https://files.astralhosted.com/public/c7/16/51ae563a8615d472fdbffc43a3f3d46588c264ac4f024f63f01283becfbb/tomli-2.2.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:023aa114dd824ade0100497eb2318602af309e5a55595f76b626d6d9f3b7b0a6", size = 123429, upload-time = "2024-11-27T22:37:57Z", zstd = { hash = "sha256:2444bcd2eb5af418a76441306066ccd1c5788458c86ff885861b1791a629b50b", size = 99208 } },
-    { url = "https://files.astralhosted.com/public/f1/dd/4f6cd1e7b160041db83c694abc78e100473c15d54620083dbd5aae7b990e/tomli-2.2.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ece47d672db52ac607a3d9599a9d48dcb2f2f735c6c2d1f34130085bb12b112a", size = 226067, upload-time = "2024-11-27T22:37:58Z", zstd = { hash = "sha256:ba4fe8deaa3c524cca132bf7fba6885aaa9ba1cb9af0b4fedf0507adea45aa1a", size = 182720 } },
+    { url = "https://files.astralhosted.com/public/43/ca/75707e6efa2b37c77dadb324ae7d9571cb424e61ea73fad7c56c2d14527f/tomli-2.2.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:678e4fa69e4575eb77d103de3df8a895e1591b48e740211bd1067378c69e8249", size = 131077, upload-time = "2024-11-27T22:37:54Z", zstd = { hash = "sha256:d5cdb73f8a8fb053a9a4c6eef0a4d28d3a972d4030fab9a9527a28e9e9010d85", size = 106526 } },
+    { url = "https://files.astralhosted.com/public/c7/16/51ae563a8615d472fdbffc43a3f3d46588c264ac4f024f63f01283becfbb/tomli-2.2.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:023aa114dd824ade0100497eb2318602af309e5a55595f76b626d6d9f3b7b0a6", size = 123429, upload-time = "2024-11-27T22:37:56Z", zstd = { hash = "sha256:2444bcd2eb5af418a76441306066ccd1c5788458c86ff885861b1791a629b50b", size = 99208 } },
+    { url = "https://files.astralhosted.com/public/f1/dd/4f6cd1e7b160041db83c694abc78e100473c15d54620083dbd5aae7b990e/tomli-2.2.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ece47d672db52ac607a3d9599a9d48dcb2f2f735c6c2d1f34130085bb12b112a", size = 226067, upload-time = "2024-11-27T22:37:57Z", zstd = { hash = "sha256:ba4fe8deaa3c524cca132bf7fba6885aaa9ba1cb9af0b4fedf0507adea45aa1a", size = 182720 } },
     { url = "https://files.astralhosted.com/public/a9/6b/c54ede5dc70d648cc6361eaf429304b02f2871a345bbdd51e993d6cdf550/tomli-2.2.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6972ca9c9cc9f0acaa56a8ca1ff51e7af152a9f87fb64623e31d5c83700080ee", size = 236030, upload-time = "2024-11-27T22:37:59Z", zstd = { hash = "sha256:f655b6cf14cb49fb458b97f6f0d330b091efa1732ec827e6f56361b36c6f384d", size = 190873 } },
     { url = "https://files.astralhosted.com/public/1f/47/999514fa49cfaf7a92c805a86c3c43f4215621855d151b61c602abb38091/tomli-2.2.1-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:c954d2250168d28797dd4e3ac5cf812a406cd5a92674ee4c8f123c889786aa8e", size = 240898, upload-time = "2024-11-27T22:38:00Z", zstd = { hash = "sha256:cd8feb206b9ba9ae710f39f5814f30756138d3f67af19513e8bbfa95254b9767", size = 197723 } },
     { url = "https://files.astralhosted.com/public/73/41/0a01279a7ae09ee1573b423318e7934674ce06eb33f50936655071d81a24/tomli-2.2.1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:8dd28b3e155b80f4d54beb40a441d366adcfe740969820caf156c019fb5c7ec4", size = 229894, upload-time = "2024-11-27T22:38:02Z", zstd = { hash = "sha256:aa97641cd9dc3bfd4b3a1af6200bcc7fc31b9da747c83f671d03cda44a806f69", size = 186050 } },
     { url = "https://files.astralhosted.com/public/55/18/5d8bc5b0a0362311ce4d18830a5d28943667599a60d20118074ea1b01bb7/tomli-2.2.1-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:e59e304978767a54663af13c07b3d1af22ddee3bb2fb0618ca1593e4f593a106", size = 245319, upload-time = "2024-11-27T22:38:03Z", zstd = { hash = "sha256:834e2df4f4e49b891b294cea7cab05597fe60f6e40ad107a8ed7ada5994a3b18", size = 202830 } },
     { url = "https://files.astralhosted.com/public/92/a3/7ade0576d17f3cdf5ff44d61390d4b3febb8a9fc2b480c75c47ea048c646/tomli-2.2.1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:33580bccab0338d00994d7f16f4c4ec25b776af3ffaac1ed74e0b3fc95e885a8", size = 238273, upload-time = "2024-11-27T22:38:04Z", zstd = { hash = "sha256:681ad480247831106c0ff1afa4630e890e09be6016eef2fb675110800733f679", size = 193478 } },
-    { url = "https://files.astralhosted.com/public/72/6f/fa64ef058ac1446a1e51110c375339b3ec6be245af9d14c87c4a6412dd32/tomli-2.2.1-cp311-cp311-win32.whl", hash = "sha256:465af0e0875402f1d226519c9904f37254b3045fc5084697cefb9bdde1ff99ff", size = 98310, upload-time = "2024-11-27T22:38:06Z", zstd = { hash = "sha256:34bdcbfaabbd6ffa78492d46e85c2cecf4fa6ddfcf2ed3a43ad9082f64f4f434", size = 72199 } },
-    { url = "https://files.astralhosted.com/public/6a/1c/4a2dcde4a51b81be3530565e92eda625d94dafb46dbeb15069df4caffc34/tomli-2.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:2d0f2fdd22b02c6d81637a3c95f8cd77f995846af7414c5c4b8d0545afa1bc4b", size = 108309, upload-time = "2024-11-27T22:38:07Z", zstd = { hash = "sha256:61e3cf4975b4c85882ed129b7660848cfa63b91916f7d12115f3d8bfe0240c5d", size = 78281 } },
-    { url = "https://files.astralhosted.com/public/52/e1/f8af4c2fcde17500422858155aeb0d7e93477a0d59a98e56cbfe75070fd0/tomli-2.2.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:4a8f6e44de52d5e6c657c9fe83b562f5f4256d8ebbfe4ff922c495620a7f6cea", size = 132762, upload-time = "2024-11-27T22:38:08Z", zstd = { hash = "sha256:19f2f8e3cfd53c656b1983ed87e85f009473d23a1adcf1febe8aca60548211e1", size = 107358 } },
+    { url = "https://files.astralhosted.com/public/72/6f/fa64ef058ac1446a1e51110c375339b3ec6be245af9d14c87c4a6412dd32/tomli-2.2.1-cp311-cp311-win32.whl", hash = "sha256:465af0e0875402f1d226519c9904f37254b3045fc5084697cefb9bdde1ff99ff", size = 98310, upload-time = "2024-11-27T22:38:05Z", zstd = { hash = "sha256:34bdcbfaabbd6ffa78492d46e85c2cecf4fa6ddfcf2ed3a43ad9082f64f4f434", size = 72199 } },
+    { url = "https://files.astralhosted.com/public/6a/1c/4a2dcde4a51b81be3530565e92eda625d94dafb46dbeb15069df4caffc34/tomli-2.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:2d0f2fdd22b02c6d81637a3c95f8cd77f995846af7414c5c4b8d0545afa1bc4b", size = 108309, upload-time = "2024-11-27T22:38:06Z", zstd = { hash = "sha256:61e3cf4975b4c85882ed129b7660848cfa63b91916f7d12115f3d8bfe0240c5d", size = 78281 } },
+    { url = "https://files.astralhosted.com/public/52/e1/f8af4c2fcde17500422858155aeb0d7e93477a0d59a98e56cbfe75070fd0/tomli-2.2.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:4a8f6e44de52d5e6c657c9fe83b562f5f4256d8ebbfe4ff922c495620a7f6cea", size = 132762, upload-time = "2024-11-27T22:38:07Z", zstd = { hash = "sha256:19f2f8e3cfd53c656b1983ed87e85f009473d23a1adcf1febe8aca60548211e1", size = 107358 } },
     { url = "https://files.astralhosted.com/public/03/b8/152c68bb84fc00396b83e7bbddd5ec0bd3dd409db4195e2a9b3e398ad2e3/tomli-2.2.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8d57ca8095a641b8237d5b079147646153d22552f1c637fd3ba7f4b0b29167a8", size = 123453, upload-time = "2024-11-27T22:38:09Z", zstd = { hash = "sha256:d19e9fd2e34e8df3044c9afd9a9b0d197daeaebacfa499d5a3f29e5cd6b235d9", size = 99047 } },
     { url = "https://files.astralhosted.com/public/c8/d6/fc9267af9166f79ac528ff7e8c55c8181ded34eb4b0e93daa767b8841573/tomli-2.2.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4e340144ad7ae1533cb897d406382b4b6fede8890a03738ff1683af800d54192", size = 233486, upload-time = "2024-11-27T22:38:10Z", zstd = { hash = "sha256:e5d76686e321c9215677df1b4bdaccf3d5d6f73886df0c405acaaf34e0efca6d", size = 187573 } },
     { url = "https://files.astralhosted.com/public/5c/51/51c3f2884d7bab89af25f678447ea7d297b53b5a3b5730a7cb2ef6069f07/tomli-2.2.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:db2b95f9de79181805df90bedc5a5ab4c165e6ec3fe99f970d0e302f384ad222", size = 242349, upload-time = "2024-11-27T22:38:11Z", zstd = { hash = "sha256:04576945390eb3dd3cdefe2e11af655288e96a21288776e990863f5ea05e9a27", size = 197187 } },
     { url = "https://files.astralhosted.com/public/ab/df/bfa89627d13a5cc22402e441e8a931ef2108403db390ff3345c05253935e/tomli-2.2.1-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:40741994320b232529c802f8bc86da4e1aa9f413db394617b9a256ae0f9a7f77", size = 252159, upload-time = "2024-11-27T22:38:13Z", zstd = { hash = "sha256:e6be8fcdcb1212f3f66f145d1e61642f9409923a6291ec648ed38d17e37ffd1c", size = 207923 } },
-    { url = "https://files.astralhosted.com/public/9e/6e/fa2b916dced65763a5168c6ccb91066f7639bdc88b48adda990db10c8c0b/tomli-2.2.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:400e720fe168c0f8521520190686ef8ef033fb19fc493da09779e592861b78c6", size = 237243, upload-time = "2024-11-27T22:38:15Z", zstd = { hash = "sha256:dbae2b573055be75cd1475a74b86e1ea68a04975dc9ca7a22cc42ae494cb5872", size = 190887 } },
-    { url = "https://files.astralhosted.com/public/b4/04/885d3b1f650e1153cbb93a6a9782c58a972b94ea4483ae4ac5cedd5e4a09/tomli-2.2.1-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:02abe224de6ae62c19f090f68da4e27b10af2b93213d36cf44e6e1c5abd19fdd", size = 259645, upload-time = "2024-11-27T22:38:16Z", zstd = { hash = "sha256:b612b55e762d8b25dc245e13967a2d03c21d184d9ac8a5516c7185954b5cbcca", size = 214256 } },
-    { url = "https://files.astralhosted.com/public/9c/de/6b432d66e986e501586da298e28ebeefd3edc2c780f3ad73d22566034239/tomli-2.2.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b82ebccc8c8a36f2094e969560a1b836758481f3dc360ce9a3277c65f374285e", size = 244584, upload-time = "2024-11-27T22:38:18Z", zstd = { hash = "sha256:b45e34dd60ab5d79d31c2b99a3956263581e166b7491dcd0d2244cf13511f5ea", size = 199800 } },
+    { url = "https://files.astralhosted.com/public/9e/6e/fa2b916dced65763a5168c6ccb91066f7639bdc88b48adda990db10c8c0b/tomli-2.2.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:400e720fe168c0f8521520190686ef8ef033fb19fc493da09779e592861b78c6", size = 237243, upload-time = "2024-11-27T22:38:14Z", zstd = { hash = "sha256:dbae2b573055be75cd1475a74b86e1ea68a04975dc9ca7a22cc42ae494cb5872", size = 190887 } },
+    { url = "https://files.astralhosted.com/public/b4/04/885d3b1f650e1153cbb93a6a9782c58a972b94ea4483ae4ac5cedd5e4a09/tomli-2.2.1-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:02abe224de6ae62c19f090f68da4e27b10af2b93213d36cf44e6e1c5abd19fdd", size = 259645, upload-time = "2024-11-27T22:38:15Z", zstd = { hash = "sha256:b612b55e762d8b25dc245e13967a2d03c21d184d9ac8a5516c7185954b5cbcca", size = 214256 } },
+    { url = "https://files.astralhosted.com/public/9c/de/6b432d66e986e501586da298e28ebeefd3edc2c780f3ad73d22566034239/tomli-2.2.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b82ebccc8c8a36f2094e969560a1b836758481f3dc360ce9a3277c65f374285e", size = 244584, upload-time = "2024-11-27T22:38:17Z", zstd = { hash = "sha256:b45e34dd60ab5d79d31c2b99a3956263581e166b7491dcd0d2244cf13511f5ea", size = 199800 } },
     { url = "https://files.astralhosted.com/public/1c/9a/47c0449b98e6e7d1be6cbac02f93dd79003234ddc4aaab6ba07a9a7482e2/tomli-2.2.1-cp312-cp312-win32.whl", hash = "sha256:889f80ef92701b9dbb224e49ec87c645ce5df3fa2cc548664eb8a25e03127a98", size = 98875, upload-time = "2024-11-27T22:38:19Z", zstd = { hash = "sha256:7e1b94fcffb5da44e37a29bdca990e90e7525b96cedb4c807e341ffa9508e0d2", size = 72706 } },
     { url = "https://files.astralhosted.com/public/ef/60/9b9638f081c6f1261e2688bd487625cd1e660d0a85bd469e91d8db969734/tomli-2.2.1-cp312-cp312-win_amd64.whl", hash = "sha256:7fc04e92e1d624a4a63c76474610238576942d6b8950a2d7f908a340494e67e4", size = 109418, upload-time = "2024-11-27T22:38:20Z", zstd = { hash = "sha256:9ddbca35c8aa125a95decfc9c442095c3b4ba42cec4745025f18731021cf1b00", size = 79196 } },
-    { url = "https://files.astralhosted.com/public/04/90/2ee5f2e0362cb8a0b6499dc44f4d7d48f8fff06d28ba46e6f1eaa61a1388/tomli-2.2.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:f4039b9cbc3048b2416cc57ab3bda989a6fcf9b36cf8937f01a6e731b64f80d7", size = 132708, upload-time = "2024-11-27T22:38:22Z", zstd = { hash = "sha256:094db49b12fa48dbf7bc28bb31f7a970ad952b7448b74d51844f886160de0548", size = 107300 } },
-    { url = "https://files.astralhosted.com/public/c0/ec/46b4108816de6b385141f082ba99e315501ccd0a2ea23db4a100dd3990ea/tomli-2.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:286f0ca2ffeeb5b9bd4fcc8d6c330534323ec51b2f52da063b11c502da16f30c", size = 123582, upload-time = "2024-11-27T22:38:23Z", zstd = { hash = "sha256:b81d835321f2d53c80123a00afba3fc2f20000ff97e3ba2f3546dc61fbcd6d7b", size = 98900 } },
+    { url = "https://files.astralhosted.com/public/04/90/2ee5f2e0362cb8a0b6499dc44f4d7d48f8fff06d28ba46e6f1eaa61a1388/tomli-2.2.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:f4039b9cbc3048b2416cc57ab3bda989a6fcf9b36cf8937f01a6e731b64f80d7", size = 132708, upload-time = "2024-11-27T22:38:21Z", zstd = { hash = "sha256:094db49b12fa48dbf7bc28bb31f7a970ad952b7448b74d51844f886160de0548", size = 107300 } },
+    { url = "https://files.astralhosted.com/public/c0/ec/46b4108816de6b385141f082ba99e315501ccd0a2ea23db4a100dd3990ea/tomli-2.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:286f0ca2ffeeb5b9bd4fcc8d6c330534323ec51b2f52da063b11c502da16f30c", size = 123582, upload-time = "2024-11-27T22:38:22Z", zstd = { hash = "sha256:b81d835321f2d53c80123a00afba3fc2f20000ff97e3ba2f3546dc61fbcd6d7b", size = 98900 } },
     { url = "https://files.astralhosted.com/public/a0/bd/b470466d0137b37b68d24556c38a0cc819e8febe392d5b199dcd7f578365/tomli-2.2.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a92ef1a44547e894e2a17d24e7557a5e85a9e1d0048b0b5e7541f76c5032cb13", size = 232543, upload-time = "2024-11-27T22:38:24Z", zstd = { hash = "sha256:f0139331244c8d904a7bb13d12c8e3009fb6ce0ba0dd8cd595d4faea2edba444", size = 186997 } },
     { url = "https://files.astralhosted.com/public/d9/e5/82e80ff3b751373f7cead2815bcbe2d51c895b3c990686741a8e56ec42ab/tomli-2.2.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9316dc65bed1684c9a98ee68759ceaed29d229e985297003e494aa825ebb0281", size = 241691, upload-time = "2024-11-27T22:38:26Z", zstd = { hash = "sha256:3f389737d9211a07551ed2b2763b31586736ac29aa3c776e9b0de4185d638bcc", size = 196404 } },
-    { url = "https://files.astralhosted.com/public/05/7e/2a110bc2713557d6a1bfb06af23dd01e7dde52b6ee7dadc589868f9abfac/tomli-2.2.1-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:e85e99945e688e32d5a35c1ff38ed0b3f41f43fad8df0bdf79f72b2ba7bc5272", size = 251170, upload-time = "2024-11-27T22:38:28Z", zstd = { hash = "sha256:99ba4147e191f6fd762421c0070175227bd9e620b95fb232bb3147641a21b70a", size = 207028 } },
-    { url = "https://files.astralhosted.com/public/64/7b/22d713946efe00e0adbcdfd6d1aa119ae03fd0b60ebed51ebb3fa9f5a2e5/tomli-2.2.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ac065718db92ca818f8d6141b5f66369833d4a80a9d74435a268c52bdfa73140", size = 236530, upload-time = "2024-11-27T22:38:30Z", zstd = { hash = "sha256:f139d13400efd16cbc8b8af425c46eb9537c3104ebc2fc898d7d731f57ca1a6f", size = 190352 } },
-    { url = "https://files.astralhosted.com/public/38/31/3a76f67da4b0cf37b742ca76beaf819dca0ebef26d78fc794a576e08accf/tomli-2.2.1-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:d920f33822747519673ee656a4b6ac33e382eca9d331c87770faa3eef562aeb2", size = 258666, upload-time = "2024-11-27T22:38:31Z", zstd = { hash = "sha256:13df992a2ceecf4bdbe84898b3578206e0dfd2729969ea2f6807ace6b9a33d6b", size = 213588 } },
-    { url = "https://files.astralhosted.com/public/07/10/5af1293da642aded87e8a988753945d0cf7e00a9452d3911dd3bb354c9e2/tomli-2.2.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a198f10c4d1b1375d7687bc25294306e551bf1abfa4eace6650070a5c1ae2744", size = 243954, upload-time = "2024-11-27T22:38:32Z", zstd = { hash = "sha256:25c66dd98e71ce784dd89b39632eec1403a786b8e836cd334a6232111e985626", size = 199318 } },
-    { url = "https://files.astralhosted.com/public/5b/b9/1ed31d167be802da0fc95020d04cd27b7d7065cc6fbefdd2f9186f60d7bd/tomli-2.2.1-cp313-cp313-win32.whl", hash = "sha256:d3f5614314d758649ab2ab3a62d4f2004c825922f9e370b29416484086b264ec", size = 98724, upload-time = "2024-11-27T22:38:33Z", zstd = { hash = "sha256:adc65892197c08b803c96411c91fdbb881ea964455435126952f22ff6583a2e2", size = 72578 } },
+    { url = "https://files.astralhosted.com/public/05/7e/2a110bc2713557d6a1bfb06af23dd01e7dde52b6ee7dadc589868f9abfac/tomli-2.2.1-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:e85e99945e688e32d5a35c1ff38ed0b3f41f43fad8df0bdf79f72b2ba7bc5272", size = 251170, upload-time = "2024-11-27T22:38:27Z", zstd = { hash = "sha256:99ba4147e191f6fd762421c0070175227bd9e620b95fb232bb3147641a21b70a", size = 207028 } },
+    { url = "https://files.astralhosted.com/public/64/7b/22d713946efe00e0adbcdfd6d1aa119ae03fd0b60ebed51ebb3fa9f5a2e5/tomli-2.2.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ac065718db92ca818f8d6141b5f66369833d4a80a9d74435a268c52bdfa73140", size = 236530, upload-time = "2024-11-27T22:38:29Z", zstd = { hash = "sha256:f139d13400efd16cbc8b8af425c46eb9537c3104ebc2fc898d7d731f57ca1a6f", size = 190352 } },
+    { url = "https://files.astralhosted.com/public/38/31/3a76f67da4b0cf37b742ca76beaf819dca0ebef26d78fc794a576e08accf/tomli-2.2.1-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:d920f33822747519673ee656a4b6ac33e382eca9d331c87770faa3eef562aeb2", size = 258666, upload-time = "2024-11-27T22:38:30Z", zstd = { hash = "sha256:13df992a2ceecf4bdbe84898b3578206e0dfd2729969ea2f6807ace6b9a33d6b", size = 213588 } },
+    { url = "https://files.astralhosted.com/public/07/10/5af1293da642aded87e8a988753945d0cf7e00a9452d3911dd3bb354c9e2/tomli-2.2.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a198f10c4d1b1375d7687bc25294306e551bf1abfa4eace6650070a5c1ae2744", size = 243954, upload-time = "2024-11-27T22:38:31Z", zstd = { hash = "sha256:25c66dd98e71ce784dd89b39632eec1403a786b8e836cd334a6232111e985626", size = 199318 } },
+    { url = "https://files.astralhosted.com/public/5b/b9/1ed31d167be802da0fc95020d04cd27b7d7065cc6fbefdd2f9186f60d7bd/tomli-2.2.1-cp313-cp313-win32.whl", hash = "sha256:d3f5614314d758649ab2ab3a62d4f2004c825922f9e370b29416484086b264ec", size = 98724, upload-time = "2024-11-27T22:38:32Z", zstd = { hash = "sha256:adc65892197c08b803c96411c91fdbb881ea964455435126952f22ff6583a2e2", size = 72578 } },
     { url = "https://files.astralhosted.com/public/c7/32/b0963458706accd9afcfeb867c0f9175a741bf7b19cd424230714d722198/tomli-2.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:a38aa0308e754b0e3c67e344754dff64999ff9b513e691d0e786265c93583c69", size = 109383, upload-time = "2024-11-27T22:38:34Z", zstd = { hash = "sha256:0be1c45ac49950eb5d1ae184dac34c0bbf5219067b3bd1a2d0c0937f7bcb2253", size = 79192 } },
     { url = "https://files.astralhosted.com/public/6e/c2/61d3e0f47e2b74ef40a68b9e6ad5984f6241a942f7cd3bbfbdbd03861ea9/tomli-2.2.1-py3-none-any.whl", hash = "sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", size = 14257, upload-time = "2024-11-27T22:38:35Z", zstd = { hash = "sha256:574aedcc59d215534eb0d1775ec408c8030f981fab09fed56f8c06bce325682a", size = 12411 } },
 ]
@@ -1141,6 +1387,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cloud = [
+    { name = "boto3" },
+    { name = "google-cloud-storage" },
+]
+cloud-gcs = [
+    { name = "google-cloud-storage" },
+]
+cloud-s3 = [
+    { name = "boto3" },
+]
 parquet = [
     { name = "pyarrow" },
 ]
@@ -1169,12 +1425,16 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.28" },
+    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.14.0" },
     { name = "numpy", specifier = ">=1.21.5" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=12.0.0" },
     { name = "tenacity", specifier = ">=8.2.0" },
     { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.52.1" },
+    { name = "zephon", extras = ["cloud-gcs"], marker = "extra == 'cloud'" },
+    { name = "zephon", extras = ["cloud-s3"], marker = "extra == 'cloud'" },
 ]
-provides-extras = ["parquet", "vortex"]
+provides-extras = ["parquet", "vortex", "cloud-s3", "cloud-gcs", "cloud"]
 
 [package.metadata.requires-dev]
 dev = [

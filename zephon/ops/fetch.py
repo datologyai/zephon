@@ -18,7 +18,6 @@ class FetchOp(DefaultFinalize):
 
     def __init__(self, buf: Optional[Buffering] = None) -> None:
         self._store: MultiDatasetShardStore | None = None
-        self._file_store = None
         self._buffering = buf or Buffering(max_batch=64, max_latency_ms=5)
 
     def setup(self, ctx: OpContext) -> None:

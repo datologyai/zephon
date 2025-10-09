@@ -1,5 +1,7 @@
 """User-facing dataset descriptors and detectors."""
 
+import os
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -7,7 +9,7 @@ from typing import Mapping
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
 from zephon.io.protocols import RandomAccessShard
-from zephon.io.storage import LocalFSBackend
+from zephon.io.storage import RouterStorageBackend
 
 
 @dataclass(frozen=True)
@@ -59,34 +61,48 @@ class Dataset:
             FileNotFoundError: if ``path`` does not exist.
             ValueError: if ``path`` is not a directory or format unsupported.
         """
-        # TODO(MaxiBoether): What if this is a cloud path? Right now hard coded to local FS.
+        # Support both local directories and cloud URIs (s3://, gs://, ...).
+        url = urllib.parse.urlparse(path)
+        is_remote = bool(url.scheme)
 
-        root = Path(path)
-        if not root.exists():
-            raise FileNotFoundError(f"Dataset path does not exist: {root}")
-        if not root.is_dir():
-            raise ValueError(f"Dataset path must be a directory: {root}")
+        # Resolve local directory and validate basic constraints.
+        root_str: str
+        if not is_remote:
+            root = Path(path)
+            if not root.exists():
+                raise FileNotFoundError(f"Dataset path does not exist: {root}")
+            if not root.is_dir():
+                raise ValueError(f"Dataset path must be a directory: {root}")
+            root = root.resolve()
+            root_str = str(root)
+        else:
+            # Do not touch the remote path; validation is delegated to storage.
+            root_str = path
 
-        root = root.resolve()
-
+        # Detect format using storage introspection when not explicitly provided.
         kind = fmt
+        storage = RouterStorageBackend()
         if kind is None:
-            if (root / "index.json").is_file():
+            # MDS: index.json exists at the dataset root
+            if storage.exists(os.path.join(root_str, "index.json")):
                 kind = "mds"
-            elif any(p.suffix == ".jsonl" for p in root.iterdir() if p.is_file()):
-                kind = "jsonl"
+            else:
+                # JSONL: presence of .jsonl files directly under root
+                try:
+                    entries = storage.listdir(root_str)
+                except Exception:
+                    entries = []
+                if any(name.endswith(".jsonl") for name in entries):
+                    kind = "jsonl"
 
         if kind not in {"mds", "jsonl"}:
-            raise ValueError(f"Unsupported dataset format at path: {root}")
+            raise ValueError(f"Unsupported dataset format at path: {root_str}")
 
         ensure_builtin_formats()
         handler = get_format(kind)
-        storage = LocalFSBackend(
-            root=root
-        )  # TODO(follow up PR): Implement cloud storage backend.
-        shard_index, shard_meta = handler.discover(str(root), storage)
-        backend = {"kind": kind, "path": str(root), "shards": shard_meta}
-        return cls(name=name, shard_index=shard_index, backend=backend, path=str(root))
+        shard_index, shard_meta = handler.discover(root_str, storage)
+        backend = {"kind": kind, "path": root_str, "shards": shard_meta}
+        return cls(name=name, shard_index=shard_index, backend=backend, path=root_str)
 
     @classmethod
     def from_dict(cls, name: str, shards: Mapping[int, RandomAccessShard]) -> "Dataset":

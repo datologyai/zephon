@@ -4,10 +4,22 @@ from typing import IO, Any, Mapping, Protocol
 
 
 class StorageBackend(Protocol):
-    """Protocol implemented by all storage backends."""
+    """Protocol implemented by all storage backends.
+
+    Notes on semantics:
+    - ``open`` is intended for small control files used during discovery
+      (e.g., ``index.json``) and light text reads. Implementations may
+      internally materialize to a temporary file or use streaming file
+      objects. Large data transfers should use ``download`` and be managed
+      by resolvers/caches.
+    """
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
-        """Open ``path`` and return a file-like object."""
+        """Open ``path`` and return a file-like object.
+
+        Intended for small metadata files; backends may use temporary files
+        or streamed file objects under the hood.
+        """
         ...
 
     def exists(self, path: str) -> bool:
