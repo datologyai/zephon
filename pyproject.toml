@@ -190,6 +190,7 @@ addopts = "--strict-markers -ra --tb=native --color=yes"
 markers = [
     "world_size(val)",
     "remote",
+    "integration: marks tests as integration (use --run-integration to run)",
 ]
 filterwarnings = [
     'ignore:ExtraArgumentWarning',

@@ -41,6 +41,11 @@ class RuntimeOptions:
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
+    # Expert knob:
+    # Keep latency-based flush in deterministic mode when True unless a stage contains
+    # a batch-shape sensitive operator (in which case we auto-disable it for that stage).
+    # When False, latency flush is always disabled in deterministic mode.
+    allow_latency_flush_in_deterministic: bool = True
 
 
 class Engine:
@@ -55,11 +60,7 @@ class Engine:
         }
         self._ctx = base_ctx
         self._opts = opts
-        if self._opts.deterministic:
-            # TODO(MaxiBoether): there most likely is a difference between determinism (same setting) and elastic scalability.
-            # Determinism == same ordering given I run my setup exactly the same way (reliable multithreading, no elastic scaling)
-            # Elastic scalability: determinism plus concept of canonical nodes to ensure determinism across configs!
-            raise NotImplementedError("Deterministic mode not implemented yet.")
+        # Deterministic mode is supported by the threads runner via ordered batching.
 
         self._work = work
         self._runners: list[Any] = []
@@ -155,12 +156,26 @@ class Engine:
             ):
                 chosen = "threads"
             if chosen == "threads":
+                allow_latency = self._opts.allow_latency_flush_in_deterministic
+                if self._opts.deterministic:
+                    has_sensitive = any(
+                        getattr(nd.op.traits(), "batch_shape_sensitive", False)
+                        for nd in stage.nodes
+                    )
+                    if has_sensitive and allow_latency:
+                        print(
+                            "Deterministic mode: disabling time-based flush for Stage[%d] due to batch-shape sensitive op.",
+                            idx,
+                        )
+                        allow_latency = False
                 self._runners.append(
                     ThreadStageRunner(
                         stage,
                         self._ctx,
                         self._opts.max_workers,
                         prefetch_capacity=prefetch,
+                        deterministic=self._opts.deterministic,
+                        allow_latency_flush_in_deterministic=allow_latency,
                     )
                 )
             elif chosen == "remote":

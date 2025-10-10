@@ -111,6 +111,29 @@ class Pipeline:
         self._tail = node
         return self
 
+    # Internal/testing helper: insert a small deterministic delay stage.
+    def _delay(
+        self,
+        *,
+        max_delay_ms: float = 2.0,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        from zephon.ops.delay import (
+            DelayById,
+        )  # lazy import; not part of public __all__
+
+        op = DelayById(max_delay_ms=max_delay_ms)
+        node = self._graph.add(
+            "delay",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
     def options(self, **hints: Any) -> "Pipeline":
         # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
         for key, value in hints.items():

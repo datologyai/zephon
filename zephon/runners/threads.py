@@ -1,7 +1,35 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Threaded stage runner that drives operators with bounded queues."""
+"""Threaded stage runner that drives operators with bounded queues.
+
+Deterministic vs non-deterministic behaviour
+-------------------------------------------
+
+This runner supports two execution modes controlled by the `deterministic`
+flag supplied at construction time:
+
+- Non-deterministic (default):
+  - Operators may buffer by count and by latency (``max_latency_ms``) as
+    requested by their ``Buffering`` trait. Micro-batches are scheduled into a
+    thread pool, and downstream receives results in completion order. This
+    maximizes throughput/latency at the cost of non-stable ordering when tasks
+    complete at different times.
+
+- Deterministic:
+  - Time-based flushes are enabled (every ``max_latency_ms``) unless the
+    engine explicitly disables them (e.g., when any operator in the stage is
+    batch-shape sensitive). In any case, count-based buffering is honoured.
+  - Each scheduled micro-batch receives a monotonically increasing sequence
+    number. Results are collected and re-ordered so that downstream observes
+    the exact same order it would in a single-threaded execution regardless of
+    completion timing. Within a micro-batch, element order is preserved.
+
+The deterministic path is optimistic by construction: every scheduled
+micro-batch is tagged with a sequence number, and the runner always enqueues an
+explicit ``(seq, payload)`` pair to the result queue. Consumers of that queue
+therefore do not need to defensively handle missing sequence numbers.
+"""
 
 import copy
 import queue
@@ -9,7 +37,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional, TypeAlias
 
 from zephon.core.constants import Element
 from zephon.core.graph import Node, Stage
@@ -29,6 +57,10 @@ class ThreadStageRunner:
     provide backpressure even when operators expand or filter the stream, without
     requiring new stages.
     """
+
+    # When deterministic=False the result queue carries a plain list[Element].
+    # When deterministic=True it carries (seq:int, payload:list[Element]).
+    ResultItem: TypeAlias = "list[Element] | tuple[int, list[Element]]"
 
     class _InflightCounter:
         """Track how many tasks are currently executing for an operator."""
@@ -60,14 +92,21 @@ class ThreadStageRunner:
         node: Node
         deterministic: bool
         ctx_proto: dict[str, Any]
+        allow_latency_flush: bool = False
         instances: list[Op] = field(init=False, default_factory=list)
         parallelism: int = field(init=False)
         buffer_cfg: Buffering | None = field(init=False)
         buffer: list[Element] = field(init=False, default_factory=list)
         first_ts_ms: Optional[float] = field(init=False, default=None)
+        # Deterministic sequencing state (per-operator)
+        next_seq: int = field(init=False, default=0)
+        emit_seq: int = field(init=False, default=0)
+        pending_results: dict[int, list[Element]] = field(
+            init=False, default_factory=dict
+        )
         inflight: "ThreadStageRunner._InflightCounter" = field(init=False)
         input_queue: queue.Queue[object] = field(init=False)
-        result_queue: queue.Queue[list[Element]] = field(init=False)
+        result_queue: queue.Queue["ThreadStageRunner.ResultItem"] = field(init=False)
         _instance_queue: queue.Queue[Op] = field(init=False, repr=False)
 
         def __post_init__(self) -> None:
@@ -90,7 +129,11 @@ class ThreadStageRunner:
             else:
                 self.buffer_cfg = Buffering(
                     max_batch=cfg.max_batch,
-                    max_latency_ms=None if self.deterministic else cfg.max_latency_ms,
+                    max_latency_ms=(
+                        cfg.max_latency_ms
+                        if (not self.deterministic or self.allow_latency_flush)
+                        else None
+                    ),
                 )
 
         def acquire_instance(self) -> Op:
@@ -199,8 +242,11 @@ class ThreadStageRunner:
         stage: Stage,
         ctx_services: dict[str, Any],
         max_workers: int,
+        *,
         prefetch_capacity: int = 0,
         queue_capacity: int = 4,
+        deterministic: bool = False,
+        allow_latency_flush_in_deterministic: bool = True,
     ) -> None:
         self._stage = stage
         self._max_workers = max_workers
@@ -213,8 +259,9 @@ class ThreadStageRunner:
         self.ops: list["ThreadStageRunner._OperatorState"] = [
             ThreadStageRunner._OperatorState(
                 node=node,
-                deterministic=False,
+                deterministic=deterministic,
                 ctx_proto=base_services,
+                allow_latency_flush=allow_latency_flush_in_deterministic,
             )
             for node in stage.nodes
         ]
@@ -251,11 +298,15 @@ class ThreadStageRunner:
         if not batch:
             return
         instance = state.acquire_instance()
+        seq: Optional[int] = None
+        if state.deterministic:
+            seq = state.next_seq
+            state.next_seq += 1
 
         def work(items: list[Element]) -> list[Element]:
             try:
                 return instance.process_many(items)
-            except NotImplementedError:
+            except (NotImplementedError, AttributeError):
                 out: list[Element] = []
                 for element in items:
                     out.extend(instance.process_one(element))
@@ -283,7 +334,7 @@ class ThreadStageRunner:
 
             if result is None:
                 return
-            self._put_result(state, result, context)
+            self._put_result(state, result, context, seq=seq)
 
         future.add_done_callback(done_callback)
 
@@ -292,6 +343,8 @@ class ThreadStageRunner:
         state: "ThreadStageRunner._OperatorState",
         result: list[Element],
         context: "ThreadStageRunner._RunContext",
+        *,
+        seq: Optional[int] = None,
     ) -> None:
         """Enqueue the operator output, regardless of how many elements it contains.
 
@@ -301,9 +354,16 @@ class ThreadStageRunner:
         """
         if not result:
             return
+        payload: ThreadStageRunner.ResultItem
+        if state.deterministic:
+            assert seq is not None, "Deterministic mode requires sequence numbers"
+            payload = (seq, result)
+        else:
+            payload = result
+
         while True:
             try:
-                state.result_queue.put(result, timeout=0.1)
+                state.result_queue.put(payload, timeout=0.1)
                 return
             except queue.Full:
                 if context.stop_event.is_set():
@@ -341,10 +401,20 @@ class ThreadStageRunner:
                     self._signal_downstream_stop(next_queue, context)
                     return
                 try:
-                    result = state.result_queue.get(timeout=0.05)
+                    item = state.result_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                self._emit_downstream(result, next_queue, context)
+                if state.deterministic:
+                    rseq, payload = item
+                    state.pending_results[int(rseq)] = payload
+                    # Emit in order as far as possible
+                    while state.emit_seq in state.pending_results:
+                        ready_elems = state.pending_results.pop(state.emit_seq)
+                        state.emit_seq += 1
+                        self._emit_downstream(ready_elems, next_queue, context)
+                else:
+                    assert isinstance(item, list)
+                    self._emit_downstream(item, next_queue, context)
                 continue
 
             if context.stop_event.is_set():
@@ -379,10 +449,18 @@ class ThreadStageRunner:
     ) -> None:
         while True:
             try:
-                result = state.result_queue.get_nowait()
+                item = state.result_queue.get_nowait()
             except queue.Empty:
                 break
-            self._emit_downstream(result, next_queue, context)
+            if state.deterministic:
+                rseq, payload = item  # type: ignore[misc]
+                state.pending_results[int(rseq)] = payload  # type: ignore[assignment]
+                while state.emit_seq in state.pending_results:
+                    ready_elems = state.pending_results.pop(state.emit_seq)
+                    state.emit_seq += 1
+                    self._emit_downstream(ready_elems, next_queue, context)
+            else:
+                self._emit_downstream(item, next_queue, context)  # type: ignore[arg-type]
 
     def _emit_downstream(
         self,

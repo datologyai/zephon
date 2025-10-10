@@ -9,10 +9,22 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class OpTraits:
-    """Static capabilities an operator advertises to the planner."""
+    """Static capabilities an operator advertises to the planner.
+
+    Attributes:
+        indexable: Whether the operator preserves indexability through the plan.
+        parallelism: Suggested parallelism for the operator when not overridden.
+        batch_shape_sensitive: If True, the operator's outputs can depend on how
+            inputs are grouped into micro-batches (e.g., per-batch RNG or
+            statistics). In deterministic mode, stages that contain at least one
+            such operator will have time-based flush disabled to preserve strong
+            determinism. When False, ordering determinism suffices and latency
+            flush may be kept for performance.
+    """
 
     indexable: bool = True
     parallelism: int = 1
+    batch_shape_sensitive: bool = False
 
 
 @dataclass
