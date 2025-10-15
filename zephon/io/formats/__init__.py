@@ -19,6 +19,7 @@ def ensure_builtin_formats() -> None:
 
     importlib.import_module("zephon.io.formats.jsonl")
     importlib.import_module("zephon.io.formats.mds")
+    importlib.import_module("zephon.io.formats.litdata")
 
     _INITIALIZED = True
 

@@ -1,10 +1,10 @@
 """User-facing dataset descriptors and detectors."""
 
-import os
+import json
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
@@ -24,6 +24,7 @@ class Dataset:
     - ``path``: original filesystem path if file-backed, otherwise ``None``
 
     Backend kinds used by the internal store builder:
+    - "litdata": {"path": str, "shards": metadata}
     - "mds": {"path": str, "shards": metadata}
     - "jsonl": {"path": str, "shards": metadata}
     - "inmem": {"shards": dict[int, RandomAccessShard]}
@@ -50,7 +51,8 @@ class Dataset:
             fmt: Optional explicit format. When ``None``, auto-detects.
 
         Supported formats:
-        - ``"mds"`` directories containing ``index.json``
+        - ``"litdata"`` directories containing ``index.json`` structured with ``config`` and ``chunks``
+        - ``"mds"`` directories containing ``index.json`` structured with ``shards``
         - ``"jsonl"`` directories where ``*.jsonl`` files act as shards
 
         Returns:
@@ -61,41 +63,26 @@ class Dataset:
             FileNotFoundError: if ``path`` does not exist.
             ValueError: if ``path`` is not a directory or format unsupported.
         """
-        # Support both local directories and cloud URIs (s3://, gs://, ...).
         url = urllib.parse.urlparse(path)
         is_remote = bool(url.scheme)
 
-        # Resolve local directory and validate basic constraints.
-        root_str: str
+        root_path: Path | None = None
         if not is_remote:
-            root = Path(path)
-            if not root.exists():
-                raise FileNotFoundError(f"Dataset path does not exist: {root}")
-            if not root.is_dir():
-                raise ValueError(f"Dataset path must be a directory: {root}")
-            root = root.resolve()
-            root_str = str(root)
+            root_path = Path(path)
+            if not root_path.exists():
+                raise FileNotFoundError(f"Dataset path does not exist: {root_path}")
+            if not root_path.is_dir():
+                raise ValueError(f"Dataset path must be a directory: {root_path}")
+            root_path = root_path.resolve()
+            root_str = str(root_path)
         else:
-            # Do not touch the remote path; validation is delegated to storage.
-            root_str = path
+            root_str = path.rstrip("/") or path
 
-        # Detect format using storage introspection when not explicitly provided.
-        kind = fmt
         storage = RouterStorageBackend()
+        kind = fmt
         if kind is None:
-            # MDS: index.json exists at the dataset root
-            if storage.exists(os.path.join(root_str, "index.json")):
-                kind = "mds"
-            else:
-                # JSONL: presence of .jsonl files directly under root
-                try:
-                    entries = storage.listdir(root_str)
-                except Exception:
-                    entries = []
-                if any(name.endswith(".jsonl") for name in entries):
-                    kind = "jsonl"
-
-        if kind not in {"mds", "jsonl"}:
+            kind = _auto_detect_format(storage, root_str, root_path)
+        if kind is None:
             raise ValueError(f"Unsupported dataset format at path: {root_str}")
 
         ensure_builtin_formats()
@@ -113,3 +100,62 @@ class Dataset:
 
 
 __all__ = ["Dataset"]
+
+
+def _auto_detect_format(
+    storage: RouterStorageBackend, root_str: str, root_path: Path | None
+) -> str | None:
+    index_uri: str
+    if root_path is not None:
+        index_file = root_path / "index.json"
+        if index_file.is_file():
+            return _detect_index_format(index_file)
+        entries = [p.name for p in root_path.iterdir() if p.is_file()]
+        if any(name.endswith(".jsonl") for name in entries):
+            return "jsonl"
+        index_uri = str(index_file)
+    else:
+        base = root_str.rstrip("/")
+        index_uri = f"{base}/index.json" if base else f"{root_str}/index.json"
+        try:
+            if storage.exists(index_uri):
+                data = _load_index_json(storage, index_uri)
+                return _classify_index_payload(data)
+        except Exception:
+            return None
+
+        try:
+            entries = storage.listdir(root_str)
+        except Exception:
+            entries = []
+        if any(name.endswith(".jsonl") for name in entries):
+            return "jsonl"
+        return None
+
+    if storage.exists(index_uri):
+        data = _load_index_json(storage, index_uri)
+        return _classify_index_payload(data)
+    return None
+
+
+def _detect_index_format(index_path: Path) -> str:
+    try:
+        with index_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return "mds"
+    return _classify_index_payload(data)
+
+
+def _load_index_json(storage: RouterStorageBackend, path: str) -> Any:
+    with storage.open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _classify_index_payload(data: Any) -> str:
+    if isinstance(data, dict):
+        if "chunks" in data and "config" in data:
+            return "litdata"
+        if "shards" in data:
+            return "mds"
+    return "mds"

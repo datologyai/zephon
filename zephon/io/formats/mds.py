@@ -5,7 +5,8 @@
 
 import json
 import os
-from typing import TYPE_CHECKING, Callable, Mapping, Protocol, cast
+from copy import deepcopy
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol, TypedDict, cast
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.protocols import RandomAccessShard
@@ -16,15 +17,27 @@ if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
 
 try:
-    from streaming.base.format.mds.reader import MDSShard as _StreamingMDSShard
+    from streaming.base.format.mds.reader import MDSReader as _StreamingMDSReader
 except Exception:
-    _StreamingMDSShard = None
+    _StreamingMDSReader = None
 
 
 class _UnderlyingMDSShard(Protocol):
     def __getitem__(self, index: int) -> dict[str, object]: ...
 
     def __len__(self) -> int: ...
+
+
+class _StreamingTemplate(TypedDict):
+    column_encodings: tuple[str, ...]
+    column_names: tuple[str, ...]
+    column_sizes: tuple[int | None, ...]
+    compression: str | None
+    hashes: tuple[str, ...]
+    samples: int
+    size_limit: int | str | None
+    format: str
+    version: int
 
 
 class _PassthroughMDSShard(RandomAccessShard):
@@ -127,26 +140,47 @@ class MDSFormat(FormatHandler):
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
-        if _StreamingMDSShard is None:
+        extras = dict(local_ref.extra) if local_ref.extra else {}
+
+        if _StreamingMDSReader is None:
             raise RuntimeError(
                 "Opening MDS shards requires the 'mosaicml-streaming' package; install it to proceed"
             )
-        kwargs = {}
-        if local_ref.extra:
-            kwargs = dict(local_ref.extra)
+
+        streaming_template_data = extras.get("_streaming_template")
+        if not isinstance(streaming_template_data, dict):
+            raise RuntimeError("Missing streaming metadata for MDS shard")
+
+        streaming_template = cast(_StreamingTemplate, streaming_template_data)
+        entry = _finalize_streaming_entry(streaming_template, locator, local_ref)
+        split_obj = extras.get("split")
+        split = str(split_obj) if isinstance(split_obj, (str, os.PathLike)) else None
+        dirname = str(local_ref.raw.path.parent)
         try:
-            shard = _StreamingMDSShard(
-                raw=local_ref.raw.path,
-                zip_file=local_ref.zip.path if local_ref.zip else None,
-                compression=local_ref.compression,
-                hashes=locator.raw.hashes,
-                **kwargs,
+            streaming_shard = _StreamingMDSReader.from_json(
+                dirname=dirname,
+                split=split,
+                obj=entry,
             )
         except TypeError as exc:
             raise RuntimeError(
                 "Unsupported mosaicml-streaming version; please upgrade to a recent release"
             ) from exc
-        return _PassthroughMDSShard(shard)
+        listing: set[str] = set()
+        raw_path = local_ref.raw.path
+        if raw_path.exists():
+            listing.add(str(raw_path))
+        if local_ref.zip is not None and local_ref.zip.path.exists():
+            listing.add(str(local_ref.zip.path))
+        try:
+            streaming_shard.set_up_local(listing, safe_keep_zip=True)
+        except (
+            TypeError
+        ) as exc:  # pragma: no cover - signature mismatch on unexpected versions
+            raise RuntimeError(
+                "Unsupported mosaicml-streaming version; please upgrade to a recent release"
+            ) from exc
+        return _PassthroughMDSShard(cast(_UnderlyingMDSShard, streaming_shard))
 
 
 def _build_file(meta: Mapping[str, object], shard_id: int, kind: str) -> ShardFile:
@@ -174,11 +208,16 @@ def _build_file(meta: Mapping[str, object], shard_id: int, kind: str) -> ShardFi
 
 
 def _normalize_shard(entry: Mapping[str, object], shard_id: int) -> dict[str, object]:
+    """Convert raw streaming shard metadata into the normalized Zephon shape."""
     shard_meta: dict[str, object] = {}
+    entry_copy = deepcopy(dict(entry))
 
-    raw_meta = entry.get("raw") or entry.get("data")
-    if not isinstance(raw_meta, Mapping):
+    raw_meta = _find_mapping(
+        entry, ("raw", "data", "raw_data"), shard_id, "raw file metadata"
+    )
+    if raw_meta is None:
         raise ValueError(f"Shard {shard_id} missing raw file metadata")
+
     raw_basename = raw_meta.get("basename") or raw_meta.get("path")
     if not isinstance(raw_basename, str):
         raise ValueError(f"Shard {shard_id} missing raw basename")
@@ -209,8 +248,8 @@ def _normalize_shard(entry: Mapping[str, object], shard_id: int) -> dict[str, ob
         "hashes": hashes,
     }
 
-    zip_meta = entry.get("zip")
-    if isinstance(zip_meta, Mapping):
+    zip_meta = _find_mapping(entry, ("zip", "zip_data"), shard_id, None)
+    if zip_meta is not None:
         zip_basename = zip_meta.get("basename") or zip_meta.get("path")
         if not isinstance(zip_basename, str):
             raise ValueError(f"Shard {shard_id} missing zip basename")
@@ -250,12 +289,212 @@ def _normalize_shard(entry: Mapping[str, object], shard_id: int) -> dict[str, ob
         shard_meta["compression"] = compression
 
     extras = dict(entry)
-    for key in ("samples", "raw", "data", "zip", "compression"):
+    for key in (
+        "samples",
+        "raw",
+        "raw_data",
+        "data",
+        "zip",
+        "zip_data",
+        "compression",
+    ):
         extras.pop(key, None)
-    if extras:
-        shard_meta["extra"] = extras
+    try:
+        streaming_template = _prepare_streaming_template(entry_copy, shard_id)
+    except ValueError:
+        streaming_template = None
+    if streaming_template is not None:
+        extras["_streaming_template"] = streaming_template
+    shard_meta["extra"] = extras
 
     return shard_meta
+
+
+def _find_mapping(
+    entry: Mapping[str, object],
+    names: tuple[str, ...],
+    shard_id: int,
+    error_msg: str | None,
+) -> Mapping[str, object] | None:
+    """Return the first mapping under any of ``names`` while validating types."""
+    for name in names:
+        value = entry.get(name)
+        if isinstance(value, Mapping):
+            return value
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(
+                f"Shard {shard_id} invalid metadata under '{name}' (expected mapping)"
+            )
+    if error_msg is not None:
+        raise ValueError(f"Shard {shard_id} missing {error_msg}")
+    return None
+
+
+def _prepare_streaming_template(
+    entry: Mapping[str, object], shard_id: int
+) -> _StreamingTemplate:
+    """Extract a stable template for mosaic streaming's ``from_json`` loader.
+
+    The upstream ``index.json`` emitted by different streaming versions mixes
+    ints, floats, strings, and missing values for the same fields. We collapse
+    those variants here so later code can treat the metadata as an immutable
+    tuple of primitives without re-validating every branch at runtime.
+    """
+
+    def _ensure_sequence(name: str) -> tuple[object, ...]:
+        value = entry.get(name)
+        if value is None:
+            raise ValueError(f"Shard {shard_id} missing '{name}' metadata")
+        if isinstance(value, list):
+            return tuple(value)
+        if isinstance(value, tuple):
+            return value
+        raise ValueError(
+            f"Shard {shard_id} invalid '{name}' metadata type: {type(value).__name__}"
+        )
+
+    column_encodings = tuple(str(v) for v in _ensure_sequence("column_encodings"))
+    column_names = tuple(str(v) for v in _ensure_sequence("column_names"))
+    column_sizes_obj = entry.get("column_sizes")
+    if column_sizes_obj is None:
+        column_sizes: tuple[int | None, ...] = tuple(None for _ in column_names)
+    elif isinstance(column_sizes_obj, (list, tuple)):
+        column_sizes_list: list[int | None] = []
+        for value in column_sizes_obj:
+            if value is None:
+                column_sizes_list.append(None)
+            elif isinstance(value, int):
+                column_sizes_list.append(value)
+            elif isinstance(value, str):
+                try:
+                    column_sizes_list.append(int(value))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Shard {shard_id} invalid column size value: {value}"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"Shard {shard_id} invalid column size type: {type(value).__name__}"
+                )
+        column_sizes = tuple(column_sizes_list)
+    else:
+        raise ValueError(
+            f"Shard {shard_id} invalid 'column_sizes' metadata type: {type(column_sizes_obj).__name__}"
+        )
+
+    compression_obj = entry.get("compression")
+    compression_str: str | None
+    if compression_obj is None:
+        compression_str = None
+    elif isinstance(compression_obj, str):
+        compression_str = compression_obj
+    else:
+        compression_str = str(compression_obj)
+
+    hashes_obj = entry.get("hashes")
+    if isinstance(hashes_obj, (list, tuple)):
+        hash_list = tuple(str(item) for item in hashes_obj)
+    elif isinstance(hashes_obj, Mapping):
+        hash_list = tuple(str(key) for key in hashes_obj)
+    elif hashes_obj is None:
+        hash_list = tuple()
+    else:
+        hash_list = (str(hashes_obj),)
+
+    samples_obj = entry.get("samples")
+    if samples_obj is None:
+        raise ValueError(f"Shard {shard_id} missing sample count metadata")
+    if isinstance(samples_obj, int):
+        samples = samples_obj
+    elif isinstance(samples_obj, str):
+        try:
+            samples = int(samples_obj)
+        except ValueError as exc:
+            raise ValueError(
+                f"Shard {shard_id} invalid sample count: {samples_obj}"
+            ) from exc
+    else:
+        raise ValueError(f"Shard {shard_id} invalid sample count: {samples_obj}")
+
+    size_limit_obj = entry.get("size_limit")
+    if isinstance(size_limit_obj, (int, str)) or size_limit_obj is None:
+        size_limit_value: int | str | None = size_limit_obj
+    else:
+        raise ValueError(
+            f"Shard {shard_id} invalid size limit type: {type(size_limit_obj).__name__}"
+        )
+
+    format_obj = entry.get("format") or "mds"
+    format_value = str(format_obj)
+    version_obj = entry.get("version") or 2
+    if isinstance(version_obj, int):
+        version_value = version_obj
+    elif isinstance(version_obj, str):
+        try:
+            version_value = int(version_obj)
+        except ValueError as exc:
+            raise ValueError(
+                f"Shard {shard_id} invalid version value: {version_obj}"
+            ) from exc
+    else:
+        raise ValueError(
+            f"Shard {shard_id} invalid version value type: {type(version_obj).__name__}"
+        )
+
+    return _StreamingTemplate(
+        column_encodings=column_encodings,
+        column_names=column_names,
+        column_sizes=column_sizes,
+        compression=compression_str,
+        hashes=hash_list,
+        samples=samples,
+        size_limit=size_limit_value,
+        format=format_value,
+        version=version_value,
+    )
+
+
+def _finalize_streaming_entry(
+    template: _StreamingTemplate,
+    locator: ShardLocator,
+    local_ref: LocalShardRef,
+) -> dict[str, object]:
+    """Merge the cached streaming template with local shard paths and hashes."""
+    entry = {
+        "column_encodings": [str(v) for v in template["column_encodings"]],
+        "column_names": [str(v) for v in template["column_names"]],
+        "column_sizes": list(template["column_sizes"]),
+        "hashes": [str(v) for v in template["hashes"]],
+        "samples": template["samples"],
+        "size_limit": template["size_limit"],
+        "format": template["format"],
+        "version": template["version"],
+    }
+
+    compression = template["compression"]
+    if local_ref.compression:
+        compression = local_ref.compression
+    elif locator.compression:
+        compression = locator.compression
+    entry["compression"] = str(compression) if compression else None
+
+    raw_hashes = {str(k): str(v) for k, v in locator.raw.hashes.items()}
+    entry["raw_data"] = {
+        "basename": locator.raw.basename,
+        "bytes": int(locator.raw.bytes),
+        "hashes": raw_hashes,
+    }
+    if locator.zip is not None:
+        zip_hashes = {str(k): str(v) for k, v in locator.zip.hashes.items()}
+        entry["zip_data"] = {
+            "basename": locator.zip.basename,
+            "bytes": int(locator.zip.bytes),
+            "hashes": zip_hashes,
+        }
+    else:
+        entry["zip_data"] = None
+
+    return entry
 
 
 register_format(MDSFormat())

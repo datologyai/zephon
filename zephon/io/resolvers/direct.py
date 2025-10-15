@@ -24,6 +24,8 @@ class DirectResolver(ShardResolver):
     def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
         raw_path = self._filepath(locator.root, locator.raw.basename)
         if not raw_path.is_file():
+            self._prepare_raw_file(locator, raw_path)
+        if not raw_path.is_file():
             raise FileNotFoundError(
                 f"Shard raw file missing: dataset={locator.dataset} shard={locator.shard_id}"
             )
@@ -67,6 +69,32 @@ class DirectResolver(ShardResolver):
         if os.path.isabs(basename):
             return Path(basename)
         return Path(root) / basename
+
+    def _prepare_raw_file(self, locator: ShardLocator, raw_path: Path) -> None:
+        if locator.zip is None or not locator.compression:
+            return
+
+        zip_path = self._filepath(locator.root, locator.zip.basename)
+        if not zip_path.is_file():
+            return
+
+        compression = locator.compression.lower()
+        if compression.startswith("zstd"):
+            try:
+                import zstandard as zstd
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Resolving compressed shards requires the 'zstandard' package"
+                ) from exc
+
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            decompressor = zstd.ZstdDecompressor()
+            with zip_path.open("rb") as src, raw_path.open("wb") as dst:
+                decompressor.copy_stream(src, dst)
+        else:
+            raise RuntimeError(
+                f"Unsupported compression '{locator.compression}' for direct resolver"
+            )
 
 
 __all__ = ["DirectResolver"]
