@@ -65,9 +65,15 @@ def build_multi_dataset_store(
             view = InMemoryDatasetStore(
                 cast(Mapping[int, RandomAccessShard], shards_obj)
             )
-        elif isinstance(kind, str) and kind in {"jsonl", "mds"}:
+        elif isinstance(kind, str):
+            # Defer to any registered file-backed format handler (e.g. jsonl, mds, litdata)
             ensure_builtin_formats()
-            handler = get_format(kind)
+            try:
+                handler = get_format(kind)
+            except KeyError as exc:
+                raise ValueError(
+                    f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
+                ) from exc
             view = FileBackedDatasetShardView(
                 dataset=dataset,
                 handler=handler,
