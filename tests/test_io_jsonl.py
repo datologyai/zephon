@@ -71,7 +71,7 @@ def test_pipeline_with_cache(tmp_path: Path, jsonl_dataset: Dataset) -> None:
         PublicPipeline(work_source)
         .decode_text()
         .options(io_options={"cache": {"enabled": True, "root": cache_root}})
-        .batch(global_batch=2, dp_world=1, drop_last=False)
+        .batch(microbatch_size=2, drop_last=False)
     )
     iterator = iter(pipe)
     try:

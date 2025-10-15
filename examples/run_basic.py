@@ -40,7 +40,7 @@ def build_pipeline() -> PublicPipeline:
     pipe = PublicPipeline(ws).decode_text()
 
     pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=1)
-    pipe = pipe.batch(global_batch=10, dp_world=1, drop_last=False)
+    pipe = pipe.batch(microbatch_size=10, drop_last=False)
     pipe = pipe.options(default_stage_prefetch=2, prefetch_batches=3)
 
     return pipe

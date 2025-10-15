@@ -13,14 +13,10 @@ from zephon.core.traits import Buffering, OpTraits
 class Batch(DefaultFinalize):
     """Collect sample records into mini-batches."""
 
-    def __init__(
-        self, global_batch: int, dp_world: int, *, drop_last: bool = True
-    ) -> None:
-        if global_batch % dp_world != 0:
-            msg = "global_batch must divide dp_world"
-            raise ValueError(msg)
-        self.local_bs = global_batch // dp_world
-        self.dp_world = dp_world
+    def __init__(self, microbatch_size: int, *, drop_last: bool = True) -> None:
+        if microbatch_size <= 0:
+            raise ValueError("microbatch_size must be positive")
+        self.microbatch_size = int(microbatch_size)
         self.drop_last = drop_last
         self._buffer: list[SampleRecord] = []
 
@@ -28,7 +24,7 @@ class Batch(DefaultFinalize):
         return None
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=False)
+        return OpTraits(indexable=False, batch_shape_sensitive=False)
 
     def buffering(self) -> Optional[Buffering]:
         return None
@@ -50,9 +46,9 @@ class Batch(DefaultFinalize):
     def process_one(self, elem: Element) -> list[Element]:
         assert isinstance(elem, SampleRecord)
         self._buffer.append(elem)
-        if len(self._buffer) >= self.local_bs:
-            output = self._collate(self._buffer[: self.local_bs])
-            self._buffer = self._buffer[self.local_bs :]
+        if len(self._buffer) >= self.microbatch_size:
+            output = self._collate(self._buffer[: self.microbatch_size])
+            self._buffer = self._buffer[self.microbatch_size :]
             return [output]
         return []
 
