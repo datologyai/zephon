@@ -499,9 +499,15 @@ class ThreadStageRunner:
                 return
             except queue.Full:
                 if context.stop_event.is_set():
-                    # The consumer is draining as part of shutdown.  Keep retrying
-                    # so we never drop payload elements or the final stop token.
-                    continue
+                    # During shutdown, avoid blocking producers on a full queue.
+                    # The consumer has stopped reading (iterator closed) and set
+                    # the stop_event, so further blocking puts would deadlock.
+                    try:
+                        q.put_nowait(item)
+                    except queue.Full:
+                        # Drop the item on shutdown to allow threads to exit cleanly.
+                        return
+                continue
 
     def _put_stage_stop(self, context: "ThreadStageRunner._RunContext") -> None:
         if context.stop_sent:
