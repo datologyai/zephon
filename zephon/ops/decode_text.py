@@ -5,12 +5,12 @@
 
 from typing import Any, Optional, Sequence
 
-from zephon.core.constants import Element, SampleRecord
+from zephon.core.constants import SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 
-class DecodeText(DefaultFinalize):
+class DecodeText(DefaultFinalize[SampleRecord]):
     """Decode configured payload fields into normalised text."""
 
     def __init__(
@@ -50,13 +50,12 @@ class DecodeText(DefaultFinalize):
             result = result.lower()
         return result
 
-    def process_one(self, elem: Element) -> list[Element]:
-        assert isinstance(elem, SampleRecord)
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         payload = dict(elem.payload)
         for field in self.fields:
             if field in payload:
                 payload[field] = self._decode(payload[field])
         return [SampleRecord(meta=elem.meta, payload=payload)]
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         return [self.process_one(elem)[0] for elem in elems]

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from zephon.api import Pipeline as PublicPipeline
+from zephon.core.constants import EngineSample
 from zephon.core.op_base import OpContext
 from zephon.io import Dataset
 from zephon.ops.fetch import FetchOp
@@ -34,13 +35,25 @@ def test_dataset_from_path_detects_jsonl(jsonl_dataset: Dataset) -> None:
     assert sum(jsonl_dataset.shard_index.values()) == 5
 
 
+def make_engine_sample(
+    dataset_id: int, shard_id: int, sample_idx: int, lane_id: int = 0, chunk_id: int = 0
+) -> EngineSample:
+    """Helper to build EngineSample tuples for direct FetchOp invocation in tests."""
+    return ((dataset_id, shard_id, sample_idx), lane_id, chunk_id)
+
+
 def test_fetch_op_reads_jsonl(jsonl_dataset: Dataset) -> None:
     ctx = OpContext({"datasets_by_id": {0: jsonl_dataset}})
     op = FetchOp()
     op.setup(ctx)
-    record = op.process_one((0, 0, 1))[0]
+    record = op.process_one(make_engine_sample(0, 0, 1))[0]
     assert record.payload["value"] == 1
-    batch = op.process_many([(0, 1, 0), (0, 1, 1)])
+    batch = op.process_many(
+        [
+            make_engine_sample(0, 1, 0, lane_id=0, chunk_id=0),
+            make_engine_sample(0, 1, 1, lane_id=0, chunk_id=0),
+        ]
+    )
     assert [elem.payload["value"] for elem in batch] == [3, 4]
 
 
@@ -54,7 +67,12 @@ def test_fetch_op_reads_with_cache(jsonl_dataset: Dataset, tmp_path: Path) -> No
     )
     op = FetchOp()
     op.setup(ctx)
-    _ = op.process_many([(0, 0, 0), (0, 0, 1)])
+    _ = op.process_many(
+        [
+            make_engine_sample(0, 0, 0, lane_id=0, chunk_id=0),
+            make_engine_sample(0, 0, 1, lane_id=0, chunk_id=0),
+        ]
+    )
     assert cache_root.exists()
 
 

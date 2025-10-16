@@ -5,7 +5,11 @@
 
 from typing import Optional
 
-from zephon.core.constants import Element, SampleId, SampleMeta, SampleRecord
+from zephon.core.constants import (
+    EngineSample,
+    SampleMeta,
+    SampleRecord,
+)
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 from zephon.io import build_multi_dataset_store
@@ -13,7 +17,7 @@ from zephon.io.options import StoreOptions
 from zephon.io.protocols import MultiDatasetShardStore
 
 
-class FetchOp(DefaultFinalize):
+class FetchOp(DefaultFinalize[SampleRecord]):
     """Load sample payloads from a `MultiDatasetShardStore`."""
 
     def __init__(self, buf: Optional[Buffering] = None) -> None:
@@ -35,24 +39,25 @@ class FetchOp(DefaultFinalize):
     def buffering(self) -> Optional[Buffering]:
         return self._buffering
 
-    def process_one(self, elem: Element) -> list[Element]:
+    def process_one(self, elem: EngineSample) -> list[SampleRecord]:
         assert self._store is not None
-        sample_id: SampleId = elem
+        sample_id, lane_id, chunk_id = elem
         dataset_id, shard_id, sample_idx = sample_id
         view = self._store.for_dataset(dataset_id)
         shard = view.open(shard_id)
         row = shard[sample_idx]
-        meta = SampleMeta(sample_id=sample_id)
+        meta = SampleMeta(sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id)
         return [SampleRecord(meta=meta, payload=row)]
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
+    def process_many(self, elems: list[EngineSample]) -> list[SampleRecord]:
         assert self._store is not None
-        outputs: list[Element] = []
-        for sample_id in elems:
+        outputs: list[SampleRecord] = []
+        for elem in elems:
+            sample_id, lane_id, chunk_id = elem
             dataset_id, shard_id, sample_idx = sample_id
             view = self._store.for_dataset(dataset_id)
             shard = view.open(shard_id)
             row = shard[sample_idx]
-            meta = SampleMeta(sample_id=sample_id)
+            meta = SampleMeta(sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id)
             outputs.append(SampleRecord(meta=meta, payload=row))
         return outputs

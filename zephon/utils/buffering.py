@@ -6,12 +6,14 @@
 import queue
 import threading
 from collections.abc import Iterable, Iterator
-from typing import Generator, TypeVar, cast
+from typing import Callable, Generator, TypeVar, cast
 
 T = TypeVar("T")
 
 
-def buffered_iterable(source: Iterable[T], capacity: int) -> Iterator[T]:
+def buffered_iterable(
+    source: Iterable[T], capacity: int, on_stop: Callable[[], None] | None = None
+) -> Iterator[T]:
     """Materialise *source* behind a bounded queue of size *capacity*."""
     if capacity <= 0:
         return iter(source)
@@ -53,13 +55,29 @@ def buffered_iterable(source: Iterable[T], capacity: int) -> Iterator[T]:
     def consumer() -> Generator[T, None, None]:
         try:
             while True:
-                item = q.get()
+                try:
+                    item = q.get(timeout=0.1)
+                except queue.Empty:
+                    if stop_event.is_set():
+                        break
+                    continue
                 if item is sentinel:
                     break
                 yield cast(T, item)
         finally:
+            # 1) Cancel upstream *before* we try to join the producer thread.
+            if on_stop is not None:
+                on_stop()
             stop_event.set()
-            thread.join()
+
+            # 2) Free space (if producer was in q.put) and don’t block forever.
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+
+            thread.join(timeout=1.0)
             if exc_holder:
                 raise exc_holder[0]
 

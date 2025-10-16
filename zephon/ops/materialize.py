@@ -5,12 +5,12 @@
 
 from typing import Optional
 
-from zephon.core.constants import Element
+from zephon.core.constants import SampleBatch, SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 
-class Materialize(DefaultFinalize):
+class Materialize(DefaultFinalize[SampleRecord | SampleBatch]):
     """Force evaluation of upstream iterables without altering records."""
 
     def setup(self, ctx: OpContext) -> None:
@@ -22,8 +22,12 @@ class Materialize(DefaultFinalize):
     def buffering(self) -> Optional[Buffering]:
         return None
 
-    def process_one(self, elem: Element) -> list[Element]:
+    def process_one(
+        self, elem: SampleRecord | SampleBatch
+    ) -> list[SampleRecord | SampleBatch]:
         return [elem]
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
+    def process_many(
+        self, elems: list[SampleRecord | SampleBatch]
+    ) -> list[SampleRecord | SampleBatch]:
         return list(elems)

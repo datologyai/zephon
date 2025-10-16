@@ -4,7 +4,7 @@
 """In-memory representation of a Zephon pipeline graph and execution plan."""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from zephon.core.op_base import Op
 
@@ -14,7 +14,7 @@ class Node:
     """A vertex in the logical pipeline graph bound to an operator instance."""
 
     name: str
-    op: Op
+    op: Op[Any, Any]
     inputs: list["Node"] = field(default_factory=list)
     placement: str = "auto"
     parallelism: Optional[int] = None
@@ -30,7 +30,7 @@ class Graph:
     def add(
         self,
         name: str,
-        op: Op,
+        op: Op[Any, Any],
         *inputs: Node,
         placement: str = "auto",
         parallelism: Optional[int] = None,

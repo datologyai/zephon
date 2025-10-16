@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterator, Mapping, MutableMapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, MutableMapping, Protocol, Sequence
 
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -294,15 +294,75 @@ class WorkChunk:
                             yield x
                     break
 
+    def state_dict(self) -> dict[str, Any]:
+        """Portable, JSON-friendly snapshot of this chunk."""
+        # Serialize components as an ordered list of (name, items-as-lists)
+        comps_serial: list[tuple[str, list[list[int]]]] = []
+        for name in self._component_order:
+            items = self.components.get(name, [])
+            # Each SampleId is a tuple[int,int,int] → store as [int,int,int]
+            comps_serial.append((name, [list(sid) for sid in items]))
+
+        return {
+            "version": 1,
+            "seed": None if self.seed is None else int(self.seed),
+            "components": comps_serial,  # preserves insertion order
+            "component_order": list(self._component_order),  # redundant but explicit
+            # Optional sanity field — consumers may ignore
+            "total_samples": int(self._total_samples),
+        }
+
+    @classmethod
+    def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
+        """Rebuild a WorkChunk from state_dict()."""
+        version = int(payload.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported WorkChunk state version: {version}")
+
+        comps_in: Sequence[tuple[str, Sequence[Sequence[int]]]] = payload["components"]
+
+        # Use a plain dict; insertion order matches iteration order in Python 3.7+
+        comps: dict[str, list[SampleId]] = {}
+
+        for name, items in comps_in:
+            restored: list[SampleId] = []
+            for raw in items:
+                if len(raw) != 3:
+                    raise ValueError(f"Bad SampleId for component {name}: {raw!r}")
+                # IMPORTANT: build a fixed-length tuple to avoid tuple[int, ...]
+                a, b, c = int(raw[0]), int(raw[1]), int(raw[2])
+                restored.append((a, b, c))  # this is SampleId
+            comps[name] = restored
+
+        seed = payload.get("seed", None)
+        chunk = cls(components=comps, seed=None if seed is None else int(seed))
+
+        # Optional: honor serialized order explicitly (should already match)
+        co = payload.get("component_order")
+        if co is not None and tuple(co) != chunk._component_order:
+            # rebuild in the serialized order using a new dict literal to set insertion order
+            ordered = {name: comps[name] for name in co}
+            chunk.components = ordered
+            chunk.__post_init__()  # recompute internal caches
+
+        return chunk
+
 
 class WorkSource(Protocol):
     """Protocol for producing work chunks and supporting random access."""
 
-    def next_chunk(self) -> WorkChunk | None: ...
+    def next_chunk_for(
+        self,
+        lane: int,
+        *,
+        worker_id: int = 0,
+        workers_per_rank: int = 1,
+        canonical_replicas: int = 1,  # work source might need to know this for total number of lanes.
+    ) -> WorkChunk | None: ...
 
-    def checkpoint(self) -> bytes: ...
+    def state_dict(self) -> dict[str, Any]: ...
 
-    def restore(self, state: bytes) -> None: ...
+    def load_state_dict(self, state: dict[str, Any]) -> None: ...
 
     def supports_indexing(self) -> bool: ...
 

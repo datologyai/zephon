@@ -3,6 +3,7 @@
 
 """User-facing pipeline wrapper that layers ergonomics atop core planning."""
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias
 
 
@@ -30,6 +31,7 @@ else:
 TorchIterableDatasetType: TypeAlias = _TorchIterableDataset  # pyright: ignore[reportInvalidTypeForm]
 TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidTypeForm]
 
+from zephon.core.constants import SampleBatch, SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
@@ -202,11 +204,47 @@ class Pipeline:
         iterator = self._engine.build_iter()
         final_prefetch = self._options.prefetch_batches or 0
         if final_prefetch > 0:
-            iterator = buffered_iterable(iterator, final_prefetch)
+            iterator = buffered_iterable(
+                iterator, final_prefetch, on_stop=self._engine.close
+            )
         try:
-            yield from iterator
+            yield from self._yield_while_notifying(iterator)
         finally:
             self._engine.close()
+
+    def _yield_while_notifying(
+        self, source: Iterable[SampleRecord | SampleBatch]
+    ) -> Iterator[SampleRecord | SampleBatch]:
+        """Wrap an iterable of SampleBatch | SampleRecord.
+
+        - If item is SampleBatch -> yield item.to_training().
+        - If item is SampleRecord -> yield the item unchanged.
+        - Otherwise -> raise TypeError.
+        """
+        engine = self._engine
+        assert engine is not None
+        for item in source:
+            if isinstance(item, SampleBatch):
+                assert len(list(set(item.lane_ids))) == 1
+                lane_id = item.lane_ids[0]
+                max_chunk_id = max(item.chunk_ids)
+                max_chunk_samples = [
+                    record.meta.sample_id
+                    for record in item.records
+                    if record.meta.chunk_id == max_chunk_id
+                ]
+            elif isinstance(item, SampleRecord):  # pyright: ignore[reportUnnecessaryIsInstance]
+                lane_id = item.meta.lane_id
+                max_chunk_id = item.meta.chunk_id
+                max_chunk_samples = [item.meta.sample_id]
+            else:
+                raise TypeError(
+                    f"Unsupported element type: {type(item)!r}; "
+                    + "expected SampleBatch or SampleRecord"
+                )
+
+            if engine.notify(lane_id, max_chunk_id, max_chunk_samples):
+                yield item
 
     def explain(self) -> str:
         self._ensure()
@@ -225,3 +263,13 @@ class Pipeline:
         self._ensure()
         assert self._engine is not None
         return self._engine.eval_one(sample_id)
+
+    def checkpoint(self) -> dict[str, Any]:
+        self._ensure()
+        assert self._engine is not None
+        return self._engine.state_dict()
+
+    def restore(self, ckpt: dict[str, Any]) -> None:
+        self._ensure()
+        assert self._engine is not None
+        self._engine.load_state_dict(ckpt, replay=True)

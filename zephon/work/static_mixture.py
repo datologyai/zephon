@@ -7,7 +7,7 @@ import math
 import random
 import warnings
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -167,8 +167,9 @@ class StaticMixtureWorkSource(WorkSource):
         self._weights: dict[str, float] = dict(
             mixture_spec.normalized
         )  # create an internal copy
+        self._global_chunk_index = 0
 
-        knobs = _DatasetKnobs(
+        self._knobs = _DatasetKnobs(
             seed=seed,
             shuffle_shards=shuffle_shards,
             shuffle_within_shard=shuffle_within_shard,
@@ -178,7 +179,7 @@ class StaticMixtureWorkSource(WorkSource):
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
-            cursor = _DatasetCursor(dataset_id, ds.shard_index, knobs)
+            cursor = _DatasetCursor(dataset_id, ds.shard_index, self._knobs)
 
             if cursor.remaining <= 0:
                 # Should not happen due to validate_for call
@@ -290,10 +291,44 @@ class StaticMixtureWorkSource(WorkSource):
 
         return quota
 
-    # TODO(MaxiBoether): Next step for elastic deterrminism is to have next_chunk_for() instead (canonical node ID, worker id).
-    # Without a server, this probably literally just computes the same things everywhere and discards, with potentially shared memory optimizations as in mosaic on the same mnode.
-    # For ADO for example, this would literally just forward to next_chunk. To guarantee elastic determinism it is task of the nodes that emulate canoncial nodes to fetch 2 chunks in advance, then we should even in ADO fundamentally get elastic determinism (I think)
-    def next_chunk(self) -> WorkChunk | None:
+    def next_chunk_for(
+        self,
+        lane: int,
+        *,
+        worker_id: int = 0,
+        workers_per_rank: int = 1,
+        canonical_replicas: int = 1,
+    ) -> WorkChunk | None:
+        """Return the next chunk for a given canonical lane and worker.
+
+        This implementation follows a compute-everywhere-then-discard strategy:
+        - Enumerate the global chunk stream deterministically using the existing
+          chunking logic.
+        - Assign each global chunk index ``g`` to a lane via ``g % canonical_replicas``.
+        - Within the selected lane, assign chunks to workers via
+          ``(g // canonical_replicas) % workers_per_rank``.
+        - Discard non-matching chunks locally.
+        """
+        assert workers_per_rank > 0, "todo handle 0 workers case."
+        while True:
+            chunk = self._next_chunk()
+            if chunk is None:
+                return None
+            g = self._global_chunk_index
+            self._global_chunk_index += 1
+            chunk_lane = g % canonical_replicas  # for which lane is this chunk?
+            if chunk_lane != (
+                lane % canonical_replicas
+            ):  # are we asking for this lane?
+                continue
+            lane_idx = (
+                g // canonical_replicas
+            )  # index of the chunk WITHIN the lane (is it the first, second, thord, ...)
+            if (lane_idx % workers_per_rank) != worker_id:
+                continue
+            return chunk
+
+    def _next_chunk(self) -> WorkChunk | None:
         if self._exhausted_policy == "redistribute":
             raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
         if self._exhausted_policy == "repeat":
@@ -361,3 +396,69 @@ class StaticMixtureWorkSource(WorkSource):
 
     def sample_id_at(self, index: int) -> SampleId:
         raise NotImplementedError("StaticMixtureWorkSource is not yet indexable")
+
+    def supports_indexing(self) -> bool:
+        return False  # StaticMixtureWorkSource is not yet indexable
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "seed": int(self._seed),
+            "chunk_size": int(self._chunk_size),
+            "knobs": {
+                "shuffle_shards": self._knobs.shuffle_shards,
+                "shuffle_within_shard": self._knobs.shuffle_within_shard,
+                "shuffle_block_size": self._knobs.shuffle_block_size,
+            },
+            "global_chunk_index": int(self._global_chunk_index),
+            "weights": dict(self._weights),
+            "component_order": list(self._component_order),
+            "dataset_ids": dict(self._dataset_ids),
+            "cursor_positions": {
+                name: int(cur._position) for name, cur in self._cursors.items()
+            },
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if int(state.get("version", 0)) != 1:
+            raise RuntimeError("Unsupported StaticMixtureWorkSource checkpoint version")
+
+        self._seed = int(state["seed"])
+        self._chunk_size = int(state["chunk_size"])
+        knobs = _DatasetKnobs(
+            seed=self._seed,
+            shuffle_shards=bool(state["knobs"]["shuffle_shards"]),
+            shuffle_within_shard=bool(state["knobs"]["shuffle_within_shard"]),
+            shuffle_block_size=state["knobs"]["shuffle_block_size"],
+        )
+        # Persist restored knobs for future state_dict() calls
+        self._knobs = knobs
+
+        # Rebuild cursors deterministically and set positions
+        self._cursors.clear()
+        self._dataset_ids.clear()
+        self._datasets_by_id.clear()
+
+        for dataset_id, ds in enumerate(self._datasets):
+            self._dataset_ids[ds.name] = dataset_id
+            self._datasets_by_id[dataset_id] = ds
+            cur = _DatasetCursor(dataset_id, ds.shard_index, knobs)
+            self._cursors[ds.name] = cur
+
+        # Restore positions
+        pos = state["cursor_positions"]
+        for name, cur in self._cursors.items():
+            p = int(pos.get(name, 0))
+            cur._position = max(0, min(p, len(cur._order)))
+            cur.remaining = len(cur._order) - cur._position
+
+        self._weights = dict(state["weights"])
+        self._component_order = list(state["component_order"])
+        self._global_chunk_index = int(state["global_chunk_index"])
+
+        # Recompute per-chunk quota to reflect restored chunk_size/weights/components
+        self._chunk_quota = self._compute_chunk_quota()
+
+        # Recompute remaining/total samples with the new cursor positions
+        self._remaining = sum(cur.remaining for cur in self._cursors.values())
+        self.total_samples = len(self)

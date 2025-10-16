@@ -9,14 +9,16 @@ local index within its shard so that delays are deterministic and bounded.
 """
 
 import time
-from typing import Optional
+from typing import Optional, TypeVar
 
-from zephon.core.constants import Element, SampleRecord
+from zephon.core.constants import SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
+T = TypeVar("T")
 
-class DelayById(DefaultFinalize):
+
+class DelayById(DefaultFinalize[T]):
     """Sleep a small, deterministic amount based on the sample's local id."""
 
     def __init__(
@@ -34,11 +36,11 @@ class DelayById(DefaultFinalize):
     def buffering(self) -> Optional[Buffering]:
         return self._buffering
 
-    def process_one(self, elem: Element) -> list[Element]:
+    def process_one(self, elem: T) -> list[T]:
         return self.process_many([elem])
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
-        out: list[Element] = []
+    def process_many(self, elems: list[T]) -> list[T]:
+        out: list[T] = []
         slots = 5  # map ids/hashes into 0..4
         for item in elems:
             # Derive a stable bucket from either the SampleRecord's local id

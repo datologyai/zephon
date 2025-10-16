@@ -1,10 +1,11 @@
-from zephon.core.constants import Element
+from typing import Any
+
 from zephon.core.graph import Node, Stage
 from zephon.ops.delay import DelayById
 from zephon.runners.threads import ThreadStageRunner
 
 
-def _collect(runner: ThreadStageRunner, data: list[Element]) -> list[Element]:
+def _collect(runner: ThreadStageRunner, data: list[Any]) -> list[Any]:
     return list(runner.run(iter(data)))
 
 

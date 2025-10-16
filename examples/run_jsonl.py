@@ -37,6 +37,7 @@ def main() -> None:
     print("PLAN:\n" + pipe.explain())
     counts = Counter()
     for i, batch in enumerate(pipe):
+        batch = batch.to_training()
         counts["batches"] += 1
         counts["samples"] += len(batch["ids"])
         print(f"Batch {i}: ids={batch['ids']}, texts={batch['texts']}")

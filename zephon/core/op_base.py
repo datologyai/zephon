@@ -3,9 +3,8 @@
 
 """Abstract operator contracts shared by the planner and runtime."""
 
-from typing import Any, Optional, Protocol
+from typing import Any, Generic, Optional, Protocol, TypeVar
 
-from zephon.core.constants import Element
 from zephon.core.traits import Buffering, OpTraits
 
 
@@ -20,7 +19,11 @@ class OpContext:
         return self._services.get(key, default)
 
 
-class Op(Protocol):
+InT = TypeVar("InT")
+OutT = TypeVar("OutT")
+
+
+class Op(Protocol[InT, OutT]):
     """Protocol that Zephon operators must satisfy to plug into the pipeline."""
 
     def setup(self, ctx: OpContext) -> None: ...
@@ -29,18 +32,19 @@ class Op(Protocol):
 
     def buffering(self) -> Optional[Buffering]: ...
 
-    def process_one(self, elem: Element) -> list[Element]: ...
+    # Concrete ops specify precise input/output element types.
+    def process_one(self, elem: InT) -> list[OutT]: ...
 
-    def process_many(self, elems: list[Element]) -> list[Element]: ...
+    def process_many(self, elems: list[InT]) -> list[OutT]: ...
 
-    def finalize(self) -> list[Element]:
+    def finalize(self) -> list[OutT]:
         """Emit any buffered outputs once the upstream iterator is exhausted."""
         ...
 
 
-class DefaultFinalize:
+class DefaultFinalize(Generic[OutT]):
     """Mixin providing a no-op ``finalize`` implementation."""
 
-    def finalize(self) -> list[Element]:
+    def finalize(self) -> list[OutT]:
         """Return an empty list when the operator has no buffered tail."""
         return []

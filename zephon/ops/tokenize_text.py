@@ -6,14 +6,14 @@
 import logging
 from typing import Any, Optional
 
-from zephon.core.constants import Element, SampleRecord
+from zephon.core.constants import SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 log = logging.getLogger(__name__)
 
 
-class TokenizeText(DefaultFinalize):
+class TokenizeText(DefaultFinalize[SampleRecord]):
     """Tokenize text fields using a provided or auto-resolved tokenizer."""
 
     def __init__(
@@ -52,7 +52,7 @@ class TokenizeText(DefaultFinalize):
     def buffering(self) -> Optional[Buffering]:
         return self._buffering
 
-    def process_one(self, elem: Element) -> list[Element]:
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         assert isinstance(elem, SampleRecord)
         tokenizer = self.tok
         if tokenizer is None:
@@ -68,7 +68,7 @@ class TokenizeText(DefaultFinalize):
             payload["attention_mask"] = encoded["attention_mask"]
         return [SampleRecord(meta=elem.meta, payload=payload)]
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         tokenizer = self.tok
         if tokenizer is None:
             msg = "Tokenizer not initialised"
@@ -86,7 +86,7 @@ class TokenizeText(DefaultFinalize):
         )
         input_ids = encoded.get("input_ids", [])
         attention_mask = encoded.get("attention_mask")
-        results: list[Element] = []
+        results: list[SampleRecord] = []
         for idx, meta in enumerate(metas):
             payload = dict(payloads[idx])
             payload["input_ids"] = input_ids[idx]

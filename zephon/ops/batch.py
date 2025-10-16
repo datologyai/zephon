@@ -1,24 +1,25 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Batching operator for grouping sample records."""
+"""Batching operator for grouping sample records (lane-pure)."""
 
-from typing import Any, Optional
+from typing import Optional
 
-from zephon.core.constants import Element, SampleRecord
+from zephon.core.constants import SampleBatch, SampleRecord
 from zephon.core.op_base import DefaultFinalize, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 
-class Batch(DefaultFinalize):
-    """Collect sample records into mini-batches."""
+class Batch(DefaultFinalize[SampleBatch]):
+    """Collect sample records into mini-batches, one lane per batch."""
 
     def __init__(self, microbatch_size: int, *, drop_last: bool = True) -> None:
         if microbatch_size <= 0:
             raise ValueError("microbatch_size must be positive")
         self.microbatch_size = int(microbatch_size)
         self.drop_last = drop_last
-        self._buffer: list[SampleRecord] = []
+        # lane_id -> list[SampleRecord]
+        self._buffers: dict[int, list[SampleRecord]] = {}
 
     def setup(self, ctx: OpContext) -> None:
         return None
@@ -29,38 +30,61 @@ class Batch(DefaultFinalize):
     def buffering(self) -> Optional[Buffering]:
         return None
 
-    def _collate(self, items: list[SampleRecord]) -> dict[str, Any]:
-        batch: dict[str, Any] = {
-            "ids": [record.meta.sample_id for record in items],
-            "texts": [record.payload.get("text", "") for record in items],
-        }
-        first = items[0].payload
-        if "input_ids" in first:
-            batch["input_ids"] = [record.payload["input_ids"] for record in items]
-        if "attention_mask" in first:
-            batch["attention_mask"] = [
-                record.payload["attention_mask"] for record in items
-            ]
-        return batch
+    def _emit(self, chunk: list[SampleRecord]) -> list[SampleBatch]:
+        # Sanity: ensure lane purity inside the batch
+        if __debug__:
+            lane_ids = {r.meta.lane_id for r in chunk}
+            assert len(lane_ids) == 1, f"mixed lanes in batch: {lane_ids}"
+        batch = SampleBatch(records=tuple(chunk))
+        return [batch]
 
-    def process_one(self, elem: Element) -> list[Element]:
+    def _flush_exact(self, lane_id: int) -> list[SampleBatch]:
+        buf = self._buffers.get(lane_id, [])
+        if len(buf) < self.microbatch_size:
+            return []
+        out = self._emit(buf[: self.microbatch_size])
+        del buf[: self.microbatch_size]
+        if not buf:
+            # keep dict tidy to minimize finalize work
+            self._buffers.pop(lane_id, None)
+        else:
+            self._buffers[lane_id] = buf
+        return out
+
+    def process_one(self, elem: SampleRecord) -> list[SampleBatch]:
         assert isinstance(elem, SampleRecord)
-        self._buffer.append(elem)
-        if len(self._buffer) >= self.microbatch_size:
-            output = self._collate(self._buffer[: self.microbatch_size])
-            self._buffer = self._buffer[self.microbatch_size :]
-            return [output]
-        return []
+        lane_id = elem.meta.lane_id
+        buf = self._buffers.setdefault(lane_id, [])
+        buf.append(elem)
 
-    def process_many(self, elems: list[Element]) -> list[Element]:
-        outputs: list[Element] = []
-        for elem in elems:
-            outputs.extend(self.process_one(elem))
+        outputs: list[SampleBatch] = []
+        # Flush as many full microbatches as are now available for this lane
+        while len(buf) >= self.microbatch_size:
+            outputs.extend(self._flush_exact(lane_id))
+            buf = self._buffers.get(lane_id, [])
+            if not buf:
+                break
         return outputs
 
-    def finalize(self) -> list[Element]:
-        if not self.drop_last and self._buffer:
-            output = [self._collate(self._buffer)]
-            self._buffer = []
-            return output
-        return []
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleBatch]:
+        outputs: list[SampleBatch] = []
+        for e in elems:
+            outputs.extend(self.process_one(e))
+        return outputs
+
+    def finalize(self) -> list[SampleBatch]:
+        if not self._buffers:
+            return []
+
+        if self.drop_last:
+            # Drop any residual partial microbatches for all lanes
+            self._buffers.clear()
+            return []
+
+        # Emit remaining (possibly smaller) batches per lane
+        outputs: list[SampleBatch] = []
+        for _, buf in list(self._buffers.items()):
+            if buf:
+                outputs.extend(self._emit(buf))
+        self._buffers.clear()
+        return outputs
