@@ -26,7 +26,9 @@ class _StreamingTemplateDict(dict[str, Any]):
     """Typed dict-like helper to appease static type checking."""
 
 
-def _select_item_loader(config: Mapping[str, Any]) -> BaseItemLoader:
+def _select_item_loader(
+    config: Mapping[str, Any], chunks: list[Mapping[str, Any]] | None = None
+) -> BaseItemLoader:
     """Choose the appropriate item loader based on the config metadata."""
     loader_spec = config.get("item_loader")
     loader_name: str | None = None
@@ -50,6 +52,19 @@ def _select_item_loader(config: Mapping[str, Any]) -> BaseItemLoader:
             block_size = block_candidate
 
     if loader_name and loader_name.lower() in {"tokens", "tokensloader"}:
+        if block_size is None and chunks:
+            for chunk in chunks:
+                dim_value = chunk.get("dim")
+                chunk_size = chunk.get("chunk_size")
+                if isinstance(dim_value, (int, float)) and isinstance(
+                    chunk_size, (int, float)
+                ):
+                    chunk_size_int = int(chunk_size)
+                    if chunk_size_int > 0:
+                        candidate = int(dim_value) // chunk_size_int
+                        if candidate > 0:
+                            block_size = candidate
+                            break
         if block_size is None:
             raise ValueError("LitData tokens loader requires an integer 'block_size'")
         return TokensLoader(block_size=block_size)
@@ -90,6 +105,33 @@ def _normalize_hashes(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping):
         return {}
     return {str(k): str(v) for k, v in value.items()}
+
+
+def _derive_raw_basename(basename: str, compression: str) -> str:
+    """Return the expected raw chunk basename for a compressed chunk."""
+    if not basename or not compression:
+        return basename
+    token = f".{compression}"
+    prefix, sep, suffix = basename.partition(token)
+    if sep:
+        return f"{prefix}{suffix}"
+    return basename
+
+
+def _extract_zip_bytes(chunk: Mapping[str, Any], root: str, basename: str) -> int:
+    """Return the byte size of the compressed chunk when available."""
+    bytes_value = chunk.get("chunk_zip_bytes")
+    if isinstance(bytes_value, (int, float)):
+        return int(bytes_value)
+    file_path = os.path.join(root, basename)
+    try:
+        return os.path.getsize(file_path)
+    except OSError:
+        pass
+    fallback = chunk.get("chunk_bytes")
+    if isinstance(fallback, (int, float)):
+        return int(fallback)
+    return 0
 
 
 def _normalize_config(raw: Mapping[str, Any]) -> _StreamingTemplateDict:
@@ -150,7 +192,7 @@ class LitDataFormat(FormatHandler):
             chunk = _normalize_chunk(entry, shard_id)
             chunks.append(chunk)
 
-        loader = _select_item_loader(config)
+        loader = _select_item_loader(config, chunks)
         serializers = _get_serializers()
         loader.setup(config, chunks, serializers, None)
         intervals = loader.generate_intervals()
@@ -195,15 +237,32 @@ class LitDataFormat(FormatHandler):
             basename = _extract_chunk_basename(chunk, shard_id)
             chunk_bytes = _extract_chunk_bytes(chunk, path, basename)
             hashes = _normalize_hashes(chunk.get("hashes"))
+            compression: str | None = None
+            zip_file: ShardFile | None = None
+            raw_basename = basename
+            compression_value = config.get("compression")
+            if isinstance(compression_value, str) and compression_value:
+                compression = compression_value
+                raw_basename = _derive_raw_basename(basename, compression)
+                zip_bytes = _extract_zip_bytes(chunk, path, basename)
+                zip_file = ShardFile(
+                    basename=basename,
+                    bytes=zip_bytes,
+                    hashes=hashes,
+                )
 
             locators[shard_id] = ShardLocator(
                 dataset=dataset.name,
                 shard_id=shard_id,
                 format=self.kind,
                 root=path,
-                raw=ShardFile(basename=basename, bytes=chunk_bytes, hashes=hashes),
-                zip=None,
-                compression=None,
+                raw=ShardFile(
+                    basename=raw_basename,
+                    bytes=chunk_bytes,
+                    hashes=hashes,
+                ),
+                zip=zip_file,
+                compression=compression,
                 extra={
                     "config": config,
                     "chunk": chunk,
@@ -243,7 +302,7 @@ class _LitDataShard(RandomAccessShard):
 
         self._chunk_bytes = int(chunk_copy.get("chunk_bytes", local_ref.raw.bytes))
 
-        loader = _select_item_loader(self._config)
+        loader = _select_item_loader(self._config, [chunk_copy])
         serializers = _get_serializers()
         loader.setup(self._config, [chunk_copy], serializers, None)
         intervals = loader.generate_intervals()

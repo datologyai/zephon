@@ -10,11 +10,8 @@ import pickle
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
-from dataclasses import dataclass
 from io import BytesIO, FileIO
-from pathlib import Path
-from types import TracebackType
-from typing import Any, Mapping, NamedTuple, Optional, cast
+from typing import Any, Mapping, NamedTuple, Optional
 
 import numpy as np
 import optree
@@ -193,6 +190,53 @@ class NumpySerializer(Serializer):
         return isinstance(item, np.ndarray)
 
 
+class NoHeaderNumpySerializer(Serializer):
+    """Serializer for numpy arrays stored without a header in LitData payloads."""
+
+    def __init__(self) -> None:
+        self._dtype: np.dtype | None = None
+
+    def setup(self, metadata: Any) -> None:
+        if isinstance(metadata, str):
+            _, _, suffix = metadata.partition(":")
+            if suffix:
+                try:
+                    index = int(suffix)
+                except ValueError as exc:  # pragma: no cover - defensive
+                    raise ValueError(
+                        f"Invalid dtype index for no_header_numpy: {suffix}"
+                    ) from exc
+                dtype = _NUMPY_DTYPES_MAPPING.get(index)
+                if dtype is None:
+                    raise ValueError(f"Unsupported numpy dtype index: {index}")
+                self._dtype = dtype
+        elif isinstance(metadata, np.dtype):
+            self._dtype = metadata
+
+    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
+        array = np.asarray(item)
+        if self._dtype is None:
+            dtype_index = _NUMPY_DTYPES_REVERSE.get(array.dtype)
+            if dtype_index is None:
+                raise ValueError(
+                    f"Unsupported numpy dtype for serialization: {array.dtype}"
+                )
+            self._dtype = array.dtype
+        if array.dtype != self._dtype:
+            array = array.astype(self._dtype, copy=False)
+        return array.tobytes(order="C"), None
+
+    def deserialize(self, data: bytes) -> np.ndarray:
+        if self._dtype is None:
+            raise RuntimeError(
+                "No dtype configured for no_header_numpy deserialization"
+            )
+        return np.frombuffer(data, dtype=self._dtype).copy()
+
+    def can_serialize(self, item: Any) -> bool:
+        return isinstance(item, np.ndarray)
+
+
 class PickleSerializer(Serializer):
     def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
         return pickle.dumps(item), None
@@ -250,7 +294,7 @@ _SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(
         ("bytes", BytesSerializer()),
         ("numpy", NumpySerializer()),
         ("pickle", PickleSerializer()),
-        ("no_header_numpy", BytesSerializer()),
+        ("no_header_numpy", NoHeaderNumpySerializer()),
     ]
 )
 
@@ -462,6 +506,7 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         if torch is None:
             raise ImportError("Torch is required for the tokens loader")
         super().setup(config, chunks, serializers, region_of_interest)
+        self._shift_idx = 0
 
         serializer_name, dtype_index = self._data_format[0].split(":")
         if serializer_name not in ["no_header_numpy", "no_header_tensor"]:
@@ -698,184 +743,6 @@ def treespec_dumps(spec: optree.PyTreeSpec) -> str:
     return json.dumps([0, schema])
 
 
-# -----------------------------------------------------------------------------
-# Minimal writer helper (primarily for tests)
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class _PendingSample:
-    payload: bytes
-
-
-class LitDataWriter:
-    """Lightweight writer for generating LitData-compatible datasets in tests."""
-
-    def __init__(
-        self,
-        out: str,
-        *,
-        loader: str = "pytree",
-        block_size: int | None = None,
-        compression: str | None = None,
-    ) -> None:
-        self._root = Path(out)
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._serializers = _get_serializers()
-        self._pending: list[_PendingSample] = []
-        self._data_format: list[str] | None = None
-        self._spec: optree.PyTreeSpec | None = None
-        self._closed = False
-        self._loader = loader.lower()
-        self._block_size = block_size
-        self._compression = compression
-        if self._loader not in {"pytree", "tokens"}:
-            raise ValueError(f"Unsupported LitData writer loader: {loader}")
-        if self._loader == "tokens" and self._block_size is None:
-            raise ValueError("Tokens loader requires a block_size")
-
-    def __enter__(self) -> "LitDataWriter":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        self.close()
-
-    def write(self, sample: Any) -> None:
-        if self._loader == "tokens":
-            array = np.asarray(sample)
-            if self._data_format is None:
-                dtype_index = _NUMPY_DTYPES_REVERSE.get(array.dtype)
-                if dtype_index is None:
-                    raise ValueError(
-                        f"Unsupported numpy dtype for tokens loader: {array.dtype}"
-                    )
-                self._data_format = [f"no_header_numpy:{dtype_index}"]
-                self._spec = None
-            else:
-                dtype_index = int(self._data_format[0].split(":", 1)[1])
-                expected_dtype = _NUMPY_DTYPES_MAPPING[dtype_index]
-                if array.dtype != expected_dtype:
-                    array = array.astype(expected_dtype)
-            leaves = [array]
-            keys = self._data_format
-        else:
-            leaves, spec = optree.tree_flatten(sample)
-            if self._data_format is None:
-                self._data_format = [_serializer_key_for_leaf(leaf) for leaf in leaves]
-                self._spec = spec
-            else:
-                assert self._spec is not None
-                if spec != self._spec:
-                    raise ValueError("All samples must share the same PyTree structure")
-                for leaf, expected_key in zip(leaves, self._data_format, strict=True):
-                    if _serializer_key_for_leaf(leaf) != expected_key:
-                        raise ValueError("Inconsistent serializer key for leaf")
-            keys = self._data_format
-
-        assert keys is not None
-        serialized: list[bytes] = []
-        sizes: list[int] = []
-        for leaf, key in zip(leaves, keys, strict=True):
-            if key.startswith("no_header_numpy"):
-                array = np.asarray(leaf)
-                encoded = array.tobytes(order="C")
-                serialized.append(encoded)
-                sizes.append(len(encoded))
-            elif key.startswith("no_header_tensor"):
-                if torch is None:
-                    raise ImportError("Torch is required for tensor tokens")
-                tensor = (
-                    leaf if isinstance(leaf, torch.Tensor) else torch.as_tensor(leaf)
-                )
-                encoded = tensor.cpu().numpy().tobytes(order="C")
-                serialized.append(encoded)
-                sizes.append(len(encoded))
-            else:
-                serializer = self._serializers[key]
-                encoded, _ = serializer.serialize(leaf)
-                serialized.append(encoded)
-                sizes.append(len(encoded))
-
-        payload, _ = PyTreeLoader.encode_data(serialized, sizes, leaves)
-        self._pending.append(_PendingSample(payload=payload))
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if not self._pending:
-            return
-
-        assert self._data_format is not None
-
-        chunk_filename = "chunk.00000.bin"
-        chunk_path = self._root / chunk_filename
-        payloads = [sample.payload for sample in self._pending]
-        header_bytes = 4 + (len(payloads) + 1) * 4
-        offsets = [header_bytes]
-        for payload in payloads:
-            offsets.append(offsets[-1] + len(payload))
-
-        with chunk_path.open("wb") as handle:
-            handle.write(np.uint32(len(payloads)).tobytes())
-            handle.write(np.array(offsets, dtype=np.uint32).tobytes())
-            for payload in payloads:
-                handle.write(payload)
-
-        chunk_bytes = chunk_path.stat().st_size
-        chunk_entry: dict[str, Any] = {
-            "chunk_path": chunk_filename,
-            "chunk_size": len(payloads),
-            "chunk_bytes": chunk_bytes,
-            "column_sizes": [None for _ in self._data_format],
-        }
-        if self._loader == "tokens":
-            chunk_entry["dim"] = cast(int, self._block_size) * len(payloads)
-
-        if self._compression:
-            import zstandard as zstd
-
-            compression = self._compression
-            base, _, level_str = compression.partition(":")
-            level = int(level_str) if level_str else None
-            codec = base or compression
-            compressor = (
-                zstd.ZstdCompressor(level=level)
-                if level is not None
-                else zstd.ZstdCompressor()
-            )
-            zip_name = f"{chunk_filename}.{codec}"
-            zip_path = self._root / zip_name
-            with chunk_path.open("rb") as src, zip_path.open("wb") as dst:
-                dst.write(compressor.compress(src.read()))
-            chunk_entry["compression"] = compression
-            chunk_entry["chunk_zip_path"] = zip_name
-            chunk_entry["chunk_zip_bytes"] = zip_path.stat().st_size
-
-        index = {
-            "config": {
-                "data_format": self._data_format,
-                "data_spec": treespec_dumps(self._spec)
-                if self._spec is not None
-                else None,
-                "item_loader": (
-                    {"name": "pytree"}
-                    if self._loader == "pytree"
-                    else {"name": "tokens", "block_size": cast(int, self._block_size)}
-                ),
-            },
-            "chunks": [chunk_entry],
-        }
-
-        with (self._root / "index.json").open("w", encoding="utf-8") as handle:
-            json.dump(index, handle)
-
-
 def _serializer_key_for_leaf(leaf: object) -> str:
     """Return the serializer key that can encode ``leaf``."""
     if isinstance(leaf, bool):
@@ -899,7 +766,6 @@ __all__ = [
     "_get_serializers",
     "BaseItemLoader",
     "Interval",
-    "LitDataWriter",
     "PyTreeLoader",
     "TokensLoader",
     "treespec_dumps",

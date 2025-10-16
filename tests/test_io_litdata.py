@@ -3,11 +3,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from litdata.streaming.writer import BinaryWriter
 
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
-from zephon.io.formats.litdata_support import LitDataWriter
 from zephon.io.resolvers import DirectResolver
 from zephon.io.storage import LocalFSBackend
 
@@ -21,21 +21,27 @@ def test_litdata_reader_handles_dataset(
         tmp_path / f"litdata_{loader_kind}_{'compressed' if compression else 'plain'}"
     )
     kwargs: dict[str, object] = {"loader": loader_kind}
+    block_size: int | None = None
     if loader_kind == "tokens":
         block_size = 4
-        kwargs["block_size"] = block_size
         samples = [
             np.arange(i * block_size, (i + 1) * block_size, dtype=np.int32)
             for i in range(4)
         ]
     else:
         samples = [(idx, f"sample-{idx}") for idx in range(4)]
-    if compression:
-        kwargs["compression"] = "zstd:3"
-
-    with LitDataWriter(out=str(dataset_dir), **kwargs) as writer:
-        for sample in samples:
-            writer.write(sample)
+    compression_value = "zstd:3" if compression else None
+    writer = _binary_writer_for_samples(
+        dataset_dir,
+        len(samples),
+        loader_kind,
+        block_size=block_size,
+        compression=compression_value,
+    )
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
 
     dataset = Dataset.from_path(name="lit", path=str(dataset_dir))
     ensure_builtin_formats()
@@ -48,15 +54,22 @@ def test_litdata_reader_handles_dataset(
     for shard_id, locator in locators.items():
         local_ref = resolver.resolve(locator)
         chunk_meta: dict[str, object] = {}
+        config_meta: dict[str, object] = {}
         if isinstance(locator.extra, Mapping):
             candidate = locator.extra.get("chunk")
             if isinstance(candidate, Mapping):
                 chunk_meta = dict(candidate)
+            config_candidate = locator.extra.get("config")
+            if isinstance(config_candidate, Mapping):
+                config_meta = dict(config_candidate)
         if compression:
-            assert chunk_meta.get("compression") == "zstd:3"
-            assert chunk_meta.get("chunk_zip_path")
+            assert locator.compression == "zstd:3"
+            assert locator.zip is not None
+            assert str(config_meta.get("compression")) == "zstd:3"
         else:
-            assert chunk_meta.get("compression") is None
+            assert locator.compression is None
+            assert locator.zip is None
+            assert not config_meta.get("compression")
         shard = handler.open_shard(locator, local_ref)
         try:
             assert len(shard) == dataset.shard_index[shard_id]
@@ -77,3 +90,124 @@ def test_litdata_reader_handles_dataset(
     else:
         expected = [(idx, f"sample-{idx}") for idx in range(len(samples))]
         assert observed == expected
+
+
+def test_litdata_reader_handles_dict_with_numpy_ints(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "litdata_numpy_dict"
+    samples = [
+        {"payload": np.arange(i * 5, (i + 1) * 5, dtype=np.int32)} for i in range(3)
+    ]
+    writer = _binary_writer_for_samples(dataset_dir, len(samples), loader_kind="pytree")
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
+
+    dataset = Dataset.from_path(name="lit-numpy", path=str(dataset_dir))
+    ensure_builtin_formats()
+    handler = get_format("litdata")
+    locators = handler.build_locators(dataset)
+    assert dataset.path is not None
+    resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
+
+    observed: list[Mapping[str, object]] = []
+    for shard_id, locator in locators.items():
+        local_ref = resolver.resolve(locator)
+        shard = handler.open_shard(locator, local_ref)
+        try:
+            assert len(shard) == dataset.shard_index[shard_id]
+            for row_idx in range(len(shard)):
+                row = shard[row_idx]
+                assert isinstance(row, Mapping)
+                observed.append(row)
+        finally:
+            shard.close()
+
+    for expected, actual in zip(samples, observed, strict=True):
+        assert set(actual.keys()) == {"payload"}
+        value = actual["payload"]
+        assert isinstance(value, np.ndarray)
+        assert value.dtype == expected["payload"].dtype
+        assert np.array_equal(value, expected["payload"])
+
+
+def test_litdata_reader_handles_no_header_numpy(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "litdata_no_header_numpy"
+    samples = [
+        {"payload": np.arange(i * 4, (i + 1) * 4, dtype=np.uint32)} for i in range(3)
+    ]
+    writer = BinaryWriter(cache_dir=str(dataset_dir), chunk_size=len(samples))
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
+
+    dataset = Dataset.from_path(name="lit-no-header", path=str(dataset_dir))
+    ensure_builtin_formats()
+    handler = get_format("litdata")
+    locators = handler.build_locators(dataset)
+    assert dataset.path is not None
+    resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
+
+    observed: list[Mapping[str, object]] = []
+    for shard_id, locator in locators.items():
+        local_ref = resolver.resolve(locator)
+        shard = handler.open_shard(locator, local_ref)
+        try:
+            assert len(shard) == dataset.shard_index[shard_id]
+            for row_idx in range(len(shard)):
+                row = shard[row_idx]
+                assert isinstance(row, Mapping)
+                observed.append(row)
+        finally:
+            shard.close()
+
+    for expected, actual in zip(samples, observed, strict=True):
+        value = actual["payload"]
+        assert isinstance(value, np.ndarray)
+        assert value.dtype == expected["payload"].dtype
+        assert np.array_equal(value, expected["payload"])
+
+
+def _binary_writer_for_samples(
+    out: Path,
+    chunk_size: int,
+    loader_kind: str,
+    *,
+    block_size: int | None = None,
+    compression: str | None = None,
+) -> BinaryWriter:
+    kwargs: dict[str, object] = {"cache_dir": str(out), "chunk_size": chunk_size}
+    if compression:
+        kwargs["compression"] = compression
+    if loader_kind == "tokens":
+        pytest.importorskip("torch")
+        from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
+
+        if block_size is None:
+            raise ValueError("block_size must be provided for tokens loader")
+        kwargs["item_loader"] = StreamingTokensLoader(block_size=block_size)
+    writer = BinaryWriter(**kwargs)
+    if compression:
+        _ensure_single_thread_zstd(writer)
+    return writer
+
+
+def _ensure_single_thread_zstd(writer: BinaryWriter) -> None:
+    compressor = getattr(writer, "_compressor", None)
+    name = getattr(compressor, "name", "") if compressor is not None else ""
+    if not compressor or "zstd" not in str(name).lower():
+        return
+    try:
+        import zstd  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return
+    level = getattr(compressor, "level", None)
+    if level is None:
+        return
+    compress = zstd.compress
+
+    def _patched(data: bytes, *, _level: int = level, _compress=compress) -> bytes:
+        return _compress(data, _level, 1)
+
+    compressor.compress = _patched

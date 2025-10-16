@@ -3,9 +3,10 @@ import json
 import numpy as np
 import optree
 import pytest
+from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
+from litdata.streaming.writer import BinaryWriter
 
 from zephon.io.formats.litdata_support import (
-    LitDataWriter,
     PyTreeLoader,
     Serializer,
     TokensLoader,
@@ -103,39 +104,46 @@ def test_tokens_loader_reads_blocks(tmp_path):
         for i in range(3)
     ]
 
-    with LitDataWriter(
-        out=str(dataset_dir), loader="tokens", block_size=block_size
-    ) as writer:
-        for sample in samples:
-            writer.write(sample)
+    writer = BinaryWriter(
+        cache_dir=str(dataset_dir),
+        chunk_size=len(samples),
+        item_loader=StreamingTokensLoader(block_size=block_size),
+    )
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
 
     index_data = json.loads((dataset_dir / "index.json").read_text())
     config = index_data["config"]
-    chunk = index_data["chunks"][0]
+    chunks = index_data["chunks"]
 
     loader = TokensLoader(block_size=block_size)
     serializers = _get_serializers()
-    loader.setup(config, [chunk], serializers, None)
+    loader.setup(config, chunks, serializers, None)
 
     intervals = loader.generate_intervals()
-    assert len(intervals) == 1
-    interval = intervals[0]
-    assert interval.chunk_start == 0
-    assert interval.chunk_end == len(samples)
+    assert intervals[-1].chunk_end == len(samples)
+    assert len(intervals) == len(index_data["chunks"])
 
-    chunk_path = dataset_dir / chunk["chunk_path"]
-    for block_idx, expected in enumerate(samples):
-        item = loader.load_item_from_chunk(
-            block_idx,
-            chunk_index=0,
-            chunk_filepath=str(chunk_path),
-            begin=0,
-            filesize_bytes=int(chunk["chunk_bytes"]),
-        )
-        assert isinstance(item, np.ndarray)
-        assert np.array_equal(item, expected)
+    for chunk_index, (chunk_entry, interval) in enumerate(
+        zip(index_data["chunks"], intervals, strict=True)
+    ):
+        chunk_basename = chunk_entry.get("chunk_path") or chunk_entry.get("filename")
+        assert chunk_basename is not None
+        chunk_path = dataset_dir / chunk_basename
+        for block_idx in range(interval.chunk_start, interval.chunk_end):
+            item = loader.load_item_from_chunk(
+                block_idx,
+                chunk_index=chunk_index,
+                chunk_filepath=str(chunk_path),
+                begin=interval.chunk_start,
+                filesize_bytes=int(chunk_entry["chunk_bytes"]),
+            )
+            assert isinstance(item, np.ndarray)
+            assert np.array_equal(item, samples[block_idx])
 
-    loader.close(0)
+        loader.close(chunk_index)
 
 
 @pytest.mark.parametrize(
