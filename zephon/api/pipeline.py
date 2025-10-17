@@ -4,7 +4,7 @@
 """User-facing pipeline wrapper that layers ergonomics atop core planning."""
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias, cast
 
 
 class _IterableDatasetProto(Protocol):
@@ -31,7 +31,7 @@ else:
 TorchIterableDatasetType: TypeAlias = _TorchIterableDataset  # pyright: ignore[reportInvalidTypeForm]
 TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidTypeForm]
 
-from zephon.core.constants import SampleBatch, SampleRecord
+from zephon.core.constants import EngineSample, SampleBatch, SampleId, SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
@@ -217,8 +217,8 @@ class Pipeline:
     ) -> Iterator[SampleRecord | SampleBatch]:
         """Wrap an iterable of SampleBatch | SampleRecord.
 
-        - If item is SampleBatch -> yield item.to_training().
-        - If item is SampleRecord -> yield the item unchanged.
+        - If item is SampleBatch -> yield item.
+        - If item is SampleRecord -> yield the item.
         - Otherwise -> raise TypeError.
         """
         engine = self._engine
@@ -262,7 +262,18 @@ class Pipeline:
     def _eval_one(self, sample_id: Any) -> Any:
         self._ensure()
         assert self._engine is not None
-        return self._engine.eval_one(sample_id)
+        value: EngineSample | SampleId | Any = sample_id
+        try:
+            if (
+                isinstance(sample_id, tuple)
+                and len(sample_id) == 3
+                and all(isinstance(x, int) for x in sample_id)
+            ):
+                sid = cast(SampleId, sample_id)
+                value = cast(EngineSample, (sid, 0, 0))
+        except Exception:
+            pass
+        return self._engine.eval_one(value)
 
     def checkpoint(self) -> dict[str, Any]:
         self._ensure()

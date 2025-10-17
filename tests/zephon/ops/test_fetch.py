@@ -66,3 +66,34 @@ def test_fetch_op_reads_with_cache(jsonl_dataset: Dataset, tmp_path: Path) -> No
         ]
     )
     assert cache_root.exists()
+
+
+def test_fetch_op_setup_requires_datasets() -> None:
+    op = FetchOp()
+    with pytest.raises(RuntimeError):
+        op.setup(OpContext({}))
+
+
+def test_fetch_op_preserves_order_across_groups(jsonl_dataset: Dataset) -> None:
+    ctx = OpContext({"datasets_by_id": {0: jsonl_dataset}})
+    op = FetchOp()
+    op.setup(ctx)
+    # Interleave two shard groups; order should be preserved
+    batch = [
+        make_engine_sample(0, 1, 1),  # value 4
+        make_engine_sample(0, 0, 0),  # value 0
+        make_engine_sample(0, 1, 0),  # value 3
+        make_engine_sample(0, 0, 2),  # value 2
+    ]
+    out = op.process_many(batch)
+    assert [r.payload["value"] for r in out] == [4, 0, 3, 2]
+
+
+def test_fetch_op_traits_and_buffering_override() -> None:
+    from zephon.core.traits import Buffering
+
+    custom = Buffering(max_batch=7, max_latency_ms=1)
+    op = FetchOp(buf=custom)
+    assert op.buffering() == custom
+    t = op.traits()
+    assert t.indexable is True and t.parallelism == 16

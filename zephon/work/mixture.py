@@ -14,6 +14,11 @@ class MixtureSpec:
 
     weights: Mapping[str, float]
 
+    def __post_init__(self) -> None:
+        # Eagerly validate so bad specs fail on construction, not on first use.
+        # This also populates the cached_property once.
+        _ = self.normalized
+
     def validate_for(self, components: Iterable[str]) -> None:
         """Ensure this mixture matches the provided component names exactly."""
         ordered = list(components)

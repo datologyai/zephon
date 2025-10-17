@@ -56,3 +56,12 @@ def test_router_defaults_to_local(tmp_path: Path) -> None:
 
     with router.open(str(local_file), "r", encoding="utf-8") as handle:
         assert handle.read() == "local"
+
+
+def test_router_unknown_scheme_falls_back_to_local(tmp_path: Path) -> None:
+    router = RouterStorageBackend(local_root=tmp_path)
+    # Access the backend selection method directly to assert fallback behaviour
+    backend = router._backend_for("ftp://host/path/file.bin")  # type: ignore[attr-defined]
+    from zephon.io.storage.local import LocalFSBackend
+
+    assert isinstance(backend, LocalFSBackend)

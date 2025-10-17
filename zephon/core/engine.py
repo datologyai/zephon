@@ -622,9 +622,9 @@ class Engine:
         self._lane_progress[lane_id] = LanePtr(max_chunk_id, seen_offset + add_k)
         return True
 
-    def eval_one(self, sample_id: SampleId) -> Any:
+    def eval_one(self, sample: SampleId | EngineSample) -> Any:
         """Synchronously evaluate a single element through every stage runner."""
-        value: Any = sample_id
+        value: Any = sample
         for runner in self._runners:
             value = runner.run_one(value)
         return value
