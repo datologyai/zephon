@@ -330,7 +330,7 @@ class NoHeaderTensorSerializer(Serializer):  # pragma: no cover - torch dependen
             )
         if len(data) == 0:
             return torch.empty((0,), dtype=self._dtype)
-        return torch.frombuffer(data, dtype=self._dtype)
+        return torch.frombuffer(bytearray(data), dtype=self._dtype)
 
     def can_serialize(self, item: Any) -> bool:
         if torch is None:
