@@ -51,13 +51,44 @@ class FetchOp(DefaultFinalize[SampleRecord]):
 
     def process_many(self, elems: list[EngineSample]) -> list[SampleRecord]:
         assert self._store is not None
-        outputs: list[SampleRecord] = []
-        for elem in elems:
+        if not elems:
+            return []
+
+        # Prepare output slots to preserve the input order regardless of grouping.
+        out: list[SampleRecord | None] = [None] * len(elems)
+
+        # Group by (dataset_id, shard_id) to reuse the opened shard per group.
+        groups: dict[
+            tuple[int, int], list[tuple[int, int, int, int, tuple[int, int, int]]]
+        ] = {}
+        for pos, elem in enumerate(elems):
             sample_id, lane_id, chunk_id = elem
             dataset_id, shard_id, sample_idx = sample_id
+            key = (int(dataset_id), int(shard_id))
+            lst = groups.get(key)
+            if lst is None:
+                lst = []
+                groups[key] = lst
+            # Store (position-in-batch, lane_id, chunk_id, sample_idx, sample_id)
+            lst.append((pos, int(lane_id), int(chunk_id), int(sample_idx), sample_id))
+
+        # TODO(MaxiBoether): Further optimize per-shard fetching
+        # - Sort indices within each group by sample_idx to improve locality, then
+        #   scatter results back to their original positions.
+        # - If shards expose a bulk API (e.g., get_many/reads for a list of indices),
+        #   use it to avoid per-item resolve/open/close in ResilientShard
+        #   (see zephon/io/stores/resilient.py).
+
+        # Fetch per group and fill outputs.
+        for (dataset_id, shard_id), items in groups.items():
             view = self._store.for_dataset(dataset_id)
             shard = view.open(shard_id)
-            row = shard[sample_idx]
-            meta = SampleMeta(sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id)
-            outputs.append(SampleRecord(meta=meta, payload=row))
-        return outputs
+            for pos, lane_id, chunk_id, sample_idx, sample_id in items:
+                row = shard[sample_idx]
+                meta = SampleMeta(
+                    sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id
+                )
+                out[pos] = SampleRecord(meta=meta, payload=row)
+
+        # The type checker: out should now be fully populated.
+        return [x for x in out if x is not None]

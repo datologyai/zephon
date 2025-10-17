@@ -30,10 +30,11 @@ The engine also inserts a lane-merging distributor at the tail only when a rank 
 and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane dataflow.
 """
 
+import math
 import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Literal, Optional
+from typing import Any, Iterable, Iterator, Literal
 
 from zephon.core.constants import (
     ChunkId,
@@ -93,12 +94,22 @@ def _extract_lane_id(item: SampleRecord | SampleBatch) -> int:
 class RuntimeOptions:
     """User-tunable knobs that influence how the engine constructs runners."""
 
-    runner: Optional[str] = None
+    runner: str | None = None  # Default runner. Typically auto-inferred.
+    per_stage_runner: dict[int, str] = field(
+        default_factory=dict
+    )  # Manual override for runner per-stage. Mostly useful for debugging and advanced usage.
     allow_subprocess_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
-    mp_context: Any = None
-    max_workers: int = 8  # How does this get configured? The fundamental problem is that stages are implicitly created. So hwo should a user define how many workers to give each stage beforehand?
-    per_stage_runner: dict[int, str] = field(default_factory=dict)
-    deterministic: bool = False
+    mp_context: Any = None  # TODO(MaxiBoether): Do we need this?
+    worker_allocation: Literal[
+        "fit_to_ops", "per_stage_fixed", "global", "autotune"
+    ] = "fit_to_ops"
+    stage_weighting: Literal["equal", "by_declared_parallelism"] = (
+        "by_declared_parallelism"
+    )
+    max_workers: int = (
+        8  # max_workers per stage OR global, depending on worker_allocation.
+    )
+    deterministic: bool = True
     prefetch_batches: int | None = None
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
@@ -118,6 +129,8 @@ class RuntimeOptions:
     # TODO(MaxiBoether): This should be obtained from the current environment (e.g., torchtitan). Maybe not part of RuntimeOptions but rather part of init? Runtime options describe logical options of pipeline.
     num_ranks: int = 1
     physical_rank: int = 0
+    # Autotune placeholders (intentionally not implemented yet)
+    autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
 
 
 class Engine:
@@ -195,18 +208,35 @@ class Engine:
         - Final pipeline prefetch to the consumer
         """
         lines: list[str] = []
+
+        mode = self._opts.worker_allocation
+        if mode == "global":
+            lines.append(
+                f"Allocation=global total={self._opts.max_workers} weighting={self._opts.stage_weighting}"
+            )
+        elif mode == "per_stage_fixed":
+            lines.append(
+                f"Allocation=per_stage_fixed per_stage={self._opts.max_workers}"
+            )
+        else:
+            lines.append("Allocation=fit_to_ops (cap=sum(node.parallelism), min 1/op)")
+
         for idx, (stage, runner) in enumerate(zip(self._plan.stages, self._runners)):
             runner_kind = "unknown"
             op_in_q: int | None = None
             stage_prefetch: int | None = None
+            cap: int | None = None
 
             if isinstance(runner, ThreadStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
                 runner_kind = "threads"
                 op_in_q = getattr(runner, "_queue_capacity", None)
                 stage_prefetch = getattr(runner, "_prefetch_capacity", None)
+                cap = getattr(runner, "_max_workers", None)  # <- show cap
 
             # Header with placement and runner only (buffers are shown inline)
-            lines.append(f"Stage[{idx}] place={stage.placement} runner={runner_kind}")
+            lines.append(
+                f"Stage[{idx}] place={stage.placement} runner={runner_kind} cap={cap}"
+            )
 
             # Inside-stage ops with input buffers between them
             nodes = [f"{nd.name}@p{nd.parallelism}" for nd in stage.nodes]
@@ -252,11 +282,79 @@ class Engine:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _apportion(total: int, weights: list[int]) -> list[int]:
+        """Split `total` into integer parts proportional to `weights`.
+
+        Uses largest-remainder (Hamilton) method; guarantees sum(parts) == total.
+        If all weights are non-positive, falls back to an equal split.
+        """
+        if total <= 0 or not weights:
+            return [0] * len(weights)
+        wpos = [max(0, int(w)) for w in weights]
+        wsum = sum(wpos)
+        n = len(wpos)
+        if wsum == 0:
+            base = total // n
+            parts = [base] * n
+            for i in range(total - base * n):
+                parts[i] += 1
+            return parts
+        quotas = [total * (w / wsum) for w in wpos]
+        floors = [int(math.floor(q)) for q in quotas]
+        remaining = total - sum(floors)
+        order = sorted(range(n), key=lambda i: (quotas[i] - floors[i]), reverse=True)
+        for i in range(remaining):
+            floors[order[i]] += 1
+        return floors
+
     def _build_runners(self) -> None:
         """Instantiate per-stage runners according to placement and options."""
         inside_worker = inside_torch_worker()
         default_runner = self._opts.runner or "auto"
+        mode = self._opts.worker_allocation
+        num_stages = len(self._plan.stages)
+        if mode == "autotune":
+            raise NotImplementedError(
+                "worker_allocation='autotune' is reserved for future auto-tuning. "
+                + "Use 'per_stage_fixed' or 'global' for now."
+            )
+
+        if mode == "global":
+            total = self._opts.max_workers
+            if total < num_stages:
+                warnings.warn(
+                    f"[zephon] max_workers_total={total} < number of stages={num_stages}; "
+                    + f"bumping to {num_stages} (1 thread per stage).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                total = num_stages
+
+            if self._opts.stage_weighting == "equal":
+                weights = [1 for _ in range(num_stages)]
+            else:  # by_declared_parallelism
+                weights = [
+                    max(
+                        1,
+                        sum(max(1, (nd.parallelism or 1)) for nd in stage.nodes),
+                    )
+                    for stage in self._plan.stages
+                ]
+            per_stage_caps = self._apportion(total, weights)
+        elif mode == "per_stage_fixed":
+            # per_stage_fixed: same cap for each stage
+            cap = self._opts.max_workers
+            per_stage_caps = [cap for _ in range(num_stages)]
+        else:
+            per_stage_caps = [
+                max(1, sum(max(1, (nd.parallelism or 1)) for nd in stage.nodes))
+                for stage in self._plan.stages
+            ]
+
         for idx, stage in enumerate(self._plan.stages):
+            cap_for_stage = per_stage_caps[idx]
+
             prefetch = self._opts.per_stage_prefetch.get(
                 idx, self._opts.default_stage_prefetch
             )
@@ -291,7 +389,7 @@ class Engine:
                     ThreadStageRunner(
                         stage,
                         self._ctx,
-                        self._opts.max_workers,
+                        cap_for_stage,
                         prefetch_capacity=prefetch,
                         deterministic=self._opts.deterministic,
                         allow_latency_flush_in_deterministic=allow_latency,
