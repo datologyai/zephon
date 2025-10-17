@@ -11,7 +11,6 @@ from zephon.work.base import (
     WorkSource,
 )
 from zephon.work.mixture import MixtureSpec
-from zephon.work.static import StaticWorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 __all__ = [
@@ -20,7 +19,6 @@ __all__ = [
     "MixtureReadMode",
     "WorkChunk",
     "WorkSource",
-    "StaticWorkSource",
     "MixtureSpec",
     "StaticMixtureWorkSource",
 ]
