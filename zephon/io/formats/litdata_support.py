@@ -194,6 +194,7 @@ class NoHeaderNumpySerializer(Serializer):
     """Serializer for numpy arrays stored without a header in LitData payloads."""
 
     def __init__(self) -> None:
+        self._dtype_to_indices = {v: k for k, v in _NUMPY_DTYPES_MAPPING.items()}
         self._dtype: np.dtype | None = None
 
     def setup(self, metadata: Any) -> None:
@@ -216,25 +217,27 @@ class NoHeaderNumpySerializer(Serializer):
     def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
         array = np.asarray(item)
         if self._dtype is None:
-            dtype_index = _NUMPY_DTYPES_REVERSE.get(array.dtype)
+            dtype_index = self._dtype_to_indices.get(array.dtype)
             if dtype_index is None:
                 raise ValueError(
                     f"Unsupported numpy dtype for serialization: {array.dtype}"
                 )
             self._dtype = array.dtype
-        if array.dtype != self._dtype:
-            array = array.astype(self._dtype, copy=False)
-        return array.tobytes(order="C"), None
+        else:
+            dtype_index = self._dtype_to_indices[self._dtype]
+            if array.dtype != self._dtype:
+                array = array.astype(self._dtype, copy=False)
+        return array.tobytes(order="C"), f"no_header_numpy:{dtype_index}"
 
     def deserialize(self, data: bytes) -> np.ndarray:
         if self._dtype is None:
             raise RuntimeError(
                 "No dtype configured for no_header_numpy deserialization"
             )
-        return np.frombuffer(data, dtype=self._dtype).copy()
+        return np.frombuffer(data, dtype=self._dtype)
 
     def can_serialize(self, item: Any) -> bool:
-        return isinstance(item, np.ndarray)
+        return isinstance(item, np.ndarray) and len(item.shape) == 1
 
 
 class PickleSerializer(Serializer):
@@ -285,6 +288,94 @@ class TensorSerializer(Serializer):  # pragma: no cover - torch dependent
         return isinstance(item, torch.Tensor)
 
 
+class NoHeaderTensorSerializer(Serializer):  # pragma: no cover - torch dependent
+    """Serializer for tensors stored without a header in LitData payloads."""
+
+    def __init__(self) -> None:
+        if torch is None:
+            raise ImportError("Torch is required for tensor serialization")
+        self._dtype_to_indices = {v: k for k, v in _TORCH_DTYPES_MAPPING.items()}
+        self._dtype: Any = None
+
+    def setup(self, metadata: Any) -> None:
+        if torch is None:
+            raise ImportError("Torch is required for tensor serialization")
+        if isinstance(metadata, str):
+            _, _, suffix = metadata.partition(":")
+            if suffix:
+                try:
+                    index = int(suffix)
+                except ValueError as exc:  # pragma: no cover - defensive
+                    raise ValueError(
+                        f"Invalid dtype index for no_header_tensor: {suffix}"
+                    ) from exc
+                dtype = _TORCH_DTYPES_MAPPING.get(index)
+                if dtype is None:
+                    raise ValueError(f"Unsupported tensor dtype index: {index}")
+                self._dtype = dtype
+
+    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
+        if torch is None:
+            raise ImportError("Torch is required for tensor serialization")
+        dtype_index = self._dtype_to_indices[item.dtype]
+        self._dtype = item.dtype
+        return item.numpy().tobytes(order="C"), f"no_header_tensor:{dtype_index}"
+
+    def deserialize(self, data: bytes) -> Any:
+        if torch is None:
+            raise ImportError("Torch is required for tensor deserialization")
+        if self._dtype is None:
+            raise RuntimeError(
+                "No dtype configured for no_header_tensor deserialization"
+            )
+        if len(data) == 0:
+            return torch.empty((0,), dtype=self._dtype)
+        return torch.frombuffer(data, dtype=self._dtype)
+
+    def can_serialize(self, item: Any) -> bool:
+        if torch is None:
+            return False
+        return isinstance(item, torch.Tensor) and len(item.shape) == 1
+
+
+class PILSerializer(Serializer):
+    """Serializer for PIL/Pillow images - compatible with LitData format."""
+
+    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
+        import numpy as np
+        from PIL import Image
+
+        if not isinstance(item, Image.Image):
+            raise ValueError(f"Expected PIL Image, got {type(item)}")
+
+        mode = item.mode.encode("utf-8")
+        width, height = item.size
+        raw = item.tobytes()
+        header = np.array([width, height, len(mode)], np.uint32)
+        return header.tobytes() + mode + raw, None
+
+    def deserialize(self, data: bytes) -> Any:
+        import numpy as np
+        from PIL import Image
+
+        idx = 3 * 4  # 3 uint32 values
+        width, height, mode_size = np.frombuffer(data[:idx], np.uint32)
+        width_i = int(width)
+        height_i = int(height)
+        mode_len = int(mode_size)
+        mode_bytes = data[idx : idx + mode_len]
+        raw = data[idx + mode_len :]
+        return Image.frombytes(mode_bytes.decode("utf-8"), (width_i, height_i), raw)
+
+    def can_serialize(self, data: Any) -> bool:
+        try:
+            from PIL import Image
+
+            return isinstance(data, Image.Image)
+        except ImportError:
+            return False
+
+
 _SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(
     [
         ("str", StringSerializer()),
@@ -295,12 +386,13 @@ _SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(
         ("numpy", NumpySerializer()),
         ("pickle", PickleSerializer()),
         ("no_header_numpy", NoHeaderNumpySerializer()),
+        ("pil", PILSerializer()),
     ]
 )
 
 if torch is not None:  # pragma: no branch
     _SERIALIZERS["tensor"] = TensorSerializer()
-    _SERIALIZERS["no_header_tensor"] = BytesSerializer()
+    _SERIALIZERS["no_header_tensor"] = NoHeaderTensorSerializer()
 
 
 def _get_serializers(
@@ -741,25 +833,6 @@ def treespec_dumps(spec: optree.PyTreeSpec) -> str:
 
     schema = _encode(spec)
     return json.dumps([0, schema])
-
-
-def _serializer_key_for_leaf(leaf: object) -> str:
-    """Return the serializer key that can encode ``leaf``."""
-    if isinstance(leaf, bool):
-        return "bool"
-    if isinstance(leaf, int):
-        return "int"
-    if isinstance(leaf, float):
-        return "float"
-    if isinstance(leaf, bytes):
-        return "bytes"
-    if isinstance(leaf, str):
-        return "str"
-    if isinstance(leaf, np.ndarray):
-        return "numpy"
-    if torch is not None and isinstance(leaf, torch.Tensor):
-        return "tensor"
-    return "pickle"
 
 
 __all__ = [

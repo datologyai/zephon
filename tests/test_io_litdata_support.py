@@ -7,6 +7,11 @@ from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
 from litdata.streaming.writer import BinaryWriter
 
 from zephon.io.formats.litdata_support import (
+    _NUMPY_DTYPES_REVERSE,
+    _TORCH_DTYPES_MAPPING,
+    NoHeaderNumpySerializer,
+    NoHeaderTensorSerializer,
+    PILSerializer,
     PyTreeLoader,
     Serializer,
     TokensLoader,
@@ -56,6 +61,60 @@ def test_litdata_serializers_can_be_overridden():
     assert isinstance(serializers["str"], _EchoSerializer)
     payload, _ = serializers["str"].serialize(42)
     assert serializers["str"].deserialize(payload) == "42"
+
+
+def test_no_header_numpy_serializer_roundtrip_and_metadata():
+    serializer = NoHeaderNumpySerializer()
+    sample = np.arange(6, dtype=np.uint16)
+
+    payload, metadata = serializer.serialize(sample)
+    expected_index = _NUMPY_DTYPES_REVERSE[np.dtype(np.uint16)]
+    assert metadata == f"no_header_numpy:{expected_index}"
+
+    rehydrator = NoHeaderNumpySerializer()
+    rehydrator.setup(metadata)
+    restored = rehydrator.deserialize(payload)
+    assert isinstance(restored, np.ndarray)
+    assert restored.dtype == sample.dtype
+    assert np.array_equal(restored, sample)
+    assert serializer.can_serialize(sample)
+    assert not serializer.can_serialize(sample.reshape(2, 3))
+
+
+def test_no_header_tensor_serializer_roundtrip_and_metadata():
+    torch = pytest.importorskip("torch")
+
+    serializer = NoHeaderTensorSerializer()
+    sample = torch.arange(5, dtype=torch.int32)
+
+    payload, metadata = serializer.serialize(sample)
+    reverse_mapping = {dtype: idx for idx, dtype in _TORCH_DTYPES_MAPPING.items()}
+    expected_index = reverse_mapping[sample.dtype]
+    assert metadata == f"no_header_tensor:{expected_index}"
+
+    rehydrator = NoHeaderTensorSerializer()
+    rehydrator.setup(metadata)
+    restored = rehydrator.deserialize(payload)
+    assert torch.equal(restored, sample)
+    assert serializer.can_serialize(sample)
+    assert not serializer.can_serialize(sample.reshape(1, 5))
+
+
+def test_pil_serializer_roundtrip():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    serializer = PILSerializer()
+    image = Image.new("RGB", (4, 3), color=(12, 34, 56))
+    payload, metadata = serializer.serialize(image)
+    assert metadata is None
+
+    restored = serializer.deserialize(payload)
+    assert isinstance(restored, Image.Image)
+    assert restored.mode == image.mode
+    assert restored.size == image.size
+    assert restored.tobytes() == image.tobytes()
+    assert serializer.can_serialize(image)
 
 
 def test_pytree_loader_intervals_and_deserialize_roundtrip():

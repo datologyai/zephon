@@ -312,7 +312,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "(python_full_version < '3.13' and implementation_name != 'PyPy') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy')" },
 ]
 sdist = { url = "https://files.astralhosted.com/public/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04Z" }
 wheels = [
@@ -3404,6 +3404,7 @@ test = [
     { name = "litdata" },
     { name = "mosaicml-streaming" },
     { name = "optree" },
+    { name = "pillow" },
     { name = "pytest" },
     { name = "zstandard" },
 ]
@@ -3439,6 +3440,7 @@ test = [
     { name = "litdata", specifier = ">=0.2.0" },
     { name = "mosaicml-streaming", specifier = ">=0.13.0" },
     { name = "optree", specifier = ">=0.12.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "zstandard", specifier = ">=0.22.0" },
 ]
