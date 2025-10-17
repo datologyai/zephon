@@ -452,7 +452,6 @@ def test_scale_down_equivalence_current_api(
     ).options(
         num_ranks=1,
         physical_rank=0,
-        allow_latency_flush_in_deterministic=False,
     )
     all_flat, _ = consume_until(pipe_all)
     total = len(all_flat)
@@ -470,7 +469,6 @@ def test_scale_down_equivalence_current_api(
         ).options(
             num_ranks=N,
             physical_rank=r,
-            allow_latency_flush_in_deterministic=False,
         )
         flat, _ = consume_until(pipe)
         per_rank_flats.append(flat)
@@ -565,7 +563,6 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
         ).options(
             num_ranks=1,
             physical_rank=0,
-            allow_latency_flush_in_deterministic=False,
         )
         truth_pipe._ensure()
         assert truth_pipe._engine is not None
@@ -591,7 +588,6 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
                 num_ranks=ranks,
                 physical_rank=r,
                 mapping_strategy=strat,
-                allow_latency_flush_in_deterministic=False,
             )
             rank_pipe._ensure()
             assert rank_pipe._engine is not None
@@ -607,4 +603,226 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
         assert _is_cyclic_rotation_elems(merged_phase, truth_phase_elems)
 
         # advance
+        ckpt = ckpt_next
+
+
+@pytest.mark.parametrize("chunk_size", [7, 10, 16, 32])
+def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -> None:
+    """
+    Change both DP (num_ranks) and microbatch size across phases, while resuming.
+
+    Contract: for each phase, the multi-rank merged stream (element-level RR)
+    equals the single-rank "truth" up to a cyclic rotation at the element level.
+    """
+    ds = make_dataset("alpha", 512)
+    lanes = 4
+
+    # Phase spec: (num_ranks, mapping_strategy, batch_size, FLAT element budget)
+    # flat budgets are multiples of that phase's batch_size so elem counts are integral
+    phases: list[tuple[int, str, int, int]] = [
+        (4, "contiguous", 8, 64),  # 8 batches this phase
+        (2, "interleaved", 4, 64),  # 16 batches this phase (halved microbatch)
+    ]
+
+    ckpt: dict | None = None
+
+    for ranks, strat, batch_size, flat_budget in phases:
+        phase_elem_budget = flat_budget // batch_size
+        assert phase_elem_budget > 0 and (flat_budget % batch_size == 0)
+
+        # ---- Single-rank truth for this phase ----
+        truth_pipe = _build_pipe_params(
+            ds,
+            chunk_size=chunk_size,
+            canonical_replicas=lanes,
+            with_batch=True,
+            batch_size=batch_size,
+            stage_prefetch=2,
+            final_prefetch=2,
+        ).options(
+            num_ranks=1,
+            physical_rank=0,
+        )
+        truth_pipe._ensure()
+        assert truth_pipe._engine is not None
+        if ckpt is not None:
+            truth_pipe._engine.load_state_dict(ckpt, replay=True)
+        truth_phase_elems, ckpt_next = consume_until(
+            truth_pipe, elem_limit=phase_elem_budget, return_elems=True
+        )
+        assert ckpt_next is not None
+
+        # ---- Multi-rank per-rank sequences for this phase ----
+        per_rank_elems: list[list[tuple[int, list[str]]]] = []
+        for r in range(ranks):
+            rank_pipe = _build_pipe_params(
+                ds,
+                chunk_size=chunk_size,
+                canonical_replicas=lanes,
+                with_batch=True,
+                batch_size=batch_size,
+                stage_prefetch=0,
+                final_prefetch=0,
+            ).options(
+                num_ranks=ranks,
+                physical_rank=r,
+                mapping_strategy=strat,
+            )
+            rank_pipe._ensure()
+            assert rank_pipe._engine is not None
+            if ckpt is not None:
+                rank_pipe._engine.load_state_dict(ckpt, replay=True)
+            per_rank_elems.append(consume_until(rank_pipe, return_elems=True)[0])
+
+        merged_phase = rr_merge(
+            per_rank_elems, mode="elem", limit=len(truth_phase_elems)
+        )
+
+        # Allow cyclic rotation at element level for this phase
+        assert _is_cyclic_rotation_elems(merged_phase, truth_phase_elems)
+
+        # advance to next phase
+        ckpt = ckpt_next
+
+
+@pytest.mark.parametrize("where", ["boundary", "within"])  # checkpoint location
+def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
+    where: str,
+) -> None:
+    """
+    Single-lane, batched pipeline: resume from a checkpoint taken exactly at a
+    chunk boundary vs within a chunk. Both must reproduce the baseline.
+    """
+    ds = make_dataset("alpha", 512)
+    chunk_size = 16
+    batch_size = 8  # divides chunk_size so boundary in terms of batches is integral
+
+    # Canonical baseline (full run)
+    baseline = _build_pipe_params(
+        ds,
+        chunk_size=chunk_size,
+        canonical_replicas=1,
+        with_batch=True,
+        batch_size=batch_size,
+        stage_prefetch=0,
+        final_prefetch=0,
+    )
+    baseline_flat, _ = consume_until(baseline)
+    assert baseline_flat
+
+    # Number of batches per chunk in single lane
+    batches_per_chunk = chunk_size // batch_size
+    assert batches_per_chunk > 0
+    # Choose a modest number of full chunks to advance before checkpointing
+    full_chunks = 3
+    elem_limit = full_chunks * batches_per_chunk
+    if where == "within":
+        elem_limit -= 1  # cut one batch before the boundary
+        assert elem_limit > 0
+
+    # Phase 1: run until elem_limit batches, capture checkpoint and prefix
+    p1 = _build_pipe_params(
+        ds,
+        chunk_size=chunk_size,
+        canonical_replicas=1,
+        with_batch=True,
+        batch_size=batch_size,
+        stage_prefetch=0,
+        final_prefetch=0,
+    )
+    prefix_elems, ckpt = consume_until(p1, elem_limit=elem_limit, return_elems=True)
+    assert ckpt is not None and prefix_elems
+    # Flatten texts from (lane, [texts...])
+    prefix_flat = [t for _, texts in prefix_elems for t in texts]
+    assert prefix_flat == baseline_flat[: len(prefix_flat)]
+
+    # Phase 2: resume and drain the rest
+    p2 = _build_pipe_params(
+        ds,
+        chunk_size=chunk_size,
+        canonical_replicas=1,
+        with_batch=True,
+        batch_size=batch_size,
+        stage_prefetch=0,
+        final_prefetch=0,
+    )
+    p2._ensure()
+    assert p2._engine is not None
+    p2._engine.load_state_dict(ckpt, replay=True)
+    suffix_flat, _ = consume_until(p2)
+
+    assert prefix_flat + suffix_flat == baseline_flat
+
+
+def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
+    """
+    Three phases with resume:
+    - Phase A: 4 ranks, microbatch 8
+    - Phase B: 2 ranks, microbatch 4 (scale down + halve microbatch)
+    - Phase C: 4 ranks, microbatch 8 (scale up + restore microbatch)
+    For each phase, compare merged multi-rank to single-rank truth up to a cyclic rotation.
+    """
+    ds = make_dataset("alpha", 512)
+    chunk_size = 16
+    lanes = 4
+
+    phases: list[tuple[int, str, int, int]] = [
+        (4, "contiguous", 8, 64),
+        (2, "interleaved", 4, 64),
+        (4, "contiguous", 8, 64),
+    ]
+
+    ckpt: dict | None = None
+
+    for ranks, strat, batch_size, flat_budget in phases:
+        phase_elem_budget = flat_budget // batch_size
+        assert phase_elem_budget > 0 and (flat_budget % batch_size == 0)
+
+        # Single-rank truth for this phase
+        truth = _build_pipe_params(
+            ds,
+            chunk_size=chunk_size,
+            canonical_replicas=lanes,
+            with_batch=True,
+            batch_size=batch_size,
+            stage_prefetch=2,
+            final_prefetch=2,
+        ).options(
+            num_ranks=1,
+            physical_rank=0,
+        )
+        truth._ensure()
+        assert truth._engine is not None
+        if ckpt is not None:
+            truth._engine.load_state_dict(ckpt, replay=True)
+        truth_elems, ckpt_next = consume_until(
+            truth, elem_limit=phase_elem_budget, return_elems=True
+        )
+        assert ckpt_next is not None
+
+        # Multi-rank per-rank sequences for this phase
+        per_rank_elems: list[list[tuple[int, list[str]]]] = []
+        for r in range(ranks):
+            rp = _build_pipe_params(
+                ds,
+                chunk_size=chunk_size,
+                canonical_replicas=lanes,
+                with_batch=True,
+                batch_size=batch_size,
+                stage_prefetch=0,
+                final_prefetch=0,
+            ).options(
+                num_ranks=ranks,
+                physical_rank=r,
+                mapping_strategy=strat,
+            )
+            rp._ensure()
+            assert rp._engine is not None
+            if ckpt is not None:
+                rp._engine.load_state_dict(ckpt, replay=True)
+            per_rank_elems.append(consume_until(rp, return_elems=True)[0])
+
+        merged = rr_merge(per_rank_elems, mode="elem", limit=len(truth_elems))
+        assert _is_cyclic_rotation_elems(merged, truth_elems)
+
         ckpt = ckpt_next
