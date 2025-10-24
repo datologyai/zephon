@@ -13,22 +13,18 @@ from zephon.core.engine import (
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
 from zephon.ops.delay import DelayById
-from zephon.work.base import WorkChunk
+from zephon.work.base import WorkChunk, WorkSource
 
 
-class _DummyWorkSource:
+class _DummyWorkSource(WorkSource):
+    def __init__(self) -> None:
+        super().__init__()
+
     @property
     def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
         return {}
 
-    def next_chunk_for(
-        self,
-        lane: int,
-        *,
-        worker_id: int = 0,
-        workers_per_rank: int = 1,
-        canonical_replicas: int = 1,
-    ) -> Any:  # pragma: no cover - not used here
+    def next_chunk(self) -> Any:  # pragma: no cover - not used here
         return None
 
     def state_dict(self) -> dict[str, Any]:  # pragma: no cover - minimal
@@ -52,7 +48,18 @@ def _mk_engine_with_opts(**opts: Any) -> Engine:
     g.add("delay", DelayById(max_delay_ms=0.0))
     plan = Planner().make_plan(g)
     work = _DummyWorkSource()
-    return Engine(plan, RuntimeOptions(**opts), work)
+    # Provide a default aggregate_dir when simulating multi-rank setups
+    o = dict(opts)
+    try:
+        nr = int(o.get("num_ranks", 1))
+    except Exception:
+        nr = 1
+    if nr > 1 and not o.get("aggregate_dir"):
+        import os
+        import tempfile
+
+        o["aggregate_dir"] = os.path.join(tempfile.gettempdir(), "zephon_test_agg")
+    return Engine(plan, RuntimeOptions(**o), work)
 
 
 def test_world_mapping_contiguous_and_interleaved() -> None:
@@ -173,6 +180,8 @@ def test_notify_replay_and_live_progress() -> None:
     # Enter replay mode by loading a state dict with progress at chunk 1, offset 1
     # Prime inflight with a chunk to also exercise inflight serialization
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(components={"A": [(0, 0, 0)]})
+    # Maintain invariant: next_cid must be max(inflight)+1 for state_dict()
+    eng._lane_next_cid[lane] = 2  # type: ignore[attr-defined]
     state = eng.state_dict()
     # Mutate saved progress to emulate a later checkpoint
     state["progress"] = {str(lane): {"chunk_id": 1, "offset": 1}}

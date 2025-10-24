@@ -3,33 +3,9 @@
 
 """User-facing pipeline wrapper that layers ergonomics atop core planning."""
 
+import importlib.util as _importlib_util
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias, cast
-
-
-class _IterableDatasetProto(Protocol):
-    def __iter__(self) -> Iterator[Any]: ...
-
-
-class _DatasetProto(_IterableDatasetProto, Protocol):
-    def __len__(self) -> int: ...
-
-    def __getitem__(self, index: int) -> Any: ...
-
-
-if TYPE_CHECKING:
-    try:
-        from torch.utils.data import Dataset as _TorchDataset
-        from torch.utils.data import IterableDataset as _TorchIterableDataset
-    except Exception:  # typing fallback when torch absent
-        _TorchIterableDataset = _IterableDatasetProto
-        _TorchDataset = _DatasetProto
-else:
-    _TorchIterableDataset = _IterableDatasetProto
-    _TorchDataset = _DatasetProto
-
-TorchIterableDatasetType: TypeAlias = _TorchIterableDataset  # pyright: ignore[reportInvalidTypeForm]
-TorchDatasetType: TypeAlias = _TorchDataset  # pyright: ignore[reportInvalidTypeForm]
 
 from zephon.core.constants import EngineSample, SampleBatch, SampleId, SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
@@ -38,7 +14,96 @@ from zephon.core.planner import Planner
 from zephon.io.options import StoreOptions
 from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
 from zephon.utils import buffered_iterable
+from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
+
+
+# ---------- Private protocol fallbacks (non-public => no D101) ----------
+class _IterableDatasetProto(Protocol):
+    def __iter__(self) -> Iterator[Any]: ...
+
+
+class _DatasetProto(Protocol):
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int) -> Any: ...
+
+
+# ---------- Public type aliases (unified across branches) ----------
+if TYPE_CHECKING:
+    try:
+        from torch.utils.data import Dataset as _TDataset
+        from torch.utils.data import IterableDataset as _TIterable
+    except Exception:
+        _TIterable = _IterableDatasetProto
+        _TDataset = _DatasetProto
+    TorchIterableDatasetType: TypeAlias = _TIterable  # type: ignore[assignment]
+    TorchDatasetType: TypeAlias = _TDataset  # type: ignore[assignment]
+else:
+    TorchIterableDatasetType: TypeAlias = _IterableDatasetProto
+    TorchDatasetType: TypeAlias = _DatasetProto
+
+# ---------- Runtime base (used for inheritance / isinstance) ----------
+_RTIterableDatasetBase: type
+try:
+    from torch.utils.data import IterableDataset as _RTIterableDatasetBase
+except Exception:
+    _RTIterableDatasetBase = object
+
+
+class TorchPipelineIterableDataset(_RTIterableDatasetBase):
+    """Adapter that just yields from the Zephon Pipeline; no sharding here."""
+
+    def __init__(self, pipeline: "Pipeline", *, stateful: bool = False) -> None:
+        self._pipeline = pipeline
+        self._stateful = stateful
+        self._pending_ckpt: dict | None = None  # only used when stateful=True
+
+    def __iter__(self):
+        # Defer engine construction & (if stateful) applying checkpoint until we’re in the worker.
+        if self._stateful and self._pending_ckpt is not None:
+            # restore() will internally _ensure() and apply the checkpoint.
+            self._pipeline.restore(self._pending_ckpt)
+            self._pending_ckpt = None
+
+        if detect_loader_kind() == "unknown":
+            print(
+                "Warning! You seem to be using neither torchdata.StatefulDataloader nor torch.DataLoader. You might want to consider iterating over the Pipeline directly, as the TorchDataset wrapper is mostly used as a tool to integrate with legacy setups that require the DataLoader class."
+            )
+
+        # Worker partitioning handled by Engine/WorkSource internally.
+        yield from self._pipeline
+
+    def state_dict(self):
+        if not self._stateful:
+            raise AttributeError(
+                "This dataset is not stateful. Pass stateful=True in to_torch_dataset()."
+            )
+
+        dl_kind = detect_loader_kind()
+        if dl_kind == "vanilla":
+            raise NotImplementedError(
+                "Obtaining correct state via the torch.DataLoader is not supported. If you need to checkpoint state, please use the torchdata.StatefulDataloader instead."
+            )
+        elif dl_kind == "unknown":
+            print(
+                "Warning! You seem to be using neither torchdata.StatefulDataloader nor torch.DataLoader. You might want to consider iterating over the Pipeline directly, as the TorchDataset wrapper is mostly used as a tool to integrate with legacy setups that require the DataLoader class."
+            )
+
+        # If engine already exists (typical after iteration started), use pipeline.checkpoint().
+        eng = self._pipeline._engine
+        if eng is not None:
+            return {"engine": self._pipeline.checkpoint()}
+        # If iteration hasn’t begun in this process, return whatever pending state we have (or None).
+        return {"engine": self._pending_ckpt}
+
+    def load_state_dict(self, sd: dict[Any, Any]):
+        if not self._stateful:
+            raise AttributeError(
+                "This dataset is not stateful. Pass stateful=True in to_torch_dataset()."
+            )
+        # Do NOT call pipeline.restore() here — this might be running in the parent.
+        # Just stash it; __iter__ in the worker will apply it before building the engine.
+        self._pending_ckpt = sd.get("engine")
 
 
 class Pipeline:
@@ -153,20 +218,10 @@ class Pipeline:
             self._plan = plan
             self._engine = Engine(plan, self._options, self.ws)
 
-    def to_torch_dataset(self) -> TorchIterableDatasetType:
-        try:
-            from torch.utils.data import IterableDataset
-        except ModuleNotFoundError as exc:
-            msg = "to_torch_dataset requires 'torch' to be installed."
-            raise RuntimeError(msg) from exc
-
-        pipeline = self
-
-        class _Dataset(IterableDataset):
-            def __iter__(self) -> Iterator[Any]:
-                yield from pipeline
-
-        return _Dataset()
+    def to_torch_dataset(self, stateful: bool = True) -> TorchIterableDatasetType:
+        if _importlib_util.find_spec("torch.utils.data") is None:
+            raise RuntimeError("to_torch_dataset requires 'torch' to be installed.")
+        return TorchPipelineIterableDataset(self, stateful=stateful)
 
     def to_indexable_torch_dataset(self) -> TorchDatasetType:
         if not self.is_indexable:
@@ -284,3 +339,63 @@ class Pipeline:
         self._ensure()
         assert self._engine is not None
         self._engine.load_state_dict(ckpt, replay=True)
+
+    def __getstate__(self):
+        """
+        Pickle guard for DataLoader/StatefulDataLoader worker bootstrap.
+
+        Why this exists
+        ----------------
+        - When num_workers > 0 and the start method is SPAWN (macOS/Windows, or Linux if set),
+          PyTorch/torchdata must *pickle the entire Dataset object* to send it into each worker.
+          The IterableDataset holds a reference to this Pipeline, so the Pipeline is pickled too.
+        - That pickling happens during **worker startup**, *before* any iteration and *before*
+          your dataset’s `state_dict()` is consulted. In other words, checkpoint/resume APIs do
+          not affect how the Dataset/Pipeline objects themselves are transferred to workers.
+        - If the Pipeline already holds a live Engine (thread pools, locks, file handles, etc.),
+          serialization either fails (not picklable) or, under FORK, produces an unsafe snapshot
+          of a partially initialized thread pool in the child process.
+
+        Strategy
+        --------
+        - Strip all process-local runtime from the pickled representation:
+            * `_engine` : the live runtime (threads, queues, locks)
+            * `_plan`   : the derived execution plan (rebuildable from the graph)
+          These are set to None in the pickled state.
+        - Keep only pure data/config: graph, options, work source. Workers will rebuild the
+          plan/engine lazily upon first iteration.
+
+        How this interacts with resume
+        -------------------------------
+        - For resume with torchdata.StatefulDataLoader, the dataset should expose its own
+          `state_dict()` / `load_state_dict()` and *stash* any Zephon checkpoint there.
+          Apply that checkpoint inside the worker (e.g., in `__iter__`) by calling
+          `pipeline.restore(ckpt)`, which will lazily `_ensure()` and load state.
+        - We *intentionally* do not serialize a live Engine here. Resume state should be
+          passed explicitly via the dataset’s state API, not implicitly by pickling.
+
+        Effects
+        -------
+        - SPAWN: safe — no Engine is ever serialized across processes.
+        - FORK: safe — the child won’t inherit an already-started thread pool; the Engine
+          will be created post-fork inside the worker.
+        """
+        d = self.__dict__.copy()
+        d["_engine"] = None
+        d["_plan"] = None
+        return d
+
+    def __setstate__(self, state: dict[Any, Any]):
+        """
+        Unpickle guard that complements __getstate__.
+
+        - Ensures plan/engine are rebuilt lazily in the receiving process by resetting
+          the runtime fields to None.
+        - Leaves graph/options/work source intact (pure data).
+        - If you’re using a stateful IterableDataset, that dataset should apply any
+          previously stashed checkpoint from its own `load_state_dict()` by calling
+          `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.
+        """
+        self.__dict__.update(state)
+        self._engine = None
+        self._plan = None

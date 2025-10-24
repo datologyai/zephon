@@ -108,14 +108,15 @@ def test_load_state_dict_preserves_sequence_and_positions(
         shuffle_block_size=block_size,
     )
 
-    # Consume some chunks to create a non-trivial checkpoint
+    # Create a lane-bound clone and consume some chunks to create a checkpoint
+    ws_a = work_a.clone_for_lane(0, canonical_replicas=1)
     prefix_chunks: list[dict[str, list[tuple[int, int, int]]]] = []
     for _ in range(3):
-        ch = work_a.next_chunk_for(0)
+        ch = ws_a.next_chunk()
         assert ch is not None
         prefix_chunks.append(_flatten_components(ch))
 
-    st = work_a.state_dict()
+    st = ws_a.state_dict()
 
     # Build a new instance with different knobs and chunk_size/seed, then load
     work_b = StaticMixtureWorkSource(
@@ -127,10 +128,11 @@ def test_load_state_dict_preserves_sequence_and_positions(
         shuffle_within_shard=not shuffle_within,
         shuffle_block_size=(None if block_size else 4),
     )
-    work_b.load_state_dict(st)
+    ws_b = work_b.clone_for_lane(0, canonical_replicas=1)
+    ws_b.load_state_dict(st)
 
     # After load, structural state should match the checkpoint
-    st_b = work_b.state_dict()
+    st_b = ws_b.state_dict()
     assert st_b["seed"] == st["seed"]
     assert st_b["chunk_size"] == st["chunk_size"]
     assert st_b["weights"] == st["weights"]
@@ -141,8 +143,8 @@ def test_load_state_dict_preserves_sequence_and_positions(
 
     # Continuing from the checkpoint, both streams must produce identical chunks
     for _ in range(5):
-        ca = work_a.next_chunk_for(0)
-        cb = work_b.next_chunk_for(0)
+        ca = ws_a.next_chunk()
+        cb = ws_b.next_chunk()
         if ca is None or cb is None:
             assert ca is None and cb is None
             break
@@ -155,13 +157,14 @@ def test_load_state_dict_version_mismatch_raises() -> None:
         [ds], {ds.name: 1.0}, chunk_size=4, seed=5, shuffle_shards=True
     )
 
-    st = work.state_dict()
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    st = ws.state_dict()
     st_bad = dict(st)
     st_bad["version"] = 999
 
     other = StaticMixtureWorkSource([ds], {ds.name: 1.0}, chunk_size=4)
     with pytest.raises(RuntimeError):
-        other.load_state_dict(st_bad)
+        other.clone_for_lane(0, canonical_replicas=1).load_state_dict(st_bad)
 
 
 def test_static_mixture_emits_fixed_quota_chunks() -> None:
@@ -175,21 +178,22 @@ def test_static_mixture_emits_fixed_quota_chunks() -> None:
         shuffle_shards=False,
     )
 
-    assert len(work) == 15
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    assert len(ws) == 15
 
-    chunk = work.next_chunk_for(0)
+    chunk = ws.next_chunk()
     assert chunk is not None
     assert sorted(chunk.components.keys()) == ["alpha", "beta"]
     assert len(chunk.components["alpha"]) == 3
     assert len(chunk.components["beta"]) == 2
 
-    assert len(work) == 10
+    assert len(ws) == 10
 
-    work.next_chunk_for(0)
-    work.next_chunk_for(0)
+    ws.next_chunk()
+    ws.next_chunk()
 
-    assert len(work) == 0
-    assert work.next_chunk_for(0) is None
+    assert len(ws) == 0
+    assert ws.next_chunk() is None
 
 
 def test_chunk_size_smaller_than_components_raises() -> None:
@@ -232,11 +236,12 @@ def test_chunk_samples_match_components_and_counts() -> None:
         shuffle_shards=False,
     )
 
-    dataset_ids = work.dataset_ids
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    dataset_ids = ws.dataset_ids
     assert dataset_ids["alpha"] != dataset_ids["beta"]
-    assert len(work) == 8
+    assert len(ws) == 8
 
-    first_chunk = work.next_chunk_for(0)
+    first_chunk = ws.next_chunk()
     assert first_chunk is not None
     assert sorted(first_chunk.components.keys()) == ["alpha", "beta"]
     assert len(first_chunk.components["alpha"]) == 2
@@ -251,17 +256,17 @@ def test_chunk_samples_match_components_and_counts() -> None:
     )
     assert [sample_id[2] for sample_id in first_chunk.components["alpha"]] == [0, 1]
     assert [sample_id[2] for sample_id in first_chunk.components["beta"]] == [0, 1]
-    assert len(work) == 4
+    assert len(ws) == 4
 
-    second_chunk = work.next_chunk_for(0)
+    second_chunk = ws.next_chunk()
     assert second_chunk is not None
     assert len(second_chunk.components["alpha"]) == 2
     assert len(second_chunk.components["beta"]) == 2
     assert [sample_id[2] for sample_id in second_chunk.components["alpha"]] == [2, 3]
     assert [sample_id[2] for sample_id in second_chunk.components["beta"]] == [2, 3]
-    assert len(work) == 0
+    assert len(ws) == 0
 
-    assert work.next_chunk_for(0) is None
+    assert ws.next_chunk() is None
 
 
 def test_chunk_samples_match_components_and_counts_25_75() -> None:
@@ -276,11 +281,12 @@ def test_chunk_samples_match_components_and_counts_25_75() -> None:
         shuffle_shards=False,
     )
 
-    dataset_ids = work.dataset_ids
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    dataset_ids = ws.dataset_ids
     assert dataset_ids["alpha"] != dataset_ids["beta"]
-    assert len(work) == 8
+    assert len(ws) == 8
 
-    first_chunk = work.next_chunk_for(0)
+    first_chunk = ws.next_chunk()
     assert first_chunk is not None
     assert sorted(first_chunk.components.keys()) == ["alpha", "beta"]
     assert len(first_chunk.components["alpha"]) == 3
@@ -295,17 +301,17 @@ def test_chunk_samples_match_components_and_counts_25_75() -> None:
     )
     assert [sample_id[2] for sample_id in first_chunk.components["alpha"]] == [0, 1, 2]
     assert [sample_id[2] for sample_id in first_chunk.components["beta"]] == [0]
-    assert len(work) == 4
+    assert len(ws) == 4
 
-    second_chunk = work.next_chunk_for(0)
+    second_chunk = ws.next_chunk()
     assert second_chunk is not None
     assert len(second_chunk.components["alpha"]) == 3
     assert len(second_chunk.components["beta"]) == 1
     assert [sample_id[2] for sample_id in second_chunk.components["alpha"]] == [3, 4, 5]
     assert [sample_id[2] for sample_id in second_chunk.components["beta"]] == [1]
-    assert len(work) == 0
+    assert len(ws) == 0
 
-    assert work.next_chunk_for(0) is None
+    assert ws.next_chunk() is None
 
 
 def test_seeded_shuffle_is_deterministic() -> None:
@@ -338,14 +344,16 @@ def test_seeded_shuffle_is_deterministic() -> None:
         shuffle_within_shard=True,
     )
 
-    chunk_one = work_one.next_chunk_for(0)
-    chunk_two = work_two.next_chunk_for(0)
+    w1 = work_one.clone_for_lane(0, canonical_replicas=1)
+    w2 = work_two.clone_for_lane(0, canonical_replicas=1)
+    chunk_one = w1.next_chunk()
+    chunk_two = w2.next_chunk()
 
     assert chunk_one is not None
     assert chunk_two is not None
     assert chunk_one.components == chunk_two.components
     # Ensure samples come from their respective datasets even after shuffles.
-    ids = work_one.dataset_ids
+    ids = w1.dataset_ids
     for comp_name, samples in chunk_one.components.items():
         expected_dataset_id = ids[comp_name]
         assert all(sample[0] == expected_dataset_id for sample in samples)

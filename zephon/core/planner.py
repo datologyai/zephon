@@ -4,6 +4,7 @@
 """Stage planner that converts logical graphs into executable plans."""
 
 from zephon.core.graph import Graph, Node, Plan, Stage
+from zephon.ops.batch import Batch
 
 
 class Planner:
@@ -77,6 +78,13 @@ class Planner:
         indexable = all(
             all(nd.op.traits().indexable for nd in stage.nodes) for stage in stages
         )
+
+        batch_size_hint = None
+        for stage in stages:
+            for nd in stage.nodes:
+                if isinstance(nd.op, Batch):
+                    batch_size_hint = nd.op.microbatch_size
+
         explain_lines = []
         for idx, stage in enumerate(stages):
             ops = [f"{nd.name}@p{nd.parallelism}" for nd in stage.nodes]
@@ -84,5 +92,8 @@ class Planner:
                 f"Stage[{idx}] place={stage.placement} break='{stage.break_reason}' ops={ops}"
             )
         return Plan(
-            stages=stages, explain="\n".join(explain_lines), indexable=indexable
+            stages=stages,
+            explain="\n".join(explain_lines),
+            indexable=indexable,
+            batch_size_hint=batch_size_hint,
         )

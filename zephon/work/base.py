@@ -3,9 +3,11 @@
 
 """Abstract base definitions for work sources and chunks."""
 
+import copy
+from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterator, Mapping, MutableMapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -348,27 +350,78 @@ class WorkChunk:
         return chunk
 
 
-class WorkSource(Protocol):
-    """Protocol for producing work chunks and supporting random access."""
+class WorkSource(ABC):
+    """Abstract producer of `WorkChunk` instances for the engine."""
 
-    def next_chunk_for(
-        self,
-        lane: int,
-        *,
-        worker_id: int = 0,
-        workers_per_rank: int = 1,
-        canonical_replicas: int = 1,  # work source might need to know this for total number of lanes.
-    ) -> WorkChunk | None: ...
+    def __init__(self):
+        self._lane: int | None = None
+        self._canon: int | None = None
+        self._cloned = False
 
-    def state_dict(self) -> dict[str, Any]: ...
+    def next_chunk(self) -> WorkChunk | None:
+        raise NotImplementedError()
 
-    def load_state_dict(self, state: dict[str, Any]) -> None: ...
+    def state_dict(self) -> dict:
+        return {
+            "lane_id": self._lane,
+            "canonical_replicas": self._canon,
+            "chunk_size_hint": self.chunk_size_hint(),
+        }
 
-    def supports_indexing(self) -> bool: ...
+    def load_state_dict(self, state: dict) -> None:
+        if int(state["lane_id"]) != self._lane:
+            raise RuntimeError("Lane mismatch loading LaneWorkSource state.")
+        if int(state["canonical_replicas"]) != self._canon:
+            raise RuntimeError("canonical_replicas changed; migration required.")
 
-    def __len__(self) -> int: ...
+    def _bind_lane(self, lane_id: int, canonical_replicas: int) -> None:
+        """Bind the clone to a specific lane.
 
-    def sample_id_at(self, index: int) -> SampleId: ...
+        Update any internal seed/cursors using lane_id if needed.
+        """
+        if not self._cloned:
+            raise RuntimeError(
+                "State Error: The WorkSource should have been cloned internally before binding it."
+            )
+
+        self._lane = int(lane_id)
+        self._canon = int(canonical_replicas)
+
+    def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> "WorkSource":
+        """Default clone strategy: config-based if available, else deepcopy."""
+        if self._cloned:
+            raise RuntimeError(
+                "State Error: clone_for_lane should only be called on user-defined WorkSource instances."
+            )
+        ws = copy.deepcopy(self)
+        ws._cloned = True
+        ws._bind_lane(lane_id, canonical_replicas)
+
+        # TODO(MaxiBoether): Implement an alternative to deepcopy if worksources support it.
+        # try:
+        #    cfg = self.config_dict()
+        #    ws = type(self).from_config(cfg)
+        # except Exception:
+        # fall back to deepcopy; ensure your subclass is deepcopy-safe
+        #    ws = copy.deepcopy(self)
+        return ws
+
+    def supports_indexing(self) -> bool:
+        raise NotImplementedError()
+
+    def __len__(self) -> int:
+        raise NotImplementedError()
+
+    def sample_id_at(self, index: int) -> SampleId:
+        raise NotImplementedError()
 
     @property
-    def datasets_by_id(self) -> Mapping[int, Dataset]: ...
+    def datasets_by_id(self) -> Mapping[int, Dataset]:
+        raise NotImplementedError()
+
+    def chunk_size_hint(self) -> int | None:
+        """Return fixed chunk size if constant.
+
+        Used for deterministic resume validation. Default None.
+        """
+        return None

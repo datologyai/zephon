@@ -3,6 +3,7 @@
 
 """In-memory representation of a Zephon pipeline graph and execution plan."""
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -66,3 +67,90 @@ class Plan:
     stages: list[Stage]
     explain: str
     indexable: bool
+    batch_size_hint: int | None = None
+
+    # --- Deterministic identity helpers ---
+    def _freeze(self, value: Any) -> Any:
+        """Convert common Python containers into hashable, ordered tuples."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return tuple(self._freeze(v) for v in value)
+        if isinstance(value, dict):
+            return tuple(
+                (str(k), self._freeze(v))
+                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            )
+        raise TypeError(f"non-freezable value for identity: {type(value)!r}")
+
+    def _op_identity(self, op: Any) -> tuple[Any, ...]:
+        """Return an operator signature capturing class, config, and traits."""
+        cls = op.__class__
+        fqcn = f"{cls.__module__}.{cls.__qualname__}"
+
+        config_items: list[tuple[str, Any]] = []
+        for key, val in sorted(getattr(op, "__dict__", {}).items()):
+            if key.startswith("_"):
+                continue
+            try:
+                config_items.append((key, self._freeze(val)))
+            except TypeError:
+                continue
+
+        traits_payload: tuple[Any, ...] = ()
+        try:
+            traits = op.traits()
+            traits_payload = tuple(
+                (name, self._freeze(getattr(traits, name)))
+                for name in sorted(vars(traits))
+            )
+        except Exception:
+            traits_payload = ()
+
+        return (
+            fqcn,
+            tuple(config_items),
+            traits_payload,
+        )
+
+    def _signature(self) -> tuple[Any, ...]:
+        """Compact tuple describing the plan for hashing purposes."""
+        stages_sig: list[Any] = []
+        for st in self.stages:
+            nodes_sig: list[Any] = []
+            for nd in st.nodes:
+                nodes_sig.append(
+                    (
+                        nd.name,
+                        nd.placement,
+                        int(nd.parallelism) if nd.parallelism else 1,
+                        self._op_identity(nd.op),
+                    )
+                )
+            stages_sig.append(
+                (
+                    st.name,
+                    st.placement,
+                    st.break_reason,
+                    tuple(nodes_sig),
+                )
+            )
+
+        return (
+            tuple(stages_sig),
+            bool(self.indexable),
+            self.batch_size_hint,
+        )
+
+    def fingerprint(self) -> str:
+        """Return a stable SHA-256 hex digest for this plan."""
+        blob = repr(self._signature()).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    @property
+    def plan_id(self) -> str:
+        """Short identifier derived from the plan fingerprint.
+
+        First 16 hex characters of the SHA-256 digest; suitable for logs/paths.
+        """
+        return self.fingerprint()[:16]

@@ -1,6 +1,10 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import multiprocessing as mp
+from collections import Counter, defaultdict
+from pathlib import Path
+
 import pytest
 
 from zephon.api import Pipeline as PublicPipeline
@@ -88,6 +92,8 @@ def _build_pipe_params(
     physical_rank: int = 0,
     mapping_strategy: str = "contiguous",
     allow_latency_flush_in_deterministic: bool = True,
+    aggregate_dir: str | None = None,
+    run_id: str | None = None,
 ) -> PublicPipeline:
     work = StaticMixtureWorkSource(
         [ds],
@@ -116,6 +122,8 @@ def _build_pipe_params(
         prefetch_batches=final_prefetch,
         max_workers=8,
         allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
+        aggregate_dir=aggregate_dir,
+        **({"run_id": run_id} if run_id is not None else {}),
     )
     return pipe
 
@@ -201,6 +209,7 @@ def test_resume_equivalence_no_batch(
 
     baseline = _build_pipe_params(
         ds,
+        #      f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-baseline",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
@@ -214,6 +223,7 @@ def test_resume_equivalence_no_batch(
 
     p1 = _build_pipe_params(
         ds,
+        #     f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-p1",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
@@ -226,6 +236,7 @@ def test_resume_equivalence_no_batch(
 
     p2 = _build_pipe_params(
         ds,
+        #    f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-p2",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
@@ -253,6 +264,7 @@ def test_checkpoint_resume_with_workers_change_no_batch(
     # Ground truth (any worker count is fine; use A for consistency)
     base = _build_pipe_params(
         ds,
+        # f"crwcnb-{workers_a}-{workers_b}-baseline",
         chunk_size=chunk_size,
         canonical_replicas=1,
         with_batch=False,
@@ -264,6 +276,7 @@ def test_checkpoint_resume_with_workers_change_no_batch(
 
     p1 = _build_pipe_params(
         ds,
+        # f"crwcnb-{workers_a}-{workers_b}-p1",
         chunk_size=chunk_size,
         canonical_replicas=1,
         with_batch=False,
@@ -427,8 +440,8 @@ def test_checkpoint_resume_mid_chunk_no_batch() -> None:
 # ---- 3) Scale-down equivalence, no batch (simulate N ranks vs. 1 rank)
 @pytest.mark.parametrize("with_batch", [False, True])
 @pytest.mark.parametrize("stage_prefetch,final_prefetch", [(0, 0), (4, 16)])
-def test_scale_down_equivalence_current_api(
-    with_batch: bool, stage_prefetch: int, final_prefetch: int
+def test_scale_down_equivalence_truth_checkpnts(
+    with_batch: bool, stage_prefetch: int, final_prefetch: int, tmp_path: Path
 ) -> None:
     """Compare N-rank merged stream to 1-rank truth across batch/prefetch modes."""
     N = 4
@@ -466,6 +479,7 @@ def test_scale_down_equivalence_current_api(
             batch_size=(batch_size or 8),
             stage_prefetch=stage_prefetch,
             final_prefetch=final_prefetch,
+            aggregate_dir=str(tmp_path),
         ).options(
             num_ranks=N,
             physical_rank=r,
@@ -522,7 +536,7 @@ def test_multiple_resumes_same_size_no_batch_current_api() -> None:
 
 
 # ---- 7) Multiple resizes across phases (ranks/strategy change), with batch
-def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
+def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) -> None:
     """
     Stitch phases with different world sizes & mappings; contract is:
     - element-level RR across lanes
@@ -545,7 +559,7 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
 
     ckpt: dict | None = None  # carry checkpoint across phases
 
-    for ranks, strat, flat_budget in phases:
+    for phase_idx, (ranks, strat, flat_budget) in enumerate(phases):
         phase_elem_budget = flat_budget // batch_size
         assert phase_elem_budget > 0, (
             "phase budget must be a positive multiple of batch size"
@@ -560,6 +574,7 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
             batch_size=batch_size,
             stage_prefetch=2,
             final_prefetch=2,
+            run_id=f"mrrb-truth-p{phase_idx}",
         ).options(
             num_ranks=1,
             physical_rank=0,
@@ -584,6 +599,8 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
                 batch_size=batch_size,
                 stage_prefetch=0,
                 final_prefetch=0,
+                aggregate_dir=str(tmp_path),
+                run_id=f"mrrb-sim-p{phase_idx}",
             ).options(
                 num_ranks=ranks,
                 physical_rank=r,
@@ -606,13 +623,45 @@ def test_multiple_resizes_equivalence_with_batch_current_api() -> None:
         ckpt = ckpt_next
 
 
-@pytest.mark.parametrize("chunk_size", [7, 10, 16, 32])
-def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -> None:
+def _flatten_elems(elems: list[tuple[int, list[str]]]) -> list[str]:
+    """Flatten [(lane, [texts...]), ...] to a flat list of texts."""
+    out: list[str] = []
+    for _, texts in elems:
+        out.extend(texts)
+    return out
+
+
+@pytest.mark.parametrize(
+    "chunk_size",
+    [
+        pytest.param(
+            7,
+            marks=pytest.mark.xfail(
+                reason="Known resume duplication when batch ∤ chunk", strict=True
+            ),
+            id="cs=7 [xfail]",
+        ),
+        pytest.param(
+            10,
+            marks=pytest.mark.xfail(
+                reason="Known resume duplication when batch ∤ chunk", strict=True
+            ),
+            id="cs=10 [xfail]",
+        ),
+        pytest.param(16, id="cs=16"),
+        pytest.param(32, id="cs=32"),
+    ],
+)
+def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpoints(
+    chunk_size: int, tmp_path: Path
+) -> None:
     """
     Change both DP (num_ranks) and microbatch size across phases, while resuming.
 
     Contract: for each phase, the multi-rank merged stream (element-level RR)
     equals the single-rank "truth" up to a cyclic rotation at the element level.
+
+    We HAVE TO use truth checkpoints here, otherwise we need to do multiprocessing. We also have a MP test at the end of this file.
     """
     ds = make_dataset("alpha", 512)
     lanes = 4
@@ -623,10 +672,32 @@ def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -
         (4, "contiguous", 8, 64),  # 8 batches this phase
         (2, "interleaved", 4, 64),  # 16 batches this phase (halved microbatch)
     ]
+    total_flat_budget = sum(b for _, _, _, b in phases)
+
+    # ---- Global oracle: single-rank, single pass, NO batching, no checkpoint ----
+    oracle_pipe = _build_pipe_params(
+        ds,
+        chunk_size=chunk_size,
+        canonical_replicas=lanes,
+        with_batch=False,  # <— important: per-element oracle
+        stage_prefetch=2,
+        final_prefetch=2,
+        aggregate_dir=str(tmp_path),
+        run_id=f"resize-mb-cs{chunk_size}-truth",
+    ).options(
+        num_ranks=1,
+        physical_rank=0,
+    )
+    # First N elements of the true canonical stream (no resume, no batching)
+    oracle_flat, _ = consume_until(
+        oracle_pipe, flat_limit=total_flat_budget, return_elems=False
+    )
+    assert len(oracle_flat) == total_flat_budget
 
     ckpt: dict | None = None
+    observed_flat: list[str] = []
 
-    for ranks, strat, batch_size, flat_budget in phases:
+    for phase_idx, (ranks, strat, batch_size, flat_budget) in enumerate(phases):
         phase_elem_budget = flat_budget // batch_size
         assert phase_elem_budget > 0 and (flat_budget % batch_size == 0)
 
@@ -639,6 +710,8 @@ def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -
             batch_size=batch_size,
             stage_prefetch=2,
             final_prefetch=2,
+            aggregate_dir=str(tmp_path),
+            run_id=f"resize-mb-cs{chunk_size}-ph{phase_idx}-truth",
         ).options(
             num_ranks=1,
             physical_rank=0,
@@ -663,6 +736,8 @@ def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -
                 batch_size=batch_size,
                 stage_prefetch=0,
                 final_prefetch=0,
+                aggregate_dir=str(tmp_path),
+                run_id=f"resize-mb-cs{chunk_size}-ph{phase_idx}-simul",
             ).options(
                 num_ranks=ranks,
                 physical_rank=r,
@@ -680,9 +755,17 @@ def test_resize_and_microbatch_change_equivalence_current_api(chunk_size: int) -
 
         # Allow cyclic rotation at element level for this phase
         assert _is_cyclic_rotation_elems(merged_phase, truth_phase_elems)
+        observed_flat.extend(_flatten_elems(merged_phase))
 
         # advance to next phase
         ckpt = ckpt_next
+
+    # Sanity: consumed exactly what we asked for across phases
+    assert len(observed_flat) == total_flat_budget
+
+    # Global check: no duplicate replays across resume boundaries.
+    # Compare as multisets to ignore harmless reordering from batching.
+    assert Counter(observed_flat) == Counter(oracle_flat)
 
 
 @pytest.mark.parametrize("where", ["boundary", "within"])  # checkpoint location
@@ -754,7 +837,7 @@ def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
     assert prefix_flat + suffix_flat == baseline_flat
 
 
-def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
+def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -> None:
     """
     Three phases with resume:
     - Phase A: 4 ranks, microbatch 8
@@ -774,7 +857,7 @@ def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
 
     ckpt: dict | None = None
 
-    for ranks, strat, batch_size, flat_budget in phases:
+    for phase_idx, (ranks, strat, batch_size, flat_budget) in enumerate(phases):
         phase_elem_budget = flat_budget // batch_size
         assert phase_elem_budget > 0 and (flat_budget % batch_size == 0)
 
@@ -787,6 +870,8 @@ def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
             batch_size=batch_size,
             stage_prefetch=2,
             final_prefetch=2,
+            aggregate_dir=str(tmp_path),
+            run_id=f"scaleudownnomp-p{phase_idx}-truth",
         ).options(
             num_ranks=1,
             physical_rank=0,
@@ -811,6 +896,8 @@ def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
                 batch_size=batch_size,
                 stage_prefetch=0,
                 final_prefetch=0,
+                aggregate_dir=str(tmp_path),
+                run_id=f"scaleudownnomp-p{phase_idx}-simulation",
             ).options(
                 num_ranks=ranks,
                 physical_rank=r,
@@ -826,3 +913,273 @@ def test_scale_down_then_up_with_microbatch_change_current_api() -> None:
         assert _is_cyclic_rotation_elems(merged, truth_elems)
 
         ckpt = ckpt_next
+
+
+####### Multiprocessing tests without truth checkpoints
+
+
+def _truth_windows_no_dl(
+    *,
+    ds: Dataset,
+    run_id: str,
+    canonical_replicas: int,
+    chunk_size: int,
+    with_batch: bool,
+    microbatch_size: int,
+    global_batch_size: int,
+    total_windows: int,
+) -> list[list[str]]:
+    """Single-rank 'truth' windows — no checkpoints, just iterate."""
+    pipe = _build_pipe_params(
+        ds,
+        with_batch=with_batch,
+        batch_size=microbatch_size,
+        chunk_size=chunk_size,
+        canonical_replicas=canonical_replicas,
+        num_ranks=1,
+        physical_rank=0,
+        mapping_strategy="contiguous",
+        aggregate_dir=None,  # single rank → auto tmp dir
+        run_id=run_id,
+    )
+    wins: list[list[str]] = []
+    it = iter(pipe)
+    try:
+        for _ in range(total_windows):
+            buf: list[str] = []
+            while len(buf) < global_batch_size:
+                buf.extend(_extract_texts(next(it)))
+            wins.append(buf)
+    finally:
+        del it
+    return wins
+
+
+def _rank_worker_proc(
+    rank: int,
+    ranks: int,
+    run_id: str,
+    *,
+    ds: Dataset,
+    canonical_replicas: int,
+    with_batch: bool,
+    microbatch_size: int,
+    chunk_size: int,
+    acc_steps: int,
+    windows: int,
+    mapping_strategy: str,
+    tmp_path_str: str,  # shared dir only when ranks > 1
+    start_ckpt: dict | None,
+    out_q: "mp.Queue",  # emits (rank, window_idx, [texts...])
+    win_barrier: "mp.Barrier",  # sync at window boundaries
+    ckpt_barrier: "mp.Barrier",
+    ckpt_q: "mp.Queue",  # emits (rank, merged_ckpt)
+) -> None:
+    pipe = _build_pipe_params(
+        ds,
+        with_batch=with_batch,
+        batch_size=microbatch_size,
+        chunk_size=chunk_size,
+        canonical_replicas=canonical_replicas,
+        num_ranks=ranks,
+        physical_rank=rank,
+        mapping_strategy=mapping_strategy,
+        aggregate_dir=tmp_path_str,
+        run_id=run_id,
+    )
+    pipe._ensure()
+    eng = pipe._engine
+    assert eng is not None
+    if start_ckpt is not None:
+        eng.load_state_dict(start_ckpt, replay=True)
+
+    it = iter(pipe)
+    try:
+        for w in range(windows):
+            buf: list[str] = []
+            for _ in range(acc_steps):
+                buf.extend(_extract_texts(next(it)))
+            out_q.put((rank, w, buf))
+            win_barrier.wait()
+        ckpt_barrier.wait()
+        merged = eng.state_dict()  # triggers file aggregation for multi-rank
+        ckpt_q.put((rank, merged))
+    finally:
+        try:
+            del it
+        except Exception:
+            pass
+        eng.close()
+
+
+def _phase_run_and_checkpoint_mp(
+    *,
+    ds: Dataset,
+    run_id: str,
+    ranks: int,
+    canonical_replicas: int,
+    with_batch: bool,
+    microbatch_size: int,
+    chunk_size: int,
+    acc_steps: int,
+    windows: int,
+    mapping_strategy: str,
+    tmp_path: Path | None,
+    start_ckpt: dict | None,
+) -> tuple[list[list[str]], dict]:
+    """
+    Run one phase concurrently across `ranks`; return (windows_out, merged_ckpt).
+
+    NOTE ON ORDERING W/ MULTI-PRODUCER QUEUE:
+      We synchronize workers with a Barrier so they *call* put() for window w
+      before proceeding to window w+1. However, multiprocessing.Queue is only
+      FIFO per producer. Each process has a local feeder/buffer; a fast producer
+      can enqueue (and have its feeder flush) items for window w+1 before a slow
+      producer’s window w item has actually reached the shared queue. The parent
+      can therefore observe (fast, w+1) before (slow, w).
+
+      To make the test deterministic, we demultiplex by window index in the
+      parent: we keep a small stash of out-of-window items and only assemble
+      window w when we've collected exactly `ranks` contributions for w.
+    """
+    ctx = mp.get_context("spawn")
+    out_q: mp.Queue = ctx.Queue()
+    ckpt_q: mp.Queue = ctx.Queue()
+    win_barrier = ctx.Barrier(ranks)
+    ckpt_barrier = ctx.Barrier(ranks)
+
+    procs: list[mp.Process] = []
+    for r in range(ranks):
+        p = ctx.Process(
+            target=_rank_worker_proc,
+            args=(r, ranks, run_id),
+            kwargs=dict(
+                ds=ds,
+                canonical_replicas=canonical_replicas,
+                with_batch=with_batch,
+                microbatch_size=microbatch_size,
+                chunk_size=chunk_size,
+                acc_steps=acc_steps,
+                windows=windows,
+                mapping_strategy=mapping_strategy,
+                tmp_path_str=(str(tmp_path) if (tmp_path and ranks > 1) else None),
+                start_ckpt=start_ckpt,
+                out_q=out_q,
+                win_barrier=win_barrier,
+                ckpt_barrier=ckpt_barrier,
+                ckpt_q=ckpt_q,
+            ),
+            daemon=False,
+        )
+        p.start()
+        procs.append(p)
+
+    try:
+        # collect per-window outputs from all ranks; concatenate in rank order
+        windows_out: list[list[str]] = []
+
+        # Map: window_idx -> list[(rankid, buf)]
+        stash: dict[int, list[tuple[int, list[str]]]] = defaultdict(list)
+
+        # ---- Collect per-window outputs from all ranks (order-agnostic) ----
+        for w in range(windows):
+            per_window = stash.pop(w, [])
+            while len(per_window) < ranks:
+                rr, w_idx, buf = out_q.get()
+                # Store by the window they claim, regardless of current w
+                stash[w_idx].append((rr, buf))
+                if w_idx == w:
+                    per_window = stash[w]
+
+            # (optional) stable rank order for reproducible merges
+            per_window.sort(key=lambda x: x[0])
+
+            merged: list[str] = []
+            for _, chunk in per_window:
+                merged.extend(chunk)
+            windows_out.append(merged)
+
+        merged_ckpt = None
+        for _ in range(ranks):
+            _rid, ckpt = ckpt_q.get()
+            if merged_ckpt is None:
+                merged_ckpt = ckpt
+        assert merged_ckpt is not None
+        return windows_out, merged_ckpt
+    finally:
+        for p in procs:
+            p.join(timeout=60)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+
+
+# ---------- the one-for-one torchdata-style test (no DataLoader) ----------
+
+
+def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
+    tmp_path: Path,
+) -> None:
+    """
+    Mirror tests/integration/test_dataloader_elasticity.py but without the DataLoader:
+      Phase A: ranks=4, mapping=contiguous,  micro=8, acc=2  → GLOBAL=64
+      Phase B: ranks=2, mapping=interleaved, micro=4, acc=8  → GLOBAL=64
+      Phase C: ranks=4, mapping=contiguous,  micro=8, acc=2  → GLOBAL=64
+
+    - Build 'truth' windows once from a single-rank pipeline (no checkpoints).
+    - Run each phase under multiprocessing, take a merged checkpoint, and resume.
+    - Compare each MP window to the truth window using multiset equality.
+    """
+    GLOBAL = 64
+    WINDOWS_PER_PHASE = 4
+    TOTAL_WINDOWS = WINDOWS_PER_PHASE * 3
+
+    ds = make_dataset("alpha", 4096)
+    canonical_lanes = 4
+    chunk_size = 16  # divisible by micro=8 and 4 → deterministic resume safety
+
+    # ---- Truth windows (single rank, no checkpoints) ----
+    truth_windows = _truth_windows_no_dl(
+        ds=ds,
+        run_id="mpscaling-truth",
+        canonical_replicas=canonical_lanes,
+        chunk_size=chunk_size,
+        with_batch=True,
+        microbatch_size=8,  # truth microbatch doesn't matter, we just buffer GLOBAL=64
+        global_batch_size=GLOBAL,
+        total_windows=TOTAL_WINDOWS,
+    )
+    assert len(truth_windows) == TOTAL_WINDOWS
+
+    phases = [
+        (4, "contiguous", 8, 2),
+        (2, "interleaved", 4, 8),
+        (4, "contiguous", 8, 2),
+    ]
+
+    got_all: list[list[str]] = []
+    start_ckpt: dict | None = None
+    for idx, (ranks, mapping, micro, acc) in enumerate(phases):
+        phase_tmp = tmp_path / f"phase_{idx}"
+        phase_tmp.mkdir(parents=True, exist_ok=True)
+        phase_windows, start_ckpt = _phase_run_and_checkpoint_mp(
+            ds=ds,
+            run_id=f"mpscaling-{idx}",
+            ranks=ranks,
+            canonical_replicas=canonical_lanes,
+            with_batch=True,
+            microbatch_size=micro,
+            chunk_size=chunk_size,
+            acc_steps=acc,
+            windows=WINDOWS_PER_PHASE,
+            mapping_strategy=mapping,
+            tmp_path=phase_tmp,  # required only because ranks>1 in all phases here
+            start_ckpt=start_ckpt,
+        )
+        got_all.extend(phase_windows)
+
+    # ---- Compare window-by-window to truth (multiset equality) ----
+    assert len(got_all) == TOTAL_WINDOWS
+    for w_got, w_truth in zip(got_all, truth_windows):
+        assert len(w_got) == len(w_truth) == GLOBAL
+        assert Counter(w_got) == Counter(w_truth)

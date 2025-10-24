@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import sys
+from importlib.machinery import ModuleSpec
 from types import ModuleType
 
 import pytest
@@ -15,21 +14,19 @@ def _install_torch_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     utils_mod = ModuleType("torch.utils")
     data_mod = ModuleType("torch.utils.data")
 
-    class IterableDataset:  # minimal stub
-        def __iter__(self):  # pragma: no cover - actual implementations override
-            return iter(())
+    class IterableDataset: ...
 
-    class Dataset:  # minimal stub
-        def __len__(self):  # pragma: no cover - not used directly here
-            return 0
-
-        def __getitem__(self, index):  # pragma: no cover - not used directly here
-            raise IndexError
+    class Dataset: ...
 
     data_mod.IterableDataset = IterableDataset
     data_mod.Dataset = Dataset
     torch_mod.utils = utils_mod
     utils_mod.data = data_mod
+
+    # minimal specs so importlib.util.find_spec doesn't raise
+    torch_mod.__spec__ = ModuleSpec("torch", loader=None)
+    utils_mod.__spec__ = ModuleSpec("torch.utils", loader=None)
+    data_mod.__spec__ = ModuleSpec("torch.utils.data", loader=None)
 
     monkeypatch.setitem(sys.modules, "torch", torch_mod)
     monkeypatch.setitem(sys.modules, "torch.utils", utils_mod)

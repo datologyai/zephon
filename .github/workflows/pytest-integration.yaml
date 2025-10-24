@@ -15,7 +15,7 @@ jobs:
   integration:
     name: Integration Tests
     timeout-minutes: 40
-    runs-on: ubuntu-latest
+    runs-on: LargeGithubRunner
     strategy:
       matrix:
         python_version: ["3.10"]

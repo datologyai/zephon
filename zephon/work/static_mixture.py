@@ -155,6 +155,8 @@ class StaticMixtureWorkSource(WorkSource):
             raise ValueError("chunk_size must be positive")
         if not datasets:
             raise ValueError("At least one dataset must be provided")
+        super().__init__()
+
         self._datasets: list[Dataset] = list(datasets)
         dataset_names = [ds.name for ds in self._datasets]
 
@@ -212,6 +214,9 @@ class StaticMixtureWorkSource(WorkSource):
                 "exhausted_policy must be one of 'stop', 'redistribute', 'repeat'"
             )
         self._exhausted_policy = exhausted_policy
+
+    def chunk_size_hint(self) -> int | None:
+        return self._chunk_size
 
     @property
     def datasets_by_id(self) -> Mapping[int, Dataset]:
@@ -291,41 +296,31 @@ class StaticMixtureWorkSource(WorkSource):
 
         return quota
 
-    def next_chunk_for(
-        self,
-        lane: int,
-        *,
-        worker_id: int = 0,
-        workers_per_rank: int = 1,
-        canonical_replicas: int = 1,
-    ) -> WorkChunk | None:
+    def next_chunk(self) -> WorkChunk | None:
         """Return the next chunk for a given canonical lane and worker.
 
         This implementation follows a compute-everywhere-then-discard strategy:
         - Enumerate the global chunk stream deterministically using the existing
           chunking logic.
         - Assign each global chunk index ``g`` to a lane via ``g % canonical_replicas``.
-        - Within the selected lane, assign chunks to workers via
-          ``(g // canonical_replicas) % workers_per_rank``.
         - Discard non-matching chunks locally.
         """
-        assert workers_per_rank > 0, "todo handle 0 workers case."
+        assert self._lane is not None, (
+            "Please assign lane for WorkSource before requesting chunk."
+        )
+        assert self._canon is not None, (
+            "Please assign lane for WorkSource before requesting chunk."
+        )
         while True:
             chunk = self._next_chunk()
             if chunk is None:
                 return None
             g = self._global_chunk_index
             self._global_chunk_index += 1
-            chunk_lane = g % canonical_replicas  # for which lane is this chunk?
-            if chunk_lane != (
-                lane % canonical_replicas
-            ):  # are we asking for this lane?
+            chunk_lane = g % self._canon  # for which lane is this chunk?
+            if chunk_lane != (self._lane % self._canon):  # are we asking for this lane?
                 continue
-            lane_idx = (
-                g // canonical_replicas
-            )  # index of the chunk WITHIN the lane (is it the first, second, thord, ...)
-            if (lane_idx % workers_per_rank) != worker_id:
-                continue
+
             return chunk
 
     def _next_chunk(self) -> WorkChunk | None:
@@ -401,7 +396,8 @@ class StaticMixtureWorkSource(WorkSource):
         return False  # StaticMixtureWorkSource is not yet indexable
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        base = super().state_dict()
+        return base | {
             "version": 1,
             "seed": int(self._seed),
             "chunk_size": int(self._chunk_size),
@@ -420,6 +416,8 @@ class StaticMixtureWorkSource(WorkSource):
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
+        super().load_state_dict(state)
+
         if int(state.get("version", 0)) != 1:
             raise RuntimeError("Unsupported StaticMixtureWorkSource checkpoint version")
 

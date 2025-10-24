@@ -11,7 +11,7 @@ from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
 from zephon.ops.delay import DelayById
 from zephon.ops.fetch import FetchOp
-from zephon.work.base import MixtureReadConfig, MixtureReadMode
+from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 
@@ -86,33 +86,27 @@ def test_engine_reproducible_weighted_random() -> None:
     assert first == second
 
 
-class _DummyWorkSource:
+class _DummyWorkSource(WorkSource):
     """Minimal WorkSource stub for constructing the Engine in tests.
 
     We don't iterate the engine here; we only need a `datasets_by_id` mapping
     for operator setup context.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+
     @property
     def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
         return {}
 
     # Methods below satisfy the WorkSource protocol at runtime if accessed.
-    def next_chunk_for(
-        self,
-        lane: int,
-        *,
-        worker_id: int = 0,
-        workers_per_rank: int = 1,
-        canonical_replicas: int = 1,
-    ) -> Any:  # pragma: no cover - not used in these tests
+    def next_chunk(self) -> Any:  # pragma: no cover - not used in these tests
         return None
 
-    def state_dict(self) -> dict[str, Any]:  # pragma: no cover - not used
-        return {}
+    # Use default WorkSource.state_dict for lane/canon if needed.
 
-    def load_state_dict(self, state: dict[str, Any]) -> None:  # pragma: no cover
-        return None
+    # load_state_dict falls back to WorkSource.load_state_dict
 
     def supports_indexing(self) -> bool:  # pragma: no cover - not used
         return False

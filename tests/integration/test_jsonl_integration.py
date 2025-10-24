@@ -213,3 +213,55 @@ def test_jsonl_integration_reproducibility(
         assert runs_b[i] == runs_b[0]
     # And equivalence across worker counts
     assert runs_a[0] == runs_b[0]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "StaticMixtureWorkSource currently drops the remainder when count % chunk_size != 0. "
+        "We want to allow generating a final chunk smaller than chunk_size "
+        "(exhausted policy: 'emit_partial')."
+    ),
+    strict=True,
+)
+def test_jsonl_emits_partial_final_chunk_xfail(tmp_path: Path) -> None:
+    # Use existing helpers to build datasets; pick a total that leaves remainder
+    # for the JS side (evens 0..256 → 129 items; 129 % 16 == 1).
+    ds_js, _ = _prepare_datasets(tmp_path, total=257, files=3)
+
+    chunk_size = 16
+
+    # Single-dataset mixture; no shuffling so reasoning is straightforward.
+    work = StaticMixtureWorkSource(
+        [ds_js],
+        {ds_js.name: 1.0},
+        chunk_size=chunk_size,
+        seed=123,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+    pipe = (
+        PublicPipeline(work)
+        .decode_text()
+        .tokenize(tokenizer_id="__fallback__", parallelism=2)
+        .options(
+            deterministic=True,
+            canonical_replicas=1,
+            num_ranks=1,
+            physical_rank=0,
+            mapping_strategy="contiguous",
+            max_workers=4,
+        )
+    )
+
+    out = _project_items(pipe)  # -> List[Tuple[name, val]]
+
+    # Desired future behavior: do NOT drop the tail; emit a 1-sample final chunk.
+    expected_js_count = (257 + 1) // 2  # evens in [0..256] => 129
+    assert len(out) == expected_js_count, (
+        f"expected {expected_js_count}, got {len(out)}"
+    )
+
+    # And the last even (256) should be present.
+    values = [v for _, v in out]
+    assert 256 in values, "final remainder sample (256) should not be dropped"
