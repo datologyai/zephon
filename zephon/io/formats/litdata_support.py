@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import json
 import logging
 import os
 import pickle
+import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
-from copy import deepcopy
 from io import BytesIO, FileIO
 from typing import Any, Mapping, NamedTuple, Optional
 
@@ -395,15 +396,54 @@ if torch is not None:  # pragma: no branch
     _SERIALIZERS["no_header_tensor"] = NoHeaderTensorSerializer()
 
 
+_CONFIGURED_SERIALIZER_CACHE: dict[str, Serializer] = {}
+_CONFIGURED_SERIALIZER_LOCK = threading.Lock()
+
+
+def _clone_serializer(serializer: Serializer) -> Serializer:
+    """Return a lightweight clone of ``serializer`` without deep-copy overhead."""
+    try:
+        return copy.copy(serializer)
+    except Exception:
+        cls = serializer.__class__
+        try:
+            return cls()  # type: ignore[call-arg]
+        except Exception:
+            return copy.deepcopy(serializer)
+
+
 def _get_serializers(
     overrides: Optional[Mapping[str, Serializer]] = None,
 ) -> dict[str, Serializer]:
     """Return serializer instances, allowing overrides for testing."""
-    serializers = OrderedDict(_SERIALIZERS)
+    serializers: OrderedDict[str, Serializer] = OrderedDict(_SERIALIZERS)
     if overrides:
         for key, value in overrides.items():
             serializers[key] = value
-    return {key: deepcopy(value) for key, value in serializers.items()}
+    return serializers
+
+
+def _configured_serializer_for_format(
+    fmt: str, base_key: str, serializer: Serializer, shareable: bool
+) -> Serializer:
+    """Return a serializer ready for ``fmt``, caching globally when safe."""
+    if fmt == base_key:
+        return serializer
+
+    if shareable:
+        with _CONFIGURED_SERIALIZER_LOCK:
+            cached = _CONFIGURED_SERIALIZER_CACHE.get(fmt)
+        if cached is not None:
+            return cached
+
+    configured = _clone_serializer(serializer)
+    configured.setup(fmt)
+
+    if shareable:
+        with _CONFIGURED_SERIALIZER_LOCK:
+            existing = _CONFIGURED_SERIALIZER_CACHE.setdefault(fmt, configured)
+        return existing
+    return configured
 
 
 # -----------------------------------------------------------------------------
@@ -432,15 +472,21 @@ class BaseItemLoader(ABC):
     ) -> None:
         self._config = dict(config)
         self._chunks = [dict(chunk) for chunk in chunks]
-        self._serializers = {key: deepcopy(value) for key, value in serializers.items()}
+        self._serializers = dict(serializers)
         self._data_format = list(self._config["data_format"])
         self._shift_idx = len(self._data_format) * 4
         self.region_of_interest = region_of_interest
 
         for fmt in self._data_format:
-            serializer = deepcopy(self._serializers[self._data_format_to_key(fmt)])
-            serializer.setup(fmt)
-            self._serializers[fmt] = serializer
+            if fmt in self._serializers:
+                continue
+            key = self._data_format_to_key(fmt)
+            base_serializer = self._serializers[key]
+            shareable = key in _SERIALIZERS and base_serializer is _SERIALIZERS[key]
+            configured = _configured_serializer_for_format(
+                fmt, key, base_serializer, shareable
+            )
+            self._serializers[fmt] = configured
 
     @functools.lru_cache(maxsize=128)
     def _data_format_to_key(self, data_format: str) -> str:
