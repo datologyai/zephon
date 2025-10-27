@@ -150,6 +150,7 @@ class RuntimeOptions:
     prefetch_batches: int | None = None
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
+    op_queue_capacity: int = 16  # maximum size of inflight items between ops.
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
     # Expert knob:
@@ -537,6 +538,7 @@ class Engine:
                         prefetch_capacity=prefetch,
                         deterministic=self._opts.deterministic,
                         allow_latency_flush_in_deterministic=allow_latency,
+                        queue_capacity=self._opts.op_queue_capacity,
                     )
                 )
             elif chosen == "remote":

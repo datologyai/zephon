@@ -95,6 +95,7 @@ def _build_pipe_params(
     allow_latency_flush_in_deterministic: bool = True,
     aggregate_dir: str | None = None,
     run_id: str | None = None,
+    op_queue_capacity: int | None = None,
 ) -> PublicPipeline:
     work = StaticMixtureWorkSource(
         [ds],
@@ -125,6 +126,11 @@ def _build_pipe_params(
         allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
         aggregate_dir=aggregate_dir,
         **({"run_id": run_id} if run_id is not None else {}),
+        **(
+            {"op_queue_capacity": op_queue_capacity}
+            if op_queue_capacity is not None
+            else {}
+        ),
     )
     return pipe
 
@@ -917,6 +923,7 @@ def _truth_windows_no_dl(
     microbatch_size: int,
     global_batch_size: int,
     total_windows: int,
+    op_queue_capacity: int | None = None,
 ) -> list[list[str]]:
     """Single-rank 'truth' windows — no checkpoints, just iterate."""
     pipe = _build_pipe_params(
@@ -930,6 +937,7 @@ def _truth_windows_no_dl(
         mapping_strategy="contiguous",
         aggregate_dir=None,  # single rank → auto tmp dir
         run_id=run_id,
+        op_queue_capacity=op_queue_capacity,
     )
     wins: list[list[str]] = []
     it = iter(pipe)
@@ -963,6 +971,7 @@ def _rank_worker_proc(
     win_barrier: "mp.Barrier",  # sync at window boundaries
     ckpt_barrier: "mp.Barrier",
     ckpt_q: "mp.Queue",  # emits (rank, merged_ckpt)
+    op_queue_capacity: int | None = None,
 ) -> None:
     pipe = _build_pipe_params(
         ds,
@@ -975,6 +984,7 @@ def _rank_worker_proc(
         mapping_strategy=mapping_strategy,
         aggregate_dir=tmp_path_str,
         run_id=run_id,
+        op_queue_capacity=op_queue_capacity,
     )
     pipe._ensure()
     eng = pipe._engine
@@ -1016,6 +1026,7 @@ def _phase_run_and_checkpoint_mp(
     mapping_strategy: str,
     tmp_path: Path | None,
     start_ckpt: dict | None,
+    op_queue_capacity: int | None = None,
 ) -> tuple[list[list[str]], dict]:
     """
     Run one phase concurrently across `ranks`; return (windows_out, merged_ckpt).
@@ -1058,6 +1069,7 @@ def _phase_run_and_checkpoint_mp(
                 win_barrier=win_barrier,
                 ckpt_barrier=ckpt_barrier,
                 ckpt_q=ckpt_q,
+                op_queue_capacity=op_queue_capacity,
             ),
             daemon=False,
         )
@@ -1133,8 +1145,25 @@ def _phase_run_and_checkpoint_mp(
 # ---------- the one-for-one torchdata-style test (no DataLoader) ----------
 
 
+@pytest.mark.parametrize(
+    "op_queue_capacity",
+    [
+        4,
+        pytest.param(
+            256,
+            marks=pytest.mark.xfail(
+                reason=(
+                    "Currently this test fails for unknown reasons if we increase the maximum "
+                    "queue capacity between operators. It has probably something to do with how "
+                    "much data is inflight/some timings that change with a larger "
+                    "op_queue_capacity. We need to investigate this"
+                )
+            ),
+        ),
+    ],
+)
 def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
-    tmp_path: Path,
+    tmp_path: Path, op_queue_capacity: int
 ) -> None:
     """
     Mirror tests/integration/test_dataloader_elasticity.py but without the DataLoader:
@@ -1164,6 +1193,7 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
         microbatch_size=8,  # truth microbatch doesn't matter, we just buffer GLOBAL=64
         global_batch_size=GLOBAL,
         total_windows=TOTAL_WINDOWS,
+        op_queue_capacity=op_queue_capacity,
     )
     assert len(truth_windows) == TOTAL_WINDOWS
 
@@ -1191,6 +1221,7 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
             mapping_strategy=mapping,
             tmp_path=phase_tmp,  # required only because ranks>1 in all phases here
             start_ckpt=start_ckpt,
+            op_queue_capacity=op_queue_capacity,
         )
         got_all.extend(phase_windows)
 
