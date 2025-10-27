@@ -2453,6 +2453,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.astralhosted.com/public/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33Z", zstd = { hash = "sha256:19affb01e880079f05bb108bc4e241a45dbdd9928bd2d08356da36ff30495fc0", size = 12699 } },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -3513,6 +3525,7 @@ test = [
     { name = "optree" },
     { name = "pillow" },
     { name = "pytest" },
+    { name = "pytest-timeout" },
     { name = "torchdata" },
     { name = "zstandard" },
 ]
@@ -3551,6 +3564,7 @@ test = [
     { name = "optree", specifier = ">=0.12.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "torchdata", specifier = ">=0.11.0" },
     { name = "zstandard", specifier = ">=0.22.0" },
 ]

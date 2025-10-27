@@ -65,6 +65,7 @@ test = [
     "optree>=0.12.0",
     "pillow>=10.0.0",
     "torchdata>=0.11.0",
+    "pytest-timeout>=2.4.0",
 ]
 docs = [
     "sphinx>=7.0.0",

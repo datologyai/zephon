@@ -3,6 +3,7 @@
 import multiprocessing as mp
 from collections import Counter, defaultdict
 from pathlib import Path
+from queue import Empty
 
 import pytest
 
@@ -155,7 +156,8 @@ def _node_worker_proc(
                 _, texts = _extract_elem(item)
                 assert len(texts) == microbatch_size
                 buf.extend(texts)
-            out_q.put((rank, w, buf))
+            # win_barrier.wait()
+            out_q.put((rank, w, buf), timeout=45.0)
             win_barrier.wait()  # align with other nodes at window boundary
 
         # Phase checkpoint: every node participates concurrently
@@ -199,7 +201,7 @@ def _phase_run_and_checkpoint_mp(
       window w when we've collected exactly `ranks` contributions for w.
     """
     ctx = mp.get_context("spawn")
-    out_q: mp.Queue = ctx.Queue()
+    out_q: mp.Queue = ctx.Queue(maxsize=max(4 * ranks, ranks * windows) + 16)
     ckpt_q: mp.Queue = ctx.Queue()
     win_barrier = ctx.Barrier(ranks)
     ckpt_barrier = ctx.Barrier(ranks)
@@ -241,11 +243,25 @@ def _phase_run_and_checkpoint_mp(
         for w in range(windows):
             per_window = stash.pop(w, [])
             while len(per_window) < ranks:
-                rankid, w_idx, buf = out_q.get(timeout=90.0)
-                # Store by the window they claim, regardless of current w
-                stash.setdefault(w_idx, []).append((rankid, buf))
+                try:
+                    rankid, w_idx, buf = out_q.get(timeout=90.0)
+                except Empty:
+                    crashed = {
+                        p.pid: p.exitcode
+                        for p in procs
+                        if not p.is_alive() and p.exitcode not in (None, 0)
+                    }
+                    if crashed:
+                        raise RuntimeError(
+                            f"Rank worker crashed while collecting window {w}: {crashed}"
+                        )
+                    continue
                 if w_idx == w:
-                    per_window = stash[w]
+                    # Append directly to the current window's accumulator.
+                    per_window.append((rankid, buf))
+                else:
+                    # Stash for a future window.
+                    stash[w_idx].append((rankid, buf))
 
             merged: list[str] = []
             for _, chunk in per_window:
@@ -255,7 +271,19 @@ def _phase_run_and_checkpoint_mp(
         # Gather phase checkpoint from all ranks (identical merged dicts)
         merged_ckpt = None
         for _ in range(ranks):
-            rankid, ckpt = ckpt_q.get(timeout=90.0)
+            try:
+                rankid, ckpt = ckpt_q.get(timeout=90.0)
+            except Empty:
+                crashed = {
+                    p.pid: p.exitcode
+                    for p in procs
+                    if not p.is_alive() and p.exitcode not in (None, 0)
+                }
+                if crashed:
+                    raise RuntimeError(
+                        f"Rank worker crashed before emitting checkpoint: {crashed}"
+                    )
+                raise
             if merged_ckpt is None:
                 merged_ckpt = ckpt
         assert merged_ckpt is not None

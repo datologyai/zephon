@@ -4,6 +4,7 @@
 import multiprocessing as mp
 from collections import Counter, defaultdict
 from pathlib import Path
+from queue import Empty
 
 import pytest
 
@@ -634,20 +635,8 @@ def _flatten_elems(elems: list[tuple[int, list[str]]]) -> list[str]:
 @pytest.mark.parametrize(
     "chunk_size",
     [
-        pytest.param(
-            7,
-            marks=pytest.mark.xfail(
-                reason="Known resume duplication when batch ∤ chunk", strict=True
-            ),
-            id="cs=7 [xfail]",
-        ),
-        pytest.param(
-            10,
-            marks=pytest.mark.xfail(
-                reason="Known resume duplication when batch ∤ chunk", strict=True
-            ),
-            id="cs=10 [xfail]",
-        ),
+        pytest.param(7, id="cs=7"),
+        pytest.param(10, id="cs=10"),
         pytest.param(16, id="cs=16"),
         pytest.param(32, id="cs=32"),
     ],
@@ -999,7 +988,8 @@ def _rank_worker_proc(
             buf: list[str] = []
             for _ in range(acc_steps):
                 buf.extend(_extract_texts(next(it)))
-            out_q.put((rank, w, buf))
+            # win_barrier.wait()
+            out_q.put((rank, w, buf), timeout=45.0)
             win_barrier.wait()
         ckpt_barrier.wait()
         merged = eng.state_dict()  # triggers file aggregation for multi-rank
@@ -1043,7 +1033,7 @@ def _phase_run_and_checkpoint_mp(
       window w when we've collected exactly `ranks` contributions for w.
     """
     ctx = mp.get_context("spawn")
-    out_q: mp.Queue = ctx.Queue()
+    out_q: mp.Queue = ctx.Queue(maxsize=max(4 * ranks, ranks * windows) + 16)
     ckpt_q: mp.Queue = ctx.Queue()
     win_barrier = ctx.Barrier(ranks)
     ckpt_barrier = ctx.Barrier(ranks)
@@ -1085,11 +1075,25 @@ def _phase_run_and_checkpoint_mp(
         for w in range(windows):
             per_window = stash.pop(w, [])
             while len(per_window) < ranks:
-                rr, w_idx, buf = out_q.get()
-                # Store by the window they claim, regardless of current w
-                stash[w_idx].append((rr, buf))
+                try:
+                    rr, w_idx, buf = out_q.get(timeout=60.0)
+                except Empty:
+                    crashed = {
+                        p.pid: p.exitcode
+                        for p in procs
+                        if not p.is_alive() and p.exitcode not in (None, 0)
+                    }
+                    if crashed:
+                        raise RuntimeError(
+                            f"Rank worker crashed while collecting window {w}: {crashed}"
+                        )
+                    continue
                 if w_idx == w:
-                    per_window = stash[w]
+                    # Append directly to the current window's accumulator.
+                    per_window.append((rr, buf))
+                else:
+                    # Stash for a future window.
+                    stash[w_idx].append((rr, buf))
 
             # (optional) stable rank order for reproducible merges
             per_window.sort(key=lambda x: x[0])
@@ -1101,7 +1105,19 @@ def _phase_run_and_checkpoint_mp(
 
         merged_ckpt = None
         for _ in range(ranks):
-            _rid, ckpt = ckpt_q.get()
+            try:
+                _rid, ckpt = ckpt_q.get(timeout=60.0)
+            except Empty:
+                crashed = {
+                    p.pid: p.exitcode
+                    for p in procs
+                    if not p.is_alive() and p.exitcode not in (None, 0)
+                }
+                if crashed:
+                    raise RuntimeError(
+                        f"Rank worker crashed before emitting checkpoint: {crashed}"
+                    )
+                raise
             if merged_ckpt is None:
                 merged_ckpt = ckpt
         assert merged_ckpt is not None

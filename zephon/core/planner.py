@@ -5,6 +5,7 @@
 
 from zephon.core.graph import Graph, Node, Plan, Stage
 from zephon.ops.batch import Batch
+from zephon.ops.replay_filter import ReplayFilter
 
 
 class Planner:
@@ -36,6 +37,8 @@ class Planner:
         `Engine` consumes these annotations to pick stage runners and expose
         diagnostics for the data-loading plan.
         """
+        nodes = self._with_replay_filters(graph)
+
         stages: list[Stage] = []
         current_nodes: list[Node] = []
         current_io_bound = False
@@ -59,7 +62,7 @@ class Planner:
             current_placement = "auto"
             break_reason = reason
 
-        for node in graph.nodes:
+        for node in nodes:
             # traits = node.op.traits()
             # Right now, we fuse everything, unless we want to have a new placement (e.g. remote -> local)
             barrier = False
@@ -97,3 +100,44 @@ class Planner:
             indexable=indexable,
             batch_size_hint=batch_size_hint,
         )
+
+    def _with_replay_filters(self, graph: Graph) -> list[Node]:
+        nodes: list[Node] = []
+        has_batch = False
+        for node in graph.nodes:
+            if isinstance(node.op, Batch):
+                has_batch = True
+                has_filter = any(
+                    isinstance(inp.op, ReplayFilter) for inp in node.inputs
+                )
+                if not has_filter:
+                    dop = node.parallelism or 1
+                    filter_node = Node(
+                        name=f"{node.name}_replay_filter",
+                        op=ReplayFilter(),
+                        inputs=list(node.inputs),
+                        placement=node.placement,
+                        parallelism=dop,
+                    )
+                    # TODO: Explore co-locating ReplayFilter within Batch once we have explicit pre-batch hooks.
+                    node.inputs = [filter_node]
+                    nodes.append(filter_node)
+                nodes.append(node)
+            else:
+                nodes.append(node)
+
+        if not has_batch and nodes:
+            tail = nodes[-1]
+            if not isinstance(tail.op, ReplayFilter):
+                dop = tail.parallelism or 1
+                filter_node = Node(
+                    name=f"{tail.name}_replay_filter",
+                    op=ReplayFilter(),
+                    inputs=[tail],
+                    placement=tail.placement,
+                    parallelism=dop,
+                )
+                nodes.append(filter_node)
+
+        graph.nodes = nodes
+        return nodes

@@ -37,6 +37,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import warnings
 from collections import defaultdict, deque
@@ -52,12 +53,15 @@ from zephon.core.constants import (
     LaneId,
     LanePtr,
     SampleBatch,
+    SampleCursor,
     SampleId,
     SampleRecord,
 )
-from zephon.core.graph import Plan
+from zephon.core.graph import Plan, Stage
+from zephon.core.replay import ReplayConfigService
 from zephon.core.world import World
 from zephon.io.options import StoreOptions
+from zephon.ops.replay_filter import ReplayFilter
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
     MixtureReadConfig,
@@ -180,20 +184,22 @@ class Engine:
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
         }
+        self._replay_config = ReplayConfigService()
         self._ctx = base_ctx
+        self._ctx["replay_state_service"] = self._replay_config
         self._opts = opts
         self._world = self._build_world()
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )
         self._lane_progress: dict[LaneId, LanePtr] = defaultdict(LanePtr)
-        # When non-None, we are replaying; drop outputs for that lane until we pass this pointer.
-        self._replay_until: dict[LaneId, LanePtr] | None = None
-        self._replay_seen: dict[LaneId, LanePtr] | None = None
+        self._lane_last_cursor: dict[LaneId, SampleCursor | None] = {}
 
         self._lane_next_cid: dict[LaneId, int] = defaultdict(int)
         self._warned_once_about_runid = False
         self._checkpoint_reload_count = 0
+        self._checkpoint_lock = threading.Lock()
+        self._rr_next_idx: dict[str, int] = {}
 
         self._work = work
         self._lane_ws: dict[LaneId, WorkSource] = {}
@@ -201,6 +207,9 @@ class Engine:
             self._lane_ws[lane] = self._work.clone_for_lane(
                 lane, canonical_replicas=self._world.canonical_replicas
             )
+            self._lane_last_cursor.setdefault(lane, None)
+
+        self._publish_replay_snapshot()
 
         # Stage runners are stored heterogeneously.
         self._runners: list[ThreadStageRunner] = []
@@ -239,11 +248,6 @@ class Engine:
             assert cs is not None, (
                 "No chunk size hint for current work source, determinism breaks potentially"
             )
-            if (bs % cs != 0) and (cs % bs != 0):
-                print(
-                    "Warning! Your chunk and batch size don't align. If you plan to checkpoint and continue from a checkpoint, this currently breaks. Consider making the batch size a multiple/divisor of chunk size for now.",
-                    file=sys.stderr,
-                )
 
     @property
     def _round_file(self) -> Path:
@@ -480,11 +484,7 @@ class Engine:
                 weights = [1 for _ in range(num_stages)]
             else:  # by_declared_parallelism
                 weights = [
-                    max(
-                        1,
-                        sum(max(1, (nd.parallelism or 1)) for nd in stage.nodes),
-                    )
-                    for stage in self._plan.stages
+                    self._stage_parallelism(stage) for stage in self._plan.stages
                 ]
             per_stage_caps = self._apportion(total, weights)
         elif mode == "per_stage_fixed":
@@ -493,8 +493,7 @@ class Engine:
             per_stage_caps = [cap for _ in range(num_stages)]
         else:
             per_stage_caps = [
-                max(1, sum(max(1, (nd.parallelism or 1)) for nd in stage.nodes))
-                for stage in self._plan.stages
+                self._stage_parallelism(stage) for stage in self._plan.stages
             ]
 
         for idx, stage in enumerate(self._plan.stages):
@@ -553,34 +552,29 @@ class Engine:
         Maintains inflight_chunks_per_lane[lane_id][chunk_id] -> chunk_obj.
         """
         inflight_lane = self.inflight_chunks_per_lane.setdefault(lane_id, {})
-        target = None
-        if self._replay_until is not None:
-            target = self._replay_until.get(lane_id)
-
         # Phase 1: replay restored inflight chunks first (ascending chunk_id)
         for cid in sorted(inflight_lane.keys()):
             chunk = inflight_lane[cid]
-            # Drop strictly older chunks; skip the prefix on the pointer chunk
-            if target is not None:
-                if int(cid) < int(target.chunk_id):
-                    continue
-            for sample_id in chunk:
+            for offset, sample_id in enumerate(chunk):
                 # Note that we yield the _entire_ chunk here. This can break with elastic continuation in case a batch is cross-chunk boundaries.
-                yield (sample_id, lane_id, int(cid))
+                yield (sample_id, lane_id, int(cid), offset)
 
         # Phase 2: fetch new chunks and assign stable per-lane ids
         ws = self._lane_ws[lane_id]
         while True:
-            chunk = ws.next_chunk()
-            if chunk is None:
-                return  # lane exhausted
+            with self._checkpoint_lock:
+                # Since internally we prefetch, this could overlap with a checkpointing call.
+                # We need to ensure that we are not prefetching while updating the lane state.
+                chunk = ws.next_chunk()
+                if chunk is None:
+                    return  # lane exhausted
 
-            cid = int(self._lane_next_cid[lane_id])
-            self._lane_next_cid[lane_id] = cid + 1
-            inflight_lane[cid] = chunk
+                cid = int(self._lane_next_cid[lane_id])
+                self._lane_next_cid[lane_id] = cid + 1
+                inflight_lane[cid] = chunk
 
-            for sample_id in chunk:
-                yield (sample_id, lane_id, cid)
+            for offset, sample_id in enumerate(chunk):
+                yield (sample_id, lane_id, cid, offset)
 
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)
@@ -589,8 +583,101 @@ class Engine:
             a -= 1
         return a  # at least 1
 
-    def _source_stream(self) -> Iterator[EngineSample]:
-        """Yield sample identifiers from the backing work source."""
+    def _refresh_rr_from_progress(self) -> None:
+        """Recompute the tail round-robin (RR) pointer for THIS owner (rank + DataLoader worker) from durable per-lane progress.
+
+        Scope: physical vs logical
+        - Physical-scoped (ephemeral): the RR pointer is keyed by the current topology and
+        the exact owned lane set:
+            "{physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        It means "which lane index should this owner emit from next?". When topology
+        changes (ranks/workers/mapping), the key changes, and any stale pointer is ignored.
+        - Logical-scoped (durable): per-lane state keyed by canonical lane_id:
+            * LanePtr(chunk_id, offset)
+            * inflight chunks
+            * last replay cursor
+            * next chunk id
+        This state is the source of truth across checkpoints and elastic remaps and
+        guarantees no skips/duplicates globally.
+
+        What this method does
+        - For the current owner, determine the set of owned lanes under the current topology.
+        - If the owner is idle (worker_id >= active), return.
+        - If there is ≤ 1 owned lane, set the RR index to 0.
+        - Otherwise, choose the "least-advanced" lane among the owned lanes using:
+            (progress.chunk_id, progress.offset, lane_id)
+        and set the RR pointer to that lane's index within the owned lane list.
+        This is deterministic and tends to preserve fairness.
+
+        Guarantees
+        - No skips/duplicates globally: ensured by durable per-lane progress and inflight state.
+        - Deterministic local emission within the same topology: the RR pointer is persisted
+        under the physical key and reused.
+        - Multiset equality per global window when checkpointing at window boundaries:
+        lane progress + one-lane-per-batch invariant ensure the same set of samples per
+        window (order may be permuted).
+
+        Non-goals
+        - Exact cross-topology, sample-by-sample interleaving is not preserved. After a
+        remap, the RR pointer is recomputed from progress and may differ from the prior
+        owner's next turn. If you were to checkpoint mid-window, the composition of the
+        remainder of that window could permute (still no skips/dups overall). Therefore,
+        checkpoint at window boundaries if you require window-level set semantics.
+
+        Where it's used
+        - Called during load_state_dict() (after restoring per-lane progress) to seed the
+        RR pointer for the new topology.
+        - Called inside state_dict() before local state is written, ensuring RR state is
+        consistent with observed progress.
+        - If this method has not been called for a fresh run/topology, _lane_rr_iter()
+        falls back to RR index 0 for the current key.
+
+        Bottom line
+        - RR pointer: local, physical-world-scoped fairness hint; recomputed or reused per key.
+        - Per-lane progress: durable, topology-agnostic correctness state; guarantees continuity.
+        """
+        lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
+        worker_id, workers_per_rank = get_torch_worker_info()
+        active = self._active_workers(workers_per_rank, lanes_all)
+        if worker_id >= active:
+            return
+        lanes = self._owned_lanes
+        key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        if len(lanes) <= 1:
+            self._rr_next_idx[key] = 0
+            return
+
+        def lane_progress_tuple(lane: int) -> tuple[int, int, int]:
+            ptr = self._lane_progress.get(lane, LanePtr())
+            return (int(ptr.chunk_id), int(ptr.offset), int(lane))
+
+        next_lane = min(lanes, key=lane_progress_tuple)
+        self._rr_next_idx[key] = lanes.index(next_lane)
+
+    def _publish_replay_snapshot(self) -> None:
+        snapshot = {
+            int(lane): cursor for lane, cursor in self._lane_last_cursor.items()
+        }
+        self._replay_config.set_snapshot(snapshot)
+
+    def _stage_parallelism(self, stage: Stage) -> int:
+        total = 0
+        filter_parallelism = 0
+        for nd in stage.nodes:
+            dop = max(1, (nd.parallelism or 1))
+            if isinstance(nd.op, ReplayFilter):
+                # TODO: if we ever fuse ReplayFilter into Batch, revisit how we account for its DOP.
+                filter_parallelism = max(filter_parallelism, dop)
+                continue
+            total += dop
+        if total == 0:
+            total = filter_parallelism
+        else:
+            total = max(total, filter_parallelism)
+        return max(1, total)
+
+    @property
+    def _owned_lanes(self) -> list[LaneId]:
         lanes_all = self._world.lanes_for_rank[
             self._world.physical_rank
         ]  # canonical order
@@ -598,11 +685,15 @@ class Engine:
         active = self._active_workers(workers_per_rank, lanes_all)
 
         if worker_id >= active:
-            return  # this worker is idle / no lanes assigned
+            return []  # this worker is idle / no lanes assigned
 
-        owned = [
+        return [
             lane for idx, lane in enumerate(lanes_all) if (idx % active) == worker_id
         ]
+
+    def _source_stream(self) -> Iterator[EngineSample]:
+        """Yield sample identifiers from the backing work source."""
+        owned = self._owned_lanes
 
         # Build one generator per lane
         gens: dict[LaneId, Iterator[EngineSample]] = {
@@ -624,12 +715,48 @@ class Engine:
         self,
         upstream: Iterable[SampleRecord | SampleBatch],
     ) -> Iterator[SampleRecord | SampleBatch]:
-        """Unbounded per-lane tail mux with round-robin emission.
+        """Tail round-robin multiplexer over the lanes owned by THIS DataLoader worker.
 
-        - Always drain upstream into per-lane deques.
-        - Always try to emit in round-robin across lanes owned by this rank.
-        - If the current target lane is empty, keep pulling from upstream until it isn't,
-          or until upstream ends. Warn as buffers grow large.
+        Purpose
+        - Maintain the "one lane per batch" invariant at the tail:
+        drain the upstream into per-lane buffers and emit in round-robin order
+        across the owned lanes.
+
+        Physical key scoping
+        - The RR pointer is keyed by:
+            "{physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        which binds the pointer to this owner and its current lane assignment.
+        When topology changes, the key changes and the stale pointer is ignored.
+
+        Initialization and interaction with RR refresh
+        - This iterator reads the saved RR pointer for the current key; if missing,
+        it defaults to 0.
+        - _refresh_rr_from_progress() should be called after loading a checkpoint (and is
+        called by load_state_dict()) to provide a progress-derived starting point.
+        For brand-new runs with no checkpoint, defaulting to 0 is fine.
+
+        Round-robin algorithm (high level)
+        - If this worker is idle (worker_id >= active), drain upstream (expected empty) and return.
+        - Otherwise:
+        1) Initialize idx from the saved RR pointer (or 0).
+        2) Drain upstream into per-lane deques (routing by item.lane_id).
+        3) Emit exactly one item from lane owned_lanes[idx], then advance:
+            idx = (idx + 1) % len(owned_lanes), and persist the updated pointer
+            under the same physical key.
+        4) Continue until upstream ends and all per-lane buffers are drained.
+
+        Guarantees and limits
+        - No skips/duplicates: ensured by durable per-lane progress in the engine.
+        - One lane per batch at the tail: the pipeline enforces that batches carry a
+        single lane id; this mux preserves that invariant on emission.
+        - Deterministic local interleaving in the same topology: the saved pointer is reused.
+        - Across topology changes, the exact interleaving may differ; if you checkpoint
+        at window boundaries, the multiset of samples per window remains identical.
+
+        Best practices
+        - Checkpoint at window boundaries to preserve window-level set semantics across
+        elastic remaps.
+        - Rely on per-lane progress for correctness; the RR pointer is a local fairness hint.
         """
         warn_threshold = 10000
 
@@ -645,10 +772,10 @@ class Engine:
             assert len(upstr) == 0
             return
 
-        lanes = [
-            lane for idx, lane in enumerate(lanes_all) if (idx % active) == worker_id
-        ]
+        lanes = self._owned_lanes
         if len(lanes) <= 1:  # Simple case: only one owned lane
+            key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+            self._rr_next_idx[key] = 0
             yield from upstream
             return
 
@@ -657,7 +784,8 @@ class Engine:
         }
         it = iter(upstream)
         upstream_ended = False
-        idx = 0
+        key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        idx = self._rr_next_idx.get(key, 0) % len(lanes)
 
         # soft warning thresholds (double each time they’re tripped)
         per_lane_next_warn: dict[int, int] = {}
@@ -706,6 +834,7 @@ class Engine:
             # Emit exactly one from the current lane, then advance RR pointer.
             yield buffers[lane].popleft()
             idx = (idx + 1) % len(lanes)
+            self._rr_next_idx[key] = idx
 
         # -------- DRAIN REGIME: upstream ended, flush everything in RR ----------
         while any(buffers[l] for l in lanes):
@@ -717,6 +846,7 @@ class Engine:
                 if buffers[lane]:
                     yield buffers[lane].popleft()
                     idx = (idx + 1) % len(lanes)
+                    self._rr_next_idx[key] = idx
                     emitted = True
                     break
                 idx = (idx + 1) % len(lanes)
@@ -724,6 +854,7 @@ class Engine:
             if not emitted:
                 # All empty (defensive; the outer while should break next iteration).
                 break
+        self._rr_next_idx[key] = idx
 
     def build_iter(self) -> Iterator[SampleRecord | SampleBatch]:
         """Return an iterator that threads the work stream through all stages."""
@@ -739,66 +870,35 @@ class Engine:
         yield from stream_iter
 
     def notify(
-        self, lane_id: int, max_chunk_id: int, max_chunk_samples: list[SampleId]
-    ) -> bool:
-        """Return True if the *whole* item should be yielded to the consumer.
+        self, lane_id: int, max_chunk_id: int, cursors: list[SampleCursor]
+    ) -> None:
+        """Record delivery progress for ``lane_id`` and evict completed chunks."""
+        # We don't take the checkpointing lock here. The reason is that notify should
+        # only be called when the consumer gets a new item, and the consumer should
+        # only request a checkpoint after they have gotten that item. In that sense,
+        # checkpointing is not customer-thread safe. If this becomes a problem, we should
+        # consider locking here, but then we'd acquire the lock for every sample.
 
-        Also:
-        - Evict inflight chunks with cid < max_chunk_id for this lane.
-        - Update per-lane training position (chunk_id, offset).
-        - While in replay mode, drop items until we strictly pass the saved pointer.
-        """
         # 1) Evict older inflight chunks for this lane.
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         for cid in list(inflight_lane.keys()):
             if cid < max_chunk_id:
                 inflight_lane.pop(cid, None)
-        add_k = len(max_chunk_samples)
+        add_k = len(cursors)
 
-        # 2) Replay gate
-        if self._replay_until is not None and lane_id in self._replay_until:
-            target = self._replay_until[lane_id]
+        if lane_id not in self._lane_last_cursor:
+            self._lane_last_cursor[lane_id] = None
 
-            if max_chunk_id < target.chunk_id:
-                # Before the checkpoint chunk: drop (don't touch lane_progress)
-                return False
-
-            if max_chunk_id == target.chunk_id:
-                # Compare against a fresh, 0-based replay cursor
-                rp = 0
-                if self._replay_seen is not None:
-                    rp = self._replay_seen.get(
-                        lane_id, LanePtr(target.chunk_id, 0)
-                    ).offset
-                projected = rp + add_k
-
-                if projected <= target.offset:
-                    # Still before/at the saved pointer: advance replay cursor only
-                    if self._replay_seen is not None:
-                        self._replay_seen[lane_id] = LanePtr(target.chunk_id, projected)
-                    return False
-
-                # We cross the saved pointer on this item: switch to live
-                if self._replay_seen is not None:
-                    self._replay_seen.pop(lane_id, None)
-                self._replay_until.pop(lane_id, None)
-                if not self._replay_until:
-                    self._replay_until = None
-
-            else:  # max_chunk_id > target.chunk_id
-                # Past the saved chunk: switch to live immediately
-                self._replay_until.pop(lane_id, None)
-                if self._replay_seen is not None:
-                    self._replay_seen.pop(lane_id, None)
-                if not self._replay_until:
-                    self._replay_until = None
-                # fall through to accept
-
-        # 3) Live mode (or just crossed pointer): accept and advance persisted progress
+        # 2) Advance persisted progress
         cur = self._lane_progress[lane_id]
         seen_offset = cur.offset if (cur.chunk_id == max_chunk_id) else 0
         self._lane_progress[lane_id] = LanePtr(max_chunk_id, seen_offset + add_k)
-        return True
+        # 3) Track latest cursor for checkpoints
+        if cursors:
+            max_cursor = max(cursors)
+            previous = self._lane_last_cursor.get(lane_id)
+            if previous is None or max_cursor > previous:
+                self._lane_last_cursor[lane_id] = max_cursor
 
     def eval_one(self, sample: SampleId | EngineSample) -> Any:
         """Synchronously evaluate a single element through every stage runner."""
@@ -817,84 +917,90 @@ class Engine:
 
     def _state_dict_local(self) -> dict[str, Any]:
         """Serializable snapshot of engine runtime state (no plan/op state)."""
-        lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
-        worker_id, workers_per_rank = get_torch_worker_info()
-        active = self._active_workers(workers_per_rank, lanes_all)
+        with self._checkpoint_lock:
+            owned = self._owned_lanes
+            # print(f"node {self._world.physical_rank}/{self._world.num_ranks} w{worker_id}/{workers_per_rank} owns {len(owned)} lanes.")
 
-        owned = {
-            lane for idx, lane in enumerate(lanes_all) if (idx % active) == worker_id
-        }
-        # print(f"node {self._world.physical_rank}/{self._world.num_ranks} w{worker_id}/{workers_per_rank} owns {len(owned)} lanes.")
-        if worker_id >= active:
-            assert len(owned) == 0
+            self._refresh_rr_from_progress()
 
-        for purge_candidate_str in [
-            "_lane_ws",
-            "inflight_chunks_per_lane",
-            "_lane_progress",
-            "_lane_next_cid",
-        ]:
-            # print(f"length of {purge_candidate_str} is {len(getattr(self, purge_candidate_str))}")
+            for purge_candidate_str in [
+                "_lane_ws",
+                "inflight_chunks_per_lane",
+                "_lane_progress",
+                "_lane_next_cid",
+                "_lane_last_cursor",
+            ]:
+                # print(f"length of {purge_candidate_str} is {len(getattr(self, purge_candidate_str))}")
+                for lane in list(getattr(self, purge_candidate_str)):
+                    if lane not in owned:
+                        del getattr(self, purge_candidate_str)[lane]
 
-            for lane in list(getattr(self, purge_candidate_str)):
-                if lane not in owned:
-                    del getattr(self, purge_candidate_str)[lane]
+            for lane in owned:
+                self._lane_ws.setdefault(
+                    lane,
+                    self._work.clone_for_lane(
+                        lane, canonical_replicas=self._world.canonical_replicas
+                    ),
+                )
+                self.inflight_chunks_per_lane.setdefault(lane, {})
+                if lane not in self._lane_progress:
+                    self._lane_progress[lane] = LanePtr(0, 0)
+                if lane not in self._lane_next_cid:
+                    self._lane_next_cid[lane] = 0
 
-        for lane in owned:
-            self._lane_ws.setdefault(
-                lane,
-                self._work.clone_for_lane(
-                    lane, canonical_replicas=self._world.canonical_replicas
-                ),
-            )
-            self.inflight_chunks_per_lane.setdefault(lane, {})
-            if lane not in self._lane_progress:
-                self._lane_progress[lane] = LanePtr(0, 0)
-            if lane not in self._lane_next_cid:
-                self._lane_next_cid[lane] = 0
+            inflight: dict[int, dict[int, dict[str, Any]]] = {}
+            for lane, by_chunk in self.inflight_chunks_per_lane.items():
+                inflight[int(lane)] = {
+                    int(cid): ch.state_dict() for cid, ch in by_chunk.items()
+                }
 
-        inflight: dict[int, dict[int, dict[str, Any]]] = {}
-        for lane, by_chunk in self.inflight_chunks_per_lane.items():
-            inflight[int(lane)] = {
-                int(cid): ch.state_dict() for cid, ch in by_chunk.items()
+            progress = {
+                int(l): {"chunk_id": int(p.chunk_id), "offset": int(p.offset)}
+                for l, p in self._lane_progress.items()
             }
 
-        progress = {
-            int(l): {"chunk_id": int(p.chunk_id), "offset": int(p.offset)}
-            for l, p in self._lane_progress.items()
-        }
+            world = {
+                "canonical_replicas": int(self._world.canonical_replicas),
+                "num_ranks": int(self._world.num_ranks),
+                "physical_rank": int(self._world.physical_rank),
+                "mapping": {
+                    int(r): [int(x) for x in lanes]
+                    for r, lanes in self._world.lanes_for_rank.items()
+                },
+            }
+            for lane, by_chunk in self.inflight_chunks_per_lane.items():
+                if by_chunk:
+                    mx = max(by_chunk)
+                    assert self._lane_next_cid[lane] == mx + 1
+                    if self._lane_next_cid[lane] < mx + 1:
+                        # Either bump silently or assert in debug
+                        self._lane_next_cid[lane] = mx + 1  # or: assert False
 
-        world = {
-            "canonical_replicas": int(self._world.canonical_replicas),
-            "num_ranks": int(self._world.num_ranks),
-            "physical_rank": int(self._world.physical_rank),
-            "mapping": {
-                int(r): [int(x) for x in lanes]
-                for r, lanes in self._world.lanes_for_rank.items()
-            },
-        }
-        for lane, by_chunk in self.inflight_chunks_per_lane.items():
-            if by_chunk:
-                mx = max(by_chunk)
-                assert self._lane_next_cid[lane] == mx + 1
-                if self._lane_next_cid[lane] < mx + 1:
-                    # Either bump silently or assert in debug
-                    self._lane_next_cid[lane] = mx + 1  # or: assert False
+            lane_next = {int(l): int(n) for l, n in self._lane_next_cid.items()}
+            lane_ws_state = {
+                int(l): self._lane_ws[l].state_dict() for l in self._lane_ws
+            }
+            rr_next_idx = dict(self._rr_next_idx)
 
-        lane_next = {int(l): int(n) for l, n in self._lane_next_cid.items()}
-        lane_ws_state = {int(l): self._lane_ws[l].state_dict() for l in self._lane_ws}
+            replay_cursors: dict[int, Any] = {}
+            for lane, cursor in self._lane_last_cursor.items():
+                replay_cursors[int(lane)] = (
+                    cursor.as_key() if cursor is not None else None
+                )
 
-        return {
-            "version": 1,
-            "world": world,
-            "inflight": inflight,
-            "progress": progress,
-            "lane_next_cid": lane_next,
-            "work_source": self._work.state_dict(),
-            "lane_ws_state": lane_ws_state,
-            "last_round_id": self._last_round_id,
-            "checkpoint_reload_count": self._checkpoint_reload_count,
-        }
+            return {
+                "version": 1,
+                "world": world,
+                "inflight": inflight,
+                "progress": progress,
+                "lane_next_cid": lane_next,
+                "work_source": self._work.state_dict(),
+                "lane_ws_state": lane_ws_state,
+                "last_round_id": self._last_round_id,
+                "checkpoint_reload_count": self._checkpoint_reload_count,
+                "rr_next_idx": rr_next_idx,
+                "replay_cursors": replay_cursors,
+            }
 
     # ---------- FS utilities ----------
     def _atomic_write_text(self, path: Path, text: str) -> None:
@@ -1027,6 +1133,22 @@ class Engine:
     def state_dict(self) -> dict[str, Any]:
         # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
+        if len(self._owned_lanes) == 0:
+            # Idle workers just return their local state
+            # In the best case, they would also read the aggregate checkpoint to have a complete return
+            # The problem is that we cannot ensure this:
+            # Leader (rank 0, worker 0) publishes round_id
+            # Worker 0 & 1 successfully read the round_id, write their state files
+            # Leader sees all lanes covered, merges states, writes merged file, deletes round file
+            # Worker 2 (slow to call state_dict()) tries to read round_id, but:
+            # The round file might be deleted already, OR
+            # The round file exists but the merged file ALSO exists, causing _read_open_round_id() to return None due to this check:
+            #
+            # The thing is that for torchdata in the end we only return worker 0 results anyways due to our torchdata_compat.py
+            # so it doesn't really matter. For regular torch dataloader, state_dict() does not work anyways by design (it does not forward to workers)
+            # And in regular Zephon without a DL, we don't have multiple workers per rank. Hence, this is fine, but if there is a better solution we should improve this.
+            return local
+
         lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
         worker_id, workers_per_rank = get_torch_worker_info()
         active_here = self._active_workers(workers_per_rank, lanes_all)
@@ -1140,6 +1262,23 @@ class Engine:
         checkpoint_reload_counts = {s.get("checkpoint_reload_count") for s in states}
         assert len(checkpoint_reload_counts) == 1
 
+        rr_next_idx: dict[str, int] = {}
+        for st in states:
+            for key, idx in st.get("rr_next_idx", {}).items():
+                if key in rr_next_idx and rr_next_idx[key] != int(idx):
+                    raise RuntimeError(f"duplicate rr_next_idx for key {key}")
+                rr_next_idx[key] = int(idx)
+
+        replay_cursors: dict[int, Any] = {}
+        for st in states:
+            for lane_s, key in st.get("replay_cursors", {}).items():
+                lane = int(lane_s)
+                if lane in replay_cursors:
+                    raise RuntimeError(
+                        f"duplicate replay_cursors entry for lane {lane}"
+                    )
+                replay_cursors[lane] = key
+
         return {
             "version": 1,
             "world": {"canonical_replicas": C, "num_ranks": merged_num_ranks},
@@ -1150,6 +1289,8 @@ class Engine:
             "lane_ws_state": lane_ws_state,
             "last_round_id": list(last_round_ids)[0],
             "checkpoint_reload_count": list(checkpoint_reload_counts)[0],
+            "rr_next_idx": rr_next_idx,
+            "replay_cursors": replay_cursors,
         }
 
     def load_state_dict(self, state: dict[str, Any], *, replay: bool = True) -> None:
@@ -1163,27 +1304,6 @@ class Engine:
             assert cs is not None, (
                 "No chunk size hint for current work source, determinism breaks potentially"
             )
-            if (bs % cs != 0) and (cs % bs != 0):
-                # TODO(MaxiBoether): Currently our notify logic only works with batching if batching does not go across chunk boundaries.
-                # Imagine a batch containing samples cross a chunk boundary. We would elastically continue with the highest chunk id within that batch
-                # So we would repeat all of the samples from that chunk that we have already seen within the previous batch, because the Batch operator
-                # buffers start empty. An example:
-
-                # a batch contains samples from chunks 3 and chunk 4 (so cross chunks).
-                # let it look like this c3s7 c3s8 c4s0 c4s1 c4s2 c4s3 for a batch size of 6.
-                # now if we see this batch, we will discard chunk 3 from the inflight chunks.
-                # during continuation, what now happens is that the source starts to replay c4 from the start.
-                # since the batching buffers are empty it would build this batch: c4s0 c4s1 c4s2 c4s3 c4s4 c4s5 and this batch would be accepted by notify because c4s5 increases our pointer.
-                # this cannot happen if chunk and batch boundaries are aligned.
-                #
-                # The long term solution is to ingest a filter op into the graph in case of elastic resumption, and let that op
-                # on the sample (pre-batch) level filter out everything before the last seen item. This also requires us to have unique sample IDs even in
-                # case an operator has a 1:n sample mapping.
-                raise RuntimeError(
-                    "Correct resumption requires identical num_ranks or "
-                    + "compatible batch/chunk sizes (one must divide the other). "
-                    + f"batch_size={bs}, chunk_size={cs}"
-                )
 
         # This is FOR ALL WORKERS on that node. So we restore a bit more than we have to because we cannot be certain whether load_state_dict is called before workers are instantiated or not.
 
@@ -1254,16 +1374,29 @@ class Engine:
         self._checkpoint_reload_count = state["checkpoint_reload_count"] + 1
         self._agg_dir.mkdir(parents=True, exist_ok=True)
 
-        # Enter replay so we drop until we pass the saved pointers (if requested)
+        rr_next_idx_raw = state.get("rr_next_idx", {}) or {}
+        self._rr_next_idx = {str(k): int(v) for k, v in rr_next_idx_raw.items()}
+
+        replay_raw = state.get("replay_cursors", {}) or {}
+        self._lane_last_cursor = dict.fromkeys(owned)
         if replay:
-            # Keep the checkpoint pointer separate:
-            self._replay_until = {
-                l: LanePtr(v.chunk_id, v.offset) for l, v in self._lane_progress.items()
-            }
-            # Start a fresh replay cursor at offset 0 for each lane's target chunk
-            self._replay_seen = {
-                l: LanePtr(v.chunk_id, 0) for l, v in self._lane_progress.items()
-            }
+            for lane in owned:
+                payload = replay_raw.get(str(lane)) or replay_raw.get(int(lane))
+                if payload is None:
+                    self._lane_last_cursor[lane] = None
+                    continue
+                chunk_id_raw, chunk_offset_raw, lineage_raw, sample_id_raw = payload
+                self._lane_last_cursor[lane] = SampleCursor.from_key(
+                    (
+                        int(chunk_id_raw),
+                        int(chunk_offset_raw),
+                        tuple(lineage_raw),
+                        tuple(sample_id_raw),
+                    )
+                )
         else:
-            self._replay_until = None
-            self._replay_seen = None
+            for lane in owned:
+                self._lane_last_cursor[lane] = None
+
+        self._refresh_rr_from_progress()
+        self._publish_replay_snapshot()

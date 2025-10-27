@@ -24,7 +24,13 @@ OutT = TypeVar("OutT")
 
 
 class Op(Protocol[InT, OutT]):
-    """Protocol that Zephon operators must satisfy to plug into the pipeline."""
+    """Protocol that Zephon operators must satisfy to plug into the pipeline.
+
+    Fan-out operators **must** keep ``SampleMeta.sample_id`` stable and derive new
+    lineage paths via :meth:`zephon.core.constants.SampleMeta.child`. This ensures
+    that ordering and replay checks observe a deterministic total order even when
+    operators execute with parallel workers.
+    """
 
     def setup(self, ctx: OpContext) -> None: ...
 

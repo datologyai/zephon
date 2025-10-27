@@ -5,6 +5,7 @@ import pytest
 from zephon.core.constants import (
     LanePtr,
     SampleBatch,
+    SampleCursor,
     SampleMeta,
     SampleRecord,
 )
@@ -38,6 +39,32 @@ def test_sample_batch_basic_and_ids() -> None:
     assert batch.ids == ((0, 0, 0), (0, 0, 1))
     assert batch.lane_ids == (7, 7)
     assert batch.chunk_ids == (10, 10)
+    assert batch.lineage_paths == ((), ())
+
+
+def test_sample_meta_lineage_helpers() -> None:
+    base = SampleMeta(sample_id=(1, 2, 3), lane_id=0, chunk_id=4)
+    assert base.lineage == ()
+    child0 = base.child(0)
+    assert child0.lineage == (0,)
+    assert child0.sample_id == base.sample_id
+    child1 = child0.child(1)
+    assert child1.lineage == (0, 1)
+    assert base.lineage == ()
+    assert child0.cursor < child1.cursor
+
+
+def test_sample_cursor_from_key_roundtrip() -> None:
+    meta = SampleMeta(
+        sample_id=(9, 9, 9), lane_id=3, chunk_id=2, chunk_offset=5
+    ).with_lineage((2, 4))
+    key = meta.as_cursor_key()
+    cursor = SampleCursor.from_key(key)
+    assert cursor.sample_id == meta.sample_id
+    assert cursor.chunk_id == meta.chunk_id
+    assert cursor.chunk_offset == meta.chunk_offset
+    assert cursor.lineage == (2, 4)
+    assert cursor.child(1).lineage == (2, 4, 1)
 
 
 def test_sample_batch_to_training_text_only_and_empty() -> None:

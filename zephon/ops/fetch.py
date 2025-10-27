@@ -41,12 +41,17 @@ class FetchOp(DefaultFinalize[SampleRecord]):
 
     def process_one(self, elem: EngineSample) -> list[SampleRecord]:
         assert self._store is not None
-        sample_id, lane_id, chunk_id = elem
+        sample_id, lane_id, chunk_id, chunk_offset = elem
         dataset_id, shard_id, sample_idx = sample_id
         view = self._store.for_dataset(dataset_id)
         shard = view.open(shard_id)
         row = shard[sample_idx]
-        meta = SampleMeta(sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id)
+        meta = SampleMeta(
+            sample_id=sample_id,
+            lane_id=lane_id,
+            chunk_id=chunk_id,
+            chunk_offset=chunk_offset,
+        )
         return [SampleRecord(meta=meta, payload=row)]
 
     def process_many(self, elems: list[EngineSample]) -> list[SampleRecord]:
@@ -59,18 +64,27 @@ class FetchOp(DefaultFinalize[SampleRecord]):
 
         # Group by (dataset_id, shard_id) to reuse the opened shard per group.
         groups: dict[
-            tuple[int, int], list[tuple[int, int, int, int, tuple[int, int, int]]]
+            tuple[int, int], list[tuple[int, int, int, int, int, tuple[int, int, int]]]
         ] = {}
         for pos, elem in enumerate(elems):
-            sample_id, lane_id, chunk_id = elem
+            sample_id, lane_id, chunk_id, chunk_offset = elem
             dataset_id, shard_id, sample_idx = sample_id
             key = (int(dataset_id), int(shard_id))
             lst = groups.get(key)
             if lst is None:
                 lst = []
                 groups[key] = lst
-            # Store (position-in-batch, lane_id, chunk_id, sample_idx, sample_id)
-            lst.append((pos, int(lane_id), int(chunk_id), int(sample_idx), sample_id))
+            # Store (position-in-batch, lane_id, chunk_id, chunk_offset, sample_idx, sample_id)
+            lst.append(
+                (
+                    pos,
+                    int(lane_id),
+                    int(chunk_id),
+                    int(chunk_offset),
+                    int(sample_idx),
+                    sample_id,
+                )
+            )
 
         # TODO(MaxiBoether): Further optimize per-shard fetching
         # - Sort indices within each group by sample_idx to improve locality, then
@@ -83,10 +97,13 @@ class FetchOp(DefaultFinalize[SampleRecord]):
         for (dataset_id, shard_id), items in groups.items():
             view = self._store.for_dataset(dataset_id)
             shard = view.open(shard_id)
-            for pos, lane_id, chunk_id, sample_idx, sample_id in items:
+            for pos, lane_id, chunk_id, chunk_offset, sample_idx, sample_id in items:
                 row = shard[sample_idx]
                 meta = SampleMeta(
-                    sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id
+                    sample_id=sample_id,
+                    lane_id=lane_id,
+                    chunk_id=chunk_id,
+                    chunk_offset=chunk_offset,
                 )
                 out[pos] = SampleRecord(meta=meta, payload=row)
 

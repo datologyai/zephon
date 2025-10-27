@@ -36,5 +36,5 @@ jobs:
       - name: Run Integration Tests
         run: |
           set -ex
-          uv run pytest -m integration --run-integration --maxfail=10
+          uv run pytest -m integration --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
 

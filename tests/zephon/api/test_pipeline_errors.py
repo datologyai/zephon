@@ -4,20 +4,20 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api.pipeline import Pipeline
-from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
+from zephon.core.constants import SampleBatch, SampleCursor, SampleMeta, SampleRecord
 
 
 class _StubEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[int, int, list[tuple[int, int, int]]]] = []
+        self.calls: list[tuple[int, int, list[SampleCursor]]] = []
 
     def notify(
         self,
         lane_id: int,
         max_chunk_id: int,
-        max_chunk_samples: list[tuple[int, int, int]],
+        cursors: list[SampleCursor],
     ) -> bool:
-        self.calls.append((lane_id, max_chunk_id, list(max_chunk_samples)))
+        self.calls.append((lane_id, max_chunk_id, list(cursors)))
         return True
 
 
@@ -50,6 +50,8 @@ def test_yield_while_notifying_type_checks_and_forwards() -> None:
     # Engine.notify was invoked with lane and chunk derived from elements
     assert stub.calls[0][0] == 2 and stub.calls[0][1] == 5
     assert stub.calls[1][0] == 2 and stub.calls[1][1] == 6
+    assert stub.calls[0][2][0] == rec.meta.cursor
+    assert stub.calls[1][2] == [r.meta.cursor for r in batch.records]
 
 
 def test_yield_while_notifying_unsupported_type_raises() -> None:

@@ -28,10 +28,17 @@ def jsonl_dataset(tmp_path: Path) -> Dataset:
 
 
 def make_engine_sample(
-    dataset_id: int, shard_id: int, sample_idx: int, lane_id: int = 0, chunk_id: int = 0
+    dataset_id: int,
+    shard_id: int,
+    sample_idx: int,
+    lane_id: int = 0,
+    chunk_id: int = 0,
+    chunk_offset: int | None = None,
 ) -> EngineSample:
     """Helper to build EngineSample tuples for direct FetchOp invocation in tests."""
-    return ((dataset_id, shard_id, sample_idx), lane_id, chunk_id)
+    if chunk_offset is None:
+        chunk_offset = sample_idx
+    return ((dataset_id, shard_id, sample_idx), lane_id, chunk_id, chunk_offset)
 
 
 def test_fetch_op_reads_jsonl(jsonl_dataset: Dataset) -> None:

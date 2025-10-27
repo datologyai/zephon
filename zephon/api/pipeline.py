@@ -283,23 +283,23 @@ class Pipeline:
                 assert len(list(set(item.lane_ids))) == 1
                 lane_id = item.lane_ids[0]
                 max_chunk_id = max(item.chunk_ids)
-                max_chunk_samples = [
-                    record.meta.sample_id
+                progress_cursors = [
+                    record.meta.cursor
                     for record in item.records
                     if record.meta.chunk_id == max_chunk_id
                 ]
             elif isinstance(item, SampleRecord):  # pyright: ignore[reportUnnecessaryIsInstance]
                 lane_id = item.meta.lane_id
                 max_chunk_id = item.meta.chunk_id
-                max_chunk_samples = [item.meta.sample_id]
+                progress_cursors = [item.meta.cursor]
             else:
                 raise TypeError(
                     f"Unsupported element type: {type(item)!r}; "
                     + "expected SampleBatch or SampleRecord"
                 )
 
-            if engine.notify(lane_id, max_chunk_id, max_chunk_samples):
-                yield item
+            engine.notify(lane_id, max_chunk_id, progress_cursors)
+            yield item
 
     def explain(self) -> str:
         self._ensure()
@@ -325,7 +325,7 @@ class Pipeline:
                 and all(isinstance(x, int) for x in sample_id)
             ):
                 sid = cast(SampleId, sample_id)
-                value = cast(EngineSample, (sid, 0, 0))
+                value = cast(EngineSample, (sid, 0, 0, 0))
         except Exception:
             pass
         return self._engine.eval_one(value)

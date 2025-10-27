@@ -165,39 +165,31 @@ def test_torch_worker_helpers_with_stubbed_torch(
     assert get_torch_worker_info() == (3, 7)
 
 
-def test_notify_replay_and_live_progress() -> None:
+def test_notify_updates_progress_and_cursor() -> None:
     eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
 
     lane = 0
-    # Live mode: no replay yet
-    should_emit = eng.notify(
-        lane, max_chunk_id=0, max_chunk_samples=[(0, 0, 0), (0, 0, 1)]
+    cursor0 = SampleMeta(
+        sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0
+    ).cursor
+    cursor1 = (
+        SampleMeta(sample_id=(0, 0, 1), lane_id=lane, chunk_id=0, chunk_offset=1)
+        .child(0)
+        .cursor
     )
-    assert should_emit is True
+
+    eng.notify(lane, max_chunk_id=0, cursors=[cursor0, cursor1])
     assert eng._lane_progress[lane].chunk_id == 0  # type: ignore[attr-defined]
     assert eng._lane_progress[lane].offset == 2  # type: ignore[attr-defined]
+    assert eng._lane_last_cursor[lane] == cursor1  # type: ignore[attr-defined]
 
-    # Enter replay mode by loading a state dict with progress at chunk 1, offset 1
-    # Prime inflight with a chunk to also exercise inflight serialization
-    eng.inflight_chunks_per_lane[lane][1] = WorkChunk(components={"A": [(0, 0, 0)]})
-    # Maintain invariant: next_cid must be max(inflight)+1 for state_dict()
-    eng._lane_next_cid[lane] = 2  # type: ignore[attr-defined]
-    state = eng.state_dict()
-    # Mutate saved progress to emulate a later checkpoint
-    state["progress"] = {str(lane): {"chunk_id": 1, "offset": 1}}
-
-    eng2 = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
-    eng2.load_state_dict(state, replay=True)
-
-    # Before reaching target chunk 1: drop everything
-    assert eng2.notify(lane, max_chunk_id=0, max_chunk_samples=[(0, 0, 0)]) is False
-    # At target chunk 1, but cumulative <= offset → still drop
-    assert eng2.notify(lane, max_chunk_id=1, max_chunk_samples=[(0, 0, 0)]) is False
-    # Crossing the offset with additional items → accept and switch to live
-    assert (
-        eng2.notify(lane, max_chunk_id=1, max_chunk_samples=[(0, 0, 1), (0, 0, 2)])
-        is True
-    )
+    cursor2 = SampleMeta(
+        sample_id=(0, 0, 2), lane_id=lane, chunk_id=1, chunk_offset=0
+    ).cursor
+    eng.notify(lane, max_chunk_id=1, cursors=[cursor2])
+    assert eng._lane_progress[lane].chunk_id == 1  # type: ignore[attr-defined]
+    assert eng._lane_progress[lane].offset == 1  # type: ignore[attr-defined]
+    assert eng._lane_last_cursor[lane] == cursor2  # type: ignore[attr-defined]
 
 
 def test_state_round_trip_reconstructs_inflight_and_progress() -> None:
