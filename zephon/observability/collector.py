@@ -1,0 +1,104 @@
+"""Utilities to collect and aggregate observability metrics."""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from typing import Iterable
+
+from .config import ExecutionTrackingMode, MetricsSinkConfig
+from .stats import (
+    FetchTimingDelta,
+    FetchTimingSummary,
+    NodeMetricsDelta,
+    PipelineSummary,
+)
+
+
+@dataclass
+class CollectorConfig:
+    """Runtime configuration for a collector."""
+
+    tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF
+    sink: MetricsSinkConfig | None = None
+    report_interval_s: float = 5.0
+    plan_id: str | None = None
+
+
+class PipelineCollector:
+    """Thread-safe accumulator for per-node execution metrics."""
+
+    def __init__(self, config: CollectorConfig):
+        self._config = config
+        self._lock = threading.RLock()
+        self._summary = PipelineSummary(
+            plan_id=config.plan_id,
+            reporting_interval_s=config.report_interval_s,
+            tracking_mode=config.tracking_mode,
+        )
+        self._fetch_summary = FetchTimingSummary(
+            plan_id=config.plan_id,
+            reporting_interval_s=config.report_interval_s,
+            tracking_mode=config.tracking_mode,
+        )
+
+    @property
+    def tracking_mode(self) -> ExecutionTrackingMode:
+        return self._config.tracking_mode
+
+    def record(self, delta: NodeMetricsDelta) -> None:
+        if self._config.tracking_mode is ExecutionTrackingMode.OFF:
+            return
+        with self._lock:
+            self._summary.apply(delta)
+
+    def extend(self, deltas: Iterable[NodeMetricsDelta]) -> None:
+        for delta in deltas:
+            self.record(delta)
+
+    def record_fetch(self, delta: FetchTimingDelta) -> None:
+        if not self._config.tracking_mode.collects_nodes:
+            return
+        with self._lock:
+            self._fetch_summary.apply(delta)
+
+    def snapshot(self) -> PipelineSummary:
+        with self._lock:
+            return self._summary.clone()
+
+    def snapshot_fetch(self) -> FetchTimingSummary:
+        with self._lock:
+            return self._fetch_summary.clone()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._summary = PipelineSummary(
+                plan_id=self._summary.plan_id,
+                reporting_interval_s=self._summary.reporting_interval_s,
+                tracking_mode=self._summary.tracking_mode,
+            )
+            self._fetch_summary = FetchTimingSummary(
+                plan_id=self._fetch_summary.plan_id,
+                reporting_interval_s=self._fetch_summary.reporting_interval_s,
+                tracking_mode=self._fetch_summary.tracking_mode,
+            )
+
+    def merge_summary(
+        self,
+        other: PipelineSummary,
+        fetch: FetchTimingSummary | None = None,
+    ) -> None:
+        if self._config.tracking_mode is ExecutionTrackingMode.OFF:
+            return
+        with self._lock:
+            self._summary.merge(other)
+            if fetch is not None:
+                self._fetch_summary.merge(fetch)
+
+    def plan_id(self) -> str | None:
+        return self._summary.plan_id
+
+    def set_plan_id(self, value: str) -> None:
+        with self._lock:
+            self._summary.plan_id = value
+            self._fetch_summary.plan_id = value

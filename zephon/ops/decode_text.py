@@ -6,11 +6,11 @@
 from typing import Any, Optional, Sequence
 
 from zephon.core.constants import SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 
-class DecodeText(DefaultFinalize[SampleRecord]):
+class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     """Decode configured payload fields into normalised text."""
 
     def __init__(
@@ -23,15 +23,13 @@ class DecodeText(DefaultFinalize[SampleRecord]):
         lowercase: bool = False,
         buffering: Optional[Buffering] = None,
     ) -> None:
+        DefaultSetup.__init__(self)
         self.fields = tuple(fields)
         self.encoding = encoding
         self.errors = errors
         self.normalize_newlines = normalize_newlines
         self.lowercase = lowercase
         self._buffering = buffering or Buffering(max_batch=128, max_latency_ms=2)
-
-    def setup(self, ctx: OpContext) -> None:
-        return None
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, parallelism=2)

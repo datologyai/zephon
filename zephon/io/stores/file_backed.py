@@ -34,7 +34,7 @@ class FileBackedDatasetShardView(DatasetShardView):
         )
         self._shards: dict[int, RandomAccessShard] = {}
 
-    def open(self, shard_id: int) -> RandomAccessShard:
+    def open(self, shard_id: int) -> tuple[RandomAccessShard, bool]:
         try:
             locator = self._locators[shard_id]
         except KeyError as exc:
@@ -42,7 +42,9 @@ class FileBackedDatasetShardView(DatasetShardView):
                 f"Shard {shard_id} not found in dataset '{self._dataset.name}'"
             ) from exc
         shard = self._shards.get(shard_id)
+        reused_shard = True
         if shard is None:
+            reused_shard = False
             length = self._lengths.get(shard_id, 0)
             # TODO(MaxiBoether): right now we also use the ResilientShard for runs without a cache. Is this a problem?
             shard = ResilientShard(
@@ -55,7 +57,7 @@ class FileBackedDatasetShardView(DatasetShardView):
                 retry_max_backoff=self._retry_max_backoff,
             )
             self._shards[shard_id] = shard
-        return shard
+        return shard, reused_shard
 
 
 __all__ = [

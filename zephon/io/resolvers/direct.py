@@ -60,6 +60,7 @@ class DirectResolver(ShardResolver):
             zip=zip_file,
             compression=locator.compression,
             extra=locator.extra,
+            cache_hit=True,
         )
 
     def touch(self, locator: ShardLocator) -> None:

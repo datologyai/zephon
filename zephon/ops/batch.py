@@ -6,23 +6,22 @@
 from typing import Optional
 
 from zephon.core.constants import SampleBatch, SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 
-class Batch(DefaultFinalize[SampleBatch]):
+class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
     """Collect sample records into mini-batches, one lane per batch."""
 
     def __init__(self, microbatch_size: int, *, drop_last: bool = True) -> None:
+        DefaultSetup.__init__(self)
+
         if microbatch_size <= 0:
             raise ValueError("microbatch_size must be positive")
         self.microbatch_size = int(microbatch_size)
         self.drop_last = drop_last
         # lane_id -> list[SampleRecord]
         self._buffers: dict[int, list[SampleRecord]] = {}
-
-    def setup(self, ctx: OpContext) -> None:
-        return None
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=False, batch_shape_sensitive=False)

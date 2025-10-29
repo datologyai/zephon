@@ -7,13 +7,13 @@ import logging
 from typing import Any, Optional
 
 from zephon.core.constants import SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 log = logging.getLogger(__name__)
 
 
-class TokenizeText(DefaultFinalize[SampleRecord]):
+class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     """Tokenize text fields using a provided or auto-resolved tokenizer."""
 
     def __init__(
@@ -25,13 +25,23 @@ class TokenizeText(DefaultFinalize[SampleRecord]):
         add_attention_mask: bool = True,
         buffering: Optional[Buffering] = None,
     ) -> None:
+        DefaultSetup.__init__(self)
+
         self.tok = tokenizer
         self.tokenizer_id = tokenizer_id
         self.field = field
         self.add_attention_mask = add_attention_mask
         self._buffering = buffering or Buffering(max_batch=64, max_latency_ms=3)
 
-    def setup(self, ctx: OpContext) -> None:
+    def setup(
+        self,
+        ctx: OpContext,
+        stage_index: int,
+        stage_name: str,
+        op_index: int,
+        collect_stats: bool,
+    ) -> None:
+        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
         if self.tok is None:
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()
@@ -40,7 +50,7 @@ class TokenizeText(DefaultFinalize[SampleRecord]):
                     from transformers import AutoTokenizer
 
                     self.tok = AutoTokenizer.from_pretrained(self.tokenizer_id)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning(
                         "Falling back to toy tokenizer after HF load error: %s", exc
                     )

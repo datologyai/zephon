@@ -27,8 +27,8 @@ class InMemoryDatasetStore(DatasetShardView):
     def __init__(self, shards: Mapping[int, RandomAccessShard]):
         self._shards = dict(shards)
 
-    def open(self, shard_id: int) -> RandomAccessShard:
-        return self._shards[shard_id]
+    def open(self, shard_id: int) -> tuple[RandomAccessShard, bool]:
+        return self._shards[shard_id], True
 
 
 class InMemoryMultiDatasetStore(MultiDatasetShardStore):

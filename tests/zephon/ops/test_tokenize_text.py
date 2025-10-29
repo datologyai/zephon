@@ -12,14 +12,36 @@ from zephon.core.op_base import OpContext
 from zephon.ops.tokenize_text import TokenizeText
 
 
+def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
+    return None
+
+
+def _setup(
+    op: TokenizeText,
+    ctx_data: dict[str, object] | None = None,
+    *,
+    collect_stats: bool = False,
+) -> TokenizeText:
+    ctx = {"record_node_metrics": _noop}
+    if ctx_data:
+        ctx.update(ctx_data)
+    op.setup(
+        OpContext(ctx),
+        stage_index=0,
+        stage_name="stage0",
+        op_index=0,
+        collect_stats=collect_stats,
+    )
+    return op
+
+
 def _rec(text: Any, *, field: str = "text") -> SampleRecord:
     meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
     return SampleRecord(meta=meta, payload={field: text})
 
 
 def test_tokenize_fallback_process_one_and_many() -> None:
-    op = TokenizeText(tokenizer=None, tokenizer_id="__fallback__")
-    op.setup(OpContext({}))
+    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__"))
     r1 = _rec("hello world")
     out1 = op.process_one(r1)[0]
     assert "input_ids" in out1.payload and "attention_mask" in out1.payload
@@ -32,8 +54,9 @@ def test_tokenize_fallback_process_one_and_many() -> None:
 
 
 def test_tokenize_custom_field_and_missing_field() -> None:
-    op = TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="title")
-    op.setup(OpContext({}))
+    op = _setup(
+        TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="title")
+    )
     r = _rec("ignored", field="text")  # text present, but tokenizer uses "title"
     out = op.process_one(r)[0]
     # When field is missing, fallback tokenizer sees empty string
@@ -45,7 +68,7 @@ def test_tokenize_disable_attention_mask() -> None:
     op = TokenizeText(
         tokenizer=None, tokenizer_id="__fallback__", add_attention_mask=False
     )
-    op.setup(OpContext({}))
+    op = _setup(op)
     out = op.process_one(_rec("hi there"))[0]
     assert "input_ids" in out.payload
     assert "attention_mask" not in out.payload
@@ -66,8 +89,7 @@ def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
             }
 
     tok = ToyTok()
-    op = TokenizeText(tokenizer=tok)
-    op.setup(OpContext({}))
+    op = _setup(TokenizeText(tokenizer=tok))
     out = op.process_many([_rec("x"), _rec("y")])
     assert out[0].payload["input_ids"] == [1, 2, 3]
     assert op.resolved_tokenizer_id() == "toy-tokenizer"
@@ -91,8 +113,7 @@ def test_tokenizer_id_load_failure_falls_back(
     fake.AutoTokenizer = _AutoTokenizer
     monkeypatch.setitem(sys.modules, "transformers", fake)
 
-    op = TokenizeText(tokenizer=None, tokenizer_id="some-model")
-    op.setup(OpContext({}))
+    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="some-model"))
     out = op.process_one(_rec("hello"))[0]
     # Fallback engaged internally, but resolved_tokenizer_id returns configured id
     assert "input_ids" in out.payload
@@ -106,8 +127,7 @@ def test_tokenizer_raises_if_setup_not_called() -> None:
 
 
 def test_tokenizer_traits_and_default_buffering() -> None:
-    op = TokenizeText(tokenizer_id="__fallback__")
-    op.setup(OpContext({}))
+    op = _setup(TokenizeText(tokenizer_id="__fallback__"))
     t = op.traits()
     buf = op.buffering()
     assert t.indexable is True and t.parallelism == 4

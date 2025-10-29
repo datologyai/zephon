@@ -137,7 +137,9 @@ class CacheManager(ShardResolver):
                 if state_value == _ShardState.LOCAL:
                     if raw_path.is_file():
                         self._shared.set_access_time(entry.index, time.time_ns())
-                        return self._build_ref(raw_path, zip_path, locator)
+                        return self._build_ref(
+                            raw_path, zip_path, locator, cache_hit=True
+                        )
                     self._mark_remote_locked(entry.index)
                     continue
 
@@ -192,7 +194,7 @@ class CacheManager(ShardResolver):
             self._shared.shard_states[entry.index] = _ShardState.LOCAL
             self._shared.set_access_time(entry.index, time.time_ns())
 
-        return self._build_ref(raw_path, actual_zip, locator)
+        return self._build_ref(raw_path, actual_zip, locator, cache_hit=False)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -369,6 +371,7 @@ class CacheManager(ShardResolver):
         raw_path: Path,
         zip_path: Optional[Path],
         locator: ShardLocator,
+        cache_hit: bool,
     ) -> LocalShardRef:
         raw_file = LocalShardFile(path=raw_path, bytes=raw_path.stat().st_size)
         zip_file = None
@@ -379,6 +382,7 @@ class CacheManager(ShardResolver):
             zip=zip_file,
             compression=locator.compression,
             extra=locator.extra,
+            cache_hit=cache_hit,
         )
 
     def _shard_lock(self, dataset_root: Path, shard_id: int) -> BaseFileLock:

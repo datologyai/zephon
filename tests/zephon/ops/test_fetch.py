@@ -12,6 +12,28 @@ from zephon.io import Dataset
 from zephon.ops.fetch import FetchOp
 
 
+def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
+    return None
+
+
+def _setup_op(
+    op: FetchOp, ctx_data: dict[str, object], *, collect_stats: bool = False
+) -> FetchOp:
+    ctx = {
+        "record_node_metrics": _noop,
+        "emit_fetch_metrics": _noop,
+        **ctx_data,
+    }
+    op.setup(
+        OpContext(ctx),
+        stage_index=0,
+        stage_name="stage0",
+        op_index=0,
+        collect_stats=collect_stats,
+    )
+    return op
+
+
 @pytest.fixture()
 def jsonl_dataset(tmp_path: Path) -> Dataset:
     shard0 = tmp_path / "shard0.jsonl"
@@ -42,9 +64,7 @@ def make_engine_sample(
 
 
 def test_fetch_op_reads_jsonl(jsonl_dataset: Dataset) -> None:
-    ctx = OpContext({"datasets_by_id": {0: jsonl_dataset}})
-    op = FetchOp()
-    op.setup(ctx)
+    op = _setup_op(FetchOp(), {"datasets_by_id": {0: jsonl_dataset}})
     record = op.process_one(make_engine_sample(0, 0, 1))[0]
     assert record.payload["value"] == 1
     batch = op.process_many(
@@ -58,14 +78,13 @@ def test_fetch_op_reads_jsonl(jsonl_dataset: Dataset) -> None:
 
 def test_fetch_op_reads_with_cache(jsonl_dataset: Dataset, tmp_path: Path) -> None:
     cache_root = tmp_path / "cache"
-    ctx = OpContext(
+    op = _setup_op(
+        FetchOp(),
         {
             "datasets_by_id": {0: jsonl_dataset},
             "io_options": {"cache": {"enabled": True, "root": cache_root}},
-        }
+        },
     )
-    op = FetchOp()
-    op.setup(ctx)
     _ = op.process_many(
         [
             make_engine_sample(0, 0, 0, lane_id=0, chunk_id=0),
@@ -78,13 +97,17 @@ def test_fetch_op_reads_with_cache(jsonl_dataset: Dataset, tmp_path: Path) -> No
 def test_fetch_op_setup_requires_datasets() -> None:
     op = FetchOp()
     with pytest.raises(RuntimeError):
-        op.setup(OpContext({}))
+        op.setup(
+            OpContext({"record_node_metrics": _noop, "emit_fetch_metrics": _noop}),
+            stage_index=0,
+            stage_name="stage0",
+            op_index=0,
+            collect_stats=False,
+        )
 
 
 def test_fetch_op_preserves_order_across_groups(jsonl_dataset: Dataset) -> None:
-    ctx = OpContext({"datasets_by_id": {0: jsonl_dataset}})
-    op = FetchOp()
-    op.setup(ctx)
+    op = _setup_op(FetchOp(), {"datasets_by_id": {0: jsonl_dataset}})
     # Interleave two shard groups; order should be preserved
     batch = [
         make_engine_sample(0, 1, 1),  # value 4

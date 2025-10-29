@@ -26,7 +26,8 @@ def test_build_multi_dataset_store_inmem_only() -> None:
     assert isinstance(store, DatasetStoreRegistry)
     view = store.for_dataset(7)
     # opening inmem shard returns the same shard object
-    shard = view.open(0)
+    shard, reused = view.open(0)
+    assert reused is True
     assert len(shard) == 1
 
 

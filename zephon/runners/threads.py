@@ -37,12 +37,16 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Optional, TypeAlias, Union, cast
+from typing import Any, Callable, Iterable, Iterator, Optional, TypeAlias, Union, cast
 
 from zephon.core.constants import EngineSample, SampleBatch, SampleRecord
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import Op, OpContext
 from zephon.core.traits import Buffering
+from zephon.observability.config import ExecutionTrackingMode
+from zephon.observability.size_estimator import estimate_bytes
+from zephon.observability.stats import NodeMetricsDelta
+from zephon.observability.stopwatch import Stopwatch
 from zephon.utils import buffered_iterable
 
 
@@ -96,13 +100,20 @@ class ThreadStageRunner:
         deterministic: bool
         ctx_proto: dict[str, Any]
         allow_latency_flush: bool = False
+        stage_index: int = 0
+        stage_name: str = ""
+        collect_stats: bool = False
+        op_index: int = 0  # position within the stage for metrics/metadata
         instances: list[Op[Any, Any]] = field(init=False, default_factory=list)
         parallelism: int = field(init=False)
         buffer_cfg: Buffering | None = field(init=False)
         buffer: list["ThreadStageRunner.StreamIn"] = field(
             init=False, default_factory=list
         )
-        first_ts_ms: Optional[float] = field(init=False, default=None)
+        buffer_ts_ns: list[int] = field(
+            init=False, default_factory=list
+        )  # arrival timestamp per buffered element
+        first_ts_ns: Optional[int] = field(init=False, default=None)
         # Deterministic sequencing state (per-operator)
         next_seq: int = field(init=False, default=0)
         emit_seq: int = field(init=False, default=0)
@@ -124,7 +135,13 @@ class ThreadStageRunner:
             for _ in range(self.parallelism):
                 instance = copy.deepcopy(self.node.op)
                 ctx = OpContext(dict(base_ctx))
-                instance.setup(ctx)
+                instance.setup(
+                    ctx,
+                    self.stage_index,
+                    self.stage_name,
+                    self.op_index,
+                    self.collect_stats,
+                )
                 self.instances.append(instance)
                 self._instance_queue.put(instance)
 
@@ -149,51 +166,68 @@ class ThreadStageRunner:
 
         def reset_buffers(self) -> None:
             self.buffer = []
-            self.first_ts_ms = None
+            self.buffer_ts_ns = []
+            self.first_ts_ns = None
 
         def enqueue(
             self, elems: list["ThreadStageRunner.StreamIn"], *, force: bool = False
-        ) -> list[list["ThreadStageRunner.StreamIn"]]:
-            ready: list[list["ThreadStageRunner.StreamIn"]] = []
+        ) -> list[tuple[list["ThreadStageRunner.StreamIn"], int]]:
+            ready: list[tuple[list["ThreadStageRunner.StreamIn"], int]] = []
             if not elems and not force:
                 return ready
             if self.buffer_cfg is None:
                 for elem in elems:
-                    ready.append([elem])
+                    ready.append(([elem], 0))
                 if force and self.buffer:
                     ready.append(self._drain_buffer())
                 return ready
 
-            now = time.time() * 1000.0
+            now_ns = time.perf_counter_ns()
             for elem in elems:
+                arrival_ns = time.perf_counter_ns()
                 if not self.buffer:
-                    self.first_ts_ms = now
+                    self.first_ts_ns = arrival_ns
                 self.buffer.append(elem)
+                self.buffer_ts_ns.append(arrival_ns)
                 if (
                     self.buffer_cfg.max_batch
                     and len(self.buffer) >= self.buffer_cfg.max_batch
                 ):
-                    ready.append(self._pop_batch(self.buffer_cfg.max_batch))
-                    self.first_ts_ms = None if not self.buffer else time.time() * 1000.0
+                    ready.append(self._pop_batch(self.buffer_cfg.max_batch, now_ns))
                 elif (
                     self.buffer_cfg.max_latency_ms is not None
-                    and self.first_ts_ms is not None
-                    and (now - self.first_ts_ms) >= self.buffer_cfg.max_latency_ms
+                    and self.first_ts_ns is not None
+                    and (now_ns - self.first_ts_ns) / 1_000_000
+                    >= self.buffer_cfg.max_latency_ms
                 ):
-                    ready.append(self._drain_buffer())
+                    ready.append(self._drain_buffer(now_ns=now_ns))
+                now_ns = time.perf_counter_ns()
             if force and self.buffer:
                 ready.append(self._drain_buffer())
             return ready
 
-        def _pop_batch(self, size: int) -> list["ThreadStageRunner.StreamIn"]:
+        def _pop_batch(
+            self, size: int, now_ns: int
+        ) -> tuple[list["ThreadStageRunner.StreamIn"], int]:
+            current_ns = now_ns
             chunk = self.buffer[:size]
+            timestamps = self.buffer_ts_ns[:size]
             self.buffer = self.buffer[size:]
+            self.buffer_ts_ns = self.buffer_ts_ns[size:]
+            wait_ns = 0
+            if timestamps:
+                wait_ns = max(0, current_ns - timestamps[0])
             if not self.buffer:
-                self.first_ts_ms = None
-            return list(chunk)
+                self.first_ts_ns = None
+            else:
+                self.first_ts_ns = self.buffer_ts_ns[0]
+            return list(chunk), wait_ns
 
-        def _drain_buffer(self) -> list["ThreadStageRunner.StreamIn"]:
-            return self._pop_batch(len(self.buffer))
+        def _drain_buffer(
+            self, *, now_ns: Optional[int] = None
+        ) -> tuple[list["ThreadStageRunner.StreamIn"], int]:
+            current_ns = now_ns if now_ns is not None else time.perf_counter_ns()
+            return self._pop_batch(len(self.buffer), current_ns)
 
         def finalize(self) -> list["ThreadStageRunner.StreamOut"]:
             tail: list["ThreadStageRunner.StreamOut"] = []
@@ -210,7 +244,13 @@ class ThreadStageRunner:
                 for _ in range(add):
                     instance = copy.deepcopy(self.node.op)
                     ctx = OpContext(dict(self.ctx_proto))
-                    instance.setup(ctx)
+                    instance.setup(
+                        ctx,
+                        self.stage_index,
+                        self.stage_name,
+                        self.op_index,
+                        self.collect_stats,
+                    )
                     self.instances.append(instance)
                     self._instance_queue.put(instance)
                 self.parallelism = desired
@@ -252,26 +292,40 @@ class ThreadStageRunner:
         queue_capacity: int = 4,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
+        stage_index: int = 0,
+        tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
     ) -> None:
         self._stage = stage
         self._max_workers = max_workers
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._prefetch_capacity = max(0, prefetch_capacity)
         self._queue_capacity = max(1, queue_capacity)
+        self._stage_index = stage_index
+        self._tracking_mode = tracking_mode
+        self._record_node_metrics: Callable[[NodeMetricsDelta], None] = ctx_services[
+            "record_node_metrics"
+        ]
+        self._metrics_meta: list[tuple[int, str, int, str]] = []
+        self._context_lock = threading.Lock()
+        self._active_context: Optional["ThreadStageRunner._RunContext"] = None
+        self._node_sw = Stopwatch(self._tracking_mode.collects_nodes)
 
         base_services = dict(ctx_services)
+        stage_name = stage.name or f"stage_{stage_index}"
 
-        self.ops: list["ThreadStageRunner._OperatorState"] = [
-            ThreadStageRunner._OperatorState(
+        self.ops: list["ThreadStageRunner._OperatorState"] = []
+        collect_op_stats = self._tracking_mode.collects_nodes  # caches result
+        for op_index, node in enumerate(stage.nodes):
+            state = ThreadStageRunner._OperatorState(
                 node=node,
                 deterministic=deterministic,
                 ctx_proto=base_services,
                 allow_latency_flush=allow_latency_flush_in_deterministic,
+                stage_index=self._stage_index,
+                stage_name=stage_name,
+                op_index=op_index,
+                collect_stats=collect_op_stats,
             )
-            for node in stage.nodes
-        ]
-
-        for state in self.ops:
             state.inflight = ThreadStageRunner._InflightCounter()
             # Small bounded input queue per operator.  It allows downstream ops to
             # apply backpressure without creating new stages and keeps memory usage
@@ -282,9 +336,10 @@ class ThreadStageRunner:
             # high but the queue can never grow without bound.
             result_capacity = max(1, self._queue_capacity * state.parallelism)
             state.result_queue = queue.Queue(maxsize=result_capacity)
-
-        self._context_lock = threading.Lock()
-        self._active_context: Optional["ThreadStageRunner._RunContext"] = None
+            self.ops.append(state)
+            self._metrics_meta.append(
+                (self._stage_index, stage_name, state.op_index, state.node.name)
+            )
 
     def _create_context(self) -> "ThreadStageRunner._RunContext":
         out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
@@ -299,30 +354,50 @@ class ThreadStageRunner:
         context: "ThreadStageRunner._RunContext",
         state: "ThreadStageRunner._OperatorState",
         batch: list["ThreadStageRunner.StreamIn"],
+        *,
+        wait_ns: int = 0,
     ) -> None:
         if not batch or context.stop_event.is_set():
             return
         instance = state.acquire_instance()
-        seq: Optional[int] = None
+        seq: int | None = None
         if state.deterministic:
             seq = state.next_seq
             state.next_seq += 1
 
+        consumed_elements = -1
+        consumed_bytes = -1
+        queue_depth_snapshot = -1
+        metrics_meta = None
+        collect_stats = self._tracking_mode.collects_nodes
+        if collect_stats:
+            consumed_elements = len(batch)
+            consumed_bytes = estimate_bytes(batch)
+            metrics_meta = self._metrics_meta[state.op_index]
+            try:
+                queue_depth_snapshot = state.input_queue.qsize()
+            except NotImplementedError:
+                queue_depth_snapshot = -1
+
         def work(
             items: list["ThreadStageRunner.StreamIn"],
-        ) -> list["ThreadStageRunner.StreamOut"]:
+        ) -> tuple[list["ThreadStageRunner.StreamOut"], int]:
+            start_ns = self._node_sw.start()
             try:
-                return instance.process_many(items)
+                outputs = instance.process_many(items)
             except (NotImplementedError, AttributeError):
                 out: list["ThreadStageRunner.StreamOut"] = []
                 for element in items:
                     out.extend(instance.process_one(element))
-                return out
+                outputs = out
+            return outputs, self._node_sw.elapsed(start_ns)
 
         state.inflight.increment()
         future = self._executor.submit(work, batch)
 
-        def done_callback(fut: Future[list["ThreadStageRunner.StreamOut"]]) -> None:
+        def done_callback(
+            fut: Future[tuple[list["ThreadStageRunner.StreamOut"], int]],
+        ) -> None:
             """Executor completion hook for a single micro-batch.
 
             Operators are allowed to change cardinality: they may drop inputs
@@ -331,16 +406,39 @@ class ThreadStageRunner:
             through the per-operator queues.
             """
             try:
-                result = fut.result()
+                result, proc_ns = fut.result()
             except Exception as exc:  # noqa: BLE001
                 self._record_error(context, exc)
                 result = None
+                proc_ns = 0
             finally:
                 state.release_instance(instance)
                 state.inflight.decrement()
 
             if result is None:
                 return
+
+            if collect_stats:
+                stage_index, stage_name, op_index, op_name = metrics_meta  # pyright: ignore[reportGeneralTypeIssues] no assert none on hot path
+                produced_elements = len(result)
+                produced_bytes = estimate_bytes(result)
+                delta = NodeMetricsDelta(
+                    stage_index=stage_index,
+                    op_index=op_index,
+                    stage_name=stage_name,
+                    name=op_name,
+                    processed_ns=proc_ns,
+                    produced_elements=produced_elements,
+                    consumed_elements=consumed_elements,
+                    produced_bytes=produced_bytes,
+                    consumed_bytes=consumed_bytes,
+                    wait_ns=wait_ns,
+                    max_queue_depth=queue_depth_snapshot,
+                    min_processing_ns=proc_ns,
+                    max_processing_ns=proc_ns,
+                )
+                self._record_node_metrics(delta)
+
             self._put_result(state, result, context, seq=seq)
 
         future.add_done_callback(done_callback)
@@ -438,8 +536,8 @@ class ThreadStageRunner:
                 ready = state.enqueue(
                     cast(list[ThreadStageRunner.StreamIn], []), force=True
                 )
-                for batch in ready:
-                    self._schedule_batch(context, state, batch)
+                for batch, wait_ns in ready:
+                    self._schedule_batch(context, state, batch, wait_ns=wait_ns)
                 continue
 
             try:
@@ -457,8 +555,8 @@ class ThreadStageRunner:
                     [cast(ThreadStageRunner.StreamIn, item)], force=False
                 )
 
-            for batch in ready:
-                self._schedule_batch(context, state, batch)
+            for batch, wait_ns in ready:
+                self._schedule_batch(context, state, batch, wait_ns=wait_ns)
 
     def _drain_results(
         self,

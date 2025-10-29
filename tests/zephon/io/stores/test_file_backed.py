@@ -100,11 +100,14 @@ def test_file_backed_dataset_view_caches_shards(tmp_path) -> None:
         retry_max_backoff=0.0,
     )
 
-    s1 = view.open(0)
-    s2 = view.open(0)
+    s1, reused1 = view.open(0)
+    assert reused1 is False
+    s2, reused2 = view.open(0)
+    assert reused2 is True
     assert s1 is s2  # cached per shard id
     assert len(s1) == 2
-    assert s1[0] == {"x": 1}
+    payload0, _ = s1[0]
+    assert payload0 == {"x": 1}
 
     # Underlying handler.open_shard only called once due to caching within ResilientShard lifecycle
     # (open happens per __getitem__ in ResilientShard; we can only assert resolver was used)
@@ -125,8 +128,10 @@ def test_file_backed_dataset_view_retries_on_eviction(tmp_path) -> None:
         retry_initial_backoff=0.0,
         retry_max_backoff=0.0,
     )
-    shard = view.open(0)
-    assert shard[0] == {"x": 5}
+    shard, reused = view.open(0)
+    assert reused is False
+    row, _ = shard[0]
+    assert row == {"x": 5}
     # We should have attempted resolve at least twice because of initial failure
     assert resolver.resolve_calls >= 2
     assert resolver.touch_calls >= 1

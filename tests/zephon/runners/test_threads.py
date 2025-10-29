@@ -1,8 +1,24 @@
+from dataclasses import dataclass
 from typing import Any
 
 from zephon.core.graph import Node, Stage
+from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
+from zephon.core.traits import OpTraits
+from zephon.observability.config import ExecutionTrackingMode
+from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.delay import DelayById
 from zephon.runners.threads import ThreadStageRunner
+
+
+def _noop_metrics(_: NodeMetricsDelta) -> None:  # pragma: no cover - trivial helper
+    return None
+
+
+def _ctx_services(extra: dict[str, object] | None = None) -> dict[str, object]:
+    services: dict[str, object] = {"record_node_metrics": _noop_metrics}
+    if extra:
+        services.update(extra)
+    return services
 
 
 def _collect(runner: ThreadStageRunner, data: list[Any]) -> list[Any]:
@@ -19,14 +35,14 @@ def test_runner_emits_in_input_order_when_deterministic() -> None:
 
     # Deterministic: outputs must match the input order exactly
     det_runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=8, deterministic=True
+        stage, ctx_services=_ctx_services(), max_workers=8, deterministic=True
     )
     out_det = _collect(det_runner, data)
     assert out_det == data
 
     # Non-deterministic: should still be a permutation; may equal by chance
     nondet_runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=8, deterministic=False
+        stage, ctx_services=_ctx_services(), max_workers=8, deterministic=False
     )
     out_nondet = _collect(nondet_runner, data)
     assert sorted(out_nondet) == sorted(data)
@@ -39,7 +55,7 @@ def test_run_one_returns_through_single_op_stage() -> None:
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
 
     runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=2, deterministic=True
+        stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
     )
     out = runner.run_one(7)
     assert out == 7
@@ -50,7 +66,7 @@ def test_set_parallelism_errors_and_adjustments() -> None:
     node = Node(name="delay", op=op)
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=4, deterministic=True
+        stage, ctx_services=_ctx_services(), max_workers=4, deterministic=True
     )
 
     # Invalid op index raises
@@ -76,7 +92,11 @@ def test_prefetching_stage_iterator_close_is_clean() -> None:
     node = Node(name="delay", op=op)
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=2, deterministic=True, prefetch_capacity=4
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        prefetch_capacity=4,
     )
 
     it = runner.run(iter(range(100)))
@@ -94,8 +114,59 @@ def test_passthrough_stage_forwards_stream() -> None:
     # Empty stage (no ops) must pass through StreamOut elements
     stage = Stage(name="empty", nodes=[], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
-        stage, ctx_services={}, max_workers=2, deterministic=True
+        stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
     )
     data = list(range(10))
     out = list(runner.run(iter(data)))
     assert out == data
+
+
+@dataclass
+class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    """Simple identity operator used for observability tests."""
+
+    name: str = "identity"
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> None:
+        return None
+
+    def process_one(self, elem: Any) -> list[Any]:
+        return [elem]
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return list(elems)
+
+
+def test_thread_runner_emits_metrics_deltas_when_callback_provided() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage0", nodes=[node], placement="auto", break_reason="test")
+
+    captured: list[NodeMetricsDelta] = []
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services({"record_node_metrics": captured.append}),
+        max_workers=2,
+        deterministic=True,
+        stage_index=7,
+        tracking_mode=ExecutionTrackingMode.NODES,
+    )
+
+    data = list(range(6))
+    out = list(runner.run(iter(data)))
+    assert out == data
+
+    assert captured, "expected at least one metrics delta"
+    produced = sum(delta.produced_elements for delta in captured)
+    consumed = sum(delta.consumed_elements for delta in captured)
+    assert produced == len(data)
+    assert consumed == len(data)
+    assert all(delta.stage_index == 7 for delta in captured)
+    assert all(delta.stage_name == "stage0" for delta in captured)

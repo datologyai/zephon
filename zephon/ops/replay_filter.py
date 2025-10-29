@@ -8,22 +8,33 @@ of the pipeline when no batching is used.
 """
 
 from zephon.core.constants import LaneId, SampleCursor, SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.replay import ReplayConfigService
 from zephon.core.traits import Buffering, OpTraits
 
 
-class ReplayFilter(DefaultFinalize[SampleRecord]):
+class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
     """Per-lane pre-batch dropper configured lazily via the OpContext."""
 
     def __init__(self) -> None:
+        DefaultSetup.__init__(self)
+
         self._service: ReplayConfigService | None = None
         self._targets: dict[LaneId, SampleCursor | None] = {}
         self._finalized_lanes: dict[LaneId, bool] = {}
         self._disabled: bool = True
         self._initialized = False
 
-    def setup(self, ctx: OpContext) -> None:
+    def setup(
+        self,
+        ctx: OpContext,
+        stage_index: int,
+        stage_name: str,
+        op_index: int,
+        collect_stats: bool,
+    ) -> None:
+        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+
         service = ctx.get("replay_state_service")
         if service is None:
             raise RuntimeError("ReplayConfigService not available!")

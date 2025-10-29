@@ -5,13 +5,25 @@
 
 import importlib.util as _importlib_util
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Iterator, Optional, Protocol, TypeAlias, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterator,
+    Optional,
+    Protocol,
+    TypeAlias,
+    cast,
+)
 
 from zephon.core.constants import EngineSample, SampleBatch, SampleId, SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
 from zephon.io.options import StoreOptions
+from zephon.observability import (
+    ExecutionTrackingMode,
+    MetricsSinkConfig,
+)
 from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
@@ -43,11 +55,12 @@ else:
     TorchDatasetType: TypeAlias = _DatasetProto
 
 # ---------- Runtime base (used for inheritance / isinstance) ----------
-_RTIterableDatasetBase: type
+_RTIterableDatasetBase: type[Any]
 try:
     from torch.utils.data import IterableDataset as _RTIterableDatasetBase
 except Exception:
-    _RTIterableDatasetBase = object
+    # Provide a concrete runtime base so type checkers accept the subclass definition.
+    _RTIterableDatasetBase = object  # type: ignore[assignment]
 
 
 class TorchPipelineIterableDataset(_RTIterableDatasetBase):
@@ -175,6 +188,20 @@ class Pipeline:
             "batch", op, self._tail, placement=placement, parallelism=parallelism
         )
         self._tail = node
+        return self
+
+    def enable_observability(
+        self,
+        tracking: ExecutionTrackingMode | str = ExecutionTrackingMode.NODES,
+        *,
+        sink: MetricsSinkConfig | None = None,
+    ) -> "Pipeline":
+        """Enable runtime metrics collection for the compiled pipeline."""
+        mode = ExecutionTrackingMode.from_value(tracking)
+        self._options.execution_tracking = mode
+        if sink is None:
+            sink = MetricsSinkConfig()
+        self._options.metrics_sink_config = sink
         return self
 
     # Internal/testing helper: insert a small deterministic delay stage.

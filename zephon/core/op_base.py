@@ -32,7 +32,14 @@ class Op(Protocol[InT, OutT]):
     operators execute with parallel workers.
     """
 
-    def setup(self, ctx: OpContext) -> None: ...
+    def setup(
+        self,
+        ctx: OpContext,
+        stage_index: int,
+        stage_name: str,
+        op_index: int,
+        collect_stats: bool,
+    ) -> None: ...
 
     def traits(self) -> OpTraits: ...
 
@@ -54,3 +61,26 @@ class DefaultFinalize(Generic[OutT]):
     def finalize(self) -> list[OutT]:
         """Return an empty list when the operator has no buffered tail."""
         return []
+
+
+class DefaultSetup:
+    """Mixin providing a ``setup`` implementation that creates basic handles to stage metadata."""
+
+    def __init__(self):
+        self.stage_index = -1
+        self.stage_name = ""
+        self.op_index = -1
+        self.collect_stats = False
+
+    def setup(
+        self,
+        ctx: OpContext,
+        stage_index: int,
+        stage_name: str,
+        op_index: int,
+        collect_stats: bool,
+    ) -> None:
+        self.stage_index = stage_index
+        self.stage_name = stage_name
+        self.op_index = op_index
+        self.collect_stats = collect_stats

@@ -52,6 +52,7 @@ class ShardLocator:
     zip: ShardFile | None = None
     compression: str | None = None
     extra: Mapping[str, object] | None = None
+    cache_hit: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class LocalShardRef:
     zip: LocalShardFile | None = None
     compression: str | None = None
     extra: Mapping[str, object] | None = None
+    cache_hit: bool | None = None
 
 
 __all__ = [

@@ -12,23 +12,21 @@ import time
 from typing import Optional, TypeVar
 
 from zephon.core.constants import SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 T = TypeVar("T")
 
 
-class DelayById(DefaultFinalize[T]):
+class DelayById(DefaultSetup, DefaultFinalize[T]):
     """Sleep a small, deterministic amount based on the sample's local id."""
 
     def __init__(
         self, *, max_delay_ms: float = 2.0, buffering: Optional[Buffering] = None
     ) -> None:
+        DefaultSetup.__init__(self)
         self.max_delay_ms = float(max_delay_ms)
         self._buffering = buffering or Buffering(max_batch=32, max_latency_ms=2)
-
-    def setup(self, ctx: OpContext) -> None:  # pragma: no cover - no setup needed
-        return None
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, parallelism=8)

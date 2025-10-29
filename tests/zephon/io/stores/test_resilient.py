@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from zephon.io.formats.base import FormatHandler
-from zephon.io.protocols import RandomAccessShard
+from zephon.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon.io.resolvers.base import ShardResolver
 from zephon.io.stores.resilient import ResilientShard
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
@@ -114,7 +114,9 @@ def test_resilient_shard_retries_on_eviction_and_touches(tmp_path) -> None:
         retry_initial_backoff=0.0,
         retry_max_backoff=0.0,
     )
-    assert shard[0] == {"x": 5}
+    row, stats = shard[0]
+    assert row == {"x": 5}
+    assert isinstance(stats, SampleLoadStats)
     assert resolver.resolve_calls >= 2  # retried after initial failure
     assert resolver.touch_calls >= 1
 
@@ -138,3 +140,33 @@ def test_resilient_shard_propagates_indexerror_when_length_unknown(tmp_path) -> 
         _ = shard[10]
 
     shard.close()  # no-op
+
+
+def test_resilient_shard_records_load_stats(tmp_path) -> None:
+    loc = _locator()
+    ref = LocalShardRef(
+        raw=LocalShardFile(path=tmp_path / "raw.bin", bytes=1),
+        cache_hit=True,
+    )
+    resolver = _FakeResolver(local=ref)
+    handler = _FakeHandler(rows=[{"x": 1}])
+    shard = ResilientShard(
+        locator=loc,
+        resolver=resolver,
+        handler=handler,
+        length=1,
+        retry_attempts=1,
+        retry_initial_backoff=0.0,
+        retry_max_backoff=0.0,
+    )
+    row, stats = shard[0]
+    assert row == {"x": 1}
+    assert stats is not None
+    assert stats.cache_hits == 1
+    assert stats.cache_misses == 0
+    assert stats.retries == 0
+    assert stats.resolve_ns >= 0
+    assert stats.open_ns >= 0
+    assert stats.read_ns >= 0
+    assert stats.close_ns >= 0
+    assert stats.touch_ns >= 0

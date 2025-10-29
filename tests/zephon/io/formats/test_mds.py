@@ -71,11 +71,14 @@ def test_mds_reader_handles_streaming_variants(
             for algo in writer_kwargs["hashes"]:
                 assert algo in hashes_present
 
-        shard = view.open(shard_id)
+        shard, reused = view.open(shard_id)
+        assert reused in (True, False)
         try:
             assert len(shard) == dataset.shard_index[shard_id]
             for row_idx in range(len(shard)):
-                row = shard[row_idx]
+                got = shard[row_idx]
+                assert isinstance(got, tuple)
+                row = got[0]
                 observed.append(
                     {
                         "text": str(row["text"]),

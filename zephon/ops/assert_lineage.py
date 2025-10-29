@@ -6,11 +6,11 @@
 from collections import defaultdict
 
 from zephon.core.constants import SampleBatch, SampleCursor, SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 
-class AssertLineageOrder(DefaultFinalize[SampleRecord | SampleBatch]):
+class AssertLineageOrder(DefaultSetup, DefaultFinalize[SampleRecord | SampleBatch]):
     """Verifies that records for each lane arrive in strictly increasing order.
 
     This operator is intended for debugging pipelines that use fan-out or complex
@@ -20,10 +20,8 @@ class AssertLineageOrder(DefaultFinalize[SampleRecord | SampleBatch]):
     """
 
     def __init__(self) -> None:
+        DefaultSetup.__init__(self)
         self._last_per_lane: dict[int, SampleCursor | None] = defaultdict(lambda: None)
-
-    def setup(self, ctx: OpContext) -> None:  # noqa: D401 - simple wiring
-        return None
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True)

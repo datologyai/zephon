@@ -6,15 +6,12 @@
 from typing import Optional
 
 from zephon.core.constants import SampleBatch, SampleRecord
-from zephon.core.op_base import DefaultFinalize, OpContext
+from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 
-class Materialize(DefaultFinalize[SampleRecord | SampleBatch]):
+class Materialize(DefaultSetup, DefaultFinalize[SampleRecord | SampleBatch]):
     """Force evaluation of upstream iterables without altering records."""
-
-    def setup(self, ctx: OpContext) -> None:
-        return None
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=False)

@@ -4,6 +4,10 @@ from zephon.core.replay import ReplayConfigService
 from zephon.ops.replay_filter import ReplayFilter
 
 
+def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
+    return None
+
+
 def _record(
     sample_idx: int, lane: int = 0, lineage: tuple[int, ...] = ()
 ) -> SampleRecord:
@@ -15,7 +19,13 @@ def _record(
 
 def _filter(service: ReplayConfigService) -> ReplayFilter:
     op = ReplayFilter()
-    op.setup(OpContext({"replay_state_service": service}))
+    ctx = OpContext(
+        {
+            "replay_state_service": service,
+            "record_node_metrics": _noop,
+        }
+    )
+    op.setup(ctx, stage_index=0, stage_name="stage0", op_index=0, collect_stats=False)
     return op
 
 

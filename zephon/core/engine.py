@@ -61,6 +61,9 @@ from zephon.core.graph import Plan, Stage
 from zephon.core.replay import ReplayConfigService
 from zephon.core.world import World
 from zephon.io.options import StoreOptions
+from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
+from zephon.observability.collector import CollectorConfig, PipelineCollector
+from zephon.observability.emitter import MetricsReporter
 from zephon.ops.replay_filter import ReplayFilter
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
@@ -102,6 +105,10 @@ def _extract_lane_id(item: SampleRecord | SampleBatch) -> int:
         raise RuntimeError("Empty batch has no lane_id")
     # Pipeline guarantees one lane per batch at the tail
     return int(lids[0])
+
+
+def _noop(*args: Any, **kwargs: Any) -> None:
+    pass
 
 
 def _call_engine_clean_merged(engine: "Engine"):
@@ -173,6 +180,9 @@ class RuntimeOptions:
     aggregate_dir: str | None = None
     # How long to wait for all contributors and for the merged file.
     aggregate_timeout_s: float = 30.0
+    # Observability controls.
+    execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
+    metrics_sink_config: MetricsSinkConfig | None = None
 
 
 class Engine:
@@ -211,6 +221,38 @@ class Engine:
             self._lane_last_cursor.setdefault(lane, None)
 
         self._publish_replay_snapshot()
+
+        tracking_mode = self._opts.execution_tracking
+        self._collector: PipelineCollector | None = None
+        self._metrics_reporter: MetricsReporter | None = None
+        self._metrics_started = False
+        self._ctx["emit_fetch_metrics"] = _noop
+        self._ctx["record_node_metrics"] = _noop
+
+        if tracking_mode != ExecutionTrackingMode.OFF:
+            metrics_sink_config = self._opts.metrics_sink_config
+            report_interval = (
+                metrics_sink_config.flush_interval_s
+                if metrics_sink_config is not None
+                else 5.0
+            )
+            collector_config = CollectorConfig(
+                tracking_mode=tracking_mode,
+                sink=metrics_sink_config,
+                report_interval_s=report_interval,
+                plan_id=self._plan.plan_id,
+            )
+            self._collector = PipelineCollector(collector_config)
+            worker_id, _ = get_torch_worker_info()
+            self._metrics_reporter = MetricsReporter(
+                self._collector,
+                metrics_sink_config,
+                rank_id=self._world.physical_rank,
+                worker_id=worker_id,
+            )
+            if self._collector.tracking_mode.collects_nodes:
+                self._ctx["emit_fetch_metrics"] = self._emit_fetch_metrics
+            self._ctx["record_node_metrics"] = self._collector.record
 
         # Stage runners are stored heterogeneously.
         self._runners: list[ThreadStageRunner] = []
@@ -539,6 +581,12 @@ class Engine:
                         deterministic=self._opts.deterministic,
                         allow_latency_flush_in_deterministic=allow_latency,
                         queue_capacity=self._opts.op_queue_capacity,
+                        stage_index=idx,
+                        tracking_mode=(
+                            self._collector.tracking_mode
+                            if self._collector is not None
+                            else ExecutionTrackingMode.OFF
+                        ),
                     )
                 )
             elif chosen == "remote":
@@ -547,6 +595,17 @@ class Engine:
                 raise NotImplementedError("ProcessStageRunner not yet implemented.")
             else:
                 raise ValueError(f"Unknown runner '{chosen}'")
+
+    def metrics_snapshot(self):
+        """Return a clone of the current pipeline metrics summary when enabled."""
+        if self._collector is None:
+            return None
+        return self._collector.snapshot()
+
+    def _emit_fetch_metrics(self, delta: Any) -> None:
+        """Forward fetch timings to the collector when tracking is enabled."""
+        if self._collector is not None and self._collector.tracking_mode.collects_nodes:
+            self._collector.record_fetch(delta)
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
@@ -860,6 +919,9 @@ class Engine:
 
     def build_iter(self) -> Iterator[SampleRecord | SampleBatch]:
         """Return an iterator that threads the work stream through all stages."""
+        if self._metrics_reporter is not None and not self._metrics_started:
+            self._metrics_reporter.start()
+            self._metrics_started = True
         source_iter = self._source_stream()
 
         # Construct overall pipeline by chaining runners
@@ -916,6 +978,12 @@ class Engine:
                 runner.close()
             except Exception:
                 pass
+        if self._metrics_reporter is not None and self._metrics_started:
+            try:
+                self._metrics_reporter.stop()
+            except Exception:
+                pass
+        self._metrics_started = False
 
     def _state_dict_local(self) -> dict[str, Any]:
         """Serializable snapshot of engine runtime state (no plan/op state)."""
