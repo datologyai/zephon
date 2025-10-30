@@ -82,8 +82,8 @@ class ResilientShard(RandomAccessShard):
             read_start = self.timer.start()
             try:
                 item = shard[index]
-                assert isinstance(
-                    item, dict
+                assert not isinstance(
+                    item, tuple
                 )  # until we improve typing -- indicates no recursion in resilientshards.
             finally:
                 stats.read_ns += self.timer.elapsed(read_start)
