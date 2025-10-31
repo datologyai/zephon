@@ -7,7 +7,6 @@ import functools
 import json
 import logging
 import os
-import pickle
 import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
@@ -23,377 +22,28 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - optional dependency
     torch = None  # type: ignore[assignment]
 
+from litdata.constants import _NUMPY_DTYPES_MAPPING, _TORCH_DTYPES_MAPPING
+from litdata.streaming.serializers import (
+    _SERIALIZERS as LITDATA_SERIALIZERS,
+)
+from litdata.streaming.serializers import (
+    NoHeaderNumpySerializer,
+    NoHeaderTensorSerializer,
+    PILSerializer,
+    Serializer,
+)
+
 logger = logging.getLogger("zephon.litdata")
 
 # -----------------------------------------------------------------------------
 # Serializers
 # -----------------------------------------------------------------------------
 
-_TORCH_DTYPES_MAPPING: dict[int, Any] = {}
-if torch is not None:  # pragma: no branch - evaluated at import
-    _TORCH_DTYPES_MAPPING = {
-        0: torch.float32,
-        1: torch.float,
-        2: torch.float64,
-        3: torch.double,
-        4: torch.complex64,
-        5: torch.cfloat,
-        6: torch.complex128,
-        7: torch.cdouble,
-        8: torch.float16,
-        9: torch.half,
-        10: torch.bfloat16,
-        11: torch.uint8,
-        12: torch.int8,
-        13: torch.int16,
-        14: torch.short,
-        15: torch.int32,
-        16: torch.int,
-        17: torch.int64,
-        18: torch.long,
-        19: torch.bool,
-        20: torch.uint16,
-    }
+_SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(LITDATA_SERIALIZERS)
 
-_NUMPY_SCTYPES = [
-    np.int8,
-    np.int16,
-    np.int32,
-    np.int64,
-    np.uint8,
-    np.uint16,
-    np.uint32,
-    np.uint64,
-    np.float16,
-    np.float32,
-    np.float64,
-    np.complex64,
-    np.complex128,
-    bool,
-    object,
-    bytes,
-    str,
-    np.void,
-]
-
-_NUMPY_DTYPES_MAPPING: dict[int, np.dtype] = {
-    idx: np.dtype(value) for idx, value in enumerate(_NUMPY_SCTYPES)
-}
 _NUMPY_DTYPES_REVERSE: dict[np.dtype, int] = {
     dtype: idx for idx, dtype in _NUMPY_DTYPES_MAPPING.items()
 }
-
-
-class Serializer(ABC):
-    """Interface for object serializers."""
-
-    @abstractmethod
-    def serialize(self, data: Any) -> tuple[bytes, Optional[str]]: ...
-
-    @abstractmethod
-    def deserialize(self, data: bytes) -> Any: ...
-
-    @abstractmethod
-    def can_serialize(self, data: Any) -> bool: ...
-
-    def setup(self, metadata: Any) -> None:
-        return None
-
-
-class _NumericSerializer:
-    def __init__(self, dtype: Any) -> None:
-        self.dtype = dtype
-        self.size = np.dtype(dtype).itemsize  # type: ignore[arg-type]
-
-    def serialize(self, obj: Any) -> tuple[bytes, Optional[str]]:
-        return self.dtype(obj).tobytes(), None  # type: ignore[arg-type]
-
-    def deserialize(self, data: bytes) -> Any:
-        return np.frombuffer(data, self.dtype)[0]  # type: ignore[arg-type]
-
-
-class StringSerializer(Serializer):
-    def serialize(self, obj: str) -> tuple[bytes, Optional[str]]:
-        return obj.encode("utf-8"), None
-
-    def deserialize(self, data: bytes) -> str:
-        return data.decode("utf-8")
-
-    def can_serialize(self, data: Any) -> bool:
-        return isinstance(data, str) and not os.path.isfile(data)
-
-
-class BooleanSerializer(Serializer):
-    def serialize(self, item: bool) -> tuple[bytes, Optional[str]]:
-        return np.uint8(item).tobytes(), None
-
-    def deserialize(self, data: bytes) -> bool:
-        return bool(np.frombuffer(data, np.uint8)[0])
-
-    def can_serialize(self, data: Any) -> bool:
-        return isinstance(data, bool)
-
-
-class IntegerSerializer(_NumericSerializer, Serializer):
-    def __init__(self) -> None:
-        super().__init__(np.int64)
-
-    def can_serialize(self, data: Any) -> bool:
-        return isinstance(data, int)
-
-
-class FloatSerializer(_NumericSerializer, Serializer):
-    def __init__(self) -> None:
-        super().__init__(np.float64)
-
-    def can_serialize(self, data: Any) -> bool:
-        return isinstance(data, float)
-
-
-class BytesSerializer(Serializer):
-    def serialize(self, item: bytes) -> tuple[bytes, Optional[str]]:
-        return item, None
-
-    def deserialize(self, data: bytes) -> bytes:
-        return data
-
-    def can_serialize(self, item: Any) -> bool:
-        return isinstance(item, bytes)
-
-
-class NumpySerializer(Serializer):
-    def __init__(self) -> None:
-        self._dtype_to_index = {v: k for k, v in _NUMPY_DTYPES_MAPPING.items()}
-
-    def serialize(self, item: np.ndarray) -> tuple[bytes, Optional[str]]:
-        dtype_index = self._dtype_to_index[item.dtype]
-        parts = [np.uint32(dtype_index).tobytes(), np.uint32(len(item.shape)).tobytes()]
-        for dim in item.shape:
-            parts.append(np.uint32(dim).tobytes())
-        parts.append(item.tobytes(order="C"))
-        return b"".join(parts), None
-
-    def deserialize(self, data: bytes) -> np.ndarray:
-        dtype_index = np.frombuffer(data[0:4], np.uint32).item()
-        dtype = _NUMPY_DTYPES_MAPPING[dtype_index]
-        shape_len = np.frombuffer(data[4:8], np.uint32).item()
-        shape = []
-        for idx in range(shape_len):
-            shape.append(
-                np.frombuffer(data[8 + 4 * idx : 8 + 4 * (idx + 1)], np.uint32).item()
-            )
-        tensor = np.frombuffer(data[8 + 4 * shape_len :], dtype=dtype)
-        if tuple(shape) == tensor.shape:
-            return tensor
-        return np.reshape(tensor, shape)
-
-    def can_serialize(self, item: Any) -> bool:
-        return isinstance(item, np.ndarray)
-
-
-class NoHeaderNumpySerializer(Serializer):
-    """Serializer for numpy arrays stored without a header in LitData payloads."""
-
-    def __init__(self) -> None:
-        self._dtype_to_indices = {v: k for k, v in _NUMPY_DTYPES_MAPPING.items()}
-        self._dtype: np.dtype | None = None
-
-    def setup(self, metadata: Any) -> None:
-        if isinstance(metadata, str):
-            _, _, suffix = metadata.partition(":")
-            if suffix:
-                try:
-                    index = int(suffix)
-                except ValueError as exc:  # pragma: no cover - defensive
-                    raise ValueError(
-                        f"Invalid dtype index for no_header_numpy: {suffix}"
-                    ) from exc
-                dtype = _NUMPY_DTYPES_MAPPING.get(index)
-                if dtype is None:
-                    raise ValueError(f"Unsupported numpy dtype index: {index}")
-                self._dtype = dtype
-        elif isinstance(metadata, np.dtype):
-            self._dtype = metadata
-
-    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
-        array = np.asarray(item)
-        if self._dtype is None:
-            dtype_index = self._dtype_to_indices.get(array.dtype)
-            if dtype_index is None:
-                raise ValueError(
-                    f"Unsupported numpy dtype for serialization: {array.dtype}"
-                )
-            self._dtype = array.dtype
-        else:
-            dtype_index = self._dtype_to_indices[self._dtype]
-            if array.dtype != self._dtype:
-                array = array.astype(self._dtype, copy=False)
-        return array.tobytes(order="C"), f"no_header_numpy:{dtype_index}"
-
-    def deserialize(self, data: bytes) -> np.ndarray:
-        if self._dtype is None:
-            raise RuntimeError(
-                "No dtype configured for no_header_numpy deserialization"
-            )
-        return np.frombuffer(data, dtype=self._dtype)
-
-    def can_serialize(self, item: Any) -> bool:
-        return isinstance(item, np.ndarray) and len(item.shape) == 1
-
-
-class PickleSerializer(Serializer):
-    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
-        return pickle.dumps(item), None
-
-    def deserialize(self, data: bytes) -> Any:
-        return pickle.loads(data)  # noqa: S301
-
-    def can_serialize(self, _: Any) -> bool:
-        return True
-
-
-class TensorSerializer(Serializer):  # pragma: no cover - torch dependent
-    def __init__(self) -> None:
-        if torch is None:
-            raise ImportError("Torch is required for tensor serialization")
-        self._dtype_to_indices = {v: k for k, v in _TORCH_DTYPES_MAPPING.items()}
-
-    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
-        if torch is None:
-            raise ImportError("Torch is required for tensor serialization")
-        dtype_index = self._dtype_to_indices[item.dtype]
-        data = [np.uint32(dtype_index).tobytes()]
-        data.append(np.uint32(item.dim()).tobytes())
-        data.extend(np.uint32(dim).tobytes() for dim in item.shape)
-        data.append(item.cpu().numpy().tobytes(order="C"))
-        return b"".join(data), None
-
-    def deserialize(self, data: bytes) -> Any:
-        if torch is None:
-            raise ImportError("Torch is required for tensor deserialization")
-        dtype_index = np.frombuffer(data[0:4], np.uint32).item()
-        dtype = _TORCH_DTYPES_MAPPING[dtype_index]
-        shape_len = np.frombuffer(data[4:8], np.uint32).item()
-        shape = []
-        for idx in range(shape_len):
-            shape.append(
-                np.frombuffer(data[8 + 4 * idx : 8 + 4 * (idx + 1)], np.uint32).item()
-            )
-        array = np.frombuffer(data[8 + 4 * shape_len :], dtype=np.float32)
-        tensor = torch.from_numpy(array).to(dtype=dtype)
-        return tensor.reshape(shape)
-
-    def can_serialize(self, item: Any) -> bool:
-        if torch is None:
-            return False
-        return isinstance(item, torch.Tensor)
-
-
-class NoHeaderTensorSerializer(Serializer):  # pragma: no cover - torch dependent
-    """Serializer for tensors stored without a header in LitData payloads."""
-
-    def __init__(self) -> None:
-        if torch is None:
-            raise ImportError("Torch is required for tensor serialization")
-        self._dtype_to_indices = {v: k for k, v in _TORCH_DTYPES_MAPPING.items()}
-        self._dtype: Any = None
-
-    def setup(self, metadata: Any) -> None:
-        if torch is None:
-            raise ImportError("Torch is required for tensor serialization")
-        if isinstance(metadata, str):
-            _, _, suffix = metadata.partition(":")
-            if suffix:
-                try:
-                    index = int(suffix)
-                except ValueError as exc:  # pragma: no cover - defensive
-                    raise ValueError(
-                        f"Invalid dtype index for no_header_tensor: {suffix}"
-                    ) from exc
-                dtype = _TORCH_DTYPES_MAPPING.get(index)
-                if dtype is None:
-                    raise ValueError(f"Unsupported tensor dtype index: {index}")
-                self._dtype = dtype
-
-    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
-        if torch is None:
-            raise ImportError("Torch is required for tensor serialization")
-        dtype_index = self._dtype_to_indices[item.dtype]
-        self._dtype = item.dtype
-        return item.numpy().tobytes(order="C"), f"no_header_tensor:{dtype_index}"
-
-    def deserialize(self, data: bytes) -> Any:
-        if torch is None:
-            raise ImportError("Torch is required for tensor deserialization")
-        if self._dtype is None:
-            raise RuntimeError(
-                "No dtype configured for no_header_tensor deserialization"
-            )
-        if len(data) == 0:
-            return torch.empty((0,), dtype=self._dtype)
-        return torch.frombuffer(bytearray(data), dtype=self._dtype)
-
-    def can_serialize(self, item: Any) -> bool:
-        if torch is None:
-            return False
-        return isinstance(item, torch.Tensor) and len(item.shape) == 1
-
-
-class PILSerializer(Serializer):
-    """Serializer for PIL/Pillow images - compatible with LitData format."""
-
-    def serialize(self, item: Any) -> tuple[bytes, Optional[str]]:
-        import numpy as np
-        from PIL import Image
-
-        if not isinstance(item, Image.Image):
-            raise ValueError(f"Expected PIL Image, got {type(item)}")
-
-        mode = item.mode.encode("utf-8")
-        width, height = item.size
-        raw = item.tobytes()
-        header = np.array([width, height, len(mode)], np.uint32)
-        return header.tobytes() + mode + raw, None
-
-    def deserialize(self, data: bytes) -> Any:
-        import numpy as np
-        from PIL import Image
-
-        idx = 3 * 4  # 3 uint32 values
-        width, height, mode_size = np.frombuffer(data[:idx], np.uint32)
-        width_i = int(width)
-        height_i = int(height)
-        mode_len = int(mode_size)
-        mode_bytes = data[idx : idx + mode_len]
-        raw = data[idx + mode_len :]
-        return Image.frombytes(mode_bytes.decode("utf-8"), (width_i, height_i), raw)
-
-    def can_serialize(self, data: Any) -> bool:
-        try:
-            from PIL import Image
-
-            return isinstance(data, Image.Image)
-        except ImportError:
-            return False
-
-
-_SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(
-    [
-        ("str", StringSerializer()),
-        ("bool", BooleanSerializer()),
-        ("int", IntegerSerializer()),
-        ("float", FloatSerializer()),
-        ("bytes", BytesSerializer()),
-        ("numpy", NumpySerializer()),
-        ("pickle", PickleSerializer()),
-        ("no_header_numpy", NoHeaderNumpySerializer()),
-        ("pil", PILSerializer()),
-    ]
-)
-
-if torch is not None:  # pragma: no branch
-    _SERIALIZERS["tensor"] = TensorSerializer()
-    _SERIALIZERS["no_header_tensor"] = NoHeaderTensorSerializer()
 
 
 _CONFIGURED_SERIALIZER_CACHE: dict[str, Serializer] = {}
@@ -885,6 +535,9 @@ __all__ = [
     "_get_serializers",
     "BaseItemLoader",
     "Interval",
+    "NoHeaderNumpySerializer",
+    "NoHeaderTensorSerializer",
+    "PILSerializer",
     "PyTreeLoader",
     "TokensLoader",
     "treespec_dumps",
