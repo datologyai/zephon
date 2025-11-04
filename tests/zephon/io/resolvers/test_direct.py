@@ -91,6 +91,9 @@ def test_direct_resolver_decompresses_zstd_when_missing_raw(
     raw_path = tmp_path / "shard.raw"
 
     class _Zstd:
+        class ZstdError(Exception):
+            pass
+
         class ZstdDecompressor:
             def copy_stream(self, src, dst):
                 data = src.read()
@@ -144,3 +147,123 @@ def test_direct_resolver_unsupported_compression(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError):
         _ = resolver.resolve(loc)
+
+
+def test_direct_resolver_reprepares_empty_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = LocalFSBackend(root=Path("/"))
+    resolver = DirectResolver(backend)
+
+    raw_path = tmp_path / "shard.raw"
+    raw_path.write_bytes(b"")  # existing but empty
+    zip_path = tmp_path / "shard.zst"
+    payload = b"payload"
+    zip_path.write_bytes(payload)
+
+    attempts = {"count": 0}
+
+    class _Zstd:
+        class ZstdError(Exception):
+            pass
+
+        class ZstdDecompressor:
+            def copy_stream(self, src, dst):
+                attempts["count"] += 1
+                dst.write(src.read())
+
+    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+
+    zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
+    loc = _mk_locator(
+        str(tmp_path),
+        basename="shard.raw",
+        bytes=len(payload),
+        zip_meta=zip_meta,
+        compression="zstd",
+    )
+    ref = resolver.resolve(loc)
+    assert ref.raw.path.read_bytes() == payload
+    assert attempts["count"] == 1  # only decompressed once
+
+
+def test_direct_resolver_retries_until_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = LocalFSBackend(root=Path("/"))
+    resolver = DirectResolver(backend)
+
+    zip_path = tmp_path / "shard.zst"
+    payload = b"payload"
+    zip_path.write_bytes(payload)
+    raw_path = tmp_path / "shard.raw"
+
+    attempts = {"count": 0}
+
+    class _Zstd:
+        class ZstdError(Exception):
+            pass
+
+        class ZstdDecompressor:
+            def copy_stream(self, src, dst):
+                attempts["count"] += 1
+                data = src.read()
+                if attempts["count"] < 3:
+                    # simulate a broken decompression that writes nothing
+                    return
+                dst.write(data)
+
+    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+
+    zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
+    loc = _mk_locator(
+        str(tmp_path),
+        basename="shard.raw",
+        bytes=len(payload),
+        zip_meta=zip_meta,
+        compression="zstd",
+    )
+
+    ref = resolver.resolve(loc)
+    assert ref.raw.path.read_bytes() == payload
+    assert attempts["count"] == 3
+
+
+def test_direct_resolver_retry_exhaustion_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = LocalFSBackend(root=Path("/"))
+    resolver = DirectResolver(backend)
+
+    zip_path = tmp_path / "shard.zst"
+    payload = b"payload"
+    zip_path.write_bytes(payload)
+    raw_path = tmp_path / "shard.raw"
+
+    attempts = {"count": 0}
+
+    class _Zstd:
+        class ZstdError(Exception):
+            pass
+
+        class ZstdDecompressor:
+            def copy_stream(self, src, dst):
+                attempts["count"] += 1
+                # Always write nothing, triggering validation failure
+                src.read()
+
+    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+
+    zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
+    loc = _mk_locator(
+        str(tmp_path),
+        basename="shard.raw",
+        bytes=len(payload),
+        zip_meta=zip_meta,
+        compression="zstd",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        _ = resolver.resolve(loc)
+    assert "Raw shard empty" in str(excinfo.value)
+    assert attempts["count"] == 3
