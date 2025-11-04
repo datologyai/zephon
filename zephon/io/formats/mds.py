@@ -153,8 +153,9 @@ class MDSFormat(FormatHandler):
 
         streaming_template = cast(_StreamingTemplate, streaming_template_data)
         entry = _finalize_streaming_entry(streaming_template, locator, local_ref)
-        split_obj = extras.get("split")
-        split = str(split_obj) if isinstance(split_obj, (str, os.PathLike)) else None
+        # Use the concrete local directory for this shard and avoid providing a
+        # split to prevent duplicating subdirectories (e.g., "1350/1350/").
+        split = None
         dirname = str(local_ref.raw.path.parent)
         try:
             streaming_shard = _StreamingMDSReader.from_json(
@@ -479,21 +480,22 @@ def _finalize_streaming_entry(
     entry["compression"] = str(compression) if compression else None
 
     raw_hashes = {str(k): str(v) for k, v in locator.raw.hashes.items()}
+    raw_basename = os.path.basename(str(local_ref.raw.path))
     entry["raw_data"] = {
-        "basename": locator.raw.basename,
+        "basename": raw_basename,
         "bytes": int(locator.raw.bytes),
         "hashes": raw_hashes,
     }
-    if locator.zip is not None:
+    if locator.zip is not None and local_ref.zip is not None:
         zip_hashes = {str(k): str(v) for k, v in locator.zip.hashes.items()}
+        zip_basename = os.path.basename(str(local_ref.zip.path))
         entry["zip_data"] = {
-            "basename": locator.zip.basename,
+            "basename": zip_basename,
             "bytes": int(locator.zip.bytes),
             "hashes": zip_hashes,
         }
     else:
         entry["zip_data"] = None
-
     return entry
 
 
