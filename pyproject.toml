@@ -48,6 +48,21 @@ cloud = [
     "zephon[cloud-s3]",
     "zephon[cloud-gcs]",
 ]
+litdata = [
+    "optree",
+    "zstandard",
+    "litdata"
+]
+streaming = [
+    "mosaicml-streaming",
+    "zstandard",
+]
+mosaic = [
+    "zephon[streaming]",
+]
+mds = [
+    "zephon[streaming]",
+]
 
 [dependency-groups]
 dev = [
