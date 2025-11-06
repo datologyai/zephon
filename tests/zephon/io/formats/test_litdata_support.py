@@ -9,6 +9,7 @@ from litdata.streaming.writer import BinaryWriter
 from zephon.io.formats.litdata_support import (
     _NUMPY_DTYPES_REVERSE,
     _TORCH_DTYPES_MAPPING,
+    FlatPyTree,
     NoHeaderNumpySerializer,
     NoHeaderTensorSerializer,
     PILSerializer,
@@ -151,6 +152,33 @@ def test_pytree_loader_intervals_and_deserialize_roundtrip():
     encoded, _ = PyTreeLoader.encode_data(payloads, sizes, ["payload", 7])
     restored = loader.deserialize(encoded, chunk_index=0)
     assert restored == ("payload", 7)
+
+
+def test_pytree_loader_flat_mode_returns_lazy_bundle():
+    config = {
+        "data_format": ["str", "int"],
+        "data_spec": optree.tree_structure(("a", "b")),
+        "return_flat_leaves": True,
+    }
+    chunk = {"chunk_size": 1}
+
+    loader = PyTreeLoader(return_flat_leaves=True)
+    serializers = _get_serializers()
+    loader.setup(config, [chunk], serializers, None)
+
+    payloads: list[bytes] = []
+    sizes: list[int] = []
+    for fmt, value in zip(config["data_format"], ("payload", 7), strict=True):
+        serializer = loader._serializers[fmt]  # type: ignore[attr-defined]
+        serialized, _ = serializer.serialize(value)
+        payloads.append(serialized)
+        sizes.append(len(serialized))
+
+    encoded, _ = PyTreeLoader.encode_data(payloads, sizes, ["payload", 7])
+    flat = loader.deserialize(encoded, chunk_index=0)
+    assert isinstance(flat, FlatPyTree)
+    assert flat.leaves == ["payload", 7]
+    assert flat.materialize() == ("payload", 7)
 
 
 def test_tokens_loader_reads_blocks(tmp_path):

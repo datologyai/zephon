@@ -10,6 +10,7 @@ import os
 import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
+from dataclasses import dataclass
 from io import BytesIO, FileIO
 from typing import Any, Mapping, NamedTuple, Optional
 
@@ -44,6 +45,21 @@ _SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(LITDATA_SERIALIZERS)
 _NUMPY_DTYPES_REVERSE: dict[np.dtype, int] = {
     dtype: idx for idx, dtype in _NUMPY_DTYPES_MAPPING.items()
 }
+
+
+@dataclass(slots=True)
+class FlatPyTree:
+    """Lightweight wrapper around flattened pytree leaves with lazy reconstruction."""
+
+    leaves: list[Any]
+    spec: optree.PyTreeSpec
+
+    def materialize(self) -> Any:
+        """Reconstruct the original pytree structure."""
+        return optree.tree_unflatten(self.spec, self.leaves)
+
+    # Alias for ergonomics
+    to_tree = materialize
 
 
 _CONFIGURED_SERIALIZER_CACHE: dict[str, Serializer] = {}
@@ -181,10 +197,32 @@ class BaseItemLoader(ABC):
 class PyTreeLoader(BaseItemLoader):
     """Loader that reconstructs arbitrary pytrees from LitData payloads."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, return_flat_leaves: bool = False) -> None:
         super().__init__()
         self._chunk_filepath: str | None = None
         self._open_handle: FileIO | None = None
+        self._return_flat_leaves = return_flat_leaves
+        self._tree_spec: optree.PyTreeSpec | None = None
+        self._unflatten: Optional[functools.partial] = None
+
+    def setup(
+        self,
+        config: Mapping[str, Any],
+        chunks: list[Mapping[str, Any]],
+        serializers: Mapping[str, Serializer],
+        region_of_interest: Optional[list[tuple[int, int]]] = None,
+    ) -> None:
+        super().setup(config, chunks, serializers, region_of_interest)
+        flag = self._config.get("return_flat_leaves")
+        if isinstance(flag, bool):
+            self._return_flat_leaves = flag
+        spec = self._config.get("data_spec")
+        if isinstance(spec, optree.PyTreeSpec):
+            self._tree_spec = spec
+            self._unflatten = functools.partial(optree.tree_unflatten, spec)
+        else:
+            self._tree_spec = None
+            self._unflatten = None
 
     def generate_intervals(self) -> list[Interval]:
         intervals: list[Interval] = []
@@ -246,6 +284,11 @@ class PyTreeLoader(BaseItemLoader):
             data_bytes = raw_item_data[idx : idx + int(size)]
             data.append(serializer.deserialize(data_bytes))
             idx += int(size)
+        if self._return_flat_leaves:
+            assert self._tree_spec is not None
+            return FlatPyTree(list(data), self._tree_spec)
+        if self._unflatten is not None:
+            return self._unflatten(data)
         return optree.tree_unflatten(self._config["data_spec"], data)
 
     def close(self, chunk_index: int) -> None:
@@ -534,6 +577,7 @@ def treespec_dumps(spec: optree.PyTreeSpec) -> str:
 __all__ = [
     "_get_serializers",
     "BaseItemLoader",
+    "FlatPyTree",
     "Interval",
     "NoHeaderNumpySerializer",
     "NoHeaderTensorSerializer",

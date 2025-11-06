@@ -69,7 +69,10 @@ def _select_item_loader(
             raise ValueError("LitData tokens loader requires an integer 'block_size'")
         return TokensLoader(block_size=block_size)
 
-    return PyTreeLoader()
+    flag = config.get("return_flat_leaves")
+    return PyTreeLoader(
+        return_flat_leaves=bool(flag) if isinstance(flag, bool) else False
+    )
 
 
 def _extract_chunk_basename(chunk: Mapping[str, Any], shard_id: int) -> str:
@@ -208,6 +211,7 @@ class LitDataFormat(FormatHandler):
             shard_meta[shard_id] = {
                 "config": config,
                 "chunk": chunks[shard_id],
+                "interval": interval,
             }
 
         return shard_index, shard_meta
@@ -229,6 +233,7 @@ class LitDataFormat(FormatHandler):
                 raise ValueError(f"LitData shard {shard_id} metadata must be mapping")
             config = meta.get("config")
             chunk = meta.get("chunk")
+            interval = meta.get("interval")
             if not isinstance(config, Mapping) or not isinstance(chunk, Mapping):
                 raise ValueError(
                     f"LitData shard {shard_id} missing config or chunk data"
@@ -267,6 +272,9 @@ class LitDataFormat(FormatHandler):
                     "config": config,
                     "chunk": chunk,
                     "chunk_index": shard_id,
+                    **(
+                        {"interval": interval} if isinstance(interval, Interval) else {}
+                    ),
                 },
             )
         return locators
@@ -281,7 +289,9 @@ class LitDataFormat(FormatHandler):
         chunk = extra.get("chunk")
         if not isinstance(config, Mapping) or not isinstance(chunk, Mapping):
             raise RuntimeError("LitData shard extras missing config or chunk metadata")
-        return _LitDataShard(locator.root, config, chunk, local_ref)
+        interval = extra.get("interval")
+        cached_interval = interval if isinstance(interval, Interval) else None
+        return _LitDataShard(locator.root, config, chunk, local_ref, cached_interval)
 
 
 class _LitDataShard(RandomAccessShard):
@@ -293,25 +303,33 @@ class _LitDataShard(RandomAccessShard):
         config: Mapping[str, Any],
         chunk: Mapping[str, Any],
         local_ref: LocalShardRef,
+        interval: Interval | None = None,
     ) -> None:
         self._root = root
         self._raw_path = local_ref.raw.path
-        self._config = _normalize_config(config)
-        chunk_copy = dict(chunk)
-        self._chunk = chunk_copy
-
-        self._chunk_bytes = int(chunk_copy.get("chunk_bytes", local_ref.raw.bytes))
-
-        loader = _select_item_loader(self._config, [chunk_copy])
-        serializers = _get_serializers()
-        loader.setup(self._config, [chunk_copy], serializers, None)
-        intervals = loader.generate_intervals()
-        if not intervals:
-            self._length = 0
-            self._interval = Interval(0, 0, 0, 0)
+        if isinstance(config, _StreamingTemplateDict):
+            self._config = config
         else:
-            self._interval = intervals[0]
-            self._length = int(self._interval.chunk_end - self._interval.chunk_start)
+            self._config = _normalize_config(config)
+        self._chunk = chunk if isinstance(chunk, dict) else dict(chunk)
+        self._chunk_bytes = int(self._chunk.get("chunk_bytes", local_ref.raw.bytes))
+
+        loader = _select_item_loader(self._config, [self._chunk])
+        serializers = _get_serializers()
+        loader.setup(self._config, [self._chunk], serializers, None)
+        if isinstance(interval, Interval):
+            self._interval = interval
+            self._length = int(interval.chunk_end - interval.chunk_start)
+        else:
+            intervals = loader.generate_intervals()
+            if not intervals:
+                self._length = 0
+                self._interval = Interval(0, 0, 0, 0)
+            else:
+                self._interval = intervals[0]
+                self._length = int(
+                    self._interval.chunk_end - self._interval.chunk_start
+                )
 
         self._loader = loader
 
