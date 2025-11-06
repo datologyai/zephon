@@ -165,6 +165,7 @@ def _node_worker_proc(
         merged = dl.state_dict()  # triggers file-based aggregation in your Engine
         ckpt_q.put((rank, merged))
     finally:
+        ckpt_barrier.wait(timeout=45.0)  # wait that everybody is done at the end
         try:
             del it
         except Exception:

@@ -346,6 +346,9 @@ class Engine:
 
     def _clean_merged(self) -> None:
         if self._previous_merged_file is not None:
+            self._log(
+                f"We are cleaning up the previous local checkpoint synchronization file ({self._previous_merged_file}). If you face a timeout error after this, it means that your main rank/worker exits before all workers have consumed the checkpoint. You should ensure all workers have completed the checkpoint (e.g., via a barrier) if you checkpoint at the end of training. If no error occurs, all is well."
+            )
             self._previous_merged_file.unlink(missing_ok=True)
             self._previous_merged_file = None
 
@@ -1191,14 +1194,21 @@ class Engine:
             st = self._read_json(fp)
             if st is None:
                 if printt:
-                    print(f"{fp.name} covers nothing!")
+                    self._log(f"{fp.name} covers nothing!")
                 continue
             states.append(st)
             for k in st.get("progress", {}).keys():
                 if printt:
-                    print(f"{fp.name} covers lane {k}!")
+                    self._log(f"{fp.name} covers lane {k}!")
                 covered.add(int(k))
         return states, covered
+
+    def _log(self, msg: str) -> None:
+        worker_id, workers_per_rank = get_torch_worker_info()
+        print(
+            f"[PR {self._world.physical_rank}][PID {os.getpid()}][Worker {worker_id}/{workers_per_rank - 1}] {msg}",
+            file=sys.stderr,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         # Fast path: single node & single active worker → just return local
@@ -1245,7 +1255,7 @@ class Engine:
                 states, covered = self._read_states_for_round(round_id)
                 missing = sorted(expected_lanes - covered)
                 raise RuntimeError(
-                    f"Aggregation timeout after {self._agg_timeout_s}s. "
+                    f"[PID {os.getpid()}] Aggregation timeout after {self._agg_timeout_s}s. "
                     + f"Missing lanes={missing}; files={len(self._list_state_files(round_id))}"
                 )
 
@@ -1267,7 +1277,7 @@ class Engine:
         ok = self._wait_until(lambda: merged_path.exists(), self._agg_timeout_s)
         if not ok:
             raise RuntimeError(
-                f"Timed out after {self._agg_timeout_s}s waiting for merged checkpoint at {merged_path}"
+                f"[PID {os.getpid()}] Timed out after {self._agg_timeout_s}s waiting for merged checkpoint at {merged_path}"
             )
         merged = self._read_json(merged_path)
         my_path.unlink(missing_ok=True)

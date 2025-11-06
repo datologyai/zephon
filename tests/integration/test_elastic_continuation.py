@@ -1005,6 +1005,7 @@ def _rank_worker_proc(
         merged = eng.state_dict()  # triggers file aggregation for multi-rank
         ckpt_q.put((rank, merged))
     finally:
+        ckpt_barrier.wait(timeout=45.0)  # wait that everybody is done at the end
         try:
             del it
         except Exception:
@@ -1145,23 +1146,7 @@ def _phase_run_and_checkpoint_mp(
 # ---------- the one-for-one torchdata-style test (no DataLoader) ----------
 
 
-@pytest.mark.parametrize(
-    "op_queue_capacity",
-    [
-        4,
-        pytest.param(
-            256,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Currently this test fails for unknown reasons if we increase the maximum "
-                    "queue capacity between operators. It has probably something to do with how "
-                    "much data is inflight/some timings that change with a larger "
-                    "op_queue_capacity. We need to investigate this"
-                )
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("op_queue_capacity", [4, 256])
 def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
     tmp_path: Path, op_queue_capacity: int
 ) -> None:
