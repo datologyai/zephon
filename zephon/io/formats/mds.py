@@ -57,6 +57,9 @@ class _PassthroughMDSShard(RandomAccessShard):
         if close_method is not None:
             close_method()
 
+    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+        return [self._shard[i] for i in indices]
+
 
 class MDSFormat(FormatHandler):
     """Format handler for Mosaic MDS datasets."""

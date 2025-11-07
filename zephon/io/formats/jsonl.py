@@ -57,6 +57,39 @@ class JsonlShard(RandomAccessShard):
     def close(self) -> None:
         return None
 
+    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+        if not indices:
+            return []
+        # Validate and prepare scatter targets for duplicates and arbitrary order.
+        for i in indices:
+            if i < 0:
+                raise IndexError(i)
+        out: list[dict[str, object] | None] = [None] * len(indices)
+        waiting: dict[int, list[int]] = {}
+        for pos, idx in enumerate(indices):
+            waiting.setdefault(int(idx), []).append(pos)
+
+        # Single pass over file collecting requested rows.
+        with self._path.open("r", encoding="utf-8") as handle:
+            for lnum, line in enumerate(handle):
+                if not waiting:
+                    break
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if lnum in waiting:
+                    obj = json.loads(stripped)
+                    for pos in waiting[lnum]:
+                        out[pos] = obj
+                    del waiting[lnum]
+
+        if waiting:
+            # Some indices were out of range; report the smallest missing one.
+            missing = min(waiting.keys())
+            raise IndexError(missing)
+        rows = [x for x in out if x is not None]
+        return rows
+
 
 class JsonlFormat(FormatHandler):
     """Format handler for JSON Lines datasets."""

@@ -18,6 +18,9 @@ class _FakeShard(RandomAccessShard):
     def __getitem__(self, index: int) -> dict[str, object]:
         return self._rows[index]
 
+    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+        return [self[i] for i in indices]
+
     def __len__(self) -> int:  # pragma: no cover - not relevant
         return len(self._rows)
 
@@ -48,6 +51,7 @@ class _FakeResolver(ShardResolver):
 class _FakeHandler(FormatHandler):
     kind: str = "fakefmt"
     rows: list[dict[str, object]] | None = None
+    open_calls: int = 0
 
     def discover(self, path, storage):  # pragma: no cover - unused
         raise NotImplementedError
@@ -58,6 +62,7 @@ class _FakeHandler(FormatHandler):
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
+        self.open_calls += 1
         return _FakeShard(self.rows or [{"x": 1}])
 
 
@@ -170,3 +175,79 @@ def test_resilient_shard_records_load_stats(tmp_path) -> None:
     assert stats.read_ns >= 0
     assert stats.close_ns >= 0
     assert stats.touch_ns >= 0
+
+
+def _mk_locator(tmp_path) -> ShardLocator:
+    raw = ShardFile(basename="raw.bin", bytes=1, hashes={})
+    return ShardLocator(
+        dataset="d",
+        shard_id=0,
+        format="fakefmt",
+        root=str(tmp_path),
+        raw=raw,
+    )
+
+
+def test_resilient_getsamples_batch_single_open(tmp_path) -> None:
+    locator = _mk_locator(tmp_path)
+    handler = _FakeHandler(rows=[{"x": 10}, {"x": 20}, {"x": 30}])
+    local = LocalShardRef(
+        raw=LocalShardFile(path=tmp_path / "raw.bin", bytes=3), cache_hit=True
+    )
+    resolver = _FakeResolver(local=local)
+
+    shard = ResilientShard(
+        locator=locator,
+        resolver=resolver,
+        handler=handler,
+        length=3,
+        retry_attempts=1,
+        retry_initial_backoff=0.0,
+        retry_max_backoff=0.0,
+    )
+
+    rows_or_tuple = shard.getsamples([2, 0, 1])
+    assert isinstance(rows_or_tuple, tuple)
+    rows, stats = rows_or_tuple
+    assert [r["x"] for r in rows] == [30, 10, 20]
+    assert len(stats) == 3
+
+    # Single resolve/open/close path for the batch
+    assert resolver.resolve_calls == 1
+    assert resolver.touch_calls == 1
+    assert handler.open_calls == 1
+
+
+def test_resilient_getsamples_single_item_delegates(tmp_path) -> None:
+    locator = _mk_locator(tmp_path)
+    handler = _FakeHandler(rows=[{"x": 5}, {"x": 6}])
+    local = LocalShardRef(
+        raw=LocalShardFile(path=tmp_path / "raw.bin", bytes=2), cache_hit=True
+    )
+    resolver = _FakeResolver(local=local)
+
+    shard = ResilientShard(
+        locator=locator,
+        resolver=resolver,
+        handler=handler,
+        length=2,
+        retry_attempts=1,
+        retry_initial_backoff=0.0,
+        retry_max_backoff=0.0,
+    )
+
+    # Single element via getsamples([idx]) delegates to __getitem__ internally
+    rows_or_tuple = shard.getsamples([1])
+    assert isinstance(rows_or_tuple, tuple)
+    rows, stats = rows_or_tuple
+    assert [r["x"] for r in rows] == [6]
+    assert len(stats) == 1
+    # Exactly one resolve and one open for this call
+    assert resolver.resolve_calls == 1
+    assert resolver.touch_calls == 1
+    assert handler.open_calls == 1
+
+    # Now __getitem__ directly
+    row, st = shard[0]
+    assert row["x"] == 5
+    assert st.retries >= 0

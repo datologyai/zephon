@@ -2,7 +2,11 @@
 
 from typing import Mapping
 
-from .protocols import DatasetShardView, MultiDatasetShardStore, RandomAccessShard
+from .protocols import (
+    DatasetShardView,
+    MultiDatasetShardStore,
+    RandomAccessShard,
+)
 
 
 class InMemoryShard:
@@ -19,6 +23,9 @@ class InMemoryShard:
 
     def close(self) -> None:
         return None
+
+    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+        return [self[i] for i in indices]
 
 
 class InMemoryDatasetStore(DatasetShardView):

@@ -20,11 +20,23 @@ class SampleLoadStats:
 
 
 class RandomAccessShard(Protocol):
-    """A shard that supports len/index style random access."""
+    """A shard that supports len/index style random access with bulk reads.
+
+    Implementations MUST implement ``getsamples``. The return type mirrors the
+    pattern used by ``__getitem__``: implementations may return just the rows or
+    a tuple of (rows, per-sample stats). Implementations that do not surface
+    per-sample stats can simply loop over ``__getitem__`` and return the rows.
+    """
 
     def __getitem__(
         self, index: int
     ) -> dict[str, object] | tuple[dict[str, object], SampleLoadStats]: ...
+
+    def getsamples(
+        self, indices: list[int]
+    ) -> (
+        list[dict[str, object]] | tuple[list[dict[str, object]], list[SampleLoadStats]]
+    ): ...
 
     def __len__(self) -> int: ...
 

@@ -155,3 +155,14 @@ def test_file_backed_dataset_view_invalid_shard_raises(tmp_path) -> None:
         assert False, "expected KeyError"
     except KeyError:
         pass
+
+
+def _mk_locator(tmp_path) -> ShardLocator:
+    raw = ShardFile(basename="raw.bin", bytes=1, hashes={})
+    return ShardLocator(
+        dataset="d",
+        shard_id=0,
+        format="fakefmt",
+        root=str(tmp_path),
+        raw=raw,
+    )

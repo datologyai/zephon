@@ -348,6 +348,9 @@ class _LitDataShard(RandomAccessShard):
             self._chunk_bytes,
         )
 
+    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+        return [cast(dict[str, object], self[i]) for i in indices]
+
     def close(self) -> None:
         close = getattr(self._loader, "close", None)
         if callable(close):

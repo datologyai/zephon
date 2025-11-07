@@ -144,14 +144,31 @@ class FetchOp(DefaultSetup, DefaultFinalize[SampleRecord]):
             seen_before = shard_key in self._seen_shards
             shard_reopens = 1 if not reused_flag and seen_before else 0
 
-            for pos, lane_id, chunk_id, chunk_offset, sample_idx, sample_id in items:
-                # TODO: We should improve the typing/structure a bit: Right now we always return a ResilientShard, which returns stats. For in memory data we don't return stats. This requires us to define a RandomAccessShard to either return stats and the item or just the item since a resilientshard is also a random acccess shard. It works but we could re-think the relationship of RandomAcccessShard, ResilientShard, and what the view returns.
-                got = shard[sample_idx]
-                if isinstance(got, tuple):
-                    row, stats = got
-                    sample_stats.append(stats)
-                else:
-                    row = got
+            # Sort by sample_idx to maximize locality; then scatter back.
+            items_sorted = sorted(items, key=lambda t: t[4])
+            sorted_indices = [t[4] for t in items_sorted]
+
+            # TODO(MaxiBoether): We should improve the typing/structure a bit: Right now we
+            # always return a ResilientShard for file-backed data, which returns stats.
+            # For in-memory data and some formats we don't return stats. This requires
+            # RandomAccessShard.getsamples to either return stats and the items or just
+            # the items. It works but we could re-think the relationship of
+            # RandomAccessShard, ResilientShard, and what the view returns.
+            got_many = shard.getsamples(sorted_indices)
+            if isinstance(got_many, tuple):
+                rows, stats_list = got_many
+                sample_stats.extend(stats_list)
+            else:
+                rows = got_many
+
+            for (
+                pos,
+                lane_id,
+                chunk_id,
+                chunk_offset,
+                _sample_idx,
+                sample_id,
+            ), row in zip(items_sorted, rows, strict=True):
                 meta = SampleMeta(
                     sample_id=sample_id,
                     lane_id=lane_id,

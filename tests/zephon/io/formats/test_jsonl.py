@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from zephon.io.dataset import Dataset
-from zephon.io.formats.jsonl import JsonlFormat
+from zephon.io.formats.jsonl import JsonlFormat, JsonlShard
 from zephon.io.storage.local import LocalFSBackend
 from zephon.io.types import LocalShardFile, LocalShardRef
 
@@ -95,3 +95,19 @@ def test_jsonl_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) -
     handler = JsonlFormat()
     with pytest.raises(ValueError):
         _ = handler.build_locators(ds)
+
+
+def test_jsonl_shard_getsamples_unsorted_and_duplicates(tmp_path: Path) -> None:
+    p = tmp_path / "shard.jsonl"
+    rows = [{"v": i} for i in range(6)]
+    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    shard = JsonlShard(p)
+
+    out = shard.getsamples([4, 1, 4, 0])
+    assert [r["v"] for r in out] == [4, 1, 4, 0]
+
+    assert shard.getsamples([]) == []
+
+    with pytest.raises(IndexError):
+        _ = shard.getsamples([10])

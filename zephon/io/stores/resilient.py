@@ -148,6 +148,113 @@ class ResilientShard(RandomAccessShard):
         stats.optimistic_reuses = optimistic_reuses
         return item, stats
 
+    def getsamples(
+        self, indices: list[int]
+    ) -> (
+        list[dict[str, object]] | tuple[list[dict[str, object]], list[SampleLoadStats]]
+    ):
+        if not indices:
+            return []
+
+        # Fast path: single element delegates to __getitem__
+        if len(indices) == 1:
+            item, stats = self[indices[0]]
+            return [item], [stats]
+
+        # Validate index bounds
+        for idx in indices:
+            if idx < 0:
+                raise IndexError(idx)
+            if self._length and idx >= self._length:
+                raise IndexError(idx)
+
+        attempts = 0
+        cache_hits = 0
+        cache_misses = 0
+
+        resolve_ns_total = 0
+        open_ns_total = 0
+        read_ns_total = 0
+        close_ns_total = 0
+        touch_ns_total = 0
+
+        def _load_many() -> list[dict[str, object]]:
+            nonlocal attempts, cache_hits, cache_misses
+            nonlocal \
+                resolve_ns_total, \
+                open_ns_total, \
+                read_ns_total, \
+                close_ns_total, \
+                touch_ns_total
+
+            attempts += 1
+            resolve_start = self.timer.start()
+            local_ref = self._resolver.resolve(self._locator)
+            resolve_ns_total += self.timer.elapsed(resolve_start)
+
+            if local_ref.cache_hit:
+                cache_hits += 1
+            else:
+                cache_misses += 1
+
+            open_start = self.timer.start()
+            shard = self._handler.open_shard(self._locator, local_ref)
+            open_ns_total += self.timer.elapsed(open_start)
+
+            try:
+                read_start = self.timer.start()
+                rows = shard.getsamples(indices)
+                assert not isinstance(
+                    rows, tuple
+                )  # until we improve typing -- indicates no recursion in resilientshards.
+            finally:
+                read_ns_total += self.timer.elapsed(read_start)
+                close_start = self.timer.start()
+                with contextlib.suppress(Exception):
+                    shard.close()
+                close_ns_total += self.timer.elapsed(close_start)
+
+            touch_start = self.timer.start()
+            self._resolver.touch(self._locator)
+            touch_ns_total += self.timer.elapsed(touch_start)
+            return rows
+
+        rows = self._retrying(_load_many)
+
+        n = len(rows)
+        stats_list: list[SampleLoadStats] = []
+        if n > 0:
+
+            def _split(total: int) -> list[int]:
+                base = total // n
+                rem = total % n
+                return [base + (1 if i < rem else 0) for i in range(n)]
+
+            resolve_parts = _split(resolve_ns_total)
+            open_parts = _split(open_ns_total)
+            read_parts = _split(read_ns_total)
+            close_parts = _split(close_ns_total)
+            touch_parts = _split(touch_ns_total)
+            retry_count = max(0, attempts - 1)
+            hit_parts = _split(cache_hits)
+            miss_parts = _split(cache_misses)
+
+            for i in range(n):
+                stats_list.append(
+                    SampleLoadStats(
+                        resolve_ns=resolve_parts[i],
+                        open_ns=open_parts[i],
+                        read_ns=read_parts[i],
+                        close_ns=close_parts[i],
+                        touch_ns=touch_parts[i],
+                        retries=retry_count,
+                        cache_hits=hit_parts[i],
+                        cache_misses=miss_parts[i],
+                    )
+                )
+
+        return rows, stats_list
+
     def close(self) -> None:
         return None
 
