@@ -16,6 +16,7 @@ class SampleLoadStats:
     retries: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    optimistic_reuses: int = 0
 
 
 class RandomAccessShard(Protocol):
