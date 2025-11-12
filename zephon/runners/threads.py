@@ -37,7 +37,18 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Iterator, Optional, TypeAlias, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    Optional,
+    Sequence,
+    TypeAlias,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from zephon.core.constants import EngineSample, SampleBatch, SampleRecord
 from zephon.core.graph import Node, Stage
@@ -48,6 +59,15 @@ from zephon.observability.size_estimator import estimate_bytes
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
 from zephon.utils import buffered_iterable
+
+_QItem = TypeVar("_QItem")
+
+
+class _Stop:
+    pass
+
+
+StopToken = _Stop
 
 
 class ThreadStageRunner:
@@ -121,7 +141,9 @@ class ThreadStageRunner:
             init=False, default_factory=dict
         )
         inflight: "ThreadStageRunner._InflightCounter" = field(init=False)
-        input_queue: queue.Queue[object] = field(init=False)
+        input_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken] = (
+            field(init=False)
+        )
         result_queue: queue.Queue["ThreadStageRunner.ResultItem"] = field(init=False)
         _instance_queue: queue.Queue[Op[Any, Any]] = field(init=False, repr=False)
 
@@ -170,16 +192,18 @@ class ThreadStageRunner:
             self.first_ts_ns = None
 
         def enqueue(
-            self, elems: list["ThreadStageRunner.StreamIn"], *, force: bool = False
+            self, elems: Sequence["ThreadStageRunner.StreamIn"], *, force: bool = False
         ) -> list[tuple[list["ThreadStageRunner.StreamIn"], int]]:
             ready: list[tuple[list["ThreadStageRunner.StreamIn"], int]] = []
             if not elems and not force:
                 return ready
             if self.buffer_cfg is None:
-                for elem in elems:
-                    ready.append(([elem], 0))
-                if force and self.buffer:
-                    ready.append(self._drain_buffer())
+                # Preserve the upstream microbatch as-is (no internal batching),
+                # so process_many can vectorize when available.
+                if elems:
+                    batch = elems if isinstance(elems, list) else list(elems)
+                    ready.append((batch, 0))
+                # there is no internal buffer in the 'None' path, so nothing to flush on 'force'
                 return ready
 
             now_ns = time.perf_counter_ns()
@@ -274,8 +298,8 @@ class ThreadStageRunner:
 
     @dataclass
     class _RunContext:
-        stop_token: object
-        stage_out_queue: queue.Queue[object]
+        stop_token: StopToken
+        stage_out_queue: queue.Queue["ThreadStageRunner.StreamOut | StopToken"]
         stop_event: threading.Event
         pumps: list[threading.Thread] = field(default_factory=list)
         feeder: threading.Thread | None = None
@@ -344,10 +368,176 @@ class ThreadStageRunner:
     def _create_context(self) -> "ThreadStageRunner._RunContext":
         out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
         return ThreadStageRunner._RunContext(
-            stop_token=object(),
+            stop_token=StopToken(),
             stage_out_queue=queue.Queue(maxsize=out_capacity),
             stop_event=threading.Event(),
         )
+
+    def _put_result(
+        self,
+        state: "ThreadStageRunner._OperatorState",
+        result: list["ThreadStageRunner.StreamOut"],
+        context: "ThreadStageRunner._RunContext",
+        *,
+        seq: Optional[int] = None,
+    ) -> None:
+        """Enqueue the operator output, regardless of how many elements it contains.
+
+        ``result`` can be empty (filter) or contain more elements than the input
+        micro-batch (fan-out).  We push the whole list as one unit; downstream pumps
+        iterate element-by-element when emitting to their consumers.
+        """
+        # In deterministic mode we MUST enqueue even empty results so the
+        # reordering gate can advance emit_seq. In non-deterministic mode
+        # it's fine to drop empties.
+        payload: ThreadStageRunner.ResultItem
+        if state.deterministic:
+            assert seq is not None, "Deterministic mode requires sequence numbers"
+            payload = (seq, result)
+        else:
+            if not result:
+                return
+
+            payload = result
+
+        while True:
+            try:
+                state.result_queue.put(payload, timeout=0.1)
+                return
+            except queue.Full:
+                if context.stop_event.is_set():
+                    # If shutdown has been requested we still retry until a consumer
+                    # drains space; dropping here would lose data emitted before the
+                    # stop signal propagated.
+                    continue
+
+    def _operator_loop(
+        self, idx: int, context: "ThreadStageRunner._RunContext"
+    ) -> None:
+        state = self.ops[idx]
+        next_queue: (
+            queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken] | None
+        ) = self.ops[idx + 1].input_queue if idx + 1 < len(self.ops) else None
+
+        state.reset_buffers()
+        upstream_closed = False
+
+        while True:
+            self._drain_results(state, next_queue, context)
+
+            if upstream_closed:
+                # Once upstream is closed we keep draining until no tasks
+                # remain. Only then do we forward finalize() output and
+                # the stop token downstream.
+                if (
+                    state.inflight.is_zero()
+                    and state.result_queue.empty()
+                    and not state.buffer
+                ):
+                    tail = state.finalize()
+                    if tail:
+                        self._emit_downstream(tail, next_queue, context)
+                    self._signal_downstream_stop(next_queue, context)
+                    return
+                try:
+                    item = state.result_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if state.deterministic:
+                    rseq, payload = cast(
+                        tuple[int, list[ThreadStageRunner.StreamOut]], item
+                    )
+                    state.pending_results[int(rseq)] = payload
+                    # Emit in order as far as possible
+                    while state.emit_seq in state.pending_results:
+                        ready_elems = state.pending_results.pop(state.emit_seq)
+                        state.emit_seq += 1
+                        self._emit_downstream(ready_elems, next_queue, context)
+                else:
+                    assert isinstance(item, list)
+                    self._emit_downstream(item, next_queue, context)
+                continue
+
+            if context.stop_event.is_set():
+                # Upstream is tearing down (either gracefully or because an error
+                # was recorded).  Flush whatever we buffered so downstream stages
+                # observe every element before we forward the stop signal.
+                upstream_closed = True
+                ready = state.enqueue([], force=True)
+                for batch, wait_ns in ready:
+                    self._schedule_batch(context, state, batch, wait_ns=wait_ns)
+                continue
+
+            try:
+                item = state.input_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            if isinstance(item, _Stop):
+                upstream_closed = True
+                ready = state.enqueue([], force=True)
+            else:
+                ready = state.enqueue(item, force=False)
+
+            if ready:
+                # Schedule at most one wave per inner loop; then drain.
+                # We schedule 1 batch for every op instance (state.parallelism) before draining again.
+                burst = max(1, state.parallelism)
+                for i, (batch, wait_ns) in enumerate(ready):
+                    self._schedule_batch(context, state, batch, wait_ns=wait_ns)
+                    # Let done callbacks blocked on result_queue.put() make progress.
+                    # Also keeps next operator fed so its input_queue doesn’t starve.
+                    if (i + 1) % burst == 0:
+                        self._drain_results(state, next_queue, context)
+
+    def _drain_results(
+        self,
+        state: "ThreadStageRunner._OperatorState",
+        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
+        | None,
+        context: "ThreadStageRunner._RunContext",
+    ) -> None:
+        while True:
+            try:
+                item = state.result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if state.deterministic:
+                rseq, payload = cast(
+                    tuple[int, list[ThreadStageRunner.StreamOut]], item
+                )
+                state.pending_results[int(rseq)] = payload
+                while state.emit_seq in state.pending_results:
+                    ready_elems = state.pending_results.pop(state.emit_seq)
+                    state.emit_seq += 1
+                    self._emit_downstream(ready_elems, next_queue, context)
+            else:
+                self._emit_downstream(
+                    cast(list[ThreadStageRunner.StreamOut], item), next_queue, context
+                )
+
+    def _emit_downstream(
+        self,
+        elements: list["ThreadStageRunner.StreamOut"],
+        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
+        | None,
+        context: "ThreadStageRunner._RunContext",
+    ) -> None:
+        if not elements:
+            return
+        # Preserve order: results are forwarded element-by-element so downstream
+        # operators observe the same ordering they would have seen in a single-threaded
+        # execution.
+
+        # Between operators: ship the whole micro-batch as one queue item to amortize costs.
+        # At the final boundary (next_queue is None), keep yielding element-by-element
+        # so external consumers see the same stream of records/batches as before.
+        if next_queue is not None:
+            self._put_into_queue(next_queue, elements, context)
+            return
+
+        for elem in elements:
+            self._put_into_queue(context.stage_out_queue, elem, context)
 
     def _schedule_batch(
         self,
@@ -360,6 +550,7 @@ class ThreadStageRunner:
         if not batch or context.stop_event.is_set():
             return
         instance = state.acquire_instance()
+
         seq: int | None = None
         if state.deterministic:
             seq = state.next_seq
@@ -443,164 +634,10 @@ class ThreadStageRunner:
 
         future.add_done_callback(done_callback)
 
-    def _put_result(
-        self,
-        state: "ThreadStageRunner._OperatorState",
-        result: list["ThreadStageRunner.StreamOut"],
-        context: "ThreadStageRunner._RunContext",
-        *,
-        seq: Optional[int] = None,
-    ) -> None:
-        """Enqueue the operator output, regardless of how many elements it contains.
-
-        ``result`` can be empty (filter) or contain more elements than the input
-        micro-batch (fan-out).  We push the whole list as one unit; downstream pumps
-        iterate element-by-element when emitting to their consumers.
-        """
-        # In deterministic mode we MUST enqueue even empty results so the
-        # reordering gate can advance emit_seq. In non-deterministic mode
-        # it's fine to drop empties.
-        payload: ThreadStageRunner.ResultItem
-        if state.deterministic:
-            assert seq is not None, "Deterministic mode requires sequence numbers"
-            payload = (seq, result)
-        else:
-            if not result:
-                return
-
-            payload = result
-
-        while True:
-            try:
-                state.result_queue.put(payload, timeout=0.1)
-                return
-            except queue.Full:
-                if context.stop_event.is_set():
-                    # If shutdown has been requested we still retry until a consumer
-                    # drains space; dropping here would lose data emitted before the
-                    # stop signal propagated.
-                    continue
-
-    def _operator_loop(
-        self, idx: int, context: "ThreadStageRunner._RunContext"
-    ) -> None:
-        state = self.ops[idx]
-        next_queue: queue.Queue[object] | None = (
-            self.ops[idx + 1].input_queue if idx + 1 < len(self.ops) else None
-        )
-
-        state.reset_buffers()
-        upstream_closed = False
-
-        while True:
-            self._drain_results(state, next_queue, context)
-
-            if upstream_closed:
-                # Once upstream is closed we keep draining until no tasks
-                # remain. Only then do we forward finalize() output and
-                # the stop token downstream.
-                if (
-                    state.inflight.is_zero()
-                    and state.result_queue.empty()
-                    and not state.buffer
-                ):
-                    tail = state.finalize()
-                    if tail:
-                        self._emit_downstream(tail, next_queue, context)
-                    self._signal_downstream_stop(next_queue, context)
-                    return
-                try:
-                    item = state.result_queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
-                if state.deterministic:
-                    rseq, payload = cast(
-                        tuple[int, list[ThreadStageRunner.StreamOut]], item
-                    )
-                    state.pending_results[int(rseq)] = payload
-                    # Emit in order as far as possible
-                    while state.emit_seq in state.pending_results:
-                        ready_elems = state.pending_results.pop(state.emit_seq)
-                        state.emit_seq += 1
-                        self._emit_downstream(ready_elems, next_queue, context)
-                else:
-                    assert isinstance(item, list)
-                    self._emit_downstream(item, next_queue, context)
-                continue
-
-            if context.stop_event.is_set():
-                # Upstream is tearing down (either gracefully or because an error
-                # was recorded).  Flush whatever we buffered so downstream stages
-                # observe every element before we forward the stop signal.
-                upstream_closed = True
-                ready = state.enqueue(
-                    cast(list[ThreadStageRunner.StreamIn], []), force=True
-                )
-                for batch, wait_ns in ready:
-                    self._schedule_batch(context, state, batch, wait_ns=wait_ns)
-                continue
-
-            try:
-                item = state.input_queue.get(timeout=0.05)
-            except queue.Empty:
-                continue
-
-            if item is context.stop_token:
-                upstream_closed = True
-                ready = state.enqueue(
-                    cast(list[ThreadStageRunner.StreamIn], []), force=True
-                )
-            else:
-                ready = state.enqueue(
-                    [cast(ThreadStageRunner.StreamIn, item)], force=False
-                )
-
-            for batch, wait_ns in ready:
-                self._schedule_batch(context, state, batch, wait_ns=wait_ns)
-
-    def _drain_results(
-        self,
-        state: "ThreadStageRunner._OperatorState",
-        next_queue: queue.Queue[object] | None,
-        context: "ThreadStageRunner._RunContext",
-    ) -> None:
-        while True:
-            try:
-                item = state.result_queue.get_nowait()
-            except queue.Empty:
-                break
-            if state.deterministic:
-                rseq, payload = cast(
-                    tuple[int, list[ThreadStageRunner.StreamOut]], item
-                )
-                state.pending_results[int(rseq)] = payload
-                while state.emit_seq in state.pending_results:
-                    ready_elems = state.pending_results.pop(state.emit_seq)
-                    state.emit_seq += 1
-                    self._emit_downstream(ready_elems, next_queue, context)
-            else:
-                self._emit_downstream(
-                    cast(list[ThreadStageRunner.StreamOut], item), next_queue, context
-                )
-
-    def _emit_downstream(
-        self,
-        elements: list["ThreadStageRunner.StreamOut"],
-        next_queue: queue.Queue[object] | None,
-        context: "ThreadStageRunner._RunContext",
-    ) -> None:
-        if not elements:
-            return
-        # Preserve order: results are forwarded element-by-element so downstream
-        # operators observe the same ordering they would have seen in a single-threaded
-        # execution.
-        target = next_queue if next_queue is not None else context.stage_out_queue
-        for elem in elements:
-            self._put_into_queue(target, elem, context)
-
     def _signal_downstream_stop(
         self,
-        next_queue: queue.Queue[object] | None,
+        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
+        | None,
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         if next_queue is None:
@@ -610,8 +647,8 @@ class ThreadStageRunner:
 
     def _put_into_queue(
         self,
-        q: queue.Queue[object],
-        item: object,
+        q: "queue.Queue[_QItem]",
+        item: "_QItem",
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         while True:
@@ -678,7 +715,7 @@ class ThreadStageRunner:
                 for elem in upstream:
                     if context.stop_event.is_set():
                         break
-                    self._put_into_queue(first_state.input_queue, elem, context)
+                    self._put_into_queue(first_state.input_queue, [elem], context)
             except BaseException as exc:  # noqa: BLE001
                 self._record_error(context, exc)
             finally:
@@ -731,9 +768,9 @@ class ThreadStageRunner:
                             if context.stop_event.is_set():
                                 break
                             continue
-                        if item is context.stop_token:
+                        if isinstance(item, _Stop):
                             break
-                        yield cast(ThreadStageRunner.StreamOut, item)
+                        yield item
                     if context.error is not None:
                         raise context.error
                 finally:
