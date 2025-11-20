@@ -15,7 +15,13 @@ from typing import (
     cast,
 )
 
-from zephon.core.constants import EngineSample, SampleBatch, SampleId, SampleRecord
+from zephon.core.constants import (
+    EngineSample,
+    SampleBatch,
+    SampleId,
+    SampleRecord,
+    StreamItem,
+)
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Plan
 from zephon.core.planner import Planner
@@ -295,9 +301,9 @@ class Pipeline:
             self._engine.close()
 
     def _yield_while_notifying(
-        self, source: Iterable[SampleRecord | SampleBatch]
-    ) -> Iterator[SampleRecord | SampleBatch]:
-        """Wrap an iterable of SampleBatch | SampleRecord.
+        self, source: Iterable[StreamItem]
+    ) -> Iterator[StreamItem]:
+        """Wrap an iterable that yields stream elements (SampleRecord or SampleBatch).
 
         - If item is SampleBatch -> yield item.
         - If item is SampleRecord -> yield the item.

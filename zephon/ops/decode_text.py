@@ -5,7 +5,7 @@
 
 from typing import Any, Optional, Sequence
 
-from zephon.core.constants import SampleRecord
+from zephon.core.constants import SamplePayload, SamplePayloadDict, SampleRecord
 from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
@@ -48,8 +48,13 @@ class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             result = result.lower()
         return result
 
+    def _expect_mapping(self, payload: SamplePayload) -> SamplePayloadDict:
+        if not isinstance(payload, dict):
+            raise TypeError("DecodeText expects dict payloads")
+        return payload
+
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
-        payload = dict(elem.payload)
+        payload = dict(self._expect_mapping(elem.payload))
         for field in self.fields:
             if field in payload:
                 payload[field] = self._decode(payload[field])

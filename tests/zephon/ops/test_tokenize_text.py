@@ -40,17 +40,26 @@ def _rec(text: Any, *, field: str = "text") -> SampleRecord:
     return SampleRecord(meta=meta, payload={field: text})
 
 
+def _payload_dict(record: SampleRecord) -> dict[str, Any]:
+    payload = record.payload
+    assert isinstance(payload, dict)
+    return payload
+
+
 def test_tokenize_fallback_process_one_and_many() -> None:
     op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__"))
     r1 = _rec("hello world")
     out1 = op.process_one(r1)[0]
-    assert "input_ids" in out1.payload and "attention_mask" in out1.payload
+    payload = _payload_dict(out1)
+    assert "input_ids" in payload and "attention_mask" in payload
     # many
     r2 = _rec("more words")
     bulk = op.process_many([r1, r2])
     assert len(bulk) == 2
-    assert all("input_ids" in r.payload for r in bulk)
-    assert all("attention_mask" in r.payload for r in bulk)
+    for rec in bulk:
+        payload = _payload_dict(rec)
+        assert "input_ids" in payload
+        assert "attention_mask" in payload
 
 
 def test_tokenize_custom_field_and_missing_field() -> None:
@@ -60,8 +69,9 @@ def test_tokenize_custom_field_and_missing_field() -> None:
     r = _rec("ignored", field="text")  # text present, but tokenizer uses "title"
     out = op.process_one(r)[0]
     # When field is missing, fallback tokenizer sees empty string
-    assert out.payload.get("input_ids", []) == []
-    assert out.payload.get("attention_mask", []) == []
+    payload = _payload_dict(out)
+    assert payload.get("input_ids", []) == []
+    assert payload.get("attention_mask", []) == []
 
 
 def test_tokenize_disable_attention_mask() -> None:
@@ -70,8 +80,9 @@ def test_tokenize_disable_attention_mask() -> None:
     )
     op = _setup(op)
     out = op.process_one(_rec("hi there"))[0]
-    assert "input_ids" in out.payload
-    assert "attention_mask" not in out.payload
+    payload = _payload_dict(out)
+    assert "input_ids" in payload
+    assert "attention_mask" not in payload
 
 
 def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
@@ -91,7 +102,7 @@ def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
     tok = ToyTok()
     op = _setup(TokenizeText(tokenizer=tok))
     out = op.process_many([_rec("x"), _rec("y")])
-    assert out[0].payload["input_ids"] == [1, 2, 3]
+    assert _payload_dict(out[0])["input_ids"] == [1, 2, 3]
     assert op.resolved_tokenizer_id() == "toy-tokenizer"
 
 
@@ -116,7 +127,7 @@ def test_tokenizer_id_load_failure_falls_back(
     op = _setup(TokenizeText(tokenizer=None, tokenizer_id="some-model"))
     out = op.process_one(_rec("hello"))[0]
     # Fallback engaged internally, but resolved_tokenizer_id returns configured id
-    assert "input_ids" in out.payload
+    assert "input_ids" in _payload_dict(out)
     assert op.resolved_tokenizer_id() == "some-model"
 
 

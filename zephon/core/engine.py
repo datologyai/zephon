@@ -56,6 +56,7 @@ from zephon.core.constants import (
     SampleCursor,
     SampleId,
     SampleRecord,
+    StreamItem,
 )
 from zephon.core.graph import Plan, Stage
 from zephon.core.replay import ReplayConfigService
@@ -96,7 +97,7 @@ def get_torch_worker_info() -> tuple[int, int]:
         return 0, 1
 
 
-def _extract_lane_id(item: SampleRecord | SampleBatch) -> int:
+def _extract_lane_id(item: StreamItem) -> int:
     if isinstance(item, SampleRecord):
         return int(item.meta.lane_id)
     assert isinstance(item, SampleBatch)
@@ -777,8 +778,8 @@ class Engine:
 
     def _lane_rr_iter(
         self,
-        upstream: Iterable[SampleRecord | SampleBatch],
-    ) -> Iterator[SampleRecord | SampleBatch]:
+        upstream: Iterable[StreamItem],
+    ) -> Iterator[StreamItem]:
         """Tail round-robin multiplexer over the lanes owned by THIS DataLoader worker.
 
         Purpose
@@ -843,9 +844,7 @@ class Engine:
             yield from upstream
             return
 
-        buffers: dict[int, deque[SampleRecord | SampleBatch]] = {
-            lane: deque() for lane in lanes
-        }
+        buffers: dict[int, deque[StreamItem]] = {lane: deque() for lane in lanes}
         it = iter(upstream)
         upstream_ended = False
         key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
@@ -920,7 +919,7 @@ class Engine:
                 break
         self._rr_next_idx[key] = idx
 
-    def build_iter(self) -> Iterator[SampleRecord | SampleBatch]:
+    def build_iter(self) -> Iterator[StreamItem]:
         """Return an iterator that threads the work stream through all stages."""
         if self._metrics_reporter is not None and not self._metrics_started:
             self._metrics_reporter.start()

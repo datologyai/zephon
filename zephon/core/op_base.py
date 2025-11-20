@@ -5,6 +5,7 @@
 
 from typing import Any, Generic, Optional, Protocol, TypeVar
 
+from zephon.core.constants import StreamItem
 from zephon.core.traits import Buffering, OpTraits
 
 
@@ -20,7 +21,7 @@ class OpContext:
 
 
 InT = TypeVar("InT")
-OutT = TypeVar("OutT")
+OutT = TypeVar("OutT", bound=StreamItem)
 
 
 class Op(Protocol[InT, OutT]):

@@ -50,7 +50,13 @@ from typing import (
     cast,
 )
 
-from zephon.core.constants import EngineSample, SampleBatch, SampleRecord
+from zephon.core.constants import (
+    Microbatch,
+    RunnerStreamIn,
+    SampleBatch,
+    SampleRecord,
+    StreamItem,
+)
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import Op, OpContext
 from zephon.core.traits import Buffering
@@ -82,12 +88,9 @@ class ThreadStageRunner:
     requiring new stages.
     """
 
-    # Input/output item types at the stage boundary.
-    StreamIn: TypeAlias = EngineSample | SampleRecord | SampleBatch
-    StreamOut: TypeAlias = SampleRecord | SampleBatch
-    # When deterministic=False the result queue carries a plain list[StreamOut].
-    # When deterministic=True it carries (seq:int, payload:list[StreamOut]).
-    ResultItem: TypeAlias = Union[list[StreamOut], tuple[int, list[StreamOut]]]
+    # When deterministic=False the result queue carries a plain micro-batch payload.
+    # When deterministic=True it carries (seq:int, payload=Microbatch).
+    ResultItem: TypeAlias = Union[Microbatch, tuple[int, Microbatch]]
 
     class _InflightCounter:
         """Track how many tasks are currently executing for an operator."""
@@ -124,12 +127,12 @@ class ThreadStageRunner:
         stage_name: str = ""
         collect_stats: bool = False
         op_index: int = 0  # position within the stage for metrics/metadata
-        instances: list[Op[Any, Any]] = field(init=False, default_factory=list)
-        parallelism: int = field(init=False)
-        buffer_cfg: Buffering | None = field(init=False)
-        buffer: list["ThreadStageRunner.StreamIn"] = field(
+        instances: list[Op[RunnerStreamIn, StreamItem]] = field(
             init=False, default_factory=list
         )
+        parallelism: int = field(init=False)
+        buffer_cfg: Buffering | None = field(init=False)
+        buffer: list[RunnerStreamIn] = field(init=False, default_factory=list)
         buffer_ts_ns: list[int] = field(
             init=False, default_factory=list
         )  # arrival timestamp per buffered element
@@ -137,15 +140,15 @@ class ThreadStageRunner:
         # Deterministic sequencing state (per-operator)
         next_seq: int = field(init=False, default=0)
         emit_seq: int = field(init=False, default=0)
-        pending_results: dict[int, list["ThreadStageRunner.StreamOut"]] = field(
-            init=False, default_factory=dict
-        )
+        pending_results: dict[int, Microbatch] = field(init=False, default_factory=dict)
         inflight: "ThreadStageRunner._InflightCounter" = field(init=False)
-        input_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken] = (
-            field(init=False)
+        input_queue: queue.Queue[Sequence[RunnerStreamIn] | StopToken] = field(
+            init=False
         )
         result_queue: queue.Queue["ThreadStageRunner.ResultItem"] = field(init=False)
-        _instance_queue: queue.Queue[Op[Any, Any]] = field(init=False, repr=False)
+        _instance_queue: queue.Queue[Op[RunnerStreamIn, StreamItem]] = field(
+            init=False, repr=False
+        )
 
         def __post_init__(self) -> None:
             traits = self.node.op.traits()
@@ -180,10 +183,12 @@ class ThreadStageRunner:
                     ),
                 )
 
-        def acquire_instance(self) -> Op[Any, Any]:
+        def acquire_instance(
+            self,
+        ) -> Op[RunnerStreamIn, StreamItem]:
             return self._instance_queue.get()
 
-        def release_instance(self, instance: Op[Any, Any]) -> None:
+        def release_instance(self, instance: Op[RunnerStreamIn, StreamItem]) -> None:
             self._instance_queue.put(instance)
 
         def reset_buffers(self) -> None:
@@ -192,9 +197,9 @@ class ThreadStageRunner:
             self.first_ts_ns = None
 
         def enqueue(
-            self, elems: Sequence["ThreadStageRunner.StreamIn"], *, force: bool = False
-        ) -> list[tuple[list["ThreadStageRunner.StreamIn"], int]]:
-            ready: list[tuple[list["ThreadStageRunner.StreamIn"], int]] = []
+            self, elems: Sequence[RunnerStreamIn], *, force: bool = False
+        ) -> list[tuple[list[RunnerStreamIn], int]]:
+            ready: list[tuple[list[RunnerStreamIn], int]] = []
             if not elems and not force:
                 return ready
             if self.buffer_cfg is None:
@@ -232,7 +237,7 @@ class ThreadStageRunner:
 
         def _pop_batch(
             self, size: int, now_ns: int
-        ) -> tuple[list["ThreadStageRunner.StreamIn"], int]:
+        ) -> tuple[list[RunnerStreamIn], int]:
             current_ns = now_ns
             chunk = self.buffer[:size]
             timestamps = self.buffer_ts_ns[:size]
@@ -249,12 +254,12 @@ class ThreadStageRunner:
 
         def _drain_buffer(
             self, *, now_ns: Optional[int] = None
-        ) -> tuple[list["ThreadStageRunner.StreamIn"], int]:
+        ) -> tuple[list[RunnerStreamIn], int]:
             current_ns = now_ns if now_ns is not None else time.perf_counter_ns()
             return self._pop_batch(len(self.buffer), current_ns)
 
-        def finalize(self) -> list["ThreadStageRunner.StreamOut"]:
-            tail: list["ThreadStageRunner.StreamOut"] = []
+        def finalize(self) -> Microbatch:
+            tail: Microbatch = []
             for instance in self.instances:
                 tail.extend(instance.finalize())
             return tail
@@ -281,7 +286,7 @@ class ThreadStageRunner:
                 return
 
             remove = self.parallelism - desired
-            removed: list[Op[Any, Any]] = []
+            removed: list[Op[RunnerStreamIn, StreamItem]] = []
             try:
                 for _ in range(remove):
                     inst = self._instance_queue.get_nowait()
@@ -299,7 +304,7 @@ class ThreadStageRunner:
     @dataclass
     class _RunContext:
         stop_token: StopToken
-        stage_out_queue: queue.Queue["ThreadStageRunner.StreamOut | StopToken"]
+        stage_out_queue: queue.Queue[StreamItem | StopToken]
         stop_event: threading.Event
         pumps: list[threading.Thread] = field(default_factory=list)
         feeder: threading.Thread | None = None
@@ -376,16 +381,15 @@ class ThreadStageRunner:
     def _put_result(
         self,
         state: "ThreadStageRunner._OperatorState",
-        result: list["ThreadStageRunner.StreamOut"],
+        result: Microbatch,
         context: "ThreadStageRunner._RunContext",
         *,
         seq: Optional[int] = None,
     ) -> None:
-        """Enqueue the operator output, regardless of how many elements it contains.
+        """Enqueue the operator output micro-batch as a single queue payload.
 
-        ``result`` can be empty (filter) or contain more elements than the input
-        micro-batch (fan-out).  We push the whole list as one unit; downstream pumps
-        iterate element-by-element when emitting to their consumers.
+        ``result`` may be empty (filter) or contain more elements than the input batch
+        (fan-out). Downstream queues always treat it atomically.
         """
         # In deterministic mode we MUST enqueue even empty results so the
         # reordering gate can advance emit_seq. In non-deterministic mode
@@ -415,9 +419,9 @@ class ThreadStageRunner:
         self, idx: int, context: "ThreadStageRunner._RunContext"
     ) -> None:
         state = self.ops[idx]
-        next_queue: (
-            queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken] | None
-        ) = self.ops[idx + 1].input_queue if idx + 1 < len(self.ops) else None
+        next_queue: queue.Queue[Sequence[RunnerStreamIn] | StopToken] | None = (
+            self.ops[idx + 1].input_queue if idx + 1 < len(self.ops) else None
+        )
 
         state.reset_buffers()
         upstream_closed = False
@@ -444,9 +448,7 @@ class ThreadStageRunner:
                 except queue.Empty:
                     continue
                 if state.deterministic:
-                    rseq, payload = cast(
-                        tuple[int, list[ThreadStageRunner.StreamOut]], item
-                    )
+                    rseq, payload = cast(tuple[int, Microbatch], item)
                     state.pending_results[int(rseq)] = payload
                     # Emit in order as far as possible
                     while state.emit_seq in state.pending_results:
@@ -454,8 +456,7 @@ class ThreadStageRunner:
                         state.emit_seq += 1
                         self._emit_downstream(ready_elems, next_queue, context)
                 else:
-                    assert isinstance(item, list)
-                    self._emit_downstream(item, next_queue, context)
+                    self._emit_downstream(cast(Microbatch, item), next_queue, context)
                 continue
 
             if context.stop_event.is_set():
@@ -493,8 +494,7 @@ class ThreadStageRunner:
     def _drain_results(
         self,
         state: "ThreadStageRunner._OperatorState",
-        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
-        | None,
+        next_queue: queue.Queue[Sequence[RunnerStreamIn] | StopToken] | None,
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         while True:
@@ -503,24 +503,19 @@ class ThreadStageRunner:
             except queue.Empty:
                 break
             if state.deterministic:
-                rseq, payload = cast(
-                    tuple[int, list[ThreadStageRunner.StreamOut]], item
-                )
+                rseq, payload = cast(tuple[int, Microbatch], item)
                 state.pending_results[int(rseq)] = payload
                 while state.emit_seq in state.pending_results:
                     ready_elems = state.pending_results.pop(state.emit_seq)
                     state.emit_seq += 1
                     self._emit_downstream(ready_elems, next_queue, context)
             else:
-                self._emit_downstream(
-                    cast(list[ThreadStageRunner.StreamOut], item), next_queue, context
-                )
+                self._emit_downstream(cast(Microbatch, item), next_queue, context)
 
     def _emit_downstream(
         self,
-        elements: list["ThreadStageRunner.StreamOut"],
-        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
-        | None,
+        elements: Microbatch,
+        next_queue: queue.Queue[Sequence[RunnerStreamIn] | StopToken] | None,
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         if not elements:
@@ -543,7 +538,7 @@ class ThreadStageRunner:
         self,
         context: "ThreadStageRunner._RunContext",
         state: "ThreadStageRunner._OperatorState",
-        batch: list["ThreadStageRunner.StreamIn"],
+        batch: list[RunnerStreamIn],
         *,
         wait_ns: int = 0,
     ) -> None:
@@ -571,13 +566,13 @@ class ThreadStageRunner:
                 queue_depth_snapshot = -1
 
         def work(
-            items: list["ThreadStageRunner.StreamIn"],
-        ) -> tuple[list["ThreadStageRunner.StreamOut"], int]:
+            items: list[RunnerStreamIn],
+        ) -> tuple[Microbatch, int]:
             start_ns = self._node_sw.start()
             try:
-                outputs = instance.process_many(items)
+                outputs: Microbatch = instance.process_many(items)
             except (NotImplementedError, AttributeError):
-                out: list["ThreadStageRunner.StreamOut"] = []
+                out: Microbatch = []
                 for element in items:
                     out.extend(instance.process_one(element))
                 outputs = out
@@ -587,7 +582,7 @@ class ThreadStageRunner:
         future = self._executor.submit(work, batch)
 
         def done_callback(
-            fut: Future[tuple[list["ThreadStageRunner.StreamOut"], int]],
+            fut: Future[tuple[Microbatch, int]],
         ) -> None:
             """Executor completion hook for a single micro-batch.
 
@@ -636,8 +631,7 @@ class ThreadStageRunner:
 
     def _signal_downstream_stop(
         self,
-        next_queue: queue.Queue[Sequence["ThreadStageRunner.StreamIn"] | StopToken]
-        | None,
+        next_queue: queue.Queue[Sequence[RunnerStreamIn] | StopToken] | None,
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         if next_queue is None:
@@ -685,7 +679,7 @@ class ThreadStageRunner:
 
     def _start_feeder(
         self,
-        upstream: Iterable["ThreadStageRunner.StreamIn"],
+        upstream: Iterable[RunnerStreamIn],
         context: "ThreadStageRunner._RunContext",
     ) -> None:
         if not self.ops:
@@ -693,9 +687,13 @@ class ThreadStageRunner:
             def passthrough() -> None:
                 try:
                     for elem in upstream:
+                        if not isinstance(elem, (SampleRecord, SampleBatch)):
+                            raise TypeError(
+                                f"Passthrough stage received unsupported element {type(elem)!r}"
+                            )
                         self._put_into_queue(
                             context.stage_out_queue,
-                            cast(ThreadStageRunner.StreamOut, elem),
+                            elem,
                             context,
                         )
                 except BaseException as exc:  # noqa: BLE001
@@ -746,9 +744,7 @@ class ThreadStageRunner:
         if context.feeder is not None:
             context.feeder.join(timeout=1.0)
 
-    def run(
-        self, upstream: Iterable["ThreadStageRunner.StreamIn"]
-    ) -> Iterator["ThreadStageRunner.StreamOut"]:
+    def run(self, upstream: Iterable[RunnerStreamIn]) -> Iterator[StreamItem]:
         context = self._create_context()
         with self._context_lock:
             if self._active_context is not None:
@@ -759,7 +755,7 @@ class ThreadStageRunner:
             self._start_operator_threads(context)
             self._start_feeder(upstream, context)
 
-            def iterator() -> Iterator["ThreadStageRunner.StreamOut"]:
+            def iterator() -> Iterator[StreamItem]:
                 try:
                     while True:
                         try:
@@ -794,12 +790,14 @@ class ThreadStageRunner:
             with self._context_lock:
                 self._active_context = None
 
-    def run_one(
-        self, elem: "ThreadStageRunner.StreamIn"
-    ) -> "ThreadStageRunner.StreamOut":
+    def run_one(self, elem: RunnerStreamIn) -> StreamItem:
         if not self.ops:
-            # passthrough stage: elem must already be a StreamOut
-            return cast("ThreadStageRunner.StreamOut", elem)
+            # passthrough stage: elem must already be a stream item
+            if not isinstance(elem, (SampleRecord, SampleBatch)):
+                raise TypeError(
+                    f"Passthrough stage received unsupported element {type(elem)!r}"
+                )
+            return elem
         value: Any = elem
         for state in self.ops:
             instance = state.instances[0]
@@ -811,7 +809,11 @@ class ThreadStageRunner:
             tail = state.instances[0].finalize()
             if tail:
                 raise RuntimeError("Finalize emitted data in run_one path")
-        return cast("ThreadStageRunner.StreamOut", value)
+        if not isinstance(value, (SampleRecord, SampleBatch)):
+            raise TypeError(
+                f"Stage produced unsupported element {type(value)!r} in run_one()"
+            )
+        return value
 
     def set_parallelism(self, op_index: int, new_parallelism: int) -> None:
         if op_index < 0 or op_index >= len(self.ops):

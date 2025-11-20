@@ -3,11 +3,12 @@
 
 """Operators that pull raw samples from the shard store."""
 
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 from zephon.core.constants import (
     EngineSample,
     SampleMeta,
+    SamplePayload,
     SampleRecord,
 )
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
@@ -66,10 +67,12 @@ class FetchOp(DefaultSetup, DefaultFinalize[SampleRecord]):
         shard, _ = view.open(shard_id)
         got = shard[sample_idx]
         if isinstance(got, tuple):
-            row, _ = got
+            row_raw, _ = got
         else:
-            row = got
-        assert isinstance(row, dict)
+            row_raw = got
+        row = cast(
+            SamplePayload, row_raw
+        )  # TODO(MaxiBoether): improve typing on what shards return.
         meta = SampleMeta(
             sample_id=sample_id,
             lane_id=lane_id,
@@ -168,7 +171,10 @@ class FetchOp(DefaultSetup, DefaultFinalize[SampleRecord]):
                 chunk_offset,
                 _sample_idx,
                 sample_id,
-            ), row in zip(items_sorted, rows, strict=True):
+            ), row_raw in zip(items_sorted, rows, strict=True):
+                row = cast(
+                    SamplePayload, row_raw
+                )  # TODO(MaxiBoether): improve typing on what shards return.
                 meta = SampleMeta(
                     sample_id=sample_id,
                     lane_id=lane_id,

@@ -25,9 +25,16 @@ def _extract_texts(item) -> list[str]:
     from zephon.core.constants import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
-        return [str(item.payload.get("text", ""))]
+        payload = item.payload
+        assert isinstance(payload, dict)
+        return [str(payload.get("text", ""))]
     assert isinstance(item, SampleBatch)
-    return [str(r.payload.get("text", "")) for r in item.records]
+    texts: list[str] = []
+    for record in item.records:
+        payload = record.payload
+        assert isinstance(payload, dict)
+        texts.append(str(payload.get("text", "")))
+    return texts
 
 
 def consume_until(

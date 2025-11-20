@@ -4,7 +4,15 @@
 """Canonical data model shared across the core data-loading pipeline."""
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, cast
+from typing import TYPE_CHECKING, Any, Iterable, TypeAlias, cast
+
+if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type checker.
+    from numpy.typing import NDArray
+    from torch import Tensor
+
+    SamplePayloadArray: TypeAlias = NDArray[Any] | Tensor
+else:  # Runtime fallback keeps optional dependencies optional.
+    SamplePayloadArray = Any  # type: ignore[assignment]
 
 DatasetId = int
 ShardId = int
@@ -32,7 +40,7 @@ def _normalize_lineage(path: Iterable[int] | LineagePath) -> LineagePath:
     return normalized
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SampleCursor:
     """Stable ordering key that survives fan-out across the pipeline."""
 
@@ -98,7 +106,7 @@ class SampleCursor:
         return self._cmp_key() >= other._cmp_key()
 
 
-@dataclass
+@dataclass(slots=True)
 class LanePtr:
     """Keeps track at which chunk and item we are per lane."""
 
@@ -106,7 +114,7 @@ class LanePtr:
     offset: int = 0  # number of final outputs from 'chunk_id' already delivered
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SampleMeta:
     """Lightweight metadata that uniquely identifies a sample in a shard.
 
@@ -146,15 +154,15 @@ class SampleMeta:
         return self.cursor.as_key()
 
 
-@dataclass
+@dataclass(slots=True)
 class SampleRecord:
     """Sample payload bundled with its metadata for transport through stages."""
 
     meta: SampleMeta
-    payload: dict[str, Any]
+    payload: "SamplePayload"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SampleBatch:
     """A batch of SampleRecord."""
 
@@ -184,19 +192,48 @@ class SampleBatch:
         if not items:
             return {"ids": [], "texts": []}
 
+        payloads: list[SamplePayloadDict] = []
+        texts: list[str] = []
+        for record in items:
+            payload = record.payload
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    "SampleBatch.to_training expects dict payloads on every record"
+                )
+            payloads.append(payload)
+            texts.append(str(payload.get("text", "")))
+
         batch: dict[str, Any] = {
             "ids": [r.meta.sample_id for r in items],
-            "texts": [r.payload.get("text", "") for r in items],
+            "texts": texts,
         }
 
         # include tensor-like fields only if present across all records
-        keys_all = set(items[0].payload.keys())
-        for r in items[1:]:
-            keys_all &= set(r.payload.keys())
+        keys_all = set(payloads[0].keys())
+        for payload in payloads[1:]:
+            keys_all &= set(payload.keys())
 
         if "input_ids" in keys_all:
-            batch["input_ids"] = [r.payload["input_ids"] for r in items]
+            batch["input_ids"] = [payload["input_ids"] for payload in payloads]
         if "attention_mask" in keys_all:
-            batch["attention_mask"] = [r.payload["attention_mask"] for r in items]
+            batch["attention_mask"] = [
+                payload["attention_mask"] for payload in payloads
+            ]
 
         return batch
+
+
+# Payload typing --------------------------------------------------------------
+SampleNumeric: TypeAlias = int | float | complex
+SamplePayloadAtom: TypeAlias = (
+    bytes | memoryview | str | SampleNumeric | SamplePayloadArray
+)
+SamplePayload: TypeAlias = (
+    SamplePayloadAtom | list["SamplePayload"] | dict[Any, "SamplePayload"]
+)
+SamplePayloadDict: TypeAlias = dict[Any, SamplePayload]
+
+# Pipeline items and micro-batches travel between operators/stages.
+StreamItem: TypeAlias = SampleRecord | SampleBatch
+Microbatch = list[StreamItem]
+RunnerStreamIn: TypeAlias = EngineSample | StreamItem

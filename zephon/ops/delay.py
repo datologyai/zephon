@@ -11,11 +11,11 @@ local index within its shard so that delays are deterministic and bounded.
 import time
 from typing import Optional, TypeVar
 
-from zephon.core.constants import SampleRecord
+from zephon.core.constants import SampleRecord, StreamItem
 from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
-T = TypeVar("T")
+T = TypeVar("T", bound=StreamItem)
 
 
 class DelayById(DefaultSetup, DefaultFinalize[T]):

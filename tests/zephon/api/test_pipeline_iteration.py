@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
 from zephon.core.constants import SampleBatch, SampleRecord
+
+
+def _payload_dict(record: SampleRecord) -> dict[str, Any]:
+    payload = record.payload
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _consume_all_batches(pipe: PublicPipeline) -> list[SampleBatch]:
@@ -45,7 +53,7 @@ def test_pipeline_iter_yields_records_without_batch() -> None:
         it.close()
 
     assert isinstance(first, SampleRecord)
-    assert first.payload.get("text") == "hello\nworld"
+    assert _payload_dict(first).get("text") == "hello\nworld"
 
 
 def test_pipeline_iter_with_batch_and_drop_last_behavior() -> None:

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
+from zephon.core.constants import SampleRecord
+
+
+def _payload_dict(record: SampleRecord) -> dict[str, Any]:
+    payload = record.payload
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _collect_texts(pipe: PublicPipeline) -> list[str]:
@@ -9,7 +18,8 @@ def _collect_texts(pipe: PublicPipeline) -> list[str]:
     it = iter(pipe)
     try:
         for item in it:
-            out.append(item.payload.get("text", ""))
+            assert isinstance(item, SampleRecord)
+            out.append(_payload_dict(item).get("text", ""))
     finally:
         it.close()
     return out
@@ -32,11 +42,13 @@ def test_pipeline_checkpoint_restore_resumes_from_saved_position() -> None:
     try:
         for _ in range(3):
             rec = next(it)
-            seen.append(rec.payload.get("text", ""))
+            assert isinstance(rec, SampleRecord)
+            seen.append(_payload_dict(rec).get("text", ""))
         ckpt = pipe1.checkpoint()
         remainder: list[str] = []
         for rec in it:
-            remainder.append(rec.payload.get("text", ""))
+            assert isinstance(rec, SampleRecord)
+            remainder.append(_payload_dict(rec).get("text", ""))
     finally:
         it.close()
 

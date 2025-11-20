@@ -6,7 +6,7 @@
 import logging
 from typing import Any, Optional
 
-from zephon.core.constants import SampleRecord
+from zephon.core.constants import SamplePayload, SamplePayloadDict, SampleRecord
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
@@ -62,17 +62,22 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     def buffering(self) -> Optional[Buffering]:
         return self._buffering
 
+    def _expect_mapping(self, payload: SamplePayload) -> SamplePayloadDict:
+        if not isinstance(payload, dict):
+            raise TypeError("TokenizeText expects dict payloads")
+        return payload
+
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
-        assert isinstance(elem, SampleRecord)
         tokenizer = self.tok
         if tokenizer is None:
             msg = "Tokenizer not initialised"
             raise RuntimeError(msg)
-        text = elem.payload.get(self.field, "")
+        payload = self._expect_mapping(elem.payload)
+        text = payload.get(self.field, "")
         encoded = tokenizer(
             text, add_special_tokens=True, padding=False, truncation=False
         )
-        payload = dict(elem.payload)
+        payload = dict(payload)
         payload["input_ids"] = encoded["input_ids"]
         if self.add_attention_mask and "attention_mask" in encoded:
             payload["attention_mask"] = encoded["attention_mask"]
@@ -85,12 +90,12 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             raise RuntimeError(msg)
         texts: list[str] = []
         metas: list[Any] = []
-        payloads: list[dict[str, Any]] = []
+        payloads: list[SamplePayloadDict] = []
         for elem in elems:
-            assert isinstance(elem, SampleRecord), f"elem is {type(elem)} = {elem}"
-            texts.append(elem.payload.get(self.field, ""))
+            payload = self._expect_mapping(elem.payload)
+            texts.append(str(payload.get(self.field, "")))
             metas.append(elem.meta)
-            payloads.append(elem.payload)
+            payloads.append(payload)
         encoded = tokenizer(
             texts, add_special_tokens=True, padding=False, truncation=False
         )

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
 from zephon.core.constants import SampleBatch, SampleRecord
+
+
+def _payload_dict(record: SampleRecord) -> dict[str, Any]:
+    payload = record.payload
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_decode_and_tokenize_single_records() -> None:
@@ -29,9 +37,10 @@ def test_decode_and_tokenize_single_records() -> None:
 
     for rec in items:
         assert isinstance(rec, SampleRecord)
-        assert isinstance(rec.payload.get("input_ids"), list)
-        assert rec.payload.get("input_ids")
-        assert isinstance(rec.payload.get("attention_mask"), list)
+        payload = _payload_dict(rec)
+        assert isinstance(payload.get("input_ids"), list)
+        assert payload.get("input_ids")
+        assert isinstance(payload.get("attention_mask"), list)
 
 
 def test_tokenize_with_batch_outputs_masks() -> None:
@@ -61,6 +70,8 @@ def test_tokenize_with_batch_outputs_masks() -> None:
         lids = set(b.lane_ids)
         assert len(lids) == 1
         for rec in b.records:
-            assert isinstance(rec.payload.get("input_ids"), list)
-            if rec.payload.get("attention_mask") is not None:
-                assert isinstance(rec.payload.get("attention_mask"), list)
+            payload = _payload_dict(rec)
+            assert isinstance(payload.get("input_ids"), list)
+            mask = payload.get("attention_mask")
+            if mask is not None:
+                assert isinstance(mask, list)

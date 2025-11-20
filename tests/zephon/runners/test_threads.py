@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
+from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
 from zephon.core.traits import OpTraits
@@ -21,8 +22,28 @@ def _ctx_services(extra: dict[str, object] | None = None) -> dict[str, object]:
     return services
 
 
-def _collect(runner: ThreadStageRunner, data: list[Any]) -> list[Any]:
-    return list(runner.run(iter(data)))
+def _mk_record(value: int) -> SampleRecord:
+    meta = SampleMeta(
+        sample_id=(0, 0, value),
+        lane_id=0,
+        chunk_id=0,
+        chunk_offset=value,
+    )
+    return SampleRecord(meta=meta, payload={"value": value})
+
+
+def _mk_records(values: Iterable[int]) -> list[SampleRecord]:
+    return [_mk_record(int(v)) for v in values]
+
+
+def _extract_values(records: Iterable[SampleRecord]) -> list[int]:
+    return [int(rec.payload["value"]) for rec in records]
+
+
+def _collect(runner: ThreadStageRunner, data: list[int]) -> list[int]:
+    records = _mk_records(data)
+    out_records = list(runner.run(iter(records)))
+    return _extract_values(out_records)
 
 
 def test_runner_emits_in_input_order_when_deterministic() -> None:
@@ -57,8 +78,10 @@ def test_run_one_returns_through_single_op_stage() -> None:
     runner = ThreadStageRunner(
         stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
     )
-    out = runner.run_one(7)
-    assert out == 7
+    record = _mk_record(7)
+    out = runner.run_one(record)
+    assert isinstance(out, SampleRecord)
+    assert out == record
 
 
 def test_set_parallelism_errors_and_adjustments() -> None:
@@ -99,24 +122,24 @@ def test_prefetching_stage_iterator_close_is_clean() -> None:
         prefetch_capacity=4,
     )
 
-    it = runner.run(iter(range(100)))
+    it = runner.run(iter(_mk_records(range(100))))
     # pull a few then close early
-    got = []
+    got_records: list[SampleRecord] = []
     for _ in range(5):
-        got.append(next(it))
-    assert got == list(range(5))
+        got_records.append(next(it))
+    assert _extract_values(got_records) == list(range(5))
     # Explicitly close iterator; should not raise or hang
     if hasattr(it, "close"):
         it.close()  # type: ignore[call-arg]
 
 
 def test_passthrough_stage_forwards_stream() -> None:
-    # Empty stage (no ops) must pass through StreamOut elements
+    # Empty stage (no ops) must pass through stream elements
     stage = Stage(name="empty", nodes=[], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
         stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
     )
-    data = list(range(10))
+    data = _mk_records(range(10))
     out = list(runner.run(iter(data)))
     assert out == data
 
@@ -159,7 +182,7 @@ def test_thread_runner_emits_metrics_deltas_when_callback_provided() -> None:
         tracking_mode=ExecutionTrackingMode.NODES,
     )
 
-    data = list(range(6))
+    data = _mk_records(range(6))
     out = list(runner.run(iter(data)))
     assert out == data
 

@@ -64,7 +64,9 @@ def _project_items(pipe: PublicPipeline) -> list[tuple[str, int]]:
         assert isinstance(rec, SampleRecord)
         ds_id = int(rec.meta.sample_id[0])
         name = id_to_name.get(ds_id, str(ds_id))
-        val = int(rec.payload.get("text", 0))
+        payload = rec.payload
+        assert isinstance(payload, dict)
+        val = int(payload.get("text", 0))
         out.append((name, val))
     return out
 

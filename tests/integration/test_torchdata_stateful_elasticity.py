@@ -32,12 +32,18 @@ def _extract_elem(item) -> tuple[int, list[str]]:
     from zephon.core.constants import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
-        return int(item.meta.lane_id), [str(item.payload.get("text", ""))]
+        payload = item.payload
+        assert isinstance(payload, dict)
+        return int(item.meta.lane_id), [str(payload.get("text", ""))]
     assert isinstance(item, SampleBatch)
     lids = item.lane_ids
     assert lids, "empty batch"
     lane = int(lids[0])
-    texts = [str(r.payload.get("text", "")) for r in item.records]
+    texts = []
+    for record in item.records:
+        payload = record.payload
+        assert isinstance(payload, dict)
+        texts.append(str(payload.get("text", "")))
     return lane, texts
 
 

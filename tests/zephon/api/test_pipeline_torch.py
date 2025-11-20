@@ -1,6 +1,7 @@
 import sys
 from importlib.machinery import ModuleSpec
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -71,7 +72,7 @@ def test_to_indexable_torch_dataset_with_indexable_pipeline(
     assert len(torch_ds) == len(ws)
     item0 = torch_ds[0]
     assert isinstance(item0, SampleRecord)
-    assert isinstance(item0.payload.get("input_ids"), list)
+    assert isinstance(_payload_dict(item0).get("input_ids"), list)
 
 
 def test_to_indexable_raises_when_not_indexable(
@@ -85,3 +86,9 @@ def test_to_indexable_raises_when_not_indexable(
     assert not pipe.is_indexable
     with pytest.raises(RuntimeError):
         _ = pipe.to_indexable_torch_dataset()
+
+
+def _payload_dict(record: SampleRecord) -> dict[str, Any]:
+    payload = record.payload
+    assert isinstance(payload, dict)
+    return payload

@@ -5,12 +5,12 @@
 
 from collections import defaultdict
 
-from zephon.core.constants import SampleBatch, SampleCursor, SampleRecord
+from zephon.core.constants import SampleBatch, SampleCursor, SampleRecord, StreamItem
 from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 
 
-class AssertLineageOrder(DefaultSetup, DefaultFinalize[SampleRecord | SampleBatch]):
+class AssertLineageOrder(DefaultSetup, DefaultFinalize[StreamItem]):
     """Verifies that records for each lane arrive in strictly increasing order.
 
     This operator is intended for debugging pipelines that use fan-out or complex
@@ -49,20 +49,16 @@ class AssertLineageOrder(DefaultSetup, DefaultFinalize[SampleRecord | SampleBatc
         for record in batch.records:
             self._check_record(record)
 
-    def process_one(
-        self, elem: SampleRecord | SampleBatch
-    ) -> list[SampleRecord | SampleBatch]:
+    def process_one(self, elem: StreamItem) -> list[StreamItem]:
         self._visit(elem)
         return [elem]
 
-    def process_many(
-        self, elems: list[SampleRecord | SampleBatch]
-    ) -> list[SampleRecord | SampleBatch]:
+    def process_many(self, elems: list[StreamItem]) -> list[StreamItem]:
         for elem in elems:
             self._visit(elem)
         return elems
 
-    def _visit(self, elem: SampleRecord | SampleBatch) -> None:
+    def _visit(self, elem: StreamItem) -> None:
         if isinstance(elem, SampleBatch):
             self._check_batch(elem)
             return
