@@ -236,4 +236,10 @@ SamplePayloadDict: TypeAlias = dict[Any, SamplePayload]
 # Pipeline items and micro-batches travel between operators/stages.
 StreamItem: TypeAlias = SampleRecord | SampleBatch
 Microbatch = list[StreamItem]
+# Inputs that enter a runner are either raw engine samples, previously emitted
+# stream items, or micro-batches forwarded across runners.
 RunnerStreamIn: TypeAlias = EngineSample | StreamItem
+RunnerStageIn: TypeAlias = RunnerStreamIn | Microbatch
+# Downstream stages read either micro-batches (preferred) or flattened stream
+# items depending on how the runner is configured.
+RunnerStageOut: TypeAlias = StreamItem | Microbatch

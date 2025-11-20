@@ -43,7 +43,7 @@ import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -52,6 +52,7 @@ from zephon.core.constants import (
     EngineSample,
     LaneId,
     LanePtr,
+    RunnerStageOut,
     SampleBatch,
     SampleCursor,
     SampleId,
@@ -544,6 +545,7 @@ class Engine:
             ]
 
         for idx, stage in enumerate(self._plan.stages):
+            is_last_stage = idx == num_stages - 1
             cap_for_stage = per_stage_caps[idx]
 
             prefetch = self._opts.per_stage_prefetch.get(
@@ -590,6 +592,9 @@ class Engine:
                             self._collector.tracking_mode
                             if self._collector is not None
                             else ExecutionTrackingMode.OFF
+                        ),
+                        stage_output_mode=(
+                            "stream_items" if is_last_stage else "microbatches"
                         ),
                     )
                 )
@@ -927,13 +932,14 @@ class Engine:
         source_iter = self._source_stream()
 
         # Construct overall pipeline by chaining runners
-        stream_iter = self._runners[0].run(source_iter)
+        stage_stream: Iterable[RunnerStageOut] = self._runners[0].run(source_iter)
         for runner in self._runners[1:]:
-            stream_iter = runner.run(stream_iter)
+            stage_stream = runner.run(stage_stream)
 
-        stream_iter = self._lane_rr_iter(stream_iter)
+        final_stream = cast(Iterable[StreamItem], stage_stream)
+        final_stream = self._lane_rr_iter(final_stream)
 
-        yield from stream_iter
+        yield from final_stream
 
     def notify(
         self, lane_id: int, max_chunk_id: int, cursors: list[SampleCursor]

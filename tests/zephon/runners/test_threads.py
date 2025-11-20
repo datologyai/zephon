@@ -56,14 +56,22 @@ def test_runner_emits_in_input_order_when_deterministic() -> None:
 
     # Deterministic: outputs must match the input order exactly
     det_runner = ThreadStageRunner(
-        stage, ctx_services=_ctx_services(), max_workers=8, deterministic=True
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=8,
+        deterministic=True,
+        stage_output_mode="stream_items",
     )
     out_det = _collect(det_runner, data)
     assert out_det == data
 
     # Non-deterministic: should still be a permutation; may equal by chance
     nondet_runner = ThreadStageRunner(
-        stage, ctx_services=_ctx_services(), max_workers=8, deterministic=False
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=8,
+        deterministic=False,
+        stage_output_mode="stream_items",
     )
     out_nondet = _collect(nondet_runner, data)
     assert sorted(out_nondet) == sorted(data)
@@ -76,7 +84,11 @@ def test_run_one_returns_through_single_op_stage() -> None:
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
 
     runner = ThreadStageRunner(
-        stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
     )
     record = _mk_record(7)
     out = runner.run_one(record)
@@ -89,7 +101,11 @@ def test_set_parallelism_errors_and_adjustments() -> None:
     node = Node(name="delay", op=op)
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
-        stage, ctx_services=_ctx_services(), max_workers=4, deterministic=True
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        stage_output_mode="stream_items",
     )
 
     # Invalid op index raises
@@ -120,6 +136,7 @@ def test_prefetching_stage_iterator_close_is_clean() -> None:
         max_workers=2,
         deterministic=True,
         prefetch_capacity=4,
+        stage_output_mode="stream_items",
     )
 
     it = runner.run(iter(_mk_records(range(100))))
@@ -137,7 +154,11 @@ def test_passthrough_stage_forwards_stream() -> None:
     # Empty stage (no ops) must pass through stream elements
     stage = Stage(name="empty", nodes=[], placement="auto", break_reason="test")
     runner = ThreadStageRunner(
-        stage, ctx_services=_ctx_services(), max_workers=2, deterministic=True
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
     )
     data = _mk_records(range(10))
     out = list(runner.run(iter(data)))
@@ -180,6 +201,7 @@ def test_thread_runner_emits_metrics_deltas_when_callback_provided() -> None:
         deterministic=True,
         stage_index=7,
         tracking_mode=ExecutionTrackingMode.NODES,
+        stage_output_mode="stream_items",
     )
 
     data = _mk_records(range(6))
@@ -193,3 +215,46 @@ def test_thread_runner_emits_metrics_deltas_when_callback_provided() -> None:
     assert consumed == len(data)
     assert all(delta.stage_index == 7 for delta in captured)
     assert all(delta.stage_name == "stage0" for delta in captured)
+
+
+def test_thread_runner_emits_microbatches_and_accepts_batch_input() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage1", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="microbatches",
+    )
+
+    singles = _mk_records(range(2))
+    batch = _mk_records(range(2, 5))
+    upstream = iter([singles[0], singles[1], batch])
+    out = list(runner.run(upstream))
+
+    assert len(out) == 3
+    assert all(isinstance(elem, list) for elem in out)
+    assert _extract_values(out[0]) == [0]
+    assert _extract_values(out[1]) == [1]
+    assert _extract_values(out[2]) == [2, 3, 4]
+
+
+def test_thread_runner_stream_mode_flattens_microbatch_input() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage2", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    microbatch = _mk_records(range(5))
+    out = list(runner.run(iter([microbatch])))
+    assert out == microbatch

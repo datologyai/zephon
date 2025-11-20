@@ -42,6 +42,7 @@ from typing import (
     Callable,
     Iterable,
     Iterator,
+    Literal,
     Optional,
     Sequence,
     TypeAlias,
@@ -52,6 +53,8 @@ from typing import (
 
 from zephon.core.constants import (
     Microbatch,
+    RunnerStageIn,
+    RunnerStageOut,
     RunnerStreamIn,
     SampleBatch,
     SampleRecord,
@@ -304,7 +307,7 @@ class ThreadStageRunner:
     @dataclass
     class _RunContext:
         stop_token: StopToken
-        stage_out_queue: queue.Queue[StreamItem | StopToken]
+        stage_out_queue: queue.Queue[RunnerStageOut | StopToken]
         stop_event: threading.Event
         pumps: list[threading.Thread] = field(default_factory=list)
         feeder: threading.Thread | None = None
@@ -323,6 +326,7 @@ class ThreadStageRunner:
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
+        stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
         self._stage = stage
         self._max_workers = max_workers
@@ -331,6 +335,9 @@ class ThreadStageRunner:
         self._queue_capacity = max(1, queue_capacity)
         self._stage_index = stage_index
         self._tracking_mode = tracking_mode
+        if stage_output_mode not in {"microbatches", "stream_items"}:
+            raise ValueError(f"Unsupported stage_output_mode '{stage_output_mode}'.")
+        self._emit_microbatches = stage_output_mode == "microbatches"
         self._record_node_metrics: Callable[[NodeMetricsDelta], None] = ctx_services[
             "record_node_metrics"
         ]
@@ -531,6 +538,19 @@ class ThreadStageRunner:
             self._put_into_queue(next_queue, elements, context)
             return
 
+        self._emit_stage_output(elements, context)
+
+    def _emit_stage_output(
+        self,
+        elements: Microbatch,
+        context: "ThreadStageRunner._RunContext",
+    ) -> None:
+        if not elements:
+            return
+        if self._emit_microbatches:
+            self._put_into_queue(context.stage_out_queue, elements, context)
+            return
+
         for elem in elements:
             self._put_into_queue(context.stage_out_queue, elem, context)
 
@@ -679,23 +699,34 @@ class ThreadStageRunner:
 
     def _start_feeder(
         self,
-        upstream: Iterable[RunnerStreamIn],
+        upstream: Iterable[RunnerStageIn],
         context: "ThreadStageRunner._RunContext",
     ) -> None:
+        # This path (not self.ops) probably is rarely/never called. Might consider removing.
         if not self.ops:
 
             def passthrough() -> None:
                 try:
                     for elem in upstream:
-                        if not isinstance(elem, (SampleRecord, SampleBatch)):
+                        if context.stop_event.is_set():
+                            break
+                        batch: Microbatch
+                        if isinstance(elem, list):
+                            batch = elem
+                            for item in batch:
+                                if not isinstance(item, (SampleRecord, SampleBatch)):  # pyright: ignore[reportUnnecessaryIsInstance]
+                                    raise TypeError(
+                                        "Passthrough stage received unsupported element "
+                                        + f"{type(item)!r} inside microbatch"
+                                    )
+                        elif isinstance(elem, (SampleRecord, SampleBatch)):
+                            batch = [elem]
+                        else:
                             raise TypeError(
-                                f"Passthrough stage received unsupported element {type(elem)!r}"
+                                "Passthrough stage received unsupported element "
+                                + f"{type(elem)!r}"
                             )
-                        self._put_into_queue(
-                            context.stage_out_queue,
-                            elem,
-                            context,
-                        )
+                        self._emit_stage_output(batch, context)
                 except BaseException as exc:  # noqa: BLE001
                     self._record_error(context, exc)
                 finally:
@@ -713,7 +744,12 @@ class ThreadStageRunner:
                 for elem in upstream:
                     if context.stop_event.is_set():
                         break
-                    self._put_into_queue(first_state.input_queue, [elem], context)
+                    batch: Sequence[RunnerStreamIn]
+                    if isinstance(elem, list):
+                        batch = elem
+                    else:
+                        batch = [elem]
+                    self._put_into_queue(first_state.input_queue, batch, context)
             except BaseException as exc:  # noqa: BLE001
                 self._record_error(context, exc)
             finally:
@@ -744,7 +780,7 @@ class ThreadStageRunner:
         if context.feeder is not None:
             context.feeder.join(timeout=1.0)
 
-    def run(self, upstream: Iterable[RunnerStreamIn]) -> Iterator[StreamItem]:
+    def run(self, upstream: Iterable[RunnerStageIn]) -> Iterator[RunnerStageOut]:
         context = self._create_context()
         with self._context_lock:
             if self._active_context is not None:
@@ -755,7 +791,7 @@ class ThreadStageRunner:
             self._start_operator_threads(context)
             self._start_feeder(upstream, context)
 
-            def iterator() -> Iterator[StreamItem]:
+            def iterator() -> Iterator[RunnerStageOut]:
                 try:
                     while True:
                         try:
