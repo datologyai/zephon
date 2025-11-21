@@ -187,12 +187,9 @@ class Pipeline:
         *,
         drop_last: bool = True,
         placement: str = "auto",
-        parallelism: Optional[int] = None,
     ) -> "Pipeline":
         op = Batch(microbatch_size, drop_last=drop_last)
-        node = self._graph.add(
-            "batch", op, self._tail, placement=placement, parallelism=parallelism
-        )
+        node = self._graph.add("batch", op, self._tail, placement=placement)
         self._tail = node
         return self
 

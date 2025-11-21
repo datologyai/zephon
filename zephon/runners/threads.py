@@ -25,10 +25,60 @@ flag supplied at construction time:
     the exact same order it would in a single-threaded execution regardless of
     completion timing. Within a micro-batch, element order is preserved.
 
-The deterministic path is optimistic by construction: every scheduled
-micro-batch is tagged with a sequence number, and the runner always enqueues an
-explicit ``(seq, payload)`` pair to the result queue. Consumers of that queue
-therefore do not need to defensively handle missing sequence numbers.
+The deterministic path works by construction:
+
+* The pump thread is the only producer of micro-batches. Right before it hands
+  work to the thread pool it tags the batch with ``next_seq`` and increments it
+  (see :meth:`_schedule_batch`).
+* Worker callbacks always enqueue ``(seq, payload)`` pairs, even when the
+  payload is empty because the operator buffered or filtered everything out.
+  This guarantees the reordering gate never observes gaps.
+* ``_drain_results`` advances ``emit_seq`` only when the next integer is
+  present, so out-of-order completions merely accumulate in
+  ``pending_results`` until their predecessors arrive.
+* Within a micro-batch the runner preserves element order, so fan-out operators
+  emit children in the same relative order a single-threaded execution would.
+
+This scheme handles filtering, fan-out, and operator-local buffering as long as
+operators are deterministic per invocation **and** any cross-invocation state is
+confined to exactly one operator instance (i.e., the operator runs with
+parallelism 1 or otherwise partitions its state explicitly). If the planner or
+user scales such an operator to multiple instances, each instance would own a
+disjoint buffer, leading to nondeterministic flush boundaries. Note the
+difference between *runner-level* buffering (via ``Buffering`` traits) and
+*operator-internal* buffering:
+
+- Runner buffering happens on the pump thread before seq assignment, so the
+  resulting micro-batches are deterministic. ``max_latency_ms`` may change the
+  group size between runs, but ordering is unaffected. Stages with
+  ``batch_shape_sensitive`` operators disable latency flushes in deterministic
+  mode to avoid grouping-dependent behaviour.
+- Operator buffering happens inside the worker instance that processed a given
+  seq. When the operator finally flushes (e.g., ``Batch.finalize``), its output
+  rides on the seq of that invocation, so downstream order remains the same as
+  the single-threaded baseline.
+
+Example (Batch):
+
+``Batch`` keeps a per-lane buffer inside each operator instance. Because the
+planner defaults its parallelism to 1, the stage creates a single instance,
+meaning there is one authoritative buffer per lane. Inputs flow through the
+runner in deterministic order, seq numbers enforce downstream ordering, and
+every flush produces the same batches regardless of thread timing. If a user
+overrides ``parallelism`` to a value > 1, the buffers split across instances
+and batching becomes nondeterministic, which is why ``Batch`` is meant to run
+single-threaded (or to rely on runner-level buffering instead).
+
+In summary, an operator is compatible with the seq-based determinism if it:
+
+1. Produces deterministic outputs for a deterministic input micro-batch.
+2. Keeps state confined to a single operator instance (or explicitly runs at
+   parallelism 1 when cross-element state is needed).
+3. Derives child lineage deterministically when fan-out occurs.
+4. Does not rely on wall-clock ordering between invocations.
+
+Under those constraints, the sequence numbers guarantee the threaded execution
+observes the exact same logical stream as a single-threaded run.
 """
 
 import copy
@@ -67,6 +117,7 @@ from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
+from zephon.ops.batch import Batch
 from zephon.utils import buffered_iterable
 
 _QItem = TypeVar("_QItem")
@@ -156,6 +207,14 @@ class ThreadStageRunner:
         def __post_init__(self) -> None:
             traits = self.node.op.traits()
             self.parallelism = max(1, self.node.parallelism or traits.parallelism or 1)
+            if (
+                self.deterministic
+                and isinstance(self.node.op, Batch)
+                and self.parallelism != 1
+            ):
+                raise RuntimeError(
+                    "Batch operator must run with parallelism=1 in deterministic mode"
+                )
             base_ctx = dict(self.ctx_proto)
             base_ctx.setdefault("deterministic", self.deterministic)
 
