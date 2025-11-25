@@ -67,6 +67,7 @@ from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.emitter import MetricsReporter
 from zephon.ops.replay_filter import ReplayFilter
+from zephon.runners.inline import InlineStageRunner
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
     MixtureReadConfig,
@@ -257,7 +258,7 @@ class Engine:
             self._ctx["record_node_metrics"] = self._collector.record
 
         # Stage runners are stored heterogeneously.
-        self._runners: list[ThreadStageRunner] = []
+        self._runners: list[ThreadStageRunner | InlineStageRunner] = []
         self._build_runners()
 
         self._agg_timeout_s = self._opts.aggregate_timeout_s
@@ -429,6 +430,10 @@ class Engine:
                 op_in_q = getattr(runner, "_queue_capacity", None)
                 stage_prefetch = getattr(runner, "_prefetch_capacity", None)
                 cap = getattr(runner, "_max_workers", None)  # <- show cap
+            elif isinstance(runner, InlineStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
+                runner_kind = "inline"
+                stage_prefetch = getattr(runner, "_prefetch_capacity", None)
+                cap = getattr(runner, "_max_workers", None)
 
             # Header with placement and runner only (buffers are shown inline)
             lines.append(
@@ -455,6 +460,8 @@ class Engine:
             if op_in_q is not None:
                 sp = stage_prefetch or 0
                 out_q = max(1, sp or op_in_q)
+            elif stage_prefetch and stage_prefetch > 0:
+                out_q = max(1, stage_prefetch)
 
             # Boundary: to next stage or pipeline end
             if out_q is not None:
@@ -565,19 +572,27 @@ class Engine:
                 and not self._opts.allow_subprocess_in_worker
             ):
                 chosen = "threads"
-            if chosen == "threads":
-                allow_latency = self._opts.allow_latency_flush_in_deterministic
-                if self._opts.deterministic:
-                    has_sensitive = any(
-                        getattr(nd.op.traits(), "batch_shape_sensitive", False)
-                        for nd in stage.nodes
+            allow_latency = self._opts.allow_latency_flush_in_deterministic
+            if self._opts.deterministic:
+                has_sensitive = any(
+                    getattr(nd.op.traits(), "batch_shape_sensitive", False)
+                    for nd in stage.nodes
+                )
+                if has_sensitive and allow_latency:
+                    print(
+                        "Deterministic mode: disabling time-based flush for Stage[%d] due to batch-shape sensitive op.",
+                        idx,
                     )
-                    if has_sensitive and allow_latency:
-                        print(
-                            "Deterministic mode: disabling time-based flush for Stage[%d] due to batch-shape sensitive op.",
-                            idx,
-                        )
-                        allow_latency = False
+                    allow_latency = False
+
+            runner_tracking_mode = (
+                self._collector.tracking_mode
+                if self._collector is not None
+                else ExecutionTrackingMode.OFF
+            )
+            output_mode = "stream_items" if is_last_stage else "microbatches"
+
+            if chosen == "threads":
                 self._runners.append(
                     ThreadStageRunner(
                         stage,
@@ -588,14 +603,22 @@ class Engine:
                         allow_latency_flush_in_deterministic=allow_latency,
                         queue_capacity=self._opts.op_queue_capacity,
                         stage_index=idx,
-                        tracking_mode=(
-                            self._collector.tracking_mode
-                            if self._collector is not None
-                            else ExecutionTrackingMode.OFF
-                        ),
-                        stage_output_mode=(
-                            "stream_items" if is_last_stage else "microbatches"
-                        ),
+                        tracking_mode=runner_tracking_mode,
+                        stage_output_mode=output_mode,
+                    )
+                )
+            elif chosen == "inline":
+                self._runners.append(
+                    InlineStageRunner(
+                        stage,
+                        self._ctx,
+                        cap_for_stage,
+                        prefetch_capacity=prefetch,
+                        deterministic=self._opts.deterministic,
+                        allow_latency_flush_in_deterministic=allow_latency,
+                        stage_index=idx,
+                        tracking_mode=runner_tracking_mode,
+                        stage_output_mode=output_mode,
                     )
                 )
             elif chosen == "remote":

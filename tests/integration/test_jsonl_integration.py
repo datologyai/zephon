@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import json
+from itertools import product
 from pathlib import Path
 from typing import Iterable
 
@@ -82,6 +85,7 @@ def _run_pipeline(
     cache_root: Path | None = None,
     stage_prefetch: int = 0,
     final_prefetch: int = 0,
+    runner_kind: str = "threads",
 ) -> list[tuple[str, int]]:
     ds_js, ds_html = datasets
     mixture = {ds_js.name: 0.6, ds_html.name: 0.4}
@@ -100,6 +104,7 @@ def _run_pipeline(
     pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=8)
     pipe = pipe.options(
         deterministic=deterministic,
+        runner=runner_kind,
         max_workers=workers,
         default_stage_prefetch=stage_prefetch,
         prefetch_batches=final_prefetch,
@@ -114,7 +119,72 @@ def _run_pipeline(
     return _project_items(pipe)
 
 
-def test_jsonl_integration_filter_js_and_html(tmp_path: Path) -> None:
+def _build_repro_param_cases() -> list[pytest.ParameterSet]:
+    chunk_sizes = [32]
+    worker_counts = [2, 8]
+    cases: list[pytest.ParameterSet] = []
+
+    def add_cases(
+        runner_kind: str,
+        modes: Iterable[MixtureReadMode],
+        cache_options: Iterable[bool],
+        stage_prefetch_values: Iterable[int],
+        final_prefetch_values: Iterable[int],
+    ) -> None:
+        for (
+            chunk_size,
+            workers,
+            mode,
+            cache_enabled,
+            stage_prefetch,
+            final_prefetch,
+        ) in product(
+            chunk_sizes,
+            worker_counts,
+            modes,
+            cache_options,
+            stage_prefetch_values,
+            final_prefetch_values,
+        ):
+            case_id = (
+                f"{runner_kind}-w{workers}-mode-{mode.name}-cache-"
+                f"{'on' if cache_enabled else 'off'}-stage{stage_prefetch}-final{final_prefetch}"
+            )
+            cases.append(
+                pytest.param(
+                    chunk_size,
+                    workers,
+                    mode,
+                    cache_enabled,
+                    stage_prefetch,
+                    final_prefetch,
+                    runner_kind,
+                    id=case_id,
+                )
+            )
+
+    add_cases(
+        "threads",
+        [MixtureReadMode.WEIGHTED_ROUND_ROBIN, MixtureReadMode.WEIGHTED_RANDOM],
+        [False, True],
+        [0, 4],
+        [0, 16],
+    )
+    add_cases(
+        "inline",
+        [MixtureReadMode.WEIGHTED_ROUND_ROBIN],
+        [True],
+        [0],
+        [0],
+    )
+    return cases
+
+
+_JSONL_REPRO_CASES = _build_repro_param_cases()
+
+
+@pytest.mark.parametrize("runner_kind", ["threads", "inline"])
+def test_jsonl_integration_filter_js_and_html(tmp_path: Path, runner_kind: str) -> None:
     ds_js, ds_html = _prepare_datasets(tmp_path, total=200, files=4)
 
     # Only JS dataset using public API
@@ -127,6 +197,7 @@ def test_jsonl_integration_filter_js_and_html(tmp_path: Path) -> None:
     )
     pipe_js = pipe_js.options(
         deterministic=True,
+        runner=runner_kind,
         mixture_config=MixtureReadConfig(
             mode=MixtureReadMode.WEIGHTED_ROUND_ROBIN, seed=7
         ),
@@ -147,6 +218,7 @@ def test_jsonl_integration_filter_js_and_html(tmp_path: Path) -> None:
     )
     pipe_html = pipe_html.options(
         deterministic=True,
+        runner=runner_kind,
         mixture_config=MixtureReadConfig(
             mode=MixtureReadMode.WEIGHTED_ROUND_ROBIN, seed=7
         ),
@@ -156,14 +228,10 @@ def test_jsonl_integration_filter_js_and_html(tmp_path: Path) -> None:
     assert all(name == "HTML" and (val % 2 == 1) for name, val in out_html)
 
 
-@pytest.mark.parametrize("chunk_size", [32])
-@pytest.mark.parametrize("workers", [2, 8])
 @pytest.mark.parametrize(
-    "mode", [MixtureReadMode.WEIGHTED_ROUND_ROBIN, MixtureReadMode.WEIGHTED_RANDOM]
+    "chunk_size, workers, mode, cache_enabled, stage_prefetch, final_prefetch, runner_kind",
+    _JSONL_REPRO_CASES,
 )
-@pytest.mark.parametrize("cache_enabled", [False, True])
-@pytest.mark.parametrize("stage_prefetch", [0, 4])
-@pytest.mark.parametrize("final_prefetch", [0, 16])
 def test_jsonl_integration_reproducibility(
     tmp_path: Path,
     chunk_size: int,
@@ -173,6 +241,7 @@ def test_jsonl_integration_reproducibility(
     stage_prefetch: int,
     final_prefetch: int,
     repro_iters: int,
+    runner_kind: str,
 ) -> None:
     datasets = _prepare_datasets(tmp_path, total=300, files=3)
 
@@ -191,6 +260,7 @@ def test_jsonl_integration_reproducibility(
             cache_root=tmp_path / ".cache",
             stage_prefetch=stage_prefetch,
             final_prefetch=final_prefetch,
+            runner_kind=runner_kind,
         )
         runs_a.append(out_a)
 
@@ -205,16 +275,32 @@ def test_jsonl_integration_reproducibility(
             cache_root=tmp_path / ".cache",
             stage_prefetch=stage_prefetch,
             final_prefetch=final_prefetch,
+            runner_kind=runner_kind,
         )
         runs_b.append(out_b)
 
-    # Check internal consistency
     for i in range(1, len(runs_a)):
         assert runs_a[i] == runs_a[0]
     for i in range(1, len(runs_b)):
         assert runs_b[i] == runs_b[0]
-    # And equivalence across worker counts
     assert runs_a[0] == runs_b[0]
+
+
+def test_jsonl_runner_threads_inline_parity(tmp_path: Path) -> None:
+    datasets = _prepare_datasets(tmp_path, total=120, files=4)
+    common_kwargs = dict(
+        deterministic=True,
+        workers=4,
+        chunk_size=32,
+        mode=MixtureReadMode.WEIGHTED_ROUND_ROBIN,
+        cache_enabled=False,
+        cache_root=tmp_path / ".cache",
+        stage_prefetch=2,
+        final_prefetch=8,
+    )
+    out_threads = _run_pipeline(datasets, runner_kind="threads", **common_kwargs)
+    out_inline = _run_pipeline(datasets, runner_kind="inline", **common_kwargs)
+    assert out_threads == out_inline
 
 
 @pytest.mark.xfail(

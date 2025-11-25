@@ -1,7 +1,13 @@
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
-from zephon.core.constants import SampleMeta, SampleRecord
+from tests.zephon.runners._helpers import (
+    _ctx_services,
+    _extract_values,
+    _mk_record,
+    _mk_records,
+)
+from zephon.core.constants import SampleRecord
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
 from zephon.core.traits import OpTraits
@@ -9,35 +15,6 @@ from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.delay import DelayById
 from zephon.runners.threads import ThreadStageRunner
-
-
-def _noop_metrics(_: NodeMetricsDelta) -> None:  # pragma: no cover - trivial helper
-    return None
-
-
-def _ctx_services(extra: dict[str, object] | None = None) -> dict[str, object]:
-    services: dict[str, object] = {"record_node_metrics": _noop_metrics}
-    if extra:
-        services.update(extra)
-    return services
-
-
-def _mk_record(value: int) -> SampleRecord:
-    meta = SampleMeta(
-        sample_id=(0, 0, value),
-        lane_id=0,
-        chunk_id=0,
-        chunk_offset=value,
-    )
-    return SampleRecord(meta=meta, payload={"value": value})
-
-
-def _mk_records(values: Iterable[int]) -> list[SampleRecord]:
-    return [_mk_record(int(v)) for v in values]
-
-
-def _extract_values(records: Iterable[SampleRecord]) -> list[int]:
-    return [int(rec.payload["value"]) for rec in records]
 
 
 def _collect(runner: ThreadStageRunner, data: list[int]) -> list[int]:

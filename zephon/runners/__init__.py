@@ -3,8 +3,10 @@
 
 """Stage runner implementations for executing Zephon plans."""
 
+from zephon.runners.inline import InlineStageRunner
 from zephon.runners.threads import ThreadStageRunner
 
 __all__ = [
+    "InlineStageRunner",
     "ThreadStageRunner",
 ]
