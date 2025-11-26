@@ -58,6 +58,7 @@ class Stage:
     nodes: list[Node]
     placement: str
     break_reason: str
+    runner_hint: str | None = None
 
 
 @dataclass
@@ -132,6 +133,7 @@ class Plan:
                     st.name,
                     st.placement,
                     st.break_reason,
+                    st.runner_hint,
                     tuple(nodes_sig),
                 )
             )

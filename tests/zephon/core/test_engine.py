@@ -9,8 +9,11 @@ from zephon.core.graph import Graph
 from zephon.core.planner import Planner
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
+from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.ops.fetch import FetchOp
+from zephon.runners.inline import InlineStageRunner
+from zephon.runners.process import ProcessStageRunner
 from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -110,6 +113,9 @@ class _DummyWorkSource(WorkSource):
 
     def supports_indexing(self) -> bool:  # pragma: no cover - not used
         return False
+
+    def chunk_size_hint(self) -> int | None:  # pragma: no cover - deterministic tests
+        return 1
 
     def __len__(self) -> int:  # pragma: no cover - not used
         return 0
@@ -254,3 +260,27 @@ def test_autotune_mode_not_implemented() -> None:
             worker_allocation="autotune",
             max_workers=8,
         )
+
+
+def test_engine_forces_inline_runner_for_batch_stage() -> None:
+    g = Graph()
+    src = g.add("src", DelayById(max_delay_ms=0.0))
+    batch = g.add("batch", Batch(microbatch_size=4), src)
+    g.add("tail", DelayById(max_delay_ms=0.0), batch)
+
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    eng = Engine(
+        plan,
+        RuntimeOptions(
+            runner="process", worker_allocation="per_stage_fixed", max_workers=1
+        ),
+        work,
+    )
+    try:
+        assert len(eng._runners) == 3
+        assert isinstance(eng._runners[1], InlineStageRunner)
+        assert isinstance(eng._runners[0], ProcessStageRunner)
+        assert isinstance(eng._runners[2], ProcessStageRunner)
+    finally:
+        eng.close()

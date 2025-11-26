@@ -33,6 +33,7 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 import atexit
 import json
 import math
+import multiprocessing as mp
 import os
 import re
 import sys
@@ -42,6 +43,7 @@ import time
 import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from multiprocessing.context import BaseContext
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
@@ -68,6 +70,7 @@ from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.emitter import MetricsReporter
 from zephon.ops.replay_filter import ReplayFilter
 from zephon.runners.inline import InlineStageRunner
+from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
 from zephon.work import (
     MixtureReadConfig,
@@ -146,7 +149,7 @@ class RuntimeOptions:
         default_factory=dict
     )  # Manual override for runner per-stage. Mostly useful for debugging and advanced usage.
     allow_subprocess_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
-    mp_context: Any = None  # TODO(MaxiBoether): Do we need this?
+    mp_context: Any = mp.get_context("fork")
     worker_allocation: Literal[
         "fit_to_ops", "per_stage_fixed", "global", "autotune"
     ] = "fit_to_ops"
@@ -161,6 +164,9 @@ class RuntimeOptions:
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
     op_queue_capacity: int = 16  # maximum size of inflight items between ops.
+    process_ipc_batch_size_factor: int = (
+        2  # scales IPC batches relative to the first op buffering.
+    )
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
     # Expert knob:
@@ -202,6 +208,7 @@ class Engine:
         self._ctx = base_ctx
         self._ctx["replay_state_service"] = self._replay_config
         self._opts = opts
+        self._mp_context = self._resolve_mp_context(self._opts.mp_context)
         self._world = self._build_world()
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
@@ -258,7 +265,9 @@ class Engine:
             self._ctx["record_node_metrics"] = self._collector.record
 
         # Stage runners are stored heterogeneously.
-        self._runners: list[ThreadStageRunner | InlineStageRunner] = []
+        self._runners: list[
+            ThreadStageRunner | InlineStageRunner | ProcessStageRunner
+        ] = []
         self._build_runners()
 
         self._agg_timeout_s = self._opts.aggregate_timeout_s
@@ -359,6 +368,13 @@ class Engine:
         # We rather fail explicitly here for now to avoid problems with runners.
         raise RuntimeError("Engine must not be pickled; build it inside a worker.")
 
+    def _resolve_mp_context(self, ctx_spec: BaseContext | str | None) -> BaseContext:
+        if ctx_spec is None:
+            return mp.get_context("fork")
+        if isinstance(ctx_spec, str):
+            return mp.get_context(ctx_spec)
+        return ctx_spec
+
     def _build_world(self) -> World:
         worker_id, workers_per_rank = get_torch_worker_info()
         # Always build a canonical schedule. If canonical_replicas is unspecified,
@@ -424,21 +440,40 @@ class Engine:
             op_in_q: int | None = None
             stage_prefetch: int | None = None
             cap: int | None = None
+            forward_mode = (
+                "microbatches"
+                if getattr(runner, "_emit_microbatches", False)
+                else "stream_items"
+            )
 
             if isinstance(runner, ThreadStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
                 runner_kind = "threads"
                 op_in_q = getattr(runner, "_queue_capacity", None)
                 stage_prefetch = getattr(runner, "_prefetch_capacity", None)
                 cap = getattr(runner, "_max_workers", None)  # <- show cap
+            elif isinstance(runner, ProcessStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
+                runner_kind = "process"
+                op_in_q = getattr(runner, "_queue_capacity", None)
+                stage_prefetch = getattr(runner, "_prefetch_capacity", None)
+                cap = getattr(runner, "_max_workers", None)
             elif isinstance(runner, InlineStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
                 runner_kind = "inline"
                 stage_prefetch = getattr(runner, "_prefetch_capacity", None)
                 cap = getattr(runner, "_max_workers", None)
 
             # Header with placement and runner only (buffers are shown inline)
-            lines.append(
-                f"Stage[{idx}] place={stage.placement} runner={runner_kind} cap={cap}"
+            header = (
+                f"Stage[{idx}] place={stage.placement} runner={runner_kind} "
+                + f"cap={cap} mode={forward_mode}"
             )
+            if isinstance(runner, ProcessStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
+                ipc = getattr(runner, "_ipc_batch_size", None)
+                direct = getattr(runner, "_single_op_direct_ipc", False)
+                header += (
+                    f" first_op_ipc_batch={ipc} "
+                    + f"direct_ipc={'enabled' if direct else 'disabled'}"
+                )
+            lines.append(header)
 
             # Inside-stage ops with input buffers between them
             nodes = [f"{nd.name}@p{nd.parallelism}" for nd in stage.nodes]
@@ -572,6 +607,9 @@ class Engine:
                 and not self._opts.allow_subprocess_in_worker
             ):
                 chosen = "threads"
+
+            if getattr(stage, "runner_hint", None) == "inline":
+                chosen = "inline"
             allow_latency = self._opts.allow_latency_flush_in_deterministic
             if self._opts.deterministic:
                 has_sensitive = any(
@@ -624,7 +662,22 @@ class Engine:
             elif chosen == "remote":
                 raise NotImplementedError("Remote workers are not yet implemented.")
             elif chosen == "process":
-                raise NotImplementedError("ProcessStageRunner not yet implemented.")
+                self._runners.append(
+                    ProcessStageRunner(
+                        stage,
+                        self._ctx,
+                        cap_for_stage,
+                        prefetch_capacity=prefetch,
+                        deterministic=self._opts.deterministic,
+                        allow_latency_flush_in_deterministic=allow_latency,
+                        queue_capacity=self._opts.op_queue_capacity,
+                        ipc_batch_size_factor=self._opts.process_ipc_batch_size_factor,
+                        stage_index=idx,
+                        tracking_mode=runner_tracking_mode,
+                        stage_output_mode=output_mode,
+                        mp_context=self._mp_context,
+                    )
+                )
             else:
                 raise ValueError(f"Unknown runner '{chosen}'")
 

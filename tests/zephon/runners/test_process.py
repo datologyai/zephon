@@ -1,0 +1,417 @@
+import multiprocessing
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from tests.zephon.runners._helpers import (
+    _ctx_services,
+    _extract_values,
+    _mk_record,
+    _mk_records,
+)
+from zephon.core.constants import SampleRecord
+from zephon.core.graph import Node, Stage
+from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op, OpContext
+from zephon.core.traits import Buffering, OpTraits
+from zephon.observability.config import ExecutionTrackingMode
+from zephon.observability.stats import NodeMetricsDelta
+from zephon.ops.delay import DelayById
+from zephon.runners.process import ProcessStageRunner
+
+
+def _collect(runner: ProcessStageRunner, data: list[int]) -> list[int]:
+    records = _mk_records(data)
+    out_records = list(runner.run(iter(records)))
+    return _extract_values(out_records)
+
+
+def test_process_runner_emits_in_input_order_when_deterministic() -> None:
+    op = DelayById(max_delay_ms=1.5)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    data = list(range(30))
+    assert _collect(runner, data) == data
+
+
+def test_process_run_one_returns_through_single_op_stage() -> None:
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    record = _mk_record(7)
+    out = runner.run_one(record)
+    assert isinstance(out, SampleRecord)
+    assert out == record
+
+
+def test_process_prefetch_iterator_close_is_clean() -> None:
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        prefetch_capacity=4,
+        stage_output_mode="stream_items",
+    )
+
+    iterator = runner.run(iter(_mk_records(range(20))))
+    got: list[SampleRecord] = []
+    for _ in range(3):
+        got.append(next(iterator))
+    assert _extract_values(got) == [0, 1, 2]
+    if hasattr(iterator, "close"):
+        iterator.close()  # type: ignore[call-arg]
+
+
+def test_process_passthrough_stage_forwards_stream() -> None:
+    stage = Stage(name="empty", nodes=[], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    data = _mk_records(range(6))
+    out = list(runner.run(iter(data)))
+    assert out == data
+
+
+def test_process_runner_ipc_batch_size_scales_with_factor() -> None:
+    op = _BufferedOp(max_batch=40)
+    node = Node(name="buffered", op=op)
+    stage = Stage(name="ipc", nodes=[node], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        ipc_batch_size_factor=3,
+        stage_output_mode="stream_items",
+    )
+    assert getattr(runner, "_ipc_batch_size") == 120
+
+
+def test_process_runner_ipc_batch_size_defaults_without_buffering() -> None:
+    op = _IdentityOp()
+    node = Node(name="plain", op=op)
+    stage = Stage(
+        name="ipc_default", nodes=[node], placement="auto", break_reason="test"
+    )
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        ipc_batch_size_factor=4,
+        stage_output_mode="stream_items",
+    )
+    assert getattr(runner, "_ipc_batch_size") == 128
+
+
+@dataclass
+class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    name: str = "identity"
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> None:
+        return None
+
+    def process_one(self, elem: Any) -> list[Any]:
+        return [elem]
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return list(elems)
+
+
+@dataclass
+class _BufferedOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    max_batch: int = 32
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> Buffering:
+        return Buffering(max_batch=self.max_batch)
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return list(elems)
+
+
+class _ValueMappingOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> None:
+        return None
+
+    def _rewrite(self, elem: SampleRecord) -> SampleRecord:
+        payload = dict(elem.payload)
+        payload["value"] = self._map(int(payload["value"]))
+        return SampleRecord(meta=elem.meta, payload=payload)
+
+    def _map(self, value: int) -> int:
+        raise NotImplementedError
+
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
+        return [self._rewrite(elem)]
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [self._rewrite(elem) for elem in elems]
+
+
+@dataclass
+class _AddValueOp(_ValueMappingOp):
+    delta: int = 0
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def _map(self, value: int) -> int:
+        return value + self.delta
+
+
+@dataclass
+class _MultiplyValueOp(_ValueMappingOp):
+    factor: int = 1
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def _map(self, value: int) -> int:
+        return value * self.factor
+
+
+@dataclass
+class _ServiceOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+        self._hook: Any = None
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> None:
+        return None
+
+    def setup(
+        self,
+        ctx: OpContext,
+        stage_index: int,
+        stage_name: str,
+        op_index: int,
+        collect_stats: bool,
+    ) -> None:
+        super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+        self._hook = ctx.get("custom_service")
+
+    def process_one(self, elem: Any) -> list[Any]:
+        if callable(self._hook):
+            self._hook(elem.payload["value"])
+        return [elem]
+
+
+def test_process_runner_proxies_context_services() -> None:
+    calls: list[tuple[str, int]] = []
+
+    def _hook(value: int) -> None:
+        calls.append((multiprocessing.current_process().name, value))
+
+    op = _ServiceOp()
+    node = Node(name="svc", op=op)
+    stage = Stage(name="svc_stage", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services({"custom_service": _hook}),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    data = list(range(5))
+    out = _collect(runner, data)
+    assert out == data
+    assert calls
+    assert all(name == "MainProcess" for name, _ in calls)
+    assert sorted(val for _, val in calls) == data
+
+
+def test_process_runner_emits_metrics_deltas_when_callback_provided() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage0", nodes=[node], placement="auto", break_reason="test")
+
+    captured: list[NodeMetricsDelta] = []
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services({"record_node_metrics": captured.append}),
+        max_workers=2,
+        deterministic=True,
+        stage_index=3,
+        tracking_mode=ExecutionTrackingMode.NODES,
+        stage_output_mode="stream_items",
+    )
+
+    data = _mk_records(range(6))
+    out = list(runner.run(iter(data)))
+    assert out == data
+
+    assert captured
+    produced = sum(delta.produced_elements for delta in captured)
+    consumed = sum(delta.consumed_elements for delta in captured)
+    assert produced == len(data)
+    assert consumed == len(data)
+    assert all(delta.stage_index == 3 for delta in captured)
+    assert all(delta.stage_name == "stage0" for delta in captured)
+
+
+def test_process_runner_emits_microbatches_and_accepts_batch_input() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage1", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="microbatches",
+    )
+
+    singles = _mk_records(range(2))
+    batch = _mk_records(range(2, 5))
+    upstream = iter([singles[0], singles[1], batch])
+    out = list(runner.run(upstream))
+
+    assert len(out) == 3
+    assert all(isinstance(elem, list) for elem in out)
+    assert _extract_values(out[0]) == [0]
+    assert _extract_values(out[1]) == [1]
+    assert _extract_values(out[2]) == [2, 3, 4]
+
+
+def test_process_runner_stream_mode_flattens_microbatch_input() -> None:
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="stage2", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    microbatch = _mk_records(range(5))
+    out = list(runner.run(iter([microbatch])))
+    assert out == microbatch
+
+
+def test_process_runner_direct_ipc_fast_path_transforms_stream() -> None:
+    op = _AddValueOp(delta=5)
+    node = Node(name="add", op=op)
+    stage = Stage(name="direct", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    assert getattr(runner, "_single_op_direct_ipc") is True
+
+    data = list(range(12))
+    out = _collect(runner, data)
+    assert out == [value + 5 for value in data]
+
+
+def test_process_runner_non_fast_path_handles_multiple_ops() -> None:
+    add = Node(name="add", op=_AddValueOp(delta=1))
+    multiply = Node(name="mul", op=_MultiplyValueOp(factor=3), inputs=[add])
+    stage = Stage(
+        name="chain",
+        nodes=[add, multiply],
+        placement="auto",
+        break_reason="test",
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=3,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    assert getattr(runner, "_single_op_direct_ipc") is False
+
+    data = list(range(10))
+    out = _collect(runner, data)
+    assert out == [(value + 1) * 3 for value in data]
+
+
+@dataclass
+class _CrashOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+
+    def buffering(self) -> None:
+        return None
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        raise ValueError("boom inside worker")
+
+
+def test_process_runner_bubbles_worker_exceptions() -> None:
+    op = _CrashOp()
+    node = Node(name="crash", op=op)
+    stage = Stage(name="stage3", nodes=[node], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        list(runner.run(iter(_mk_records(range(3)))))
+    text = str(excinfo.value)
+    assert "ValueError" in text
+    assert "boom inside worker" in text
+    assert "process_many" in text

@@ -177,13 +177,20 @@ def _build_repro_param_cases() -> list[pytest.ParameterSet]:
         [0],
         [0],
     )
+    add_cases(
+        "process",
+        [MixtureReadMode.WEIGHTED_ROUND_ROBIN],
+        [True],
+        [0],
+        [0],
+    )
     return cases
 
 
 _JSONL_REPRO_CASES = _build_repro_param_cases()
 
 
-@pytest.mark.parametrize("runner_kind", ["threads", "inline"])
+@pytest.mark.parametrize("runner_kind", ["threads", "inline", "process"])
 def test_jsonl_integration_filter_js_and_html(tmp_path: Path, runner_kind: str) -> None:
     ds_js, ds_html = _prepare_datasets(tmp_path, total=200, files=4)
 
@@ -286,7 +293,8 @@ def test_jsonl_integration_reproducibility(
     assert runs_a[0] == runs_b[0]
 
 
-def test_jsonl_runner_threads_inline_parity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runner_kind", ["process", "inline"])
+def test_jsonl_runner_threads_parity(tmp_path: Path, runner_kind: str) -> None:
     datasets = _prepare_datasets(tmp_path, total=120, files=4)
     common_kwargs = dict(
         deterministic=True,
@@ -299,7 +307,7 @@ def test_jsonl_runner_threads_inline_parity(tmp_path: Path) -> None:
         final_prefetch=8,
     )
     out_threads = _run_pipeline(datasets, runner_kind="threads", **common_kwargs)
-    out_inline = _run_pipeline(datasets, runner_kind="inline", **common_kwargs)
+    out_inline = _run_pipeline(datasets, runner_kind=runner_kind, **common_kwargs)
     assert out_threads == out_inline
 
 

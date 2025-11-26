@@ -78,6 +78,8 @@ class Planner:
                 current_placement = node.placement
         flush("end")
 
+        stages = self._split_batch_stages(stages)
+
         indexable = all(
             all(nd.op.traits().indexable for nd in stage.nodes) for stage in stages
         )
@@ -100,6 +102,65 @@ class Planner:
             indexable=indexable,
             batch_size_hint=batch_size_hint,
         )
+
+    def _split_batch_stages(self, stages: list[Stage]) -> list[Stage]:
+        expanded: list[Stage] = []
+        for stage in stages:
+            expanded.extend(self._split_stage_for_batch(stage))
+        return expanded
+
+    def _split_stage_for_batch(self, stage: Stage) -> list[Stage]:
+        nodes = stage.nodes
+        if not any(isinstance(nd.op, Batch) for nd in nodes):
+            return [stage]
+
+        segments: list[tuple[list[Node], bool]] = []
+        idx = 0
+        total = len(nodes)
+        while idx < total:
+            batch_idx = next(
+                (i for i in range(idx, total) if isinstance(nodes[i].op, Batch)),
+                None,
+            )
+            if batch_idx is None:
+                if idx < total:
+                    segments.append((nodes[idx:], False))
+                break
+
+            inline_start = batch_idx
+            if batch_idx > 0:
+                prev = nodes[batch_idx - 1]
+                current = nodes[batch_idx]
+                if (
+                    isinstance(prev.op, ReplayFilter)
+                    and prev.name == f"{current.name}_replay_filter"
+                ):
+                    inline_start = batch_idx - 1
+
+            if inline_start > idx:
+                segments.append((nodes[idx:inline_start], False))
+
+            segments.append((nodes[inline_start : batch_idx + 1], True))
+            idx = batch_idx + 1
+
+        result: list[Stage] = []
+        for seg_idx, (seg_nodes, inline) in enumerate(segments):
+            if not seg_nodes:
+                continue
+            name = stage.name if seg_idx == 0 else f"{stage.name}#{seg_idx}"
+            break_reason = stage.break_reason if seg_idx == 0 else "batch-inline"
+            runner_hint = "inline" if inline else stage.runner_hint
+            result.append(
+                Stage(
+                    name=name,
+                    nodes=seg_nodes,
+                    placement=stage.placement,
+                    break_reason=break_reason,
+                    runner_hint=runner_hint,
+                )
+            )
+
+        return result if result else [stage]
 
     def _with_replay_filters(self, graph: Graph) -> list[Node]:
         nodes: list[Node] = []

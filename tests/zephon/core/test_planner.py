@@ -45,7 +45,32 @@ def test_planner_injects_filter_before_batch() -> None:
     g.add("batch", Batch(microbatch_size=4), upstream)
 
     plan = Planner().make_plan(g)
-    stage_nodes = plan.stages[0].nodes
-    names = [nd.name for nd in stage_nodes]
-    assert names == ["upstream", "batch_replay_filter", "batch"]
-    assert isinstance(stage_nodes[1].op, ReplayFilter)
+    batch_stage = next(
+        stage
+        for stage in plan.stages
+        if any(isinstance(nd.op, Batch) for nd in stage.nodes)
+    )
+    names = [nd.name for nd in batch_stage.nodes]
+    assert names == ["batch_replay_filter", "batch"]
+    assert isinstance(batch_stage.nodes[0].op, ReplayFilter)
+
+
+def test_planner_splits_batch_stage_and_marks_inline() -> None:
+    g = Graph()
+    upstream = g.add("upstream", DelayById(max_delay_ms=0.0))
+    batch = g.add("batch", Batch(microbatch_size=4), upstream)
+    g.add("tail", DelayById(max_delay_ms=0.0), batch)
+
+    plan = Planner().make_plan(g)
+    assert len(plan.stages) == 3
+
+    head_nodes = [nd.name for nd in plan.stages[0].nodes]
+    inline_nodes = [nd.name for nd in plan.stages[1].nodes]
+    tail_nodes = [nd.name for nd in plan.stages[2].nodes]
+
+    assert head_nodes == ["upstream"]
+    assert inline_nodes == ["batch_replay_filter", "batch"]
+    assert tail_nodes == ["tail"]
+
+    assert plan.stages[1].runner_hint == "inline"
+    assert plan.stages[1].break_reason == "batch-inline"
