@@ -134,7 +134,20 @@ class Pipeline:
         self._plan: Plan | None = None
         self._engine: Engine | None = None
         self._options = RuntimeOptions()
-        self._tail = self._graph.add("fetch", FetchOp(), placement="local")
+        self._fetch_node = self._graph.add("fetch", FetchOp(), placement="local")
+        self._tail = self._fetch_node
+
+    def fetch_parallelism(self, parallelism: int | None) -> "Pipeline":
+        """Override the implicit FetchOp parallelism."""
+        if parallelism is None:
+            parallelism = max(1, self._fetch_node.op.traits().parallelism)
+        elif parallelism < 1:
+            raise ValueError("Fetch parallelism must be >= 1.")
+        self._fetch_node.parallelism = parallelism
+        return self
+
+    def fetch(self, parallelism: int | None) -> "Pipeline":
+        return self.fetch_parallelism(parallelism)
 
     def decode_text(
         self, parallelism: Optional[int] = None, **kwargs: Any

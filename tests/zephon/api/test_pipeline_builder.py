@@ -40,6 +40,36 @@ def test_pipeline_explain_includes_plan_and_runtime() -> None:
     assert "pipeline_end" in exp
 
 
+def test_pipeline_fetch_parallelism_override() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = (
+        PublicPipeline(ws)
+        .fetch_parallelism(5)
+        .decode_text()
+        .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
+    )
+
+    exp = pipe.explain()
+    assert "fetch@p5" in exp
+
+
+def test_pipeline_fetch_alias_configures_parallelism() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = (
+        PublicPipeline(ws)
+        .fetch(parallelism=4)
+        .decode_text()
+        .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
+    )
+
+    exp = pipe.explain()
+    assert "fetch@p4" in exp
+
+
 def test_pipeline_options_merge_and_final_prefetch_marker(tmp_path) -> None:
     ds = make_inmem_dataset("tiny", [{"text": "x"}])
     ws = FakeIndexableWorkSource(ds)

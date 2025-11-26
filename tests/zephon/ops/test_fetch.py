@@ -126,4 +126,4 @@ def test_fetch_op_traits_and_buffering_override() -> None:
     op = FetchOp(buf=custom)
     assert op.buffering() == custom
     t = op.traits()
-    assert t.indexable is True and t.parallelism == 16
+    assert t.indexable is True and t.parallelism == 4
