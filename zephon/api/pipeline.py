@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Iterator,
     Optional,
     Protocol,
@@ -19,6 +20,7 @@ from zephon.core.constants import (
     EngineSample,
     SampleBatch,
     SampleId,
+    SamplePayload,
     SampleRecord,
     StreamItem,
 )
@@ -30,7 +32,14 @@ from zephon.observability import (
     ExecutionTrackingMode,
     MetricsSinkConfig,
 )
-from zephon.ops import Batch, DecodeText, FetchOp, Materialize, TokenizeText
+from zephon.ops import (
+    Batch,
+    DecodeText,
+    FetchOp,
+    MapTransform,
+    Materialize,
+    TokenizeText,
+)
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
@@ -157,6 +166,39 @@ class Pipeline:
             DecodeText(**kwargs),
             self._tail,
             placement="local",
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    def map_transform(
+        self,
+        transform_fn: Callable[[SamplePayload], SamplePayload | None],
+        *,
+        drop_none: bool = True,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Add a map-style transformation operator.
+
+        Applies a user-provided transformation function to each sample's payload.
+
+        Args:
+            transform_fn: Callable that transforms the payload.
+                If it returns None and drop_none=True, the sample is filtered out.
+            drop_none: If True, drop samples where transform_fn returns None.
+            placement: Placement hint for this operator.
+            parallelism: Override default parallelism for this operator.
+
+        Returns:
+            Self for method chaining.
+        """
+        op = MapTransform(transform_fn, drop_none=drop_none)
+        node = self._graph.add(
+            "map_transform",
+            op,
+            self._tail,
+            placement=placement,
             parallelism=parallelism,
         )
         self._tail = node
