@@ -1,5 +1,9 @@
+import pytest
+
 from zephon.core.graph import Graph
+from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
 from zephon.core.planner import Planner
+from zephon.core.traits import OpTraits
 from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.ops.materialize import Materialize
@@ -74,3 +78,51 @@ def test_planner_splits_batch_stage_and_marks_inline() -> None:
 
     assert plan.stages[1].runner_hint == "inline"
     assert plan.stages[1].break_reason == "batch-inline"
+
+
+class _OrderedOp(DefaultSetup, DefaultFinalize[int], Op[int, int]):
+    def __init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def buffering(self):
+        return None
+
+    def process_one(self, elem: int) -> list[int]:
+        return [elem]
+
+
+class _ReorderingOp(_OrderedOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=False, parallelism=1)
+
+
+class _MissingTraitOp(_OrderedOp):
+    def traits(self) -> OpTraits:
+        # Intentionally omit preserves_cursor_order to ensure the planner rejects it.
+        return OpTraits()
+
+
+def test_planner_marks_plan_cursor_order_when_all_ops_preserve() -> None:
+    g = Graph()
+    a = g.add("a", _OrderedOp())
+    g.add("b", _OrderedOp(), a)
+    plan = Planner().make_plan(g)
+    assert plan.preserves_cursor_order is True
+
+
+def test_planner_marks_plan_non_cursor_order_when_any_op_reorders() -> None:
+    g = Graph()
+    a = g.add("a", _OrderedOp())
+    g.add("b", _ReorderingOp(), a)
+    plan = Planner().make_plan(g)
+    assert plan.preserves_cursor_order is False
+
+
+def test_planner_requires_trait_to_be_set() -> None:
+    g = Graph()
+    g.add("a", _MissingTraitOp())
+    with pytest.raises(ValueError):
+        Planner().make_plan(g)

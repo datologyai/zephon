@@ -13,6 +13,9 @@ class OpTraits:
 
     Attributes:
         indexable: Whether the operator preserves indexability through the plan.
+        preserves_cursor_order: Whether the operator preserves per-lane cursor
+            order (no reordering across chunk/offset/lineage). Required for
+            deciding when the cursor-order notify path is safe.
         parallelism: Suggested parallelism for the operator when not overridden.
         batch_shape_sensitive: If True, the operator's outputs can depend on how
             inputs are grouped into micro-batches (e.g., per-batch RNG or
@@ -23,6 +26,7 @@ class OpTraits:
     """
 
     indexable: bool = True
+    preserves_cursor_order: bool | None = None
     parallelism: int = 1
     batch_shape_sensitive: bool = False
 

@@ -78,3 +78,17 @@ def test_batch_traits_and_buffering_none() -> None:
     assert traits.indexable is False
     assert traits.batch_shape_sensitive is False
     assert op.buffering() is None
+
+
+def test_batch_skips_tombstones_but_forwards_them() -> None:
+    op = Batch(2, drop_last=False)
+    tomb_meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_tombstone(
+        True
+    )
+    tomb = SampleRecord(meta=tomb_meta, payload={})
+    kept = _rec(1)
+    out = op.process_many([tomb, kept])
+    assert out[0] is tomb
+    tail = op.finalize()
+    assert len(tail) == 1
+    assert tail[0].records[0] is kept

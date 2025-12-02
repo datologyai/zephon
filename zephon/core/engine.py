@@ -51,6 +51,7 @@ T = TypeVar("T")
 
 from zephon.core.constants import (
     ChunkId,
+    ContributorRef,
     EngineSample,
     LaneId,
     LanePtr,
@@ -115,6 +116,22 @@ def _extract_lane_id(item: StreamItem) -> int:
 
 def _noop(*args: Any, **kwargs: Any) -> None:
     pass
+
+
+class OffsetBitmap:
+    """Fast bitmap using 1 byte per offset (0 or 1)."""
+
+    __slots__ = ("size", "_bits")
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._bits = bytearray(size)
+
+    def set(self, offset: int) -> None:
+        self._bits[offset] = 1
+
+    def is_set(self, offset: int) -> bool:
+        return self._bits[offset] == 1
 
 
 def _call_engine_clean_merged(engine: "Engine"):
@@ -200,6 +217,7 @@ class Engine:
     def __init__(self, plan: Plan, opts: RuntimeOptions, work: WorkSource) -> None:
         """Initialize stage runners and prepare to stream work items."""
         self._plan = plan
+        self._preserves_cursor_order = bool(plan.preserves_cursor_order)
         base_ctx: dict[str, Any] = {
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
@@ -215,6 +233,8 @@ class Engine:
         )
         self._lane_progress: dict[LaneId, LanePtr] = defaultdict(LanePtr)
         self._lane_last_cursor: dict[LaneId, SampleCursor | None] = {}
+        self._offset_done: dict[LaneId, dict[ChunkId, OffsetBitmap]] = defaultdict(dict)
+        self._offset_done_count: dict[LaneId, dict[ChunkId, int]] = defaultdict(dict)
 
         self._lane_next_cid: dict[LaneId, int] = defaultdict(int)
         self._warned_once_about_runid = False
@@ -434,6 +454,12 @@ class Engine:
             )
         else:
             lines.append("Allocation=fit_to_ops (cap=sum(node.parallelism), min 1/op)")
+        bookkeeping = (
+            "simple chunk-watermark (preserves_cursor_order=True)"
+            if self._preserves_cursor_order
+            else "contributor-aware (packing/shuffle-safe)"
+        )
+        lines.append(f"Bookkeeping={bookkeeping}")
 
         for idx, (stage, runner) in enumerate(zip(self._plan.stages, self._runners)):
             runner_kind = "unknown"
@@ -801,9 +827,19 @@ class Engine:
         self._rr_next_idx[key] = lanes.index(next_lane)
 
     def _publish_replay_snapshot(self) -> None:
-        snapshot = {
-            int(lane): cursor for lane, cursor in self._lane_last_cursor.items()
-        }
+        snapshot: dict[int, SampleCursor | None] = {}
+        for lane, cursor in self._lane_last_cursor.items():
+            if cursor is None:
+                # No prior record delivered on this lane (fresh run or evicted sentinel).
+                snapshot[lane] = None
+                continue
+
+            inflight_lane = self.inflight_chunks_per_lane[lane]
+            if cursor.chunk_id not in inflight_lane:
+                # Target record will not be replayed (its chunk already evicted), so emit all.
+                snapshot[lane] = None
+            else:
+                snapshot[lane] = cursor
         self._replay_config.set_snapshot(snapshot)
 
     def _stage_parallelism(self, stage: Stage) -> int:
@@ -1017,36 +1053,102 @@ class Engine:
 
         yield from final_stream
 
-    def notify(
-        self, lane_id: int, max_chunk_id: int, cursors: list[SampleCursor]
+    def notify_monotone(
+        self, lane_id: int, max_chunk_id: int, cursors: Iterable[SampleCursor]
     ) -> None:
-        """Record delivery progress for ``lane_id`` and evict completed chunks."""
-        # We don't take the checkpointing lock here. The reason is that notify should
-        # only be called when the consumer gets a new item, and the consumer should
-        # only request a checkpoint after they have gotten that item. In that sense,
-        # checkpointing is not customer-thread safe. If this becomes a problem, we should
-        # consider locking here, but then we'd acquire the lock for every sample.
+        """Cursor-ordered notify path (no cross-chunk reordering or packing).
 
-        # 1) Evict older inflight chunks for this lane.
+        Mirrors the pre-contributors behavior: evict chunks older than
+        ``max_chunk_id``, advance lane progress by the number of cursors provided
+        from that chunk, and track the max cursor for replay.
+        """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        cursor_list = cursors if isinstance(cursors, list) else list(cursors)
+
+        # 1) Evict older inflight chunks (no bitmap bookkeeping in this path).
         for cid in list(inflight_lane.keys()):
             if cid < max_chunk_id:
                 inflight_lane.pop(cid, None)
-        add_k = len(cursors)
 
-        if lane_id not in self._lane_last_cursor:
-            self._lane_last_cursor[lane_id] = None
-
-        # 2) Advance persisted progress
-        cur = self._lane_progress[lane_id]
+        add_k = len(cursor_list)
+        cur = self._lane_progress.get(lane_id, LanePtr())
         seen_offset = cur.offset if (cur.chunk_id == max_chunk_id) else 0
         self._lane_progress[lane_id] = LanePtr(max_chunk_id, seen_offset + add_k)
-        # 3) Track latest cursor for checkpoints
-        if cursors:
-            max_cursor = max(cursors)
+
+        if cursor_list:
+            max_cursor = max(cursor_list)
             previous = self._lane_last_cursor.get(lane_id)
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
+
+    def notify(
+        self,
+        lane_id: int,
+        entries: Iterable[ContributorRef],
+        record_cursor: SampleCursor | None = None,
+    ) -> None:
+        """Record delivery progress for ``lane_id`` and evict completed chunks.
+
+        ``entries`` describe contributors that have been emitted. A chunk can be
+        evicted once every base offset in that chunk has produced exactly one
+        contributor (or tombstone) with ``is_last_child=True``. ``record_cursor``
+        is the replay identity of the delivered training record and is stored as
+        the per-lane sentinel for equality-based replay.
+        """
+        inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        # Per-chunk bitmaps track which offsets are closed; counts are popcounts
+        # so we can check "chunk complete?" in O(1) instead of re-counting bits.
+        done = self._offset_done[lane_id]
+        done_count = self._offset_done_count[lane_id]
+
+        # 1) Update per-offset completion state
+        for entry in entries:
+            cursor = entry.cursor
+            cid = cursor.chunk_id
+            off = cursor.chunk_offset
+
+            chunk = inflight_lane.get(cid)
+            if chunk is None:
+                continue  # chunk already evicted or not tracked
+
+            if cid not in done:
+                done[cid] = OffsetBitmap(len(chunk))
+                done_count[cid] = 0
+
+            if entry.is_last_child and not done[cid].is_set(off):
+                done[cid].set(off)
+                done_count[cid] += 1
+
+        # 2) Evict fully-completed chunks in cid order
+        last_completed_ptr: LanePtr | None = None
+        # Chunk IDs increase monotonically per lane; dict preserves insertion order.
+        for cid in list(inflight_lane.keys()):
+            chunk = inflight_lane[cid]
+            if cid not in done:
+                break
+            if done_count[cid] >= len(chunk):
+                last_completed_ptr = LanePtr(cid, len(chunk))
+                inflight_lane.pop(cid, None)
+                done.pop(cid, None)
+                done_count.pop(cid, None)
+            else:
+                break  # earliest incomplete chunk blocks later evictions (keep inflight contiguous)
+
+        # 3) Maintain lane progress for fairness diagnostics
+        if inflight_lane:
+            front_cid = min(inflight_lane.keys())
+            # A chunk may be inflight without any completions yet; default completed to 0.
+            self._lane_progress[lane_id] = LanePtr(
+                front_cid, done_count.get(front_cid, 0)
+            )
+        elif last_completed_ptr is not None:
+            self._lane_progress[lane_id] = last_completed_ptr
+        else:
+            self._lane_progress.setdefault(lane_id, LanePtr())
+
+        # 4) Track latest record-level cursor for replay
+        if record_cursor is not None:
+            self._lane_last_cursor[lane_id] = record_cursor
 
     def eval_one(self, sample: SampleId | EngineSample) -> Any:
         """Synchronously evaluate a single element through every stage runner."""
@@ -1083,6 +1185,8 @@ class Engine:
                 "_lane_progress",
                 "_lane_next_cid",
                 "_lane_last_cursor",
+                "_offset_done",
+                "_offset_done_count",
             ]:
                 # print(f"length of {purge_candidate_str} is {len(getattr(self, purge_candidate_str))}")
                 for lane in list(getattr(self, purge_candidate_str)):
@@ -1101,6 +1205,7 @@ class Engine:
                     self._lane_progress[lane] = LanePtr(0, 0)
                 if lane not in self._lane_next_cid:
                     self._lane_next_cid[lane] = 0
+                self._lane_last_cursor.setdefault(lane, None)
 
             inflight: dict[int, dict[int, dict[str, Any]]] = {}
             for lane, by_chunk in self.inflight_chunks_per_lane.items():
@@ -1487,6 +1592,8 @@ class Engine:
 
         # Restore inflight & pointers
         self.inflight_chunks_per_lane.clear()
+        self._offset_done.clear()
+        self._offset_done_count.clear()
         inflight_all = state.get("inflight", {})
         for lane_s, by_chunk in inflight_all.items():
             lane = int(lane_s)
@@ -1545,16 +1652,10 @@ class Engine:
                 payload = replay_raw.get(str(lane)) or replay_raw.get(int(lane))
                 if payload is None:
                     self._lane_last_cursor[lane] = None
-                    continue
-                chunk_id_raw, chunk_offset_raw, lineage_raw, sample_id_raw = payload
-                self._lane_last_cursor[lane] = SampleCursor.from_key(
-                    (
-                        int(chunk_id_raw),
-                        int(chunk_offset_raw),
-                        tuple(lineage_raw),
-                        tuple(sample_id_raw),
-                    )
-                )
+                elif isinstance(payload, SampleCursor):
+                    self._lane_last_cursor[lane] = payload
+                else:
+                    self._lane_last_cursor[lane] = SampleCursor.from_key(payload)
         else:
             for lane in owned:
                 self._lane_last_cursor[lane] = None

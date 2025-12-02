@@ -14,14 +14,19 @@ from zephon.core.traits import Buffering, OpTraits
 
 
 class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
-    """Per-lane pre-batch dropper configured lazily via the OpContext."""
+    """Per-lane pre-batch dropper configured lazily via the OpContext.
+
+    Drops records until the checkpointed per-lane cursor reappears (inclusive),
+    then emits the suffix unchanged. Assumes it runs single-threaded within its
+    stage so that per-lane state is not sharded across threads.
+    """
 
     def __init__(self) -> None:
         DefaultSetup.__init__(self)
 
         self._service: ReplayConfigService | None = None
         self._targets: dict[LaneId, SampleCursor | None] = {}
-        self._finalized_lanes: dict[LaneId, bool] = {}
+        self._seen_target: dict[LaneId, bool] = {}
         self._disabled: bool = True
         self._initialized = False
 
@@ -43,7 +48,11 @@ class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
         self._disabled = False
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> Buffering | None:
         return None
@@ -55,16 +64,12 @@ class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
 
         self._initialized = True
         snapshot = self._service.snapshot()
-        self._targets = {
-            lane: cursor for lane, cursor in snapshot.items() if cursor is not None
-        }
-        self._finalized_lanes = {
-            lane: cursor is None for lane, cursor in snapshot.items()
-        }
-        if not self._finalized_lanes:
+        self._targets = dict(snapshot.items())
+        self._seen_target = {lane: cursor is None for lane, cursor in snapshot.items()}
+        if not self._targets:
             self._disabled = True
         else:
-            self._disabled = all(self._finalized_lanes.values())
+            self._disabled = all(self._seen_target.values())
 
     def _should_drop(self, elem: SampleRecord) -> bool:
         assert self._service is not None
@@ -72,22 +77,22 @@ class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
         cursor = elem.meta.cursor
         target = self._targets.get(lane)
 
-        if lane not in self._finalized_lanes:
-            self._finalized_lanes[lane] = target is None
+        if lane not in self._seen_target:
+            self._seen_target[lane] = target is None
 
         if target is None:
-            # Lane either wasn't part of replay or we've already passed the saved cursor.
+            if all(self._seen_target.values()):
+                self._disabled = True
             return False
 
-        if cursor <= target:
-            # Still within the replay prefix -> drop element.
-            return True
+        if not self._seen_target[lane]:
+            if cursor == target:
+                self._seen_target[lane] = True
+                if all(self._seen_target.values()):
+                    self._disabled = True
+                return True  # drop sentinel itself
+            return True  # still replay prefix
 
-        # We crossed the saved cursor: mark this lane finalized and accept the element.
-        self._targets.pop(lane, None)
-        self._finalized_lanes[lane] = True
-        if all(self._finalized_lanes.values()):
-            self._disabled = True
         return False
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:

@@ -77,10 +77,15 @@ class SampleCursor:
             self.sample_id,
         )
 
+    @property
+    def base_offset(self) -> tuple[int, int]:
+        """Return ``(chunk_id, chunk_offset)`` for eviction/base-offset accounting."""
+        return (self.chunk_id, self.chunk_offset)
+
     def _cmp_key(self) -> tuple[int, int, LineagePath, SampleId]:
         return (
-            int(self.chunk_id),
-            int(self.chunk_offset),
+            self.chunk_id,
+            self.chunk_offset,
             self.lineage,
             self.sample_id,
         )
@@ -106,6 +111,19 @@ class SampleCursor:
         return self._cmp_key() >= other._cmp_key()
 
 
+@dataclass(frozen=True, slots=True)
+class ContributorRef:
+    """Reference to a contributing child derived from a base sample.
+
+    ``cursor`` pinpoints the base offset and lineage; ``is_last_child=True``
+    denotes the sole contributor (or tombstone) that closes that base offset for
+    eviction purposes.
+    """
+
+    cursor: SampleCursor
+    is_last_child: bool = True
+
+
 @dataclass(slots=True)
 class LanePtr:
     """Keeps track at which chunk and item we are per lane."""
@@ -122,6 +140,11 @@ class SampleMeta:
     Operators that split inputs must call :meth:`child` in the order elements are
     emitted so downstream consumers observe an ordering identical to the
     single-threaded execution semantics enforced by the runner.
+
+    Contributor and tombstone flags are stored inside ``tags`` under
+    ``"_contributors"`` and ``"_tombstone"`` because in simple pipelines
+    (notify_monotone path) that increases the IPC overhead since the
+    public schema grows.
     """
 
     sample_id: SampleId
@@ -136,11 +159,17 @@ class SampleMeta:
         normalized = _normalize_lineage(path)
         if normalized is self.lineage:
             return self
-        return replace(self, lineage=normalized)
+        return replace(
+            self,
+            lineage=normalized,
+        )
 
     def child(self, index: LineageIndex) -> "SampleMeta":
         """Return metadata for the ``index``-th child emitted from this sample."""
-        return replace(self, lineage=self.lineage + (int(index),))
+        return replace(
+            self,
+            lineage=self.lineage + (int(index),),
+        )
 
     @property
     def cursor(self) -> SampleCursor:
@@ -152,6 +181,51 @@ class SampleMeta:
     def as_cursor_key(self) -> SampleCursorKey:
         """Convenience helper returning the tuple form used for persistence."""
         return self.cursor.as_key()
+
+    def contribution_refs(self) -> tuple[ContributorRef, ...]:
+        """Return contributor references used for eviction/progress.
+
+        Operators that don't set ``contributors`` (1:1 outputs) are treated as emitting
+        a single contributor with ``is_last_child=True`` using their own cursor.
+        """
+        if self.contributors:
+            return self.contributors
+        return (ContributorRef(self.cursor, True),)
+
+    def contribution_cursors(self) -> tuple[SampleCursor, ...]:
+        """Return the cursors for all contributors."""
+        return tuple(ref.cursor for ref in self.contribution_refs())
+
+    @property
+    def contributors(self) -> tuple[ContributorRef, ...]:
+        val = self.tags.get("_contributors")
+        if val is None:
+            return ()
+        if isinstance(val, tuple):
+            return val
+        return tuple(val)
+
+    @property
+    def tombstone(self) -> bool:
+        return bool(self.tags.get("_tombstone", False))
+
+    def with_contributors(self, value: Iterable[ContributorRef] | None) -> "SampleMeta":
+        """Return a new ``SampleMeta`` with contributors set/cleared in tags."""
+        tags = dict(self.tags)
+        if value:
+            tags["_contributors"] = tuple(value)
+        else:
+            tags.pop("_contributors", None)
+        return replace(self, tags=tags)
+
+    def with_tombstone(self, value: bool = True) -> "SampleMeta":
+        """Return a new ``SampleMeta`` with tombstone marker set/cleared in tags."""
+        tags = dict(self.tags)
+        if value:
+            tags["_tombstone"] = True
+        else:
+            tags.pop("_tombstone", None)
+        return replace(self, tags=tags)
 
 
 @dataclass(slots=True)

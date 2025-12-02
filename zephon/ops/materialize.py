@@ -14,7 +14,7 @@ class Materialize(DefaultSetup, DefaultFinalize[StreamItem]):
     """Force evaluation of upstream iterables without altering records."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=False)
+        return OpTraits(indexable=False, preserves_cursor_order=True)
 
     def buffering(self) -> Optional[Buffering]:
         return None

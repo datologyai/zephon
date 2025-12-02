@@ -24,7 +24,7 @@ class AssertLineageOrder(DefaultSetup, DefaultFinalize[StreamItem]):
         self._last_per_lane: dict[int, SampleCursor | None] = defaultdict(lambda: None)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True)
+        return OpTraits(indexable=True, preserves_cursor_order=True)
 
     def buffering(self) -> Buffering | None:
         return None

@@ -44,17 +44,24 @@ def test_replay_filter_drops_until_past_checkpoint_cursor() -> None:
     service.set_snapshot({0: cursor})
     op = _filter(service)
 
-    # Duplicate cursor should be dropped and must not advance the service.
-    drop = _record(4)
-    assert op.process_one(drop) == []
-    assert service.snapshot()[0] == cursor
-
-    # Next record advances past the checkpoint and reenables pass-through.
+    assert op.process_one(_record(3)) == []
+    # Target itself is also dropped, then pass-through resumes.
+    assert op.process_one(_record(4)) == []
     accept = _record(5)
     assert op.process_one(accept) == [accept]
     assert service.snapshot()[0] == cursor
 
-    # Subsequent records flow through while still updating progress.
-    tail = _record(6)
-    assert op.process_one(tail) == [tail]
-    assert service.snapshot()[0] == cursor
+
+def test_replay_filter_allows_non_monotone_suffix() -> None:
+    cursor = SampleCursor(chunk_id=0, chunk_offset=2, sample_id=(0, 0, 2))
+    service = ReplayConfigService()
+    service.set_snapshot({0: cursor})
+    op = _filter(service)
+
+    # Drop records until the exact target is seen.
+    assert op.process_one(_record(3)) == []
+    assert op.process_one(_record(2)) == []
+
+    # After the flip, even "earlier" cursors must pass through.
+    late = _record(1)
+    assert op.process_one(late) == [late]

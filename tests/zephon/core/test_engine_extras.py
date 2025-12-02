@@ -3,7 +3,13 @@ from typing import Any
 
 import pytest
 
-from zephon.core.constants import LanePtr, SampleBatch, SampleMeta, SampleRecord
+from zephon.core.constants import (
+    ContributorRef,
+    LanePtr,
+    SampleBatch,
+    SampleMeta,
+    SampleRecord,
+)
 from zephon.core.engine import (
     Engine,
     RuntimeOptions,
@@ -169,6 +175,9 @@ def test_notify_updates_progress_and_cursor() -> None:
     eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
 
     lane = 0
+    eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
+        components={"X": [(1, 2, 3), (4, 5, 6)]}, seed=None
+    )
     cursor0 = SampleMeta(
         sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0
     ).cursor
@@ -178,18 +187,89 @@ def test_notify_updates_progress_and_cursor() -> None:
         .cursor
     )
 
-    eng.notify(lane, max_chunk_id=0, cursors=[cursor0, cursor1])
+    eng.notify(
+        lane,
+        entries=[
+            ContributorRef(cursor=cursor0, is_last_child=True),
+            ContributorRef(cursor=cursor1, is_last_child=True),
+        ],
+        record_cursor=cursor1,
+    )
     assert eng._lane_progress[lane].chunk_id == 0  # type: ignore[attr-defined]
     assert eng._lane_progress[lane].offset == 2  # type: ignore[attr-defined]
     assert eng._lane_last_cursor[lane] == cursor1  # type: ignore[attr-defined]
+    assert eng.inflight_chunks_per_lane[lane] == {}
 
+    eng.inflight_chunks_per_lane[lane][1] = WorkChunk(
+        components={"Y": [(7, 8, 9)]}, seed=None
+    )
     cursor2 = SampleMeta(
         sample_id=(0, 0, 2), lane_id=lane, chunk_id=1, chunk_offset=0
     ).cursor
-    eng.notify(lane, max_chunk_id=1, cursors=[cursor2])
+    eng.notify(
+        lane,
+        entries=[ContributorRef(cursor=cursor2, is_last_child=True)],
+        record_cursor=cursor2,
+    )
     assert eng._lane_progress[lane].chunk_id == 1  # type: ignore[attr-defined]
     assert eng._lane_progress[lane].offset == 1  # type: ignore[attr-defined]
     assert eng._lane_last_cursor[lane] == cursor2  # type: ignore[attr-defined]
+    assert eng.inflight_chunks_per_lane[lane] == {}
+
+
+def test_replay_snapshot_ignores_evicted_cursor() -> None:
+    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    lane = 0
+
+    # Cursor whose chunk is not inflight should not appear as target.
+    evicted_cursor = SampleMeta(
+        sample_id=(0, 0, 0), lane_id=lane, chunk_id=5, chunk_offset=0
+    ).cursor
+    eng._lane_last_cursor[lane] = evicted_cursor  # type: ignore[attr-defined]
+    eng.inflight_chunks_per_lane[lane] = {}
+    eng._publish_replay_snapshot()  # type: ignore[attr-defined]
+    assert eng._replay_config.snapshot()[lane] is None  # type: ignore[attr-defined]
+
+    # When the chunk is inflight, the cursor is preserved.
+    eng.inflight_chunks_per_lane[lane][5] = WorkChunk(components={"X": [(1, 2, 3)]})
+    eng._publish_replay_snapshot()  # type: ignore[attr-defined]
+    assert eng._replay_config.snapshot()[lane] == evicted_cursor  # type: ignore[attr-defined]
+
+
+def test_chunk_eviction_waits_for_all_offsets() -> None:
+    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    lane = 0
+    eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
+        components={"X": [(1,), (2,)]}
+    )  # two offsets
+    eng.inflight_chunks_per_lane[lane][1] = WorkChunk(components={"Y": [(3,)]})
+
+    # Close only offset 0 of chunk 0 -> no eviction
+    c0_0 = SampleMeta(sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0)
+    eng.notify(
+        lane,
+        entries=[ContributorRef(cursor=c0_0.cursor, is_last_child=True)],
+        record_cursor=c0_0.cursor,
+    )
+    assert 0 in eng.inflight_chunks_per_lane[lane]
+
+    # Close offset of chunk 1 -> chunk 0 still present
+    c1_0 = SampleMeta(sample_id=(0, 0, 1), lane_id=lane, chunk_id=1, chunk_offset=0)
+    eng.notify(
+        lane,
+        entries=[ContributorRef(cursor=c1_0.cursor, is_last_child=True)],
+        record_cursor=c1_0.cursor,
+    )
+    assert 0 in eng.inflight_chunks_per_lane[lane]  # chunk 0 not evicted yet
+
+    # Close remaining offset of chunk 0 -> both chunks can evict in order
+    c0_1 = SampleMeta(sample_id=(0, 0, 2), lane_id=lane, chunk_id=0, chunk_offset=1)
+    eng.notify(
+        lane,
+        entries=[ContributorRef(cursor=c0_1.cursor, is_last_child=True)],
+        record_cursor=c0_1.cursor,
+    )
+    assert eng.inflight_chunks_per_lane[lane] == {}
 
 
 def test_state_round_trip_reconstructs_inflight_and_progress() -> None:

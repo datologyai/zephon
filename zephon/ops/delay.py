@@ -29,7 +29,7 @@ class DelayById(DefaultSetup, DefaultFinalize[T]):
         self._buffering = buffering or Buffering(max_batch=32, max_latency_ms=2)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=8)
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=8)
 
     def buffering(self) -> Optional[Buffering]:
         return self._buffering

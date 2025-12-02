@@ -68,6 +68,7 @@ class Plan:
     stages: list[Stage]
     explain: str
     indexable: bool
+    preserves_cursor_order: bool
     batch_size_hint: int | None = None
 
     # --- Deterministic identity helpers ---
@@ -141,6 +142,7 @@ class Plan:
         return (
             tuple(stages_sig),
             bool(self.indexable),
+            bool(self.preserves_cursor_order),
             self.batch_size_hint,
         )
 

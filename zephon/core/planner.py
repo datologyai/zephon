@@ -80,9 +80,20 @@ class Planner:
 
         stages = self._split_batch_stages(stages)
 
-        indexable = all(
-            all(nd.op.traits().indexable for nd in stage.nodes) for stage in stages
-        )
+        indexable = True
+        preserves_cursor_order = True
+        for stage in stages:
+            for nd in stage.nodes:
+                traits = nd.op.traits()
+                if traits.preserves_cursor_order is None:
+                    raise ValueError(
+                        f"Operator {nd.name} ({nd.op.__class__.__name__}) must"
+                        + " set preserves_cursor_order in OpTraits."
+                    )
+                indexable = indexable and traits.indexable
+                preserves_cursor_order = preserves_cursor_order and bool(
+                    traits.preserves_cursor_order
+                )
 
         batch_size_hint = None
         for stage in stages:
@@ -100,6 +111,7 @@ class Planner:
             stages=stages,
             explain="\n".join(explain_lines),
             indexable=indexable,
+            preserves_cursor_order=preserves_cursor_order,
             batch_size_hint=batch_size_hint,
         )
 
@@ -172,7 +184,8 @@ class Planner:
                     isinstance(inp.op, ReplayFilter) for inp in node.inputs
                 )
                 if not has_filter:
-                    dop = node.parallelism or 1
+                    # ReplayFilter must be single-threaded per stage to maintain per-lane equality replay semantics.
+                    dop = 1
                     filter_node = Node(
                         name=f"{node.name}_replay_filter",
                         op=ReplayFilter(),
@@ -190,7 +203,8 @@ class Planner:
         if not has_batch and nodes:
             tail = nodes[-1]
             if not isinstance(tail.op, ReplayFilter):
-                dop = tail.parallelism or 1
+                # Keep replay filtering single-threaded at the tail.
+                dop = 1
                 filter_node = Node(
                     name=f"{tail.name}_replay_filter",
                     op=ReplayFilter(),

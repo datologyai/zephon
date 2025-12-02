@@ -24,7 +24,11 @@ class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
         self._buffers: dict[int, list[SampleRecord]] = {}
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=False, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=False,
+            preserves_cursor_order=True,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> Optional[Buffering]:
         return None
@@ -37,36 +41,44 @@ class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
         batch = SampleBatch(records=tuple(chunk))
         return [batch]
 
-    def _flush_exact(self, lane_id: int) -> list[SampleBatch]:
+    def _flush_full_batches(self, lane_id: int) -> list[SampleBatch]:
         buf = self._buffers.get(lane_id, [])
-        if len(buf) < self.microbatch_size:
+        if not buf or len(buf) < self.microbatch_size:
             return []
-        out = self._emit(buf[: self.microbatch_size])
-        del buf[: self.microbatch_size]
-        if not buf:
-            # keep dict tidy to minimize finalize work
-            self._buffers.pop(lane_id, None)
-        else:
+
+        out: list[SampleBatch] = []
+        while len(buf) >= self.microbatch_size:
+            chunk = buf[: self.microbatch_size]  # slice copy (unchanged vs previous)
+            out.extend(self._emit(chunk))
+            del buf[: self.microbatch_size]  # keep buffer tight
+        if buf:
             self._buffers[lane_id] = buf
+        else:
+            self._buffers.pop(lane_id, None)
         return out
 
-    def process_one(self, elem: SampleRecord) -> list[SampleBatch]:
+    def process_one(self, elem: SampleRecord) -> list[SampleBatch | SampleRecord]:
         assert isinstance(elem, SampleRecord)
         lane_id = elem.meta.lane_id
         buf = self._buffers.setdefault(lane_id, [])
-        buf.append(elem)
 
-        outputs: list[SampleBatch] = []
-        # Flush as many full microbatches as are now available for this lane
-        while len(buf) >= self.microbatch_size:
-            outputs.extend(self._flush_exact(lane_id))
-            buf = self._buffers.get(lane_id, [])
-            if not buf:
-                break
+        outputs: list[SampleBatch | SampleRecord] = []
+
+        # Tombstones must not affect batch shapes; forward them directly after
+        # emitting any ready full batches. Partial buffers stay untouched.
+        if elem.meta.tombstone:
+            outputs.extend(self._flush_full_batches(lane_id))
+            outputs.append(elem)  # forwarded as a record, not batched
+        else:
+            buf.append(elem)
+            outputs.extend(self._flush_full_batches(lane_id))
+
         return outputs
 
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleBatch]:
-        outputs: list[SampleBatch] = []
+    def process_many(
+        self, elems: list[SampleRecord]
+    ) -> list[SampleBatch | SampleRecord]:
+        outputs: list[SampleBatch | SampleRecord] = []
         for e in elems:
             outputs.extend(self.process_one(e))
         return outputs

@@ -9,6 +9,7 @@ from zephon.ops.decode_text import DecodeText
 from zephon.ops.fetch import FetchOp
 from zephon.ops.map_transform import MapTransform
 from zephon.ops.materialize import Materialize
+from zephon.ops.shuffle_buffer import ShuffleBuffer
 from zephon.ops.tokenize_text import TokenizeText
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "FetchOp",
     "MapTransform",
     "Materialize",
+    "ShuffleBuffer",
     "TokenizeText",
 ]

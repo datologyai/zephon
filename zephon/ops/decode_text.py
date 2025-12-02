@@ -32,7 +32,7 @@ class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         self._buffering = buffering or Buffering(max_batch=128, max_latency_ms=2)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=2)
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=2)
 
     def buffering(self) -> Optional[Buffering]:
         return self._buffering

@@ -152,7 +152,12 @@ class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         DefaultSetup.__init__(self)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> None:
         return None

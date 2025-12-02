@@ -17,8 +17,10 @@ from typing import (
 )
 
 from zephon.core.constants import (
+    ContributorRef,
     EngineSample,
     SampleBatch,
+    SampleCursor,
     SampleId,
     SamplePayload,
     SampleRecord,
@@ -38,6 +40,7 @@ from zephon.ops import (
     FetchOp,
     MapTransform,
     Materialize,
+    ShuffleBuffer,
     TokenizeText,
 )
 from zephon.utils import buffered_iterable
@@ -223,6 +226,26 @@ class Pipeline:
         self._tail = node
         return self
 
+    def shuffle(
+        self,
+        buffer_size: int,
+        *,
+        seed: int = 0,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Insert a deterministic shuffle buffer."""
+        op = ShuffleBuffer(buffer_size=buffer_size, seed=seed)
+        node = self._graph.add(
+            "shuffle_buffer",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
     def materialize(
         self, placement: str = "auto", parallelism: Optional[int] = None
     ) -> "Pipeline":
@@ -363,28 +386,55 @@ class Pipeline:
         """
         engine = self._engine
         assert engine is not None
+        assert self._plan is not None
+        use_monotone_notify = self._plan.preserves_cursor_order
         for item in source:
             if isinstance(item, SampleBatch):
                 assert len(list(set(item.lane_ids))) == 1
+                if not item.records:
+                    raise TypeError("SampleBatch must contain at least one record")
                 lane_id = item.lane_ids[0]
-                max_chunk_id = max(item.chunk_ids)
-                progress_cursors = [
-                    record.meta.cursor
-                    for record in item.records
-                    if record.meta.chunk_id == max_chunk_id
-                ]
+                if use_monotone_notify:
+                    max_chunk_id = max(item.chunk_ids)
+                    progress_cursors = [
+                        record.meta.cursor
+                        for record in item.records
+                        if record.meta.chunk_id == max_chunk_id
+                    ]
+                    engine.notify_monotone(lane_id, max_chunk_id, progress_cursors)
+                    yield item
+                    continue
+
+                contributors: list[ContributorRef] = []
+                record_cursor: SampleCursor | None = item.records[-1].meta.cursor
+                for record in item.records:
+                    contributors.extend(record.meta.contribution_refs())
+                engine.notify(lane_id, contributors, record_cursor=record_cursor)
+                yield item
             elif isinstance(item, SampleRecord):  # pyright: ignore[reportUnnecessaryIsInstance]
                 lane_id = item.meta.lane_id
-                max_chunk_id = item.meta.chunk_id
-                progress_cursors = [item.meta.cursor]
+                if use_monotone_notify:
+                    max_chunk_id = item.meta.chunk_id
+                    record_cursor = item.meta.cursor
+                    progress_cursors = [record_cursor]
+                    engine.notify_monotone(lane_id, max_chunk_id, progress_cursors)
+                    if not item.meta.tombstone:
+                        yield item
+                    continue
+
+                record_cursor = item.meta.cursor
+                refs = item.meta.contribution_refs()
+                contributors = list(refs)
+                if item.meta.tombstone:
+                    engine.notify(lane_id, contributors, record_cursor=record_cursor)
+                    continue
+                engine.notify(lane_id, contributors, record_cursor=record_cursor)
+                yield item
             else:
                 raise TypeError(
                     f"Unsupported element type: {type(item)!r}; "
                     + "expected SampleBatch or SampleRecord"
                 )
-
-            engine.notify(lane_id, max_chunk_id, progress_cursors)
-            yield item
 
     def explain(self) -> str:
         self._ensure()

@@ -57,7 +57,7 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
                     self.tok = _fallback_tokenizer()
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=4)
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
     def buffering(self) -> Optional[Buffering]:
         return self._buffering

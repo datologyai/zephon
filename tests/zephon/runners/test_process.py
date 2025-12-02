@@ -136,7 +136,12 @@ class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         DefaultSetup.__init__(self)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> None:
         return None
@@ -156,7 +161,12 @@ class _BufferedOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         DefaultSetup.__init__(self)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> Buffering:
         return Buffering(max_batch=self.max_batch)
@@ -167,7 +177,12 @@ class _BufferedOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
 
 class _ValueMappingOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> None:
         return None
@@ -216,7 +231,12 @@ class _ServiceOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         self._hook: Any = None
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> None:
         return None
@@ -388,7 +408,12 @@ class _CrashOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         DefaultSetup.__init__(self)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=1, batch_shape_sensitive=False)
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
 
     def buffering(self) -> None:
         return None

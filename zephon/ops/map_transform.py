@@ -73,7 +73,7 @@ class MapTransform(DefaultSetup, DefaultFinalize[SampleRecord]):
         DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, parallelism=4)
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
     def buffering(self) -> Optional[Buffering]:
         return self._buffering

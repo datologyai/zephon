@@ -4,20 +4,34 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api.pipeline import Pipeline
-from zephon.core.constants import SampleBatch, SampleCursor, SampleMeta, SampleRecord
+from zephon.core.constants import (
+    ContributorRef,
+    SampleBatch,
+    SampleCursor,
+    SampleMeta,
+    SampleRecord,
+)
+from zephon.core.graph import Plan
 
 
 class _StubEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[int, int, list[SampleCursor]]] = []
+        self.calls: list[tuple[int, list[ContributorRef], SampleCursor | None]] = []
+        self.monotone_calls: list[tuple[int, int, list[SampleCursor] | None]] = []
 
     def notify(
         self,
         lane_id: int,
-        max_chunk_id: int,
-        cursors: list[SampleCursor],
+        entries: list[ContributorRef],
+        record_cursor: SampleCursor | None = None,
     ) -> bool:
-        self.calls.append((lane_id, max_chunk_id, list(cursors)))
+        self.calls.append((lane_id, list(entries), record_cursor))
+        return True
+
+    def notify_monotone(
+        self, lane_id: int, max_chunk_id: int, cursors: list[SampleCursor]
+    ) -> bool:
+        self.monotone_calls.append((lane_id, max_chunk_id, list(cursors)))
         return True
 
 
@@ -25,6 +39,8 @@ def test_yield_while_notifying_type_checks_and_forwards() -> None:
     pipe = object.__new__(Pipeline)  # bypass __init__
     stub = _StubEngine()
     object.__setattr__(pipe, "_engine", stub)
+    plan = Plan(stages=[], explain="", indexable=True, preserves_cursor_order=False)
+    object.__setattr__(pipe, "_plan", plan)
 
     # Craft a SampleRecord and a SampleBatch for the same lane
     rec = SampleRecord(
@@ -48,15 +64,21 @@ def test_yield_while_notifying_type_checks_and_forwards() -> None:
     assert out[1] is batch
 
     # Engine.notify was invoked with lane and chunk derived from elements
-    assert stub.calls[0][0] == 2 and stub.calls[0][1] == 5
-    assert stub.calls[1][0] == 2 and stub.calls[1][1] == 6
-    assert stub.calls[0][2][0] == rec.meta.cursor
-    assert stub.calls[1][2] == [r.meta.cursor for r in batch.records]
+    assert stub.calls[0][0] == 2
+    assert stub.calls[1][0] == 2
+    assert stub.calls[0][2] == rec.meta.cursor
+    assert stub.calls[1][2] == batch.records[-1].meta.cursor
+    assert [e.cursor for e in stub.calls[0][1]] == [rec.meta.cursor]
+    assert [e.cursor for e in stub.calls[1][1]] == [
+        r.meta.cursor for r in batch.records
+    ]
 
 
 def test_yield_while_notifying_unsupported_type_raises() -> None:
     pipe = object.__new__(Pipeline)
     object.__setattr__(pipe, "_engine", _StubEngine())
+    plan = Plan(stages=[], explain="", indexable=True, preserves_cursor_order=False)
+    object.__setattr__(pipe, "_plan", plan)
     with pytest.raises(TypeError):
         _ = list(Pipeline._yield_while_notifying(pipe, [123]))
 
@@ -67,3 +89,26 @@ def test_pipeline_batch_requires_positive_microbatch() -> None:
     pipe = Pipeline(ws)
     with pytest.raises(ValueError):
         pipe.batch(0)
+
+
+def test_yield_while_notifying_drops_tombstones() -> None:
+    pipe = object.__new__(Pipeline)
+    stub = _StubEngine()
+    object.__setattr__(pipe, "_engine", stub)
+    plan = Plan(stages=[], explain="", indexable=True, preserves_cursor_order=False)
+    object.__setattr__(pipe, "_plan", plan)
+
+    tomb_meta = SampleMeta(
+        sample_id=(0, 0, 1),
+        lane_id=0,
+        chunk_id=0,
+    ).with_tombstone(True)
+    tomb = SampleRecord(meta=tomb_meta, payload={})
+    kept = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 2), lane_id=0, chunk_id=0), payload={}
+    )
+
+    out = list(Pipeline._yield_while_notifying(pipe, [tomb, kept]))
+    assert out == [kept]
+    # tombstone still notified for progress
+    assert len(stub.calls) == 2
