@@ -694,14 +694,53 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
     def _shutdown_workers(self) -> None:
         for state in self.ops:
             task_queue = state.task_queue
-            if task_queue is not None:
-                for _ in state.workers:
-                    self._send_command(
-                        task_queue,
-                        _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
-                    )
+            if task_queue is None:
+                continue
+
+            # First, try to drain any pending results before sending stop commands
+            # This helps avoid deadlocks where workers are blocked on semaphores
+            # and can't process stop commands. We just need to acknowledge results
+            # to release semaphores - we don't need to process them fully.
+            _debug(f"draining results before shutdown for {len(state.workers)} workers")
+            drain_start = time.time()
+            drain_timeout = 5.0  # Give up after 5 seconds of draining
+            while time.time() - drain_start < drain_timeout:
+                drained_any = False
+                try:
+                    # Drain results with timeout - get() returns immediately if items available
+                    while True:
+                        item = self._queue_get(state.result_queue, timeout=0.1)
+                        # Just acknowledge to release semaphore - don't process fully
+                        self._ack_result(state, item, None)
+                        state.inflight.decrement()
+                        drained_any = True
+                except queue.Empty:
+                    pass
+
+                if not drained_any and state.inflight.is_zero():
+                    break
+
+            # Now send stop commands to all workers
+            # Note: We don't pass context here because we're in shutdown
+            # and the draining above should have released semaphores already
+            for _ in state.workers:
+                self._send_command(
+                    task_queue,
+                    _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
+                    state=None,  # Don't drain during shutdown - already drained above
+                    context=None,
+                )
+
+            # Wait for workers to finish, with reasonable timeout
+            # We don't block indefinitely - if workers don't terminate quickly,
+            # they're likely hung and we log a warning
             for proc in state.workers:
                 proc.join(timeout=1.0)
+                if proc.is_alive():
+                    _debug(
+                        f"Worker process {proc.pid} did not terminate within timeout, "
+                        + "it may be hung"
+                    )
             for wid in state.worker_ids:
                 resp = self._service_responses.pop(wid, None)
                 if resp is not None:
@@ -712,13 +751,13 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             state.workers.clear()
             state.worker_ids.clear()
             state.result_semaphores.clear()
-            if task_queue is not None:
-                close = getattr(task_queue, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+            # task_queue is guaranteed to be not None here due to check above
+            close = getattr(task_queue, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
             state.task_queue = None
 
     def _build_worker_ctx(
@@ -738,14 +777,48 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         return ctx
 
     def _send_command(
-        self, queue_: _QueueLike[_WorkerCommand], command: _WorkerCommand
+        self,
+        queue_: _QueueLike[_WorkerCommand],
+        command: _WorkerCommand,
+        state: _ProcessOperatorState | None = None,
+        context: ConcurrentRunContext | None = None,
     ) -> None:
-        while True:
+        """Send command to worker queue, draining results if queue is full.
+
+        If the queue is full, it means workers aren't consuming commands.
+        This is often because workers are blocked on semaphores waiting to send results.
+        By draining results, we release semaphores and allow workers to proceed.
+        """
+        retries = 0
+        max_retries = 10  # Limit retries to avoid infinite loops
+        while retries < max_retries:
             try:
                 queue_.put(command, timeout=0.1)
                 return
             except queue.Full:
+                retries += 1
+                # If queue is full, workers may be blocked on semaphores
+                # Try draining results to release semaphores
+                if state is not None and context is not None:
+                    try:
+                        # Drain a few results to release semaphores
+                        for _ in range(3):  # Drain up to 3 results
+                            try:
+                                item = self._queue_get_nowait(state.result_queue)
+                                self._handle_result(state, item, None, context)
+                            except queue.Empty:
+                                break
+                    except Exception:
+                        # If draining fails, continue retrying
+                        pass
                 continue
+        # If we've exhausted retries, try one more time without timeout
+        # This will block indefinitely, but at least we tried to drain first
+        _debug(
+            f"WARNING: Queue still full after {max_retries} retries with draining. "
+            + "Falling back to blocking put() - this may indicate a deadlock."
+        )
+        queue_.put(command)
 
     def _schedule_batch(
         self,
@@ -808,7 +881,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             queue_depth_snapshot=queue_depth_snapshot,
             collect_metrics=collect_stats,
         )
-        self._send_command(task_queue, command)
+        self._send_command(task_queue, command, state=state, context=context)
         _debug(f"scheduled batch seq={seq}")
         state.inflight.increment()
 
@@ -816,7 +889,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self,
         state: _ProcessOperatorState,
         result: RunnerResult,
-        context: ConcurrentRunContext,
+        context: ConcurrentRunContext | None,
     ) -> None:
         if result.ack is None:
             return
@@ -862,7 +935,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 queue_depth_snapshot=-1,
                 collect_metrics=False,
             )
-            self._send_command(task_queue, command)
+            self._send_command(task_queue, command, state=state, context=context)
             result = self._wait_for_result(state, seq, context, next_queue)
             if result.payload:
                 outputs.extend(result.payload)
