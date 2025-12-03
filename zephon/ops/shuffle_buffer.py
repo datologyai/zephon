@@ -6,24 +6,11 @@
 from random import Random
 from typing import Optional, TypeVar
 
-from zephon.core.constants import ContributorRef, SampleMeta, SampleRecord
+from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.traits import Buffering, OpTraits
 
 T = TypeVar("T", bound=SampleRecord)
-
-
-def _with_contributors(
-    meta: SampleMeta, contributors: tuple[ContributorRef, ...]
-) -> SampleMeta:
-    return SampleMeta(
-        sample_id=meta.sample_id,
-        lane_id=meta.lane_id,
-        chunk_id=meta.chunk_id,
-        chunk_offset=meta.chunk_offset,
-        lineage=meta.lineage,
-        tags=meta.tags,
-    ).with_contributors(contributors)
 
 
 def _redistribute_closers_in_place(records: list[T]) -> None:
@@ -71,8 +58,8 @@ def _redistribute_closers_in_place(records: list[T]) -> None:
             key = meta.cursor.base_offset
             should_close = key in base_has_closer and base_last_idx[key] == idx
             if not should_close:
-                rec.meta = _with_contributors(
-                    meta, (ContributorRef(cursor=meta.cursor, is_last_child=False),)
+                rec.meta = meta.with_contributors(
+                    (ContributorRef(cursor=meta.cursor, is_last_child=False),)
                 )
             continue
 
@@ -90,7 +77,7 @@ def _redistribute_closers_in_place(records: list[T]) -> None:
                 )
 
         if changed:
-            rec.meta = _with_contributors(meta, tuple(new_refs))
+            rec.meta = meta.with_contributors(tuple(new_refs))
 
 
 class ShuffleBuffer(DefaultSetup, DefaultFinalize[T]):

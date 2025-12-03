@@ -44,7 +44,6 @@ class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
         if service is None:
             raise RuntimeError("ReplayConfigService not available!")
         self._service = service
-        self._disabled = True
         self._disabled = False
 
     def traits(self) -> OpTraits:

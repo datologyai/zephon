@@ -99,7 +99,6 @@ def tombstone_meta(ref: ContributorRef, lane_id: int) -> SampleMeta:
         raise ValueError(
             "tombstone_meta requires a closing contributor (is_last_child=True)"
         )
-    last_ref = ContributorRef(cursor=ref.cursor, is_last_child=True)
     meta = SampleMeta(
         sample_id=ref.cursor.sample_id,
         lane_id=lane_id,
@@ -107,5 +106,5 @@ def tombstone_meta(ref: ContributorRef, lane_id: int) -> SampleMeta:
         chunk_offset=ref.cursor.chunk_offset,
         lineage=ref.cursor.lineage,
         tags={"_tombstone": True},
-    ).with_contributors((last_ref,))
+    ).with_contributors((ref,))
     return meta

@@ -424,11 +424,10 @@ class Pipeline:
 
                 record_cursor = item.meta.cursor
                 refs = item.meta.contribution_refs()
-                contributors = list(refs)
                 if item.meta.tombstone:
-                    engine.notify(lane_id, contributors, record_cursor=record_cursor)
+                    engine.notify(lane_id, refs, record_cursor=record_cursor)
                     continue
-                engine.notify(lane_id, contributors, record_cursor=record_cursor)
+                engine.notify(lane_id, refs, record_cursor=record_cursor)
                 yield item
             else:
                 raise TypeError(
