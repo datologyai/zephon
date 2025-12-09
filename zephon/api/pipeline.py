@@ -214,11 +214,28 @@ class Pipeline:
         *,
         field: str = "text",
         add_attention_mask: bool = True,
+        max_length: int | None = None,
+        padding: bool | str = False,
+        truncation: bool = False,
+        return_tensors: str | None = None,
+        split_long_samples: bool = False,
+        use_fast: bool | None = None,
+        preserve_upstream_payload: bool = False,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
         op = TokenizeText(
-            tokenizer, tokenizer_id, field=field, add_attention_mask=add_attention_mask
+            tokenizer,
+            tokenizer_id,
+            field=field,
+            add_attention_mask=add_attention_mask,
+            max_length=max_length,
+            padding=padding,
+            truncation=truncation,
+            return_tensors=return_tensors,
+            split_long_samples=split_long_samples,
+            use_fast=use_fast,
+            preserve_upstream_payload=preserve_upstream_payload,
         )
         node = self._graph.add(
             "tokenize", op, self._tail, placement=placement, parallelism=parallelism

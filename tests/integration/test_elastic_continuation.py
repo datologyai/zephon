@@ -116,7 +116,11 @@ def _build_pipe_params(
         PublicPipeline(work)
         .decode_text()
         ._delay(max_delay_ms=1.0, parallelism=4)
-        .tokenize(tokenizer_id="__fallback__", parallelism=4)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            parallelism=4,
+            preserve_upstream_payload=True,
+        )
     )
     if with_batch:
         pipe = pipe.batch(batch_size, drop_last=False)

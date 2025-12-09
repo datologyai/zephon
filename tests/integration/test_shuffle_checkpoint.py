@@ -27,7 +27,11 @@ def _pipe(buffer_size: int, seed: int, sample_count: int = 128) -> PublicPipelin
         PublicPipeline(work)
         .decode_text()
         .shuffle(buffer_size=buffer_size, seed=seed)
-        .tokenize(tokenizer_id="__fallback__", parallelism=2)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            parallelism=2,
+            preserve_upstream_payload=True,
+        )
     )
 
 

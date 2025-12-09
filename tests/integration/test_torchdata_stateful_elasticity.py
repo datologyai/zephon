@@ -69,7 +69,14 @@ def _build_pipe(
         shuffle_shards=False,
         shuffle_within_shard=False,
     )
-    pipe = PublicPipeline(work).decode_text().tokenize(tokenizer_id="__fallback__")
+    pipe = (
+        PublicPipeline(work)
+        .decode_text()
+        .tokenize(
+            tokenizer_id="__fallback__",
+            preserve_upstream_payload=True,
+        )
+    )
     if with_batch:
         pipe = pipe.batch(microbatch_size, drop_last=False)
     return pipe.options(

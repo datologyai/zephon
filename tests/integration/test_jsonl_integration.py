@@ -101,7 +101,11 @@ def _run_pipeline(
     pipe = PublicPipeline(work)
     pipe = pipe.decode_text()
     pipe = pipe._delay(max_delay_ms=2.0, parallelism=8)
-    pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=8)
+    pipe = pipe.tokenize(
+        tokenizer_id="__fallback__",
+        parallelism=8,
+        preserve_upstream_payload=True,
+    )
     pipe = pipe.options(
         deterministic=deterministic,
         runner=runner_kind,
@@ -200,7 +204,11 @@ def test_jsonl_integration_filter_js_and_html(tmp_path: Path, runner_kind: str) 
         PublicPipeline(work_js)
         .decode_text()
         ._delay(max_delay_ms=2.0, parallelism=8)
-        .tokenize(tokenizer_id="__fallback__", parallelism=8)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            parallelism=8,
+            preserve_upstream_payload=True,
+        )
     )
     pipe_js = pipe_js.options(
         deterministic=True,
@@ -221,7 +229,11 @@ def test_jsonl_integration_filter_js_and_html(tmp_path: Path, runner_kind: str) 
         PublicPipeline(work_html)
         .decode_text()
         ._delay(max_delay_ms=2.0, parallelism=8)
-        .tokenize(tokenizer_id="__fallback__", parallelism=8)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            parallelism=8,
+            preserve_upstream_payload=True,
+        )
     )
     pipe_html = pipe_html.options(
         deterministic=True,
@@ -339,7 +351,11 @@ def test_jsonl_emits_partial_final_chunk_xfail(tmp_path: Path) -> None:
     pipe = (
         PublicPipeline(work)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__", parallelism=2)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            parallelism=2,
+            preserve_upstream_payload=True,
+        )
         .options(
             deterministic=True,
             canonical_replicas=1,

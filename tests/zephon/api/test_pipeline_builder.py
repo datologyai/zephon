@@ -4,6 +4,7 @@ import re
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
+from zephon.ops import TokenizeText
 
 
 def test_pipeline_explain_includes_plan_and_runtime() -> None:
@@ -89,3 +90,18 @@ def test_pipeline_options_merge_and_final_prefetch_marker(tmp_path) -> None:
 
     exp = pipe.explain()
     assert "final_prefetch=2" in exp
+
+
+def test_pipeline_tokenize_preserve_flag_forwarded() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = (
+        PublicPipeline(ws)
+        .tokenize(tokenizer_id="__fallback__", preserve_upstream_payload=True)
+        .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
+    )
+
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, TokenizeText)
+    assert tail_op.preserve_upstream_payload is True
