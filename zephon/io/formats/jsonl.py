@@ -5,6 +5,7 @@
 
 import json
 import os
+from collections import defaultdict
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
@@ -65,9 +66,9 @@ class JsonlShard(RandomAccessShard):
             if i < 0:
                 raise IndexError(i)
         out: list[dict[str, object] | None] = [None] * len(indices)
-        waiting: dict[int, list[int]] = {}
+        waiting: defaultdict[int, list[int]] = defaultdict(list)
         for pos, idx in enumerate(indices):
-            waiting.setdefault(int(idx), []).append(pos)
+            waiting[int(idx)].append(pos)
 
         # Single pass over file collecting requested rows.
         with self._path.open("r", encoding="utf-8") as handle:

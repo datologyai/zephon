@@ -9,6 +9,7 @@ from typing import Optional, TypeVar
 from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.traits import Buffering, OpTraits
+from zephon.utils.seeding import batch_seed
 
 T = TypeVar("T", bound=SampleRecord)
 
@@ -119,22 +120,13 @@ class ShuffleBuffer(DefaultSetup, DefaultFinalize[T]):
     def buffering(self) -> Optional[Buffering]:
         return self._buffering
 
-    def _batch_seed(self, elems: list[T]) -> int:
-        # Stable fold of cursor keys to avoid Python's salted hash.
-        acc = self.seed
-        for rec in elems:
-            c = rec.meta.cursor.as_key()
-            acc = (acc * 1315423911) ^ (c[0] * 2654435761) ^ (c[1] << 8)
-            acc = acc ^ hash(c[2]) ^ hash(c[3])
-        return acc & 0xFFFFFFFF
-
     def process_one(self, elem: T) -> list[T]:
         return self.process_many([elem])
 
     def process_many(self, elems: list[T]) -> list[T]:
         if not elems:
             return []
-        rng = Random(self._batch_seed(elems))
+        rng = Random(batch_seed(self.seed, elems))
         rng.shuffle(elems)
         _redistribute_closers_in_place(elems)
         return elems

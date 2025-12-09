@@ -25,7 +25,6 @@ from zephon.core.traits import Buffering
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
-from zephon.ops.batch import Batch
 
 
 @dataclass
@@ -54,13 +53,16 @@ class BaseOperatorState:
     def __post_init__(self) -> None:
         traits = self.node.op.traits()
         self.parallelism = max(1, self.node.parallelism or traits.parallelism or 1)
+        # Enforce parallelism=1 for operators that require serial state in deterministic mode
         if (
             self.deterministic
-            and isinstance(self.node.op, Batch)
+            and traits.requires_serial_state
             and self.parallelism != 1
         ):
+            op_name = type(self.node.op).__name__
             raise RuntimeError(
-                "Batch operator must run with parallelism=1 in deterministic mode"
+                f"{op_name} operator must run with parallelism=1 in deterministic mode "
+                + "because it requires serial state (requires_serial_state=True)"
             )
 
         base_ctx = dict(self.ctx_proto)

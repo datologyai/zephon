@@ -10,6 +10,7 @@ from typing import (
     Any,
     Callable,
     Iterator,
+    Literal,
     Optional,
     Protocol,
     TypeAlias,
@@ -40,6 +41,7 @@ from zephon.ops import (
     FetchOp,
     MapTransform,
     Materialize,
+    PackSequences,
     ShuffleBuffer,
     TokenizeText,
 )
@@ -285,6 +287,48 @@ class Pipeline:
     ) -> "Pipeline":
         op = Batch(microbatch_size, drop_last=drop_last)
         node = self._graph.add("batch", op, self._tail, placement=placement)
+        self._tail = node
+        return self
+
+    def pack_sequences(
+        self,
+        max_length: int,
+        num_bins: int,
+        length_fn: Callable[[SampleRecord], int] | str = "length",
+        algorithm: Literal["first_fit", "best_fit"] = "first_fit",
+        *,
+        drop_oversized: bool = True,
+        shuffle_strategy: Literal["random", "length", None] = None,
+        shuffle_seed: Optional[int] = None,
+        flush_strategy: Literal["fifo", "fullest"] = "fifo",
+        placement: str = "auto",
+    ) -> "Pipeline":
+        """Add a sequence packing operator to the pipeline.
+
+        Args:
+            max_length: Maximum length for packed bins.
+            num_bins: Number of bins to maintain per lane.
+            length_fn: Function or field name to extract sequence length from a SampleRecord.
+            algorithm: Packing algorithm to use ("first_fit" or "best_fit").
+            drop_oversized: If True, drop sequences longer than max_length.
+            shuffle_strategy: Strategy for ordering sequences before packing ("random", "length", or None).
+            shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
+            flush_strategy: Strategy for flushing bins when num_bins limit is reached.
+                "fifo" flushes oldest bins first (default), "fullest" flushes bins with smallest
+                remaining capacity first (better packing efficiency).
+            placement: Placement strategy for this operator.
+        """
+        op = PackSequences(
+            max_length=max_length,
+            length_fn=length_fn,
+            algorithm=algorithm,
+            drop_oversized=drop_oversized,
+            shuffle_strategy=shuffle_strategy,
+            shuffle_seed=shuffle_seed,
+            num_bins=num_bins,
+            flush_strategy=flush_strategy,
+        )
+        node = self._graph.add("pack_sequences", op, self._tail, placement=placement)
         self._tail = node
         return self
 

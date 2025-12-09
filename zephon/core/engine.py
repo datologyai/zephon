@@ -723,7 +723,7 @@ class Engine:
 
         Maintains inflight_chunks_per_lane[lane_id][chunk_id] -> chunk_obj.
         """
-        inflight_lane = self.inflight_chunks_per_lane.setdefault(lane_id, {})
+        inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Phase 1: replay restored inflight chunks first (ascending chunk_id)
         for cid in sorted(inflight_lane.keys()):
             chunk = inflight_lane[cid]
@@ -1200,7 +1200,6 @@ class Engine:
                         lane, canonical_replicas=self._world.canonical_replicas
                     ),
                 )
-                self.inflight_chunks_per_lane.setdefault(lane, {})
                 if lane not in self._lane_progress:
                     self._lane_progress[lane] = LanePtr(0, 0)
                 if lane not in self._lane_next_cid:

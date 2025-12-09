@@ -3,6 +3,7 @@
 
 """Batching operator for grouping sample records (lane-pure)."""
 
+from collections import defaultdict
 from typing import Optional
 
 from zephon.core.constants import SampleBatch, SampleRecord
@@ -21,13 +22,14 @@ class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
         self.microbatch_size = int(microbatch_size)
         self.drop_last = drop_last
         # lane_id -> list[SampleRecord]
-        self._buffers: dict[int, list[SampleRecord]] = {}
+        self._buffers: defaultdict[int, list[SampleRecord]] = defaultdict(list)
 
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=False,
             preserves_cursor_order=True,
             batch_shape_sensitive=False,
+            requires_serial_state=True,
         )
 
     def buffering(self) -> Optional[Buffering]:
@@ -42,7 +44,7 @@ class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
         return [batch]
 
     def _flush_full_batches(self, lane_id: int) -> list[SampleBatch]:
-        buf = self._buffers.get(lane_id, [])
+        buf = self._buffers[lane_id]
         if not buf or len(buf) < self.microbatch_size:
             return []
 
@@ -60,7 +62,7 @@ class Batch(DefaultSetup, DefaultFinalize[SampleBatch]):
     def process_one(self, elem: SampleRecord) -> list[SampleBatch | SampleRecord]:
         assert isinstance(elem, SampleRecord)
         lane_id = elem.meta.lane_id
-        buf = self._buffers.setdefault(lane_id, [])
+        buf = self._buffers[lane_id]
 
         outputs: list[SampleBatch | SampleRecord] = []
 

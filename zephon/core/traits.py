@@ -23,12 +23,19 @@ class OpTraits:
             such operator will have time-based flush disabled to preserve strong
             determinism. When False, ordering determinism suffices and latency
             flush may be kept for performance.
+        requires_serial_state: If True, the operator maintains cross-invocation
+            state (e.g., buffers) that must be confined to a single operator
+            instance for determinism. In deterministic mode, operators with this
+            trait will automatically run with parallelism=1. This prevents
+            nondeterministic behavior when multiple worker instances would each
+            maintain separate buffers.
     """
 
     indexable: bool = True
     preserves_cursor_order: bool | None = None
     parallelism: int = 1
     batch_shape_sensitive: bool = False
+    requires_serial_state: bool = False
 
 
 @dataclass
