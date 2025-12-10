@@ -709,10 +709,23 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 try:
                     # Drain results with timeout - get() returns immediately if items available
                     while True:
-                        item = self._queue_get(state.result_queue, timeout=0.1)
+                        try:
+                            item = self._queue_get(state.result_queue, timeout=0.1)
+                        except FileNotFoundError:
+                            # The result queue's underlying fd may vanish if workers
+                            # die abruptly (torch shared memory handles). At shutdown
+                            # we just stop draining and proceed with tear-down.
+                            _debug(
+                                "result_queue get() failed with FileNotFoundError during "
+                                + "shutdown; worker likely exited before sending all results"
+                            )
+                            break
                         # Just acknowledge to release semaphore - don't process fully
                         self._ack_result(state, item, None)
-                        state.inflight.decrement()
+                        if not state.inflight.is_zero():
+                            # Workers can emit error results before any batch was scheduled.
+                            # Avoid underflow during shutdown draining so we can proceed.
+                            state.inflight.decrement()
                         drained_any = True
                 except queue.Empty:
                     pass
@@ -908,7 +921,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             f"handle_result seq={result.seq} error={result.error} "
             + f"payload={len(result.payload)}"
         )
-        state.inflight.decrement()
+        if result.error is None or not state.inflight.is_zero():
+            # A worker can crash during startup before any batches are scheduled,
+            # emitting an error result with no matching inflight increment. Guard
+            # against underflow so we can surface the real crash.
+            state.inflight.decrement()
         super()._handle_result(state, result, next_queue, context)
 
     def _finalize_state(

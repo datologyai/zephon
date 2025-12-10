@@ -337,6 +337,11 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 item = self._queue_get_nowait(state.result_queue)
             except queue.Empty:
                 break
+            except FileNotFoundError as exc:
+                # Multiprocessing queues can raise when the writer (worker) dies
+                # before the payload is fully handed off (e.g., torch shared fds).
+                self._record_error(context, exc)
+                return
             self._handle_result(state, item, next_queue, context)
 
     def _handle_result(
@@ -434,65 +439,74 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         state.reset_buffers()
         upstream_closed = False
 
-        while True:
-            self._drain_results(state, next_queue, context)
+        try:
+            while True:
+                self._drain_results(state, next_queue, context)
 
-            if upstream_closed:
-                if (
-                    state.inflight.is_zero()
-                    and (not state.pending_results or context.error is not None)
-                    and not state.buffer
-                ):
-                    # In the error case, we don't wait for missing seq gaps.
-                    if context.error is not None:
-                        state.pending_results.clear()
+                if upstream_closed:
+                    if (
+                        state.inflight.is_zero()
+                        and (not state.pending_results or context.error is not None)
+                        and not state.buffer
+                    ):
+                        # In the error case, we don't wait for missing seq gaps.
+                        if context.error is not None:
+                            state.pending_results.clear()
 
-                    tail = self._finalize_state(state, context, next_queue)
-                    if tail:
-                        self._emit_downstream(tail, next_queue, context)
-                    self._signal_downstream_stop(next_queue, context)
-                    return
+                        tail = self._finalize_state(state, context, next_queue)
+                        if tail:
+                            self._emit_downstream(tail, next_queue, context)
+                        self._signal_downstream_stop(next_queue, context)
+                        return
+                    try:
+                        item = self._queue_get(state.result_queue, timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    except FileNotFoundError as exc:
+                        self._record_error(context, exc)
+                        return
+                    self._handle_result(state, item, next_queue, context)
+                    continue
+
+                if context.stop_event.is_set():
+                    upstream_closed = True
+                    ready = state.enqueue([], force=True)
+                    for batch, wait_ns in ready:
+                        self._schedule_batch(
+                            state,
+                            batch,
+                            wait_ns=wait_ns,
+                            context=context,
+                        )
+                    continue
+
                 try:
-                    item = self._queue_get(state.result_queue, timeout=0.05)
+                    item = self._queue_get(state.input_queue, timeout=0.05)
                 except queue.Empty:
                     continue
-                self._handle_result(state, item, next_queue, context)
-                continue
 
-            if context.stop_event.is_set():
-                upstream_closed = True
-                ready = state.enqueue([], force=True)
-                for batch, wait_ns in ready:
-                    self._schedule_batch(
-                        state,
-                        batch,
-                        wait_ns=wait_ns,
-                        context=context,
-                    )
-                continue
+                if isinstance(item, _Stop):
+                    upstream_closed = True
+                    ready = state.enqueue([], force=True)
+                else:
+                    ready = state.enqueue(item, force=False)
 
-            try:
-                item = self._queue_get(state.input_queue, timeout=0.05)
-            except queue.Empty:
-                continue
-
-            if isinstance(item, _Stop):
-                upstream_closed = True
-                ready = state.enqueue([], force=True)
-            else:
-                ready = state.enqueue(item, force=False)
-
-            if ready:
-                burst = max(1, state.parallelism)
-                for i, (batch, wait_ns) in enumerate(ready):
-                    self._schedule_batch(
-                        state,
-                        batch,
-                        wait_ns=wait_ns,
-                        context=context,
-                    )
-                    if (i + 1) % burst == 0:
-                        self._drain_results(state, next_queue, context)
+                if ready:
+                    burst = max(1, state.parallelism)
+                    for i, (batch, wait_ns) in enumerate(ready):
+                        self._schedule_batch(
+                            state,
+                            batch,
+                            wait_ns=wait_ns,
+                            context=context,
+                        )
+                        if (i + 1) % burst == 0:
+                            self._drain_results(state, next_queue, context)
+        except BaseException as exc:  # noqa: BLE001
+            # Any unexpected failure in the pump should propagate as a stage error
+            # so the iterator can stop cleanly rather than killing the thread.
+            self._record_error(context, exc)
+            return
 
     def _signal_downstream_stop(
         self,

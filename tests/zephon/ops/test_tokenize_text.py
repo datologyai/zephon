@@ -248,6 +248,7 @@ def test_split_long_samples_padding_applied() -> None:
 
 
 def test_split_long_samples_respects_return_tensors() -> None:
+    torch = pytest.importorskip("torch")
     op = _setup(
         TokenizeText(
             tokenizer=None,
@@ -262,7 +263,6 @@ def test_split_long_samples_respects_return_tensors() -> None:
     assert len(out) == 2
     for rec in out:
         payload = _payload_dict(rec)
-        torch = pytest.importorskip("torch")
         assert isinstance(payload["input_ids"], torch.Tensor)
         assert payload["input_ids"].ndim == 1
 
@@ -434,8 +434,9 @@ def test_tokenizer_id_load_failure_falls_back(
     monkeypatch.setitem(sys.modules, "transformers", fake)
 
     op = TokenizeText(tokenizer=None, tokenizer_id="some-model")
+    _setup(op)
     with pytest.raises(RuntimeError):
-        _setup(op)
+        _ = op.process_one(_rec("hi"))
 
 
 def test_tokenizer_use_fast_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -469,10 +470,11 @@ def test_tokenizer_use_fast_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls["kwargs"]["use_fast"] is False
 
 
-def test_tokenizer_raises_if_setup_not_called() -> None:
+def test_tokenizer_initializes_on_first_process() -> None:
     op = TokenizeText(tokenizer=None, tokenizer_id=None)
-    with pytest.raises(RuntimeError):
-        _ = op.process_one(_rec("text"))
+    out = op.process_one(_rec("text"))
+    payload = _payload_dict(out[0])
+    assert "input_ids" in payload
 
 
 def test_tokenizer_traits_and_default_buffering() -> None:
@@ -596,6 +598,7 @@ def test_setup_retries_without_use_fast_on_type_error(
     # Init with use_fast=True (default)
     op = TokenizeText(tokenizer_id="flaky-model", use_fast=True)
     _setup(op)
+    _ = op.process_one(_rec("hi"))
 
     # Should have called twice:
     # 1. With use_fast=True (Failed)
@@ -622,7 +625,7 @@ def test_setup_raises_other_type_errors(monkeypatch: pytest.MonkeyPatch) -> None
 
     op = TokenizeText(tokenizer_id="broken-model")
     with pytest.raises(TypeError, match="Something else completely broken"):
-        _setup(op)
+        _ = _setup(op).process_one(_rec("hello"))
 
 
 # --- Batch Normalization & Edge Cases ---

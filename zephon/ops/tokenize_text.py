@@ -107,6 +107,7 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         self._warned_preserve_non_mapping = False
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
+        self._tokenizer_instantiated = False
 
     def setup(
         self,
@@ -117,8 +118,23 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         collect_stats: bool,
     ) -> None:
         DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+        # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
+        # hf tokenizers don't like if we fork after creating the object
 
-        # 1. Initialize Tokenizer
+        # Pre-compute tokenizer kwargs (Performance Optimization)
+        self._cached_kwargs = {"add_special_tokens": True}
+        if self.split_long_samples:
+            self._cached_kwargs["padding"] = False
+            self._cached_kwargs["truncation"] = False
+        else:
+            self._cached_kwargs["padding"] = self.padding
+            self._cached_kwargs["truncation"] = self.truncation
+            if self.max_length is not None:
+                self._cached_kwargs["max_length"] = self.max_length
+            if self.return_tensors is not None:
+                self._cached_kwargs["return_tensors"] = self.return_tensors
+
+    def _setup_tokenizer(self) -> None:
         if self.tok is None:
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()
@@ -142,21 +158,11 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
                         self.tok = AutoTokenizer.from_pretrained(
                             self.tokenizer_id, **kwargs
                         )
+
                     else:
                         raise
 
-        # 2. Pre-compute tokenizer kwargs (Performance Optimization)
-        self._cached_kwargs = {"add_special_tokens": True}
-        if self.split_long_samples:
-            self._cached_kwargs["padding"] = False
-            self._cached_kwargs["truncation"] = False
-        else:
-            self._cached_kwargs["padding"] = self.padding
-            self._cached_kwargs["truncation"] = self.truncation
-            if self.max_length is not None:
-                self._cached_kwargs["max_length"] = self.max_length
-            if self.return_tensors is not None:
-                self._cached_kwargs["return_tensors"] = self.return_tensors
+        self._tokenizer_instantiated = True
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
@@ -201,6 +207,9 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             payload["attention_mask"] = cast(SamplePayload, mask)
 
     def _process(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        if not self._tokenizer_instantiated:
+            self._setup_tokenizer()
+
         if self.tok is None:
             msg = "Tokenizer not initialised"
             raise RuntimeError(msg)
