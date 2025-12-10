@@ -219,6 +219,51 @@ class StaticMixtureWorkSource(WorkSource):
             )
         self._exhausted_policy = exhausted_policy
 
+    def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource:
+        """Lightweight clone that avoids deepcopying large cursor buffers.
+
+        The default ``WorkSource`` implementation performs a full ``deepcopy``,
+        which replicates every per-dataset order list. Those lists can be very
+        large and immutable, so we instead share the order buffers and copy only
+        the mutable cursor state.
+        """
+        if self._cloned:
+            raise RuntimeError(
+                "State Error: clone_for_lane should only be called on user-defined WorkSource instances."
+            )
+
+        clone = object.__new__(type(self))
+        WorkSource.__init__(clone)
+
+        clone._datasets = list(self._datasets)
+        clone._dataset_ids = dict(self._dataset_ids)
+        clone._datasets_by_id = dict(self._datasets_by_id)
+        clone._weights = dict(self._weights)
+        clone._component_order = list(self._component_order)
+        clone._chunk_size = self._chunk_size
+        clone._chunk_quota = dict(self._chunk_quota)
+        clone._seed = self._seed
+        clone._global_chunk_index = self._global_chunk_index
+        clone._exhausted_policy = self._exhausted_policy
+        clone._knobs = self._knobs
+
+        # Create fresh cursors that share the immutable order buffer but have
+        # independent positions/remaining counts.
+        clone._cursors = {}
+        for name, cur in self._cursors.items():
+            new_cur = _DatasetCursor.__new__(_DatasetCursor)
+            new_cur._order = cur._order
+            new_cur._position = cur._position
+            new_cur.remaining = cur.remaining
+            clone._cursors[name] = new_cur
+
+        clone._remaining = self._remaining
+        clone.total_samples = self.total_samples
+
+        clone._cloned = True
+        clone._bind_lane(lane_id, canonical_replicas)
+        return clone
+
     def chunk_size_hint(self) -> int | None:
         return self._chunk_size
 
