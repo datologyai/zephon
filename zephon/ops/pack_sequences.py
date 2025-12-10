@@ -158,6 +158,13 @@ class PackSequences(DefaultSetup, DefaultFinalize[SampleRecord]):
         if isinstance(value, int):
             return value
 
+        # Numpy/torch scalars (have .item() method)
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return int(value.item())
+            except (TypeError, AttributeError):
+                pass
+
         # Tensor-like objects (numpy arrays, torch tensors, JAX arrays, etc.)
         # Check for shape attribute and try to access first dimension
         # Use getattr to safely access shape without type checker errors

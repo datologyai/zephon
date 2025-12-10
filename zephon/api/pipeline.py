@@ -301,6 +301,7 @@ class Pipeline:
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
+        pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
         placement: str = "auto",
     ) -> "Pipeline":
         """Add a sequence packing operator to the pipeline.
@@ -316,6 +317,11 @@ class Pipeline:
             flush_strategy: Strategy for flushing bins when num_bins limit is reached.
                 "fifo" flushes oldest bins first (default), "fullest" flushes bins with smallest
                 remaining capacity first (better packing efficiency).
+            pack_payloads: How to combine payloads from multiple samples in a bin.
+                "keep_list" keeps payloads as a list (default),
+                "torch_tensor" concatenates PyTorch tensors along the first dimension,
+                "numpy_array" concatenates NumPy arrays along the first axis,
+                or a custom callable that takes list[Any] and returns Any.
             placement: Placement strategy for this operator.
         """
         op = PackSequences(
@@ -327,6 +333,7 @@ class Pipeline:
             shuffle_seed=shuffle_seed,
             num_bins=num_bins,
             flush_strategy=flush_strategy,
+            pack_payloads=pack_payloads,
         )
         node = self._graph.add("pack_sequences", op, self._tail, placement=placement)
         self._tail = node
