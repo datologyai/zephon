@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
+from zephon.utils import disable_gc
 from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 
@@ -87,14 +88,17 @@ class _DatasetCursor:
             random.Random(knobs.seed).shuffle(shard_ids)
 
         sequence: list[SampleId] = []
-        for position, shard_id in enumerate(shard_ids):
-            count = int(shard_index[shard_id])
-            offsets = list(range(count))
-            if knobs.shuffle_within_shard and count > 1:  # Shuffle within the shards
-                shard_seed = (knobs.seed << 32) ^ ((position << 16) + shard_id)
-                random.Random(shard_seed).shuffle(offsets)
-            # Construct global sequence
-            sequence.extend((dataset_id, shard_id, offset) for offset in offsets)
+        with disable_gc():  # see https://github.com/python/cpython/issues/142531
+            for position, shard_id in enumerate(shard_ids):
+                count = int(shard_index[shard_id])
+                offsets = list(range(count))
+                if (
+                    knobs.shuffle_within_shard and count > 1
+                ):  # Shuffle within the shards
+                    shard_seed = (knobs.seed << 32) ^ ((position << 16) + shard_id)
+                    random.Random(shard_seed).shuffle(offsets)
+                # Construct global sequence
+                sequence.extend((dataset_id, shard_id, offset) for offset in offsets)
 
         block_size = knobs.shuffle_block_size
         # Mosaic-style block-based shuffle on top to create cross-shard shuffles
