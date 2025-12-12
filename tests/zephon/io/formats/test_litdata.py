@@ -193,6 +193,62 @@ def _binary_writer_for_samples(
     return writer
 
 
+def test_litdata_shard_getsamples_batch_loading(tmp_path: Path) -> None:
+    """Test that getsamples correctly loads multiple items in batch."""
+    dataset_dir = tmp_path / "litdata_getsamples"
+    samples = [(idx, f"sample-{idx}") for idx in range(6)]
+    writer = _binary_writer_for_samples(dataset_dir, len(samples), loader_kind="pytree")
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
+
+    dataset = Dataset.from_path(name="lit-getsamples", path=str(dataset_dir))
+    ensure_builtin_formats()
+    handler = get_format("litdata")
+    locators = handler.build_locators(dataset)
+    assert dataset.path is not None
+    resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
+
+    for locator in locators.values():
+        local_ref = resolver.resolve(locator)
+        shard = handler.open_shard(locator, local_ref)
+        try:
+            # Test batch loading with unsorted and duplicate indices
+            out = shard.getsamples([4, 1, 4, 0])
+            assert len(out) == 4
+            assert [int(r[0]) for r in out] == [4, 1, 4, 0]
+            assert [str(r[1]) for r in out] == [
+                "sample-4",
+                "sample-1",
+                "sample-4",
+                "sample-0",
+            ]
+
+            # Test empty list
+            assert shard.getsamples([]) == []
+
+            # Test out of bounds
+            with pytest.raises(IndexError):
+                _ = shard.getsamples([10])
+
+            # Test that single item works
+            single = shard.getsamples([2])
+            assert len(single) == 1
+            assert int(single[0][0]) == 2
+            assert str(single[0][1]) == "sample-2"
+
+            # Test loading all items
+            all_indices = list(range(len(shard)))
+            all_items = shard.getsamples(all_indices)
+            assert len(all_items) == len(shard)
+            for idx, item in enumerate(all_items):
+                assert int(item[0]) == idx
+                assert str(item[1]) == f"sample-{idx}"
+        finally:
+            shard.close()
+
+
 def _ensure_single_thread_zstd(writer: BinaryWriter) -> None:
     compressor = getattr(writer, "_compressor", None)
     name = getattr(compressor, "name", "") if compressor is not None else ""

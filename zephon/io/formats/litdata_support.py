@@ -179,6 +179,26 @@ class BaseItemLoader(ABC):
         filesize_bytes: int,
     ) -> Any: ...
 
+    def load_items_from_chunk(
+        self,
+        indices: list[int],
+        chunk_index: int,
+        chunk_filepath: str,
+        begin: int,
+        filesize_bytes: int,
+    ) -> list[Any]:
+        """Load multiple items from a chunk efficiently.
+
+        Default implementation falls back to calling load_item_from_chunk
+        for each index. Subclasses should override for better performance.
+        """
+        return [
+            self.load_item_from_chunk(
+                index, chunk_index, chunk_filepath, begin, filesize_bytes
+            )
+            for index in indices
+        ]
+
     def load_item_from_bytes(
         self, raw_bytes: bytes, chunk_index: int
     ) -> Any:  # pragma: no cover - rarely used
@@ -204,6 +224,7 @@ class PyTreeLoader(BaseItemLoader):
         self._return_flat_leaves = return_flat_leaves
         self._tree_spec: optree.PyTreeSpec | None = None
         self._unflatten: Optional[functools.partial] = None
+        self._offset_table: np.ndarray | None = None
 
     def setup(
         self,
@@ -248,16 +269,53 @@ class PyTreeLoader(BaseItemLoader):
         fp.seek(begin)
         return fp.read(int(end - begin))
 
-    def load_item_from_chunk(
-        self,
-        index: int,
-        chunk_index: int,
-        chunk_filepath: str,
-        begin: int,
-        filesize_bytes: int,
-    ) -> Any:
-        offset = (1 + (index - begin) if index >= begin else index + 1) * 4
+    def _load_data_cached(self, fp: FileIO | BytesIO, relative_index: int) -> bytes:
+        """Load data using cached offset table.
 
+        The offset table has chunk_size + 1 entries (indices 0 to chunk_size).
+        The original code reads 8 bytes starting at position (i + 1) * 4 in the file,
+        which corresponds to reading entries at positions (i + 1) * 4 and (i + 2) * 4.
+
+        Since the table starts at byte 4 in the file:
+        - File position (i + 1) * 4 corresponds to table entry i
+        - File position (i + 2) * 4 corresponds to table entry i + 1
+
+        So for item at relative_index i:
+        - begin = offset_table[i]
+        - end = offset_table[i + 1]
+
+        For the last item (relative_index = chunk_size - 1):
+        - begin = offset_table[chunk_size - 1]
+        - end = offset_table[chunk_size] (the last entry)
+        """
+        if self._offset_table is None:
+            raise RuntimeError("Offset table not cached")
+
+        # The offset table has chunk_size + 1 entries (0 to chunk_size)
+        # For item at relative_index i, we use entries i (begin) and i+1 (end)
+        begin_idx = relative_index
+        end_idx = relative_index + 1
+
+        if end_idx >= len(self._offset_table):
+            # This shouldn't happen if relative_index is valid, but handle it anyway
+            raise IndexError(
+                f"Invalid relative_index {relative_index} for offset table of size {len(self._offset_table)}"
+            )
+
+        begin = int(self._offset_table[begin_idx])
+        end = int(self._offset_table[end_idx])
+
+        fp.seek(begin)
+        return fp.read(end - begin)
+
+    def _ensure_file_open(
+        self, chunk_filepath: str, filesize_bytes: int, chunk_size: int | None = None
+    ) -> None:
+        """Ensure the chunk file is open, opening it if necessary.
+
+        If chunk_size is provided and the file is being opened for the first time,
+        the offset table will be cached.
+        """
         if chunk_filepath != self._chunk_filepath:
             if (
                 not os.path.exists(chunk_filepath)
@@ -271,9 +329,83 @@ class PyTreeLoader(BaseItemLoader):
                 self._open_handle.close()
             self._open_handle = open(chunk_filepath, "rb", 0)  # noqa: SIM115
 
+            # Cache the offset table if chunk_size is provided
+            if chunk_size is not None:
+                self._cache_offset_table(chunk_size)
+            else:
+                self._offset_table = None
+
+    def _cache_offset_table(self, chunk_size: int) -> None:
+        """Read and cache the entire offset table from the file."""
+        if self._open_handle is None:
+            raise RuntimeError("File handle not open")
+        # Offset table starts at byte 4 and has (chunk_size + 1) uint32 entries
+        self._open_handle.seek(4)
+        offset_table_bytes = self._open_handle.read((chunk_size + 1) * 4)
+        self._offset_table = np.frombuffer(offset_table_bytes, dtype=np.uint32)
+
+    def load_item_from_chunk(
+        self,
+        index: int,
+        chunk_index: int,
+        chunk_filepath: str,
+        begin: int,
+        filesize_bytes: int,
+    ) -> Any:
+        # Get chunk_size from self._chunks if available
+        chunk_size: int | None = None
+        if chunk_index < len(self._chunks):
+            chunk = self._chunks[chunk_index]
+            chunk_size = int(chunk.get("chunk_size", 0))
+
+        self._ensure_file_open(chunk_filepath, filesize_bytes, chunk_size)
+
         assert self._open_handle is not None
-        data = self._load_data(self._open_handle, offset)
+
+        # Use cached offset table if available
+        if self._offset_table is not None:
+            relative_index = index - begin if index >= begin else index
+            data = self._load_data_cached(self._open_handle, relative_index)
+        else:
+            offset = (1 + (index - begin) if index >= begin else index + 1) * 4
+            data = self._load_data(self._open_handle, offset)
+
         return self.deserialize(data, chunk_index)
+
+    def load_items_from_chunk(
+        self,
+        indices: list[int],
+        chunk_index: int,
+        chunk_filepath: str,
+        begin: int,
+        filesize_bytes: int,
+    ) -> list[Any]:
+        """Load multiple items from a chunk efficiently by batching reads."""
+        if not indices:
+            return []
+
+        # Get chunk_size from self._chunks if available
+        chunk_size: int | None = None
+        if chunk_index < len(self._chunks):
+            chunk = self._chunks[chunk_index]
+            chunk_size = int(chunk.get("chunk_size", 0))
+
+        self._ensure_file_open(chunk_filepath, filesize_bytes, chunk_size)
+        assert self._open_handle is not None
+
+        # Use cached offset table if available
+        if self._offset_table is not None:
+            results: list[Any] = []
+            for index in indices:
+                relative_index = index - begin if index >= begin else index
+                data = self._load_data_cached(self._open_handle, relative_index)
+                results.append(self.deserialize(data, chunk_index))
+            return results
+        else:
+            # Fallback to base class implementation
+            return super().load_items_from_chunk(
+                indices, chunk_index, chunk_filepath, begin, filesize_bytes
+            )
 
     def deserialize(self, raw_item_data: bytes, chunk_index: int) -> Any:
         idx = self._shift_idx
@@ -295,6 +427,7 @@ class PyTreeLoader(BaseItemLoader):
         if self._open_handle is not None:
             self._open_handle.close()
             self._open_handle = None
+        self._offset_table = None
 
     def delete(self, chunk_index: int, chunk_filepath: str) -> None:
         if os.path.exists(chunk_filepath):

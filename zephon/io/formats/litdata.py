@@ -349,7 +349,23 @@ class _LitDataShard(RandomAccessShard):
         )
 
     def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
-        return [cast(dict[str, object], self[i]) for i in indices]
+        if not indices:
+            return []
+        # Validate indices
+        length = len(self)
+        for i in indices:
+            if i < 0 or i >= length:
+                raise IndexError("LitData shard index out of range")
+        # Convert relative indices to absolute indices
+        absolute_indices = [self._interval.chunk_start + i for i in indices]
+        items = self._loader.load_items_from_chunk(
+            absolute_indices,
+            0,
+            str(self._raw_path),
+            self._interval.chunk_start,
+            self._chunk_bytes,
+        )
+        return [cast(dict[str, object], item) for item in items]
 
     def close(self) -> None:
         close = getattr(self._loader, "close", None)
