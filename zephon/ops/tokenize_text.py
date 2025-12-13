@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from types import ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -136,6 +137,15 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
 
     def _setup_tokenizer(self) -> None:
         if self.tok is None:
+            # Before importing hf tokenizers we tell it we handle the parallelism
+            # and not hf tokenizers. This avoids unforeseen effects when running
+            # multiple op instances.
+            os.environ["TOKENIZERS_PARALLELISM"] = "False"
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            os.environ["OPENBLAS_NUM_THREADS"] = "1"
+            os.environ["RAYON_NUM_THREADS"] = "1"
+
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()
             else:
