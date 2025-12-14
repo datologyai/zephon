@@ -66,6 +66,30 @@ class TokenizerLike(Protocol):
     ) -> TokenizerOutput: ...
 
 
+def _prep_env() -> None:
+    """Disables parallelism within the hf tokenizer."""
+    os.environ["TOKENIZERS_PARALLELISM"] = "False"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["RAYON_NUM_THREADS"] = "1"
+
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    try:
+        import tensorflow as tf
+
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except Exception:
+        pass
+
+
 class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     """Tokenize text fields using a provided or auto-resolved tokenizer."""
 
@@ -140,11 +164,7 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             # Before importing hf tokenizers we tell it we handle the parallelism
             # and not hf tokenizers. This avoids unforeseen effects when running
             # multiple op instances.
-            os.environ["TOKENIZERS_PARALLELISM"] = "False"
-            os.environ["OMP_NUM_THREADS"] = "1"
-            os.environ["MKL_NUM_THREADS"] = "1"
-            os.environ["OPENBLAS_NUM_THREADS"] = "1"
-            os.environ["RAYON_NUM_THREADS"] = "1"
+            _prep_env()
 
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()
