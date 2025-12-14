@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import sys
+import sysconfig
+import threading
 from types import ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -52,6 +56,28 @@ TokenBatch: TypeAlias = Union[
     Sequence[Sequence[int]],
 ]
 TokenizerOutput: TypeAlias = Mapping[str, TokenBatch]
+
+
+def _gil_disabled() -> bool:
+    check = getattr(sys, "_is_gil_enabled", None)
+    if callable(check):
+        try:
+            return not bool(check())
+        except Exception:
+            pass
+
+    try:
+        gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+        if gil_disabled is not None:
+            return bool(gil_disabled)
+    except Exception:
+        pass
+
+    return False
+
+
+# Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
+_IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 
 
 class TokenizerLike(Protocol):
@@ -161,6 +187,10 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
 
     def _setup_tokenizer(self) -> None:
         if self.tok is None:
+            lock_ctx = (
+                _IMPORT_LOCK if _IMPORT_LOCK is not None else contextlib.nullcontext()
+            )
+
             # Before importing hf tokenizers we tell it we handle the parallelism
             # and not hf tokenizers. This avoids unforeseen effects when running
             # multiple op instances.
@@ -169,7 +199,8 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()
             else:
-                from transformers import AutoTokenizer
+                with lock_ctx:
+                    from transformers import AutoTokenizer
 
                 kwargs: dict[str, Any] = {}
                 if self.use_fast is not None:
