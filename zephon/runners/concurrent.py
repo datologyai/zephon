@@ -451,6 +451,8 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                     ):
                         # In the error case, we don't wait for missing seq gaps.
                         if context.error is not None:
+                            for pending in state.pending_results.values():
+                                self._ack_result(state, pending, context)
                             state.pending_results.clear()
 
                         tail = self._finalize_state(state, context, next_queue)
@@ -632,9 +634,9 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
     def _join_threads(self, context: ConcurrentRunContext) -> None:
         for thread in context.pumps:
-            thread.join(timeout=1.0)
+            thread.join(timeout=5.0)
         if context.feeder is not None:
-            context.feeder.join(timeout=1.0)
+            context.feeder.join(timeout=5.0)
 
     # -- Public API -----------------------------------------------------
     def run(self, upstream: Iterable[RunnerStageIn]) -> Iterator[RunnerStageOut]:

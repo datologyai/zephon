@@ -473,9 +473,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         super()._start_operator_threads(context)
 
     def _before_run(self, context: ConcurrentRunContext) -> None:
-        self._start_service_thread()
         for state in self.ops:
             self._launch_workers(state)
+        self._start_service_thread()
 
     def _after_run(self, context: ConcurrentRunContext) -> None:
         self._shutdown_workers()
@@ -711,7 +711,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                     while True:
                         try:
                             item = self._queue_get(state.result_queue, timeout=0.1)
-                        except FileNotFoundError:
+                        except (FileNotFoundError, EOFError, OSError, ValueError):
                             # The result queue's underlying fd may vanish if workers
                             # die abruptly (torch shared memory handles). At shutdown
                             # we just stop draining and proceed with tear-down.
@@ -742,6 +742,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                     _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
                     state=None,  # Don't drain during shutdown - already drained above
                     context=None,
+                    block_on_exhaustion=False,
                 )
 
             # Wait for workers to finish, with reasonable timeout
@@ -795,6 +796,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         command: _WorkerCommand,
         state: _ProcessOperatorState | None = None,
         context: ConcurrentRunContext | None = None,
+        block_on_exhaustion: bool = True,
     ) -> None:
         """Send command to worker queue, draining results if queue is full.
 
@@ -825,13 +827,22 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                         # If draining fails, continue retrying
                         pass
                 continue
-        # If we've exhausted retries, try one more time without timeout
-        # This will block indefinitely, but at least we tried to drain first
-        _debug(
-            f"WARNING: Queue still full after {max_retries} retries with draining. "
-            + "Falling back to blocking put() - this may indicate a deadlock."
-        )
-        queue_.put(command)
+        if block_on_exhaustion:
+            # If we've exhausted retries, try one more time without timeout
+            # This will block indefinitely, but at least we tried to drain first\
+            if command.kind != "batch":
+                print(
+                    f"WARNING: Queue still full after {max_retries} retries with draining. "
+                    + f"Falling back to blocking put() - this may indicate a deadlock. Command: {command}",
+                    file=sys.stderr,
+                )
+            queue_.put(command)
+        else:
+            print(
+                f"WARNING: Queue still full after {max_retries} retries with draining. "
+                + f"Skipping command {command}.",
+                file=sys.stderr,
+            )
 
     def _schedule_batch(
         self,
