@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Semaphore
@@ -51,6 +52,29 @@ _DEBUG = bool(os.environ.get("ZEPHON_DEBUG_PROCESS_RUNNER"))
 def _debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
     if _DEBUG:
         print(f"[ProcessRunner] {msg}", file=sys.stderr, flush=True)
+
+
+class _NamedQueue(mp_queues.Queue):
+    """Queue that tags its feeder thread with a friendly name."""
+
+    def __init__(self, name: str, maxsize: int = 0, *, ctx: BaseContext):
+        super().__init__(maxsize, ctx=ctx)
+        self._ignore_epipe = True
+        self._name_label = name
+
+    def _start_thread(self) -> None:
+        super()._start_thread()  # type: ignore[attr-defined]
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.name = f"QueueFeederThread[{self._name_label}]"
+
+    def __getstate__(self) -> Any:  # noqa: D401 - custom pickle payload
+        base_state = super().__getstate__()  # type: ignore[attr-defined]
+        return (self._name_label, base_state)
+
+    def __setstate__(self, state: Any) -> None:
+        self._name_label, base_state = state
+        super().__setstate__(base_state)  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -217,6 +241,7 @@ class _ProcessOperatorState(ConcurrentOperatorState):
         self.input_queue = queue.Queue[Sequence[RunnerStreamIn] | StopToken](
             maxsize=self.queue_capacity
         )
+        # note that this is just a temporary q regular queue that we will replace with a proper mp.Queue
         self.result_queue = queue.Queue[RunnerResult](maxsize=1)
 
 
@@ -383,14 +408,14 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self._ipc_batch_size_factor = max(1, int(ipc_batch_size_factor))
         self._ipc_batch_size = self._derive_ipc_batch_size(stage)
         ctx = mp_context or mp.get_context("fork")
-        queue_factory = cast(QueueFactory, getattr(ctx, "Queue"))
+        self._mp_context: BaseContext = ctx
+
         semaphore_factory = cast(SemaphoreFactory, getattr(ctx, "Semaphore"))
         process_factory = cast(ProcessFactory, getattr(ctx, "Process"))
-        self._queue_factory: QueueFactory = queue_factory
         self._semaphore_factory: SemaphoreFactory = semaphore_factory
         self._process_factory: ProcessFactory = process_factory
         self._service_queue = cast(
-            _ClosableQueue[_ServiceRequest | None], self._queue_factory()
+            _ClosableQueue[_ServiceRequest | None], self._make_ipc_queue("service")
         )
         self._service_thread: threading.Thread | None = None
         self._service_stop = threading.Event()
@@ -408,6 +433,63 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             tracking_mode=tracking_mode,
             stage_output_mode=stage_output_mode,
         )
+
+    def _make_ipc_queue(
+        self, name: str, maxsize: int | None = None
+    ) -> _ClosableQueue[Any]:
+        size = 0 if maxsize is None else maxsize
+        return cast(
+            _ClosableQueue[Any],
+            _NamedQueue(name, maxsize=size, ctx=self._mp_context),
+        )
+
+    @staticmethod
+    def _close_ipc_queue(q: Any) -> None:
+        """
+        Helper to cleanly kill a queue.
+
+        Attempts to flush for 5 seconds. If it times out, cancels the join
+        to prevent hanging, logging a warning that data may be lost.
+        """
+        if q is None:
+            return
+
+        # 1. Close the queue to prevent new data
+        try:
+            q.close()
+        except Exception:
+            pass
+
+        # 2. Attempt to join the background thread with a 5-second timeout
+        # standard q.join_thread() does not support timeout, so we access
+        # the underlying thread directly if it exists.
+        has_thread = hasattr(q, "_thread") and q._thread is not None
+        if has_thread:
+            try:
+                q._thread.join(timeout=5)
+            except Exception:
+                pass
+
+        # 3. Check if cleanup was successful or requires force cancellation
+        if hasattr(q, "cancel_join_thread"):
+            try:
+                # If the thread is still alive after the join attempt,
+                # it means we timed out.
+                if has_thread and q._thread.is_alive():
+                    print(
+                        "Queue failed to flush within 5 seconds. "
+                        + "Cancelling join thread to prevent hang (data loss possible).",
+                        file=sys.stderr,
+                    )
+                    q.cancel_join_thread()
+
+                # Fallback: If we couldn't access the thread logic (e.g. mocked object),
+                # but we know we shouldn't block, we can opt to cancel immediately.
+                elif not has_thread:
+                    q.cancel_join_thread()
+
+            except Exception:
+                pass
 
     def _derive_ipc_batch_size(self, stage: Stage) -> int:
         fallback = 128
@@ -494,14 +576,15 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         if self._service_thread is None:
             return
         self._service_stop.set()
-        self._service_queue.put(None)
+        try:
+            self._service_queue.put(None)
+        except (FileNotFoundError, EOFError, OSError, ValueError):
+            pass  # i think we right now do this multiple times but anyways
+
         self._service_thread.join(timeout=1.0)
         self._service_thread = None
         for resp in self._service_responses.values():
-            try:
-                resp.close()
-            except Exception:
-                pass
+            self._close_ipc_queue(resp)
         self._service_responses.clear()
 
     def _start_feeder(
@@ -653,17 +736,30 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         state.workers = []
         state.worker_ids = []
         state.result_semaphores = []
-        result_queue = cast(_ClosableQueue[RunnerResult], self._queue_factory())
+
+        op_label = state.node.name or f"op{state.op_index}"
+        queue_label = f"{state.stage_name}:{op_label}"
+
+        result_queue = cast(
+            _ClosableQueue[RunnerResult],
+            self._make_ipc_queue(f"result:{queue_label}"),
+        )
         state.result_queue = result_queue
         queue_capacity = max(1, self._queue_capacity * max(1, state.parallelism))
         task_queue = cast(
-            _ClosableQueue[_WorkerCommand], self._queue_factory(queue_capacity)
+            _ClosableQueue[_WorkerCommand],
+            self._make_ipc_queue(f"task:{queue_label}", queue_capacity),
         )
         state.task_queue = task_queue
         for idx in range(state.parallelism):
-            resp_queue = cast(_ClosableQueue[tuple[bool, Any]], self._queue_factory())
             semaphore = self._semaphore_factory(self._queue_capacity)
             worker_id = self._next_worker_id
+            resp_queue = cast(
+                _ClosableQueue[tuple[bool, Any]],
+                self._make_ipc_queue(
+                    f"service-response:{queue_label}:{worker_id}",
+                ),
+            )
             self._next_worker_id += 1
             ctx_payload = self._build_worker_ctx(worker_id, resp_queue)
             config = _ProcessWorkerConfig(
@@ -751,27 +847,36 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             for proc in state.workers:
                 proc.join(timeout=1.0)
                 if proc.is_alive():
-                    _debug(
-                        f"Worker process {proc.pid} did not terminate within timeout, "
-                        + "it may be hung"
-                    )
+                    proc.terminate()
+                    # Give it a moment to die gracefully, then kill
+                    proc.join(timeout=0.1)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join()
+
+            while not state.inflight.is_zero():
+                state.inflight.decrement()
+
+            # The workers are dead; they will never fill the sequence gaps.
+            # If we don't clear this, the operator thread waits forever for seq N.
+            state.pending_results.clear()
+
+            # 3. Clear runner-level buffers
+            # Ensure the thread doesn't think it has batched items left to schedule.
+            state.reset_buffers()
+
             for wid in state.worker_ids:
                 resp = self._service_responses.pop(wid, None)
-                if resp is not None:
-                    try:
-                        resp.close()
-                    except Exception:
-                        pass
+                self._close_ipc_queue(resp)
+
             state.workers.clear()
             state.worker_ids.clear()
             state.result_semaphores.clear()
-            # task_queue is guaranteed to be not None here due to check above
-            close = getattr(task_queue, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+
+            self._close_ipc_queue(state.task_queue)
+            self._close_ipc_queue(self._service_queue)
+            self._close_ipc_queue(state.result_queue)
+
             state.task_queue = None
 
     def _build_worker_ctx(
@@ -978,8 +1083,21 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
     ) -> RunnerResult:
         while True:
-            item = state.result_queue.get()
-            _debug(f"_wait_for_result saw seq={item.seq}")
+            try:
+                item = self._queue_get(state.result_queue, timeout=0.1)
+            except queue.Empty:
+                if context.stop_event.is_set():
+                    # If the stage is stopping, we cannot wait indefinitely for a worker
+                    # that might already be dead. Raise an error to break the loop.
+                    info = WorkerErrorInfo(
+                        exc_type="StageStopped",
+                        message="Stage is shutting down during finalization",
+                        formatted_traceback="",
+                    )
+                    raise WorkerCrashed(info)
+                continue
+
+                debug(f"_wait_for_result saw seq={item.seq}")
             if item.error is not None:
                 exc = WorkerCrashed(item.error)
                 self._record_error(context, exc)
@@ -1000,7 +1118,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         if ctx is not None:
             ctx.stop_event.set()
             self._put_stage_stop(ctx)
-            self._join_threads(ctx)
 
         self._shutdown_workers()
         self._stop_service_thread()
+
+        if ctx is not None:
+            self._join_threads(ctx)
