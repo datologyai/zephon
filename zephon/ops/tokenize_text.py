@@ -11,6 +11,7 @@ import os
 import sys
 import sysconfig
 import threading
+import traceback
 from types import ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -23,6 +24,12 @@ from typing import (
     TypeVar,
     Union,
     cast,
+)
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
 )
 
 from zephon.core.children import spawn_child
@@ -202,13 +209,27 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
                 with lock_ctx:
                     from transformers import AutoTokenizer
 
+                @retry(
+                    wait=wait_random_exponential(multiplier=2, max=15),
+                    stop=stop_after_attempt(5),
+                    reraise=True,
+                )
+                def _load_with_retry(model_id: str, **k: Any) -> Any:
+                    try:
+                        tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
+                    except Exception as e:
+                        print(
+                            f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
+                            file=sys.stderr,
+                        )
+                        raise e
+                    return tokenizer
+
                 kwargs: dict[str, Any] = {}
                 if self.use_fast is not None:
                     kwargs["use_fast"] = self.use_fast
                 try:
-                    self.tok = AutoTokenizer.from_pretrained(
-                        self.tokenizer_id, **kwargs
-                    )
+                    self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
                 except TypeError as exc:
                     # Some tokenizers may not accept the `use_fast` kwarg;
                     # retry without it so we surface the original failure instead of
@@ -216,9 +237,7 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
                     if "use_fast" in kwargs and "use_fast" in str(exc):
                         kwargs = dict(kwargs)
                         kwargs.pop("use_fast", None)
-                        self.tok = AutoTokenizer.from_pretrained(
-                            self.tokenizer_id, **kwargs
-                        )
+                        self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
 
                     else:
                         raise

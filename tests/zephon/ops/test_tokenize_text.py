@@ -600,12 +600,11 @@ def test_setup_retries_without_use_fast_on_type_error(
     _setup(op)
     _ = op.process_one(_rec("hi"))
 
-    # Should have called twice:
-    # 1. With use_fast=True (Failed)
-    # 2. Without use_fast (Succeeded)
-    assert len(call_history) == 2
-    assert call_history[0]["use_fast"] is True
-    assert "use_fast" not in call_history[1]
+    # With tenacity retrying, we expect multiple attempts with use_fast=True
+    # followed by a final successful load without use_fast.
+    assert len(call_history) >= 2
+    assert all(k.get("use_fast") is True for k in call_history[:-1])
+    assert "use_fast" not in call_history[-1]
     assert isinstance(op.tok, FlakyTokenizer)
 
 
