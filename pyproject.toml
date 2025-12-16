@@ -26,6 +26,7 @@ classifiers = [
 dynamic = ["version"]
 
 dependencies = [
+    "cloudpickle>=2.0.0",
     "numpy>=1.21.5",
     "tenacity>=8.2.0",
     "wrapt>=2.0.0",

@@ -187,16 +187,22 @@ class Pipeline:
         """Add a map-style transformation operator.
 
         Applies a user-provided transformation function to each sample's payload.
+        Supports lambda functions, closures, and nested functions seamlessly with
+        multiprocessing-based runners (uses cloudpickle for serialization).
 
         Args:
             transform_fn: Callable that transforms the payload.
                 If it returns None and drop_none=True, the sample is filtered out.
+                Supports lambdas, closures, and nested functions.
             drop_none: If True, drop samples where transform_fn returns None.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.
 
         Returns:
             Self for method chaining.
+
+        Example:
+            >>> pipeline.map_transform(lambda x: {"value": x["value"] * 2})
         """
         op = MapTransform(transform_fn, drop_none=drop_none)
         node = self._graph.add(
@@ -306,10 +312,14 @@ class Pipeline:
     ) -> "Pipeline":
         """Add a sequence packing operator to the pipeline.
 
+        Supports lambda functions for length_fn and pack_payloads parameters,
+        which work seamlessly with multiprocessing-based runners.
+
         Args:
             max_length: Maximum length for packed bins.
             num_bins: Number of bins to maintain per lane.
             length_fn: Function or field name to extract sequence length from a SampleRecord.
+                Can be a lambda function (e.g., lambda r: len(r.payload["tokens"])).
             algorithm: Packing algorithm to use ("first_fit" or "best_fit").
             drop_oversized: If True, drop sequences longer than max_length.
             shuffle_strategy: Strategy for ordering sequences before packing ("random", "length", or None).
@@ -321,7 +331,7 @@ class Pipeline:
                 "keep_list" keeps payloads as a list (default),
                 "torch_tensor" concatenates PyTorch tensors along the first dimension,
                 "numpy_array" concatenates NumPy arrays along the first axis,
-                or a custom callable that takes list[Any] and returns Any.
+                or a custom callable (including lambdas) that takes list[Any] and returns Any.
             placement: Placement strategy for this operator.
         """
         op = PackSequences(

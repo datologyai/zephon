@@ -440,3 +440,113 @@ def test_process_runner_bubbles_worker_exceptions() -> None:
     assert "ValueError" in text
     assert "boom inside worker" in text
     assert "process_many" in text
+
+
+@dataclass
+class _LambdaOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleRecord]):
+    """Operator that uses a lambda function internally.
+
+    This mimics what PackSequences does with its length_fn field.
+    """
+
+    transform: Any = None  # Will be set to a lambda in __post_init__
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+        # Use a lambda to transform the value, just like PackSequences uses lambda for length_fn
+        self.transform = lambda x: x * 2
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def buffering(self) -> None:
+        return None
+
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
+        payload = dict(elem.payload)
+        payload["value"] = self.transform(int(payload["value"]))
+        return [SampleRecord(meta=elem.meta, payload=payload)]
+
+
+def test_process_runner_serializes_operator_with_lambda() -> None:
+    """Test that operators containing lambda functions serialize correctly.
+
+    This verifies that cloudpickle is working - standard pickle would fail
+    with 'Can't pickle <lambda>' error.
+    """
+    op = _LambdaOp()
+    node = Node(name="lambda_op", op=op)
+    stage = Stage(
+        name="lambda_stage", nodes=[node], placement="auto", break_reason="test"
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    # If cloudpickle is working, this should succeed
+    # If standard pickle is used, it would fail with PicklingError
+    data = list(range(5))
+    out = _collect(runner, data)
+    assert out == [x * 2 for x in data]
+
+
+@dataclass
+class _ClosureOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleRecord]):
+    """Operator that uses a closure (lambda capturing outer variable)."""
+
+    multiplier: int = 3
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+        # Create a closure that captures self.multiplier
+        self.transform = lambda x: x * self.multiplier
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def buffering(self) -> None:
+        return None
+
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
+        payload = dict(elem.payload)
+        payload["value"] = self.transform(int(payload["value"]))
+        return [SampleRecord(meta=elem.meta, payload=payload)]
+
+
+def test_process_runner_serializes_operator_with_closure() -> None:
+    """Test that operators with closures (lambdas capturing outer variables) work.
+
+    Closures are even trickier than plain lambdas for standard pickle.
+    """
+    op = _ClosureOp(multiplier=5)
+    node = Node(name="closure_op", op=op)
+    stage = Stage(
+        name="closure_stage", nodes=[node], placement="auto", break_reason="test"
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    data = list(range(4))
+    out = _collect(runner, data)
+    assert out == [x * 5 for x in data]

@@ -1,4 +1,13 @@
-"""Process-based stage runner that executes ops using multiprocessing workers."""
+"""Process-based stage runner that executes ops using multiprocessing workers.
+
+Lambda function support
+-----------------------
+This runner uses cloudpickle to serialize operators before sending them to worker
+processes. This enables operators to contain lambda functions, closures, and nested
+functions that standard pickle cannot handle. The serialization is done surgically:
+only the operator is serialized with cloudpickle, while the rest of the multiprocessing
+infrastructure uses standard pickle to avoid compatibility issues.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +26,8 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Semaphore
 from typing import Any, Callable, Iterable, Literal, Protocol, Sequence, TypeVar, cast
 
+import cloudpickle
+
 from zephon.core.constants import (
     Microbatch,
     RunnerStageIn,
@@ -25,7 +36,7 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.graph import Node, Stage
-from zephon.core.op_base import Op, OpContext
+from zephon.core.op_base import OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.runners.concurrent import (
@@ -136,7 +147,7 @@ class _RemoteServiceProxy:
 class _ProcessWorkerConfig:
     worker_index: int
     worker_id: int
-    op_proto: Op[Any, StreamItem]
+    op_proto_bytes: bytes  # Serialized with cloudpickle to support lambdas
     stage_index: int
     stage_name: str
     op_index: int
@@ -154,7 +165,9 @@ ProcessFactory = Callable[..., BaseProcess]
 
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     try:
-        op_instance = copy.deepcopy(config.op_proto)
+        # Deserialize operator using cloudpickle to support lambdas/closures
+        op_proto = cloudpickle.loads(config.op_proto_bytes)
+        op_instance = copy.deepcopy(op_proto)
         ctx = OpContext(dict(config.ctx_services))
         op_instance.setup(
             ctx,
@@ -407,9 +420,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self._queue_capacity = max(1, queue_capacity)
         self._ipc_batch_size_factor = max(1, int(ipc_batch_size_factor))
         self._ipc_batch_size = self._derive_ipc_batch_size(stage)
-        ctx = mp_context or mp.get_context("fork")
+        ctx = mp_context or mp.get_context("spawn")
         self._mp_context: BaseContext = ctx
-
         semaphore_factory = cast(SemaphoreFactory, getattr(ctx, "Semaphore"))
         process_factory = cast(ProcessFactory, getattr(ctx, "Process"))
         self._semaphore_factory: SemaphoreFactory = semaphore_factory
@@ -751,6 +763,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             self._make_ipc_queue(f"task:{queue_label}", queue_capacity),
         )
         state.task_queue = task_queue
+
+        # Serialize operator once using cloudpickle to support lambdas/closures
+        op_proto_bytes = cloudpickle.dumps(state.node.op)
+
         for idx in range(state.parallelism):
             semaphore = self._semaphore_factory(self._queue_capacity)
             worker_id = self._next_worker_id
@@ -765,7 +781,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             config = _ProcessWorkerConfig(
                 worker_index=idx,
                 worker_id=worker_id,
-                op_proto=state.node.op,
+                op_proto_bytes=op_proto_bytes,
                 stage_index=state.stage_index,
                 stage_name=state.stage_name,
                 op_index=state.op_index,

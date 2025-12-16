@@ -166,7 +166,7 @@ class RuntimeOptions:
         default_factory=dict
     )  # Manual override for runner per-stage. Mostly useful for debugging and advanced usage.
     allow_subprocess_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
-    mp_context: Any = mp.get_context("fork")
+    mp_context: Any = mp.get_context("spawn")
     worker_allocation: Literal[
         "fit_to_ops", "per_stage_fixed", "global", "autotune"
     ] = "fit_to_ops"
@@ -390,7 +390,7 @@ class Engine:
 
     def _resolve_mp_context(self, ctx_spec: BaseContext | str | None) -> BaseContext:
         if ctx_spec is None:
-            return mp.get_context("fork")
+            return mp.get_context("spawn")
         if isinstance(ctx_spec, str):
             return mp.get_context(ctx_spec)
         return ctx_spec

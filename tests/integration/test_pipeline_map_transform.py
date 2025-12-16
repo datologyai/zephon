@@ -353,3 +353,51 @@ def test_pipeline_map_transform_with_process_runner_complex_transform(
                 assert payload.get("value") % 2 == 0
     finally:
         iterator.close()
+
+
+def test_pipeline_map_transform_with_process_runner_lambda(tmp_path: Path) -> None:
+    """Test MapTransform with lambda functions in process runner.
+
+    This explicitly tests that lambda functions work with ProcessRunner.
+    Without cloudpickle, this would fail with: Can't pickle <function <lambda>>.
+    """
+    shard0 = tmp_path / "shard0.jsonl"
+    shard0.write_text(
+        "\n".join(json.dumps({"text": f"sample {i}", "value": i}) for i in range(5)),
+        encoding="utf-8",
+    )
+    jsonl_dataset = Dataset.from_path("demo", str(tmp_path))
+
+    work_source = StaticMixtureWorkSource(
+        [jsonl_dataset],
+        mixture=MixtureSpec({jsonl_dataset.name: 1.0}).weights,
+        chunk_size=1,
+        seed=11,
+        shuffle_shards=False,
+    )
+
+    # Use lambdas directly - this is the key test for cloudpickle support
+    pipe = (
+        PublicPipeline(work_source)
+        .decode_text()
+        .map_transform(lambda p: {**p, "value": p["value"] * 2})  # Lambda!
+        .map_transform(lambda p: {**p, "doubled": True})  # Another lambda!
+        .batch(microbatch_size=2, drop_last=False)
+        .options(runner="process", max_workers=2)
+    )
+
+    iterator = iter(pipe)
+    try:
+        batches = list(iterator)
+        total_samples = sum(len(batch.records) for batch in batches)
+        assert total_samples >= 3
+        # Verify lambdas were applied
+        for batch in batches:
+            for record in batch.records:
+                payload = record.payload
+                assert isinstance(payload, dict)
+                assert payload.get("doubled") is True
+                # Value should be doubled
+                assert payload.get("value") % 2 == 0
+    finally:
+        iterator.close()
