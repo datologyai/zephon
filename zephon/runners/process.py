@@ -258,6 +258,24 @@ class _ProcessOperatorState(ConcurrentOperatorState):
         self.result_queue = queue.Queue[RunnerResult](maxsize=1)
 
 
+def _close_reader_end(q: Any) -> None:
+    conn = getattr(q, "_reader", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _close_writer_end(q: Any) -> None:
+    conn = getattr(q, "_writer", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
     """Execute a stage in dedicated worker processes with IPC queues.
 
@@ -457,49 +475,40 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
     @staticmethod
     def _close_ipc_queue(q: Any) -> None:
-        """
-        Helper to cleanly kill a queue.
-
-        Attempts to flush for 5 seconds. If it times out, cancels the join
-        to prevent hanging, logging a warning that data may be lost.
-        """
         if q is None:
             return
 
-        # 1. Close the queue to prevent new data
         try:
             q.close()
         except Exception:
             pass
 
-        # 2. Attempt to join the background thread with a 5-second timeout
-        # standard q.join_thread() does not support timeout, so we access
-        # the underlying thread directly if it exists.
-        has_thread = hasattr(q, "_thread") and q._thread is not None
-        if has_thread:
+        t = getattr(q, "_thread", None)
+        if t is not None:
             try:
-                q._thread.join(timeout=5)
+                t.join(timeout=5)
             except Exception:
                 pass
 
-        # 3. Check if cleanup was successful or requires force cancellation
-        if hasattr(q, "cancel_join_thread"):
+            if t.is_alive():
+                print(
+                    "Queue failed to flush within 5 seconds. "
+                    + "Force-closing pipe to unblock feeder thread (data loss possible).",
+                    file=sys.stderr,
+                )
+                _close_writer_end(q)
+                _close_reader_end(q)
+                try:
+                    q.cancel_join_thread()
+                except Exception:
+                    pass
+                try:
+                    t.join(timeout=0.5)
+                except Exception:
+                    pass
+        else:
             try:
-                # If the thread is still alive after the join attempt,
-                # it means we timed out.
-                if has_thread and q._thread.is_alive():
-                    print(
-                        "Queue failed to flush within 5 seconds. "
-                        + "Cancelling join thread to prevent hang (data loss possible).",
-                        file=sys.stderr,
-                    )
-                    q.cancel_join_thread()
-
-                # Fallback: If we couldn't access the thread logic (e.g. mocked object),
-                # but we know we shouldn't block, we can opt to cancel immediately.
-                elif not has_thread:
-                    q.cancel_join_thread()
-
+                q.cancel_join_thread()
             except Exception:
                 pass
 
@@ -802,6 +811,14 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             state.worker_ids.append(worker_id)
             state.result_semaphores.append(semaphore)
             state.workers.append(proc)
+            # main -> worker (service response queue): main is producer-only
+            _close_reader_end(resp_queue)
+
+        # main -> workers (task queue): main is producer-only
+        _close_reader_end(task_queue)
+
+        # workers -> main (result queue): main is consumer-only
+        _close_writer_end(result_queue)
 
     def _shutdown_workers(self) -> None:
         for state in self.ops:
@@ -890,10 +907,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             state.result_semaphores.clear()
 
             self._close_ipc_queue(state.task_queue)
-            self._close_ipc_queue(self._service_queue)
             self._close_ipc_queue(state.result_queue)
 
             state.task_queue = None
+
+        self._close_ipc_queue(self._service_queue)
 
     def _build_worker_ctx(
         self, worker_id: int, response_queue: _ClosableQueue[tuple[bool, Any]]
