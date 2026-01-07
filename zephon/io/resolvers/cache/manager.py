@@ -1,6 +1,5 @@
 """Cache-backed implementation of the shard resolver protocol."""
 
-import atexit
 import bz2
 import contextlib
 import errno
@@ -12,6 +11,7 @@ import os
 import shutil
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional, cast
@@ -38,6 +38,13 @@ except Exception:
 _CACHE_LOCK_FILENAME = ".cache.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 Opener = Callable[[Path], BinaryIO]
+
+
+def _close_cache_manager(manager_ref: weakref.ReferenceType["CacheManager"]) -> None:
+    manager = manager_ref()
+    if manager is None:
+        return
+    manager.close()
 
 
 @dataclass(frozen=True)
@@ -83,7 +90,10 @@ class CacheManager(ShardResolver):
                 self._reset_if_first_owner(reset_lock_path)
         self._shared = CacheSharedState(self._root)
         self._cache_lock = FileLock(str(self._root / _CACHE_LOCK_FILENAME))
-        atexit.register(self.close)
+        # Avoid atexit strong refs so the manager can be collected between runs.
+        self._close_finalizer = weakref.finalize(
+            self, _close_cache_manager, weakref.ref(self)
+        )
 
     def stats(self) -> CacheStats:
         with self._cache_lock:

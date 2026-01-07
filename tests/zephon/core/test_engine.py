@@ -1,4 +1,8 @@
+import gc
 import re
+import time
+import types
+import weakref
 from typing import Any, Mapping
 
 import pytest
@@ -87,6 +91,38 @@ def test_engine_reproducible_weighted_random() -> None:
         deterministic=True, workers=8, mode=MixtureReadMode.WEIGHTED_RANDOM
     )
     assert first == second
+
+
+def test_engine_cleanup_finalizer_removes_previous_merged(
+    monkeypatch, tmp_path
+) -> None:
+    # Avoid building runners to keep setup minimal for this finalizer test.
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    eng = Engine(plan, RuntimeOptions(aggregate_dir=str(tmp_path)), work)
+
+    called = {"flag": False}
+
+    def patched_clean(self: Engine) -> None:
+        called["flag"] = True
+
+    eng._clean_merged = types.MethodType(patched_clean, eng)
+    fin = eng._clean_finalizer
+    eng_ref = weakref.ref(eng)
+    eng = None
+
+    for _ in range(50):
+        if not fin.alive:
+            break
+        gc.collect()
+        time.sleep(0.01)
+
+    assert called["flag"] is True
+    assert fin.alive is False
+    assert eng_ref() is None
 
 
 class _DummyWorkSource(WorkSource):

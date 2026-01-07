@@ -30,7 +30,6 @@ The engine also inserts a lane-merging distributor at the tail only when a rank 
 and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane dataflow.
 """
 
-import atexit
 import json
 import math
 import multiprocessing as mp
@@ -41,6 +40,7 @@ import tempfile
 import threading
 import time
 import warnings
+import weakref
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from multiprocessing.context import BaseContext
@@ -134,17 +134,18 @@ class OffsetBitmap:
         return self._bits[offset] == 1
 
 
-def _call_engine_clean_merged(engine: "Engine"):
+def _call_engine_clean_merged(engine_ref: weakref.ReferenceType["Engine"]):
     """This is a helper for a really strange observation, described below.
 
-    In irregular frequencies, we run into
-     File "/Users/mboether/dev/zephon/zephon/core/engine.py",
-     line 202, in __init__ atexit.register(self._clean_merged)
-     ^^^^^^^^^^^^^^^^^^ AttributeError: 'Engine' object has no attribute '_clean_merged'
-    Errors. This safe-guards against that.
+    In irregular frequencies, we ran into shutdown-time
+    AttributeError: 'Engine' object has no attribute '_clean_merged' errors.
+    This safe-guards against that.
     """
     try:
-        # only look up the attribute at exit time, not at registration time
+        engine = engine_ref()
+        if engine is None:
+            return
+        # only look up the attribute at call time, not at registration time
         cm = getattr(engine, "_clean_merged", None)
         if callable(cm):
             cm()
@@ -315,7 +316,10 @@ class Engine:
         self._last_round_id: str | None = None
         self._previous_merged_file: Path | None = None
 
-        atexit.register(_call_engine_clean_merged, self)
+        # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
+        self._clean_finalizer = weakref.finalize(
+            self, _call_engine_clean_merged, weakref.ref(self)
+        )
 
         bs = self._plan.batch_size_hint
         if bs is not None:

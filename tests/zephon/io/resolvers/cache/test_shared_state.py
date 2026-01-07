@@ -1,8 +1,12 @@
+import gc
 import json
 import time
 from multiprocessing import Process, Queue
 from pathlib import Path
 
+import pytest
+
+import zephon.io.resolvers.cache.shared_state as shared_state_mod
 from zephon.io.resolvers.cache.shared_state import (
     _DEFAULT_MAX_SHARDS,
     CacheEntry,
@@ -195,3 +199,29 @@ def test_shared_state_is_visible_across_processes(tmp_path: Path) -> None:
         assert e2.raw == "raw2.bin"
     finally:
         ss.close()
+
+
+def test_cache_shared_state_cleanup_runs_on_gc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "cache"
+    called = {"flag": False}
+    orig = shared_state_mod._close_cache_shared_state
+
+    def wrapped(ref) -> None:
+        called["flag"] = True
+        orig(ref)
+
+    monkeypatch.setattr(shared_state_mod, "_close_cache_shared_state", wrapped)
+    ss = CacheSharedState(root)
+    fin = ss._close_finalizer
+    ss = None
+
+    for _ in range(200):
+        if not fin.alive:
+            break
+        gc.collect()
+        time.sleep(0.01)
+
+    assert called["flag"] is True
+    assert fin.alive is False

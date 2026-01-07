@@ -1,9 +1,9 @@
 """Shared-memory bookkeeping for the cache-enabled resolver."""
 
-import atexit
 import contextlib
 import json
 import os
+import weakref
 from dataclasses import dataclass
 from enum import IntEnum
 from multiprocessing import shared_memory
@@ -20,6 +20,15 @@ _CACHE_META_FILENAME = "meta.json"
 _CACHE_META_LOCK_FILENAME = "meta.lock"
 _DEFAULT_MAX_SHARDS = int(os.environ.get("ZEPHON_CACHE_MAX_SHARDS", "8192"))
 _SHM_KEYS = ("states", "access", "sizes", "usage")
+
+
+def _close_cache_shared_state(
+    state_ref: weakref.ReferenceType["CacheSharedState"],
+) -> None:
+    state = state_ref()
+    if state is None:
+        return
+    state.close()
 
 
 class _ShardState(IntEnum):
@@ -70,6 +79,7 @@ class CacheSharedState:
         self._usage_view: np.ndarray | None = None
         self._owns_regions = False
         self._closed = False
+        self._close_finalizer: weakref.finalize | None = None
 
         with self._meta_lock:
             if self._meta_path.exists():
@@ -236,7 +246,10 @@ class CacheSharedState:
 
         self._owns_regions = owns_regions
         self._closed = False
-        atexit.register(self.close)
+        # Avoid atexit strong refs so GC can reclaim shared state instances.
+        self._close_finalizer = weakref.finalize(
+            self, _close_cache_shared_state, weakref.ref(self)
+        )
 
     # ------------------------------------------------------------------
     # Metadata helpers

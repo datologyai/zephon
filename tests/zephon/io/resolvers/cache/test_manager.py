@@ -1,12 +1,15 @@
+import gc
 import os
 import threading
 import time
+import weakref
 from multiprocessing import Process, Queue
 from pathlib import Path
 from typing import IO, Any, Mapping
 
 import pytest
 
+import zephon.io.resolvers.cache.manager as manager_mod
 from zephon.io.resolvers.cache import (
     CacheManager,
     PermanentSourceMissing,
@@ -168,6 +171,38 @@ def test_validate_hash_mismatch_raises_and_removes_file(tmp_path: Path) -> None:
         assert not expected_local.exists()
     finally:
         mgr.close()
+
+
+def test_cache_manager_cleanup_runs_on_gc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir(parents=True, exist_ok=True)
+    cache_root = tmp_path / "cache"
+    called = {"flag": False}
+
+    orig = manager_mod._close_cache_manager
+
+    def wrapped(ref) -> None:
+        called["flag"] = True
+        orig(ref)
+
+    monkeypatch.setattr(manager_mod, "_close_cache_manager", wrapped)
+    mgr = CacheManager(cache_root, LocalFSBackend(root=remote))
+
+    fin = mgr._close_finalizer
+    mgr_ref = weakref.ref(mgr)
+    mgr = None  # drop strong ref
+
+    for _ in range(200):
+        if not fin.alive:
+            break
+        gc.collect()
+        time.sleep(0.01)
+
+    assert called["flag"] is True
+    assert fin.alive is False
+    assert mgr_ref() is None
 
 
 def test_blocking_false_raises_not_ready_when_preparing(
