@@ -956,10 +956,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 if state is not None and context is not None:
                     try:
                         # Drain a few results to release semaphores
-                        for _ in range(3):  # Drain up to 3 results
+                        next_queue = self._next_queue_for(state)
+                        for _ in range(3):
                             try:
                                 item = self._queue_get_nowait(state.result_queue)
-                                self._handle_result(state, item, None, context)
+                                self._handle_result(state, item, next_queue, context)
                             except queue.Empty:
                                 break
                     except Exception:

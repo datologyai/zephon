@@ -402,6 +402,43 @@ def test_process_runner_non_fast_path_handles_multiple_ops() -> None:
     assert out == [(value + 1) * 3 for value in data]
 
 
+def test_process_runner_multi_op_draining_forwards_to_next_op() -> None:
+    """Regression test for multi-op stage correctness under backpressure.
+
+    There was a bug where _send_command's draining path passed next_queue=None,
+    which would route results directly to stage output instead of the next operator.
+    The bug is very unlikely to trigger (requires a tight race condition), but this
+    test exercises multi-op stages with backpressure to catch it if it ever happens.
+    """
+    add1 = Node(name="add1", op=_AddValueOp(delta=1))
+    add10 = Node(name="add10", op=_AddValueOp(delta=10), inputs=[add1])
+
+    stage = Stage(
+        name="chain2",
+        nodes=[add1, add10],
+        placement="auto",
+        break_reason="test",
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        queue_capacity=1,
+        stage_output_mode="stream_items",
+    )
+
+    assert getattr(runner, "_single_op_direct_ipc") is False
+
+    data = list(range(100))
+    out = _collect(runner, data)
+
+    # Expected: v + 1 + 10 = v + 11
+    expected = [v + 11 for v in data]
+    assert out == expected
+
+
 @dataclass
 class _CrashOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
     def __post_init__(self) -> None:
