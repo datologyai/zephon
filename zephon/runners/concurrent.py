@@ -74,6 +74,25 @@ class _InflightCounter:
         with self._cv:
             return self._count == 0
 
+    def try_decrement(self) -> bool:
+        """Atomically decrement if count > 0. Returns True if decremented."""
+        with self._cv:
+            if self._count == 0:
+                return False
+            self._count -= 1
+            if self._count == 0:
+                self._cv.notify_all()
+            return True
+
+    def force_zero(self) -> int:
+        """Atomically set count to zero. Returns previous count."""
+        with self._cv:
+            old = self._count
+            self._count = 0
+            if old > 0:
+                self._cv.notify_all()
+            return old
+
 
 @dataclass(slots=True)
 class WorkerErrorInfo:
@@ -451,7 +470,8 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                     ):
                         # In the error case, we don't wait for missing seq gaps.
                         if context.error is not None:
-                            for pending in state.pending_results.values():
+                            # Use list() to snapshot: other threads may still modify pending_results.
+                            for pending in list(state.pending_results.values()):
                                 self._ack_result(state, pending, context)
                             state.pending_results.clear()
 

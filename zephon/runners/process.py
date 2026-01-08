@@ -7,11 +7,19 @@ processes. This enables operators to contain lambda functions, closures, and nes
 functions that standard pickle cannot handle. The serialization is done surgically:
 only the operator is serialized with cloudpickle, while the rest of the multiprocessing
 infrastructure uses standard pickle to avoid compatibility issues.
+
+Debugging hangs and crashes
+---------------------------
+Set ZEPHON_FAULTHANDLER=1 to enable faulthandler, which will dump all thread stacks
+on SIGSEGV, SIGFPE, SIGABRT, SIGBUS, SIGILL crashes and on SIGUSR1 (for manual trigger).
+Set ZEPHON_DEBUG_SHUTDOWN=1 to enable detailed shutdown logging.
+Set ZEPHON_SHUTDOWN_WATCHDOG=<seconds> to dump thread stacks if shutdown takes too long.
 """
 
 from __future__ import annotations
 
 import copy
+import gc
 import multiprocessing as mp
 import os
 import queue
@@ -27,6 +35,11 @@ from multiprocessing.synchronize import Semaphore
 from typing import Any, Callable, Iterable, Literal, Protocol, Sequence, TypeVar, cast
 
 import cloudpickle
+
+from zephon.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
+
+# Initialize faulthandler at module load time
+setup_faulthandler()
 
 from zephon.core.constants import (
     Microbatch,
@@ -58,11 +71,21 @@ class _ClosableQueue(_QueueLike[Q], Protocol):
 
 
 _DEBUG = bool(os.environ.get("ZEPHON_DEBUG_PROCESS_RUNNER"))
+_SHUTDOWN_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_SHUTDOWN"))
+_SHUTDOWN_WATCHDOG_TIMEOUT = float(os.environ.get("ZEPHON_SHUTDOWN_WATCHDOG", "0"))
 
 
 def _debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
     if _DEBUG:
         print(f"[ProcessRunner] {msg}", file=sys.stderr, flush=True)
+
+
+def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
+    """Debug logging specifically for shutdown paths."""
+    if _SHUTDOWN_DEBUG:
+        ts = time.strftime("%H:%M:%S", time.localtime())
+        ms = int((time.time() % 1) * 1000)
+        print(f"[Shutdown {ts}.{ms:03d}] {msg}", file=sys.stderr, flush=True)
 
 
 class _NamedQueue(mp_queues.Queue):
@@ -452,6 +475,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self._service_responses: dict[int, _ClosableQueue[tuple[bool, Any]]] = {}
         self._next_worker_id = 0
         self._single_op_direct_ipc = len(stage.nodes) == 1
+        self._shutdown_lock = threading.Lock()
+        self._workers_shutdown = False
         super().__init__(
             stage,
             ctx_services,
@@ -463,6 +488,26 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             tracking_mode=tracking_mode,
             stage_output_mode=stage_output_mode,
         )
+        self._log_debug_config()
+
+    def _log_debug_config(self) -> None:
+        """Log which debugging features are enabled at initialization."""
+        features: list[str] = []
+        if _DEBUG:
+            features.append("ZEPHON_DEBUG_PROCESS_RUNNER")
+        if _SHUTDOWN_DEBUG:
+            features.append("ZEPHON_DEBUG_SHUTDOWN")
+        if _SHUTDOWN_WATCHDOG_TIMEOUT > 0:
+            features.append(f"ZEPHON_SHUTDOWN_WATCHDOG={_SHUTDOWN_WATCHDOG_TIMEOUT}s")
+        if os.environ.get("ZEPHON_FAULTHANDLER"):
+            features.append("ZEPHON_FAULTHANDLER")
+
+        if features:
+            print(
+                f"[ProcessRunner] Debug features enabled: {', '.join(features)}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _make_ipc_queue(
         self, name: str, maxsize: int | None = None
@@ -576,6 +621,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         super()._start_operator_threads(context)
 
     def _before_run(self, context: ConcurrentRunContext) -> None:
+        # Reset shutdown flag for runner reuse (start -> stop -> start)
+        self._workers_shutdown = False
         for state in self.ops:
             self._launch_workers(state)
         self._start_service_thread()
@@ -595,18 +642,27 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
     def _stop_service_thread(self) -> None:
         if self._service_thread is None:
+            _shutdown_debug("_stop_service_thread: no service thread")
             return
+        _shutdown_debug("_stop_service_thread: setting stop flag")
         self._service_stop.set()
         try:
             self._service_queue.put(None)
         except (FileNotFoundError, EOFError, OSError, ValueError):
             pass  # i think we right now do this multiple times but anyways
 
-        self._service_thread.join(timeout=1.0)
+        _shutdown_debug("_stop_service_thread: joining service thread")
+        self._service_thread.join(timeout=10.0)
+        if self._service_thread.is_alive():
+            _shutdown_debug(
+                "_stop_service_thread: WARNING - service thread still alive after 10s join"
+            )
         self._service_thread = None
+        _shutdown_debug("_stop_service_thread: closing response queues")
         for resp in self._service_responses.values():
             self._close_ipc_queue(resp)
         self._service_responses.clear()
+        _shutdown_debug("_stop_service_thread: done")
 
     def _start_feeder(
         self,
@@ -718,6 +774,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         while True:
             if state.inflight.is_zero() and not state.pending_results:
                 break
+            if context.stop_event.is_set():
+                # Shutdown requested; don't wait forever for dead workers.
+                break
             try:
                 item = self._queue_get(state.result_queue, timeout=0.05)
             except queue.Empty:
@@ -821,18 +880,31 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         _close_writer_end(result_queue)
 
     def _shutdown_workers(self) -> None:
-        for state in self.ops:
+        with self._shutdown_lock:
+            if self._workers_shutdown:
+                _shutdown_debug("_shutdown_workers: already complete, skipping")
+                return
+            self._workers_shutdown = True
+        _shutdown_debug(f"_shutdown_workers: starting for {len(self.ops)} ops")
+        for op_idx, state in enumerate(self.ops):
             task_queue = state.task_queue
             if task_queue is None:
+                _shutdown_debug(
+                    f"_shutdown_workers: op[{op_idx}] has no task_queue, skipping"
+                )
                 continue
 
             # First, try to drain any pending results before sending stop commands
             # This helps avoid deadlocks where workers are blocked on semaphores
             # and can't process stop commands. We just need to acknowledge results
             # to release semaphores - we don't need to process them fully.
-            _debug(f"draining results before shutdown for {len(state.workers)} workers")
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] draining results for "
+                + f"{len(state.workers)} workers, inflight={state.inflight._count}"
+            )
             drain_start = time.time()
             drain_timeout = 5.0  # Give up after 5 seconds of draining
+            drained_total = 0
             while time.time() - drain_start < drain_timeout:
                 drained_any = False
                 try:
@@ -844,28 +916,38 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                             # The result queue's underlying fd may vanish if workers
                             # die abruptly (torch shared memory handles). At shutdown
                             # we just stop draining and proceed with tear-down.
-                            _debug(
-                                "result_queue get() failed with FileNotFoundError during "
-                                + "shutdown; worker likely exited before sending all results"
+                            _shutdown_debug(
+                                f"_shutdown_workers: op[{op_idx}] result_queue get() "
+                                + "failed; worker likely exited"
                             )
                             break
                         # Just acknowledge to release semaphore - don't process fully
                         self._ack_result(state, item, None)
-                        if not state.inflight.is_zero():
-                            # Workers can emit error results before any batch was scheduled.
-                            # Avoid underflow during shutdown draining so we can proceed.
-                            state.inflight.decrement()
+                        # Use atomic try_decrement to avoid TOCTOU race: a pump thread
+                        # (still alive after join timeout) may have dequeued an item
+                        # before shutdown and decrement between our check and decrement.
+                        # Also handles error results from startup crashes (no increment).
+                        state.inflight.try_decrement()
                         drained_any = True
+                        drained_total += 1
                 except queue.Empty:
                     pass
 
                 if not drained_any and state.inflight.is_zero():
                     break
 
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] drain done, drained={drained_total}, "
+                + f"inflight={state.inflight._count}, elapsed={time.time() - drain_start:.2f}s"
+            )
+
             # Now send stop commands to all workers
             # Note: We don't pass context here because we're in shutdown
             # and the draining above should have released semaphores already
-            for _ in state.workers:
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] sending stop to {len(state.workers)} workers"
+            )
+            for worker_idx, _ in enumerate(state.workers):
                 self._send_command(
                     task_queue,
                     _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
@@ -877,27 +959,49 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             # Wait for workers to finish, with reasonable timeout
             # We don't block indefinitely - if workers don't terminate quickly,
             # they're likely hung and we log a warning
-            for proc in state.workers:
-                proc.join(timeout=1.0)
+            _shutdown_debug(f"_shutdown_workers: op[{op_idx}] joining workers")
+            for worker_idx, proc in enumerate(state.workers):
+                _shutdown_debug(
+                    f"_shutdown_workers: op[{op_idx}] joining worker[{worker_idx}] pid={proc.pid}"
+                )
+                proc.join(timeout=10.0)
                 if proc.is_alive():
+                    _shutdown_debug(
+                        f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] still alive, terminating"
+                    )
                     proc.terminate()
                     # Give it a moment to die gracefully, then kill
-                    proc.join(timeout=0.1)
+                    proc.join(timeout=5)
                     if proc.is_alive():
+                        _shutdown_debug(
+                            f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] still alive, killing"
+                        )
                         proc.kill()
                         proc.join()
 
-            while not state.inflight.is_zero():
-                state.inflight.decrement()
+            # Atomically clear any remaining inflight count
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] force_zero (was {state.inflight._count})"
+            )
+            state.inflight.force_zero()
 
             # The workers are dead; they will never fill the sequence gaps.
-            # If we don't clear this, the operator thread waits forever for seq N.
+            # Release semaphores for pending results before clearing to avoid leaks.
+            # Use list() to snapshot values: pump threads may still be modifying the dict.
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] clearing {len(state.pending_results)} pending results"
+            )
+            for pending in list(state.pending_results.values()):
+                self._ack_result(state, pending, None)
             state.pending_results.clear()
 
             # 3. Clear runner-level buffers
             # Ensure the thread doesn't think it has batched items left to schedule.
             state.reset_buffers()
 
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] closing {len(state.worker_ids)} response queues"
+            )
             for wid in state.worker_ids:
                 resp = self._service_responses.pop(wid, None)
                 self._close_ipc_queue(resp)
@@ -905,13 +1009,21 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             state.workers.clear()
             state.worker_ids.clear()
             state.result_semaphores.clear()
+            _shutdown_debug(f"_shutdown_workers: op[{op_idx}] gc.collect()")
+            gc.collect()  # In GIL-free Python, this is required to ensure the semaphores are cleaned up.
 
+            _shutdown_debug(
+                f"_shutdown_workers: op[{op_idx}] closing task/result queues"
+            )
             self._close_ipc_queue(state.task_queue)
             self._close_ipc_queue(state.result_queue)
 
             state.task_queue = None
 
+        _shutdown_debug("_shutdown_workers: closing service queue")
         self._close_ipc_queue(self._service_queue)
+        gc.collect()  # In GIL-free Python, this is required to ensure the semaphores are cleaned up.
+        _shutdown_debug("_shutdown_workers: done")
 
     def _build_worker_ctx(
         self, worker_id: int, response_queue: _ClosableQueue[tuple[bool, Any]]
@@ -949,6 +1061,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             try:
                 queue_.put(command, timeout=0.1)
                 return
+            except ValueError:
+                # Queue was closed - only silently return if we're in shutdown
+                if self._workers_shutdown:
+                    return
+                raise  # Re-raise if not in shutdown - this indicates a real bug
             except queue.Full:
                 retries += 1
                 # If queue is full, workers may be blocked on semaphores
@@ -969,14 +1086,19 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 continue
         if block_on_exhaustion:
             # If we've exhausted retries, try one more time without timeout
-            # This will block indefinitely, but at least we tried to drain first\
+            # This will block indefinitely, but at least we tried to drain first
             if command.kind != "batch":
                 print(
                     f"WARNING: Queue still full after {max_retries} retries with draining. "
                     + f"Falling back to blocking put() - this may indicate a deadlock. Command: {command}",
                     file=sys.stderr,
                 )
-            queue_.put(command)
+            try:
+                queue_.put(command)
+            except ValueError:
+                if self._workers_shutdown:
+                    return
+                raise
         else:
             print(
                 f"WARNING: Queue still full after {max_retries} retries with draining. "
@@ -1072,11 +1194,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             f"handle_result seq={result.seq} error={result.error} "
             + f"payload={len(result.payload)}"
         )
-        if result.error is None or not state.inflight.is_zero():
-            # A worker can crash during startup before any batches are scheduled,
-            # emitting an error result with no matching inflight increment. Guard
-            # against underflow so we can surface the real crash.
-            state.inflight.decrement()
+        # Use try_decrement for all results: during shutdown, force_zero() may have
+        # already cleared the counter while pump threads are still processing results.
+        # This races when buffered_iterable's 1s join timeout expires before
+        # _join_threads completes, allowing _shutdown_workers to run concurrently.
+        state.inflight.try_decrement()
         super()._handle_result(state, result, next_queue, context)
 
     def _finalize_state(
@@ -1147,15 +1269,22 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         raise NotImplementedError("ProcessStageRunner does not support live scaling")
 
     def close(self) -> None:
-        with self._context_lock:
-            ctx = self._active_context
+        _shutdown_debug("close() called")
+        with ShutdownWatchdog(_SHUTDOWN_WATCHDOG_TIMEOUT, "close()"):
+            with self._context_lock:
+                ctx = self._active_context
 
-        if ctx is not None:
-            ctx.stop_event.set()
-            self._put_stage_stop(ctx)
+            if ctx is not None:
+                _shutdown_debug("close(): setting stop_event")
+                ctx.stop_event.set()
+                self._put_stage_stop(ctx)
 
-        self._shutdown_workers()
-        self._stop_service_thread()
+            _shutdown_debug("close(): calling _shutdown_workers")
+            self._shutdown_workers()
+            _shutdown_debug("close(): calling _stop_service_thread")
+            self._stop_service_thread()
 
-        if ctx is not None:
-            self._join_threads(ctx)
+            if ctx is not None:
+                _shutdown_debug("close(): calling _join_threads")
+                self._join_threads(ctx)
+            _shutdown_debug("close(): done")

@@ -775,3 +775,94 @@ def test_splitting_with_padding_fill() -> None:
     # Check padding values (fallback uses 0 for pad)
     assert ids[1] == 0
     assert mask[1] == 0
+
+
+# --- Free-threaded Python tensor iteration safety tests ---
+
+
+def test_normalize_batch_converts_torch_tensor_to_tuple_when_lock_set() -> None:
+    """Test that _normalize_batch converts PyTorch tensors to tuples on free-threaded Python."""
+    torch = pytest.importorskip("torch")
+    import threading
+
+    from zephon.ops import tokenize_text
+
+    # Save original lock value
+    original_lock = tokenize_text._TENSOR_ITER_LOCK
+
+    try:
+        # Simulate free-threaded Python by setting the lock
+        tokenize_text._TENSOR_ITER_LOCK = threading.Lock()
+
+        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="pt")
+
+        # Create a 2D tensor (batch_size=3, seq_len=4)
+        tensor = torch.randn(3, 4)
+
+        result = op._normalize_batch(tensor, batch_size=3)
+
+        # Should return a tuple of tensors, not the original tensor
+        assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
+        assert len(result) == 3
+        for i, row in enumerate(result):
+            assert isinstance(row, torch.Tensor)
+            assert row.shape == (4,)
+            # Verify the data is correct
+            assert torch.allclose(row, tensor[i])
+
+    finally:
+        # Restore original lock value
+        tokenize_text._TENSOR_ITER_LOCK = original_lock
+
+
+def test_normalize_batch_returns_tensor_when_lock_not_set() -> None:
+    """Test that _normalize_batch returns tensor as-is on regular Python (with GIL)."""
+    torch = pytest.importorskip("torch")
+
+    from zephon.ops import tokenize_text
+
+    # Save original lock value
+    original_lock = tokenize_text._TENSOR_ITER_LOCK
+
+    try:
+        # Simulate regular Python by clearing the lock
+        tokenize_text._TENSOR_ITER_LOCK = None
+
+        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="pt")
+
+        tensor = torch.randn(3, 4)
+
+        result = op._normalize_batch(tensor, batch_size=3)
+
+        # Should return the original tensor as-is
+        assert result is tensor
+
+    finally:
+        tokenize_text._TENSOR_ITER_LOCK = original_lock
+
+
+def test_normalize_batch_leaves_numpy_unchanged_even_with_lock() -> None:
+    """Test that _normalize_batch does not convert numpy arrays (only PyTorch has the race)."""
+    np = pytest.importorskip("numpy")
+    import threading
+
+    from zephon.ops import tokenize_text
+
+    # Save original lock value
+    original_lock = tokenize_text._TENSOR_ITER_LOCK
+
+    try:
+        # Simulate free-threaded Python by setting the lock
+        tokenize_text._TENSOR_ITER_LOCK = threading.Lock()
+
+        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="np")
+
+        arr = np.random.randn(3, 4)
+
+        result = op._normalize_batch(arr, batch_size=3)
+
+        # Should return the original numpy array as-is (not converted to tuple)
+        assert result is arr
+
+    finally:
+        tokenize_text._TENSOR_ITER_LOCK = original_lock

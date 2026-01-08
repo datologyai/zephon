@@ -587,3 +587,43 @@ def test_process_runner_serializes_operator_with_closure() -> None:
     data = list(range(4))
     out = _collect(runner, data)
     assert out == [x * 5 for x in data]
+
+
+def test_process_runner_partial_iteration_shutdown_no_underflow() -> None:
+    """Partial iteration followed by shutdown should not cause underflow.
+
+    This creates conditions where shutdown races with result handling:
+    1. Multiple workers are processing batches
+    2. Shutdown is triggered while results are still in-flight
+    3. Both pump threads and shutdown logic try to decrement
+
+    The fix uses atomic try_decrement() and force_zero() to prevent TOCTOU races.
+    """
+    op = DelayById(max_delay_ms=50)
+    node = Node(name="slow", op=op)
+    stage = Stage(
+        name="shutdown_race", nodes=[node], placement="auto", break_reason="test"
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=False,
+        queue_capacity=8,
+        prefetch_capacity=4,
+        stage_output_mode="stream_items",
+    )
+
+    records = _mk_records(range(50))
+    iterator = runner.run(iter(records))
+
+    # Consume partial results, leaving many in-flight
+    for _ in range(5):
+        try:
+            next(iterator)
+        except StopIteration:
+            break
+
+    # Shutdown - should NOT raise "Inflight counter underflowed"
+    runner.close()

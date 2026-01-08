@@ -86,6 +86,11 @@ def _gil_disabled() -> bool:
 # Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
 _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 
+# Lock to serialize tensor iteration on free-threaded Python.
+# PyTorch has a race condition in PyType_GenericAlloc when multiple threads iterate
+# tensors concurrently without the GIL. See: https://github.com/pytorch/pytorch/issues/171992
+_TENSOR_ITER_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
+
 
 class TokenizerLike(Protocol):
     """Minimal interface used for tokenization."""
@@ -441,6 +446,12 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         if shape is not None:
             # Check dimension 0. Safety: len(shape) check handles 0-d scalars.
             if len(shape) > 0 and shape[0] == batch_size:
+                # On free-threaded Python, convert PyTorch tensors to tuples to avoid
+                # a race condition in the allocator during iteration.
+                # See: https://github.com/pytorch/pytorch/issues/171992
+                if _TENSOR_ITER_LOCK is not None and "torch" in type(batch).__module__:
+                    with _TENSOR_ITER_LOCK:
+                        return cast(Sequence[TokenSeq], batch.unbind(0))  # type: ignore[union-attr]
                 return cast(Sequence[TokenSeq], batch)
 
             # If shape mismatch or scalar, wrap it in a list.
