@@ -236,3 +236,8 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 [[tool.uv.index]]
 name = "pypi"
 url = "https://api.pyx.dev/simple/pypi"
+
+[[tool.uv.index]]
+name = "datologyai"
+url = "https://api.pyx.dev/simple/datologyai/main"
+publish-url = "https://api.pyx.dev/v1/upload/datologyai/main"

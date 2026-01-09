@@ -84,6 +84,56 @@ tests/
 └── zephon/       # Unit tests mirroring source structure
 ```
 
+## Publishing Releases
+
+Zephon is published to our internal pyx.dev registry. The project uses `setuptools-scm` for version management, which derives versions from git tags.
+
+### Publishing an Alpha/Internal Release
+
+1. **Create a version tag** following [PEP 440](https://peps.python.org/pep-0440/):
+   ```bash
+   git tag v0.1.0a1  # alpha release
+   git tag v0.1.0    # stable release
+   ```
+
+2. **Build the package** (ensure no uncommitted changes for a clean version):
+   ```bash
+   uv build
+   ```
+
+3. **Publish to the internal registry**:
+   ```bash
+   # Dry run first to validate
+   uv publish dist/* --publish-url https://api.pyx.dev/v1/upload/datologyai/main --dry-run
+
+   # Publish for real
+   uv publish dist/* --publish-url https://api.pyx.dev/v1/upload/datologyai/main
+   ```
+
+4. **Push the tag**:
+   ```bash
+   git push origin v0.1.0a1
+   ```
+
+### Installing Internal Releases
+
+```bash
+# Install a specific version
+uv pip install zephon==0.0.1a1 --index https://api.pyx.dev/simple/datologyai/main
+
+# Install latest (including pre-releases)
+uv pip install zephon --pre --index https://api.pyx.dev/simple/datologyai/main
+```
+
+### Version Scheme
+
+- `X.Y.ZaN` - Alpha releases (e.g., `0.1.0a1`)
+- `X.Y.ZbN` - Beta releases (e.g., `0.1.0b1`)
+- `X.Y.ZrcN` - Release candidates (e.g., `0.1.0rc1`)
+- `X.Y.Z` - Stable releases (e.g., `0.1.0`)
+
+Note: If you build with uncommitted changes, setuptools-scm will append a `.devN+gHASH` suffix to indicate a dirty build.
+
 ## Key Reading
 
 - [sample_lifecycle.md](sample_lifecycle.md) - Essential architecture documentation covering sample flow, determinism, checkpointing, and operator contracts
