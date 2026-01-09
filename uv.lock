@@ -2296,7 +2296,7 @@ source = { registry = "https://api.pyx.dev/simple/pypi" }
 dependencies = [
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.astralhosted.com/public/f4/ac/87285f15f7cce6d4a008f33f1757fb5a13611ea8914eb58c3d0d26243468/proto_plus-1.26.1.tar.gz", hash = "sha256:21a515a4c4c0088a773899e23c7bbade3d18f9c66c73edd4c7ee3816bc96a012", size = 56142, upload-time = "2025-03-10T15:54:39Z" }
+sdist = { url = "https://files.astralhosted.com/public/f4/ac/87285f15f7cce6d4a008f33f1757fb5a13611ea8914eb58c3d0d26243468/proto_plus-1.26.1.tar.gz", hash = "sha256:21a515a4c4c0088a773899e23c7bbade3d18f9c66c73edd4c7ee3816bc96a012", size = 56142, upload-time = "2025-03-10T15:54:38Z" }
 wheels = [
     { url = "https://files.astralhosted.com/public/4e/6d/280c4c2ce28b1593a19ad5239c8b826871fc6ec275c21afc8e1820108039/proto_plus-1.26.1-py3-none-any.whl", hash = "sha256:13285478c2dcf2abb829db158e1047e2f1e8d63a077d94263c2b88b043c75a66", size = 50163, upload-time = "2025-03-10T15:54:37Z", zstd = { hash = "sha256:4fa14ee0abff845d9ae9bce1dc99b82814cd8ae804c85e680a523a028850ecc5", size = 30542 } },
 ]
@@ -3657,17 +3657,17 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.28" },
-    { name = "cloudpickle", specifier = ">=2.0.0" },
-    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.14.0" },
+    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.20.0" },
+    { name = "cloudpickle", specifier = ">=1.6.0" },
+    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.0.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
     { name = "mosaicml-streaming", marker = "extra == 'streaming'" },
-    { name = "numpy", specifier = ">=1.21.5" },
+    { name = "numpy", specifier = ">=1.20.0" },
     { name = "optree", marker = "extra == 'litdata'" },
-    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=12.0.0" },
-    { name = "tenacity", specifier = ">=8.2.0" },
+    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=8.0.0" },
+    { name = "tenacity", specifier = ">=5.0.0" },
     { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.52.1" },
-    { name = "wrapt", specifier = ">=2.0.0" },
+    { name = "wrapt", specifier = ">=1.11.0" },
     { name = "zephon", extras = ["cloud-gcs"], marker = "extra == 'cloud'" },
     { name = "zephon", extras = ["cloud-s3"], marker = "extra == 'cloud'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mds'" },
