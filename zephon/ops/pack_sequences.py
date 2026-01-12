@@ -16,6 +16,7 @@ from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.core.op_base import DefaultFinalize, DefaultSetup
 from zephon.core.traits import Buffering, OpTraits
 from zephon.utils.seeding import batch_seed
+from zephon.utils.torch_compat import _tensor_lock_ctx
 
 
 @dataclass(slots=True)
@@ -231,37 +232,38 @@ class PackSequences(DefaultSetup, DefaultFinalize[SampleRecord]):
         if not payloads:
             return payloads
 
-        # Handle dict payloads
-        if isinstance(payloads[0], dict):
-            result = {}
-            for key in payloads[0].keys():
-                values = [p[key] for p in payloads]
-                if all(isinstance(v, torch.Tensor) for v in values):
-                    result[key] = torch.cat(values, dim=0)
-                else:
-                    non_tensor_types = {
-                        type(v).__name__
-                        for v in values
-                        if not isinstance(v, torch.Tensor)
-                    }
-                    raise TypeError(
-                        f"pack_payloads='torch_tensor' requires all values to be torch.Tensor, "
-                        + f"but found non-tensor types: {non_tensor_types}"
-                    )
-            return result
+        with _tensor_lock_ctx():
+            # Handle dict payloads
+            if isinstance(payloads[0], dict):
+                result = {}
+                for key in payloads[0].keys():
+                    values = [p[key] for p in payloads]
+                    if all(isinstance(v, torch.Tensor) for v in values):
+                        result[key] = torch.cat(values, dim=0)
+                    else:
+                        non_tensor_types = {
+                            type(v).__name__
+                            for v in values
+                            if not isinstance(v, torch.Tensor)
+                        }
+                        raise TypeError(
+                            f"pack_payloads='torch_tensor' requires all values to be torch.Tensor, "
+                            + f"but found non-tensor types: {non_tensor_types}"
+                        )
+                return result
 
-        # Handle direct tensor payloads
-        if all(isinstance(p, torch.Tensor) for p in payloads):
-            return torch.cat(payloads, dim=0)
+            # Handle direct tensor payloads
+            if all(isinstance(p, torch.Tensor) for p in payloads):
+                return torch.cat(payloads, dim=0)
 
-        # Fail if not all tensors
-        non_tensor_types = {
-            type(p).__name__ for p in payloads if not isinstance(p, torch.Tensor)
-        }
-        raise TypeError(
-            f"pack_payloads='torch_tensor' requires all payloads to be torch.Tensor, "
-            + f"but found non-tensor types: {non_tensor_types}"
-        )
+            # Fail if not all tensors
+            non_tensor_types = {
+                type(p).__name__ for p in payloads if not isinstance(p, torch.Tensor)
+            }
+            raise TypeError(
+                f"pack_payloads='torch_tensor' requires all payloads to be torch.Tensor, "
+                + f"but found non-tensor types: {non_tensor_types}"
+            )
 
     def _pack_numpy_arrays(self, payloads: list[Any]) -> Any:
         """Pack NumPy arrays by concatenating along first axis."""

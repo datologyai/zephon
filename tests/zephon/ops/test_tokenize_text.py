@@ -866,3 +866,112 @@ def test_normalize_batch_leaves_numpy_unchanged_even_with_lock() -> None:
 
     finally:
         tokenize_text._TENSOR_ITER_LOCK = original_lock
+
+
+# --- PyTorch version detection tests ---
+
+
+def test_torch_has_allocator_fix_detects_old_versions() -> None:
+    """Test that _torch_has_allocator_fix returns False for PyTorch < 2.10."""
+    from unittest.mock import MagicMock, patch
+
+    from zephon.utils import torch_compat
+
+    mock_torch = MagicMock()
+
+    # Test version 2.9.0 - should return False
+    mock_torch.__version__ = "2.9.0"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        # Need to reimport the function to use the mocked torch
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is False, "2.9.0 should not have the fix"
+
+    # Test version 2.5.1 - should return False
+    mock_torch.__version__ = "2.5.1"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is False, "2.5.1 should not have the fix"
+
+
+def test_torch_has_allocator_fix_detects_new_versions() -> None:
+    """Test that _torch_has_allocator_fix returns True for PyTorch >= 2.10."""
+    from unittest.mock import MagicMock, patch
+
+    from zephon.utils import torch_compat
+
+    mock_torch = MagicMock()
+
+    # Test version 2.10.0 - should return True
+    mock_torch.__version__ = "2.10.0"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is True, "2.10.0 should have the fix"
+
+    # Test version 2.10.0+cu124 - should return True (strip build metadata)
+    mock_torch.__version__ = "2.10.0+cu124"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is True, "2.10.0+cu124 should have the fix"
+
+    # Test version 3.0.0 - should return True
+    mock_torch.__version__ = "3.0.0"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is True, "3.0.0 should have the fix"
+
+    # Test version 2.11.0.dev - should return True
+    mock_torch.__version__ = "2.11.0.dev20250101"
+    with patch.dict("sys.modules", {"torch": mock_torch}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is True, "2.11.0.dev should have the fix"
+
+
+def test_torch_has_allocator_fix_handles_missing_torch() -> None:
+    """Test that _torch_has_allocator_fix returns False when torch is not installed."""
+    from unittest.mock import patch
+
+    from zephon.utils import torch_compat
+
+    # Mock torch import to raise ImportError
+    with patch.dict("sys.modules", {"torch": None}):
+        result = torch_compat._torch_has_allocator_fix()
+        assert result is False, "Should return False when torch is not available"
+
+
+def test_should_use_tensor_lock_when_gil_enabled() -> None:
+    """Test that _should_use_tensor_lock returns False when GIL is enabled."""
+    from unittest.mock import patch
+
+    from zephon.utils import torch_compat
+
+    with patch.object(torch_compat, "_gil_disabled", return_value=False):
+        result = torch_compat._should_use_tensor_lock()
+        assert result is False, "Should return False when GIL is enabled"
+
+
+def test_should_use_tensor_lock_when_torch_fixed() -> None:
+    """Test that _should_use_tensor_lock returns False when torch >= 2.10."""
+    from unittest.mock import patch
+
+    from zephon.utils import torch_compat
+
+    with (
+        patch.object(torch_compat, "_gil_disabled", return_value=True),
+        patch.object(torch_compat, "_torch_has_allocator_fix", return_value=True),
+    ):
+        result = torch_compat._should_use_tensor_lock()
+        assert result is False, "Should return False when torch has the fix"
+
+
+def test_should_use_tensor_lock_when_needed() -> None:
+    """Test that _should_use_tensor_lock returns True when GIL disabled and torch < 2.10."""
+    from unittest.mock import patch
+
+    from zephon.utils import torch_compat
+
+    with (
+        patch.object(torch_compat, "_gil_disabled", return_value=True),
+        patch.object(torch_compat, "_torch_has_allocator_fix", return_value=False),
+    ):
+        result = torch_compat._should_use_tensor_lock()
+        assert result is True, "Should return True when GIL disabled and torch unfixed"

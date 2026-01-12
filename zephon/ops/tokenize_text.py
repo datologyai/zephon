@@ -9,7 +9,6 @@ import contextlib
 import logging
 import os
 import sys
-import sysconfig
 import threading
 import traceback
 from types import ModuleType
@@ -41,6 +40,12 @@ from zephon.core.constants import (
 )
 from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
 from zephon.core.traits import Buffering, OpTraits
+from zephon.utils.torch_compat import (
+    _TENSOR_ITER_LOCK,
+    _gil_disabled,
+    _should_use_tensor_lock,
+    _tensor_lock_ctx,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -65,31 +70,8 @@ TokenBatch: TypeAlias = Union[
 TokenizerOutput: TypeAlias = Mapping[str, TokenBatch]
 
 
-def _gil_disabled() -> bool:
-    check = getattr(sys, "_is_gil_enabled", None)
-    if callable(check):
-        try:
-            return not bool(check())
-        except Exception:
-            pass
-
-    try:
-        gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
-        if gil_disabled is not None:
-            return bool(gil_disabled)
-    except Exception:
-        pass
-
-    return False
-
-
 # Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
 _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
-
-# Lock to serialize tensor iteration on free-threaded Python.
-# PyTorch has a race condition in PyType_GenericAlloc when multiple threads iterate
-# tensors concurrently without the GIL. See: https://github.com/pytorch/pytorch/issues/171992
-_TENSOR_ITER_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 
 
 class TokenizerLike(Protocol):
@@ -171,6 +153,9 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
         self._tokenizer_instantiated = False
+        # On free-threaded Python + old PyTorch, we intercept return_tensors='pt'
+        # to avoid HF tokenizer creating tensors (which races with our code).
+        self._convert_np_to_pt = False
 
     def setup(
         self,
@@ -194,7 +179,13 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
             self._cached_kwargs["truncation"] = self.truncation
             if self.max_length is not None:
                 self._cached_kwargs["max_length"] = self.max_length
-            if self.return_tensors is not None:
+            # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
+            # races with our code. Request numpy from HF and convert ourselves under lock.
+            # See: https://github.com/pytorch/pytorch/issues/171992
+            if self.return_tensors == "pt" and _should_use_tensor_lock():
+                self._convert_np_to_pt = True
+                self._cached_kwargs["return_tensors"] = "np"
+            elif self.return_tensors is not None:
                 self._cached_kwargs["return_tensors"] = self.return_tensors
 
     def _setup_tokenizer(self) -> None:
@@ -314,6 +305,11 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
 
         encoded = self._tokenize_texts(texts)
 
+        # On free-threaded Python + old PyTorch, we requested numpy from HF tokenizer
+        # and convert to torch ourselves under lock to avoid allocator race condition.
+        if self._convert_np_to_pt:
+            encoded = self._convert_batch_np_to_torch(encoded)
+
         # Use type ignores here as TokenBatch is complex;
         # _normalize_batch handles the runtime safety.
         raw_input_ids: TokenBatch = encoded.get("input_ids", [])  # type: ignore[assignment]
@@ -384,17 +380,32 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         self._ensure_padding_token()
         return tokenizer(texts, **self._cached_kwargs)
 
+    def _convert_batch_np_to_torch(
+        self, encoded: TokenizerOutput
+    ) -> dict[str, TokenBatch]:
+        """Convert numpy arrays to torch tensors under the lock.
+
+        Used on free-threaded Python + old PyTorch to avoid allocator race
+        condition when HF tokenizer creates tensors internally.
+        """
+        import torch
+
+        with _tensor_lock_ctx():
+            return {
+                k: torch.from_numpy(v) if "numpy" in type(v).__module__ else v
+                for k, v in encoded.items()
+            }
+
     def _convert_tensor(self, value: TokenSeq) -> TokenSeq:
         backend = self.return_tensors
         if backend is None:
             return value
         if backend == "pt":
             torch = self._lazy_import("torch")
-            return (
-                value
-                if hasattr(value, "shape") and "torch" in type(value).__module__
-                else torch.tensor(value)
-            )
+            if hasattr(value, "shape") and "torch" in type(value).__module__:
+                return value
+            with _tensor_lock_ctx():
+                return torch.tensor(value)
         if backend in ("np", "numpy"):
             np = self._lazy_import("numpy")
             return (
@@ -567,39 +578,42 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     ) -> list[tuple["torch.Tensor", "torch.Tensor | None"]]:
         import torch
 
-        segments: list[tuple[torch.Tensor, torch.Tensor | None]] = []
-        if mask is None and self.add_attention_mask:
-            mask = torch.ones_like(ids, dtype=ids.dtype)
+        with _tensor_lock_ctx():
+            segments: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+            if mask is None and self.add_attention_mask:
+                mask = torch.ones_like(ids, dtype=ids.dtype)
 
-        total = ids.shape[0]
-        if total == 0:
-            seg_ids = ids
-            seg_mask = mask
-            if self.padding:
-                seg_ids = torch.full(
-                    (max_len,), pad_id, dtype=ids.dtype, device=ids.device
-                )
-                if self.add_attention_mask:
-                    seg_mask = torch.zeros_like(seg_ids)
-            segments.append((seg_ids, seg_mask))
-            return segments
-
-        for start in range(0, total, max_len):
-            end = min(total, start + max_len)
-            seg_ids = ids[start:end]
-            seg_mask = mask[start:end] if mask is not None else None
-            seg_len = end - start
-            if self.padding and seg_len < max_len:
-                pad_len = max_len - seg_len
-                pad = torch.full((pad_len,), pad_id, dtype=ids.dtype, device=ids.device)
-                seg_ids = torch.cat((seg_ids, pad), dim=-1)
-                if seg_mask is not None:
-                    pad_mask = torch.zeros(
-                        (pad_len,), dtype=seg_mask.dtype, device=seg_ids.device
+            total = ids.shape[0]
+            if total == 0:
+                seg_ids = ids
+                seg_mask = mask
+                if self.padding:
+                    seg_ids = torch.full(
+                        (max_len,), pad_id, dtype=ids.dtype, device=ids.device
                     )
-                    seg_mask = torch.cat((seg_mask, pad_mask), dim=-1)
-            segments.append((seg_ids, seg_mask))
-        return segments
+                    if self.add_attention_mask:
+                        seg_mask = torch.zeros_like(seg_ids)
+                segments.append((seg_ids, seg_mask))
+                return segments
+
+            for start in range(0, total, max_len):
+                end = min(total, start + max_len)
+                seg_ids = ids[start:end]
+                seg_mask = mask[start:end] if mask is not None else None
+                seg_len = end - start
+                if self.padding and seg_len < max_len:
+                    pad_len = max_len - seg_len
+                    pad = torch.full(
+                        (pad_len,), pad_id, dtype=ids.dtype, device=ids.device
+                    )
+                    seg_ids = torch.cat((seg_ids, pad), dim=-1)
+                    if seg_mask is not None:
+                        pad_mask = torch.zeros(
+                            (pad_len,), dtype=seg_mask.dtype, device=seg_ids.device
+                        )
+                        seg_mask = torch.cat((seg_mask, pad_mask), dim=-1)
+                segments.append((seg_ids, seg_mask))
+            return segments
 
     def _split_segments_numpy(
         self,
@@ -792,7 +806,8 @@ def _fallback_tokenizer() -> TokenizerLike:
                     raise RuntimeError(
                         "return_tensors='pt' requested but torch is not available"
                     ) from exc
-                return {key: torch.tensor(value) for key, value in result.items()}
+                with _tensor_lock_ctx():
+                    return {key: torch.tensor(value) for key, value in result.items()}
 
             if return_tensors in ("np", "numpy"):
                 try:  # pragma: no cover
