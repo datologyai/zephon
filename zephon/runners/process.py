@@ -19,7 +19,6 @@ Set ZEPHON_SHUTDOWN_WATCHDOG=<seconds> to dump thread stacks if shutdown takes t
 from __future__ import annotations
 
 import copy
-import gc
 import multiprocessing as mp
 import os
 import queue
@@ -36,6 +35,12 @@ from typing import Any, Callable, Iterable, Literal, Protocol, Sequence, TypeVar
 
 import cloudpickle
 
+from zephon.utils import (
+    SafeSemLock,
+    cleanup_semaphores,
+    collect_with_finalizers,
+    dump_semaphore_registry,
+)
 from zephon.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
 
 # Initialize faulthandler at module load time
@@ -89,18 +94,38 @@ def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
 
 
 class _NamedQueue(mp_queues.Queue):
-    """Queue that tags its feeder thread with a friendly name."""
+    """Queue that tags its feeder thread with a friendly name.
+
+    Uses SafeSemLock for all internal semaphores to ensure proper cleanup in
+    free-threaded Python where GC finalizers run in background threads and can
+    race with explicit cleanup.
+    """
 
     def __init__(self, name: str, maxsize: int = 0, *, ctx: BaseContext):
         super().__init__(maxsize, ctx=ctx)
         self._ignore_epipe = True
         self._name_label = name
 
+        # Wrap all semaphores with SafeSemLock for coordinated cleanup
+        # in free-threaded Python where GC finalizers run in background threads
+        self._sem = SafeSemLock.wrap(self._sem, source=f"queue:{name}:_sem")
+        self._rlock = SafeSemLock.wrap(self._rlock, source=f"queue:{name}:_rlock")
+        self._wlock = SafeSemLock.wrap(self._wlock, source=f"queue:{name}:_wlock")
+
     def _start_thread(self) -> None:
         super()._start_thread()  # type: ignore[attr-defined]
         thread = getattr(self, "_thread", None)
         if thread is not None:
             thread.name = f"QueueFeederThread[{self._name_label}]"
+
+    def close(self) -> None:
+        """Close the queue and clean up all internal semaphores."""
+        try:
+            super().close()
+        finally:
+            self._sem.cleanup()
+            self._rlock.cleanup()
+            self._wlock.cleanup()
 
     def __getstate__(self) -> Any:  # noqa: D401 - custom pickle payload
         base_state = super().__getstate__()  # type: ignore[attr-defined]
@@ -178,15 +203,16 @@ class _ProcessWorkerConfig:
     ctx_services: dict[str, Any]
     task_queue: _QueueLike[_WorkerCommand]
     result_queue: _QueueLike[RunnerResult]
-    backpressure: Semaphore
+    backpressure: Semaphore | SafeSemLock
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
-SemaphoreFactory = Callable[..., Semaphore]
+SemaphoreFactory = Callable[..., Semaphore | SafeSemLock]
 ProcessFactory = Callable[..., BaseProcess]
 
 
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
+    _debug(f"worker[{config.worker_index}] starting")
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
@@ -202,7 +228,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         while True:
             command = config.task_queue.get()
             if command.kind == "stop":
-                _debug(f"worker[{config.worker_index}] received stop")
+                _debug(f"worker[{config.worker_index}] received stop, exiting cleanly")
                 break
             if command.kind == "batch":
                 _debug(
@@ -269,7 +295,9 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
 class _ProcessOperatorState(ConcurrentOperatorState):
     task_queue: _QueueLike[_WorkerCommand] | None = field(init=False, default=None)
     workers: list[BaseProcess] = field(init=False, default_factory=list)
-    result_semaphores: list[Semaphore] = field(init=False, default_factory=list)
+    result_semaphores: list[Semaphore | SafeSemLock] = field(
+        init=False, default_factory=list
+    )
     worker_ids: list[int] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -463,7 +491,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self._ipc_batch_size = self._derive_ipc_batch_size(stage)
         ctx = mp_context or mp.get_context("spawn")
         self._mp_context: BaseContext = ctx
-        semaphore_factory = cast(SemaphoreFactory, getattr(ctx, "Semaphore"))
+        # Use SafeSemLock for coordinated cleanup in free-threaded Python
+        semaphore_factory: SemaphoreFactory = lambda value=1: SafeSemLock.new_semaphore(
+            value, ctx=ctx
+        )
         process_factory = cast(ProcessFactory, getattr(ctx, "Process"))
         self._semaphore_factory: SemaphoreFactory = semaphore_factory
         self._process_factory: ProcessFactory = process_factory
@@ -526,7 +557,12 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         try:
             q.close()
         except Exception:
-            pass
+            name = "unnamed" if not isinstance(q, _NamedQueue) else q._name_label
+            print(
+                f"Error closing queue {name!r}.",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
 
         t = getattr(q, "_thread", None)
         if t is not None:
@@ -967,7 +1003,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 proc.join(timeout=10.0)
                 if proc.is_alive():
                     _shutdown_debug(
-                        f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] still alive, terminating"
+                        f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] did NOT exit cleanly, terminating"
                     )
                     proc.terminate()
                     # Give it a moment to die gracefully, then kill
@@ -1008,9 +1044,12 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
             state.workers.clear()
             state.worker_ids.clear()
+            # In GIL-free Python, semaphore __del__ finalizers are deferred and may
+            # not run before the resource tracker checks at shutdown. Explicitly
+            # clean up to prevent "leaked semaphore" warnings.
+            cleanup_semaphores(state.result_semaphores)
             state.result_semaphores.clear()
-            _shutdown_debug(f"_shutdown_workers: op[{op_idx}] gc.collect()")
-            gc.collect()  # In GIL-free Python, this is required to ensure the semaphores are cleaned up.
+            collect_with_finalizers()
 
             _shutdown_debug(
                 f"_shutdown_workers: op[{op_idx}] closing task/result queues"
@@ -1022,7 +1061,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
         _shutdown_debug("_shutdown_workers: closing service queue")
         self._close_ipc_queue(self._service_queue)
-        gc.collect()  # In GIL-free Python, this is required to ensure the semaphores are cleaned up.
+        # Final cleanup: more aggressive GC for any remaining semaphores.
+        collect_with_finalizers(cycles=5, yield_ms=2.0)
+        # Dump semaphore debug info if ZEPHON_SEMAPHORE_DEBUG=1
+        dump_semaphore_registry()
         _shutdown_debug("_shutdown_workers: done")
 
     def _build_worker_ctx(
@@ -1244,17 +1286,23 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 item = self._queue_get(state.result_queue, timeout=0.1)
             except queue.Empty:
                 if context.stop_event.is_set():
-                    # If the stage is stopping, we cannot wait indefinitely for a worker
-                    # that might already be dead. Raise an error to break the loop.
-                    info = WorkerErrorInfo(
-                        exc_type="StageStopped",
-                        message="Stage is shutting down during finalization",
-                        formatted_traceback="",
+                    # Shutdown requested - return empty result to allow graceful exit.
+                    # This is not an error: workers are being stopped via stop commands
+                    # and the feeder should complete cleanly.
+                    return RunnerResult(
+                        seq=seq,
+                        payload=[],
+                        wait_ns=0,
+                        consumed_elements=0,
+                        consumed_bytes=0,
+                        queue_depth_snapshot=-1,
+                        proc_ns=0,
+                        collect_metrics=False,
+                        ack=None,
+                        error=None,
                     )
-                    raise WorkerCrashed(info)
                 continue
-
-                debug(f"_wait_for_result saw seq={item.seq}")
+            _debug(f"_wait_for_result saw seq={item.seq}")
             if item.error is not None:
                 exc = WorkerCrashed(item.error)
                 self._record_error(context, exc)

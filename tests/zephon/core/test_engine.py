@@ -110,7 +110,7 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
         called["flag"] = True
 
     eng._clean_merged = types.MethodType(patched_clean, eng)
-    fin = eng._clean_finalizer
+    fin = eng._cleanup_finalizer
     eng_ref = weakref.ref(eng)
     eng = None
 

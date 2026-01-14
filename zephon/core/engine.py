@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import warnings
 import weakref
 from collections import defaultdict, deque
@@ -134,21 +135,29 @@ class OffsetBitmap:
         return self._bits[offset] == 1
 
 
-def _call_engine_clean_merged(engine_ref: weakref.ReferenceType["Engine"]):
-    """This is a helper for a really strange observation, described below.
+def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
+    """Cleanup finalizer for Engine - runs at GC or interpreter shutdown.
 
-    In irregular frequencies, we ran into shutdown-time
-    AttributeError: 'Engine' object has no attribute '_clean_merged' errors.
-    This safe-guards against that.
+    This ensures semaphore cleanup happens before the resource tracker
+    checks for leaks, even in free-threaded Python where GC is deferred.
+
+    Calls close() first (to clean up runners, queues, and semaphores),
+    then _clean_merged() (to clean up temporary files).
     """
     try:
         engine = engine_ref()
         if engine is None:
             return
-        # only look up the attribute at call time, not at registration time
-        cm = getattr(engine, "_clean_merged", None)
-        if callable(cm):
-            cm()
+        try:
+            # Close runners first (handles semaphore cleanup)
+            close_fn = getattr(engine, "close", None)
+            if callable(close_fn):
+                close_fn()
+        finally:
+            # Always clean merged files, even if close() fails
+            cm = getattr(engine, "_clean_merged", None)
+            if callable(cm):
+                cm()
     except Exception:
         pass
 
@@ -317,8 +326,9 @@ class Engine:
         self._previous_merged_file: Path | None = None
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        self._clean_finalizer = weakref.finalize(
-            self, _call_engine_clean_merged, weakref.ref(self)
+        # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
+        self._cleanup_finalizer = weakref.finalize(
+            self, _call_engine_cleanup, weakref.ref(self)
         )
 
         bs = self._plan.batch_size_hint
@@ -1167,12 +1177,20 @@ class Engine:
             try:
                 runner.close()
             except Exception:
-                pass
+                print(
+                    f"Error closing runner {runner!r}.",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
         if self._metrics_reporter is not None and self._metrics_started:
             try:
                 self._metrics_reporter.stop()
             except Exception:
-                pass
+                print(
+                    "Error stopping metrics reporter.",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
         self._metrics_started = False
 
     def _state_dict_local(self) -> dict[str, Any]:
