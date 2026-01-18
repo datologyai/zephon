@@ -9,9 +9,10 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import numpy as np
+
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
-from zephon.utils import disable_gc
 from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 
@@ -87,44 +88,45 @@ class _DatasetCursor:
         if knobs.shuffle_shards and len(shard_ids) > 1:
             random.Random(knobs.seed).shuffle(shard_ids)
 
-        sequence: list[SampleId] = []
-        with disable_gc():  # see https://github.com/python/cpython/issues/142531
-            for position, shard_id in enumerate(shard_ids):
-                count = int(shard_index[shard_id])
-                offsets = list(range(count))
-                if (
-                    knobs.shuffle_within_shard and count > 1
-                ):  # Shuffle within the shards
-                    shard_seed = (knobs.seed << 32) ^ ((position << 16) + shard_id)
-                    random.Random(shard_seed).shuffle(offsets)
-                # Construct global sequence
-                sequence.extend((dataset_id, shard_id, offset) for offset in offsets)
+        # Pre-compute total sample count and allocate numpy array
+        total_samples = sum(int(shard_index[sid]) for sid in shard_ids)
+        order = np.empty((total_samples, 3), dtype=np.int32)
+
+        # Fill array using vectorized operations
+        pos = 0
+        for position, shard_id in enumerate(shard_ids):
+            count = int(shard_index[shard_id])
+            order[pos : pos + count, 0] = dataset_id
+            order[pos : pos + count, 1] = shard_id
+            offsets = np.arange(count, dtype=np.int32)
+            if knobs.shuffle_within_shard and count > 1:
+                shard_seed = (knobs.seed << 32) ^ ((position << 16) + shard_id)
+                np.random.default_rng(shard_seed).shuffle(offsets)
+            order[pos : pos + count, 2] = offsets
+            pos += count
 
         block_size = knobs.shuffle_block_size
         # Mosaic-style block-based shuffle on top to create cross-shard shuffles
-        if block_size is not None and block_size > 0 and len(sequence) > 1:
+        if block_size is not None and block_size > 0 and len(order) > 1:
             block_size = max(1, int(block_size))
-            rng = random.Random(knobs.seed ^ _GOLDEN_RATIO_64)
-            # TODO: consider numpy.random.Generator.shuffle for large blocks if this
-            # becomes a hotspot; NumPy performs the shuffle in C and can be faster.
-            for start in range(0, len(sequence), block_size):
-                end = min(start + block_size, len(sequence))
-                block = sequence[start:end]
-                rng.shuffle(block)
-                sequence[start:end] = block
+            rng = np.random.default_rng(knobs.seed ^ _GOLDEN_RATIO_64)
+            for start in range(0, len(order), block_size):
+                end = min(start + block_size, len(order))
+                rng.shuffle(order[start:end])
 
-        self._order = sequence
+        self._order: np.ndarray = order
         self._position = 0
-        self.remaining = len(sequence)
+        self.remaining = len(order)
 
     def next_many(self, limit: int) -> list[SampleId]:
         if limit <= 0 or self._position >= len(self._order):
             return []
         end = min(self._position + limit, len(self._order))
-        chunk = self._order[self._position : end]
+        chunk_arr = self._order[self._position : end]
         self._position = end
-        self.remaining -= len(chunk)
-        return chunk
+        self.remaining -= len(chunk_arr)
+        # Convert numpy rows to tuples for API compatibility
+        return [tuple(row) for row in chunk_arr.tolist()]
 
 
 class StaticMixtureWorkSource(WorkSource):
