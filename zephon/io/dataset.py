@@ -113,6 +113,8 @@ def _auto_detect_format(
         entries = [p.name for p in root_path.iterdir() if p.is_file()]
         if any(name.endswith(".jsonl") for name in entries):
             return "jsonl"
+        if any(name.endswith(".vortex") for name in entries):
+            return "vortex"
         index_uri = str(index_file)
     else:
         base = root_str.rstrip("/")
@@ -130,6 +132,8 @@ def _auto_detect_format(
             entries = []
         if any(name.endswith(".jsonl") for name in entries):
             return "jsonl"
+        if any(name.endswith(".vortex") for name in entries):
+            return "vortex"
         return None
 
     if storage.exists(index_uri):

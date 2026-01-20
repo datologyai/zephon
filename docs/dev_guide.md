@@ -8,7 +8,7 @@ Zephon is a high-performance, modular, multimodal-first data loader for PyTorch 
 - Deterministic checkpoint/restart for fault-tolerant training
 - Cloud storage support (S3, GCS, local filesystem)
 - Elastic training (change rank count while preserving order)
-- Multiple data formats (JSONL, LitData, MosaicML Streaming/MDS)
+- Multiple data formats (JSONL, LitData, MosaicML Streaming/MDS, Vortex)
 
 ## Prerequisites
 
@@ -82,6 +82,34 @@ zephon/
 tests/
 ├── integration/  # End-to-end tests (use make integration)
 └── zephon/       # Unit tests mirroring source structure
+```
+
+## Optional Format Dependencies
+
+Some data formats require additional dependencies. Install them using the optional dependency groups defined in `pyproject.toml`:
+
+```bash
+# For Vortex format support (Python 3.11+ only)
+uv pip install -e ".[vortex]"
+
+# For MosaicML Streaming/MDS format support
+uv pip install -e ".[streaming]"
+
+# For LitData format support
+uv pip install -e ".[litdata]"
+
+# For Parquet format support
+uv pip install -e ".[parquet]"
+
+# For cloud storage (S3 and GCS)
+uv pip install -e ".[cloud]"
+
+# Or install specific cloud providers
+uv pip install -e ".[cloud-s3]"   # S3 only
+uv pip install -e ".[cloud-gcs]"  # GCS only
+
+# Combine multiple extras
+uv pip install -e ".[vortex,streaming,cloud]"
 ```
 
 ## Publishing Releases

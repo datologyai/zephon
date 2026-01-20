@@ -3030,7 +3030,7 @@ name = "substrait"
 version = "0.25.0"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
 dependencies = [
-    { name = "protobuf", marker = "python_full_version >= '3.11'" },
+    { name = "protobuf" },
 ]
 sdist = { url = "https://files.astralhosted.com/public/89/ec/a9909bf93df6718945889b379eb7f5da1ff3a4dc3bb73862dff03e6e56d6/substrait-0.25.0.tar.gz", hash = "sha256:090feda0f1a6e996ce0baf2d64635ff4b9b2cae58542c7cf3f818ff5e88a2924", size = 193979, upload-time = "2025-11-05T12:25:56Z" }
 wheels = [
@@ -3360,8 +3360,31 @@ wheels = [
 
 [[package]]
 name = "vortex-data"
+version = "0.33.2"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+resolution-markers = [
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "pyarrow", marker = "python_full_version < '3.11'" },
+    { name = "substrait", marker = "python_full_version < '3.11'" },
+]
+wheels = [
+    { url = "https://files.astralhosted.com/public/fd/fd/cae1e4e56bc2f1149da8ceb8e41abf9e0e62ff173a38d65db0086320eb57/vortex_data-0.33.2-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:2cce3dbf5a6f94ed623afc3acd92942576bed5489efc6ea0d5bd3194224c7613", size = 10219485, upload-time = "2025-05-15T16:47:29Z", zstd = { hash = "sha256:329d979fcf22977fee41b485e430bf2d5167bc75f4cd6b810438f554eb499dba", size = 7210266 } },
+    { url = "https://files.astralhosted.com/public/45/35/88f747d564dcee19d9be8313d839c63bd0e21775df3775933bec4765d8cf/vortex_data-0.33.2-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:18bad072f2d8e992e22ba3bad1123b1c4c1c071107723bd66a0c500e64535157", size = 9434550, upload-time = "2025-05-15T16:47:32Z", zstd = { hash = "sha256:f3355c684d83286a1c445b55e0b6b517467e7023ea4e3689745fd2e1ff33474b", size = 6748131 } },
+    { url = "https://files.astralhosted.com/public/7c/58/4f15838b6d96ece136d382be2daded2052e6f8910667e14516dae162a1f2/vortex_data-0.33.2-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4fd7d7689512bee15e125bb8adada60490d73a52ef43c0942df2daa0dfabd6cf", size = 8818111, upload-time = "2025-05-15T16:47:35Z", zstd = { hash = "sha256:c156eb0d06c0f5083b7ce1c39bcd89f5f5d16217ff5767e52e390fa0d0fc2a42", size = 6414985 } },
+    { url = "https://files.astralhosted.com/public/bc/ed/ad2b2c71b967721021424439ec70989cfdf58fa1d21f5e30ee3b6aa6df1b/vortex_data-0.33.2-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:78ee2044d50fdaf2aa825a3ed6531ad9f01e5da9b577117803b3907f21539ecd", size = 9478039, upload-time = "2025-05-15T16:47:37Z", zstd = { hash = "sha256:12abe4f61f2ecf9e4196ec5b09928a2f6e2c39670961702808465de051299e7b", size = 6770249 } },
+]
+
+[[package]]
+name = "vortex-data"
 version = "0.56.0"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
+resolution-markers = [
+    "python_full_version >= '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
+]
 dependencies = [
     { name = "pyarrow", marker = "python_full_version >= '3.11'" },
     { name = "substrait", marker = "python_full_version >= '3.11'" },
@@ -3591,6 +3614,8 @@ dependencies = [
     { name = "cloudpickle" },
     { name = "numpy" },
     { name = "tenacity" },
+    { name = "vortex-data", version = "0.33.2", source = { registry = "https://api.pyx.dev/simple/pypi" }, marker = "python_full_version < '3.11'" },
+    { name = "vortex-data", version = "0.56.0", source = { registry = "https://api.pyx.dev/simple/pypi" }, marker = "python_full_version >= '3.11'" },
     { name = "wrapt" },
 ]
 
@@ -3626,7 +3651,7 @@ streaming = [
     { name = "zstandard" },
 ]
 vortex = [
-    { name = "vortex-data", marker = "python_full_version >= '3.11'" },
+    { name = "vortex-data", version = "0.56.0", source = { registry = "https://api.pyx.dev/simple/pypi" }, marker = "python_full_version >= '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -3657,15 +3682,16 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.20.0" },
+    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.28" },
     { name = "cloudpickle", specifier = ">=1.6.0" },
-    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.0.0" },
+    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.14.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
     { name = "mosaicml-streaming", marker = "extra == 'streaming'" },
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "optree", marker = "extra == 'litdata'" },
-    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=8.0.0" },
+    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=12.0.0" },
     { name = "tenacity", specifier = ">=5.0.0" },
+    { name = "vortex-data", specifier = ">=0.33.2" },
     { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.52.1" },
     { name = "wrapt", specifier = ">=1.11.0" },
     { name = "zephon", extras = ["cloud-gcs"], marker = "extra == 'cloud'" },
