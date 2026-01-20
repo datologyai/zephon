@@ -5,14 +5,15 @@
 
 from typing import Callable, Optional, cast
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import (
     EngineSample,
     SampleMeta,
     SamplePayload,
     SampleRecord,
 )
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, OpContext
+from zephon.core.traits import OpTraits
 from zephon.io import build_multi_dataset_store
 from zephon.io.options import StoreOptions
 from zephon.io.protocols import MultiDatasetShardStore
@@ -21,13 +22,18 @@ from zephon.observability import Stopwatch
 from zephon.observability.stats import FetchTimingDelta
 
 
-class FetchOp(DefaultSetup, DefaultFinalize[SampleRecord]):
+class FetchOp(DefaultSetup):
     """Load sample payloads from a `MultiDatasetShardStore`."""
 
-    def __init__(self, buf: Optional[Buffering] = None) -> None:
+    def __init__(
+        self,
+        max_batch: int = 64,
+        max_latency_ms: Optional[int] = 5,
+    ) -> None:
         DefaultSetup.__init__(self)
         self._store: MultiDatasetShardStore | None = None
-        self._buffering = buf or Buffering(max_batch=64, max_latency_ms=5)
+        self._max_batch = max_batch
+        self._max_latency_ms = max_latency_ms
         self._emit_fetch_metrics: Callable[[FetchTimingDelta], None] | None = None
         self._seen_shards: set[tuple[int, int]] = set()
         self._timer = Stopwatch(False)
@@ -56,8 +62,11 @@ class FetchOp(DefaultSetup, DefaultFinalize[SampleRecord]):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[EngineSample]:
+        return CountingAccumulator[EngineSample](
+            max_batch=self._max_batch,
+            max_latency_ms=None if deterministic else self._max_latency_ms,
+        )
 
     def process_one(self, elem: EngineSample) -> list[SampleRecord]:
         assert self._store is not None

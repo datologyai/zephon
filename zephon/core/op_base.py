@@ -3,10 +3,11 @@
 
 """Abstract operator contracts shared by the planner and runtime."""
 
-from typing import Any, Generic, Optional, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
+from zephon.core.accumulators import Accumulator
 from zephon.core.constants import StreamItem
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.traits import OpTraits
 
 
 class OpContext:
@@ -31,6 +32,16 @@ class Op(Protocol[InT, OutT]):
     lineage paths via :meth:`zephon.core.constants.SampleMeta.child`. This ensures
     that ordering and replay checks observe a deterministic total order even when
     operators execute with parallel workers.
+
+    Accumulators and Deterministic Parallelism
+    ------------------------------------------
+    Each operator provides an accumulator via the ``accumulator()`` method. The
+    accumulator runs on the pump thread (serial) and defines invocation boundaries
+    for parallel workers. This ensures deterministic execution:
+
+    - All cross-invocation state lives in the accumulator
+    - Worker ``process_many`` calls are stateless across invocations
+    - Thread and Process runners execute identical batch boundaries
     """
 
     def setup(
@@ -44,24 +55,27 @@ class Op(Protocol[InT, OutT]):
 
     def traits(self) -> OpTraits: ...
 
-    def buffering(self) -> Optional[Buffering]: ...
+    def accumulator(self, *, deterministic: bool) -> Accumulator[InT]:
+        """Return the accumulator for this operator.
+
+        The accumulator runs on the pump thread and defines invocation batch
+        boundaries. For stateless operators, use PassthroughAccumulator.
+        For operators that need buffering, use CountingAccumulator or a
+        custom accumulator.
+
+        Args:
+            deterministic: If True, the accumulator should disable any
+                non-deterministic behavior (e.g., time-based flushing).
+
+        Returns:
+            An accumulator instance that will be used by the runner.
+        """
+        ...
 
     # Concrete ops specify precise input/output element types.
     def process_one(self, elem: InT) -> list[OutT]: ...
 
     def process_many(self, elems: list[InT]) -> list[OutT]: ...
-
-    def finalize(self) -> list[OutT]:
-        """Emit any buffered outputs once the upstream iterator is exhausted."""
-        ...
-
-
-class DefaultFinalize(Generic[OutT]):
-    """Mixin providing a no-op ``finalize`` implementation."""
-
-    def finalize(self) -> list[OutT]:
-        """Return an empty list when the operator has no buffered tail."""
-        return []
 
 
 class DefaultSetup:

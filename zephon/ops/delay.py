@@ -9,36 +9,43 @@ local index within its shard so that delays are deterministic and bounded.
 """
 
 import time
-from typing import Optional, TypeVar
+from typing import Optional
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import SampleRecord, StreamItem
-from zephon.core.op_base import DefaultFinalize, DefaultSetup
-from zephon.core.traits import Buffering, OpTraits
-
-T = TypeVar("T", bound=StreamItem)
+from zephon.core.op_base import DefaultSetup
+from zephon.core.traits import OpTraits
 
 
-class DelayById(DefaultSetup, DefaultFinalize[T]):
+class DelayById(DefaultSetup):
     """Sleep a small, deterministic amount based on the sample's local id."""
 
     def __init__(
-        self, *, max_delay_ms: float = 2.0, buffering: Optional[Buffering] = None
+        self,
+        *,
+        max_delay_ms: float = 2.0,
+        max_batch: int = 32,
+        max_latency_ms: Optional[int] = 2,
     ) -> None:
         DefaultSetup.__init__(self)
         self.max_delay_ms = float(max_delay_ms)
-        self._buffering = buffering or Buffering(max_batch=32, max_latency_ms=2)
+        self._max_batch = max_batch
+        self._max_latency_ms = max_latency_ms
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=8)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[StreamItem]:
+        return CountingAccumulator[StreamItem](
+            max_batch=self._max_batch,
+            max_latency_ms=None if deterministic else self._max_latency_ms,
+        )
 
-    def process_one(self, elem: T) -> list[T]:
+    def process_one(self, elem: StreamItem) -> list[StreamItem]:
         return self.process_many([elem])
 
-    def process_many(self, elems: list[T]) -> list[T]:
-        out: list[T] = []
+    def process_many(self, elems: list[StreamItem]) -> list[StreamItem]:
+        out: list[StreamItem] = []
         slots = 5  # map ids/hashes into 0..4
         for item in elems:
             # Derive a stable bucket from either the SampleRecord's local id

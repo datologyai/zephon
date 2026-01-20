@@ -150,33 +150,27 @@ def test_map_transform_preserves_metadata() -> None:
     assert out.meta.tags == {"tag": "value"}
 
 
-def test_map_transform_traits_and_buffering() -> None:
-    """Test operator traits and buffering configuration."""
+def test_map_transform_traits_and_accumulator() -> None:
+    """Test operator traits and accumulator configuration."""
 
     def transform(payload: dict) -> dict:
         return payload
 
-    op = _setup(MapTransform(transform))
+    op = _setup(MapTransform(transform, max_batch=32, max_latency_ms=100))
     traits = op.traits()
-    buffering = op.buffering()
 
     assert traits.indexable is True
     assert traits.parallelism == 4
-    assert buffering is not None
-    assert buffering.max_batch == 64
-    assert buffering.max_latency_ms == 3
 
+    # Test deterministic mode disables time-based flushing
+    acc_det = op.accumulator(deterministic=True)
+    assert acc_det._max_batch == 32
+    assert acc_det._max_latency_ms is None
 
-def test_map_transform_custom_buffering() -> None:
-    """Test custom buffering configuration."""
-    from zephon.core.traits import Buffering
-
-    def transform(payload: dict) -> dict:
-        return payload
-
-    custom_buffering = Buffering(max_batch=128, max_latency_ms=5)
-    op = _setup(MapTransform(transform, buffering=custom_buffering))
-    assert op.buffering() == custom_buffering
+    # Test non-deterministic mode preserves latency config
+    acc_nondet = op.accumulator(deterministic=False)
+    assert acc_nondet._max_batch == 32
+    assert acc_nondet._max_latency_ms == 100
 
 
 def test_map_transform_invalid_callable() -> None:

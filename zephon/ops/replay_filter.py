@@ -7,13 +7,14 @@ This operator runs immediately before batching (when present) or as the tail
 of the pipeline when no batching is used.
 """
 
+from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import LaneId, SampleCursor, SampleRecord
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
+from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.replay import ReplayConfigService
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.traits import OpTraits
 
 
-class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
+class ReplayFilter(DefaultSetup):
     """Per-lane pre-batch dropper configured lazily via the OpContext.
 
     Drops records until the checkpointed per-lane cursor reappears (inclusive),
@@ -53,8 +54,8 @@ class ReplayFilter(DefaultSetup, DefaultFinalize[SampleRecord]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> Buffering | None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return PassthroughAccumulator[SampleRecord]()
 
     def _init_replay(self) -> None:
         if self._initialized:

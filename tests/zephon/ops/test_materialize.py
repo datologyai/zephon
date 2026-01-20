@@ -21,16 +21,20 @@ def test_materialize_identity_for_records_and_batches() -> None:
     assert out2 == [b]
 
 
-def test_materialize_process_many_and_finalize() -> None:
+def test_materialize_process_many() -> None:
     op = Materialize()
     records = [_rec(i) for i in range(3)]
     out = op.process_many(records)
     assert out == records
-    assert op.finalize() == []
 
 
-def test_materialize_traits_and_buffering_none() -> None:
+def test_materialize_traits_and_accumulator() -> None:
+    from zephon.core.accumulators import PassthroughAccumulator
+
     op = Materialize()
     t = op.traits()
     assert t.indexable is False
-    assert op.buffering() is None
+
+    # PassthroughAccumulator has no configuration - keep isinstance as regression guard
+    acc = op.accumulator(deterministic=False)
+    assert isinstance(acc, PassthroughAccumulator)

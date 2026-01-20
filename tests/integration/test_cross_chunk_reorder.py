@@ -3,26 +3,56 @@
 
 """Integration test illustrating checkpoint loss under cross-chunk reordering."""
 
+from typing import Sequence
+
 import pytest
 
 from zephon.api import Pipeline as PublicPipeline
+from zephon.core.accumulators import Accumulator, ReadyBatch
 from zephon.core.constants import SampleRecord
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, Op
+from zephon.core.traits import OpTraits
 from zephon.io import Dataset, InMemoryShard
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration
 
 
-class _DeferFirstOp(
-    DefaultSetup, DefaultFinalize[SampleRecord], Op[SampleRecord, SampleRecord]
-):
-    """Buffer the first element; emit it only at finalize, reordering chunk_ids."""
+class _DeferringAccumulator(Accumulator[SampleRecord]):
+    """Accumulator that defers the first element until flush, reordering chunk_ids."""
+
+    def __init__(self) -> None:
+        self._first: SampleRecord | None = None
+
+    def has_pending_data(self) -> bool:
+        return self._first is not None
+
+    def push_many(
+        self, elems: Sequence[SampleRecord]
+    ) -> list[ReadyBatch[SampleRecord]]:
+        ready: list[ReadyBatch[SampleRecord]] = []
+        for elem in elems:
+            if self._first is None:
+                # Buffer the first element
+                self._first = elem
+            else:
+                # Emit subsequent elements immediately
+                ready.append(([elem], 0))
+        return ready
+
+    def flush(self) -> list[ReadyBatch[SampleRecord]]:
+        if self._first is None:
+            return []
+        elem = self._first
+        self._first = None
+        return [([elem], 0)]
+
+
+class _DeferFirstOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+    """Buffer the first element via accumulator; emit it only at flush, reordering chunk_ids."""
 
     def __init__(self) -> None:
         DefaultSetup.__init__(self)
-        self._buffer: SampleRecord | None = None
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -32,20 +62,16 @@ class _DeferFirstOp(
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> Buffering | None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return _DeferringAccumulator()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
-        if self._buffer is None:
-            self._buffer = elem
-            return []
+        # The accumulator handles deferral; operator just passes through
         return [elem]
 
-    def finalize(self) -> list[SampleRecord]:
-        if self._buffer is None:
-            return []
-        buf, self._buffer = self._buffer, None
-        return [buf]
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        # The accumulator handles deferral; operator just passes through
+        return list(elems)
 
 
 def _make_pipe(sample_count: int) -> PublicPipeline:

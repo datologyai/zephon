@@ -119,11 +119,18 @@ def test_fetch_op_preserves_order_across_groups(jsonl_dataset: Dataset) -> None:
     assert [r.payload["value"] for r in out] == [4, 0, 3, 2]
 
 
-def test_fetch_op_traits_and_buffering_override() -> None:
-    from zephon.core.traits import Buffering
-
-    custom = Buffering(max_batch=7, max_latency_ms=1)
-    op = FetchOp(buf=custom)
-    assert op.buffering() == custom
+def test_fetch_op_traits_and_accumulator() -> None:
+    op = FetchOp(max_batch=32, max_latency_ms=10)
     t = op.traits()
+
     assert t.indexable is True and t.parallelism == 4
+
+    # Test deterministic mode disables time-based flushing
+    acc_det = op.accumulator(deterministic=True)
+    assert acc_det._max_batch == 32
+    assert acc_det._max_latency_ms is None
+
+    # Test non-deterministic mode preserves latency config
+    acc_nondet = op.accumulator(deterministic=False)
+    assert acc_nondet._max_batch == 32
+    assert acc_nondet._max_latency_ms == 10

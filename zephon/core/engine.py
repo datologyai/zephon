@@ -191,9 +191,6 @@ class RuntimeOptions:
     default_stage_prefetch: int = 0
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
     op_queue_capacity: int = 16  # maximum size of inflight items between ops.
-    process_ipc_batch_size_factor: int = (
-        2  # scales IPC batches relative to the first op buffering.
-    )
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
     # Expert knob:
@@ -711,7 +708,6 @@ class Engine:
                         deterministic=self._opts.deterministic,
                         allow_latency_flush_in_deterministic=allow_latency,
                         queue_capacity=self._opts.op_queue_capacity,
-                        ipc_batch_size_factor=self._opts.process_ipc_batch_size_factor,
                         stage_index=idx,
                         tracking_mode=runner_tracking_mode,
                         stage_output_mode=output_mode,

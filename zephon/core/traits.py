@@ -1,10 +1,9 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Operator traits that guide planning, scheduling, and buffering."""
+"""Operator traits that guide planning and scheduling."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -36,11 +35,3 @@ class OpTraits:
     parallelism: int = 1
     batch_shape_sensitive: bool = False
     requires_serial_state: bool = False
-
-
-@dataclass
-class Buffering:
-    """Runtime buffering preferences exposed by the operator implementation."""
-
-    max_batch: int = 32
-    max_latency_ms: Optional[int] = 5

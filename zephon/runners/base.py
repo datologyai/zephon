@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import copy
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
+from typing import Any, Callable, Generic, Sequence, TypeVar
 
+from zephon.core.accumulators import Accumulator
 from zephon.core.constants import (
     Microbatch,
     RunnerStageIn,
@@ -21,7 +21,6 @@ from zephon.core.constants import (
 )
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import Op, OpContext
-from zephon.core.traits import Buffering
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
@@ -29,7 +28,18 @@ from zephon.observability.stopwatch import Stopwatch
 
 @dataclass
 class BaseOperatorState:
-    """Common operator wiring shared across stage runners."""
+    """Common operator wiring shared across stage runners.
+
+    Accumulators and Buffering
+    --------------------------
+    Each operator provides an accumulator via the ``accumulator()`` method.
+    The accumulator runs on the pump thread and defines invocation batch
+    boundaries for parallel workers. This ensures deterministic execution
+    regardless of parallelism level.
+
+    The ``enqueue()`` method delegates to the accumulator's ``push_many()``
+    and ``flush()`` methods to determine when batches are ready.
+    """
 
     node: Node
     deterministic: bool
@@ -43,12 +53,7 @@ class BaseOperatorState:
         init=False, default_factory=list
     )
     parallelism: int = field(init=False)
-    buffer_cfg: Buffering | None = field(init=False)
-    buffer: list[RunnerStreamIn] = field(init=False, default_factory=list)
-    buffer_ts_ns: list[int] = field(
-        init=False, default_factory=list
-    )  # arrival timestamp per buffered element
-    first_ts_ns: Optional[int] = field(init=False, default=None)
+    accumulator_impl: Accumulator[RunnerStreamIn] = field(init=False)
 
     def __post_init__(self) -> None:
         traits = self.node.op.traits()
@@ -80,89 +85,51 @@ class BaseOperatorState:
             )
             self.instances.append(instance)
 
-        cfg = self.node.op.buffering()
-        if cfg is None:
-            self.buffer_cfg = None
-        else:
-            self.buffer_cfg = Buffering(
-                max_batch=cfg.max_batch,
-                max_latency_ms=(
-                    cfg.max_latency_ms
-                    if (not self.deterministic or self.allow_latency_flush)
-                    else None
-                ),
-            )
+        # Get accumulator from operator
+        self.accumulator_impl = self.node.op.accumulator(
+            deterministic=self.deterministic
+        )
 
     def reset_buffers(self) -> None:
-        self.buffer = []
-        self.buffer_ts_ns = []
-        self.first_ts_ns = None
+        """Reset the accumulator by recreating it.
+
+        This is called during shutdown cleanup to ensure no buffered state
+        persists across runs when a runner is reused.
+        """
+        self.accumulator_impl = self.node.op.accumulator(
+            deterministic=self.deterministic
+        )
 
     def enqueue(
         self, elems: Sequence[RunnerStreamIn], *, force: bool = False
     ) -> list[tuple[list[RunnerStreamIn], int]]:
+        """Accumulate elements and return ready batches.
+
+        Uses the operator's accumulator to determine batch boundaries.
+        The accumulator runs on the pump thread (serial) and maintains
+        any cross-invocation state needed for deterministic batching.
+
+        Args:
+            elems: Input elements to accumulate.
+            force: If True, flush all remaining buffered elements.
+
+        Returns:
+            List of (batch, wait_ns) tuples ready for worker dispatch.
+        """
         ready: list[tuple[list[RunnerStreamIn], int]] = []
+
         if not elems and not force:
             return ready
-        if self.buffer_cfg is None:
-            # Preserve the upstream microbatch as-as (no internal batching),
-            # so process_many can vectorize when available.
-            if elems:
-                batch = elems if isinstance(elems, list) else list(elems)
-                ready.append((batch, 0))
-            # there is no internal buffer in the 'None' path, so nothing to flush on 'force'
-            return ready
 
-        now_ns = time.perf_counter_ns()
-        for elem in elems:
-            arrival_ns = time.perf_counter_ns()
-            if not self.buffer:
-                self.first_ts_ns = arrival_ns
-            self.buffer.append(elem)
-            self.buffer_ts_ns.append(arrival_ns)
-            if (
-                self.buffer_cfg.max_batch
-                and len(self.buffer) >= self.buffer_cfg.max_batch
-            ):
-                ready.append(self._pop_batch(self.buffer_cfg.max_batch, now_ns))
-            elif (
-                self.buffer_cfg.max_latency_ms is not None
-                and self.first_ts_ns is not None
-                and (now_ns - self.first_ts_ns) / 1_000_000
-                >= self.buffer_cfg.max_latency_ms
-            ):
-                ready.append(self._drain_buffer(now_ns=now_ns))
-            now_ns = time.perf_counter_ns()
-        if force and self.buffer:
-            ready.append(self._drain_buffer())
+        # Push elements through accumulator
+        if elems:
+            ready.extend(self.accumulator_impl.push_many(elems))
+
+        # Flush remaining on force
+        if force:
+            ready.extend(self.accumulator_impl.flush())
+
         return ready
-
-    def _pop_batch(self, size: int, now_ns: int) -> tuple[list[RunnerStreamIn], int]:
-        current_ns = now_ns
-        chunk = self.buffer[:size]
-        timestamps = self.buffer_ts_ns[:size]
-        self.buffer = self.buffer[size:]
-        self.buffer_ts_ns = self.buffer_ts_ns[size:]
-        wait_ns = 0
-        if timestamps:
-            wait_ns = max(0, current_ns - timestamps[0])
-        if not self.buffer:
-            self.first_ts_ns = None
-        else:
-            self.first_ts_ns = self.buffer_ts_ns[0]
-        return list(chunk), wait_ns
-
-    def _drain_buffer(
-        self, *, now_ns: Optional[int] = None
-    ) -> tuple[list[RunnerStreamIn], int]:
-        current_ns = now_ns if now_ns is not None else time.perf_counter_ns()
-        return self._pop_batch(len(self.buffer), current_ns)
-
-    def finalize(self) -> Microbatch:
-        tail: Microbatch = []
-        for instance in self.instances:
-            tail.extend(instance.finalize())
-        return tail
 
 
 StateT = TypeVar("StateT", bound=BaseOperatorState)
@@ -270,10 +237,6 @@ class StageRunnerBase(Generic[StateT], ABC):
             if len(outputs) != 1:
                 raise RuntimeError("Indexable path requires 1->1 ops through the stage")
             value = outputs[0]
-        for state in self.ops:
-            tail = state.instances[0].finalize()
-            if tail:
-                raise RuntimeError("Finalize emitted data in run_one path")
         if not isinstance(value, (SampleRecord, SampleBatch)):
             raise TypeError(
                 f"Stage produced unsupported element {type(value)!r} in run_one()"

@@ -227,23 +227,21 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     Long term we might want to explore extending the buffering features offered by
     the stage runner.
 
-    Runner-level vs operator-internal buffering
-    -------------------------------------------
+    Accumulator-based buffering
+    ---------------------------
 
-    The distinction between runner-level and operator-internal buffering is
-    important:
+    All cross-invocation state is managed by accumulators that run on the
+    pump thread (serial). This ensures deterministic batch boundaries:
 
     * Runner buffering happens in :class:`BaseOperatorState.enqueue` before a
-      batch is handed to the worker backend. Batches are formed on the pump
-      thread, tagged with seq (in deterministic mode), and then scheduled.
-      Time-based and count-based flushes are controlled at this level.
+      batch is handed to the worker backend. The operator's accumulator
+      determines batch boundaries on the pump thread, tagged with seq
+      (in deterministic mode), and then scheduled.
+      Time-based and count-based flushes are controlled by the accumulator.
 
-    * Operator-internal buffering happens inside an operator instance itself
-      (for example a batching operator that accumulates elements in memory and
-      emits them from :meth:`Op.finalize`). When such an operator finally
-      flushes, its output is attached to the seq of the invocation that
-      produced it, so downstream ordering relative to other operators remains
-      well-defined.
+    * When upstream is exhausted, the accumulator's ``flush()`` method is
+      called to emit any remaining buffered data. Worker ``process_many``
+      calls are stateless across invocations.
 
     Bounded input and result queues provide backpressure even when operators
     expand or filter the stream. When queues fill up, producers block until
@@ -264,8 +262,6 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     * :meth:`_ack_result` (optional) – perform backend-specific acknowledgements
       once a result has been forwarded downstream (e.g. freeing shared memory
       in a process-based runner).
-    * :meth:`_finalize_state` (optional) – customize how operator-local buffers
-      are flushed when upstream is fully closed.
 
     The rest of the coordination – feeding upstream elements into the first
     operator, driving operator pump threads, enforcing deterministic ordering,
@@ -308,15 +304,6 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         context: ConcurrentRunContext,
     ) -> None:
         """Called after a result payload has been forwarded downstream."""
-
-    def _finalize_state(
-        self,
-        state: S,
-        context: ConcurrentRunContext,
-        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
-    ) -> Microbatch:
-        """Flush operator-local buffers once upstream is fully closed."""
-        return state.finalize()
 
     # -- Queue helpers --------------------------------------------------
     @staticmethod
@@ -466,7 +453,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                     if (
                         state.inflight.is_zero()
                         and (not state.pending_results or context.error is not None)
-                        and not state.buffer
+                        and not state.accumulator_impl.has_pending_data()
                     ):
                         # In the error case, we don't wait for missing seq gaps.
                         if context.error is not None:
@@ -475,9 +462,6 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                                 self._ack_result(state, pending, context)
                             state.pending_results.clear()
 
-                        tail = self._finalize_state(state, context, next_queue)
-                        if tail:
-                            self._emit_downstream(tail, next_queue, context)
                         self._signal_downstream_stop(next_queue, context)
                         return
                     try:

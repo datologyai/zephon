@@ -1,7 +1,8 @@
 import pytest
 
+from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.graph import Graph
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
+from zephon.core.op_base import DefaultSetup, Op
 from zephon.core.planner import Planner
 from zephon.core.traits import OpTraits
 from zephon.ops.batch import Batch
@@ -80,15 +81,15 @@ def test_planner_splits_batch_stage_and_marks_inline() -> None:
     assert plan.stages[1].break_reason == "batch-inline"
 
 
-class _OrderedOp(DefaultSetup, DefaultFinalize[int], Op[int, int]):
+class _OrderedOp(DefaultSetup, Op[int, int]):
     def __init__(self) -> None:
         DefaultSetup.__init__(self)
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
 
-    def buffering(self):
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[int]:
+        return PassthroughAccumulator[int]()
 
     def process_one(self, elem: int) -> list[int]:
         return [elem]

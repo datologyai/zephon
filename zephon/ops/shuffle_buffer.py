@@ -4,11 +4,12 @@
 """Deterministic shuffle buffer operator."""
 
 from random import Random
-from typing import Optional, TypeVar
+from typing import TypeVar
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import ContributorRef, SampleRecord
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, OpContext
+from zephon.core.traits import OpTraits
 from zephon.utils.seeding import batch_seed
 
 T = TypeVar("T", bound=SampleRecord)
@@ -81,7 +82,7 @@ def _redistribute_closers_in_place(records: list[T]) -> None:
             rec.meta = meta.with_contributors(tuple(new_refs))
 
 
-class ShuffleBuffer(DefaultSetup, DefaultFinalize[T]):
+class ShuffleBuffer(DefaultSetup):
     """Deterministically shuffle runner-sized micro-batches.
 
     This operator is deliberately *stateless*: it shuffles each incoming batch
@@ -98,9 +99,6 @@ class ShuffleBuffer(DefaultSetup, DefaultFinalize[T]):
         DefaultSetup.__init__(self)
         self.buffer_size = int(buffer_size)
         self.seed = int(seed)
-        # Encourage runner-side buffering up to the window size; latency disabled
-        # so batches are formed solely by capacity.
-        self._buffering = Buffering(max_batch=self.buffer_size, max_latency_ms=None)
 
     def setup(
         self,
@@ -117,13 +115,15 @@ class ShuffleBuffer(DefaultSetup, DefaultFinalize[T]):
         # Keep suggested parallelism at 1 to avoid oversubscribing by default.
         return OpTraits(indexable=False, preserves_cursor_order=False, parallelism=1)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        # Use count-only accumulator (no time-based flushing) to ensure
+        # deterministic batch boundaries for shuffling.
+        return CountingAccumulator[SampleRecord](max_batch=self.buffer_size)
 
-    def process_one(self, elem: T) -> list[T]:
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         return self.process_many([elem])
 
-    def process_many(self, elems: list[T]) -> list[T]:
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         if not elems:
             return []
         rng = Random(batch_seed(self.seed, elems))

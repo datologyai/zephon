@@ -84,9 +84,18 @@ def test_delaybyid_non_record_items_use_hash(monkeypatch: pytest.MonkeyPatch) ->
     assert j == len(captured)
 
 
-def test_delaybyid_traits_and_buffering() -> None:
-    op = DelayById(max_delay_ms=1.0)
+def test_delaybyid_traits_and_accumulator() -> None:
+    op = DelayById(max_delay_ms=1.0, max_batch=16, max_latency_ms=50)
     t = op.traits()
-    buf = op.buffering()
+
     assert t.indexable is True and t.parallelism == 8
-    assert buf is not None and buf.max_batch == 32 and buf.max_latency_ms == 2
+
+    # Test deterministic mode disables time-based flushing
+    acc_det = op.accumulator(deterministic=True)
+    assert acc_det._max_batch == 16
+    assert acc_det._max_latency_ms is None
+
+    # Test non-deterministic mode preserves latency config
+    acc_nondet = op.accumulator(deterministic=False)
+    assert acc_nondet._max_batch == 16
+    assert acc_nondet._max_latency_ms == 50

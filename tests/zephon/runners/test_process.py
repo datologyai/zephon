@@ -10,10 +10,14 @@ from tests.zephon.runners._helpers import (
     _mk_record,
     _mk_records,
 )
+from zephon.core.accumulators import (
+    Accumulator,
+    PassthroughAccumulator,
+)
 from zephon.core.constants import SampleRecord
 from zephon.core.graph import Node, Stage
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op, OpContext
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, Op, OpContext
+from zephon.core.traits import OpTraits
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.delay import DelayById
@@ -96,40 +100,8 @@ def test_process_passthrough_stage_forwards_stream() -> None:
     assert out == data
 
 
-def test_process_runner_ipc_batch_size_scales_with_factor() -> None:
-    op = _BufferedOp(max_batch=40)
-    node = Node(name="buffered", op=op)
-    stage = Stage(name="ipc", nodes=[node], placement="auto", break_reason="test")
-    runner = ProcessStageRunner(
-        stage,
-        ctx_services=_ctx_services(),
-        max_workers=2,
-        deterministic=True,
-        ipc_batch_size_factor=3,
-        stage_output_mode="stream_items",
-    )
-    assert getattr(runner, "_ipc_batch_size") == 120
-
-
-def test_process_runner_ipc_batch_size_defaults_without_buffering() -> None:
-    op = _IdentityOp()
-    node = Node(name="plain", op=op)
-    stage = Stage(
-        name="ipc_default", nodes=[node], placement="auto", break_reason="test"
-    )
-    runner = ProcessStageRunner(
-        stage,
-        ctx_services=_ctx_services(),
-        max_workers=2,
-        deterministic=True,
-        ipc_batch_size_factor=4,
-        stage_output_mode="stream_items",
-    )
-    assert getattr(runner, "_ipc_batch_size") == 128
-
-
 @dataclass
-class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+class _IdentityOp(DefaultSetup, Op[Any, Any]):
     name: str = "identity"
 
     def __post_init__(self) -> None:
@@ -143,8 +115,8 @@ class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+        return PassthroughAccumulator[Any]()
 
     def process_one(self, elem: Any) -> list[Any]:
         return [elem]
@@ -153,13 +125,7 @@ class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
         return list(elems)
 
 
-@dataclass
-class _BufferedOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
-    max_batch: int = 32
-
-    def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
-
+class _ValueMappingOp(DefaultSetup, Op[Any, Any]):
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=True,
@@ -168,24 +134,8 @@ class _BufferedOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> Buffering:
-        return Buffering(max_batch=self.max_batch)
-
-    def process_many(self, elems: list[Any]) -> list[Any]:
-        return list(elems)
-
-
-class _ValueMappingOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-            batch_shape_sensitive=False,
-        )
-
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+        return PassthroughAccumulator[Any]()
 
     def _rewrite(self, elem: SampleRecord) -> SampleRecord:
         payload = dict(elem.payload)
@@ -225,7 +175,7 @@ class _MultiplyValueOp(_ValueMappingOp):
 
 
 @dataclass
-class _ServiceOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+class _ServiceOp(DefaultSetup, Op[Any, Any]):
     def __post_init__(self) -> None:
         DefaultSetup.__init__(self)
         self._hook: Any = None
@@ -238,8 +188,8 @@ class _ServiceOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+        return PassthroughAccumulator[Any]()
 
     def setup(
         self,
@@ -440,7 +390,7 @@ def test_process_runner_multi_op_draining_forwards_to_next_op() -> None:
 
 
 @dataclass
-class _CrashOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+class _CrashOp(DefaultSetup, Op[Any, Any]):
     def __post_init__(self) -> None:
         DefaultSetup.__init__(self)
 
@@ -452,8 +402,8 @@ class _CrashOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+        return PassthroughAccumulator[Any]()
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         raise ValueError("boom inside worker")
@@ -480,7 +430,7 @@ def test_process_runner_bubbles_worker_exceptions() -> None:
 
 
 @dataclass
-class _LambdaOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleRecord]):
+class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
     """Operator that uses a lambda function internally.
 
     This mimics what PackSequences does with its length_fn field.
@@ -501,8 +451,8 @@ class _LambdaOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleRecor
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return PassthroughAccumulator[SampleRecord]()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         payload = dict(elem.payload)
@@ -538,7 +488,7 @@ def test_process_runner_serializes_operator_with_lambda() -> None:
 
 
 @dataclass
-class _ClosureOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleRecord]):
+class _ClosureOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
     """Operator that uses a closure (lambda capturing outer variable)."""
 
     multiplier: int = 3
@@ -556,8 +506,8 @@ class _ClosureOp(DefaultSetup, DefaultFinalize[Any], Op[SampleRecord, SampleReco
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return PassthroughAccumulator[SampleRecord]()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         payload = dict(elem.payload)

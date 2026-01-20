@@ -5,12 +5,13 @@
 
 from typing import Any, Optional, Sequence
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import SamplePayload, SamplePayloadDict, SampleRecord
-from zephon.core.op_base import DefaultFinalize, DefaultSetup
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup
+from zephon.core.traits import OpTraits
 
 
-class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
+class DecodeText(DefaultSetup):
     """Decode configured payload fields into normalised text."""
 
     def __init__(
@@ -21,7 +22,8 @@ class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         errors: str = "strict",
         normalize_newlines: bool = True,
         lowercase: bool = False,
-        buffering: Optional[Buffering] = None,
+        max_batch: int = 128,
+        max_latency_ms: Optional[int] = 2,
     ) -> None:
         DefaultSetup.__init__(self)
         self.fields = tuple(fields)
@@ -29,13 +31,17 @@ class DecodeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         self.errors = errors
         self.normalize_newlines = normalize_newlines
         self.lowercase = lowercase
-        self._buffering = buffering or Buffering(max_batch=128, max_latency_ms=2)
+        self._max_batch = max_batch
+        self._max_latency_ms = max_latency_ms
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=2)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return CountingAccumulator[SampleRecord](
+            max_batch=self._max_batch,
+            max_latency_ms=None if deterministic else self._max_latency_ms,
+        )
 
     def _decode(self, value: Any) -> str:
         if isinstance(value, bytes):

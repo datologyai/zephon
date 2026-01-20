@@ -47,7 +47,6 @@ from zephon.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
 setup_faulthandler()
 
 from zephon.core.constants import (
-    Microbatch,
     RunnerStageIn,
     RunnerStageOut,
     RunnerStreamIn,
@@ -138,7 +137,7 @@ class _NamedQueue(mp_queues.Queue):
 
 @dataclass
 class _WorkerCommand:
-    kind: Literal["batch", "finalize", "stop"]
+    kind: Literal["batch", "stop"]
     seq: int
     batch: list[RunnerStreamIn]
     wait_ns: int
@@ -247,10 +246,6 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 proc_ns = (
                     time.perf_counter_ns() - start_ns if command.collect_metrics else 0
                 )
-            else:  # finalize
-                _debug(f"worker[{config.worker_index}] finalize seq={command.seq}")
-                outputs = op_instance.finalize()
-                proc_ns = 0
 
             config.backpressure.acquire()
             result = RunnerResult(
@@ -351,8 +346,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
       - owns a deep-copied :class:`Op` instance,
       - receives :class:`_WorkerCommand` messages from ``task_queue``
-        (kinds: ``"batch"``, ``"finalize"``, ``"stop"``),
-      - runs ``process_many`` / ``process_one`` or ``finalize`` on its local
+        (kinds: ``"batch"``, ``"stop"``),
+      - runs ``process_many`` / ``process_one`` on its local
         operator instance, and
       - pushes :class:`RunnerResult` objects onto the shared ``result_queue``.
 
@@ -378,20 +373,14 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
     can re-establish the same logical stream a single-threaded run would
     produce when the operator determinism constraints are satisfied.
 
-    IPC batching
-    ------------
+    Invocation boundaries
+    ---------------------
 
-    Sending very small micro-batches across process boundaries can be
-    inefficient.  To amortize IPC overhead, the runner can further partition
-    or coalesce micro-batches before they are shipped to workers:
-
-    * ``ipc_batch_size_factor`` controls how the effective IPC batch size is
-      derived from the buffering hints of the first operator in the stage
-      (see :meth:`_derive_ipc_batch_size`).
-    * :meth:`_dispatch_ipc_batches` breaks large logical micro-batches into
-      smaller chunks tuned for the worker pool and the underlying queue
-      implementation, while still preserving the seq-based ordering guarantees
-      enforced by :class:`ConcurrentStageRunner`.
+    Invocation boundaries are defined by the operator's accumulator, which
+    runs on the pump thread. The runner sends each ready batch from the
+    accumulator to workers without further splitting or chunking. This ensures
+    that Thread and Process runners execute identical batch boundaries for
+    deterministic execution.
 
     Context services and remote calls
     ---------------------------------
@@ -444,8 +433,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
       feeder thread (:meth:`_start_direct_ipc_feeder`) drives buffering and
       scheduling for that operator directly.
     * It calls :meth:`BaseOperatorState.enqueue` to apply buffering, dispatches
-      IPC batches to workers, and drives result draining and finalization
-      itself (:meth:`_drain_until_idle`, :meth:`_finalize_state`).
+      IPC batches to workers, and drives result draining itself via
+      :meth:`_drain_until_idle`.
     * This reduces coordination overhead for the common case of a single
       heavy operator running fully in separate processes.
 
@@ -478,7 +467,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         *,
         prefetch_capacity: int = 0,
         queue_capacity: int = 4,
-        ipc_batch_size_factor: int = 2,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
@@ -487,8 +475,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         mp_context: BaseContext | None = None,
     ) -> None:
         self._queue_capacity = max(1, queue_capacity)
-        self._ipc_batch_size_factor = max(1, int(ipc_batch_size_factor))
-        self._ipc_batch_size = self._derive_ipc_batch_size(stage)
         ctx = mp_context or mp.get_context("spawn")
         self._mp_context: BaseContext = ctx
         # Use SafeSemLock for coordinated cleanup in free-threaded Python
@@ -592,31 +578,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 q.cancel_join_thread()
             except Exception:
                 pass
-
-    def _derive_ipc_batch_size(self, stage: Stage) -> int:
-        fallback = 128
-        if not stage.nodes:
-            return fallback
-        first = stage.nodes[0]
-        buffering = None
-        try:
-            buffering = first.op.buffering()
-        except Exception:
-            buffering = None
-        if buffering is None:
-            return fallback
-        max_batch = getattr(buffering, "max_batch", None)
-        if max_batch is None:
-            return fallback
-        try:
-            base = int(max(1, int(max_batch)))
-        except Exception:
-            return fallback
-        factor = max(1, int(self._ipc_batch_size_factor))
-        size = base * factor
-        if size <= 0:
-            return 1
-        return size
 
     def _make_operator_state(
         self,
@@ -737,9 +698,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 self._dispatch_ipc_batches(state, ready, context)
 
                 self._drain_until_idle(state, context)
-                tail = self._finalize_state(state, context, None)
-                if tail:
-                    self._emit_downstream(tail, None, context)
             except BaseException as exc:  # noqa: BLE001
                 self._record_error(context, exc)
             finally:
@@ -755,18 +713,32 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         ready: list[tuple[list[RunnerStreamIn], int]],
         context: ConcurrentRunContext,
     ) -> None:
+        """Dispatch ready batches to workers without splitting.
+
+        Invocation boundaries are defined by the operator's accumulator.
+        Each ready batch is sent to workers as-is to ensure deterministic
+        execution across Thread and Process runners.
+
+        This method is only used for single-operator stages using the direct
+        IPC path (see _spawn_ipc_feeder). For single-operator stages, there is
+        no next operator, so next_queue=None is passed to _drain_results,
+        which causes results to go directly to the stage output queue.
+        Multi-operator stages use _operator_loop which calculates the correct
+        next_queue via _next_queue_for.
+        """
         if not ready:
             return
         for batch, wait_ns in ready:
             if not batch:
                 continue
-            self._schedule_chunked_batch(
+            self._schedule_batch(
                 state,
                 batch,
                 wait_ns=wait_ns,
                 context=context,
-                next_queue=None,
             )
+            # next_queue=None: results go to stage output (correct for single-op stages)
+            self._drain_results(state, None, context)
 
     def _next_queue_for(
         self, state: _ProcessOperatorState
@@ -775,32 +747,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         if next_index < len(self.ops):
             return self.ops[next_index].input_queue
         return None
-
-    def _schedule_chunked_batch(
-        self,
-        state: _ProcessOperatorState,
-        batch: list[RunnerStreamIn],
-        *,
-        wait_ns: int,
-        context: ConcurrentRunContext,
-        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
-    ) -> None:
-        if not batch or context.stop_event.is_set():
-            return
-        size = self._ipc_batch_size
-        start = 0
-        while start < len(batch):
-            chunk = batch[start : start + size]
-            if not chunk:
-                break
-            self._schedule_worker_batch(
-                state,
-                chunk,
-                wait_ns=wait_ns,
-                context=context,
-            )
-            self._drain_results(state, next_queue, context)
-            start += size
 
     def _drain_until_idle(
         self,
@@ -1156,33 +1102,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         wait_ns: int,
         context: ConcurrentRunContext,
     ) -> None:
-        if not batch or context.stop_event.is_set():
-            return
-        if not self._single_op_direct_ipc and len(self.ops) > 1 and state.op_index == 0:
-            next_queue = self._next_queue_for(state)
-            self._schedule_chunked_batch(
-                state,
-                batch,
-                wait_ns=wait_ns,
-                context=context,
-                next_queue=next_queue,
-            )
-            return
-        self._schedule_worker_batch(
-            state,
-            batch,
-            wait_ns=wait_ns,
-            context=context,
-        )
+        """Schedule a batch for worker execution without splitting.
 
-    def _schedule_worker_batch(
-        self,
-        state: _ProcessOperatorState,
-        batch: list[RunnerStreamIn],
-        *,
-        wait_ns: int,
-        context: ConcurrentRunContext,
-    ) -> None:
+        Invocation boundaries are defined by the operator's accumulator.
+        Each batch is sent to workers as-is.
+        """
         if not batch or context.stop_event.is_set():
             return
         seq = state.next_seq
@@ -1242,37 +1166,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # _join_threads completes, allowing _shutdown_workers to run concurrently.
         state.inflight.try_decrement()
         super()._handle_result(state, result, next_queue, context)
-
-    def _finalize_state(
-        self,
-        state: _ProcessOperatorState,
-        context: ConcurrentRunContext,
-        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
-    ) -> Microbatch:
-        outputs: Microbatch = []
-        task_queue = state.task_queue
-        if task_queue is None:
-            return outputs
-        worker_count = len(state.workers)
-        for _ in range(worker_count):
-            seq = state.next_seq
-            state.next_seq += 1
-            command = _WorkerCommand(
-                kind="finalize",
-                seq=seq,
-                batch=[],
-                wait_ns=0,
-                consumed_elements=0,
-                consumed_bytes=0,
-                queue_depth_snapshot=-1,
-                collect_metrics=False,
-            )
-            self._send_command(task_queue, command, state=state, context=context)
-            result = self._wait_for_result(state, seq, context, next_queue)
-            if result.payload:
-                outputs.extend(result.payload)
-            self._ack_result(state, result, context)
-        return outputs
 
     def _wait_for_result(
         self,

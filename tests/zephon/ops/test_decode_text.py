@@ -60,9 +60,18 @@ def test_decode_process_many_matches_one_by_one() -> None:
     assert [r.payload["text"] for r in bulk] == [r.payload["text"] for r in seq]
 
 
-def test_decode_traits_and_default_buffering() -> None:
-    op = DecodeText()
+def test_decode_traits_and_default_accumulator() -> None:
+    op = DecodeText(max_batch=64, max_latency_ms=25)
     t = op.traits()
-    buf = op.buffering()
+
     assert t.indexable is True and t.parallelism == 2
-    assert buf is not None and buf.max_batch == 128 and buf.max_latency_ms == 2
+
+    # Test deterministic mode disables time-based flushing
+    acc_det = op.accumulator(deterministic=True)
+    assert acc_det._max_batch == 64
+    assert acc_det._max_latency_ms is None
+
+    # Test non-deterministic mode preserves latency config
+    acc_nondet = op.accumulator(deterministic=False)
+    assert acc_nondet._max_batch == 64
+    assert acc_nondet._max_latency_ms == 25

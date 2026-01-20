@@ -183,9 +183,6 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         pending: Sequence[RunnerStreamIn] = ()
         for state in self.ops:
             outputs = self._apply_operator_state(state, pending, force=True)
-            tail = state.finalize()
-            if tail:
-                outputs.extend(tail)
             pending = outputs
         return cast(Microbatch, pending)
 

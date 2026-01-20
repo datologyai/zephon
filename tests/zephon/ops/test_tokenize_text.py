@@ -477,12 +477,23 @@ def test_tokenizer_initializes_on_first_process() -> None:
     assert "input_ids" in payload
 
 
-def test_tokenizer_traits_and_default_buffering() -> None:
-    op = _setup(TokenizeText(tokenizer_id="__fallback__"))
+def test_tokenizer_traits_and_default_accumulator() -> None:
+    op = _setup(
+        TokenizeText(tokenizer_id="__fallback__", max_batch=48, max_latency_ms=15)
+    )
     t = op.traits()
-    buf = op.buffering()
+
     assert t.indexable is True and t.parallelism == 4
-    assert buf is not None and buf.max_batch == 64 and buf.max_latency_ms == 3
+
+    # Test deterministic mode disables time-based flushing
+    acc_det = op.accumulator(deterministic=True)
+    assert acc_det._max_batch == 48
+    assert acc_det._max_latency_ms is None
+
+    # Test non-deterministic mode preserves latency config
+    acc_nondet = op.accumulator(deterministic=False)
+    assert acc_nondet._max_batch == 48
+    assert acc_nondet._max_latency_ms == 15
 
 
 # --- Performance & Optimization Tests ---

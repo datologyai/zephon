@@ -24,8 +24,8 @@ def test_shuffle_buffer_is_deterministic() -> None:
     op1.setup(ctx, 0, "s", 0, False)
     op2.setup(ctx, 0, "s", 0, False)
 
-    out1 = op1.process_many(recs1) + op1.finalize()
-    out2 = op2.process_many(recs2) + op2.finalize()
+    out1 = op1.process_many(recs1)
+    out2 = op2.process_many(recs2)
 
     assert [r.meta.cursor for r in out1] == [r.meta.cursor for r in out2]
     assert [r.meta.cursor for r in out1] != original_order

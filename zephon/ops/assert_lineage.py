@@ -5,12 +5,13 @@
 
 from collections import defaultdict
 
+from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import SampleBatch, SampleCursor, SampleRecord, StreamItem
-from zephon.core.op_base import DefaultFinalize, DefaultSetup
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup
+from zephon.core.traits import OpTraits
 
 
-class AssertLineageOrder(DefaultSetup, DefaultFinalize[StreamItem]):
+class AssertLineageOrder(DefaultSetup):
     """Verifies that records for each lane arrive in strictly increasing order.
 
     This operator is intended for debugging pipelines that use fan-out or complex
@@ -26,8 +27,8 @@ class AssertLineageOrder(DefaultSetup, DefaultFinalize[StreamItem]):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True)
 
-    def buffering(self) -> Buffering | None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[StreamItem]:
+        return PassthroughAccumulator[StreamItem]()
 
     def _check_cursor(self, lane: int, cursor: SampleCursor) -> None:
         last = self._last_per_lane[lane]

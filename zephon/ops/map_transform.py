@@ -6,14 +6,15 @@
 import logging
 from typing import Callable, Optional
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import SamplePayload, SampleRecord
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, OpContext
+from zephon.core.traits import OpTraits
 
 log = logging.getLogger(__name__)
 
 
-class MapTransform(DefaultSetup, DefaultFinalize[SampleRecord]):
+class MapTransform(DefaultSetup):
     """Apply a transformation function to each sample's payload.
 
     This operator supports lightweight per-sample transformations on the entire payload.
@@ -52,7 +53,8 @@ class MapTransform(DefaultSetup, DefaultFinalize[SampleRecord]):
         transform_fn: Callable[[SamplePayload], SamplePayload | None],
         *,
         drop_none: bool = True,
-        buffering: Optional[Buffering] = None,
+        max_batch: int = 64,
+        max_latency_ms: Optional[int] = 3,
     ) -> None:
         DefaultSetup.__init__(self)
 
@@ -60,7 +62,8 @@ class MapTransform(DefaultSetup, DefaultFinalize[SampleRecord]):
             raise TypeError("transform_fn must be callable")
         self.transform_fn = transform_fn
         self.drop_none = drop_none
-        self._buffering = buffering or Buffering(max_batch=64, max_latency_ms=3)
+        self._max_batch = max_batch
+        self._max_latency_ms = max_latency_ms
 
     def setup(
         self,
@@ -75,8 +78,11 @@ class MapTransform(DefaultSetup, DefaultFinalize[SampleRecord]):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return CountingAccumulator[SampleRecord](
+            max_batch=self._max_batch,
+            max_latency_ms=None if deterministic else self._max_latency_ms,
+        )
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         """Transform a single sample.

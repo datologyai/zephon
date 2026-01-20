@@ -7,9 +7,10 @@ from tests.zephon.runners._helpers import (
     _mk_record,
     _mk_records,
 )
+from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import SampleRecord
 from zephon.core.graph import Node, Stage
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, Op
+from zephon.core.op_base import DefaultSetup, Op
 from zephon.core.traits import OpTraits
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
@@ -143,7 +144,7 @@ def test_passthrough_stage_forwards_stream() -> None:
 
 
 @dataclass
-class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
+class _IdentityOp(DefaultSetup, Op[Any, Any]):
     """Simple identity operator used for observability tests."""
 
     name: str = "identity"
@@ -159,8 +160,8 @@ class _IdentityOp(DefaultSetup, DefaultFinalize[Any], Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def buffering(self) -> None:
-        return None
+    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+        return PassthroughAccumulator[Any]()
 
     def process_one(self, elem: Any) -> list[Any]:
         return [elem]

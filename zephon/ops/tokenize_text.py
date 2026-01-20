@@ -31,6 +31,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.children import spawn_child
 from zephon.core.constants import (
     SampleMeta,
@@ -38,8 +39,8 @@ from zephon.core.constants import (
     SamplePayloadDict,
     SampleRecord,
 )
-from zephon.core.op_base import DefaultFinalize, DefaultSetup, OpContext
-from zephon.core.traits import Buffering, OpTraits
+from zephon.core.op_base import DefaultSetup, OpContext
+from zephon.core.traits import OpTraits
 from zephon.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
     _gil_disabled,
@@ -110,7 +111,7 @@ def _prep_env() -> None:
         pass
 
 
-class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
+class TokenizeText(DefaultSetup):
     """Tokenize text fields using a provided or auto-resolved tokenizer."""
 
     def __init__(
@@ -126,7 +127,8 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         return_tensors: str | None = None,
         split_long_samples: bool = False,
         use_fast: bool | None = True,
-        buffering: Optional[Buffering] = None,
+        max_batch: int = 64,
+        max_latency_ms: Optional[int] = 3,
         preserve_upstream_payload: bool = False,
     ) -> None:
         DefaultSetup.__init__(self)
@@ -147,7 +149,8 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
         self.split_long_samples = split_long_samples
         self.use_fast = use_fast
         self.preserve_upstream_payload = preserve_upstream_payload
-        self._buffering = buffering or Buffering(max_batch=64, max_latency_ms=3)
+        self._max_batch = max_batch
+        self._max_latency_ms = max_latency_ms
         self._warned_non_mapping = False
         self._warned_preserve_non_mapping = False
         # Cache kwargs to avoid building dict per batch
@@ -243,8 +246,11 @@ class TokenizeText(DefaultSetup, DefaultFinalize[SampleRecord]):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def buffering(self) -> Optional[Buffering]:
-        return self._buffering
+    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+        return CountingAccumulator[SampleRecord](
+            max_batch=self._max_batch,
+            max_latency_ms=None if deterministic else self._max_latency_ms,
+        )
 
     def _extract_text(self, payload: SamplePayload) -> tuple[str, SamplePayloadDict]:
         if isinstance(payload, dict):
