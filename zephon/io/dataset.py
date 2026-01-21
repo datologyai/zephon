@@ -115,6 +115,8 @@ def _auto_detect_format(
             return "jsonl"
         if any(name.endswith(".vortex") for name in entries):
             return "vortex"
+        if any(name.endswith(".parquet") for name in entries):
+            return "parquet"
         index_uri = str(index_file)
     else:
         base = root_str.rstrip("/")
@@ -134,6 +136,8 @@ def _auto_detect_format(
             return "jsonl"
         if any(name.endswith(".vortex") for name in entries):
             return "vortex"
+        if any(name.endswith(".parquet") for name in entries):
+            return "parquet"
         return None
 
     if storage.exists(index_uri):
@@ -161,5 +165,14 @@ def _classify_index_payload(data: Any) -> str:
         if "chunks" in data and "config" in data:
             return "litdata"
         if "shards" in data:
+            # Could be MDS, Parquet, or Vortex index
+            # Check if shards have Parquet-specific fields in extra
+            shards = data.get("shards", [])
+            if shards:
+                first_shard = shards[0] if isinstance(shards, list) else shards.get(0)
+                if isinstance(first_shard, dict):
+                    extra = first_shard.get("extra", {})
+                    if isinstance(extra, dict) and "row_groups" in extra:
+                        return "parquet"
             return "mds"
     return "mds"
