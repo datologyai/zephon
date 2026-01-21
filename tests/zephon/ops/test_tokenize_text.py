@@ -11,6 +11,7 @@ import pytest
 from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.op_base import OpContext
 from zephon.ops.tokenize_text import TokenizeText
+from zephon.utils.torch_compat import _should_use_tensor_lock
 
 
 def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
@@ -171,7 +172,13 @@ def test_tokenize_passes_extra_hf_options() -> None:
     assert kwargs["padding"] is True
     assert kwargs["truncation"] is True
     assert kwargs["max_length"] == 4
-    assert kwargs["return_tensors"] == "pt"
+    # On free-threaded Python with PyTorch < 2.10, we request numpy from the HF
+    # tokenizer and convert to pytorch ourselves under a lock to avoid an allocator
+    # race condition. The user still gets pytorch tensors, but the kwargs passed
+    # to the tokenizer have return_tensors="np" internally.
+    # See: https://github.com/pytorch/pytorch/issues/171992
+    expected_return_tensors = "np" if _should_use_tensor_lock() else "pt"
+    assert kwargs["return_tensors"] == expected_return_tensors
 
 
 def test_fallback_respects_padding_and_truncation_options() -> None:

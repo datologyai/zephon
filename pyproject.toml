@@ -54,6 +54,7 @@ cloud = [
 litdata = [
     "optree",
     "zstandard",
+    "zstd",
     "litdata"
 ]
 streaming = [

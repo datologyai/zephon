@@ -15,7 +15,7 @@ jobs:
   unit:
     name: Unit Tests
     timeout-minutes: 20
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't')) && 'LargeGithubRunner' || 'ubuntu-latest' }}
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     strategy:
@@ -27,15 +27,35 @@ jobs:
       with:
         python-version: ${{ matrix.python_version }}
         allow-prereleases: true
+        freethreaded: ${{ endsWith(matrix.python_version, 't') }}
     - uses: astral-sh/setup-uv@v6
       with:
         version: "0.8.17"
+    - name: Restore venv cache for slow builds
+      if: startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't')
+      uses: actions/cache/restore@v4
+      with:
+        path: .venv
+        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
     - name: Setup
       run: |
         set -ex
-        uv sync --group dev --group test --all-extras
+        if [[ "${{ matrix.python_version }}" == *"t" ]]; then
+          # Free-threaded Python: skip test group (mosaicml-streaming->cryptography doesn't support 3.14t)
+          # Install only compatible extras and essential test deps
+          uv sync --python ${{ matrix.python_version }} --group dev --extra parquet --extra cloud-s3 --extra cloud-gcs --extra litdata
+          uv pip install pytest pytest-timeout
+        else
+          uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras
+        fi
     - name: Run Unit Tests
       run: |
         set -ex
-        uv run pytest -m "not integration" --maxfail=10
-  
+        uv run --python ${{ matrix.python_version }} pytest -m "not integration" --maxfail=10
+    - name: Save venv cache for slow builds
+      if: always() && (startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't'))
+      uses: actions/cache/save@v4
+      with:
+        path: .venv
+        key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+
