@@ -52,14 +52,13 @@ cloud = [
     "zephon[cloud-gcs]",
 ]
 litdata = [
+    "litdata",
     "optree",
-    "zstandard",
     "zstd",
-    "litdata"
 ]
 streaming = [
     "mosaicml-streaming",
-    "zstandard",
+    "zstd",
 ]
 mosaic = [
     "zephon[streaming]",
@@ -79,7 +78,7 @@ dev = [
 test = [
     "pytest>=8.0.0",
     "mosaicml-streaming>=0.13.0",
-    "zstandard>=0.22.0",
+    "zstd>=1.5.0",
     "litdata>=0.2.0",
     "optree>=0.12.0",
     "pillow>=10.0.0",

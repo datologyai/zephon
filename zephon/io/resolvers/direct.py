@@ -90,20 +90,18 @@ class DirectResolver(ShardResolver):
         compression = compression_name.lower()
         if compression.startswith("zstd"):
             try:
-                import zstandard as zstd
+                import zstd
             except ImportError as exc:
                 raise RuntimeError(
-                    "Resolving compressed shards requires the 'zstandard' package"
+                    "Resolving compressed shards requires the 'zstd' package"
                 ) from exc
 
             retryable_exceptions: tuple[type[BaseException], ...] = (
                 _RetryableValidationError,
                 OSError,
                 IOError,
-                zstd.ZstdError,
+                Exception,  # zstd raises generic exceptions
             )
-
-            decompressor = zstd.ZstdDecompressor()
 
             retrying = Retrying(
                 stop=stop_after_attempt(3),
@@ -119,9 +117,10 @@ class DirectResolver(ShardResolver):
                     prefix=f".{raw_path.name}.tmp-",
                 )
                 try:
+                    compressed = zip_path.read_bytes()
+                    decompressed = zstd.decompress(compressed)
                     with temp_file:
-                        with zip_path.open("rb") as src:
-                            decompressor.copy_stream(src, temp_file)
+                        temp_file.write(decompressed)
                     os.replace(temp_file.name, raw_path)
                 finally:
                     with suppress(FileNotFoundError):

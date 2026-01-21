@@ -30,10 +30,10 @@ try:  # LZ4 is optional
 except Exception:
     lz4frame = None
 
-try:  # Zstandard is optional
-    import zstandard as zstandard
+try:  # zstd is optional
+    import zstd as zstd_mod
 except Exception:
-    zstandard = None
+    zstd_mod = None
 
 _CACHE_LOCK_FILENAME = ".cache.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
@@ -332,16 +332,13 @@ class CacheManager(ShardResolver):
 
             opener = _open_lzma
         elif algo in {"zst", "zstd", "zstandard"}:
-            zstd_mod = zstandard
             if zstd_mod is None:
-                raise RuntimeError(
-                    "zstandard compression requires the 'zstandard' package"
-                )
+                raise RuntimeError("zstd compression requires the 'zstd' package")
 
             def _open_zstd(p: Path) -> BinaryIO:
-                fh = p.open("rb")
-                rdr = zstd_mod.ZstdDecompressor().stream_reader(fh)
-                return cast(BinaryIO, io.BufferedReader(rdr))
+                compressed = p.read_bytes()
+                decompressed = zstd_mod.decompress(compressed)
+                return cast(BinaryIO, io.BytesIO(decompressed))
 
             opener = _open_zstd
         elif algo in {"lz4"}:

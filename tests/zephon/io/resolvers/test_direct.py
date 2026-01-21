@@ -91,16 +91,12 @@ def test_direct_resolver_decompresses_zstd_when_missing_raw(
     raw_path = tmp_path / "shard.raw"
 
     class _Zstd:
-        class ZstdError(Exception):
-            pass
+        @staticmethod
+        def decompress(data):
+            # Our stub just returns verbatim, good enough for the test
+            return data
 
-        class ZstdDecompressor:
-            def copy_stream(self, src, dst):
-                data = src.read()
-                # Our stub just copies verbatim, good enough for the test
-                dst.write(data)
-
-    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=zip_path.stat().st_size, hashes={})
     loc = _mk_locator(
@@ -164,15 +160,12 @@ def test_direct_resolver_reprepares_empty_raw(
     attempts = {"count": 0}
 
     class _Zstd:
-        class ZstdError(Exception):
-            pass
+        @staticmethod
+        def decompress(data):
+            attempts["count"] += 1
+            return data
 
-        class ZstdDecompressor:
-            def copy_stream(self, src, dst):
-                attempts["count"] += 1
-                dst.write(src.read())
-
-    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(
@@ -201,19 +194,15 @@ def test_direct_resolver_retries_until_success(
     attempts = {"count": 0}
 
     class _Zstd:
-        class ZstdError(Exception):
-            pass
+        @staticmethod
+        def decompress(data):
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                # simulate a broken decompression that returns nothing
+                return b""
+            return data
 
-        class ZstdDecompressor:
-            def copy_stream(self, src, dst):
-                attempts["count"] += 1
-                data = src.read()
-                if attempts["count"] < 3:
-                    # simulate a broken decompression that writes nothing
-                    return
-                dst.write(data)
-
-    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(
@@ -243,16 +232,13 @@ def test_direct_resolver_retry_exhaustion_raises(
     attempts = {"count": 0}
 
     class _Zstd:
-        class ZstdError(Exception):
-            pass
+        @staticmethod
+        def decompress(data):
+            attempts["count"] += 1
+            # Always return nothing, triggering validation failure
+            return b""
 
-        class ZstdDecompressor:
-            def copy_stream(self, src, dst):
-                attempts["count"] += 1
-                # Always write nothing, triggering validation failure
-                src.read()
-
-    monkeypatch.setitem(sys.modules, "zstandard", _Zstd)
+    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(
