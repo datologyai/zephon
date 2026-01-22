@@ -138,12 +138,14 @@ class ConcurrentOperatorState(BaseOperatorState):
     emit_seq: int = field(init=False, default=0)
     pending_results: dict[int, RunnerResult] = field(init=False, default_factory=dict)
     inflight: _InflightCounter = field(init=False)
+    pending_puts: _InflightCounter = field(init=False)
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
     result_queue: _QueueLike[RunnerResult] = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.inflight = _InflightCounter()
+        self.pending_puts = _InflightCounter()
 
 
 @dataclass(slots=True)
@@ -452,9 +454,15 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 if upstream_closed:
                     if (
                         state.inflight.is_zero()
+                        and state.pending_puts.is_zero()
                         and (not state.pending_results or context.error is not None)
                         and not state.accumulator_impl.has_pending_data()
                     ):
+                        # Final drain to catch results that arrived after the loop's drain.
+                        # This handles the race where a worker completes put_result() and
+                        # decrements pending_puts between our drain and this check.
+                        self._drain_results(state, next_queue, context)
+
                         # In the error case, we don't wait for missing seq gaps.
                         if context.error is not None:
                             # Use list() to snapshot: other threads may still modify pending_results.

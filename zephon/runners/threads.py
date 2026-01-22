@@ -325,9 +325,16 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
                 result = None
                 proc_ns = 0
 
-            # Put result BEFORE decrementing inflight to avoid race on free-threaded Python
-            # where pump sees inflight=0 and stops before result is queued. This serializes
-            # put_result with release_instance; a pending_puts counter could decouple them.
+            # Release worker capacity early to reduce idle time during backpressure.
+            # Increment pending_puts BEFORE decrementing inflight to prevent race where
+            # pump sees both counters at zero before put completes.
+            state.release_instance(instance)
+            should_put = result is not None and (result or state.deterministic)
+            if should_put:
+                state.pending_puts.increment()
+            state.inflight.decrement()
+
+            # Enqueue result (tracked by pending_puts for termination safety)
             if result is not None:
                 collect_stats = self._tracking_mode.collects_nodes
                 payload = RunnerResult(
@@ -341,16 +348,14 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
                     collect_metrics=collect_stats,
                 )
 
-                # Special-case: non-deterministic + empty payload:
-                if not result and not state.deterministic:
-                    if collect_stats:
-                        # Record metrics directly, don't go through result_queue to avoid backpressure just for stats
-                        self._record_result_metrics(state, payload)
-                else:
-                    self._put_result(state, payload, context)
-
-            state.release_instance(instance)
-            state.inflight.decrement()
+                if should_put:
+                    try:
+                        self._put_result(state, payload, context)
+                    finally:
+                        state.pending_puts.decrement()
+                elif collect_stats:
+                    # Non-deterministic + empty payload: record metrics only
+                    self._record_result_metrics(state, payload)
 
         future.add_done_callback(done_callback)
 

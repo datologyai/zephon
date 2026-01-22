@@ -754,7 +754,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         context: ConcurrentRunContext,
     ) -> None:
         while True:
-            if state.inflight.is_zero() and not state.pending_results:
+            if (
+                state.inflight.is_zero()
+                and state.pending_puts.is_zero()
+                and not state.pending_results
+            ):
                 break
             if context.stop_event.is_set():
                 # Shutdown requested; don't wait forever for dead workers.
