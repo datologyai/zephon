@@ -61,8 +61,13 @@ def buffered_iterable(
     ``buffered_iterable`` **does not** forcibly interrupt a running ``next()`` on
     ``source`` from another thread (Python cannot preempt that safely). Instead,
     when the consumer stops it will:
-      1) call ``on_stop()`` (if provided), then
-      2) signal an internal stop event.
+      1) signal an internal stop event,
+      2) drain the queue to unblock the producer,
+      3) join the producer thread (with timeout), then
+      4) call ``on_stop()`` (if provided).
+
+    This ordering ensures ``on_stop`` can safely close generator sources without
+    racing with the producer thread (important for free-threaded Python / no GIL).
 
     **Contract:** If ``source`` can be unbounded, may block, or owns resources
     that must be released (e.g., a generator with a ``finally:`` block, network
@@ -147,6 +152,8 @@ def buffered_iterable(
     def producer() -> None:
         try:
             for item in source_iter:
+                if stop_event.is_set():
+                    break
                 while not stop_event.is_set():
                     try:
                         q.put(item, timeout=1)
@@ -181,19 +188,25 @@ def buffered_iterable(
                     break
                 yield cast(T, item)
         finally:
-            # 1) Cancel upstream *before* we try to join the producer thread.
-            if on_stop is not None:
-                on_stop()
+            # 1) Signal producer to stop and drain queue to unblock it.
             stop_event.set()
-
-            # 2) Free space (if producer was in q.put) and don’t block forever.
             try:
                 while True:
                     q.get_nowait()
             except queue.Empty:
                 pass
 
+            # 2) Wait for producer to exit before calling on_stop. This avoids
+            #    a race condition in free-threaded Python (no GIL) where calling
+            #    generator.close() from on_stop while the producer is still
+            #    iterating the generator raises "ValueError: generator already
+            #    executing".
             thread.join(timeout=1.0)
+
+            # 3) Now safe to run cleanup - producer has exited (or timed out).
+            if on_stop is not None:
+                on_stop()
+
             if exc_holder:
                 raise exc_holder[0]
 
