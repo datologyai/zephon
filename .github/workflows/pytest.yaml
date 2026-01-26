@@ -49,6 +49,9 @@ jobs:
           uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras
         fi
     - name: Run Unit Tests
+      env:
+        # Enforce GIL-disabled mode on free-threaded Python to catch threading issues
+        PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
       run: |
         set -ex
         uv run --python ${{ matrix.python_version }} pytest -m "not integration" --maxfail=10
