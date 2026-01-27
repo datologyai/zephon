@@ -17,6 +17,19 @@ def _rec(
     return SampleRecord(meta=meta, payload={"value": i, "length": length, **payload})
 
 
+def _rec_tokens(
+    i: int,
+    tokens: list[int] | int,
+    *,
+    field: str = "input_ids",
+    lane: int = 0,
+    chunk: int = 0,
+) -> SampleRecord:
+    """Create a sample record with a token field for auto-detection tests."""
+    meta = SampleMeta(sample_id=(0, 0, i), lane_id=lane, chunk_id=chunk)
+    return SampleRecord(meta=meta, payload={"value": i, field: tokens})
+
+
 def _simple_length_fn(rec: SampleRecord) -> int:
     """Simple length function for tests."""
     payload = rec.payload
@@ -368,3 +381,242 @@ def test_packing_accumulator_num_bins_limit() -> None:
     # Flush remaining
     tail = acc.flush()
     assert len(tail) == 2  # bin2 and bin3
+
+
+# ---------------------------------------------------------------------------
+# Tests for "auto" length detection (length_fn="auto")
+# ---------------------------------------------------------------------------
+
+
+def test_pack_sequences_auto_length_with_input_ids() -> None:
+    """Test auto-detection with input_ids field."""
+    op = PackSequences(max_length=10, num_bins=10)  # default is "auto"
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Create records with input_ids field (list of tokens)
+    records = [
+        _rec_tokens(0, [1, 2, 3, 4, 5], field="input_ids"),  # length 5
+        _rec_tokens(1, [1, 2, 3, 4, 5], field="input_ids"),  # length 5
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (5 + 5 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_auto_length_with_tokens() -> None:
+    """Test auto-detection with tokens field."""
+    op = PackSequences(max_length=10, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    records = [
+        _rec_tokens(0, [1, 2, 3], field="tokens"),  # length 3
+        _rec_tokens(1, [1, 2, 3, 4, 5, 6, 7], field="tokens"),  # length 7
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (3 + 7 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_auto_length_with_token_ids() -> None:
+    """Test auto-detection with token_ids field."""
+    op = PackSequences(max_length=10, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    records = [
+        _rec_tokens(0, [1, 2, 3, 4], field="token_ids"),  # length 4
+        _rec_tokens(1, [1, 2, 3, 4, 5, 6], field="token_ids"),  # length 6
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (4 + 6 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_auto_length_with_ids() -> None:
+    """Test auto-detection with ids field."""
+    op = PackSequences(max_length=10, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    records = [
+        _rec_tokens(0, [1, 2], field="ids"),  # length 2
+        _rec_tokens(1, [1, 2, 3, 4, 5, 6, 7, 8], field="ids"),  # length 8
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (2 + 8 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_auto_length_priority_order() -> None:
+    """Test that input_ids takes priority over tokens when both present."""
+    op = PackSequences(max_length=10, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Record has both input_ids (length 5) and tokens (length 3)
+    # Should use input_ids since it has higher priority
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    record = SampleRecord(
+        meta=meta,
+        payload={
+            "input_ids": [1, 2, 3, 4, 5],  # length 5 - higher priority
+            "tokens": [1, 2, 3],  # length 3 - lower priority
+        },
+    )
+
+    # Add another record to fill the bin
+    meta2 = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    record2 = SampleRecord(
+        meta=meta2,
+        payload={"input_ids": [1, 2, 3, 4, 5]},  # length 5
+    )
+
+    ready = acc.push_many([record, record2])
+
+    # Should use input_ids length (5 + 5 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_auto_length_no_field_raises() -> None:
+    """Test that auto-detection raises when no token field found."""
+    op = PackSequences(max_length=10, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Record with no standard token fields
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    record = SampleRecord(
+        meta=meta,
+        payload={"text": "hello", "label": 1},  # no token fields
+    )
+
+    with pytest.raises(ValueError, match="Cannot auto-detect length field"):
+        acc.push_many([record])
+
+
+def test_pack_sequences_auto_length_with_int_value() -> None:
+    """Test auto-detection with pre-computed int length."""
+    op = PackSequences(max_length=100, num_bins=10)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Records with input_ids as int (pre-computed length)
+    records = [
+        _rec_tokens(0, 40, field="input_ids"),  # length 40
+        _rec_tokens(1, 60, field="input_ids"),  # length 60
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (40 + 60 = 100)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 100
+
+
+def test_pack_sequences_explicit_field_name() -> None:
+    """Test explicit field name (not auto-detection)."""
+    op = PackSequences(max_length=10, num_bins=10, length_fn="my_length")
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Records with custom field name
+    meta1 = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    meta2 = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    records = [
+        SampleRecord(meta=meta1, payload={"my_length": [1, 2, 3, 4]}),  # length 4
+        SampleRecord(meta=meta2, payload={"my_length": [1, 2, 3, 4, 5, 6]}),  # length 6
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (4 + 6 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_explicit_field_missing_raises() -> None:
+    """Test that explicit field name raises when field is missing."""
+    op = PackSequences(max_length=10, num_bins=10, length_fn="missing_field")
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    record = SampleRecord(meta=meta, payload={"input_ids": [1, 2, 3]})
+
+    with pytest.raises(ValueError, match="Field 'missing_field' not found"):
+        acc.push_many([record])
+
+
+def test_pack_sequences_callable_length_fn() -> None:
+    """Test callable length_fn still works."""
+
+    def custom_length_fn(rec: SampleRecord) -> int:
+        """Custom length function that uses 'size' field."""
+        payload = rec.payload
+        if isinstance(payload, dict):
+            return payload.get("size", 0)
+        return 0
+
+    op = PackSequences(max_length=10, num_bins=10, length_fn=custom_length_fn)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    meta1 = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    meta2 = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    records = [
+        SampleRecord(meta=meta1, payload={"size": 3}),
+        SampleRecord(meta=meta2, payload={"size": 7}),
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (3 + 7 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_callable_length_fn_with_lambda() -> None:
+    """Test lambda length_fn works."""
+    op = PackSequences(
+        max_length=10,
+        num_bins=10,
+        length_fn=lambda r: len(r.payload.get("data", [])),
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    meta1 = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    meta2 = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    records = [
+        SampleRecord(meta=meta1, payload={"data": [1, 2, 3, 4]}),  # length 4
+        SampleRecord(meta=meta2, payload={"data": [1, 2, 3, 4, 5, 6]}),  # length 6
+    ]
+    ready = acc.push_many(records)
+
+    # Should emit one full bin (4 + 6 = 10)
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+def test_pack_sequences_default_is_auto() -> None:
+    """Test that default length_fn is 'auto'."""
+    # Create operator without specifying length_fn
+    op = PackSequences(max_length=10, num_bins=10)
+
+    # Should work with standard token fields (input_ids)
+    acc = op.accumulator(deterministic=False, ctx={})
+    records = [
+        _rec_tokens(0, [1, 2, 3, 4, 5], field="input_ids"),
+        _rec_tokens(1, [1, 2, 3, 4, 5], field="input_ids"),
+    ]
+    ready = acc.push_many(records)
+
+    assert len(ready) == 1
+    packed = ready[0][0][0]
+    assert packed.meta.tags["_packing_metadata"]["total_length"] == 10

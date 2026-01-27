@@ -300,7 +300,7 @@ class Pipeline:
         self,
         max_length: int,
         num_bins: int,
-        length_fn: Callable[[SampleRecord], int] | str = "length",
+        length_fn: Callable[[SampleRecord], int] | Literal["auto"] | str = "auto",
         algorithm: Literal["first_fit", "best_fit"] = "first_fit",
         *,
         drop_oversized: bool = True,
@@ -318,8 +318,12 @@ class Pipeline:
         Args:
             max_length: Maximum length for packed bins.
             num_bins: Number of bins to maintain per lane.
-            length_fn: Function or field name to extract sequence length from a SampleRecord.
-                Can be a lambda function (e.g., lambda r: len(r.payload["tokens"])).
+            length_fn: How to extract sequence length. Options:
+                - "auto" (default): Auto-detect from common token fields
+                  (input_ids, tokens, token_ids, ids).
+                - Explicit field name (e.g., "input_ids"): Use that field.
+                - Callable: Custom function taking SampleRecord, returning int.
+                  Can be a lambda (e.g., lambda r: len(r.payload["tokens"])).
             algorithm: Packing algorithm to use ("first_fit" or "best_fit").
             drop_oversized: If True, drop sequences longer than max_length.
             shuffle_strategy: Strategy for ordering sequences before packing ("random", "length", or None).

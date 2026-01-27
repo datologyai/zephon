@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from collections.abc import Callable, Sized
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Sequence
 
@@ -16,6 +16,7 @@ from zephon.core.children import pack_meta
 from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
+from zephon.utils.length_extraction import extract_length
 from zephon.utils.seeding import batch_seed
 from zephon.utils.torch_compat import _tensor_lock_ctx
 
@@ -275,7 +276,7 @@ class PackSequences(DefaultSetup):
         self,
         max_length: int,
         num_bins: int,
-        length_fn: Callable[[SampleRecord], int] | str = "length",
+        length_fn: Callable[[SampleRecord], int] | Literal["auto"] | str = "auto",
         algorithm: Literal["first_fit", "best_fit"] = "first_fit",
         *,
         drop_oversized: bool = True,
@@ -290,7 +291,11 @@ class PackSequences(DefaultSetup):
         Args:
             max_length: Maximum length for packed bins.
             num_bins: Number of bins to maintain per lane.
-            length_fn: Function or field name to extract sequence length.
+            length_fn: How to extract sequence length. Options:
+                - "auto" (default): Auto-detect from common token fields
+                  (input_ids, tokens, token_ids, ids).
+                - Explicit field name (e.g., "input_ids"): Use that field.
+                - Callable: Custom function taking SampleRecord, returning int.
             algorithm: Packing algorithm ("first_fit" or "best_fit").
             drop_oversized: If True, drop sequences longer than max_length.
             min_sequence_length: Minimum expected sequence length.
@@ -317,53 +322,20 @@ class PackSequences(DefaultSetup):
         self.num_bins = num_bins
         self.flush_strategy = flush_strategy
 
-        # Set up length extraction function
-        if isinstance(length_fn, str):
-            self._length_field = length_fn
-            self.length_fn: Callable[[SampleRecord], int] = (
-                lambda r: self._get_length_from_field(r, self._length_field)
-            )
+        # Set up length extraction function using shared utility.
+        # "auto" = auto-detect, other string = explicit field, callable = custom.
+        if callable(length_fn):
+            self.length_fn: Callable[[SampleRecord], int] = length_fn
+        elif length_fn == "auto":
+            # Auto-detect token field from common candidates
+            self.length_fn = lambda r: extract_length(r, None)
         else:
-            self._length_field = None
-            self.length_fn = length_fn
+            # Explicit field name
+            _field = length_fn  # Capture for lambda
+            self.length_fn = lambda r, f=_field: extract_length(r, f)
 
         # Set up payload packing function
         self._pack_payloads_fn = self._resolve_pack_payloads_fn(pack_payloads)
-
-    def _get_length_from_field(self, record: SampleRecord, field: str) -> int:
-        """Extract length from a field in the payload."""
-        if not isinstance(record.payload, dict):
-            raise TypeError(
-                f"length_fn='{field}' requires payload to be a dict, got {type(record.payload)}"
-            )
-        value = record.payload.get(field)
-        if value is None:
-            raise ValueError(f"Field '{field}' not found in payload")
-
-        if isinstance(value, int):
-            return value
-
-        if hasattr(value, "item") and callable(value.item):
-            try:
-                return int(value.item())
-            except (TypeError, AttributeError):
-                pass
-
-        shape = getattr(value, "shape", None)
-        if shape is not None:
-            try:
-                if len(shape) > 0:
-                    return int(shape[0])
-            except (TypeError, AttributeError, IndexError):
-                pass
-
-        if isinstance(value, Sized):
-            return len(value)
-
-        raise TypeError(
-            f"Field '{field}' must be int, sequence-like, or tensor-like "
-            + f"for length extraction, got {type(value)}"
-        )
 
     def traits(self) -> OpTraits:
         return OpTraits(
