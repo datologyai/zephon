@@ -11,6 +11,7 @@ from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
+from zephon.utils.swrr import swrr_iterate
 from zephon.work.mixture import MixtureSpec
 
 MixtureComponent = str
@@ -222,79 +223,17 @@ class WorkChunk:
                 del weights[idx]
 
     def _emit_weighted_round_robin(self, buckets: list[_Bucket]) -> Iterator[SampleId]:
+        """Smooth Weighted Round Robin (SWRR) using shared implementation.
+
+        Delegates to swrr_iterate() which provides deterministic, proportional
+        emission matching target weights over time.
         """
-        Smooth Weighted Round Robin (SWRR), streaming.
-
-        Intuition:
-        - Each component 'c' has a fixed weight W[c].
-        - We maintain a score C[c] (starts at 0). On each step:
-            1) For all active c: C[c] += W[c]
-            2) Pick component k with maximum C[k] (ties → earlier component wins)
-            3) Emit one sample from k
-            4) C[k] -= sum(W[active])   # subtract *total* so k's score drops back
-
-        Properties:
-        - Over time, emits in proportion to weights.
-        - Deterministic given insertion order and inputs.
-        - O(N) work per emitted sample (N = #active components).
-
-        Edge cases:
-        - If a bucket runs out of items, we remove it and decrease the total weight.
-        - Floating point drift can make 'total' slightly negative; we clamp to 0.0.
-        - If total reaches 0 (e.g., only empty/removed weights remain), we just drain
-            the remaining iterators in insertion order.
-        """
-        # Filter/fast paths
-        active = [b for b in buckets if b.weight > 0.0]
-        if not active:
-            return
-        if len(active) == 1:
-            yield from active[0].items
-            return
-
-        # Stable tie-breaker: remember original order index
-        index = {b.name: i for i, b in enumerate(active)}
-
-        # Per-component state
-        weights = {b.name: float(b.weight) for b in active}
-        iters = {b.name: b.it for b in active}
-        current = {b.name: 0.0 for b in active}
-
-        total = sum(weights.values())
-        # (Should be > 0.0 because we filtered, assert defensively)
-        assert total > 0.0, "No positive weights in WRR"
-
-        while weights:
-            # 1) Everyone accrues their weight
-            for name in list(weights.keys()):
-                current[name] += weights[name]
-
-            # 2) Pick the argmax score; break ties by original order (smaller index wins)
-            chosen_name = max(weights.keys(), key=lambda n: (current[n], -index[n]))
-
-            # 3) Emit one item; reduce its score by the total
-            current[chosen_name] -= total
-            it = iters[chosen_name]
-            try:
-                yield next(it)
-                continue  # still active → next round
-            except StopIteration:
-                # 4) Exhausted: remove chosen bucket
-                w = weights.pop(chosen_name)
-                iters.pop(chosen_name, None)
-                current.pop(chosen_name, None)
-                total -= w
-
-                # Guard against tiny negative due to FP rounding
-                if total < 0.0:
-                    total = 0.0
-
-                # If no total weight left, just drain what's left linearly
-                if total == 0.0:
-                    for n in sorted(iters.keys(), key=lambda n: index[n]):
-                        for x in iters[n]:
-                            yield x
-                    break
+        for sample_id, _ in swrr_iterate(
+            components={b.name: b.items for b in buckets},
+            weights={b.name: b.weight for b in buckets},
+            order=[b.name for b in buckets],
+        ):
+            yield sample_id
 
     def state_dict(self) -> dict[str, Any]:
         """Portable, JSON-friendly snapshot of this chunk."""

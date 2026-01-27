@@ -128,7 +128,9 @@ def test_wrr_two_equal_components_alternate():
 
 
 def test_wrr_three_vs_one_simple_pattern():
-    # Counts: A=3, B=1 -> canonical pattern is A, A, B, A
+    # Counts: A=3, B=1 -> should emit 3 A's and 1 B in a balanced pattern
+    # Deficit-based SWRR produces: A, B, A, A
+    # (A has highest initial deficit at 0.75, after emitting A, B catches up)
     a = make_ids(0, 0, 3)
     b = make_ids(1, 0, 1)
     comps = {"A": a, "B": b}
@@ -139,7 +141,7 @@ def test_wrr_three_vs_one_simple_pattern():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg))
-    assert out == [a[0], a[1], b[0], a[2]]
+    assert out == [a[0], b[0], a[1], a[2]]
 
 
 def test_wrr_two_one_one_pattern():

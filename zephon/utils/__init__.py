@@ -18,6 +18,7 @@ from zephon.utils.gc import (
 )
 from zephon.utils.seeding import batch_seed
 from zephon.utils.semaphore import SafeSemLock
+from zephon.utils.swrr import SmoothWeightedRoundRobin, swrr_iterate
 
 __all__ = [
     "buffered_iterable",
@@ -31,4 +32,6 @@ __all__ = [
     "setup_faulthandler",
     "dump_all_threads",
     "ShutdownWatchdog",
+    "SmoothWeightedRoundRobin",
+    "swrr_iterate",
 ]
