@@ -693,6 +693,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                         continue
                     ready = state.enqueue(batch, force=False)
                     self._dispatch_ipc_batches(state, ready, context)
+                    # The for-loop calls next(upstream) before we can check stop_event,
+                    # and next() may block indefinitely. Check here to exit early.
+                    if context.stop_event.is_set():
+                        break
 
                 ready = state.enqueue([], force=True)
                 self._dispatch_ipc_batches(state, ready, context)
@@ -731,6 +735,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         for batch, wait_ns in ready:
             if not batch:
                 continue
+            if context.stop_event.is_set():
+                break
             self._schedule_batch(
                 state,
                 batch,
@@ -1048,8 +1054,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         By draining results, we release semaphores and allow workers to proceed.
         """
         retries = 0
-        max_retries = 10  # Limit retries to avoid infinite loops
-        while retries < max_retries:
+        max_retries = 10
+        warned = False
+        while block_on_exhaustion or retries < max_retries:
             try:
                 queue_.put(command, timeout=0.1)
                 return
@@ -1060,6 +1067,14 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 raise  # Re-raise if not in shutdown - this indicates a real bug
             except queue.Full:
                 retries += 1
+                if retries == max_retries and not warned:
+                    warned = True
+                    if command.kind != "batch":
+                        print(
+                            f"WARNING: Queue still full after {max_retries} retries "
+                            + f"with draining; will continue retrying. Command: {command}",
+                            file=sys.stderr,
+                        )
                 # If queue is full, workers may be blocked on semaphores
                 # Try draining results to release semaphores
                 if state is not None and context is not None:
@@ -1072,31 +1087,18 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                                 self._handle_result(state, item, next_queue, context)
                             except queue.Empty:
                                 break
+                        if context.stop_event.is_set():
+                            return
                     except Exception:
                         # If draining fails, continue retrying
                         pass
                 continue
-        if block_on_exhaustion:
-            # If we've exhausted retries, try one more time without timeout
-            # This will block indefinitely, but at least we tried to drain first
-            if command.kind != "batch":
-                print(
-                    f"WARNING: Queue still full after {max_retries} retries with draining. "
-                    + f"Falling back to blocking put() - this may indicate a deadlock. Command: {command}",
-                    file=sys.stderr,
-                )
-            try:
-                queue_.put(command)
-            except ValueError:
-                if self._workers_shutdown:
-                    return
-                raise
-        else:
-            print(
-                f"WARNING: Queue still full after {max_retries} retries with draining. "
-                + f"Skipping command {command}.",
-                file=sys.stderr,
-            )
+        # Only reached when block_on_exhaustion=False
+        print(
+            f"WARNING: Queue still full after {max_retries} retries with draining. "
+            + f"Skipping command {command}.",
+            file=sys.stderr,
+        )
 
     def _schedule_batch(
         self,
