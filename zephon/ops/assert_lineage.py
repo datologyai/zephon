@@ -4,6 +4,7 @@
 """Debug operators that help validate lineage ordering guarantees."""
 
 from collections import defaultdict
+from typing import Any
 
 from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import SampleBatch, SampleCursor, SampleRecord, StreamItem
@@ -27,7 +28,9 @@ class AssertLineageOrder(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[StreamItem]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[StreamItem]:
         return PassthroughAccumulator[StreamItem]()
 
     def _check_cursor(self, lane: int, cursor: SampleCursor) -> None:

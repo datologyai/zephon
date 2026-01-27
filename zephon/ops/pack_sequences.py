@@ -374,7 +374,9 @@ class PackSequences(DefaultSetup):
             preserves_cursor_order=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return PackingAccumulator(
             max_length=self.max_length,
             num_bins=self.num_bins,

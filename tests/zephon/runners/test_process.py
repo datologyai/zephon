@@ -115,7 +115,9 @@ class _IdentityOp(DefaultSetup, Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
     def process_one(self, elem: Any) -> list[Any]:
@@ -134,7 +136,9 @@ class _ValueMappingOp(DefaultSetup, Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
     def _rewrite(self, elem: SampleRecord) -> SampleRecord:
@@ -188,7 +192,9 @@ class _ServiceOp(DefaultSetup, Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
     def setup(
@@ -402,7 +408,9 @@ class _CrashOp(DefaultSetup, Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
     def process_many(self, elems: list[Any]) -> list[Any]:
@@ -451,7 +459,9 @@ class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return PassthroughAccumulator[SampleRecord]()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
@@ -506,7 +516,9 @@ class _ClosureOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return PassthroughAccumulator[SampleRecord]()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:

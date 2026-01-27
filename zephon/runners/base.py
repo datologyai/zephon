@@ -87,7 +87,8 @@ class BaseOperatorState:
 
         # Get accumulator from operator
         self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic
+            deterministic=self.deterministic,
+            ctx=base_ctx,
         )
 
     def reset_buffers(self) -> None:
@@ -97,7 +98,8 @@ class BaseOperatorState:
         persists across runs when a runner is reused.
         """
         self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic
+            deterministic=self.deterministic,
+            ctx=self.ctx_proto,
         )
 
     def enqueue(

@@ -55,7 +55,9 @@ class Op(Protocol[InT, OutT]):
 
     def traits(self) -> OpTraits: ...
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[InT]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[InT]:
         """Return the accumulator for this operator.
 
         The accumulator runs on the pump thread and defines invocation batch
@@ -66,6 +68,8 @@ class Op(Protocol[InT, OutT]):
         Args:
             deterministic: If True, the accumulator should disable any
                 non-deterministic behavior (e.g., time-based flushing).
+            ctx: Context dictionary containing runtime services (e.g., mixture
+                weights, dataset mappings, component ID lookups).
 
         Returns:
             An accumulator instance that will be used by the runner.

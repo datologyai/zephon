@@ -56,7 +56,7 @@ def test_pack_sequences_accumulator() -> None:
     op = PackSequences(
         max_length=10, length_fn="length", algorithm="first_fit", num_bins=5
     )
-    acc = op.accumulator(deterministic=False)
+    acc = op.accumulator(deterministic=False, ctx={})
 
     # Verify configuration is passed through correctly
     assert acc.max_length == 10

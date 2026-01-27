@@ -7,6 +7,8 @@ This operator runs immediately before batching (when present) or as the tail
 of the pipeline when no batching is used.
 """
 
+from typing import Any
+
 from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import LaneId, SampleCursor, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
@@ -54,7 +56,9 @@ class ReplayFilter(DefaultSetup):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return PassthroughAccumulator[SampleRecord]()
 
     def _init_replay(self) -> None:

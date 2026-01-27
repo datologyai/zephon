@@ -4,7 +4,7 @@
 """Batching operator for grouping sample records (lane-pure)."""
 
 from collections import defaultdict
-from typing import Sequence
+from typing import Any, Sequence
 
 from zephon.core.accumulators import Accumulator, ReadyBatch
 from zephon.core.constants import SampleBatch, SampleRecord
@@ -132,7 +132,9 @@ class Batch(DefaultSetup):
             parallelism=self._parallelism,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return BatchAccumulator(
             microbatch_size=self.microbatch_size,
             drop_last=self.drop_last,

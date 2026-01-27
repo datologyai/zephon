@@ -4,7 +4,7 @@
 """Map-style transformation operators for applying user-defined functions to samples."""
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import SamplePayload, SampleRecord
@@ -78,7 +78,9 @@ class MapTransform(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return CountingAccumulator[SampleRecord](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,

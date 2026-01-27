@@ -62,7 +62,9 @@ class _DeferFirstOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict
+    ) -> Accumulator[SampleRecord]:
         return _DeferringAccumulator()
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:

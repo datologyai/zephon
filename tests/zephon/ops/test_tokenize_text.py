@@ -493,12 +493,12 @@ def test_tokenizer_traits_and_default_accumulator() -> None:
     assert t.indexable is True and t.parallelism == 4
 
     # Test deterministic mode disables time-based flushing
-    acc_det = op.accumulator(deterministic=True)
+    acc_det = op.accumulator(deterministic=True, ctx={})
     assert acc_det._max_batch == 48
     assert acc_det._max_latency_ms is None
 
     # Test non-deterministic mode preserves latency config
-    acc_nondet = op.accumulator(deterministic=False)
+    acc_nondet = op.accumulator(deterministic=False, ctx={})
     assert acc_nondet._max_batch == 48
     assert acc_nondet._max_latency_ms == 15
 

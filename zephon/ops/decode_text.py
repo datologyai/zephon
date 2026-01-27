@@ -37,7 +37,9 @@ class DecodeText(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=2)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return CountingAccumulator[SampleRecord](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,

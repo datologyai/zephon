@@ -9,7 +9,7 @@ local index within its shard so that delays are deterministic and bounded.
 """
 
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import SampleRecord, StreamItem
@@ -35,7 +35,9 @@ class DelayById(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=8)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[StreamItem]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[StreamItem]:
         return CountingAccumulator[StreamItem](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,

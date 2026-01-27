@@ -3,7 +3,7 @@
 
 """Operators that pull raw samples from the shard store."""
 
-from typing import Callable, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import (
@@ -62,7 +62,9 @@ class FetchOp(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[EngineSample]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[EngineSample]:
         return CountingAccumulator[EngineSample](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,

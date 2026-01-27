@@ -4,7 +4,7 @@
 """Deterministic shuffle buffer operator."""
 
 from random import Random
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import ContributorRef, SampleRecord
@@ -115,7 +115,9 @@ class ShuffleBuffer(DefaultSetup):
         # Keep suggested parallelism at 1 to avoid oversubscribing by default.
         return OpTraits(indexable=False, preserves_cursor_order=False, parallelism=1)
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[SampleRecord]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         # Use count-only accumulator (no time-based flushing) to ensure
         # deterministic batch boundaries for shuffling.
         return CountingAccumulator[SampleRecord](max_batch=self.buffer_size)

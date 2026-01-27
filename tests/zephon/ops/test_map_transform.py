@@ -163,12 +163,12 @@ def test_map_transform_traits_and_accumulator() -> None:
     assert traits.parallelism == 4
 
     # Test deterministic mode disables time-based flushing
-    acc_det = op.accumulator(deterministic=True)
+    acc_det = op.accumulator(deterministic=True, ctx={})
     assert acc_det._max_batch == 32
     assert acc_det._max_latency_ms is None
 
     # Test non-deterministic mode preserves latency config
-    acc_nondet = op.accumulator(deterministic=False)
+    acc_nondet = op.accumulator(deterministic=False, ctx={})
     assert acc_nondet._max_batch == 32
     assert acc_nondet._max_latency_ms == 100
 

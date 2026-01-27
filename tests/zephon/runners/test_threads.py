@@ -160,7 +160,9 @@ class _IdentityOp(DefaultSetup, Op[Any, Any]):
             batch_shape_sensitive=False,
         )
 
-    def accumulator(self, *, deterministic: bool) -> Accumulator[Any]:
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
     def process_one(self, elem: Any) -> list[Any]:

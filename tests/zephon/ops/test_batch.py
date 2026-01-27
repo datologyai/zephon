@@ -110,13 +110,13 @@ def test_batch_traits_and_accumulator() -> None:
     assert traits.batch_shape_sensitive is False
 
     # Verify accumulator configuration is passed through correctly
-    acc = op.accumulator(deterministic=False)
+    acc = op.accumulator(deterministic=False, ctx={})
     assert acc.microbatch_size == 2
     assert acc.drop_last is True
 
     # Verify drop_last=False is also passed through
     op_keep = Batch(4, drop_last=False)
-    acc_keep = op_keep.accumulator(deterministic=False)
+    acc_keep = op_keep.accumulator(deterministic=False, ctx={})
     assert acc_keep.microbatch_size == 4
     assert acc_keep.drop_last is False
 
