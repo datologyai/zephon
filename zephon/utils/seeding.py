@@ -4,11 +4,13 @@
 """Utilities for deterministic seeding based on data contents."""
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-from zephon.core.constants import SampleRecord
+if TYPE_CHECKING:
+    from zephon.core.constants import SampleRecord
 
 
-def batch_seed(base_seed: int, elems: Sequence[SampleRecord]) -> int:
+def batch_seed(base_seed: int, elems: "Sequence[SampleRecord]") -> int:
     """Generate a deterministic seed from a base seed and batch contents.
 
     Uses a stable hash function to combine the base seed with cursor keys from

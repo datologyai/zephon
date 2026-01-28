@@ -9,9 +9,10 @@ field names and explicit field specification.
 """
 
 from collections.abc import Sized
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from zephon.core.constants import SampleRecord
+if TYPE_CHECKING:
+    from zephon.core.constants import SampleRecord
 
 # Standard token field candidates for auto-detection.
 # Checked in order; first match wins.
@@ -35,7 +36,7 @@ def detect_length_field(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def extract_length(record: SampleRecord, field: str | None = None) -> int:
+def extract_length(record: "SampleRecord", field: str | None = None) -> int:
     """Extract length from a record's payload.
 
     Args:

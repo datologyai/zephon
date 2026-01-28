@@ -4,7 +4,10 @@
 """Canonical data model shared across the core data-loading pipeline."""
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Iterable, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypeAlias, cast
+
+from zephon.utils.length_extraction import TOKEN_FIELD_CANDIDATES, detect_length_field
+from zephon.utils.tensor_utils import resolve_dtype, slice_last_dim, stack_sequences
 
 if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type checker.
     from numpy.typing import NDArray
@@ -261,7 +264,40 @@ class SampleBatch:
     def chunk_ids(self) -> tuple[ChunkId, ...]:
         return tuple(r.meta.chunk_id for r in self.records)
 
-    def to_training(self) -> dict[str, Any]:
+    def to_training(
+        self,
+        *,
+        tokens_field: str = "auto",
+        return_labels: bool = False,
+        dtype: Any = "auto",
+        extra_fields: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Convert batch to training-ready format with optional LM label generation.
+
+        Args:
+            tokens_field: Field name containing token IDs, or "auto" to detect
+                from common field names (input_ids, tokens, token_ids, ids).
+            return_labels: If True, generates next-token prediction labels by
+                shifting tokens. input_ids becomes tokens[:, :-1] and labels
+                becomes tokens[:, 1:]. Extra fields are also shifted to match.
+            dtype: Tensor dtype for stacking. Use "auto" to detect (prefers
+                torch.long if available, else np.int64, else returns lists).
+                Use None to explicitly return lists instead of tensors.
+            extra_fields: Additional fields to include and stack (e.g.,
+                ["attention_mask"]). These are shifted when return_labels=True.
+
+        Returns:
+            Dictionary with:
+            - "ids": List of sample IDs (always list, not stacked)
+            - "texts": List of text strings (always list, not stacked)
+            - "input_ids": Stacked token tensor (shifted if return_labels=True)
+            - "labels": Shifted labels tensor (only if return_labels=True)
+            - Any extra_fields as stacked tensors (shifted if return_labels=True)
+
+        Raises:
+            TypeError: If payloads are not dicts.
+            ValueError: If tokens_field cannot be auto-detected or is missing.
+        """
         items = list(self.records)
         if not items:
             return {"ids": [], "texts": []}
@@ -277,24 +313,65 @@ class SampleBatch:
             payloads.append(payload)
             texts.append(str(payload.get("text", "")))
 
-        batch: dict[str, Any] = {
+        # Resolve tokens_field if "auto"
+        resolved_tokens_field = tokens_field
+        if tokens_field == "auto":
+            resolved_tokens_field = detect_length_field(payloads[0])
+            if resolved_tokens_field is None:
+                raise ValueError(
+                    f"Cannot auto-detect tokens field. Payload keys: "
+                    + f"{list(payloads[0].keys())}. Expected one of: "
+                    + f"{', '.join(TOKEN_FIELD_CANDIDATES)}"
+                )
+
+        # Validate tokens_field exists in all payloads
+        for i, payload in enumerate(payloads):
+            if resolved_tokens_field not in payload:
+                raise ValueError(
+                    f"Field '{resolved_tokens_field}' not found in payload at index {i}"
+                )
+
+        # Resolve dtype
+        resolved_dtype, framework = resolve_dtype(dtype)
+
+        # Build base result
+        result: dict[str, Any] = {
             "ids": [r.meta.sample_id for r in items],
             "texts": texts,
         }
 
-        # include tensor-like fields only if present across all records
-        keys_all = set(payloads[0].keys())
-        for payload in payloads[1:]:
-            keys_all &= set(payload.keys())
+        # Extract and stack tokens
+        token_lists = [payload[resolved_tokens_field] for payload in payloads]
+        tokens = stack_sequences(token_lists, resolved_dtype, framework)
 
-        if "input_ids" in keys_all:
-            batch["input_ids"] = [payload["input_ids"] for payload in payloads]
-        if "attention_mask" in keys_all:
-            batch["attention_mask"] = [
-                payload["attention_mask"] for payload in payloads
-            ]
+        if return_labels:
+            # Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]
+            result["input_ids"] = slice_last_dim(tokens, slice(None, -1), framework)
+            result["labels"] = slice_last_dim(tokens, slice(1, None), framework)
+        else:
+            result["input_ids"] = tokens
 
-        return batch
+        # Handle extra fields
+        for field_name in extra_fields:
+            # Check field exists in all payloads
+            for i, payload in enumerate(payloads):
+                if field_name not in payload:
+                    raise ValueError(
+                        f"Extra field '{field_name}' not found in payload at index {i}"
+                    )
+
+            field_lists = [payload[field_name] for payload in payloads]
+            field_tensor = stack_sequences(field_lists, resolved_dtype, framework)
+
+            if return_labels:
+                # Shift extra fields to match input_ids shape
+                result[field_name] = slice_last_dim(
+                    field_tensor, slice(None, -1), framework
+                )
+            else:
+                result[field_name] = field_tensor
+
+        return result
 
 
 # Payload typing --------------------------------------------------------------
