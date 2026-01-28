@@ -56,11 +56,18 @@ def make_engine_sample(
     lane_id: int = 0,
     chunk_id: int = 0,
     chunk_offset: int | None = None,
+    component_id: int = 0,
 ) -> EngineSample:
     """Helper to build EngineSample tuples for direct FetchOp invocation in tests."""
     if chunk_offset is None:
         chunk_offset = sample_idx
-    return ((dataset_id, shard_id, sample_idx), lane_id, chunk_id, chunk_offset)
+    return (
+        (dataset_id, shard_id, sample_idx),
+        lane_id,
+        chunk_id,
+        chunk_offset,
+        component_id,
+    )
 
 
 def test_fetch_op_reads_jsonl(jsonl_dataset: Dataset) -> None:

@@ -61,6 +61,14 @@ def spawn_child(
         lane_id=parent.lane_id,
         chunk_id=parent.chunk_id,
         chunk_offset=parent.chunk_offset,
+        # Preserve component contribution tracking from parent.
+        # Children inherit the same component membership as their parent.
+        component_sample_counts=dict(parent.component_sample_counts),
+        component_token_counts=(
+            dict(parent.component_token_counts)
+            if parent.component_token_counts is not None
+            else None
+        ),
         lineage=new_lineage,
         tags=child_tags,
     ).with_contributors(refs)
@@ -72,6 +80,8 @@ def pack_meta(
     contributors: Iterable[ContributorRef],
     *,
     lane_id: int,
+    component_sample_counts: dict[int, int],
+    component_token_counts: dict[int, int] | None = None,
     tags: dict[str, Any] | None = None,
 ) -> SampleMeta:
     """Build metadata for a packed record that merges multiple contributors.
@@ -79,6 +89,14 @@ def pack_meta(
     ``primary_cursor`` is the replay identity for the packed record and must be
     unique per lane. ``contributors`` lists all contributors included in the pack;
     any contributor that completes a base offset must set ``is_last_child=True``.
+
+    ``component_sample_counts`` aggregates how many original samples from each
+    component are included in this pack. For example, if packing 3 samples from
+    component 0 and 2 from component 1, this would be ``{0: 3, 1: 2}``.
+
+    ``component_token_counts`` optionally provides token counts per component,
+    computed when packing happens after tokenization. If packing before tokenize,
+    pass None and ensure_mixture will fall back to distributing by sample counts.
     """
     tags = {} if tags is None else dict(tags)
     tags.pop("_tombstone", None)
@@ -87,6 +105,8 @@ def pack_meta(
         lane_id=lane_id,
         chunk_id=primary_cursor.chunk_id,
         chunk_offset=primary_cursor.chunk_offset,
+        component_sample_counts=component_sample_counts,
+        component_token_counts=component_token_counts,
         lineage=primary_cursor.lineage,
         tags=tags,
     ).with_contributors(tuple(contributors))

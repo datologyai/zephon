@@ -541,7 +541,7 @@ class Pipeline:
                 and all(isinstance(x, int) for x in sample_id)
             ):
                 sid = cast(SampleId, sample_id)
-                value = cast(EngineSample, (sid, 0, 0, 0))
+                value = cast(EngineSample, (sid, 0, 0, 0, 0))  # component_id=0
         except Exception:
             pass
         return self._engine.eval_one(value)

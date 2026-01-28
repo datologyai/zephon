@@ -72,7 +72,7 @@ class FetchOp(DefaultSetup):
 
     def process_one(self, elem: EngineSample) -> list[SampleRecord]:
         assert self._store is not None
-        sample_id, lane_id, chunk_id, chunk_offset = elem
+        sample_id, lane_id, chunk_id, chunk_offset, component_id = elem
         dataset_id, shard_id, sample_idx = sample_id
         view = self._store.for_dataset(dataset_id)
         shard, _ = view.open(shard_id)
@@ -89,6 +89,7 @@ class FetchOp(DefaultSetup):
             lane_id=lane_id,
             chunk_id=chunk_id,
             chunk_offset=chunk_offset,
+            component_sample_counts={component_id: 1},
         )
         return [SampleRecord(meta=meta, payload=row)]
 
@@ -102,17 +103,18 @@ class FetchOp(DefaultSetup):
 
         # Group by (dataset_id, shard_id) to reuse the opened shard per group.
         groups: dict[
-            tuple[int, int], list[tuple[int, int, int, int, int, tuple[int, int, int]]]
+            tuple[int, int],
+            list[tuple[int, int, int, int, int, int, tuple[int, int, int]]],
         ] = {}
         for pos, elem in enumerate(elems):
-            sample_id, lane_id, chunk_id, chunk_offset = elem
+            sample_id, lane_id, chunk_id, chunk_offset, component_id = elem
             dataset_id, shard_id, sample_idx = sample_id
             key = (int(dataset_id), int(shard_id))
             lst = groups.get(key)
             if lst is None:
                 lst = []
                 groups[key] = lst
-            # Store (position-in-batch, lane_id, chunk_id, chunk_offset, sample_idx, sample_id)
+            # Store (pos, lane_id, chunk_id, chunk_offset, sample_idx, component_id, sample_id)
             lst.append(
                 (
                     pos,
@@ -120,6 +122,7 @@ class FetchOp(DefaultSetup):
                     int(chunk_id),
                     int(chunk_offset),
                     int(sample_idx),
+                    int(component_id),
                     sample_id,
                 )
             )
@@ -181,6 +184,7 @@ class FetchOp(DefaultSetup):
                 chunk_id,
                 chunk_offset,
                 _sample_idx,
+                component_id,
                 sample_id,
             ), row_raw in zip(items_sorted, rows, strict=True):
                 row = cast(
@@ -191,6 +195,7 @@ class FetchOp(DefaultSetup):
                     lane_id=lane_id,
                     chunk_id=chunk_id,
                     chunk_offset=chunk_offset,
+                    component_sample_counts={component_id: 1},
                 )
                 out[pos] = SampleRecord(meta=meta, payload=row)
             self._seen_shards.add(shard_key)

@@ -24,7 +24,8 @@ SampleId = tuple[DatasetId, ShardId, LocalSampleId]
 LaneId = int
 ChunkId = int
 ChunkOffset = int
-EngineSample = tuple[SampleId, LaneId, ChunkId, ChunkOffset]
+ComponentId = int
+EngineSample = tuple[SampleId, LaneId, ChunkId, ChunkOffset, ComponentId]
 LineageIndex = int
 LineagePath = tuple[LineageIndex, ...]
 # Cursor order: chunk_id -> chunk_offset -> lineage path -> original sample id.
@@ -148,12 +149,35 @@ class SampleMeta:
     ``"_contributors"`` and ``"_tombstone"`` because in simple pipelines
     (notify_monotone path) that increases the IPC overhead since the
     public schema grows.
+
+    Component Contribution Tracking
+    -------------------------------
+    Samples track which mixture components they contain via two fields:
+
+    ``component_sample_counts``: Maps component_id -> number of original samples
+    from that component. For a regular sample this is ``{cid: 1}``. For a packed
+    sample combining 3 from component 0 and 2 from component 1: ``{0: 3, 1: 2}``.
+
+    ``component_token_counts``: Maps component_id -> token count from that component.
+    None until packing occurs after tokenization. When packing tokenized samples,
+    captures tokens per component, e.g., ``{0: 300, 1: 200}``.
+
+    This design supports ensure_mixture tracking per-component contributions:
+    - ``weight="samples"``: use ``component_sample_counts`` directly
+    - ``weight="tokens"``: use ``component_token_counts`` if set, else distribute
+      total token count proportionally by ``component_sample_counts``
+
+    The separation allows packing before or after tokenization:
+    - Pack before tokenize: only sample counts known at pack time
+    - Pack after tokenize: both sample and token counts computed at pack time
     """
 
     sample_id: SampleId
     lane_id: LaneId
     chunk_id: ChunkId
     chunk_offset: ChunkOffset = 0
+    component_sample_counts: dict[int, int] = field(default_factory=lambda: {0: 1})
+    component_token_counts: dict[int, int] | None = None
     lineage: LineagePath = field(default_factory=tuple)
     tags: dict[str, Any] = field(default_factory=dict)
 

@@ -63,10 +63,18 @@ def test_pack_and_tombstone_helpers() -> None:
         ContributorRef(cursor=SampleCursor(3, 1, (0, 0, 7), (1,)), is_last_child=False),
         ContributorRef(cursor=SampleCursor(4, 0, (0, 0, 8), (2,)), is_last_child=True),
     )
-    packed = pack_meta(base_cursor, refs, lane_id=2, tags={"kind": "packed"})
+    # Packing two samples from component 0
+    packed = pack_meta(
+        base_cursor,
+        refs,
+        lane_id=2,
+        component_sample_counts={0: 2},
+        tags={"kind": "packed"},
+    )
     assert packed.cursor == base_cursor
     assert packed.contributors == refs
     assert packed.tags["kind"] == "packed"
+    assert packed.component_sample_counts == {0: 2}
 
     tombstone = tombstone_meta(refs[1], lane_id=2)
     assert tombstone.tombstone

@@ -229,6 +229,10 @@ class Engine:
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
         }
+        # Mixture query service for EnsureMixture operator
+        base_ctx["get_chunk_mixture"] = self._get_chunk_mixture
+        base_ctx["get_component_name"] = self._get_component_name
+        base_ctx["get_component_id"] = self._get_component_id
         self._replay_config = ReplayConfigService()
         self._ctx = base_ctx
         self._ctx["replay_state_service"] = self._replay_config
@@ -248,6 +252,14 @@ class Engine:
         self._checkpoint_reload_count = 0
         self._checkpoint_lock = threading.Lock()
         self._rr_next_idx: dict[str, int] = {}
+
+        # Component ID mapping for mixture tracking (string -> int)
+        self._component_to_id: dict[str, int] = {}
+        self._id_to_component: list[str] = []
+        self._component_lock = threading.Lock()
+        # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
+        self._chunk_mixtures: dict[tuple[LaneId, ChunkId], dict[int, float]] = {}
+        self._mixture_lock = threading.Lock()
 
         self._work = work
         self._lane_ws: dict[LaneId, WorkSource] = {}
@@ -728,18 +740,99 @@ class Engine:
         if self._collector is not None and self._collector.tracking_mode.collects_nodes:
             self._collector.record_fetch(delta)
 
+    def _get_component_id(self, component_name: str) -> int:
+        """Get or assign a stable integer ID for a component name.
+
+        Used by EnsureMixture to convert user-provided explicit weights from
+        string names to integer IDs for efficient internal tracking.
+
+        Thread-safe: uses a lock to ensure consistent ID assignment across
+        concurrent lane streams.
+        """
+        # Fast path: already assigned
+        cid = self._component_to_id.get(component_name)
+        if cid is not None:
+            return cid
+
+        # Slow path: assign new ID under lock
+        with self._component_lock:
+            # Double-check after acquiring lock
+            cid = self._component_to_id.get(component_name)
+            if cid is not None:
+                return cid
+
+            cid = len(self._id_to_component)
+            self._component_to_id[component_name] = cid
+            self._id_to_component.append(component_name)
+            return cid
+
+    def _get_component_name(self, component_id: int) -> str | None:
+        """Look up component name by ID for human-readable warning messages.
+
+        Returns None if ID is unknown.
+        """
+        if 0 <= component_id < len(self._id_to_component):
+            return self._id_to_component[component_id]
+        return None
+
+    def _get_chunk_mixture(
+        self, lane_id: LaneId, chunk_id: ChunkId
+    ) -> dict[int, float]:
+        """Get the target mixture weights for a specific chunk.
+
+        Used by EnsureMixture to determine the target component ratios for
+        SWRR-based sample reordering.
+
+        Returns a dict mapping component_id -> normalized weight.
+
+        Raises:
+            KeyError: If the chunk mixture is not available.
+        """
+        key = (lane_id, chunk_id)
+        with self._mixture_lock:
+            if key not in self._chunk_mixtures:
+                raise KeyError(
+                    f"Chunk mixture not available for lane={lane_id}, chunk={chunk_id}"
+                )
+            return self._chunk_mixtures[key]
+
+    def _store_chunk_mixture(
+        self, lane_id: LaneId, chunk_id: ChunkId, chunk: WorkChunk
+    ) -> None:
+        """Store the mixture weights for a chunk, converting names to IDs."""
+        mixture = chunk.mixture  # dict[str, float] normalized
+        if not mixture:
+            return
+
+        id_mixture: dict[int, float] = {}
+        for name, weight in mixture.items():
+            comp_id = self._get_component_id(name)
+            id_mixture[comp_id] = weight
+
+        with self._mixture_lock:
+            self._chunk_mixtures[(lane_id, chunk_id)] = id_mixture
+
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
 
         Maintains inflight_chunks_per_lane[lane_id][chunk_id] -> chunk_obj.
+
+        Each EngineSample is a 5-tuple:
+            (sample_id, lane_id, chunk_id, chunk_offset, component_id)
+
+        WorkChunk yields (sample_id, component_name) tuples; we convert
+        component_name to component_id for efficient downstream processing.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Phase 1: replay restored inflight chunks first (ascending chunk_id)
         for cid in sorted(inflight_lane.keys()):
             chunk = inflight_lane[cid]
-            for offset, sample_id in enumerate(chunk):
+            # Store mixture for restored chunks (may already exist, but idempotent)
+            self._store_chunk_mixture(lane_id, cid, chunk)
+            for offset, (sample_id, component_name) in enumerate(chunk):
+                component_id = self._get_component_id(component_name)
                 # Note that we yield the _entire_ chunk here. This can break with elastic continuation in case a batch is cross-chunk boundaries.
-                yield (sample_id, lane_id, int(cid), offset)
+                yield (sample_id, lane_id, int(cid), offset, component_id)
 
         # Phase 2: fetch new chunks and assign stable per-lane ids
         ws = self._lane_ws[lane_id]
@@ -754,9 +847,12 @@ class Engine:
                 cid = int(self._lane_next_cid[lane_id])
                 self._lane_next_cid[lane_id] = cid + 1
                 inflight_lane[cid] = chunk
+                # Store mixture weights for this chunk
+                self._store_chunk_mixture(lane_id, cid, chunk)
 
-            for offset, sample_id in enumerate(chunk):
-                yield (sample_id, lane_id, cid, offset)
+            for offset, (sample_id, component_name) in enumerate(chunk):
+                component_id = self._get_component_id(component_name)
+                yield (sample_id, lane_id, cid, offset, component_id)
 
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)
@@ -1076,9 +1172,13 @@ class Engine:
         cursor_list = cursors if isinstance(cursors, list) else list(cursors)
 
         # 1) Evict older inflight chunks (no bitmap bookkeeping in this path).
-        for cid in list(inflight_lane.keys()):
-            if cid < max_chunk_id:
-                inflight_lane.pop(cid, None)
+        cids_to_evict = [cid for cid in inflight_lane if cid < max_chunk_id]
+        for cid in cids_to_evict:
+            inflight_lane.pop(cid, None)
+        if cids_to_evict:
+            with self._mixture_lock:
+                for cid in cids_to_evict:
+                    self._chunk_mixtures.pop((lane_id, cid), None)
 
         add_k = len(cursor_list)
         cur = self._lane_progress.get(lane_id, LanePtr())
@@ -1131,6 +1231,7 @@ class Engine:
 
         # 2) Evict fully-completed chunks in cid order
         last_completed_ptr: LanePtr | None = None
+        cids_to_evict: list[int] = []
         # Chunk IDs increase monotonically per lane; dict preserves insertion order.
         for cid in list(inflight_lane.keys()):
             chunk = inflight_lane[cid]
@@ -1138,11 +1239,18 @@ class Engine:
                 break
             if done_count[cid] >= len(chunk):
                 last_completed_ptr = LanePtr(cid, len(chunk))
-                inflight_lane.pop(cid, None)
-                done.pop(cid, None)
-                done_count.pop(cid, None)
+                cids_to_evict.append(cid)
             else:
                 break  # earliest incomplete chunk blocks later evictions (keep inflight contiguous)
+
+        for cid in cids_to_evict:
+            inflight_lane.pop(cid, None)
+            done.pop(cid, None)
+            done_count.pop(cid, None)
+        if cids_to_evict:
+            with self._mixture_lock:
+                for cid in cids_to_evict:
+                    self._chunk_mixtures.pop((lane_id, cid), None)
 
         # 3) Maintain lane progress for fairness diagnostics
         if inflight_lane:

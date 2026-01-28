@@ -224,7 +224,15 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         return outputs
 
     def _create_packed_record(self, bin_data: Bin, lane_id: int) -> SampleRecord:
-        """Create a packed SampleRecord from a bin."""
+        """Create a packed SampleRecord from a bin.
+
+        Aggregates component contributions from all packed samples:
+        - component_sample_counts: sum of sample counts per component
+        - component_token_counts: sum of token counts per component (using length_fn)
+
+        This enables ensure_mixture to correctly track which components are
+        represented in a packed sample and by how much.
+        """
         samples: list[SampleRecord] = bin_data.samples
         if not samples:
             raise ValueError("Cannot create packed record from empty bin")
@@ -244,6 +252,31 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         for sample in samples:
             contributors.extend(sample.meta.contribution_refs())
 
+        # Aggregate component contributions from all samples being packed.
+        # This tracks how many original samples and tokens from each component
+        # are combined into this packed record.
+        component_sample_counts: dict[int, int] = defaultdict(int)
+        component_token_counts: dict[int, int] = defaultdict(int)
+
+        for sample in samples:
+            seq_len = self.length_fn(sample)
+            # Aggregate sample counts from this sample's components
+            for cid, count in sample.meta.component_sample_counts.items():
+                component_sample_counts[cid] += count
+            # Compute token counts: if sample already has token counts, use them;
+            # otherwise distribute this sample's tokens by its sample count ratios.
+            if sample.meta.component_token_counts is not None:
+                for cid, tokens in sample.meta.component_token_counts.items():
+                    component_token_counts[cid] += tokens
+            else:
+                # Sample doesn't have token counts (e.g., single-component sample).
+                # Distribute seq_len proportionally by sample counts.
+                total_samples = sum(sample.meta.component_sample_counts.values())
+                for cid, count in sample.meta.component_sample_counts.items():
+                    component_token_counts[cid] += round(
+                        seq_len * count / total_samples
+                    )
+
         base_meta = samples[0].meta
         primary_cursor = base_meta.cursor.child(0)
 
@@ -251,6 +284,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             primary_cursor=primary_cursor,
             contributors=contributors,
             lane_id=lane_id,
+            component_sample_counts=dict(component_sample_counts),
+            component_token_counts=dict(component_token_counts),
             tags={
                 "_packing_metadata": {
                     "num_sequences": num_sequences,

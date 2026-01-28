@@ -38,6 +38,16 @@ def comp_seq(samples, comps):
     return [comp_of(s, comps) for s in samples]
 
 
+def extract_sample_ids(tuples):
+    """Extract sample_ids from (sample_id, component_name) tuples."""
+    return [t[0] for t in tuples]
+
+
+def extract_components(tuples):
+    """Extract component names from (sample_id, component_name) tuples."""
+    return [t[1] for t in tuples]
+
+
 # ----------------------------
 # Core invariants
 # ----------------------------
@@ -57,10 +67,15 @@ def test_emits_every_sample_exactly_once_across_modes_and_orders(mode, within):
     chunk = WorkChunk(components=comps, seed=123)
     cfg = MixtureReadConfig(mode=mode, seed=123, within_component=within)
     out = list(chunk.iter_samples(cfg))
+    sample_ids = extract_sample_ids(out)
     # no losses/dupes
-    assert Counter(out) == Counter(flatten(comps))
+    assert Counter(sample_ids) == Counter(flatten(comps))
     # length matches
     assert len(out) == sum(len(v) for v in comps.values())
+    # Each tuple should have (sample_id, component_name)
+    for sample_id, comp_name in out:
+        assert comp_name in comps
+        assert sample_id in comps[comp_name]
 
 
 def test_single_component_all_modes_emit_all_once_and_ordering_behaviour():
@@ -74,7 +89,10 @@ def test_single_component_all_modes_emit_all_once_and_ordering_behaviour():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg_wrr_as_is))
-    assert out == comps["A"]
+    sample_ids = extract_sample_ids(out)
+    assert sample_ids == comps["A"]
+    # All should be component "A"
+    assert all(comp == "A" for _, comp in out)
 
     # WRR with SHUFFLE -> same multiset, deterministic for same seed
     cfg_wrr_shuf = MixtureReadConfig(
@@ -84,7 +102,7 @@ def test_single_component_all_modes_emit_all_once_and_ordering_behaviour():
     )
     out1 = list(chunk.iter_samples(cfg_wrr_shuf))
     out2 = list(WorkChunk(components=comps, seed=chunk.seed).iter_samples(cfg_wrr_shuf))
-    assert Counter(out1) == Counter(comps["A"])
+    assert Counter(extract_sample_ids(out1)) == Counter(comps["A"])
     assert out1 == out2
 
     # With different seed, different
@@ -124,13 +142,16 @@ def test_wrr_two_equal_components_alternate():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg))
-    assert out == [a[0], b[0], a[1], b[1]]
+    sample_ids = extract_sample_ids(out)
+    comp_names = extract_components(out)
+    assert sample_ids == [a[0], b[0], a[1], b[1]]
+    assert comp_names == ["A", "B", "A", "B"]
 
 
 def test_wrr_three_vs_one_simple_pattern():
     # Counts: A=3, B=1 -> should emit 3 A's and 1 B in a balanced pattern
     # Deficit-based SWRR produces: A, B, A, A
-    # (A has highest initial deficit at 0.75, after emitting A, B catches up)
+    # (A has highest initial deficit, then B catches up, then A dominates)
     a = make_ids(0, 0, 3)
     b = make_ids(1, 0, 1)
     comps = {"A": a, "B": b}
@@ -141,7 +162,11 @@ def test_wrr_three_vs_one_simple_pattern():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg))
-    assert out == [a[0], b[0], a[1], a[2]]
+    sample_ids = extract_sample_ids(out)
+    comp_names = extract_components(out)
+    # Deficit-based SWRR order: A, B, A, A
+    assert sample_ids == [a[0], b[0], a[1], a[2]]
+    assert comp_names == ["A", "B", "A", "A"]
 
 
 def test_wrr_two_one_one_pattern():
@@ -157,7 +182,10 @@ def test_wrr_two_one_one_pattern():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg))
-    assert out == [a[0], b[0], c[0], a[1]]
+    sample_ids = extract_sample_ids(out)
+    comp_names = extract_components(out)
+    assert sample_ids == [a[0], b[0], c[0], a[1]]
+    assert comp_names == ["A", "B", "C", "A"]
 
 
 # ----------------------------
@@ -177,7 +205,7 @@ def test_weighted_random_is_seed_deterministic_and_consumes_all():
     out2 = list(WorkChunk(components=comps).iter_samples(cfg))
     assert out1 == out2
     # Every sample exactly once
-    assert Counter(out1) == Counter(flatten(comps))
+    assert Counter(extract_sample_ids(out1)) == Counter(flatten(comps))
 
 
 def test_weighted_random_different_seeds_change_order_most_of_the_time():
@@ -191,8 +219,8 @@ def test_weighted_random_different_seeds_change_order_most_of_the_time():
     out1 = list(WorkChunk(components=comps).iter_samples(cfg1))
     out2 = list(WorkChunk(components=comps).iter_samples(cfg2))
     assert out1 != out2
-    assert Counter(out1) == Counter(flatten(comps))
-    assert Counter(out2) == Counter(flatten(comps))
+    assert Counter(extract_sample_ids(out1)) == Counter(flatten(comps))
+    assert Counter(extract_sample_ids(out2)) == Counter(flatten(comps))
 
 
 # ----------------------------
@@ -274,7 +302,7 @@ def test_iter_with_precompute_true_equals_materialize_order():
     mat_list = chunk.materialize_order(cfg_mat)
 
     assert it_list == mat_list
-    assert Counter(it_list) == Counter(flatten(comps))
+    assert Counter(extract_sample_ids(it_list)) == Counter(flatten(comps))
 
 
 def test_sample_at_matches_materialized_sequence():
@@ -319,6 +347,8 @@ def test_empty_components_are_ignored_in_iteration():
         within_component=ComponentOrder.AS_IS,
     )
     out = list(chunk.iter_samples(cfg))
-    assert Counter(out) == Counter(comps["A"] + comps["C"])
+    sample_ids = extract_sample_ids(out)
+    assert Counter(sample_ids) == Counter(comps["A"] + comps["C"])
     # Only A and C appear in component sequence
-    assert set(comp_seq(out, comps)) <= {"A", "C"}
+    comp_names = extract_components(out)
+    assert set(comp_names) <= {"A", "C"}

@@ -15,6 +15,7 @@ from zephon.utils.swrr import swrr_iterate
 from zephon.work.mixture import MixtureSpec
 
 MixtureComponent = str
+SourcedSampleId = tuple[SampleId, MixtureComponent]
 SamplesPerComponent = MutableMapping[MixtureComponent, list[SampleId]]
 
 
@@ -65,7 +66,9 @@ class WorkChunk:
     seed: int | None = None
 
     ### INTERNAL ATTRIBUTES ###
-    _order_cache: list[SampleId] | None = field(init=False, default=None, repr=False)
+    _order_cache: list[SourcedSampleId] | None = field(
+        init=False, default=None, repr=False
+    )
     _order_cache_key: tuple | None = field(init=False, default=None, repr=False)
     _component_order: tuple[MixtureComponent, ...] = field(init=False, repr=False)
     _total_samples: int = field(init=False, repr=False)
@@ -77,7 +80,7 @@ class WorkChunk:
     def __len__(self) -> int:
         return self._total_samples
 
-    def __iter__(self) -> Iterator[SampleId]:
+    def __iter__(self) -> Iterator[SourcedSampleId]:
         yield from self.iter_samples()
 
     @property
@@ -107,7 +110,8 @@ class WorkChunk:
 
     def iter_samples(
         self, config: MixtureReadConfig | None = None
-    ) -> Iterator[SampleId]:
+    ) -> Iterator[SourcedSampleId]:
+        """Iterate samples in mixture order, yielding (sample_id, component_name) tuples."""
         cfg = self._resolve_config(config)
 
         if cfg.precompute:
@@ -119,7 +123,7 @@ class WorkChunk:
 
         yield from self._iter_streaming(cfg)
 
-    def materialize_order(self, config: MixtureReadConfig) -> list[SampleId]:
+    def materialize_order(self, config: MixtureReadConfig) -> list[SourcedSampleId]:
         key = (config.mode, config.seed, config.within_component)
 
         if self._order_cache is not None and self._order_cache_key == key:
@@ -140,11 +144,11 @@ class WorkChunk:
 
     def sample_at(
         self, index: int, config: MixtureReadConfig | None = None
-    ) -> SampleId:
+    ) -> SourcedSampleId:
         cfg = self._resolve_config(config)
         return self.materialize_order(cfg)[index]
 
-    def _iter_streaming(self, config: MixtureReadConfig) -> Iterator[SampleId]:
+    def _iter_streaming(self, config: MixtureReadConfig) -> Iterator[SourcedSampleId]:
         if not self._total_samples:
             return
 
@@ -154,7 +158,9 @@ class WorkChunk:
 
         # Single-bucket fast path (covers both None/WRR/Random cases)
         if len(buckets) == 1:
-            yield from buckets[0].items
+            name = buckets[0].name
+            for sample_id in buckets[0].items:
+                yield (sample_id, name)
             return
 
         if config.mode is MixtureReadMode.WEIGHTED_RANDOM:
@@ -201,7 +207,7 @@ class WorkChunk:
     # further modes: just random next sample (random without weights), trivial round robin
     def _emit_weighted_random(
         self, buckets: list[_Bucket], seed: int | None
-    ) -> Iterator[SampleId]:
+    ) -> Iterator[SourcedSampleId]:
         from random import Random
 
         active = list(buckets)
@@ -216,24 +222,25 @@ class WorkChunk:
             idx = rng.choices(range(len(active)), weights=weights, k=1)[0]
             b = active[idx]
             try:
-                yield next(b.it)
+                yield (next(b.it), b.name)
             except StopIteration:
                 # drop exhausted bucket and its weight
                 del active[idx]
                 del weights[idx]
 
-    def _emit_weighted_round_robin(self, buckets: list[_Bucket]) -> Iterator[SampleId]:
+    def _emit_weighted_round_robin(
+        self, buckets: list[_Bucket]
+    ) -> Iterator[SourcedSampleId]:
         """Smooth Weighted Round Robin (SWRR) using shared implementation.
 
         Delegates to swrr_iterate() which provides deterministic, proportional
         emission matching target weights over time.
         """
-        for sample_id, _ in swrr_iterate(
+        yield from swrr_iterate(
             components={b.name: b.items for b in buckets},
             weights={b.name: b.weight for b in buckets},
             order=[b.name for b in buckets],
-        ):
-            yield sample_id
+        )
 
     def state_dict(self) -> dict[str, Any]:
         """Portable, JSON-friendly snapshot of this chunk."""
