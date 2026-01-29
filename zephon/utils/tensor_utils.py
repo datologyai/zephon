@@ -83,9 +83,15 @@ def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> 
     if framework == "torch":
         import torch
 
-        # If inputs are already tensors, use stack; otherwise use tensor()
+        # If inputs are already tensors, use stack
         if sequences and isinstance(sequences[0], torch.Tensor):
             return torch.stack(sequences).to(dtype=dtype)
+        # If inputs are numpy arrays, stack via numpy first to avoid slow
+        # list-of-ndarrays path that triggers PyTorch warnings
+        if sequences and "numpy" in type(sequences[0]).__module__:
+            import numpy as np
+
+            return torch.from_numpy(np.array(sequences)).to(dtype=dtype)
         return torch.tensor(sequences, dtype=dtype)
     elif framework == "numpy":
         import numpy as np

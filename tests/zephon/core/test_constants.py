@@ -579,6 +579,30 @@ class TestToTrainingArrayPayloads:
         out = batch.to_training(tokens_field="nonexistent", dtype=np.int64)
         assert out["input_ids"].tolist() == [[1, 2, 3]]
 
+    def test_numpy_to_torch_no_warning(self) -> None:
+        """Converting numpy array payloads to torch tensors should not warn."""
+        import warnings
+
+        np = pytest.importorskip("numpy")
+        torch = pytest.importorskip("torch")
+        arr0 = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+        arr1 = np.array([6, 7, 8, 9, 10], dtype=np.int64)
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=arr0
+        )
+        r1 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0), payload=arr1
+        )
+        batch = SampleBatch(records=(r0, r1))
+
+        # Convert warnings to errors so the test fails if any warning is raised
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = batch.to_training(dtype=torch.long)
+
+        assert isinstance(out["input_ids"], torch.Tensor)
+        assert out["input_ids"].tolist() == [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+
 
 # ---------------------------------------------------------------------------
 # Cross-product parametrized tests for comprehensive coverage
