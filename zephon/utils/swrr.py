@@ -101,7 +101,11 @@ class SmoothWeightedRoundRobin(Generic[K]):
         }
 
         # Return highest deficit component, tie-break by original order
-        return max(self._order, key=lambda k: (deficits.get(k, 0), -self._index[k]))
+        # Only consider components in current target (filter out obsolete)
+        active = [k for k in self._order if k in self._target]
+        if not active:
+            return None
+        return max(active, key=lambda k: (deficits[k], -self._index[k]))
 
     def select(self, available: set[K]) -> K | None:
         """Select the next component from the available set.
@@ -197,6 +201,11 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def total_emitted(self) -> float:
         """Total weight emitted across all components."""
         return self._total
+
+    @property
+    def target_ratios(self) -> dict[K, float]:
+        """Target ratios per component (read-only to avoid exposing mutable state)."""
+        return self._target
 
     def get_actual_ratios(self) -> dict[K, float]:
         """Get current actual ratios (for monitoring/warnings)."""

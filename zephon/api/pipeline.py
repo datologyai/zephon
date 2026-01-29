@@ -14,6 +14,7 @@ from typing import (
     Optional,
     Protocol,
     TypeAlias,
+    Union,
     cast,
 )
 
@@ -263,6 +264,97 @@ class Pipeline:
         op = ShuffleBuffer(buffer_size=buffer_size, seed=seed)
         node = self._graph.add(
             "shuffle_buffer",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    def ensure_mixture(
+        self,
+        *,
+        max_buffer_size: int = 1000,
+        drain_target_ratio: float = 0.8,
+        obsolete_drain_rate: float = 0.1,
+        weight_by: Union[
+            Callable[[SampleRecord], float], Literal["samples", "auto"], str
+        ] = "auto",
+        warn_tolerance: Optional[float] = None,
+        mixture: Optional[dict[str, float]] = None,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Enforce mixture ratios using adaptive Smooth Weighted Round Robin.
+
+        Place this operator after tokenization (for token-level) or after filtering
+        (for sample-level). The operator automatically detects token fields from
+        common names (input_ids, tokens, token_ids, ids).
+
+        Uses adaptive buffering: emit immediately when SWRR's ideal component is
+        available, buffer when the desired component isn't present yet. Falls back
+        to emitting best-available when max_buffer_size is reached.
+
+        The SWRR algorithm tracks deficit (target - actual) and always picks the
+        component most "owed" samples, ensuring smooth, deterministic convergence.
+
+        Args:
+            max_buffer_size: Maximum samples to buffer before forcing emission. Only
+                reached when the desired component isn't available. Default is 1000.
+            drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
+                the buffer down to this fraction of max_buffer_size before stopping.
+                Default is 0.8 (drain to 80% of max).
+            obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
+                components (those no longer in the current mixture target). Default is
+                0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample.
+            weight_by: How to compute sample weights. Options:
+                - "auto" (default): Auto-detect token field from common names
+                  (input_ids, tokens, token_ids, ids). Raises if not found.
+                - "samples": Each sample has weight 1.
+                - Explicit field name (e.g., "input_ids"): Use that field's length.
+                - Callable: Custom function taking SampleRecord, returning float.
+            warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
+                If None (default), no warnings are emitted.
+            mixture: Explicit mixture target {component_name: float}. If None, derived
+                from chunk mixture via engine context.
+            placement: Placement hint for this operator.
+            parallelism: Override default parallelism for this operator.
+
+        Returns:
+            Self for method chaining.
+
+        Examples:
+            # Token-level (default) - place after tokenize
+            pipeline.fetch().tokenize(...).ensure_mixture()  # Uses defaults
+
+            # Sample-level enforcement (after filter)
+            pipeline.fetch().filter(...).ensure_mixture(weight_by="samples")
+
+            # With explicit token field
+            pipeline.fetch().tokenize(...).ensure_mixture(weight_by="input_ids")
+
+            # With warnings for drift (warn if >5% deviation)
+            pipeline.fetch().tokenize(...).ensure_mixture(warn_tolerance=0.05)
+
+            # Explicit mixture target (override chunk mixture)
+            pipeline.fetch().tokenize(...).ensure_mixture(
+                mixture={"English": 0.7, "German": 0.3}
+            )
+        """
+        from zephon.ops.ensure_mixture import EnsureMixture
+
+        op = EnsureMixture(
+            max_buffer_size=max_buffer_size,
+            drain_target_ratio=drain_target_ratio,
+            obsolete_drain_rate=obsolete_drain_rate,
+            weight_by=weight_by,
+            warn_tolerance=warn_tolerance,
+            mixture_override=mixture,
+            parallelism=parallelism or 1,
+        )
+        node = self._graph.add(
+            "ensure_mixture",
             op,
             self._tail,
             placement=placement,

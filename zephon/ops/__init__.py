@@ -6,6 +6,7 @@
 from zephon.ops.assert_lineage import AssertLineageOrder
 from zephon.ops.batch import Batch
 from zephon.ops.decode_text import DecodeText
+from zephon.ops.ensure_mixture import EnsureMixture
 from zephon.ops.fetch import FetchOp
 from zephon.ops.map_transform import MapTransform
 from zephon.ops.materialize import Materialize
@@ -17,6 +18,7 @@ __all__ = [
     "AssertLineageOrder",
     "Batch",
     "DecodeText",
+    "EnsureMixture",
     "FetchOp",
     "MapTransform",
     "Materialize",
