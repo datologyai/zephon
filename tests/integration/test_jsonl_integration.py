@@ -359,8 +359,10 @@ def test_jsonl_emits_partial_final_chunk_xfail(tmp_path: Path) -> None:
         .options(
             deterministic=True,
             canonical_replicas=1,
-            num_ranks=1,
-            physical_rank=0,
+            world_size=1,
+            global_rank=0,
+            dp_degree=1,
+            dp_group_id=0,
             mapping_strategy="contiguous",
             max_workers=4,
         )

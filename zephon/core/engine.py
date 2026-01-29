@@ -198,15 +198,29 @@ class RuntimeOptions:
     # a batch-shape sensitive operator (in which case we auto-disable it for that stage).
     # When False, latency flush is always disabled in deterministic mode.
     allow_latency_flush_in_deterministic: bool = True
-    # Canonical number of replicas (logical DP). If None, derives from num_ranks (TODO(MaxiBoether): this breaks if num_ranks > dp. Check when supporting 3D parallelism.)
+
+    # === Global Coordination ===
+    # Total number of ranks (GPUs) in the distributed job.
+    world_size: int = 1
+    # Unique identifier for this rank (0 to world_size-1).
+    global_rank: int = 0
+
+    # === Data Partitioning ===
+    # Number of data parallel groups (data partitions).
+    # Defaults to world_size (1D parallelism) if not specified.
+    dp_degree: int | None = None
+    # Which data partition this rank reads (0 to dp_degree-1).
+    # Defaults to global_rank (1D parallelism) if not specified.
+    dp_group_id: int | None = None
+
+    # === Logical Parallelism ===
+    # Number of canonical lanes (for elasticity). Defaults to dp_degree.
     canonical_replicas: int | None = None
-    # How to map canonical replicas to physical ranks:
-    # - 'contiguous': ranks own contiguous blocks of replicas (locality-friendly)
-    # - 'interleaved': replicas are round-robin across ranks (balanced progress)
+    # How to map canonical replicas to dp groups:
+    # - 'contiguous': dp groups own contiguous blocks of replicas (locality-friendly)
+    # - 'interleaved': replicas are round-robin across dp groups (balanced progress)
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
-    # TODO(MaxiBoether): This should be obtained from the current environment (e.g., torchtitan). Maybe not part of RuntimeOptions but rather part of init? Runtime options describe logical options of pipeline.
-    num_ranks: int = 1
-    physical_rank: int = 0
+
     # Autotune placeholders (intentionally not implemented yet)
     autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
     # Where all workers/ranks dump their local state. Must be shared (e.g., NFS) for multi-node.
@@ -216,6 +230,63 @@ class RuntimeOptions:
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
+
+
+# =============================================================================
+# Distributed Parallelism Model
+# =============================================================================
+#
+# Zephon separates two orthogonal concerns for distributed training:
+#
+# 1. GLOBAL COORDINATION (world_size, global_rank)
+#    - Used for: leader election, checkpoint aggregation, state file naming
+#    - global_rank must be unique per rank
+#    - Leader is global_rank == 0
+#
+# 2. DATA PARTITIONING (dp_degree, dp_group_id)
+#    - Used for: determining which data each rank should read
+#    - Multiple ranks can share the same dp_group_id (they get same data)
+#    - Lanes assigned based on dp_group_id, not global_rank
+#
+# With 3D parallelism (DP x TP x PP), ranks are organized as:
+#    - dp_degree groups, each needing different data
+#    - mp_degree (= TP x PP) ranks per group, all needing SAME data
+#    - world_size = dp_degree x mp_degree
+#
+# Example: PP=2, DP=2, TP=2 (8 GPUs)
+#    GPU 0: global_rank=0, dp_group_id=0  --+
+#    GPU 1: global_rank=1, dp_group_id=0    | All read same data (lane 0)
+#    GPU 4: global_rank=4, dp_group_id=0    |
+#    GPU 5: global_rank=5, dp_group_id=0  --+
+#    GPU 2: global_rank=2, dp_group_id=1  --+
+#    GPU 3: global_rank=3, dp_group_id=1    | All read same data (lane 1)
+#    GPU 6: global_rank=6, dp_group_id=1    |
+#    GPU 7: global_rank=7, dp_group_id=1  --+
+#
+# CURRENT IMPLEMENTATION: DP-only awareness
+#    - All ranks with same dp_group_id independently read same lanes
+#    - Redundant I/O (mp_degree x reads per DP group) but correct
+#    - Simple and data loading rarely the bottleneck
+#
+# FUTURE OPTIMIZATION: MP awareness (not implemented)
+#    If I/O becomes a bottleneck, could add:
+#    - mp_degree: int  # TP x PP, ranks per DP group
+#    - mp_rank: int    # unique ID within DP group (0 to mp_degree-1)
+#
+#    This would enable:
+#    - Only mp_rank==0 actually reads data
+#    - Others yield None, training framework broadcasts
+#    - Reduces I/O by factor of mp_degree
+#
+#    Additional consideration for PP stages:
+#    - First PP stage needs input tokens
+#    - Last PP stage needs labels
+#    - But both derive from same token window, so can't separate reads
+#    - Within each TP group (same PP stage), only one needs to read
+#
+#    Complexity: requires coordination with training framework for broadcast.
+#    Only implement if I/O proven to be bottleneck.
+# =============================================================================
 
 
 class Engine:
@@ -263,7 +334,7 @@ class Engine:
 
         self._work = work
         self._lane_ws: dict[LaneId, WorkSource] = {}
-        for lane in self._world.lanes_for_rank[self._world.physical_rank]:
+        for lane in self._world.lanes_for_dp_group[self._world.dp_group_id]:
             self._lane_ws[lane] = self._work.clone_for_lane(
                 lane, canonical_replicas=self._world.canonical_replicas
             )
@@ -296,7 +367,7 @@ class Engine:
             self._metrics_reporter = MetricsReporter(
                 self._collector,
                 metrics_sink_config,
-                rank_id=self._world.physical_rank,
+                rank_id=self._world.global_rank,
                 worker_id=worker_id,
             )
             if self._collector.tracking_mode.collects_nodes:
@@ -311,10 +382,10 @@ class Engine:
 
         self._agg_timeout_s = self._opts.aggregate_timeout_s
         self._using_fresh_tmp = False
-        if self._world.num_ranks == 1:
+        if self._world.world_size == 1:
             # Single-node: auto if not provided
             base = self._opts.aggregate_dir or os.path.join(
-                tempfile.gettempdir(), f"zephon_state_r{self._world.physical_rank}"
+                tempfile.gettempdir(), f"zephon_state_r{self._world.global_rank}"
             )
             self._using_fresh_tmp = (
                 self._opts.aggregate_dir is None or self._opts.aggregate_dir == ""
@@ -367,7 +438,7 @@ class Engine:
             ]
             using_default = True
             # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
-            run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world.num_ranks}-{self._plan.plan_id}"
+            run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world.world_size}-{self._plan.plan_id}"
 
         # Avoid having to use a new run id with every reload
         run_id = f"{run_id}-{self._checkpoint_reload_count}"
@@ -418,41 +489,133 @@ class Engine:
             return mp.get_context(ctx_spec)
         return ctx_spec
 
+    def _resolve_parallelism_params(self) -> None:
+        """Resolve parallelism parameters with defaults for 1D parallelism.
+
+        For 1D data parallelism, users only need to set world_size and global_rank;
+        dp_* params auto-derive to avoid redundant configuration.
+        """
+        opts = self._opts
+
+        # Validate world_size before using it for defaults
+        if opts.world_size < 1:
+            raise ValueError(f"world_size ({opts.world_size}) must be >= 1")
+
+        # Default dp params to 1D parallelism if not specified
+        if opts.dp_degree is None:
+            opts.dp_degree = opts.world_size
+        if opts.dp_group_id is None:
+            opts.dp_group_id = opts.global_rank
+
+        # Default canonical_replicas to dp_degree
+        if opts.canonical_replicas is None:
+            opts.canonical_replicas = opts.dp_degree
+
+        # === Strict Validation (errors) ===
+
+        if not (0 <= opts.global_rank < opts.world_size):
+            raise ValueError(
+                f"global_rank ({opts.global_rank}) must be in [0, world_size ({opts.world_size}))"
+            )
+
+        if opts.dp_degree < 1:
+            raise ValueError(f"dp_degree ({opts.dp_degree}) must be >= 1")
+
+        if opts.dp_degree > opts.world_size:
+            raise ValueError(
+                f"dp_degree ({opts.dp_degree}) cannot exceed world_size ({opts.world_size})"
+            )
+
+        if opts.world_size % opts.dp_degree != 0:
+            raise ValueError(
+                f"world_size ({opts.world_size}) must be divisible by dp_degree ({opts.dp_degree}). "
+                + "In 3D parallelism, mp_degree (= TP × PP = world_size / dp_degree) must be an integer."
+            )
+
+        if not (0 <= opts.dp_group_id < opts.dp_degree):
+            raise ValueError(
+                f"dp_group_id ({opts.dp_group_id}) must be in [0, dp_degree ({opts.dp_degree}))"
+            )
+
+        if opts.canonical_replicas < 1:
+            raise ValueError(
+                f"canonical_replicas ({opts.canonical_replicas}) must be >= 1"
+            )
+
+        if opts.canonical_replicas < opts.dp_degree:
+            raise ValueError(
+                f"canonical_replicas ({opts.canonical_replicas}) must be >= dp_degree ({opts.dp_degree})"
+            )
+
+        # === Warnings (valid but unusual configurations) ===
+
+        mp_degree = opts.world_size // opts.dp_degree
+        if mp_degree > 1 and (mp_degree & (mp_degree - 1)) != 0:
+            # mp_degree is not a power of 2 (and > 1)
+            warnings.warn(
+                f"[zephon] mp_degree (= world_size / dp_degree = {opts.world_size} / "
+                + f"{opts.dp_degree} = {mp_degree}) is not a power of 2. In 3D parallelism, "
+                + "mp_degree = TP × PP is typically a power of 2. "
+                + "This may indicate a configuration error.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+        if opts.canonical_replicas % opts.dp_degree != 0:
+            warnings.warn(
+                f"[zephon] canonical_replicas ({opts.canonical_replicas}) is not divisible by "
+                + f"dp_degree ({opts.dp_degree}). This will result in uneven lane distribution "
+                + "across DP groups, which may cause load imbalance.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
     def _build_world(self) -> World:
         worker_id, workers_per_rank = get_torch_worker_info()
-        # Always build a canonical schedule. If canonical_replicas is unspecified,
-        # default it to the number of physical DP ranks (>=1).
-        num_ranks = max(1, int(self._opts.num_ranks))
-        canonical_replicas = (
-            int(self._opts.canonical_replicas)
-            if self._opts.canonical_replicas is not None
-            else num_ranks
-        )
+
+        # Resolve defaults for parallelism parameters
+        self._resolve_parallelism_params()
+
+        # After _resolve_parallelism_params(), these are guaranteed to be int
+        assert self._opts.dp_degree is not None
+        assert self._opts.dp_group_id is not None
+        assert self._opts.canonical_replicas is not None
+
+        dp_degree: int = self._opts.dp_degree
+        dp_group_id: int = self._opts.dp_group_id
+        canonical_replicas: int = self._opts.canonical_replicas
+
         strategy = (self._opts.mapping_strategy or "contiguous").lower()
-        # Build mapping according to strategy
+
+        # Build lane mapping based on dp_group_id (not global_rank)
         mapping: dict[int, list[int]] = {}
         if strategy == "interleaved":
-            for r in range(num_ranks):
-                mapping[r] = [
-                    lane for lane in range(canonical_replicas) if lane % num_ranks == r
+            for dp_id in range(dp_degree):
+                mapping[dp_id] = [
+                    lane
+                    for lane in range(canonical_replicas)
+                    if lane % dp_degree == dp_id
                 ]
         else:  # contiguous
-            base = canonical_replicas // num_ranks
-            rem = canonical_replicas % num_ranks
+            base = canonical_replicas // dp_degree
+            rem = canonical_replicas % dp_degree
             start = 0
-            for r in range(num_ranks):
-                count = base + (1 if r < rem else 0)
-                lanes = list(range(start, start + count))
-                mapping[r] = lanes
+            for dp_id in range(dp_degree):
+                count = base + (1 if dp_id < rem else 0)
+                mapping[dp_id] = list(range(start, start + count))
                 start += count
 
         return World(
             canonical_replicas=canonical_replicas,
             worker_id=worker_id,
             workers_per_rank=workers_per_rank,
-            physical_rank=self._opts.physical_rank,
-            num_ranks=num_ranks,
-            lanes_for_rank=mapping,
+            # Global coordination
+            world_size=self._opts.world_size,
+            global_rank=self._opts.global_rank,
+            # Data partitioning
+            dp_degree=dp_degree,
+            dp_group_id=dp_group_id,
+            lanes_for_dp_group=mapping,
         )
 
     def explain(self) -> str:
@@ -914,13 +1077,13 @@ class Engine:
         - RR pointer: local, physical-world-scoped fairness hint; recomputed or reused per key.
         - Per-lane progress: durable, topology-agnostic correctness state; guarantees continuity.
         """
-        lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
         worker_id, workers_per_rank = get_torch_worker_info()
         active = self._active_workers(workers_per_rank, lanes_all)
         if worker_id >= active:
             return
         lanes = self._owned_lanes
-        key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
         if len(lanes) <= 1:
             self._rr_next_idx[key] = 0
             return
@@ -966,8 +1129,8 @@ class Engine:
 
     @property
     def _owned_lanes(self) -> list[LaneId]:
-        lanes_all = self._world.lanes_for_rank[
-            self._world.physical_rank
+        lanes_all = self._world.lanes_for_dp_group[
+            self._world.dp_group_id
         ]  # canonical order
         worker_id, workers_per_rank = get_torch_worker_info()
         active = self._active_workers(workers_per_rank, lanes_all)
@@ -1049,7 +1212,7 @@ class Engine:
         warn_threshold = 10000
 
         # Derive the lanes owned by THIS DataLoader worker (same logic as _source_stream)
-        lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
         worker_id, workers_per_rank = get_torch_worker_info()
         active = self._active_workers(workers_per_rank, lanes_all)
 
@@ -1062,7 +1225,7 @@ class Engine:
 
         lanes = self._owned_lanes
         if len(lanes) <= 1:  # Simple case: only one owned lane
-            key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+            key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
             self._rr_next_idx[key] = 0
             yield from upstream
             return
@@ -1070,7 +1233,7 @@ class Engine:
         buffers: dict[int, deque[StreamItem]] = {lane: deque() for lane in lanes}
         it = iter(upstream)
         upstream_ended = False
-        key = f"{self._opts.physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
         idx = self._rr_next_idx.get(key, 0) % len(lanes)
 
         # soft warning thresholds (double each time they’re tripped)
@@ -1301,7 +1464,7 @@ class Engine:
         """Serializable snapshot of engine runtime state (no plan/op state)."""
         with self._checkpoint_lock:
             owned = self._owned_lanes
-            # print(f"node {self._world.physical_rank}/{self._world.num_ranks} w{worker_id}/{workers_per_rank} owns {len(owned)} lanes.")
+            # print(f"node {self._world.global_rank}/{self._world.world_size} w{worker_id}/{workers_per_rank} owns {len(owned)} lanes.")
 
             self._refresh_rr_from_progress()
 
@@ -1345,11 +1508,13 @@ class Engine:
 
             world = {
                 "canonical_replicas": int(self._world.canonical_replicas),
-                "num_ranks": int(self._world.num_ranks),
-                "physical_rank": int(self._world.physical_rank),
+                "world_size": int(self._world.world_size),
+                "global_rank": int(self._world.global_rank),
+                "dp_degree": int(self._world.dp_degree),
+                "dp_group_id": int(self._world.dp_group_id),
                 "mapping": {
-                    int(r): [int(x) for x in lanes]
-                    for r, lanes in self._world.lanes_for_rank.items()
+                    int(dp_id): [int(x) for x in lanes]
+                    for dp_id, lanes in self._world.lanes_for_dp_group.items()
                 },
             }
             for lane, by_chunk in self.inflight_chunks_per_lane.items():
@@ -1487,7 +1652,7 @@ class Engine:
         pid = os.getpid()
         return (
             self._agg_dir
-            / f"state_r{self._world.physical_rank}_w{wid}_p{pid}_{round_id}.json"
+            / f"state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.json"
         )
 
     def _merged_file_path(self, round_id: str) -> Path:
@@ -1517,7 +1682,7 @@ class Engine:
     def _log(self, msg: str) -> None:
         worker_id, workers_per_rank = get_torch_worker_info()
         print(
-            f"[PR {self._world.physical_rank}][PID {os.getpid()}][Worker {worker_id}/{workers_per_rank - 1}] {msg}",
+            f"[PR {self._world.global_rank}][PID {os.getpid()}][Worker {worker_id}/{workers_per_rank - 1}] {msg}",
             file=sys.stderr,
         )
 
@@ -1540,14 +1705,14 @@ class Engine:
             # And in regular Zephon without a DL, we don't have multiple workers per rank. Hence, this is fine, but if there is a better solution we should improve this.
             return local
 
-        lanes_all = self._world.lanes_for_rank[self._world.physical_rank]
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
         worker_id, workers_per_rank = get_torch_worker_info()
         active_here = self._active_workers(workers_per_rank, lanes_all)
-        if self._world.num_ranks == 1 and active_here == 1:
+        if self._world.world_size == 1 and active_here == 1:
             return local
 
         # Round setup
-        is_leader = self._world.physical_rank == 0 and worker_id == 0
+        is_leader = self._world.global_rank == 0 and worker_id == 0
         round_id = self._open_round_id(is_leader)
         self._last_round_id = round_id
         my_path = self._state_file_path(round_id)
@@ -1603,15 +1768,15 @@ class Engine:
             if int(s["world"]["canonical_replicas"]) != C:
                 raise RuntimeError("canonical_replicas mismatch")
 
-        merged_num_ranks: int | None = None
+        merged_world_size: int | None = None
         for s in states:
             w = s.get("world", {})
-            if "num_ranks" in w and w["num_ranks"] is not None:
-                n = int(w["num_ranks"])
-                if merged_num_ranks is None:
-                    merged_num_ranks = n
-                elif merged_num_ranks != n:
-                    raise RuntimeError("num_ranks mismatch across state shards")
+            if "world_size" in w and w["world_size"] is not None:
+                n = int(w["world_size"])
+                if merged_world_size is None:
+                    merged_world_size = n
+                elif merged_world_size != n:
+                    raise RuntimeError("world_size mismatch across state shards")
 
         inflight, progress, lane_next, lane_ws_state = {}, {}, {}, {}
         for st in states:
@@ -1672,7 +1837,7 @@ class Engine:
 
         return {
             "version": 1,
-            "world": {"canonical_replicas": C, "num_ranks": merged_num_ranks},
+            "world": {"canonical_replicas": C, "world_size": merged_world_size},
             "inflight": inflight,
             "progress": progress,
             "lane_next_cid": lane_next,
@@ -1698,7 +1863,7 @@ class Engine:
 
         # This is FOR ALL WORKERS on that node. So we restore a bit more than we have to because we cannot be certain whether load_state_dict is called before workers are instantiated or not.
 
-        owned = set(self._world.lanes_for_rank[self._world.physical_rank])
+        owned = set(self._world.lanes_for_dp_group[self._world.dp_group_id])
         base_ws = self._work
         # TODO(MaxiBoether): in the future support sometihng like this
         # if state.get("work_config") and hasattr(type(self._work), "from_config"):

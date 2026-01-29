@@ -87,8 +87,10 @@ def _build_pipe(
     return pipe.options(
         deterministic=True,
         canonical_replicas=1,  # single-lane; DL workers fan-in to the same pipeline
-        num_ranks=1,
-        physical_rank=0,
+        world_size=1,
+        global_rank=0,
+        dp_degree=1,
+        dp_group_id=0,
         mapping_strategy="contiguous",
         default_stage_prefetch=stage_prefetch,
         prefetch_batches=final_prefetch,

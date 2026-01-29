@@ -85,7 +85,7 @@ def consume_until(
     return out, ckpt
 
 
-# Small helper that lets us vary num_ranks/physical_rank/mapping_strategy.
+# Small helper that lets us vary dp_degree/dp_group_id/mapping_strategy.
 def _build_pipe_params(
     ds: Dataset,
     *,
@@ -96,8 +96,10 @@ def _build_pipe_params(
     stage_prefetch: int = 0,
     final_prefetch: int = 0,
     seed: int = 7,
-    num_ranks: int = 1,
-    physical_rank: int = 0,
+    world_size: int = 1,
+    global_rank: int = 0,
+    dp_degree: int = 1,
+    dp_group_id: int = 0,
     mapping_strategy: str = "contiguous",
     allow_latency_flush_in_deterministic: bool = True,
     aggregate_dir: str | None = None,
@@ -128,8 +130,10 @@ def _build_pipe_params(
     pipe = pipe.options(
         deterministic=True,
         canonical_replicas=canonical_replicas,
-        num_ranks=num_ranks,
-        physical_rank=physical_rank,
+        world_size=world_size,
+        global_rank=global_rank,
+        dp_degree=dp_degree,
+        dp_group_id=dp_group_id,
         mapping_strategy=mapping_strategy,
         default_stage_prefetch=stage_prefetch,
         prefetch_batches=final_prefetch,
@@ -481,8 +485,8 @@ def test_scale_down_equivalence_truth_checkpnts(
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
     ).options(
-        num_ranks=1,
-        physical_rank=0,
+        dp_degree=1,
+        dp_group_id=0,
     )
     all_flat, _ = consume_until(pipe_all)
     total = len(all_flat)
@@ -499,8 +503,10 @@ def test_scale_down_equivalence_truth_checkpnts(
             final_prefetch=final_prefetch,
             aggregate_dir=str(tmp_path),
         ).options(
-            num_ranks=N,
-            physical_rank=r,
+            world_size=N,
+            global_rank=r,
+            dp_degree=N,
+            dp_group_id=r,
         )
         flat, _ = consume_until(pipe)
         per_rank_flats.append(flat)
@@ -594,8 +600,8 @@ def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) ->
             final_prefetch=2,
             run_id=f"mrrb-truth-p{phase_idx}",
         ).options(
-            num_ranks=1,
-            physical_rank=0,
+            dp_degree=1,
+            dp_group_id=0,
         )
         truth_pipe._ensure()
         assert truth_pipe._engine is not None
@@ -620,8 +626,10 @@ def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) ->
                 aggregate_dir=str(tmp_path),
                 run_id=f"mrrb-sim-p{phase_idx}",
             ).options(
-                num_ranks=ranks,
-                physical_rank=r,
+                world_size=ranks,
+                global_rank=r,
+                dp_degree=ranks,
+                dp_group_id=r,
                 mapping_strategy=strat,
             )
             rank_pipe._ensure()
@@ -691,8 +699,8 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
         aggregate_dir=str(tmp_path),
         run_id=f"resize-mb-cs{chunk_size}-truth",
     ).options(
-        num_ranks=1,
-        physical_rank=0,
+        dp_degree=1,
+        dp_group_id=0,
     )
     # First N elements of the true canonical stream (no resume, no batching)
     oracle_flat, _ = consume_until(
@@ -719,8 +727,8 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
             aggregate_dir=str(tmp_path),
             run_id=f"resize-mb-cs{chunk_size}-ph{phase_idx}-truth",
         ).options(
-            num_ranks=1,
-            physical_rank=0,
+            dp_degree=1,
+            dp_group_id=0,
         )
         truth_pipe._ensure()
         assert truth_pipe._engine is not None
@@ -745,8 +753,10 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
                 aggregate_dir=str(tmp_path),
                 run_id=f"resize-mb-cs{chunk_size}-ph{phase_idx}-simul",
             ).options(
-                num_ranks=ranks,
-                physical_rank=r,
+                world_size=ranks,
+                global_rank=r,
+                dp_degree=ranks,
+                dp_group_id=r,
                 mapping_strategy=strat,
             )
             rank_pipe._ensure()
@@ -879,8 +889,8 @@ def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -
             aggregate_dir=str(tmp_path),
             run_id=f"scaleudownnomp-p{phase_idx}-truth",
         ).options(
-            num_ranks=1,
-            physical_rank=0,
+            dp_degree=1,
+            dp_group_id=0,
         )
         truth._ensure()
         assert truth._engine is not None
@@ -905,8 +915,10 @@ def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -
                 aggregate_dir=str(tmp_path),
                 run_id=f"scaleudownnomp-p{phase_idx}-simulation",
             ).options(
-                num_ranks=ranks,
-                physical_rank=r,
+                world_size=ranks,
+                global_rank=r,
+                dp_degree=ranks,
+                dp_group_id=r,
                 mapping_strategy=strat,
             )
             rp._ensure()
@@ -943,8 +955,8 @@ def _truth_windows_no_dl(
         batch_size=microbatch_size,
         chunk_size=chunk_size,
         canonical_replicas=canonical_replicas,
-        num_ranks=1,
-        physical_rank=0,
+        dp_degree=1,
+        dp_group_id=0,
         mapping_strategy="contiguous",
         aggregate_dir=None,  # single rank → auto tmp dir
         run_id=run_id,
@@ -990,8 +1002,10 @@ def _rank_worker_proc(
         batch_size=microbatch_size,
         chunk_size=chunk_size,
         canonical_replicas=canonical_replicas,
-        num_ranks=ranks,
-        physical_rank=rank,
+        world_size=ranks,
+        global_rank=rank,
+        dp_degree=ranks,
+        dp_group_id=rank,
         mapping_strategy=mapping_strategy,
         aggregate_dir=tmp_path_str,
         run_id=run_id,

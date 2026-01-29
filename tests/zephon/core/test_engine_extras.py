@@ -57,10 +57,10 @@ def _mk_engine_with_opts(**opts: Any) -> Engine:
     # Provide a default aggregate_dir when simulating multi-rank setups
     o = dict(opts)
     try:
-        nr = int(o.get("num_ranks", 1))
+        ws = int(o.get("world_size", 1))
     except Exception:
-        nr = 1
-    if nr > 1 and not o.get("aggregate_dir"):
+        ws = 1
+    if ws > 1 and not o.get("aggregate_dir"):
         import os
         import tempfile
 
@@ -71,16 +71,16 @@ def _mk_engine_with_opts(**opts: Any) -> Engine:
 def test_world_mapping_contiguous_and_interleaved() -> None:
     # Contiguous mapping
     eng_c = _mk_engine_with_opts(
-        canonical_replicas=8, num_ranks=3, mapping_strategy="contiguous"
+        canonical_replicas=8, world_size=3, dp_degree=3, mapping_strategy="contiguous"
     )
-    mapping_c = eng_c._world.lanes_for_rank  # type: ignore[attr-defined]
+    mapping_c = eng_c._world.lanes_for_dp_group  # type: ignore[attr-defined]
     assert mapping_c == {0: [0, 1, 2], 1: [3, 4, 5], 2: [6, 7]}
 
     # Interleaved mapping
     eng_i = _mk_engine_with_opts(
-        canonical_replicas=8, num_ranks=3, mapping_strategy="interleaved"
+        canonical_replicas=8, world_size=3, dp_degree=3, mapping_strategy="interleaved"
     )
-    mapping_i = eng_i._world.lanes_for_rank  # type: ignore[attr-defined]
+    mapping_i = eng_i._world.lanes_for_dp_group  # type: ignore[attr-defined]
     assert mapping_i == {0: [0, 3, 6], 1: [1, 4, 7], 2: [2, 5]}
 
 
@@ -110,8 +110,8 @@ def _mk_rec(lane: int, chunk: int, local: int = 0) -> SampleRecord:
 
 
 def test_lane_rr_iter_round_robin_order() -> None:
-    eng = _mk_engine_with_opts(canonical_replicas=2, num_ranks=1)
-    eng._world.lanes_for_rank = {0: [0, 1]}  # type: ignore[attr-defined]
+    eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+    eng._world.lanes_for_dp_group = {0: [0, 1]}  # type: ignore[attr-defined]
 
     # Upstream yields several items only for lane 0 initially, then lane 1 later
     upstream: list[SampleRecord | SampleBatch] = [
@@ -172,7 +172,7 @@ def test_torch_worker_helpers_with_stubbed_torch(
 
 
 def test_notify_updates_progress_and_cursor() -> None:
-    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
 
     lane = 0
     eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
@@ -218,7 +218,7 @@ def test_notify_updates_progress_and_cursor() -> None:
 
 
 def test_replay_snapshot_ignores_evicted_cursor() -> None:
-    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
     lane = 0
 
     # Cursor whose chunk is not inflight should not appear as target.
@@ -237,7 +237,7 @@ def test_replay_snapshot_ignores_evicted_cursor() -> None:
 
 
 def test_chunk_eviction_waits_for_all_offsets() -> None:
-    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
     lane = 0
     eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
         components={"X": [(1,), (2,)]}
@@ -273,7 +273,7 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
 
 
 def test_state_round_trip_reconstructs_inflight_and_progress() -> None:
-    eng = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
     lane = 0
     # Add two chunks as inflight
     eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
@@ -287,7 +287,7 @@ def test_state_round_trip_reconstructs_inflight_and_progress() -> None:
 
     state = eng.state_dict()
 
-    eng_restored = _mk_engine_with_opts(canonical_replicas=1, num_ranks=1)
+    eng_restored = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
     eng_restored.load_state_dict(state, replay=False)
 
     # Inflight reconstructed with WorkChunk instances
@@ -299,3 +299,224 @@ def test_state_round_trip_reconstructs_inflight_and_progress() -> None:
     assert eng_restored._lane_progress[lane].chunk_id == 2  # type: ignore[attr-defined]
     assert eng_restored._lane_progress[lane].offset == 1  # type: ignore[attr-defined]
     assert eng_restored._lane_next_cid[lane] == 3  # type: ignore[attr-defined]
+
+
+# =============================================================================
+# Parallelism Parameter Validation Tests
+# =============================================================================
+
+
+class TestParallelismValidation:
+    """Tests for parallelism parameter validation in _resolve_parallelism_params."""
+
+    # --- Strict validation (errors) ---
+
+    def test_world_size_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="world_size.*must be >= 1"):
+            _mk_engine_with_opts(world_size=0, global_rank=0)
+
+    def test_global_rank_must_be_in_range(self) -> None:
+        with pytest.raises(ValueError, match="global_rank.*must be in"):
+            _mk_engine_with_opts(world_size=4, global_rank=4)
+        with pytest.raises(ValueError, match="global_rank.*must be in"):
+            _mk_engine_with_opts(world_size=4, global_rank=-1)
+
+    def test_dp_degree_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="dp_degree.*must be >= 1"):
+            _mk_engine_with_opts(
+                world_size=4, global_rank=0, dp_degree=0, dp_group_id=0
+            )
+
+    def test_dp_degree_cannot_exceed_world_size(self) -> None:
+        with pytest.raises(ValueError, match="dp_degree.*cannot exceed world_size"):
+            _mk_engine_with_opts(
+                world_size=4, global_rank=0, dp_degree=8, dp_group_id=0
+            )
+
+    def test_world_size_must_be_divisible_by_dp_degree(self) -> None:
+        # 5 nodes with dp_degree=3 -> mp_degree would be 1.67
+        with pytest.raises(
+            ValueError, match="world_size.*must be divisible by dp_degree"
+        ):
+            _mk_engine_with_opts(
+                world_size=5, global_rank=0, dp_degree=3, dp_group_id=0
+            )
+        # 8 nodes with dp_degree=3 -> mp_degree would be 2.67
+        with pytest.raises(
+            ValueError, match="world_size.*must be divisible by dp_degree"
+        ):
+            _mk_engine_with_opts(
+                world_size=8, global_rank=0, dp_degree=3, dp_group_id=0
+            )
+
+    def test_dp_group_id_must_be_in_range(self) -> None:
+        with pytest.raises(ValueError, match="dp_group_id.*must be in"):
+            _mk_engine_with_opts(
+                world_size=4, global_rank=0, dp_degree=2, dp_group_id=2
+            )
+        with pytest.raises(ValueError, match="dp_group_id.*must be in"):
+            _mk_engine_with_opts(
+                world_size=4, global_rank=0, dp_degree=2, dp_group_id=-1
+            )
+
+    def test_canonical_replicas_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="canonical_replicas.*must be >= 1"):
+            _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=0,
+            )
+
+    def test_canonical_replicas_must_be_at_least_dp_degree(self) -> None:
+        with pytest.raises(
+            ValueError, match="canonical_replicas.*must be >= dp_degree"
+        ):
+            _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=4,
+                dp_group_id=0,
+                canonical_replicas=2,
+            )
+
+    # --- Valid configurations (no errors) ---
+
+    def test_valid_1d_parallelism(self) -> None:
+        # Pure data parallelism: world_size=4, dp_degree=4, mp_degree=1
+        eng = _mk_engine_with_opts(world_size=4, global_rank=0)
+        assert eng._world.dp_degree == 4
+        assert eng._world.canonical_replicas == 4
+
+    def test_valid_3d_parallelism(self) -> None:
+        # 3D: world_size=8, dp_degree=2, mp_degree=4 (e.g., TP=2, PP=2)
+        eng = _mk_engine_with_opts(
+            world_size=8,
+            global_rank=0,
+            dp_degree=2,
+            dp_group_id=0,
+            canonical_replicas=2,
+        )
+        assert eng._world.dp_degree == 2
+        assert eng._world.world_size == 8
+
+    def test_valid_with_more_canonical_replicas(self) -> None:
+        # Elasticity: more lanes than dp_degree for future scale-up
+        eng = _mk_engine_with_opts(
+            world_size=4,
+            global_rank=0,
+            dp_degree=2,
+            dp_group_id=0,
+            canonical_replicas=8,
+        )
+        assert eng._world.canonical_replicas == 8
+        assert eng._world.dp_degree == 2
+
+    # --- Warnings (valid but unusual) ---
+
+    def test_warns_when_mp_degree_not_power_of_2(self) -> None:
+        # world_size=6, dp_degree=2 -> mp_degree=3 (not power of 2)
+        with pytest.warns(RuntimeWarning, match="mp_degree.*is not a power of 2"):
+            _mk_engine_with_opts(
+                world_size=6,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=2,
+            )
+
+    def test_no_warning_when_mp_degree_is_1(self) -> None:
+        # mp_degree=1 should not warn (pure DP is common)
+        import warnings as w
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            _mk_engine_with_opts(
+                world_size=4, global_rank=0, dp_degree=4, dp_group_id=0
+            )
+            mp_warnings = [x for x in caught if "mp_degree" in str(x.message)]
+            assert len(mp_warnings) == 0
+
+    def test_no_warning_when_mp_degree_power_of_2(self) -> None:
+        # mp_degree=4 should not warn
+        import warnings as w
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            _mk_engine_with_opts(
+                world_size=8,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=2,
+            )
+            mp_warnings = [x for x in caught if "mp_degree" in str(x.message)]
+            assert len(mp_warnings) == 0
+
+    def test_warns_when_canonical_replicas_not_divisible_by_dp_degree(self) -> None:
+        # canonical_replicas=5, dp_degree=2 -> uneven lane distribution
+        with pytest.warns(RuntimeWarning, match="canonical_replicas.*is not divisible"):
+            _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=5,
+            )
+
+    def test_no_warning_when_canonical_replicas_divisible(self) -> None:
+        # canonical_replicas=8, dp_degree=2 -> even distribution
+        import warnings as w
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=8,
+            )
+            canon_warnings = [
+                x for x in caught if "canonical_replicas" in str(x.message)
+            ]
+            assert len(canon_warnings) == 0
+
+    # --- Lane distribution tests for uneven configs ---
+
+    def test_uneven_lane_distribution_interleaved(self) -> None:
+        # canonical_replicas=5, dp_degree=2 -> dp0: [0,2,4], dp1: [1,3]
+        import warnings as w
+
+        with w.catch_warnings():
+            w.simplefilter("ignore")  # Suppress the expected warning
+            eng = _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=5,
+                mapping_strategy="interleaved",
+            )
+        mapping = eng._world.lanes_for_dp_group
+        assert mapping[0] == [0, 2, 4]  # 3 lanes
+        assert mapping[1] == [1, 3]  # 2 lanes
+
+    def test_uneven_lane_distribution_contiguous(self) -> None:
+        # canonical_replicas=5, dp_degree=2 -> dp0: [0,1,2], dp1: [3,4]
+        import warnings as w
+
+        with w.catch_warnings():
+            w.simplefilter("ignore")  # Suppress the expected warning
+            eng = _mk_engine_with_opts(
+                world_size=4,
+                global_rank=0,
+                dp_degree=2,
+                dp_group_id=0,
+                canonical_replicas=5,
+                mapping_strategy="contiguous",
+            )
+        mapping = eng._world.lanes_for_dp_group
+        assert mapping[0] == [0, 1, 2]  # 3 lanes
+        assert mapping[1] == [3, 4]  # 2 lanes
