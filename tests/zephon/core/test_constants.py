@@ -392,13 +392,13 @@ class TestToTrainingEdgeCases:
         assert out["input_ids"] == [[1]]
         assert out["labels"] == [[2]]
 
-    def test_non_dict_payload_raises(self) -> None:
+    def test_non_dict_non_array_payload_raises(self) -> None:
         r0 = SampleRecord(
             meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
-            payload="not a dict",  # type: ignore
+            payload="not a dict or array",  # type: ignore
         )
         batch = SampleBatch(records=(r0,))
-        with pytest.raises(TypeError, match="expects dict payloads"):
+        with pytest.raises(TypeError, match="expects dict or array-like"):
             batch.to_training()
 
     def test_preserves_ids_and_texts(self) -> None:
@@ -485,6 +485,99 @@ class TestToTrainingIntegration:
         assert out["input_ids"].dtype == np.int32
         assert out["input_ids"].tolist() == [[1, 2, 3, 4]]
         assert out["labels"].tolist() == [[2, 3, 4, 5]]
+
+
+# ---------------------------------------------------------------------------
+# Array payload tests (for LitData TokensLoader and similar formats)
+# ---------------------------------------------------------------------------
+
+
+class TestToTrainingArrayPayloads:
+    """Tests for array payloads (numpy arrays, torch tensors)."""
+
+    def test_numpy_array_payloads(self) -> None:
+        np = pytest.importorskip("numpy")
+        arr0 = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+        arr1 = np.array([6, 7, 8, 9, 10], dtype=np.int64)
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=arr0
+        )
+        r1 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0), payload=arr1
+        )
+        batch = SampleBatch(records=(r0, r1))
+        out = batch.to_training(dtype=np.int64)
+
+        assert isinstance(out["input_ids"], np.ndarray)
+        assert out["input_ids"].tolist() == [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+        assert out["ids"] == [(0, 0, 0), (0, 0, 1)]
+        assert out["texts"] == ["", ""]
+
+    def test_numpy_array_payloads_with_labels(self) -> None:
+        np = pytest.importorskip("numpy")
+        arr0 = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+        arr1 = np.array([6, 7, 8, 9, 10], dtype=np.int64)
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=arr0
+        )
+        r1 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0), payload=arr1
+        )
+        batch = SampleBatch(records=(r0, r1))
+        out = batch.to_training(return_labels=True, dtype=np.int64)
+
+        assert out["input_ids"].tolist() == [[1, 2, 3, 4], [6, 7, 8, 9]]
+        assert out["labels"].tolist() == [[2, 3, 4, 5], [7, 8, 9, 10]]
+
+    def test_torch_tensor_payloads(self) -> None:
+        torch = pytest.importorskip("torch")
+        t0 = torch.tensor([1, 2, 3, 4, 5])
+        t1 = torch.tensor([6, 7, 8, 9, 10])
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=t0
+        )
+        r1 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0), payload=t1
+        )
+        batch = SampleBatch(records=(r0, r1))
+        out = batch.to_training(dtype=torch.long)
+
+        assert isinstance(out["input_ids"], torch.Tensor)
+        assert out["input_ids"].tolist() == [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+
+    def test_mixed_dict_array_raises(self) -> None:
+        np = pytest.importorskip("numpy")
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3]})
+        r1 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0),
+            payload=np.array([4, 5, 6]),
+        )
+        batch = SampleBatch(records=(r0, r1))
+        with pytest.raises(TypeError, match="Expected dict payload, got: ndarray"):
+            batch.to_training()
+
+    def test_mixed_array_dict_raises(self) -> None:
+        np = pytest.importorskip("numpy")
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+            payload=np.array([1, 2, 3]),
+        )
+        r1 = _rec((0, 0, 1), 0, 0, {"input_ids": [4, 5, 6]})
+        batch = SampleBatch(records=(r0, r1))
+        with pytest.raises(TypeError, match="mixed payload types"):
+            batch.to_training()
+
+    def test_array_payloads_ignore_tokens_field(self) -> None:
+        """tokens_field parameter is ignored for array payloads."""
+        np = pytest.importorskip("numpy")
+        arr = np.array([1, 2, 3], dtype=np.int64)
+        r0 = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0), payload=arr
+        )
+        batch = SampleBatch(records=(r0,))
+        # Should work even with explicit tokens_field (it's ignored)
+        out = batch.to_training(tokens_field="nonexistent", dtype=np.int64)
+        assert out["input_ids"].tolist() == [[1, 2, 3]]
 
 
 # ---------------------------------------------------------------------------

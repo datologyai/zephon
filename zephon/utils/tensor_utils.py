@@ -83,6 +83,9 @@ def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> 
     if framework == "torch":
         import torch
 
+        # If inputs are already tensors, use stack; otherwise use tensor()
+        if sequences and isinstance(sequences[0], torch.Tensor):
+            return torch.stack(sequences).to(dtype=dtype)
         return torch.tensor(sequences, dtype=dtype)
     elif framework == "numpy":
         import numpy as np

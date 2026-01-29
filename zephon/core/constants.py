@@ -288,6 +288,78 @@ class SampleBatch:
     def chunk_ids(self) -> tuple[ChunkId, ...]:
         return tuple(r.meta.chunk_id for r in self.records)
 
+    def _extract_from_dicts(
+        self,
+        items: list[SampleRecord],
+        tokens_field: str,
+        extra_fields: Sequence[str],
+    ) -> tuple[list[Any], list[str], dict[str, list[Any]]]:
+        """Extract tokens, texts, and extra fields from dict payloads."""
+        payloads: list[SamplePayloadDict] = []
+        texts: list[str] = []
+        for record in items:
+            payload = record.payload
+            if not isinstance(payload, dict):
+                raise TypeError(f"Expected dict payload, got: {type(payload).__name__}")
+            payloads.append(payload)
+            texts.append(str(payload.get("text", "")))
+
+        # Resolve tokens_field if "auto"
+        resolved_tokens_field = tokens_field
+        if tokens_field == "auto":
+            resolved_tokens_field = detect_length_field(payloads[0])
+            if resolved_tokens_field is None:
+                raise ValueError(
+                    f"Cannot auto-detect tokens field. Payload keys: "
+                    + f"{list(payloads[0].keys())}. Expected one of: "
+                    + f"{', '.join(TOKEN_FIELD_CANDIDATES)}"
+                )
+
+        # Validate tokens_field exists in all payloads
+        for i, payload in enumerate(payloads):
+            if resolved_tokens_field not in payload:
+                raise ValueError(
+                    f"Field '{resolved_tokens_field}' not found in payload at index {i}"
+                )
+
+        # Extract tokens
+        token_lists = [payload[resolved_tokens_field] for payload in payloads]
+
+        # Handle extra fields
+        extra_data: dict[str, list[Any]] = {}
+        for field_name in extra_fields:
+            # Check field exists in all payloads
+            for i, payload in enumerate(payloads):
+                if field_name not in payload:
+                    raise ValueError(
+                        f"Extra field '{field_name}' not found in payload at index {i}"
+                    )
+            extra_data[field_name] = [payload[field_name] for payload in payloads]
+
+        return token_lists, texts, extra_data
+
+    def _extract_from_arrays(
+        self,
+        items: list[SampleRecord],
+    ) -> tuple[list[Any], list[str], dict[str, list[Any]]]:
+        """Extract tokens from array payloads (numpy/torch tensors)."""
+        payloads = [r.payload for r in items]
+
+        # Validate all payloads are array-like (have shape attr) not strings/bytes
+        for i, p in enumerate(payloads):
+            if isinstance(p, dict):
+                raise TypeError(
+                    "SampleBatch.to_training: mixed payload types at index "
+                    f"{i} (expected all arrays, got dict)"
+                )
+            if not hasattr(p, "shape"):
+                raise TypeError(
+                    "SampleBatch.to_training expects dict or array-like "
+                    "(numpy/torch) payloads"
+                )
+
+        return payloads, [""] * len(items), {}
+
     def to_training(
         self,
         *,
@@ -326,34 +398,13 @@ class SampleBatch:
         if not items:
             return {"ids": [], "texts": []}
 
-        payloads: list[SamplePayloadDict] = []
-        texts: list[str] = []
-        for record in items:
-            payload = record.payload
-            if not isinstance(payload, dict):
-                raise TypeError(
-                    "SampleBatch.to_training expects dict payloads on every record"
-                )
-            payloads.append(payload)
-            texts.append(str(payload.get("text", "")))
-
-        # Resolve tokens_field if "auto"
-        resolved_tokens_field = tokens_field
-        if tokens_field == "auto":
-            resolved_tokens_field = detect_length_field(payloads[0])
-            if resolved_tokens_field is None:
-                raise ValueError(
-                    f"Cannot auto-detect tokens field. Payload keys: "
-                    + f"{list(payloads[0].keys())}. Expected one of: "
-                    + f"{', '.join(TOKEN_FIELD_CANDIDATES)}"
-                )
-
-        # Validate tokens_field exists in all payloads
-        for i, payload in enumerate(payloads):
-            if resolved_tokens_field not in payload:
-                raise ValueError(
-                    f"Field '{resolved_tokens_field}' not found in payload at index {i}"
-                )
+        # Extract based on payload type
+        if isinstance(items[0].payload, dict):
+            token_lists, texts, extra_data = self._extract_from_dicts(
+                items, tokens_field, extra_fields
+            )
+        else:
+            token_lists, texts, extra_data = self._extract_from_arrays(items)
 
         # Resolve dtype
         resolved_dtype, framework = resolve_dtype(dtype)
@@ -364,8 +415,7 @@ class SampleBatch:
             "texts": texts,
         }
 
-        # Extract and stack tokens
-        token_lists = [payload[resolved_tokens_field] for payload in payloads]
+        # Stack tokens
         tokens = stack_sequences(token_lists, resolved_dtype, framework)
 
         if return_labels:
@@ -376,15 +426,7 @@ class SampleBatch:
             result["input_ids"] = tokens
 
         # Handle extra fields
-        for field_name in extra_fields:
-            # Check field exists in all payloads
-            for i, payload in enumerate(payloads):
-                if field_name not in payload:
-                    raise ValueError(
-                        f"Extra field '{field_name}' not found in payload at index {i}"
-                    )
-
-            field_lists = [payload[field_name] for payload in payloads]
+        for field_name, field_lists in extra_data.items():
             field_tensor = stack_sequences(field_lists, resolved_dtype, framework)
 
             if return_labels:
