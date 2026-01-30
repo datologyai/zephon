@@ -11,6 +11,7 @@ from zephon.ops.fetch import FetchOp
 from zephon.ops.map_transform import MapTransform
 from zephon.ops.materialize import Materialize
 from zephon.ops.pack_sequences import PackSequences
+from zephon.ops.prefetch import PrefetchOp
 from zephon.ops.shuffle_buffer import ShuffleBuffer
 from zephon.ops.tokenize_text import TokenizeText
 
@@ -23,6 +24,7 @@ __all__ = [
     "MapTransform",
     "Materialize",
     "PackSequences",
+    "PrefetchOp",
     "ShuffleBuffer",
     "TokenizeText",
 ]

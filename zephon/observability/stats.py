@@ -471,6 +471,186 @@ class FetchTimingSummary:
         return any(stage.totals.samples > 0 for stage in self.stages.values())
 
 
+@dataclass(slots=True)
+class PrefetchTimingDelta:
+    """Incremental prefetch metrics emitted per batch."""
+
+    stage_index: int
+    batch_size: int
+    prefetch_requests: int
+    prefetch_succeeded: int
+    prefetch_failed: int
+
+
+@dataclass(slots=True)
+class PrefetchTimingTotals:
+    """Aggregated prefetch totals accumulated across deltas."""
+
+    batches: int = 0
+    samples: int = 0
+    prefetch_requests: int = 0
+    prefetch_succeeded: int = 0
+    prefetch_failed: int = 0
+
+    def apply(self, delta: PrefetchTimingDelta) -> None:
+        self.batches += 1
+        self.samples += max(0, delta.batch_size)
+        self.prefetch_requests += max(0, delta.prefetch_requests)
+        self.prefetch_succeeded += max(0, delta.prefetch_succeeded)
+        self.prefetch_failed += max(0, delta.prefetch_failed)
+
+    def merge(self, other: "PrefetchTimingTotals") -> None:
+        self.batches += other.batches
+        self.samples += other.samples
+        self.prefetch_requests += other.prefetch_requests
+        self.prefetch_succeeded += other.prefetch_succeeded
+        self.prefetch_failed += other.prefetch_failed
+
+    def copy(self) -> "PrefetchTimingTotals":
+        clone = PrefetchTimingTotals()
+        clone.batches = self.batches
+        clone.samples = self.samples
+        clone.prefetch_requests = self.prefetch_requests
+        clone.prefetch_succeeded = self.prefetch_succeeded
+        clone.prefetch_failed = self.prefetch_failed
+        return clone
+
+
+@dataclass
+class PrefetchTimingSummary:
+    """Aggregated prefetch metrics for an entire pipeline."""
+
+    plan_id: str | None = None
+    reporting_interval_s: float | None = None
+    tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF
+    stages: MutableMapping[int, PrefetchTimingTotals] = field(default_factory=dict)
+
+    def apply(self, delta: PrefetchTimingDelta) -> None:
+        stage = self.stages.get(delta.stage_index)
+        if stage is None:
+            stage = PrefetchTimingTotals()
+            self.stages[delta.stage_index] = stage
+        stage.apply(delta)
+
+    def merge(self, other: "PrefetchTimingSummary") -> None:
+        if self.plan_id is None:
+            self.plan_id = other.plan_id
+        if self.reporting_interval_s is None:
+            self.reporting_interval_s = other.reporting_interval_s
+        for stage_index, totals in other.stages.items():
+            existing = self.stages.get(stage_index)
+            if existing is None:
+                self.stages[stage_index] = totals.copy()
+            else:
+                existing.merge(totals)
+
+    def clone(self) -> "PrefetchTimingSummary":
+        clone = PrefetchTimingSummary(
+            plan_id=self.plan_id,
+            reporting_interval_s=self.reporting_interval_s,
+            tracking_mode=self.tracking_mode,
+        )
+        for stage_index, totals in self.stages.items():
+            clone.stages[stage_index] = totals.copy()
+        return clone
+
+    def has_samples(self) -> bool:
+        return any(totals.samples > 0 for totals in self.stages.values())
+
+    @property
+    def success_rate(self) -> float:
+        total = self.prefetch_requests
+        if total <= 0:
+            return 0.0
+        return self.prefetch_succeeded / total
+
+
+@dataclass(slots=True)
+class BackpressureDelta:
+    """Incremental backpressure metrics emitted by ConcurrentStageRunner.
+
+    Tracks queue.Full events in _put_into_queue when stages cannot forward
+    results downstream due to backpressure.
+    """
+
+    stage_index: int
+    put_into_queue_backpressure_events: int = 0
+
+
+@dataclass(slots=True)
+class BackpressureTotals:
+    """Aggregated backpressure event counts."""
+
+    put_into_queue_backpressure_events: int = 0
+
+    def apply(self, delta: BackpressureDelta) -> None:
+        self.put_into_queue_backpressure_events += (
+            delta.put_into_queue_backpressure_events
+        )
+
+    def merge(self, other: "BackpressureTotals") -> None:
+        self.put_into_queue_backpressure_events += (
+            other.put_into_queue_backpressure_events
+        )
+
+    def copy(self) -> "BackpressureTotals":
+        return BackpressureTotals(
+            put_into_queue_backpressure_events=self.put_into_queue_backpressure_events,
+        )
+
+
+@dataclass
+class BackpressureSummary:
+    """Aggregated backpressure events for an entire pipeline."""
+
+    plan_id: str | None = None
+    reporting_interval_s: float | None = None
+    tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF
+    stages: MutableMapping[int, BackpressureTotals] = field(default_factory=dict)
+
+    def apply(self, delta: BackpressureDelta) -> None:
+        stage = self.stages.get(delta.stage_index)
+        if stage is None:
+            stage = BackpressureTotals()
+            self.stages[delta.stage_index] = stage
+        stage.apply(delta)
+
+    def merge(self, other: "BackpressureSummary") -> None:
+        if self.plan_id is None:
+            self.plan_id = other.plan_id
+        if self.reporting_interval_s is None:
+            self.reporting_interval_s = other.reporting_interval_s
+        for stage_index, totals in other.stages.items():
+            existing = self.stages.get(stage_index)
+            if existing is None:
+                self.stages[stage_index] = totals.copy()
+            else:
+                existing.merge(totals)
+
+    def clone(self) -> "BackpressureSummary":
+        clone = BackpressureSummary(
+            plan_id=self.plan_id,
+            reporting_interval_s=self.reporting_interval_s,
+            tracking_mode=self.tracking_mode,
+        )
+        for stage_index, totals in self.stages.items():
+            clone.stages[stage_index] = totals.copy()
+        return clone
+
+    def has_events(self) -> bool:
+        return any(
+            totals.put_into_queue_backpressure_events > 0
+            for totals in self.stages.values()
+        )
+
+    @property
+    def total_events(self) -> int:
+        """Total backpressure events across all stages."""
+        return sum(
+            totals.put_into_queue_backpressure_events for totals in self.stages.values()
+        )
+
+
 @dataclass
 class PipelineSummary:
     """Aggregated metrics for an entire pipeline invocation."""

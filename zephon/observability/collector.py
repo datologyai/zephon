@@ -8,10 +8,14 @@ from typing import Iterable
 
 from .config import ExecutionTrackingMode, MetricsSinkConfig
 from .stats import (
+    BackpressureDelta,
+    BackpressureSummary,
     FetchTimingDelta,
     FetchTimingSummary,
     NodeMetricsDelta,
     PipelineSummary,
+    PrefetchTimingDelta,
+    PrefetchTimingSummary,
 )
 
 
@@ -41,6 +45,16 @@ class PipelineCollector:
             reporting_interval_s=config.report_interval_s,
             tracking_mode=config.tracking_mode,
         )
+        self._prefetch_summary = PrefetchTimingSummary(
+            plan_id=config.plan_id,
+            reporting_interval_s=config.report_interval_s,
+            tracking_mode=config.tracking_mode,
+        )
+        self._backpressure_summary = BackpressureSummary(
+            plan_id=config.plan_id,
+            reporting_interval_s=config.report_interval_s,
+            tracking_mode=config.tracking_mode,
+        )
 
     @property
     def tracking_mode(self) -> ExecutionTrackingMode:
@@ -62,6 +76,18 @@ class PipelineCollector:
         with self._lock:
             self._fetch_summary.apply(delta)
 
+    def record_prefetch(self, delta: PrefetchTimingDelta) -> None:
+        if not self._config.tracking_mode.collects_nodes:
+            return
+        with self._lock:
+            self._prefetch_summary.apply(delta)
+
+    def record_backpressure(self, delta: BackpressureDelta) -> None:
+        if not self._config.tracking_mode.collects_nodes:
+            return
+        with self._lock:
+            self._backpressure_summary.apply(delta)
+
     def snapshot(self) -> PipelineSummary:
         with self._lock:
             return self._summary.clone()
@@ -69,6 +95,14 @@ class PipelineCollector:
     def snapshot_fetch(self) -> FetchTimingSummary:
         with self._lock:
             return self._fetch_summary.clone()
+
+    def snapshot_prefetch(self) -> PrefetchTimingSummary:
+        with self._lock:
+            return self._prefetch_summary.clone()
+
+    def snapshot_backpressure(self) -> BackpressureSummary:
+        with self._lock:
+            return self._backpressure_summary.clone()
 
     def reset(self) -> None:
         with self._lock:
@@ -82,11 +116,23 @@ class PipelineCollector:
                 reporting_interval_s=self._fetch_summary.reporting_interval_s,
                 tracking_mode=self._fetch_summary.tracking_mode,
             )
+            self._prefetch_summary = PrefetchTimingSummary(
+                plan_id=self._prefetch_summary.plan_id,
+                reporting_interval_s=self._prefetch_summary.reporting_interval_s,
+                tracking_mode=self._prefetch_summary.tracking_mode,
+            )
+            self._backpressure_summary = BackpressureSummary(
+                plan_id=self._backpressure_summary.plan_id,
+                reporting_interval_s=self._backpressure_summary.reporting_interval_s,
+                tracking_mode=self._backpressure_summary.tracking_mode,
+            )
 
     def merge_summary(
         self,
         other: PipelineSummary,
         fetch: FetchTimingSummary | None = None,
+        prefetch: PrefetchTimingSummary | None = None,
+        backpressure: BackpressureSummary | None = None,
     ) -> None:
         if self._config.tracking_mode is ExecutionTrackingMode.OFF:
             return
@@ -94,6 +140,10 @@ class PipelineCollector:
             self._summary.merge(other)
             if fetch is not None:
                 self._fetch_summary.merge(fetch)
+            if prefetch is not None:
+                self._prefetch_summary.merge(prefetch)
+            if backpressure is not None:
+                self._backpressure_summary.merge(backpressure)
 
     def plan_id(self) -> str | None:
         return self._summary.plan_id
@@ -102,3 +152,5 @@ class PipelineCollector:
         with self._lock:
             self._summary.plan_id = value
             self._fetch_summary.plan_id = value
+            self._prefetch_summary.plan_id = value
+            self._backpressure_summary.plan_id = value

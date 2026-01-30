@@ -6,12 +6,7 @@
 from typing import Any, Callable, Optional, cast
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import (
-    EngineSample,
-    SampleMeta,
-    SamplePayload,
-    SampleRecord,
-)
+from zephon.core.constants import EngineSample, SampleMeta, SamplePayload, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.io import build_multi_dataset_store

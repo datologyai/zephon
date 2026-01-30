@@ -21,6 +21,7 @@ from zephon.io.stores import (
     DatasetStoreRegistry,
     ResilientShard,
     build_multi_dataset_store,
+    build_resolver,
 )
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
 
@@ -46,4 +47,5 @@ __all__ = [
     "StorageBackend",
     "StoreOptions",
     "build_multi_dataset_store",
+    "build_resolver",
 ]

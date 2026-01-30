@@ -18,7 +18,7 @@ from zephon.core.constants import (
     SampleRecord,
 )
 from zephon.observability.size_estimator import estimate_bytes
-from zephon.observability.stats import NodeMetricsDelta
+from zephon.observability.stats import BackpressureDelta, NodeMetricsDelta
 from zephon.runners.base import BaseOperatorState, StageRunnerBase
 from zephon.utils import buffered_iterable
 
@@ -274,9 +274,12 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     _OperatorState: type[S]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
         self._context_lock = threading.Lock()
         self._active_context: ConcurrentRunContext | None = None
-        super().__init__(*args, **kwargs)
+        self._emit_backpressure_metrics: Any = self._ctx_services.get(
+            "emit_backpressure_metrics"
+        )
 
     # -- Abstract hooks -------------------------------------------------
     def _create_context(self) -> ConcurrentRunContext:
@@ -543,6 +546,14 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 q.put(item, timeout=0.1)
                 return
             except queue.Full:
+                # Backpressure: pump thread can't forward to downstream queue
+                if self._emit_backpressure_metrics is not None:
+                    self._emit_backpressure_metrics(
+                        BackpressureDelta(
+                            stage_index=self._stage_index,
+                            put_into_queue_backpressure_events=1,
+                        )
+                    )
                 if context.stop_event.is_set():
                     try:
                         q.put_nowait(item)

@@ -69,6 +69,8 @@ class CacheManager(ShardResolver):
         download_retry: int = 2,
         download_timeout: float = 60.0,
         persist_state: bool = False,
+        min_slack_bytes: int = 512 * 1024,
+        max_slack_bytes: int = 64 * 1024 * 1024,
     ) -> None:
         self._root = root
         self._storage = storage
@@ -78,6 +80,8 @@ class CacheManager(ShardResolver):
         self._download_retry = max(1, int(download_retry))
         self._download_timeout = download_timeout
         self._persist_state = bool(persist_state)
+        self._min_slack_bytes = int(min_slack_bytes)
+        self._max_slack_bytes = int(max_slack_bytes)
 
         self._root.mkdir(parents=True, exist_ok=True)
         reset_lock_path = self._root / ".reset.lock"
@@ -404,8 +408,8 @@ class CacheManager(ShardResolver):
         required = int(locator.raw.bytes)
         if locator.zip is not None:
             required += int(locator.zip.bytes)
-        slack = max(512 * 1024, int(required * 0.005))  # 512 KiB or 0.5%
-        slack = min(64 * 1024 * 1024, slack)  # cap slack at 64 MiB
+        slack = max(self._min_slack_bytes, int(required * 0.005))  # min slack or 0.5%
+        slack = min(self._max_slack_bytes, slack)  # cap slack at max
         return required + slack
 
     def _assert_source_exists(self, src: str) -> None:

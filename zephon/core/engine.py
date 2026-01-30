@@ -74,10 +74,7 @@ from zephon.ops.replay_filter import ReplayFilter
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
-from zephon.work import (
-    MixtureReadConfig,
-    WorkSource,
-)
+from zephon.work import MixtureReadConfig, WorkSource
 from zephon.work.base import WorkChunk
 
 
@@ -347,6 +344,8 @@ class Engine:
         self._metrics_reporter: MetricsReporter | None = None
         self._metrics_started = False
         self._ctx["emit_fetch_metrics"] = _noop
+        self._ctx["emit_prefetch_metrics"] = _noop
+        self._ctx["emit_backpressure_metrics"] = _noop
         self._ctx["record_node_metrics"] = _noop
 
         if tracking_mode != ExecutionTrackingMode.OFF:
@@ -372,6 +371,8 @@ class Engine:
             )
             if self._collector.tracking_mode.collects_nodes:
                 self._ctx["emit_fetch_metrics"] = self._emit_fetch_metrics
+                self._ctx["emit_prefetch_metrics"] = self._emit_prefetch_metrics
+                self._ctx["emit_backpressure_metrics"] = self._emit_backpressure_metrics
             self._ctx["record_node_metrics"] = self._collector.record
 
         # Stage runners are stored heterogeneously.
@@ -902,6 +903,16 @@ class Engine:
         """Forward fetch timings to the collector when tracking is enabled."""
         if self._collector is not None and self._collector.tracking_mode.collects_nodes:
             self._collector.record_fetch(delta)
+
+    def _emit_prefetch_metrics(self, delta: Any) -> None:
+        """Forward prefetch timings to the collector when tracking is enabled."""
+        if self._collector is not None and self._collector.tracking_mode.collects_nodes:
+            self._collector.record_prefetch(delta)
+
+    def _emit_backpressure_metrics(self, delta: Any) -> None:
+        """Forward backpressure metrics to the collector when tracking is enabled."""
+        if self._collector is not None and self._collector.tracking_mode.collects_nodes:
+            self._collector.record_backpressure(delta)
 
     def _get_component_id(self, component_name: str) -> int:
         """Get or assign a stable integer ID for a component name.

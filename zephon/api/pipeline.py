@@ -29,13 +29,10 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.engine import Engine, RuntimeOptions
-from zephon.core.graph import Graph, Plan
+from zephon.core.graph import Graph, Node, Plan
 from zephon.core.planner import Planner
 from zephon.io.options import StoreOptions
-from zephon.observability import (
-    ExecutionTrackingMode,
-    MetricsSinkConfig,
-)
+from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
     Batch,
     DecodeText,
@@ -43,6 +40,7 @@ from zephon.ops import (
     MapTransform,
     Materialize,
     PackSequences,
+    PrefetchOp,
     ShuffleBuffer,
     TokenizeText,
 )
@@ -149,20 +147,120 @@ class Pipeline:
         self._plan: Plan | None = None
         self._engine: Engine | None = None
         self._options = RuntimeOptions()
-        self._fetch_node = self._graph.add("fetch", FetchOp(), placement="local")
-        self._tail = self._fetch_node
+        self._fetch_node: Node[FetchOp] = self._graph.add(
+            "fetch", FetchOp(), placement="local"
+        )
+        self._tail: Node[Any] = self._fetch_node
+        # Optional prefetch node inserted before fetch
+        self._prefetch_node: Node[PrefetchOp] | None = None
 
-    def fetch_parallelism(self, parallelism: int | None) -> "Pipeline":
-        """Override the implicit FetchOp parallelism."""
+    def fetch_parallelism(
+        self, parallelism: int | None, max_batch: int | None = None
+    ) -> "Pipeline":
+        """Override the implicit FetchOp parallelism and batch size.
+
+        Args:
+            parallelism: Number of parallel fetch workers. If None, uses default from traits.
+            max_batch: Maximum batch size for fetch accumulator. If None, uses default (64).
+        """
         if parallelism is None:
             parallelism = max(1, self._fetch_node.op.traits().parallelism)
         elif parallelism < 1:
             raise ValueError("Fetch parallelism must be >= 1.")
         self._fetch_node.parallelism = parallelism
+
+        if max_batch is not None:
+            if max_batch < 1:
+                raise ValueError("Fetch max_batch must be >= 1.")
+            self._fetch_node.op._max_batch = max_batch
+
         return self
 
-    def fetch(self, parallelism: int | None) -> "Pipeline":
-        return self.fetch_parallelism(parallelism)
+    def fetch(
+        self, parallelism: int | None = None, max_batch: int | None = None
+    ) -> "Pipeline":
+        """Configure fetch operator parallelism and batch size.
+
+        Args:
+            parallelism: Number of parallel fetch workers. If None, uses default.
+            max_batch: Maximum batch size for fetch accumulator. If None, uses default (64).
+        """
+        return self.fetch_parallelism(parallelism, max_batch)
+
+    def prefetch(
+        self,
+        buffer_size: int = 1024,
+        parallelism: int | None = None,
+        *,
+        placement: str = "local",
+    ) -> "Pipeline":
+        """Add a prefetch operator to warm the cache before fetching.
+
+        The prefetch operator looks ahead in the sample stream and downloads
+        shards to the local cache before they're needed by FetchOp. This
+        significantly reduces fetch latency when loading from remote storage (S3, GCS).
+
+        The prefetch node is inserted before the fetch node in the pipeline.
+
+        Args:
+            buffer_size: Number of samples to buffer for lookahead (default: 1024).
+                Larger values provide more prefetch opportunities but use more memory.
+            parallelism: Number of concurrent worker threads for downloads (default: 4).
+                Higher values increase download parallelism.
+            placement: Placement hint for the prefetch operator (default: "local").
+
+        Returns:
+            Self for method chaining.
+
+        Example:
+            >>> pipeline = (
+            ...     Pipeline(work_source)
+            ...     .prefetch(buffer_size=2048, parallelism=8)
+            ...     .decode_text()
+            ...     .tokenize()
+            ...     .batch(32)
+            ... )
+
+            Note: The fetch operator is automatically added by Pipeline.__init__,
+            so you don't need to call .fetch() explicitly. The prefetch operator
+            is inserted before the implicit fetch operator.
+
+        Note:
+            Prefetch is most effective with:
+            - Remote storage (S3, GCS) with high download latency
+            - Sequential or predictable shard access patterns
+            - Large shards where download time is significant
+
+            For local storage or already-cached data, prefetch has minimal benefit.
+        """
+        if self._prefetch_node is not None:
+            raise RuntimeError("prefetch() can only be called once per pipeline")
+
+        op = PrefetchOp(buffer_size=buffer_size)
+
+        # Insert prefetch node before fetch node in the graph
+        # The prefetch node has no inputs (connects to work source output)
+        # We need to insert it BEFORE the fetch node in the nodes list
+        # Use provided parallelism or fall back to operator's default
+        node_parallelism = (
+            parallelism if parallelism is not None else op.traits().parallelism
+        )
+        prefetch_node = Node(
+            name="prefetch",
+            op=op,
+            inputs=[],  # No inputs - reads from work source
+            placement=placement,
+            parallelism=max(1, node_parallelism),
+        )
+        self._prefetch_node = prefetch_node
+
+        # Insert prefetch at the beginning (before fetch)
+        self._graph.nodes.insert(0, prefetch_node)
+
+        # Update fetch node to depend on prefetch
+        self._fetch_node.inputs = [prefetch_node]
+
+        return self
 
     def decode_text(
         self, parallelism: Optional[int] = None, **kwargs: Any

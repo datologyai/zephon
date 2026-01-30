@@ -5,18 +5,21 @@
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Generic, Optional, TypeVar
 
 from zephon.core.op_base import Op
 
+# TypeVar for operator type, enabling typed Node[OpT] where OpT is the specific op
+OpT = TypeVar("OpT", bound=Op[Any, Any])
+
 
 @dataclass
-class Node:
+class Node(Generic[OpT]):
     """A vertex in the logical pipeline graph bound to an operator instance."""
 
     name: str
-    op: Op[Any, Any]
-    inputs: list["Node"] = field(default_factory=list)
+    op: OpT
+    inputs: list["Node[Any]"] = field(default_factory=list)
     placement: str = "auto"
     parallelism: Optional[int] = None
 
@@ -26,20 +29,20 @@ class Graph:
 
     def __init__(self) -> None:
         """Initialize an empty graph in insertion order."""
-        self.nodes: list[Node] = []
+        self.nodes: list[Node[Any]] = []
 
     def add(
         self,
         name: str,
-        op: Op[Any, Any],
-        *inputs: Node,
+        op: OpT,
+        *inputs: Node[Any],
         placement: str = "auto",
         parallelism: Optional[int] = None,
-    ) -> Node:
+    ) -> Node[OpT]:
         """Create a node, infer defaults, and append it to the graph order."""
         if parallelism is None:
             parallelism = max(1, op.traits().parallelism)
-        node = Node(
+        node: Node[OpT] = Node(
             name=name,
             op=op,
             inputs=list(inputs),
@@ -55,7 +58,7 @@ class Stage:
     """A contiguous run of graph nodes that execute under the same runner."""
 
     name: str
-    nodes: list[Node]
+    nodes: list[Node[Any]]
     placement: str
     break_reason: str
     runner_hint: str | None = None

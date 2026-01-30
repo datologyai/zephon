@@ -22,6 +22,8 @@ class CacheOptions:
     open_retry_attempts: int = 5
     open_retry_initial_backoff: float = 0.1
     open_retry_max_backoff: float = 2.0
+    min_slack_bytes: int = 512 * 1024  # 512 KiB minimum slack
+    max_slack_bytes: int = 64 * 1024 * 1024  # 64 MiB maximum slack
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
