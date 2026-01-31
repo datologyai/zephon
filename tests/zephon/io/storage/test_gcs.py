@@ -1,191 +1,191 @@
+"""Tests for GCSBackend using obstore."""
+
+import sys
+import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from zephon.io.storage.gcs import GCSBackend
 
+def _install_obstore_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Install obstore stubs for testing without the actual package."""
+    obstore_mod = types.ModuleType("obstore")
+    store_mod = types.ModuleType("obstore.store")
 
-class _FakeBlob:
-    def __init__(self, name: str, store: dict[str, bytes]) -> None:
-        self.name = name
-        self._store = store
+    # State to control mock behavior
+    state = {
+        "objects": {},  # (bucket, key) -> bytes
+        "configs": [],  # track configs passed to from_url
+        "store_type": [],  # track which store type was used
+    }
 
-    def download_to_filename(self, dst: str) -> None:
-        Path(dst).write_bytes(self._store[self.name])
+    class MockGCSStore:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            state["configs"].append(config or {})
+            state["store_type"].append("gcs")
+            return store
 
-    def exists(self) -> bool:
-        return self.name in self._store
+    class MockS3Store:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            state["configs"].append(config or {})
+            state["store_type"].append("s3")
+            return store
 
-    @property
-    def size(self) -> int:
-        return len(self._store[self.name])
+    store_mod.GCSStore = MockGCSStore
+    store_mod.S3Store = MockS3Store
 
+    class MockGetResult:
+        def __init__(self, data: bytes):
+            self._data = data
 
-class _FakeBucket:
-    def __init__(self, bucket: str, store: dict[str, bytes]) -> None:
-        self._bucket = bucket
-        self._store = store
+        def bytes(self) -> bytes:
+            return self._data
 
-    def blob(self, key: str) -> _FakeBlob:
-        return _FakeBlob(f"{self._bucket}/{key}", self._store)
+    def mock_get(store, key):
+        url = getattr(store, "_url", "gs://unknown")
+        # Handle both gs:// and s3:// URLs
+        bucket = url.replace("gs://", "").replace("s3://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return MockGetResult(data)
 
-    def get_blob(self, key: str) -> _FakeBlob | None:
-        name = f"{self._bucket}/{key}"
-        if name not in self._store:
-            return None
-        return _FakeBlob(name, self._store)
+    def mock_head(store, key):
+        url = getattr(store, "_url", "gs://unknown")
+        bucket = url.replace("gs://", "").replace("s3://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return {"size": len(data), "path": key}
 
-
-class _FakeGCSClient:
-    def __init__(self) -> None:
-        self.store: dict[str, bytes] = {}
-        self.listing: list[str] = []
-
-    def bucket(self, bucket: str) -> _FakeBucket:
-        return _FakeBucket(bucket, self.store)
-
-    def list_blobs(self, bucket: str, prefix: str, delimiter: str):
-        base = prefix or ""
+    def mock_list(store, prefix: str = ""):
+        url = getattr(store, "_url", "gs://unknown")
+        bucket = url.replace("gs://", "").replace("s3://", "")
         results = []
-        for key in self.listing:
-            if key.startswith(base) and "/" not in key[len(base) :]:
-                results.append(_ListBlobView(key))
-        return results
+        for (b, k), data in state["objects"].items():
+            if b == bucket and k.startswith(prefix):
+                results.append({"path": k, "size": len(data)})
+        return iter([results])
+
+    obstore_mod.get = mock_get
+    obstore_mod.head = mock_head
+    obstore_mod.list = mock_list
+
+    monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
+    monkeypatch.setitem(sys.modules, "obstore.store", store_mod)
+
+    return state
 
 
-class _ListBlobView:
-    def __init__(self, name: str) -> None:
-        self.name = name
+def test_gcs_native_download_stat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test GCS download and stat operations in native mode."""
+    state = _install_obstore_stubs(monkeypatch)
 
+    from zephon.io.storage.gcs import GCSBackend
 
-def test_gcs_native_download_stat(tmp_path: Path) -> None:
+    state["objects"][("bucket", "folder/file.bin")] = b"payload"
+
     backend = GCSBackend()
-    fake = _FakeGCSClient()
-    fake.store["bucket/folder/file.bin"] = b"payload"
-    backend._client = fake
-    backend._mode = "gcs"
-    backend._ensure_client = lambda: None
 
     out = tmp_path / "file.bin"
     backend.download("gs://bucket/folder/file.bin", str(out))
     assert out.read_bytes() == b"payload"
 
     assert backend.exists("gs://bucket/folder/file.bin") is True
-    assert backend.exists("gs://bucket/folder/missing.bin") is False
 
     info = backend.stat("gs://bucket/folder/file.bin")
-    assert info["size"] == len(b"payload")
+    assert info["size"] == 7
+
+    # Verify native GCS store was used
+    assert state["store_type"][0] == "gcs"
 
 
-def test_gcs_native_listdir(tmp_path: Path) -> None:
+def test_gcs_native_exists_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS exists returns False for missing files."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
     backend = GCSBackend()
-    fake = _FakeGCSClient()
-    fake.store["bucket/prefix/a.jsonl"] = b"{}"
-    fake.listing = ["prefix/a.jsonl", "prefix/sub/b.jsonl"]
-    backend._client = fake
-    backend._mode = "gcs"
-    backend._ensure_client = lambda: None
+    assert backend.exists("gs://bucket/folder/missing.bin") is False
 
+
+def test_gcs_native_listdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS listdir operation."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "prefix/a.jsonl")] = b"{}"
+    state["objects"][("bucket", "prefix/sub/b.jsonl")] = b"{}"  # Should be filtered
+
+    backend = GCSBackend()
     assert backend.listdir("gs://bucket/prefix") == ["a.jsonl"]
-
-
-class _FakeS3CompatClient:
-    def __init__(self, client_error_cls: type[Exception]) -> None:
-        self._err = client_error_cls
-        self.objects: dict[tuple[str, str], bytes] = {}
-
-    def download_file(self, bucket, key, dst, Config=None):
-        payload = self.objects.get((bucket, key))
-        if payload is None:
-            raise self._err({"Error": {"Code": "404"}})
-        Path(dst).write_bytes(payload)
-
-    def head_object(self, Bucket, Key):
-        payload = self.objects.get((Bucket, Key))
-        if payload is None:
-            raise self._err({"Error": {"Code": "404"}})
-        return {"ContentLength": len(payload)}
-
-    def get_paginator(self, operation_name):
-        return _FakePaginator(
-            [
-                {"Contents": [{"Key": "prefix/file.jsonl"}]},
-            ]
-        )
-
-
-class _FakePaginator:
-    def __init__(self, pages):
-        self._pages = pages
-
-    def paginate(self, **kwargs):
-        return list(self._pages)
-
-
-def _install_boto3_stubs(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
-    import sys
-    import types
-
-    boto3_mod = types.ModuleType("boto3")
-    s3_mod = types.ModuleType("boto3.s3")
-    transfer_mod = types.ModuleType("boto3.s3.transfer")
-
-    class TransferConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    transfer_mod.TransferConfig = TransferConfig
-
-    botocore_mod = types.ModuleType("botocore")
-    botocore_mod.UNSIGNED = "unsigned"
-    config_mod = types.ModuleType("botocore.config")
-
-    class Config:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    config_mod.Config = Config
-    exceptions_mod = types.ModuleType("botocore.exceptions")
-
-    class ClientError(Exception):
-        def __init__(self, response):
-            super().__init__("ClientError")
-            self.response = response
-
-    exceptions_mod.ClientError = ClientError
-    exceptions_mod.NoCredentialsError = type("NoCredentialsError", (Exception,), {})
-
-    monkeypatch.setitem(sys.modules, "boto3", boto3_mod)
-    monkeypatch.setitem(sys.modules, "boto3.s3", s3_mod)
-    monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer_mod)
-    monkeypatch.setitem(sys.modules, "botocore", botocore_mod)
-    monkeypatch.setitem(sys.modules, "botocore.config", config_mod)
-    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions_mod)
-
-    return ClientError
 
 
 def test_gcs_s3_compatible_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    client_error_cls = _install_boto3_stubs(monkeypatch)
+    """Test GCS S3-compatible mode (deprecated but supported)."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.setenv("GCS_KEY", "test-key")
+    monkeypatch.setenv("GCS_SECRET", "test-secret")
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "prefix/file.jsonl")] = b"{}"
+
     backend = GCSBackend()
-    fake = _FakeS3CompatClient(client_error_cls)
-    fake.objects[("bucket", "prefix/file.jsonl")] = b"{}"
-    backend._client = fake
-    backend._mode = "s3compat"
-    backend._ensure_client = lambda: None
 
     out = tmp_path / "file.jsonl"
     backend.download("gs://bucket/prefix/file.jsonl", str(out))
     assert out.read_bytes() == b"{}"
 
     info = backend.stat("gs://bucket/prefix/file.jsonl")
-    assert info["size"] == len(b"{}")
+    assert info["size"] == 2
+
+    # Verify S3-compatible store was used with correct config
+    assert state["store_type"][0] == "s3"
+    assert state["configs"][0]["aws_access_key_id"] == "test-key"
+    assert state["configs"][0]["aws_secret_access_key"] == "test-secret"
+    assert state["configs"][0]["aws_endpoint"] == "https://storage.googleapis.com"
+
+
+def test_gcs_s3_compatible_listdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS listdir in S3-compatible mode."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.setenv("GCS_KEY", "test-key")
+    monkeypatch.setenv("GCS_SECRET", "test-secret")
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "prefix/file.jsonl")] = b"{}"
+
+    backend = GCSBackend()
     assert backend.listdir("gs://bucket/prefix") == ["file.jsonl"]
 
 
-def test_gcs_open_downloads_to_temp(tmp_path: Path) -> None:
+def test_gcs_open_downloads_to_temp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test that open() downloads to temp file and cleans up."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
     backend = GCSBackend()
     paths: list[Path] = []
 
@@ -200,3 +200,62 @@ def test_gcs_open_downloads_to_temp(tmp_path: Path) -> None:
         assert handle.read() == "hello"
 
     assert not paths[0].exists()
+
+
+def test_gcs_invalid_url_handling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test handling of invalid GCS URLs."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+
+    # exists returns False for invalid URLs
+    assert backend.exists("not-gs://bucket/file") is False
+    assert backend.exists("gs://") is False
+
+    # download raises for invalid URLs
+    with pytest.raises(ValueError):
+        backend.download("not-gs://bucket/file", "/tmp/out")
+
+    # stat raises for invalid URLs
+    with pytest.raises(FileNotFoundError):
+        backend.stat("gs://bucket")
+
+
+def test_gcs_download_missing_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test that downloading a missing file raises FileNotFoundError."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+
+    with pytest.raises(FileNotFoundError):
+        backend.download("gs://bucket/missing.bin", str(tmp_path / "out.bin"))
+
+
+def test_gcs_stat_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that stat on missing file raises FileNotFoundError."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+
+    with pytest.raises(FileNotFoundError):
+        backend.stat("gs://bucket/missing.bin")
+
+
+def test_gcs_scheme_gcs_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that gcs:// scheme works (alias for gs://)."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "file.bin")] = b"data"
+
+    backend = GCSBackend()
+    assert backend.exists("gcs://bucket/file.bin") is True

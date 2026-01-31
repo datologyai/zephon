@@ -1,168 +1,164 @@
+"""Tests for S3Backend using obstore."""
+
 import sys
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from zephon.io.storage.s3 import S3Backend
 
+def _install_obstore_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Install obstore stubs for testing without the actual package."""
+    # Create mock obstore module
+    obstore_mod = types.ModuleType("obstore")
+    store_mod = types.ModuleType("obstore.store")
 
-def _install_boto3_stubs(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
-    """Register lightweight boto3/botocore stubs for unit testing."""
+    # Mock classes
+    class MockS3Store:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            return store
 
-    client_error_cls: type[Exception]
+    store_mod.S3Store = MockS3Store
 
-    # boto3.session.Session (unused in tests but patched for safety)
-    boto3_mod = types.ModuleType("boto3")
-    session_mod = types.ModuleType("boto3.session")
+    # State to control mock behavior
+    state = {
+        "objects": {},  # (bucket, key) -> bytes
+        "configs": [],  # track configs passed to from_url
+    }
 
-    class _UnusedSession:
-        def client(self, *args, **kwargs):  # pragma: no cover - not used
-            raise RuntimeError("Session.client should not be called in tests")
+    class MockGetResult:
+        def __init__(self, data: bytes):
+            self._data = data
 
-    session_mod.Session = lambda: _UnusedSession()
+        def bytes(self) -> bytes:
+            return self._data
 
-    s3_mod = types.ModuleType("boto3.s3")
-    transfer_mod = types.ModuleType("boto3.s3.transfer")
+    def mock_get(store, key):
+        # Extract bucket from store URL
+        url = getattr(store, "_url", "s3://unknown")
+        bucket = url.replace("s3://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return MockGetResult(data)
 
-    class TransferConfig:  # pragma: no cover - simple data holder
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+    def mock_head(store, key):
+        url = getattr(store, "_url", "s3://unknown")
+        bucket = url.replace("s3://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return {"size": len(data), "path": key}
 
-    transfer_mod.TransferConfig = TransferConfig
+    def mock_list(store, prefix: str = ""):
+        url = getattr(store, "_url", "s3://unknown")
+        bucket = url.replace("s3://", "")
+        results = []
+        for (b, k), data in state["objects"].items():
+            if b == bucket and k.startswith(prefix):
+                results.append({"path": k, "size": len(data)})
+        return iter([results])
 
-    botocore_mod = types.ModuleType("botocore")
-    botocore_mod.UNSIGNED = "unsigned"
+    obstore_mod.get = mock_get
+    obstore_mod.head = mock_head
+    obstore_mod.list = mock_list
 
-    config_mod = types.ModuleType("botocore.config")
+    # Patch from_url to track configs
+    original_from_url = MockS3Store.from_url
 
-    class Config:  # pragma: no cover - simple data holder
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+    @classmethod
+    def tracking_from_url(
+        cls, url: str, config: dict = None, client_options: dict = None
+    ):
+        state["configs"].append(config or {})
+        return original_from_url(url, config, client_options)
 
-    config_mod.Config = Config
+    store_mod.S3Store.from_url = tracking_from_url
 
-    exceptions_mod = types.ModuleType("botocore.exceptions")
+    monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
+    monkeypatch.setitem(sys.modules, "obstore.store", store_mod)
 
-    class ClientError(Exception):
-        def __init__(self, response):
-            super().__init__("ClientError")
-            self.response = response
-
-    class NoCredentialsError(Exception): ...
-
-    exceptions_mod.ClientError = ClientError
-    exceptions_mod.NoCredentialsError = NoCredentialsError
-    client_error_cls = ClientError
-
-    monkeypatch.setitem(sys.modules, "boto3", boto3_mod)
-    monkeypatch.setitem(sys.modules, "boto3.session", session_mod)
-    monkeypatch.setitem(sys.modules, "boto3.s3", s3_mod)
-    monkeypatch.setitem(sys.modules, "boto3.s3.transfer", transfer_mod)
-    monkeypatch.setitem(sys.modules, "botocore", botocore_mod)
-    monkeypatch.setitem(sys.modules, "botocore.config", config_mod)
-    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions_mod)
-
-    return client_error_cls
-
-
-class _FakePaginator:
-    def __init__(self, pages):
-        self._pages = pages
-
-    def paginate(self, **kwargs):
-        return list(self._pages)
-
-
-class _FakeS3Client:
-    def __init__(self, client_error_cls: type[Exception]):
-        self._err = client_error_cls
-        self.objects: dict[tuple[str, str], bytes] = {}
-        self.download_calls: list[dict[str, object]] = []
-        self.pages: list[dict[str, object]] = []
-
-    def download_file(self, bucket, key, dst, ExtraArgs=None, Config=None):
-        payload = self.objects.get((bucket, key))
-        if payload is None:
-            raise self._err({"Error": {"Code": "404"}})
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        Path(dst).write_bytes(payload)
-        self.download_calls.append(
-            {
-                "bucket": bucket,
-                "key": key,
-                "extra": ExtraArgs,
-                "config": Config,
-            }
-        )
-
-    def head_object(self, Bucket, Key):
-        payload = self.objects.get((Bucket, Key))
-        if payload is None:
-            raise self._err({"Error": {"Code": "404"}})
-        return {"ContentLength": len(payload)}
-
-    def get_paginator(self, operation_name):
-        assert operation_name == "list_objects_v2"
-        return _FakePaginator(self.pages)
+    return state
 
 
 def test_s3_download_and_stat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    client_error_cls = _install_boto3_stubs(monkeypatch)
+    """Test S3 download and stat operations."""
+    state = _install_obstore_stubs(monkeypatch)
     monkeypatch.setenv("ZEPHON_AWS_REQUESTER_PAYS", "bucket")
 
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "prefix/file.bin")] = b"payload"
+
     backend = S3Backend()
-    fake = _FakeS3Client(client_error_cls)
-    fake.objects[("bucket", "prefix/file.bin")] = b"payload"
-    backend._client = fake
-    backend._ensure_client = lambda timeout=None, unsigned_ok=True: None
 
     out = tmp_path / "out.bin"
     backend.download("s3://bucket/prefix/file.bin", str(out))
     assert out.read_bytes() == b"payload"
 
-    # Transfer args include requester pays when configured.
-    assert fake.download_calls[0]["extra"] == {"RequestPayer": "requester"}
+    # Verify requester pays config was set
+    assert state["configs"][0].get("request_payer") is True
 
     info = backend.stat("s3://bucket/prefix/file.bin")
-    assert info["size"] == len(b"payload")
+    assert info["size"] == 7
 
 
 def test_s3_download_missing_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    client_error_cls = _install_boto3_stubs(monkeypatch)
+    """Test that downloading a missing file raises FileNotFoundError."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
     backend = S3Backend()
-    fake = _FakeS3Client(client_error_cls)
-    backend._client = fake
-    backend._ensure_client = lambda timeout=None, unsigned_ok=True: None
 
     with pytest.raises(FileNotFoundError):
         backend.download("s3://bucket/missing.bin", str(tmp_path / "out.bin"))
 
 
 def test_s3_exists_and_listdir(monkeypatch: pytest.MonkeyPatch) -> None:
-    client_error_cls = _install_boto3_stubs(monkeypatch)
+    """Test S3 exists and listdir operations."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "root/file.jsonl")] = b"{}"
+    state["objects"][("bucket", "root/subdir/ignored")] = b"{}"
+
     backend = S3Backend()
-    fake = _FakeS3Client(client_error_cls)
-    fake.objects[("bucket", "root/file.jsonl")] = b"{}"
-    fake.pages = [
-        {
-            "Contents": [
-                {"Key": "root/file.jsonl"},
-                {"Key": "root/subdir/ignored"},
-            ]
-        }
-    ]
-    backend._client = fake
-    backend._ensure_client = lambda timeout=None, unsigned_ok=True: None
 
     assert backend.exists("s3://bucket/root/file.jsonl") is True
     assert backend.exists("s3://bucket/root/missing.jsonl") is False
     assert backend.listdir("s3://bucket/root") == ["file.jsonl"]
 
 
-def test_s3_open_downloads_to_temp(tmp_path: Path) -> None:
+def test_s3_stat_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that stat on missing file raises FileNotFoundError."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+
+    with pytest.raises(FileNotFoundError):
+        backend.stat("s3://bucket/missing.bin")
+
+
+def test_s3_open_downloads_to_temp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test that open() downloads to temp file and cleans up."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
     backend = S3Backend()
     invoked: list[Path] = []
 
@@ -178,3 +174,39 @@ def test_s3_open_downloads_to_temp(tmp_path: Path) -> None:
 
     temp_path = invoked[0]
     assert not temp_path.exists()
+
+
+def test_s3_invalid_url_handling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test handling of invalid S3 URLs."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+
+    # exists returns False for invalid URLs
+    assert backend.exists("not-s3://bucket/file") is False
+    assert backend.exists("s3://") is False
+
+    # download raises for invalid URLs
+    with pytest.raises(ValueError):
+        backend.download("not-s3://bucket/file", "/tmp/out")
+
+    # stat raises for invalid URLs
+    with pytest.raises(FileNotFoundError):
+        backend.stat("not-s3://bucket")
+
+
+def test_s3_custom_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test S3 with custom endpoint (e.g., MinIO)."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://localhost:9000")
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "file.bin")] = b"data"
+
+    backend = S3Backend()
+    backend.exists("s3://bucket/file.bin")
+
+    assert state["configs"][0].get("aws_endpoint") == "http://localhost:9000"

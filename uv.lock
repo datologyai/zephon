@@ -3732,14 +3732,7 @@ dependencies = [
 
 [package.optional-dependencies]
 cloud = [
-    { name = "boto3" },
-    { name = "google-cloud-storage" },
-]
-cloud-gcs = [
-    { name = "google-cloud-storage" },
-]
-cloud-s3 = [
-    { name = "boto3" },
+    { name = "obstore" },
 ]
 litdata = [
     { name = "litdata" },
@@ -3785,6 +3778,7 @@ docs = [
 test = [
     { name = "litdata" },
     { name = "mosaicml-streaming" },
+    { name = "obstore" },
     { name = "optree" },
     { name = "pillow" },
     { name = "pytest" },
@@ -3795,25 +3789,22 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", marker = "extra == 'cloud-s3'", specifier = ">=1.20.0" },
     { name = "cloudpickle", specifier = ">=1.6.0" },
-    { name = "google-cloud-storage", marker = "extra == 'cloud-gcs'", specifier = ">=2.0.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
     { name = "mosaicml-streaming", marker = "extra == 'streaming'" },
     { name = "numpy", specifier = ">=1.20.0" },
+    { name = "obstore", marker = "extra == 'cloud'", specifier = ">=0.3.0" },
     { name = "optree", marker = "extra == 'litdata'" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=8.0.0" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.52.1" },
     { name = "wrapt", specifier = ">=1.11.0" },
-    { name = "zephon", extras = ["cloud-gcs"], marker = "extra == 'cloud'" },
-    { name = "zephon", extras = ["cloud-s3"], marker = "extra == 'cloud'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mds'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mosaic'" },
     { name = "zstd", marker = "extra == 'litdata'" },
     { name = "zstd", marker = "extra == 'streaming'" },
 ]
-provides-extras = ["parquet", "vortex", "cloud-s3", "cloud-gcs", "cloud", "litdata", "streaming", "mosaic", "mds"]
+provides-extras = ["parquet", "vortex", "cloud", "litdata", "streaming", "mosaic", "mds"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3832,6 +3823,7 @@ docs = [
 test = [
     { name = "litdata", specifier = ">=0.2.0" },
     { name = "mosaicml-streaming", specifier = ">=0.13.0" },
+    { name = "obstore", specifier = ">=0.3.0" },
     { name = "optree", specifier = ">=0.12.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },

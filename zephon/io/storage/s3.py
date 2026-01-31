@@ -1,9 +1,11 @@
-"""AWS S3-backed storage implementation."""
+"""AWS S3-backed storage implementation using obstore."""
 
 from __future__ import annotations
 
+import configparser
 import logging
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 from ._utils import OpenViaDownloadMixin, split_url
@@ -11,18 +13,118 @@ from ._utils import OpenViaDownloadMixin, split_url
 logger = logging.getLogger(__name__)
 
 
-class S3Backend(OpenViaDownloadMixin):
-    """AWS S3-backed storage implementation.
+def _get_aws_region_from_env_and_files(profile: str = "default") -> str | None:
+    """Get AWS region from environment variables and config files.
 
-    Behavior mirrors Mosaic Streaming's S3 downloader where sensible:
-    - Credentials via boto3 default chain; fallback to unsigned for public buckets.
-    - Requester pays via `ZEPHON_AWS_REQUESTER_PAYS` or
-      `MOSAICML_STREAMING_AWS_REQUESTER_PAYS`.
-    - Optional custom endpoint via `S3_ENDPOINT_URL`.
+    Checks in order:
+    1. AWS_REGION / AWS_DEFAULT_REGION environment variables
+    2. ~/.aws/config file
+    """
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if region:
+        return region
+
+    config_path = Path.home() / ".aws" / "config"
+    if config_path.exists():
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(config_path)
+            section = profile if profile == "default" else f"profile {profile}"
+            if section in parser and "region" in parser[section]:
+                return parser[section]["region"]
+        except Exception as e:
+            logger.debug("Failed to read AWS config file %s: %s", config_path, e)
+
+    return None
+
+
+def _get_aws_credentials_from_env_and_files() -> dict[str, str] | None:
+    """Read AWS credentials from environment variables and standard AWS files.
+
+    Why we don't just use obstore's default credential chain:
+    obstore (via the Rust object_store crate) tries multiple credential sources
+    including the EC2 Instance Metadata Service (IMDS) at 169.254.169.254. On
+    non-EC2 machines, this results in a ~20+ second timeout before falling back
+    to other sources, making the first request extremely slow.
+
+    By checking env vars and ~/.aws/credentials ourselves first, we can skip
+    the IMDS probe entirely when credentials are available locally. If no
+    credentials are found, we return None and let obstore try its full chain
+    (which will work on EC2 where IMDS is actually available).
+
+    Checks sources in this order (matching boto3 behavior):
+    1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    2. ~/.aws/credentials file (respects AWS_PROFILE)
+    3. Returns None to let obstore try its default chain (IMDS on EC2, etc.)
+    """
+    profile = os.environ.get("AWS_PROFILE", "default")
+
+    # 1. Environment variables
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if access_key and secret_key:
+        config: dict[str, str] = {
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+        }
+        session_token = os.environ.get("AWS_SESSION_TOKEN")
+        if session_token:
+            config["aws_session_token"] = session_token
+        region = _get_aws_region_from_env_and_files(profile)
+        if region:
+            config["aws_region"] = region
+        return config
+
+    # 2. ~/.aws/credentials file
+    credentials_path = Path.home() / ".aws" / "credentials"
+    if credentials_path.exists():
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(credentials_path)
+            if profile in parser:
+                section = parser[profile]
+                if (
+                    "aws_access_key_id" in section
+                    and "aws_secret_access_key" in section
+                ):
+                    creds: dict[str, str] = {
+                        "aws_access_key_id": section["aws_access_key_id"],
+                        "aws_secret_access_key": section["aws_secret_access_key"],
+                    }
+                    if "aws_session_token" in section:
+                        creds["aws_session_token"] = section["aws_session_token"]
+                    region = _get_aws_region_from_env_and_files(profile)
+                    if region:
+                        creds["aws_region"] = region
+                    return creds
+        except Exception as e:
+            logger.debug(
+                "Failed to read AWS credentials file %s: %s", credentials_path, e
+            )
+
+    # 3. Let obstore try its default chain
+    return None
+
+
+class S3Backend(OpenViaDownloadMixin):
+    """AWS S3-backed storage implementation using obstore.
+
+    Credentials are resolved from (in order):
+    - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    - ~/.aws/credentials file (respects AWS_PROFILE)
+    - obstore default chain (IMDS on EC2, etc.)
+
+    Features:
+    - Requester pays via ZEPHON_AWS_REQUESTER_PAYS or MOSAICML_STREAMING_AWS_REQUESTER_PAYS
+    - Custom endpoint via S3_ENDPOINT_URL
     """
 
     def __init__(self) -> None:
-        self._client: Any | None = None
+        self._stores: dict[str, Any] = {}  # bucket -> S3Store
+        self._base_config: dict[str, Any] | None = None
+        self._unsigned_stores: dict[str, Any] = {}  # bucket -> unsigned S3Store
+        self._logged_unsigned_fallback = False
+
         pays_env = (
             os.environ.get("ZEPHON_AWS_REQUESTER_PAYS")
             or os.environ.get("MOSAICML_STREAMING_AWS_REQUESTER_PAYS")
@@ -31,144 +133,197 @@ class S3Backend(OpenViaDownloadMixin):
         self._requester_pays = [b.strip() for b in pays_env.split(",") if b.strip()]
         if not os.environ.get("ZEPHON_AWS_REQUESTER_PAYS") and self._requester_pays:
             logger.info(
-                "Using requester-pays buckets from MOSAICML_STREAMING_AWS_REQUESTER_PAYS; set "
-                + "ZEPHON_AWS_REQUESTER_PAYS to override."
+                "Using requester-pays buckets from MOSAICML_STREAMING_AWS_REQUESTER_PAYS; "
+                "set ZEPHON_AWS_REQUESTER_PAYS to override."
             )
-        self._logged_unsigned = False
-        self._logged_unsigned_retry = False
 
-    # ----------------
-    # Client handling
-    # ----------------
-    def _ensure_client(
-        self, *, timeout: float | None = None, unsigned_ok: bool = True
-    ) -> None:
-        if self._client is not None:
-            return
-        try:
-            self._client = self._create_client(unsigned=False, timeout=timeout)
-        except Exception as exc:
-            if not unsigned_ok:
-                raise
-            if not self._logged_unsigned:
-                logger.info(
-                    "Falling back to unsigned S3 access due to %s; assuming public bucket.",
-                    exc.__class__.__name__,
-                )
-                self._logged_unsigned = True
-            self._client = self._create_client(unsigned=True, timeout=timeout)
+    def _get_store(self, bucket: str) -> Any:
+        """Get or create an S3Store for the given bucket.
 
-    def _create_client(self, *, unsigned: bool, timeout: float | None) -> Any:
-        from boto3.session import Session
-        from botocore import UNSIGNED
-        from botocore.config import Config
+        Credentials are resolved once on first call and cached for the lifetime
+        of this backend instance. Stores are also cached per bucket.
+        """
+        if bucket in self._stores:
+            return self._stores[bucket]
 
-        cfg: dict[str, Any] = {"retries": {"mode": "adaptive"}}
-        if timeout and timeout > 0:
-            cfg["read_timeout"] = float(timeout)
-        if unsigned:
-            cfg["signature_version"] = UNSIGNED
-        config = Config(**cfg)
-        sess = Session()
+        from obstore.store import S3Store
+
+        # Build config on first use (cached for all subsequent calls)
+        if self._base_config is None:
+            creds = _get_aws_credentials_from_env_and_files()
+            if creds:
+                self._base_config = creds
+            else:
+                # No local credentials found - let obstore try its default chain
+                # (includes IMDS for EC2). If that fails, we'll fall back to
+                # unsigned access on auth errors (see _try_with_unsigned_fallback).
+                region = _get_aws_region_from_env_and_files()
+                self._base_config = {"aws_region": region} if region else {}
+
+        # Copy base config and add bucket-specific settings
+        config = dict(self._base_config)
+
+        # Custom endpoint
         endpoint = os.environ.get("S3_ENDPOINT_URL")
-        return sess.client("s3", config=config, endpoint_url=endpoint)
+        if endpoint:
+            config["aws_endpoint"] = endpoint
 
-    # -------------
-    # API methods
-    # -------------
+        # Requester pays
+        if bucket in self._requester_pays:
+            config["request_payer"] = True
+
+        store = S3Store.from_url(
+            f"s3://{bucket}", config=config, client_options={"timeout": "120s"}
+        )
+        self._stores[bucket] = store
+        return store
+
+    def _get_unsigned_store(self, bucket: str) -> Any:
+        """Get or create an unsigned S3Store for public bucket access."""
+        if bucket in self._unsigned_stores:
+            return self._unsigned_stores[bucket]
+
+        from obstore.store import S3Store
+
+        config: dict[str, Any] = {"skip_signature": True}
+        endpoint = os.environ.get("S3_ENDPOINT_URL")
+        if endpoint:
+            config["aws_endpoint"] = endpoint
+        region = _get_aws_region_from_env_and_files()
+        if region:
+            config["aws_region"] = region
+
+        store = S3Store.from_url(
+            f"s3://{bucket}", config=config, client_options={"timeout": "120s"}
+        )
+        self._unsigned_stores[bucket] = store
+        return store
 
     def exists(self, path: str) -> bool:
+        """Check if a file exists at the given S3 path."""
         scheme, bucket, key = split_url(path)
         if scheme != "s3" or not bucket or not key:
             return False
-        self._ensure_client(unsigned_ok=True)
-        assert self._client is not None
-        from botocore.exceptions import ClientError
 
+        import obstore as obs
+
+        store = self._get_store(bucket)
         try:
-            self._client.head_object(Bucket=bucket, Key=key)
+            obs.head(store, key)
             return True
-        except ClientError as e:
-            code = str(e.response.get("Error", {}).get("Code"))
-            if code in {"403", "404", "NoSuchKey"}:
+        except Exception as e:
+            err = str(e)
+            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
+                return False
+            if "403" in err or "AccessDenied" in err:
                 return False
             raise
 
+    def _download_with_store(
+        self, store: Any, bucket: str, key: str, src: str, dst: str
+    ) -> None:
+        """Download using a specific store, with error handling."""
+        import obstore as obs
+
+        try:
+            data = obs.get(store, key).bytes()
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            err = str(e)
+            if "403" in err or "AccessDenied" in err:
+                raise FileNotFoundError(f"Access denied: {src}") from e
+            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
+                raise FileNotFoundError(f"Object not found: {src}") from e
+            raise
+
+    def _should_retry_unsigned(self, error: str) -> bool:
+        """Check if error suggests we should retry with unsigned access."""
+        # 400: Some public buckets reject signed requests
+        # 403 + "InvalidAccessKeyId": Credentials are invalid/not found
+        # "NoCredentialProviders": obstore couldn't find any credentials
+        return (
+            "400" in error
+            or ("403" in error and "InvalidAccessKeyId" in error)
+            or "NoCredentialProviders" in error
+            or "credential" in error.lower()
+        )
+
     def download(self, src: str, dst: str, timeout: float | None = None) -> None:
+        """Download a file from S3 to local disk."""
+        # timeout param kept for StorageBackend protocol compatibility but unused.
+        # obstore only supports store-level timeout (set in _get_store via client_options).
+        # See: https://developmentseed.org/obstore/latest/api/store/config/
+        del timeout
         scheme, bucket, key = split_url(src)
         if scheme != "s3" or not bucket or not key:
             raise ValueError(f"Invalid S3 URL: {src}")
-        self._ensure_client(timeout=timeout, unsigned_ok=True)
-        assert self._client is not None
-        from boto3.s3.transfer import TransferConfig
-        from botocore.exceptions import ClientError
 
-        extra_args: dict[str, Any] = {}
-        if bucket in self._requester_pays:
-            extra_args["RequestPayer"] = "requester"
+        store = self._get_store(bucket)
         try:
-            self._client.download_file(
-                bucket,
-                key,
-                dst,
-                ExtraArgs=extra_args or None,
-                Config=TransferConfig(use_threads=False),
-            )
-        except ClientError as e:
-            code = str(e.response.get("Error", {}).get("Code"))
-            if code in {"403", "404", "NoSuchKey"}:
-                raise FileNotFoundError(f"Object not found: {src}") from e
-            if code == "400":
-                if not self._logged_unsigned_retry:
+            self._download_with_store(store, bucket, key, src, dst)
+        except Exception as e:
+            err = str(e)
+            # Retry with unsigned access for credential-related errors
+            if self._should_retry_unsigned(err):
+                if not self._logged_unsigned_fallback:
                     logger.info(
-                        "Retrying S3 download without credentials after 400 error for %s.",
+                        "Retrying S3 download with unsigned access for %s "
+                        "(assuming public bucket).",
                         src,
                     )
-                    self._logged_unsigned_retry = True
-                self._client = self._create_client(unsigned=True, timeout=timeout)
-                self.download(src, dst, timeout)
+                    self._logged_unsigned_fallback = True
+                unsigned_store = self._get_unsigned_store(bucket)
+                self._download_with_store(unsigned_store, bucket, key, src, dst)
                 return
             raise
 
     def listdir(self, path: str) -> list[str]:
+        """List files in an S3 directory (prefix)."""
         scheme, bucket, prefix = split_url(path)
         if scheme != "s3" or not bucket:
             raise NotADirectoryError(f"Not an S3 directory: {path}")
-        self._ensure_client(unsigned_ok=True)
-        assert self._client is not None
 
+        import obstore as obs
+
+        store = self._get_store(bucket)
         base = (
             (prefix + "/") if (prefix and not prefix.endswith("/")) else (prefix or "")
         )
-        paginator = self._client.get_paginator("list_objects_v2")
+
         entries: list[str] = []
-        for page in paginator.paginate(Bucket=bucket, Prefix=base, Delimiter="/"):
-            for obj in page.get("Contents", []) or []:
-                key = obj.get("Key", "")
-                if not key.startswith(base):
+        for chunk in obs.list(store, prefix=base):
+            for obj in chunk:
+                obj_path = obj["path"]
+                if not obj_path.startswith(base):
                     continue
-                name = key[len(base) :]
+                name = obj_path[len(base) :]
+                # Only direct children (no nested paths)
                 if name and "/" not in name:
                     entries.append(name)
+
         return sorted(entries)
 
     def stat(self, path: str) -> Mapping[str, int]:
+        """Get file metadata (size) for an S3 object."""
         scheme, bucket, key = split_url(path)
         if scheme != "s3" or not bucket or not key:
-            raise FileNotFoundError(f"Invalid S3 path for stat: {path}")
-        self._ensure_client(unsigned_ok=True)
-        assert self._client is not None
-        from botocore.exceptions import ClientError
+            raise FileNotFoundError(f"Invalid S3 path: {path}")
 
+        import obstore as obs
+
+        store = self._get_store(bucket)
         try:
-            head = self._client.head_object(Bucket=bucket, Key=key)
-        except ClientError as e:
-            code = str(e.response.get("Error", {}).get("Code"))
-            if code in {"403", "404", "NoSuchKey"}:
+            meta = obs.head(store, key)
+            return {"size": meta["size"]}
+        except Exception as e:
+            err = str(e)
+            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
                 raise FileNotFoundError(f"Object not found: {path}") from e
+            if "403" in err or "AccessDenied" in err:
+                raise FileNotFoundError(f"Access denied: {path}") from e
             raise
-        size = int(head.get("ContentLength", 0))
-        return {"size": size}
 
 
 __all__ = ["S3Backend"]

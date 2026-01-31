@@ -151,8 +151,96 @@ class _ListBlobView:
         self.name = name
 
 
+def _install_obstore_stubs(monkeypatch) -> dict:
+    """Install obstore stubs for testing without the actual package.
+
+    Returns a state dict that can be used to configure mock behavior:
+    - state["objects"]: dict mapping (bucket, key) -> bytes
+    - state["configs"]: list of configs passed to from_url
+    - state["store_type"]: list of store types used ("s3" or "gcs")
+    """
+    from unittest.mock import MagicMock
+
+    obstore_mod = types.ModuleType("obstore")
+    store_mod = types.ModuleType("obstore.store")
+
+    state = {
+        "objects": {},  # (bucket, key) -> bytes
+        "configs": [],  # track configs passed to from_url
+        "store_type": [],  # track which store type was used
+    }
+
+    class MockS3Store:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            state["configs"].append(config or {})
+            state["store_type"].append("s3")
+            return store
+
+    class MockGCSStore:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            state["configs"].append(config or {})
+            state["store_type"].append("gcs")
+            return store
+
+    store_mod.S3Store = MockS3Store
+    store_mod.GCSStore = MockGCSStore
+
+    class MockGetResult:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        def bytes(self) -> bytes:
+            return self._data
+
+    def mock_get(store, key):
+        url = getattr(store, "_url", "")
+        # Handle both s3:// and gs:// URLs
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return MockGetResult(data)
+
+    def mock_head(store, key):
+        url = getattr(store, "_url", "")
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        return {"size": len(data), "path": key}
+
+    def mock_list(store, prefix: str = ""):
+        url = getattr(store, "_url", "")
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        results = []
+        for (b, k), data in state["objects"].items():
+            if b == bucket and k.startswith(prefix):
+                results.append({"path": k, "size": len(data)})
+        return iter([results])
+
+    obstore_mod.get = mock_get
+    obstore_mod.head = mock_head
+    obstore_mod.list = mock_list
+
+    monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
+    monkeypatch.setitem(sys.modules, "obstore.store", store_mod)
+
+    return state
+
+
 __all__ = [
     "_install_boto3_stubs",
+    "_install_obstore_stubs",
     "_FakeS3Client",
     "_FakePaginator",
     "_FakeGCSClient",

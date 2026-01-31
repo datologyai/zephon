@@ -41,15 +41,8 @@ parquet = [
 vortex = [
     "vortex-data>=0.52.1; python_version >= '3.11'",
 ]
-cloud-s3 = [
-    "boto3>=1.20.0",
-]
-cloud-gcs = [
-    "google-cloud-storage>=2.0.0",
-]
 cloud = [
-    "zephon[cloud-s3]",
-    "zephon[cloud-gcs]",
+    "obstore>=0.3.0",
 ]
 litdata = [
     "litdata",
@@ -84,6 +77,7 @@ test = [
     "pillow>=10.0.0",
     "torchdata>=0.11.0",
     "pytest-timeout>=2.4.0",
+    "obstore>=0.3.0",
 ]
 docs = [
     "sphinx>=7.0.0",
