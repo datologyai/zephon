@@ -827,6 +827,17 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # Serialize operator once using cloudpickle to support lambdas/closures
         op_proto_bytes = cloudpickle.dumps(state.node.op)
 
+        # Phase 1: Create all worker configs and Process objects
+        worker_infos: list[
+            tuple[
+                int,
+                int,
+                BaseProcess,
+                Semaphore | SafeSemLock,
+                _ClosableQueue[tuple[bool, Any]],
+            ]
+        ] = []
+
         for idx in range(state.parallelism):
             semaphore = self._semaphore_factory(self._queue_capacity)
             worker_id = self._next_worker_id
@@ -856,7 +867,30 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 args=(config,),
                 daemon=True,
             )
-            proc.start()
+            worker_infos.append((idx, worker_id, proc, semaphore, resp_queue))
+
+        # Phase 2: Start all processes.
+        # For spawn/forkserver, we start processes in parallel using threads since
+        # proc.start() blocks until the process is forked. This reduces spawn time
+        # from O(n * spawn_time) to O(spawn_time).
+        # For fork, we start sequentially because fork() in a multithreaded program
+        # is unsafe: the child inherits locks held by threads that no longer exist,
+        # leading to potential deadlocks. Concurrent fork() calls exacerbate this.
+        start_method = self._mp_context.get_start_method()
+        if start_method in ("spawn", "forkserver"):
+            spawn_threads: list[threading.Thread] = []
+            for _, _, proc, _, _ in worker_infos:
+                t = threading.Thread(target=proc.start, daemon=True)
+                t.start()
+                spawn_threads.append(t)
+            for t in spawn_threads:
+                t.join()
+        else:
+            for _, _, proc, _, _ in worker_infos:
+                proc.start()
+
+        # Phase 3: Bookkeeping after all processes have started
+        for idx, worker_id, proc, semaphore, resp_queue in worker_infos:
             _debug(f"started worker process idx={idx} pid={proc.pid}")
             self._service_responses[worker_id] = resp_queue
             state.worker_ids.append(worker_id)
