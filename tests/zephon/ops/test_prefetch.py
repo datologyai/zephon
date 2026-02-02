@@ -3,7 +3,6 @@
 
 """Tests for shard prefetching operator."""
 
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,31 +20,25 @@ from zephon.ops.prefetch import PrefetchOp
 class MockResolver:
     """Mock resolver that tracks prefetch requests and simulates download latency."""
 
-    def __init__(self, base_latency_ms: float = 10.0):
+    def __init__(self, base_latency_ms: float = 0.0) -> None:
         self.base_latency_ms = base_latency_ms
-        # Track (dataset_id, shard_id) tuples that were resolved
-        self.resolve_calls: list[
-            tuple[int, int, float]
-        ] = []  # (dataset_id, shard_id, timestamp)
-        self.cached_shards: set[tuple[int, int]] = set()
-        self.lock = threading.Lock()
+        # Track (dataset_name, shard_id) tuples that were resolved
+        self.resolve_calls: list[tuple[str, int]] = []
+        self.cached_shards: set[tuple[str, int]] = set()
 
     def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
-        """Simulate resolving a shard with download latency."""
-        # Extract dataset_id from locator.dataset (which is the dataset name)
-        # We'll use the shard_id as key since that's what we have
-        key = (hash(locator.dataset) % 1000, locator.shard_id)
+        """Record a shard resolution request, optionally simulating latency."""
+        # Use dataset name directly as key (not hash) to avoid hash randomization
+        # causing flaky test failures when hash("dataset_0") == hash("dataset_1")
+        key = (locator.dataset, locator.shard_id)
+        is_cached = key in self.cached_shards
 
-        with self.lock:
-            self.resolve_calls.append((key[0], locator.shard_id, time.time()))
-            is_cached = key in self.cached_shards
+        self.resolve_calls.append(key)
 
-        if not is_cached and blocking:
-            # Simulate download time
+        if not is_cached and blocking and self.base_latency_ms > 0:
             time.sleep(self.base_latency_ms / 1000.0)
 
-        with self.lock:
-            self.cached_shards.add(key)
+        self.cached_shards.add(key)
 
         return LocalShardRef(
             raw=LocalShardFile(path=Path(f"/tmp/shard_{locator.shard_id}"), bytes=1000),
@@ -54,22 +47,19 @@ class MockResolver:
 
     def get_resolved_shards(self) -> list[int]:
         """Get list of shard IDs that were resolved (in order)."""
-        with self.lock:
-            return [shard_id for _, shard_id, _ in self.resolve_calls]
+        return [shard_id for _, shard_id in self.resolve_calls]
 
     def get_unique_resolved_shards(self) -> set[int]:
         """Get set of unique shard IDs that were resolved."""
-        with self.lock:
-            return {shard_id for _, shard_id, _ in self.resolve_calls}
+        return {shard_id for _, shard_id in self.resolve_calls}
 
     def get_stats(self) -> dict[str, Any]:
         """Get statistics about prefetch behavior."""
-        with self.lock:
-            return {
-                "resolve_count": len(self.resolve_calls),
-                "unique_shards": len({(d, s) for d, s, _ in self.resolve_calls}),
-                "cached_count": len(self.cached_shards),
-            }
+        return {
+            "resolve_count": len(self.resolve_calls),
+            "unique_shards": len(set(self.resolve_calls)),
+            "cached_count": len(self.cached_shards),
+        }
 
 
 def _setup_prefetch_with_mock(
@@ -155,7 +145,7 @@ def test_prefetch_accumulator():
 def test_prefetch_lookahead_simple():
     """Test that prefetch looks ahead and triggers downloads for unique shards."""
     op = PrefetchOp(buffer_size=10)
-    resolver = MockResolver(base_latency_ms=1.0)
+    resolver = MockResolver()
     _setup_prefetch_with_mock(op, resolver, num_datasets=1, num_shards_per_dataset=10)
 
     # Create a batch of samples from 3 different shards (4 samples each)
@@ -201,7 +191,7 @@ def test_prefetch_stress_many_shards(num_shards, buffer_size):
     - Various buffer sizes to test lookahead effectiveness
     """
     op = PrefetchOp(buffer_size=buffer_size)
-    resolver = MockResolver(base_latency_ms=0.1)  # Fast for stress test
+    resolver = MockResolver()  # Fast for stress test
     _setup_prefetch_with_mock(
         op, resolver, num_datasets=2, num_shards_per_dataset=num_shards
     )
@@ -248,7 +238,7 @@ def test_prefetch_interleaved_access():
     are interleaved, which should trigger prefetch for each unique shard.
     """
     op = PrefetchOp(buffer_size=100)
-    resolver = MockResolver(base_latency_ms=1.0)
+    resolver = MockResolver()
     _setup_prefetch_with_mock(op, resolver, num_datasets=1, num_shards_per_dataset=20)
 
     # Create interleaved pattern: alternating between 4 specific shards
@@ -282,7 +272,7 @@ def test_prefetch_sequential_access():
     Prefetch should download each shard exactly once.
     """
     op = PrefetchOp(buffer_size=200)
-    resolver = MockResolver(base_latency_ms=1.0)
+    resolver = MockResolver()
     _setup_prefetch_with_mock(op, resolver, num_datasets=1, num_shards_per_dataset=10)
 
     # Create sequential pattern: all samples from shard 0, then 1, then 2, etc.
@@ -352,7 +342,7 @@ def test_prefetch_deduplication():
     it should only be prefetched once per batch.
     """
     op = PrefetchOp(buffer_size=50)
-    resolver = MockResolver(base_latency_ms=1.0)
+    resolver = MockResolver()
     _setup_prefetch_with_mock(op, resolver, num_datasets=1, num_shards_per_dataset=10)
 
     # Create samples where the same shard appears many times
@@ -415,7 +405,7 @@ def test_prefetch_with_real_resolver_mock():
 
     # Verify all samples passed through unchanged
     assert result == samples, (
-        f"Prefetch should pass samples through unchanged, but got different results"
+        "Prefetch should pass samples through unchanged, but got different results"
     )
 
     # Verify prefetch resolved all 10 unique shards
