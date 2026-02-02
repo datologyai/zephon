@@ -61,6 +61,65 @@ def test_local_listdir_and_stat(tmp_path: Path) -> None:
 
     info = backend.stat(str(tmp_path / "b.txt"))
     assert int(info.get("size", -1)) == 2
+    assert "mtime" in info  # mtime should be present
+    assert isinstance(info["mtime"], float)
 
     with pytest.raises(NotADirectoryError):
         _ = backend.listdir(str(tmp_path / "a.txt"))
+
+
+def test_local_put_and_delete(tmp_path: Path) -> None:
+    """Test put and delete operations."""
+    backend = LocalFSBackend(root=tmp_path)
+
+    # Test put creates file and parent directories
+    target = tmp_path / "subdir" / "file.txt"
+    backend.put(str(target), b"hello world")
+    assert target.exists()
+    assert target.read_bytes() == b"hello world"
+
+    # Test put overwrites existing file
+    backend.put(str(target), b"new content")
+    assert target.read_bytes() == b"new content"
+
+    # Test delete removes file
+    backend.delete(str(target))
+    assert not target.exists()
+
+    # Test delete is idempotent (no error for missing file)
+    backend.delete(str(target))  # Should not raise
+
+
+def test_local_glob(tmp_path: Path) -> None:
+    """Test glob pattern matching."""
+    backend = LocalFSBackend(root=tmp_path)
+
+    # Create test files
+    (tmp_path / "state_r0_w0_123.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "state_r1_w0_123.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "state_r0_w0_456.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "merged_123.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "subdir" / "state_r2_w0_123.json").write_text("{}", encoding="utf-8")
+
+    # Test glob with wildcards
+    pattern = str(tmp_path / "state_r*_w*_123.json")
+    matches = backend.glob(pattern)
+    assert len(matches) == 2
+    assert all("123.json" in m for m in matches)
+    assert all("state_r" in m for m in matches)
+
+    # Test glob with no matches
+    pattern = str(tmp_path / "nonexistent_*.json")
+    matches = backend.glob(pattern)
+    assert matches == []
+
+    # Test glob without wildcards (exact match)
+    pattern = str(tmp_path / "merged_123.json")
+    matches = backend.glob(pattern)
+    assert len(matches) == 1
+    assert matches[0] == pattern
+
+    # Test glob with relative pattern
+    matches = backend.glob("state_r0_*.json")
+    assert len(matches) == 2

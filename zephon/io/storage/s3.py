@@ -6,9 +6,10 @@ import configparser
 import logging
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from ._utils import OpenViaDownloadMixin, split_url
+from ._utils import split_url
+from .obstore import ObstoreBackend
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def _get_aws_credentials_from_env_and_files() -> dict[str, str] | None:
     return None
 
 
-class S3Backend(OpenViaDownloadMixin):
+class S3Backend(ObstoreBackend):
     """AWS S3-backed storage implementation using obstore.
 
     Credentials are resolved from (in order):
@@ -118,6 +119,8 @@ class S3Backend(OpenViaDownloadMixin):
     - Requester pays via ZEPHON_AWS_REQUESTER_PAYS or MOSAICML_STREAMING_AWS_REQUESTER_PAYS
     - Custom endpoint via S3_ENDPOINT_URL
     """
+
+    valid_schemes = frozenset({"s3"})
 
     def __init__(self) -> None:
         self._stores: dict[str, Any] = {}  # bucket -> S3Store
@@ -199,45 +202,6 @@ class S3Backend(OpenViaDownloadMixin):
         self._unsigned_stores[bucket] = store
         return store
 
-    def exists(self, path: str) -> bool:
-        """Check if a file exists at the given S3 path."""
-        scheme, bucket, key = split_url(path)
-        if scheme != "s3" or not bucket or not key:
-            return False
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        try:
-            obs.head(store, key)
-            return True
-        except Exception as e:
-            err = str(e)
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                return False
-            if "403" in err or "AccessDenied" in err:
-                return False
-            raise
-
-    def _download_with_store(
-        self, store: Any, bucket: str, key: str, src: str, dst: str
-    ) -> None:
-        """Download using a specific store, with error handling."""
-        import obstore as obs
-
-        try:
-            data = obs.get(store, key).bytes()
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, "wb") as f:
-                f.write(data)
-        except Exception as e:
-            err = str(e)
-            if "403" in err or "AccessDenied" in err:
-                raise FileNotFoundError(f"Access denied: {src}") from e
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                raise FileNotFoundError(f"Object not found: {src}") from e
-            raise
-
     def _should_retry_unsigned(self, error: str) -> bool:
         """Check if error suggests we should retry with unsigned access."""
         # 400: Some public buckets reject signed requests
@@ -262,7 +226,7 @@ class S3Backend(OpenViaDownloadMixin):
 
         store = self._get_store(bucket)
         try:
-            self._download_with_store(store, bucket, key, src, dst)
+            self._download_with_store(store, key, src, dst)
         except Exception as e:
             err = str(e)
             # Retry with unsigned access for credential-related errors
@@ -275,54 +239,8 @@ class S3Backend(OpenViaDownloadMixin):
                     )
                     self._logged_unsigned_fallback = True
                 unsigned_store = self._get_unsigned_store(bucket)
-                self._download_with_store(unsigned_store, bucket, key, src, dst)
+                self._download_with_store(unsigned_store, key, src, dst)
                 return
-            raise
-
-    def listdir(self, path: str) -> list[str]:
-        """List files in an S3 directory (prefix)."""
-        scheme, bucket, prefix = split_url(path)
-        if scheme != "s3" or not bucket:
-            raise NotADirectoryError(f"Not an S3 directory: {path}")
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        base = (
-            (prefix + "/") if (prefix and not prefix.endswith("/")) else (prefix or "")
-        )
-
-        entries: list[str] = []
-        for chunk in obs.list(store, prefix=base):
-            for obj in chunk:
-                obj_path = obj["path"]
-                if not obj_path.startswith(base):
-                    continue
-                name = obj_path[len(base) :]
-                # Only direct children (no nested paths)
-                if name and "/" not in name:
-                    entries.append(name)
-
-        return sorted(entries)
-
-    def stat(self, path: str) -> Mapping[str, int]:
-        """Get file metadata (size) for an S3 object."""
-        scheme, bucket, key = split_url(path)
-        if scheme != "s3" or not bucket or not key:
-            raise FileNotFoundError(f"Invalid S3 path: {path}")
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        try:
-            meta = obs.head(store, key)
-            return {"size": meta["size"]}
-        except Exception as e:
-            err = str(e)
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                raise FileNotFoundError(f"Object not found: {path}") from e
-            if "403" in err or "AccessDenied" in err:
-                raise FileNotFoundError(f"Access denied: {path}") from e
             raise
 
 

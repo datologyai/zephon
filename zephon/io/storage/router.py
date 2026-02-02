@@ -62,8 +62,24 @@ class RouterStorageBackend(StorageBackend):
     def listdir(self, path: str) -> list[str]:
         return self._backend_for(path).listdir(path)
 
-    def stat(self, path: str) -> Mapping[str, int]:
+    def stat(self, path: str) -> Mapping[str, int | float]:
         return self._backend_for(path).stat(path)
+
+    def put(self, path: str, data: bytes) -> None:
+        return self._backend_for(path).put(path, data)
+
+    def delete(self, path: str) -> None:
+        return self._backend_for(path).delete(path)
+
+    def glob(self, pattern: str) -> list[str]:
+        return self._backend_for(pattern).glob(pattern)
+
+    def mkdir(self, path: str, parents: bool = False, exist_ok: bool = False) -> None:
+        return self._backend_for(path).mkdir(path, parents, exist_ok)
+
+    def is_cloud_path(self, path: str) -> bool:
+        """Return True if path uses a cloud storage scheme."""
+        return self._backend_for(path) is not self._local
 
 
 __all__ = ["RouterStorageBackend"]

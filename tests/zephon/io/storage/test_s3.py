@@ -1,90 +1,10 @@
 """Tests for S3Backend using obstore."""
 
-import sys
-import types
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-
-def _install_obstore_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Install obstore stubs for testing without the actual package."""
-    # Create mock obstore module
-    obstore_mod = types.ModuleType("obstore")
-    store_mod = types.ModuleType("obstore.store")
-
-    # Mock classes
-    class MockS3Store:
-        @classmethod
-        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
-            store = MagicMock()
-            store._config = config or {}
-            store._url = url
-            store._client_options = client_options or {}
-            return store
-
-    store_mod.S3Store = MockS3Store
-
-    # State to control mock behavior
-    state = {
-        "objects": {},  # (bucket, key) -> bytes
-        "configs": [],  # track configs passed to from_url
-    }
-
-    class MockGetResult:
-        def __init__(self, data: bytes):
-            self._data = data
-
-        def bytes(self) -> bytes:
-            return self._data
-
-    def mock_get(store, key):
-        # Extract bucket from store URL
-        url = getattr(store, "_url", "s3://unknown")
-        bucket = url.replace("s3://", "")
-        data = state["objects"].get((bucket, key))
-        if data is None:
-            raise Exception(f"404 NotFound: {key}")
-        return MockGetResult(data)
-
-    def mock_head(store, key):
-        url = getattr(store, "_url", "s3://unknown")
-        bucket = url.replace("s3://", "")
-        data = state["objects"].get((bucket, key))
-        if data is None:
-            raise Exception(f"404 NotFound: {key}")
-        return {"size": len(data), "path": key}
-
-    def mock_list(store, prefix: str = ""):
-        url = getattr(store, "_url", "s3://unknown")
-        bucket = url.replace("s3://", "")
-        results = []
-        for (b, k), data in state["objects"].items():
-            if b == bucket and k.startswith(prefix):
-                results.append({"path": k, "size": len(data)})
-        return iter([results])
-
-    obstore_mod.get = mock_get
-    obstore_mod.head = mock_head
-    obstore_mod.list = mock_list
-
-    # Patch from_url to track configs
-    original_from_url = MockS3Store.from_url
-
-    @classmethod
-    def tracking_from_url(
-        cls, url: str, config: dict = None, client_options: dict = None
-    ):
-        state["configs"].append(config or {})
-        return original_from_url(url, config, client_options)
-
-    store_mod.S3Store.from_url = tracking_from_url
-
-    monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
-    monkeypatch.setitem(sys.modules, "obstore.store", store_mod)
-
-    return state
+from tests.helpers.storage import _install_obstore_stubs
 
 
 def test_s3_download_and_stat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -210,3 +130,111 @@ def test_s3_custom_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     backend.exists("s3://bucket/file.bin")
 
     assert state["configs"][0].get("aws_endpoint") == "http://localhost:9000"
+
+
+def test_s3_put_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test S3 put and delete operations."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+
+    # Test put creates object
+    backend.put("s3://bucket/new/file.txt", b"hello world")
+    assert state["objects"][("bucket", "new/file.txt")] == b"hello world"
+
+    # Test put overwrites
+    backend.put("s3://bucket/new/file.txt", b"new content")
+    assert state["objects"][("bucket", "new/file.txt")] == b"new content"
+
+    # Test delete removes object
+    backend.delete("s3://bucket/new/file.txt")
+    assert ("bucket", "new/file.txt") not in state["objects"]
+
+    # Test delete is idempotent
+    backend.delete("s3://bucket/new/file.txt")  # Should not raise
+
+    # Test invalid URL handling
+    with pytest.raises(ValueError):
+        backend.put("not-s3://bucket/file", b"data")
+
+    # delete with invalid URL should be no-op (idempotent)
+    backend.delete("not-s3://bucket/file")  # Should not raise
+
+
+def test_s3_glob(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test S3 glob pattern matching."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    # Create test objects
+    state["objects"][("bucket", "prefix/state_r0_w0_123.json")] = b"{}"
+    state["objects"][("bucket", "prefix/state_r1_w0_123.json")] = b"{}"
+    state["objects"][("bucket", "prefix/state_r0_w0_456.json")] = b"{}"
+    state["objects"][("bucket", "prefix/merged_123.json")] = b"{}"
+
+    backend = S3Backend()
+
+    # Test glob with wildcards
+    matches = backend.glob("s3://bucket/prefix/state_r*_w*_123.json")
+    assert len(matches) == 2
+    assert all("123.json" in m for m in matches)
+    assert all("state_r" in m for m in matches)
+
+    # Test glob with no matches
+    matches = backend.glob("s3://bucket/prefix/nonexistent_*.json")
+    assert matches == []
+
+    # Test glob without wildcards (exact match)
+    matches = backend.glob("s3://bucket/prefix/merged_123.json")
+    assert len(matches) == 1
+    assert matches[0] == "s3://bucket/prefix/merged_123.json"
+
+    # Test glob with invalid URL
+    matches = backend.glob("not-s3://bucket/file*")
+    assert matches == []
+
+
+def test_s3_stat_includes_mtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that stat returns mtime."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "file.bin")] = b"data"
+
+    backend = S3Backend()
+    info = backend.stat("s3://bucket/file.bin")
+
+    assert "size" in info
+    assert "mtime" in info
+    assert isinstance(info["mtime"], float)
+
+
+def test_s3_stat_access_denied_raises_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that stat raises PermissionError on 403 Access Denied."""
+    _install_obstore_stubs(monkeypatch)
+
+    import sys
+
+    # Patch the mock head to raise 403 for a specific key
+    obstore_mod = sys.modules["obstore"]
+    original_head = obstore_mod.head
+
+    def mock_head_with_403(store, key):
+        if key == "forbidden.bin":
+            raise Exception("403 AccessDenied: Access denied")
+        return original_head(store, key)
+
+    obstore_mod.head = mock_head_with_403
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+
+    with pytest.raises(PermissionError, match="Access denied"):
+        backend.stat("s3://bucket/forbidden.bin")

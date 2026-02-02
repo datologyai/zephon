@@ -159,6 +159,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     - state["configs"]: list of configs passed to from_url
     - state["store_type"]: list of store types used ("s3" or "gcs")
     """
+    from datetime import datetime, timezone
     from unittest.mock import MagicMock
 
     obstore_mod = types.ModuleType("obstore")
@@ -217,7 +218,11 @@ def _install_obstore_stubs(monkeypatch) -> dict:
         data = state["objects"].get((bucket, key))
         if data is None:
             raise Exception(f"404 NotFound: {key}")
-        return {"size": len(data), "path": key}
+        return {
+            "size": len(data),
+            "path": key,
+            "last_modified": datetime.now(timezone.utc),
+        }
 
     def mock_list(store, prefix: str = ""):
         url = getattr(store, "_url", "")
@@ -228,9 +233,21 @@ def _install_obstore_stubs(monkeypatch) -> dict:
                 results.append({"path": k, "size": len(data)})
         return iter([results])
 
+    def mock_put(store, key, data):
+        url = getattr(store, "_url", "")
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        state["objects"][(bucket, key)] = bytes(data)
+
+    def mock_delete(store, key):
+        url = getattr(store, "_url", "")
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        state["objects"].pop((bucket, key), None)
+
     obstore_mod.get = mock_get
     obstore_mod.head = mock_head
     obstore_mod.list = mock_list
+    obstore_mod.put = mock_put
+    obstore_mod.delete = mock_delete
 
     monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
     monkeypatch.setitem(sys.modules, "obstore.store", store_mod)

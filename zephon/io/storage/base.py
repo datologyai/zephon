@@ -12,6 +12,13 @@ class StorageBackend(Protocol):
       internally materialize to a temporary file or use streaming file
       objects. Large data transfers should use ``download`` and be managed
       by resolvers/caches.
+    - ``put`` is the write counterpart to ``open``/``download``, intended for
+      small control files. Writes are atomic.
+    - ``delete`` is idempotent: deleting a non-existent path is not an error.
+    - ``glob`` supports ``*`` and ``?`` wildcards; cloud backends list with a
+      prefix and filter client-side for efficiency.
+    - ``mkdir`` creates directories (local) or folder markers (cloud). The
+      ``parents`` and ``exist_ok`` parameters mirror ``pathlib.Path.mkdir``.
     """
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
@@ -34,8 +41,51 @@ class StorageBackend(Protocol):
         """List entries directly contained in ``path``."""
         ...
 
-    def stat(self, path: str) -> Mapping[str, int]:
-        """Return basic metadata (at least ``size``) for ``path``."""
+    def stat(self, path: str) -> Mapping[str, int | float]:
+        """Return metadata for ``path``.
+
+        Returns a mapping with at least:
+        - ``size``: file size in bytes (int)
+        - ``mtime``: last modification time as seconds since epoch (float)
+        """
+        ...
+
+    def put(self, path: str, data: bytes) -> None:
+        """Write ``data`` to ``path`` atomically.
+
+        Creates parent directories as needed. On local filesystems, uses
+        atomic rename for crash safety. On object storage, writes are
+        inherently atomic.
+        """
+        ...
+
+    def delete(self, path: str) -> None:
+        """Delete ``path``.
+
+        Idempotent: no error is raised if ``path`` does not exist.
+        """
+        ...
+
+    def glob(self, pattern: str) -> list[str]:
+        """Return paths matching the glob ``pattern``.
+
+        Supports ``*`` and ``?`` wildcards. For cloud backends, efficiently
+        lists with a prefix and filters client-side.
+
+        Example: ``glob("s3://bucket/dir/state_r*.json")``
+        """
+        ...
+
+    def mkdir(self, path: str, parents: bool = False, exist_ok: bool = False) -> None:
+        """Create a directory at ``path``.
+
+        Args:
+            path: Directory path to create.
+            parents: If True, create parent directories as needed (like mkdir -p).
+            exist_ok: If True, don't raise an error if directory already exists.
+
+        For cloud backends, creates a folder marker (empty object with trailing /).
+        """
         ...
 
 

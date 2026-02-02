@@ -1,91 +1,10 @@
 """Tests for GCSBackend using obstore."""
 
-import sys
-import types
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-
-def _install_obstore_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Install obstore stubs for testing without the actual package."""
-    obstore_mod = types.ModuleType("obstore")
-    store_mod = types.ModuleType("obstore.store")
-
-    # State to control mock behavior
-    state = {
-        "objects": {},  # (bucket, key) -> bytes
-        "configs": [],  # track configs passed to from_url
-        "store_type": [],  # track which store type was used
-    }
-
-    class MockGCSStore:
-        @classmethod
-        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
-            store = MagicMock()
-            store._config = config or {}
-            store._url = url
-            store._client_options = client_options or {}
-            state["configs"].append(config or {})
-            state["store_type"].append("gcs")
-            return store
-
-    class MockS3Store:
-        @classmethod
-        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
-            store = MagicMock()
-            store._config = config or {}
-            store._url = url
-            store._client_options = client_options or {}
-            state["configs"].append(config or {})
-            state["store_type"].append("s3")
-            return store
-
-    store_mod.GCSStore = MockGCSStore
-    store_mod.S3Store = MockS3Store
-
-    class MockGetResult:
-        def __init__(self, data: bytes):
-            self._data = data
-
-        def bytes(self) -> bytes:
-            return self._data
-
-    def mock_get(store, key):
-        url = getattr(store, "_url", "gs://unknown")
-        # Handle both gs:// and s3:// URLs
-        bucket = url.replace("gs://", "").replace("s3://", "")
-        data = state["objects"].get((bucket, key))
-        if data is None:
-            raise Exception(f"404 NotFound: {key}")
-        return MockGetResult(data)
-
-    def mock_head(store, key):
-        url = getattr(store, "_url", "gs://unknown")
-        bucket = url.replace("gs://", "").replace("s3://", "")
-        data = state["objects"].get((bucket, key))
-        if data is None:
-            raise Exception(f"404 NotFound: {key}")
-        return {"size": len(data), "path": key}
-
-    def mock_list(store, prefix: str = ""):
-        url = getattr(store, "_url", "gs://unknown")
-        bucket = url.replace("gs://", "").replace("s3://", "")
-        results = []
-        for (b, k), data in state["objects"].items():
-            if b == bucket and k.startswith(prefix):
-                results.append({"path": k, "size": len(data)})
-        return iter([results])
-
-    obstore_mod.get = mock_get
-    obstore_mod.head = mock_head
-    obstore_mod.list = mock_list
-
-    monkeypatch.setitem(sys.modules, "obstore", obstore_mod)
-    monkeypatch.setitem(sys.modules, "obstore.store", store_mod)
-
-    return state
+from tests.helpers.storage import _install_obstore_stubs
 
 
 def test_gcs_native_download_stat(
@@ -259,3 +178,84 @@ def test_gcs_scheme_gcs_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
 
     backend = GCSBackend()
     assert backend.exists("gcs://bucket/file.bin") is True
+
+
+def test_gcs_put_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS put and delete operations."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+
+    # Test put creates object
+    backend.put("gs://bucket/new/file.txt", b"hello world")
+    assert state["objects"][("bucket", "new/file.txt")] == b"hello world"
+
+    # Test put overwrites
+    backend.put("gs://bucket/new/file.txt", b"new content")
+    assert state["objects"][("bucket", "new/file.txt")] == b"new content"
+
+    # Test delete removes object
+    backend.delete("gs://bucket/new/file.txt")
+    assert ("bucket", "new/file.txt") not in state["objects"]
+
+    # Test delete is idempotent
+    backend.delete("gs://bucket/new/file.txt")  # Should not raise
+
+    # Test invalid URL handling
+    with pytest.raises(ValueError):
+        backend.put("not-gs://bucket/file", b"data")
+
+    # delete with invalid URL should be no-op (idempotent)
+    backend.delete("not-gs://bucket/file")  # Should not raise
+
+
+def test_gcs_glob(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS glob pattern matching."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    # Create test objects
+    state["objects"][("bucket", "prefix/state_r0_w0_123.json")] = b"{}"
+    state["objects"][("bucket", "prefix/state_r1_w0_123.json")] = b"{}"
+    state["objects"][("bucket", "prefix/state_r0_w0_456.json")] = b"{}"
+    state["objects"][("bucket", "prefix/merged_123.json")] = b"{}"
+
+    backend = GCSBackend()
+
+    # Test glob with wildcards
+    matches = backend.glob("gs://bucket/prefix/state_r*_w*_123.json")
+    assert len(matches) == 2
+    assert all("123.json" in m for m in matches)
+    assert all("state_r" in m for m in matches)
+
+    # Test glob with no matches
+    matches = backend.glob("gs://bucket/prefix/nonexistent_*.json")
+    assert matches == []
+
+    # Test glob without wildcards (exact match)
+    matches = backend.glob("gs://bucket/prefix/merged_123.json")
+    assert len(matches) == 1
+    assert matches[0] == "gs://bucket/prefix/merged_123.json"
+
+    # Test glob with invalid URL
+    matches = backend.glob("not-gs://bucket/file*")
+    assert matches == []
+
+
+def test_gcs_stat_includes_mtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that stat returns mtime."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "file.bin")] = b"data"
+
+    backend = GCSBackend()
+    info = backend.stat("gs://bucket/file.bin")
+
+    assert "size" in info
+    assert "mtime" in info
+    assert isinstance(info["mtime"], float)

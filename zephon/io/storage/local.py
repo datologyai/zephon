@@ -1,6 +1,7 @@
 """Local filesystem storage backend implementation."""
 
 import contextlib
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -87,10 +88,46 @@ class LocalFSBackend(StorageBackend):
             raise NotADirectoryError(f"Not a directory: {abspath}")
         return [entry.name for entry in sorted(abspath.iterdir())]
 
-    def stat(self, path: str) -> Mapping[str, int]:
+    def stat(self, path: str) -> Mapping[str, int | float]:
         abspath = self._abspath(path)
         info = abspath.stat()
-        return {"size": info.st_size}
+        return {"size": info.st_size, "mtime": info.st_mtime}
+
+    def put(self, path: str, data: bytes) -> None:
+        abspath = self._abspath(path)
+        abspath.parent.mkdir(parents=True, exist_ok=True)
+        tmp = abspath.with_suffix(abspath.suffix + ".tmp")
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, abspath)  # Atomic on POSIX
+        except Exception:
+            with contextlib.suppress(Exception):
+                tmp.unlink()
+            raise
+
+    def delete(self, path: str) -> None:
+        self._abspath(path).unlink(missing_ok=True)
+
+    def glob(self, pattern: str) -> list[str]:
+        p = Path(pattern)
+        if p.is_absolute():
+            # Find the first part containing a wildcard
+            parts = p.parts
+            glob_start = next(
+                (i for i, part in enumerate(parts) if "*" in part or "?" in part),
+                len(parts),
+            )
+            if glob_start == len(parts):
+                # No wildcards - just check if file exists
+                return [pattern] if p.exists() else []
+            base = Path(*parts[:glob_start])
+            pat = str(Path(*parts[glob_start:]))
+            return sorted(str(x) for x in base.glob(pat))
+        else:
+            return sorted(str(x) for x in self.root.glob(pattern))
+
+    def mkdir(self, path: str, parents: bool = False, exist_ok: bool = False) -> None:
+        self._abspath(path).mkdir(parents=parents, exist_ok=exist_ok)
 
 
 __all__ = ["LocalFSBackend"]

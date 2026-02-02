@@ -48,6 +48,8 @@ from multiprocessing.context import BaseContext
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
+from zephon.io.storage import RouterStorageBackend
+
 T = TypeVar("T")
 
 from zephon.core.constants import (
@@ -220,7 +222,8 @@ class RuntimeOptions:
 
     # Autotune placeholders (intentionally not implemented yet)
     autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
-    # Where all workers/ranks dump their local state. Must be shared (e.g., NFS) for multi-node.
+    # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
+    # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None
     # How long to wait for all contributors and for the merged file.
     aggregate_timeout_s: float = 30.0
@@ -381,7 +384,6 @@ class Engine:
         ] = []
         self._build_runners()
 
-        self._agg_timeout_s = self._opts.aggregate_timeout_s
         self._using_fresh_tmp = False
         if self._world.world_size == 1:
             # Single-node: auto if not provided
@@ -392,19 +394,32 @@ class Engine:
                 self._opts.aggregate_dir is None or self._opts.aggregate_dir == ""
             )
         else:
-            # Multi-node: must be provided (shared FS)
+            # Multi-node: must be provided (shared FS or cloud storage)
             if not self._opts.aggregate_dir:
                 raise RuntimeError(
                     "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
                 )
             base = self._opts.aggregate_dir
 
-        self._agg_base = Path(base).resolve()
-        self._agg_base.mkdir(parents=True, exist_ok=True)
+        # Initialize storage backend for checkpoint I/O
+        self._agg_backend = RouterStorageBackend()
 
-        self._agg_dir.mkdir(parents=True, exist_ok=True)
+        # Detect cloud storage and adjust timeouts for higher latency
+        base = str(base)  # Handle Path objects
+        self._agg_is_cloud = self._agg_backend.is_cloud_path(base)
+        if self._agg_is_cloud:
+            self._agg_timeout_s = max(self._opts.aggregate_timeout_s, 60.0)
+            self._agg_poll_base = 0.5  # 500ms base poll interval
+        else:
+            self._agg_timeout_s = self._opts.aggregate_timeout_s
+            self._agg_poll_base = 0.05  # 50ms base poll interval
+            # Resolve local paths; cloud paths stay as-is
+            base = str(Path(base).resolve())
+
+        self._agg_base = base.rstrip("/")
+        self._agg_backend.mkdir(self._agg_base, parents=True, exist_ok=True)
         self._last_round_id: str | None = None
-        self._previous_merged_file: Path | None = None
+        self._previous_merged_file: str | None = None
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
         # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
@@ -420,11 +435,11 @@ class Engine:
             )
 
     @property
-    def _round_file(self) -> Path:
-        return self._agg_dir / "round.current"
+    def _round_file(self) -> str:
+        return f"{self._agg_dir}/round.current"
 
     @property
-    def _agg_dir(self) -> Path:
+    def _agg_dir(self) -> str:
         def _normalize_run_dir_name(
             name: str,
         ) -> str:  # Drop a trailing "-<int>" if present
@@ -433,35 +448,38 @@ class Engine:
 
         run_id = self._opts.run_id
         using_default = False
+        # Names (not full paths) of subdirectories in _agg_base, used to warn
+        # about potential run ID collisions when using the default run ID.
+        existing_subdir_names: list[str] = []
+
         if run_id.startswith(DEFAULT_RUN_ID):
-            agg_dir_entries = [
-                Path(e.path).resolve() for e in os.scandir(self._agg_base) if e.is_dir()
-            ]
+            existing_subdir_names = self._agg_backend.listdir(self._agg_base)
             using_default = True
             # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
             run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world.world_size}-{self._plan.plan_id}"
 
         # Avoid having to use a new run id with every reload
         run_id = f"{run_id}-{self._checkpoint_reload_count}"
-        current_run_dir = (self._agg_base / run_id).resolve()
-        cur_norm = _normalize_run_dir_name(current_run_dir.name)
-        result = current_run_dir / ".zephon_agg"
+        current_run_dir = f"{self._agg_base}/{run_id}"
+        cur_norm = _normalize_run_dir_name(run_id)
+        result = f"{current_run_dir}/.zephon_agg"
 
         if (
             not self._using_fresh_tmp
             and using_default
             and not self._warned_once_about_runid
-            and agg_dir_entries
+            and existing_subdir_names
         ):
-            if {_normalize_run_dir_name(p.name) for p in agg_dir_entries} != {cur_norm}:
+            existing_norms = {
+                _normalize_run_dir_name(name) for name in existing_subdir_names
+            }
+            if existing_norms != {cur_norm}:
                 # Potentially we can also only warn if the plan id or canonical replicas change since that probably really causes a semantic change but we better just tell the user early this is not the. best idea.
                 print(
-                    f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._agg_base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {agg_dir_entries}",
+                    f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._agg_base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {existing_subdir_names}",
                     file=sys.stderr,
                 )
                 self._warned_once_about_runid = True
-
-        # print(f"DEBUG: aggregation directory is {result}", file=sys.stderr)
 
         return result
 
@@ -474,9 +492,9 @@ class Engine:
     def _clean_merged(self) -> None:
         if self._previous_merged_file is not None:
             self._log(
-                f"We are cleaning up the previous local checkpoint synchronization file ({self._previous_merged_file}). If you face a timeout error after this, it means that your main rank/worker exits before all workers have consumed the checkpoint. You should ensure all workers have completed the checkpoint (e.g., via a barrier) if you checkpoint at the end of training. If no error occurs, all is well."
+                f"We are cleaning up the previous checkpoint synchronization file ({self._previous_merged_file}). If you face a timeout error after this, it means that your main rank/worker exits before all workers have consumed the checkpoint. You should ensure all workers have completed the checkpoint (e.g., via a barrier) if you checkpoint at the end of training. If no error occurs, all is well."
             )
-            self._previous_merged_file.unlink(missing_ok=True)
+            self._agg_backend.delete(self._previous_merged_file)
             self._previous_merged_file = None
 
     def __getstate__(self):
@@ -1563,49 +1581,37 @@ class Engine:
             }
 
     # ---------- FS utilities ----------
-    def _atomic_write_text(self, path: Path, text: str) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-
-    def _atomic_write_json(self, path: Path, payload: dict) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp, path)
-
-    def _read_text(self, path: Path) -> str | None:
+    def _read_text(self, path: str) -> str | None:
         try:
-            with open(path, "r") as f:
-                return f.read()
+            with self._agg_backend.open(path, "r") as f:
+                return str(f.read())
         except Exception:
             return None
 
-    def _read_json(self, path: Path) -> dict | None:
+    def _read_json(self, path: str) -> dict | None:
         try:
-            with open(path, "r") as f:
+            with self._agg_backend.open(path, "r") as f:
                 return json.load(f)
         except Exception:
             return None
 
-    def _wait_until(
-        self, pred: Callable[[], bool], timeout: float, poll: float = 0.05
-    ) -> bool:
+    def _wait_until(self, pred: Callable[[], bool], timeout: float) -> bool:
         deadline = time.time() + timeout
+        delay = self._agg_poll_base
         while time.time() < deadline:
             if pred():
                 return True
-            time.sleep(poll)
+            time.sleep(min(delay, max(0, deadline - time.time())))
+            # Exponential backoff for cloud, capped at 5s
+            if self._agg_is_cloud:
+                delay = min(delay * 1.5, 5.0)
         return False
 
     # ---------- Round / paths ----------
 
     def _publish_new_round_id(self) -> str:
         rid = str(int(time.time() * 1e9))  # monotonic-ish
-        self._atomic_write_text(self._round_file, rid)
+        self._agg_backend.put(self._round_file, rid.encode("utf-8"))
         self._last_round_id = rid
         return rid
 
@@ -1616,9 +1622,10 @@ class Engine:
 
         # This is a practically relevant guard in case users do neither supply a run id nor a fresh aggregate directory. With this check we at least avoid stale state if it is obviously old.
         try:
-            age_s = time.time() - self._round_file.stat().st_mtime
+            stat = self._agg_backend.stat(self._round_file)
+            age_s = time.time() - stat["mtime"]
         except OSError:
-            return None  # If we can't stat it, treat as missing/invalid
+            return None  # File doesn't exist or access denied
         if age_s > 120:
             return None
 
@@ -1630,23 +1637,28 @@ class Engine:
                 my_fp = self._state_file_path(rid)
             except Exception:
                 my_fp = None
-            if not my_fp or my_fp.exists():
+            if not my_fp or self._agg_backend.exists(my_fp):
                 return None
 
-        # only “open” if merged for this rid doesn’t exist yet
-        if not self._merged_file_path(rid).exists():
+        # only "open" if merged for this rid doesn't exist yet
+        if not self._agg_backend.exists(self._merged_file_path(rid)):
             return rid
         return None
 
     def _wait_value(
-        self, supplier: Callable[[], T | None], timeout: float, poll: float = 0.05
+        self,
+        supplier: Callable[[], T | None],
+        timeout: float,
     ) -> T | None:
         deadline = time.time() + timeout
+        delay = self._agg_poll_base
         while time.time() < deadline:
             val = supplier()
             if val is not None:
                 return val
-            time.sleep(poll)
+            time.sleep(min(delay, max(0, deadline - time.time())))
+            if self._agg_is_cloud:
+                delay = min(delay * 1.5, 5.0)
         return None
 
     def _open_round_id(self, is_leader: bool) -> str:
@@ -1658,19 +1670,17 @@ class Engine:
             raise RuntimeError(f"Timeout waiting for round id at {self._round_file}")
         return rid
 
-    def _state_file_path(self, round_id: str) -> Path:
+    def _state_file_path(self, round_id: str) -> str:
         wid, _ = get_torch_worker_info()
         pid = os.getpid()
-        return (
-            self._agg_dir
-            / f"state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.json"
-        )
+        return f"{self._agg_dir}/state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.json"
 
-    def _merged_file_path(self, round_id: str) -> Path:
-        return self._agg_dir / f"merged_{round_id}.json"
+    def _merged_file_path(self, round_id: str) -> str:
+        return f"{self._agg_dir}/merged_{round_id}.json"
 
-    def _list_state_files(self, round_id: str) -> list[Path]:
-        return list(self._agg_dir.glob(f"state_r*_w*_{round_id}.json"))
+    def _list_state_files(self, round_id: str) -> list[str]:
+        pattern = f"{self._agg_dir}/state_r*_w*_p*_{round_id}.json"
+        return self._agg_backend.glob(pattern)
 
     def _read_states_for_round(
         self, round_id: str, printt: bool = False
@@ -1679,14 +1689,15 @@ class Engine:
         covered: set[int] = set()
         for fp in self._list_state_files(round_id):
             st = self._read_json(fp)
+            fname = fp.rsplit("/", 1)[-1]  # Get filename from path
             if st is None:
                 if printt:
-                    self._log(f"{fp.name} covers nothing!")
+                    self._log(f"{fname} covers nothing!")
                 continue
             states.append(st)
             for k in st.get("progress", {}).keys():
                 if printt:
-                    self._log(f"{fp.name} covers lane {k}!")
+                    self._log(f"{fname} covers lane {k}!")
                 covered.add(int(k))
         return states, covered
 
@@ -1727,7 +1738,7 @@ class Engine:
         round_id = self._open_round_id(is_leader)
         self._last_round_id = round_id
         my_path = self._state_file_path(round_id)
-        self._atomic_write_json(my_path, local)  # atomic publish
+        self._agg_backend.put(my_path, json.dumps(local).encode("utf-8"))
 
         merged_path = self._merged_file_path(round_id)
         if is_leader:
@@ -1749,25 +1760,27 @@ class Engine:
             # Merge and publish
             states, _ = self._read_states_for_round(round_id, printt=False)
             merged = self._merge_state_dicts(states)
-            assert not merged_path.exists()
-            self._atomic_write_json(merged_path, merged)
-            my_path.unlink(missing_ok=True)
+            assert not self._agg_backend.exists(merged_path)
+            self._agg_backend.put(merged_path, json.dumps(merged).encode("utf-8"))
+            self._agg_backend.delete(my_path)
             if self._previous_merged_file is not None:
-                self._previous_merged_file.unlink(missing_ok=True)
+                self._agg_backend.delete(self._previous_merged_file)
             self._previous_merged_file = merged_path
-            self._round_file.unlink(
-                missing_ok=True
+            self._agg_backend.delete(
+                self._round_file
             )  # can also clean this up since we know everybody consumed it.
             return merged
 
         # Followers: wait for merged file
-        ok = self._wait_until(lambda: merged_path.exists(), self._agg_timeout_s)
+        ok = self._wait_until(
+            lambda: self._agg_backend.exists(merged_path), self._agg_timeout_s
+        )
         if not ok:
             raise RuntimeError(
                 f"[PID {os.getpid()}] Timed out after {self._agg_timeout_s}s waiting for merged checkpoint at {merged_path}"
             )
         merged = self._read_json(merged_path)
-        my_path.unlink(missing_ok=True)
+        self._agg_backend.delete(my_path)
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
         return merged
@@ -1941,7 +1954,7 @@ class Engine:
 
         self._last_round_id = state["last_round_id"]
         self._checkpoint_reload_count = state["checkpoint_reload_count"] + 1
-        self._agg_dir.mkdir(parents=True, exist_ok=True)
+        self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
 
         rr_next_idx_raw = state.get("rr_next_idx", {}) or {}
         self._rr_next_idx = {str(k): int(v) for k, v in rr_next_idx_raw.items()}

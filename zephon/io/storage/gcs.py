@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from ._utils import OpenViaDownloadMixin, split_url
+from .obstore import ObstoreBackend
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def _get_gcs_credentials_from_env_and_files() -> dict[str, str] | None:
     return None
 
 
-class GCSBackend(OpenViaDownloadMixin):
+class GCSBackend(ObstoreBackend):
     """GCS backend using obstore.
 
     Credentials are resolved from (in order):
@@ -57,6 +57,8 @@ class GCSBackend(OpenViaDownloadMixin):
     Legacy S3-compatible mode (deprecated):
     - If GCS_KEY and GCS_SECRET are set, uses S3 protocol to storage.googleapis.com
     """
+
+    valid_schemes = frozenset({"gs", "gcs"})
 
     def __init__(self) -> None:
         self._stores: dict[str, Any] = {}  # bucket -> Store
@@ -113,98 +115,6 @@ class GCSBackend(OpenViaDownloadMixin):
 
         self._stores[bucket] = store
         return store
-
-    def exists(self, path: str) -> bool:
-        """Check if a file exists at the given GCS path."""
-        scheme, bucket, key = split_url(path)
-        if scheme not in {"gs", "gcs"} or not bucket or not key:
-            return False
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        try:
-            obs.head(store, key)
-            return True
-        except Exception as e:
-            err = str(e)
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                return False
-            if "403" in err or "AccessDenied" in err:
-                return False
-            raise
-
-    def download(self, src: str, dst: str, timeout: float | None = None) -> None:
-        """Download a file from GCS to local disk."""
-        # timeout param kept for StorageBackend protocol compatibility but unused.
-        # obstore only supports store-level timeout (set in _get_store via client_options).
-        # See: https://developmentseed.org/obstore/latest/api/store/config/
-        del timeout
-        scheme, bucket, key = split_url(src)
-        if scheme not in {"gs", "gcs"} or not bucket or not key:
-            raise ValueError(f"Invalid GCS URL: {src}")
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        try:
-            data = obs.get(store, key).bytes()
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, "wb") as f:
-                f.write(data)
-        except Exception as e:
-            err = str(e)
-            if "403" in err or "AccessDenied" in err:
-                raise FileNotFoundError(f"Access denied: {src}") from e
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                raise FileNotFoundError(f"Object not found: {src}") from e
-            raise
-
-    def listdir(self, path: str) -> list[str]:
-        """List files in a GCS directory (prefix)."""
-        scheme, bucket, prefix = split_url(path)
-        if scheme not in {"gs", "gcs"} or not bucket:
-            raise NotADirectoryError(f"Not a GCS directory: {path}")
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        base = (
-            (prefix + "/") if (prefix and not prefix.endswith("/")) else (prefix or "")
-        )
-
-        entries: list[str] = []
-        for chunk in obs.list(store, prefix=base):
-            for obj in chunk:
-                obj_path = obj["path"]
-                if not obj_path.startswith(base):
-                    continue
-                name = obj_path[len(base) :]
-                # Only direct children (no nested paths)
-                if name and "/" not in name:
-                    entries.append(name)
-
-        return sorted(entries)
-
-    def stat(self, path: str) -> Mapping[str, int]:
-        """Get file metadata (size) for a GCS object."""
-        scheme, bucket, key = split_url(path)
-        if scheme not in {"gs", "gcs"} or not bucket or not key:
-            raise FileNotFoundError(f"Invalid GCS path: {path}")
-
-        import obstore as obs
-
-        store = self._get_store(bucket)
-        try:
-            meta = obs.head(store, key)
-            return {"size": meta["size"]}
-        except Exception as e:
-            err = str(e)
-            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
-                raise FileNotFoundError(f"Object not found: {path}") from e
-            if "403" in err or "AccessDenied" in err:
-                raise FileNotFoundError(f"Access denied: {path}") from e
-            raise
 
 
 __all__ = ["GCSBackend"]
