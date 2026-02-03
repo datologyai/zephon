@@ -14,6 +14,7 @@ from typing import (
     Optional,
     Protocol,
     TypeAlias,
+    TypeVar,
     Union,
     cast,
 )
@@ -47,6 +48,9 @@ from zephon.ops import (
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
+
+# TypeVar for stateful_transform state type
+_S = TypeVar("_S")
 
 
 # ---------- Private protocol fallbacks (non-public => no D101) ----------
@@ -306,6 +310,115 @@ class Pipeline:
         op = MapTransform(transform_fn, drop_none=drop_none)
         node = self._graph.add(
             "map_transform",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    def stateful_transform(
+        self,
+        name: str,
+        *,
+        init_state: Callable[[], _S],
+        push: Callable[[_S, list[SampleRecord]], tuple[_S, list[SampleRecord]]],
+        flush: Optional[Callable[[_S], list[SampleRecord]]] = None,
+        should_flush: Optional[Callable[[_S], bool]] = None,
+        transform: Optional[Callable[[list[SampleRecord]], list[SampleRecord]]] = None,
+        placement: str = "auto",
+        parallelism: int = 1,
+        indexable: bool = False,
+    ) -> "Pipeline":
+        """Add a stateful transformation with custom accumulation logic.
+
+        This is a higher-level alternative to implementing the full Op protocol.
+        State management runs on the pump thread (serial); the optional transform
+        runs in parallel workers for expensive computation.
+
+        Execution model:
+        - push/flush: Run on pump thread (serial) for state management
+        - transform: Runs in parallel workers for expensive per-item processing
+
+        This split enables patterns like "deduplicate (serial) then encode (parallel)".
+
+        The state lifecycle:
+        1. State is lazily initialized on first batch via init_state()
+        2. Each batch calls push(state, items) -> (new_state, outputs)
+        3. If should_flush returns True, flush is called and state is reset
+        4. On stream end, flush() emits any remaining buffered items
+        5. Each output item goes through transform (if provided) in parallel
+
+        Args:
+            name: Operator name for debugging/metrics.
+            init_state: Factory that creates initial state (called once per worker).
+            push: Called with (state, batch) -> (new_state, outputs).
+                Outputs are emitted immediately; state carries forward.
+            flush: Optional. Called at end-of-stream to emit remaining buffered items.
+            should_flush: Optional. If returns True, triggers early flush and state reset.
+            transform: Optional. Batch-level transform that runs in parallel workers.
+                Receives the full batch from the accumulator, preserving batch structure
+                for efficient GPU processing, vectorized ops, etc.
+            placement: Placement hint for this operator.
+            parallelism: Worker parallelism. Use >1 when transform is expensive.
+            indexable: Whether this operator preserves indexability (default False).
+                Set True only if the transform is 1:1 and deterministic.
+
+        Returns:
+            Self for method chaining.
+
+        Example - Custom batching by token count:
+            >>> def accumulate_by_tokens(state, items, max_tokens=4096):
+            ...     buffer, token_count = state["buffer"], state["tokens"]
+            ...     outputs = []
+            ...     for item in items:
+            ...         item_tokens = len(item.payload["token_ids"])
+            ...         if token_count + item_tokens > max_tokens and buffer:
+            ...             outputs.extend(buffer)
+            ...             buffer, token_count = [], 0
+            ...         buffer.append(item)
+            ...         token_count += item_tokens
+            ...     return {"buffer": buffer, "tokens": token_count}, outputs
+            ...
+            >>> pipeline.stateful_transform(
+            ...     "batch_by_tokens",
+            ...     init_state=lambda: {"buffer": [], "tokens": 0},
+            ...     push=lambda s, items: accumulate_by_tokens(s, items),
+            ...     flush=lambda s: s["buffer"] if s["buffer"] else [],
+            ... )
+
+        Example - Deduplicate (serial) then batch encode (parallel):
+            >>> def batch_encode(records):
+            ...     # Process whole batch efficiently (e.g., GPU batching)
+            ...     for r in records:
+            ...         r.payload["encoded"] = encode(r.payload["text"])
+            ...     return records
+            ...
+            >>> pipeline.stateful_transform(
+            ...     "dedupe_and_encode",
+            ...     init_state=lambda: set(),
+            ...     push=lambda seen, items: (
+            ...         seen | {i.payload["id"] for i in items},
+            ...         [i for i in items if i.payload["id"] not in seen]
+            ...     ),
+            ...     transform=batch_encode,  # processes whole batch in parallel
+            ...     parallelism=8,
+            ... )
+        """
+        from zephon.ops.stateful_transform import StatefulTransformOp
+
+        op = StatefulTransformOp(
+            init_state=init_state,
+            push_fn=push,
+            flush_fn=flush,
+            should_flush_fn=should_flush,
+            transform_fn=transform,
+            parallelism=parallelism,
+            indexable=indexable,
+        )
+        node = self._graph.add(
+            name,
             op,
             self._tail,
             placement=placement,

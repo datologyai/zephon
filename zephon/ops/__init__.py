@@ -13,6 +13,7 @@ from zephon.ops.materialize import Materialize
 from zephon.ops.pack_sequences import PackSequences
 from zephon.ops.prefetch import PrefetchOp
 from zephon.ops.shuffle_buffer import ShuffleBuffer
+from zephon.ops.stateful_transform import StatefulTransformOp
 from zephon.ops.tokenize_text import TokenizeText
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "PackSequences",
     "PrefetchOp",
     "ShuffleBuffer",
+    "StatefulTransformOp",
     "TokenizeText",
 ]
