@@ -59,6 +59,12 @@ mosaic = [
 mds = [
     "zephon[streaming]",
 ]
+docs = [
+    "sphinx>=7.0.0",
+    "furo>=2023.0.0",
+    "myst-parser>=2.0.0",
+    "sphinx-copybutton>=0.5.0",
+]
 
 [dependency-groups]
 dev = [
@@ -78,12 +84,6 @@ test = [
     "torchdata>=0.11.0",
     "pytest-timeout>=2.4.0",
     "obstore>=0.3.0",
-]
-docs = [
-    "sphinx>=7.0.0",
-    "furo>=2023.0.0",
-    "myst-parser>=2.0.0",
-    "sphinx-copybutton>=0.5.0",
 ]
 
 [project.urls]

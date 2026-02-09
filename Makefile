@@ -5,7 +5,7 @@ PY ?= $(UV) run
 PYTEST ?= pytest
 EXTRA_ARGS ?=
 
-.PHONY: help setup test integration lint format
+.PHONY: help setup test integration lint format docs
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  integration  - Run integration tests"
 	@echo "  lint         - Check formatting, linting, and types"
 	@echo "  format       - Format code and fix lint issues"
+	@echo "  docs         - Build HTML documentation"
 
 setup:
 	$(UV) sync --group dev --group test
@@ -29,3 +30,6 @@ lint:
 
 format:
 	./linting/lint.sh
+
+docs:
+	cd docs && $(MAKE) html

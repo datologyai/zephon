@@ -104,10 +104,6 @@ uv pip install -e ".[parquet]"
 # For cloud storage (S3 and GCS)
 uv pip install -e ".[cloud]"
 
-# Or install specific cloud providers
-uv pip install -e ".[cloud-s3]"   # S3 only
-uv pip install -e ".[cloud-gcs]"  # GCS only
-
 # Combine multiple extras
 uv pip install -e ".[vortex,streaming,cloud]"
 ```

@@ -19,9 +19,16 @@ def ensure_builtin_formats() -> None:
 
     importlib.import_module("zephon.io.formats.jsonl")
     importlib.import_module("zephon.io.formats.mds")
-    importlib.import_module("zephon.io.formats.litdata")
+
+    # Optional formats - parquet and vortex handle missing deps internally
     importlib.import_module("zephon.io.formats.parquet")
     importlib.import_module("zephon.io.formats.vortex")
+
+    # litdata requires optree and litdata packages at import time
+    try:
+        importlib.import_module("zephon.io.formats.litdata")
+    except ImportError:
+        pass
 
     _INITIALIZED = True
 

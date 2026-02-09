@@ -248,7 +248,7 @@ print(f"Cache hit rate: {hit_rate * 100:.1f}%")
 
 ## Complete Example
 
-See [examples/run_with_prefetch.py](../examples/run_with_prefetch.py) for a complete working example demonstrating:
+See `examples/run_with_prefetch.py` in the repository for a complete working example demonstrating:
 - Pipeline construction with prefetch
 - Configuration for different scenarios
 - Performance comparison with/without prefetch
