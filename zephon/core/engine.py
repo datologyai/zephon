@@ -773,7 +773,7 @@ class Engine:
         quotas = [total * (w / wsum) for w in wpos]
         floors = [int(math.floor(q)) for q in quotas]
         remaining = total - sum(floors)
-        order = sorted(range(n), key=lambda i: (quotas[i] - floors[i]), reverse=True)
+        order = sorted(range(n), key=lambda i: quotas[i] - floors[i], reverse=True)
         for i in range(remaining):
             floors[order[i]] += 1
         return floors
