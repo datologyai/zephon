@@ -4,6 +4,7 @@
 """User-facing pipeline wrapper that layers ergonomics atop core planning."""
 
 import importlib.util as _importlib_util
+import warnings
 from collections.abc import Iterable
 from typing import (
     TYPE_CHECKING,
@@ -697,6 +698,11 @@ class Pipeline:
         # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
         for key, value in hints.items():
             if not hasattr(self._options, key):
+                warnings.warn(
+                    f"Unknown pipeline option '{key}' ignored. "
+                    f"Valid options are attributes of RuntimeOptions.",
+                    stacklevel=2,
+                )
                 continue
             if key == "io_options":
                 new_opts = StoreOptions.from_any(value)

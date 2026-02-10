@@ -1,4 +1,5 @@
 import json
+import warnings
 from pathlib import Path
 
 from zephon.api import Pipeline as PublicPipeline
@@ -40,3 +41,29 @@ def test_pipeline_with_cache(tmp_path: Path) -> None:
     finally:
         iterator.close()
     assert cache_root.exists()
+
+
+def test_unknown_options_warn(tmp_path: Path) -> None:
+    """Unknown keys passed to .options() should emit a warning, not be silently ignored."""
+    shard = tmp_path / "shard.jsonl"
+    shard.write_text(json.dumps({"text": "hello"}), encoding="utf-8")
+    ds = Dataset.from_path("demo", str(tmp_path))
+    ws = StaticMixtureWorkSource(
+        [ds],
+        mixture=MixtureSpec({ds.name: 1.0}).weights,
+        chunk_size=1,
+        seed=0,
+    )
+    pipe = PublicPipeline(ws)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pipe.options(no_such_option=42, deterministic=True)
+
+    unknown_warnings = [w for w in caught if "no_such_option" in str(w.message)]
+    assert len(unknown_warnings) == 1, (
+        f"Expected exactly 1 warning for unknown option, got {len(unknown_warnings)}"
+    )
+    # deterministic is valid and should NOT trigger a warning
+    deterministic_warnings = [w for w in caught if "deterministic" in str(w.message)]
+    assert len(deterministic_warnings) == 0, "Valid option should not trigger a warning"
