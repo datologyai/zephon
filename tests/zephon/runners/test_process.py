@@ -589,3 +589,124 @@ def test_process_runner_partial_iteration_shutdown_no_underflow() -> None:
 
     # Shutdown - should NOT raise "Inflight counter underflowed"
     runner.close()
+
+
+# ---------------------------------------------------------------------------
+# _NamedQueue feeder error detection
+# ---------------------------------------------------------------------------
+
+from zephon.runners.process import QueueFeederError, _NamedQueue
+
+
+class TestFeederErrorDetection:
+    """Tests for _NamedQueue's feeder-error-to-sentinel mechanism."""
+
+    def _make_queue(self, maxsize: int = 0) -> _NamedQueue:
+        ctx = multiprocessing.get_context("spawn")
+        return _NamedQueue("test", maxsize=maxsize, ctx=ctx)
+
+    def test_sentinel_round_trip(self) -> None:
+        """_on_queue_feeder_error should enqueue a sentinel that get() raises on."""
+        q = self._make_queue(maxsize=10)
+        try:
+            # Start the feeder thread — it only starts on the first put().
+            # In production, _on_queue_feeder_error is called BY the running
+            # feeder thread; here we simulate it from the test thread.
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            # Simulate what CPython's _feed does: raise, then call onerror.
+            try:
+                raise RuntimeError(
+                    "unable to write to file </torch_xxx>: No space left on device (28)"
+                )
+            except RuntimeError as e:
+                q._on_queue_feeder_error(e, "dummy_obj")
+
+            with pytest.raises(QueueFeederError, match="unable to write to file"):
+                q.get(timeout=5)
+        finally:
+            q.close()
+
+    def test_sentinel_contains_full_traceback(self) -> None:
+        """The raised QueueFeederError should contain the full traceback."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            q.get(timeout=5)
+
+            try:
+                raise RuntimeError("shm_full_test")
+            except RuntimeError as e:
+                q._on_queue_feeder_error(e, "obj")
+
+            with pytest.raises(QueueFeederError) as exc_info:
+                q.get(timeout=5)
+
+            msg = str(exc_info.value)
+            assert "RuntimeError" in msg
+            assert "shm_full_test" in msg
+            assert "Traceback" in msg
+        finally:
+            q.close()
+
+    def test_normal_items_pass_through(self) -> None:
+        """get() should return normal items unchanged."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("hello")
+            q.put(42)
+            assert q.get(timeout=5) == "hello"
+            assert q.get(timeout=5) == 42
+        finally:
+            q.close()
+
+    def test_sentinel_interleaved_with_normal_items(self) -> None:
+        """Normal items before and after a sentinel should be returned normally."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("before")
+
+            try:
+                raise RuntimeError("test_interleave")
+            except RuntimeError as e:
+                q._on_queue_feeder_error(e, "obj")
+
+            q.put("after")
+
+            assert q.get(timeout=5) == "before"
+            with pytest.raises(QueueFeederError, match="test_interleave"):
+                q.get(timeout=5)
+            assert q.get(timeout=5) == "after"
+        finally:
+            q.close()
+
+    def test_feeder_error_fallback_stderr(self, capsys: pytest.CaptureFixture) -> None:
+        """When semaphore cannot be acquired, error should be printed to stderr."""
+        # Create a queue with maxsize=1, fill it, so no semaphore slot is available.
+        q = self._make_queue(maxsize=1)
+        try:
+            q.put("fill")  # fills the single slot
+
+            # Monkey-patch _FEEDER_SHORT_TIMEOUT and _FEEDER_LONG_TIMEOUT
+            # to avoid waiting 125s in a test.
+            import zephon.runners.process as proc_mod
+
+            orig_short = proc_mod._FEEDER_SHORT_TIMEOUT
+            orig_long = proc_mod._FEEDER_LONG_TIMEOUT
+            proc_mod._FEEDER_SHORT_TIMEOUT = 0.01
+            proc_mod._FEEDER_LONG_TIMEOUT = 0.01
+            try:
+                try:
+                    raise RuntimeError("timeout_test")
+                except RuntimeError as e:
+                    q._on_queue_feeder_error(e, "obj")
+            finally:
+                proc_mod._FEEDER_SHORT_TIMEOUT = orig_short
+                proc_mod._FEEDER_LONG_TIMEOUT = orig_long
+
+            captured = capsys.readouterr()
+            assert "CRITICAL" in captured.err
+            assert "timeout_test" in captured.err
+        finally:
+            q.close()
