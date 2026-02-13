@@ -1364,7 +1364,7 @@ class Engine:
         cursor_list = cursors if isinstance(cursors, list) else list(cursors)
 
         # 1) Evict older inflight chunks (no bitmap bookkeeping in this path).
-        cids_to_evict = [cid for cid in inflight_lane if cid < max_chunk_id]
+        cids_to_evict = [cid for cid in list(inflight_lane) if cid < max_chunk_id]
         for cid in cids_to_evict:
             inflight_lane.pop(cid, None)
         if cids_to_evict:
