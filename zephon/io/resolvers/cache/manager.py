@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional, cast
 
+import numpy as np
 from filelock import BaseFileLock, FileLock
 
 from zephon.io.resolvers.base import ShardResolver
@@ -236,20 +237,16 @@ class CacheManager(ShardResolver):
             self._evict_index_locked(victim)
 
     def _select_coldest_index_locked(self, skip_index: int) -> Optional[int]:
-        best_index: Optional[int] = None
-        best_time: Optional[int] = None
         states = self._shared.shard_states
         access_times = self._shared.shard_access_ns
-        for idx in range(self._shared.capacity):
-            if idx == skip_index:
-                continue
-            if states[idx] != _ShardState.LOCAL:
-                continue
-            ts = int(access_times[idx])
-            if best_index is None or best_time is None or ts < best_time:
-                best_index = idx
-                best_time = ts
-        return best_index
+        mask = states == _ShardState.LOCAL
+        if skip_index >= 0:
+            mask[skip_index] = False
+        if not mask.any():
+            return None
+        # Set non-LOCAL slots to max so argmin ignores them.
+        candidates = np.where(mask, access_times, np.iinfo(np.uint64).max)
+        return int(np.argmin(candidates))
 
     def _evict_index_locked(self, index: int) -> None:
         entry = self._shared.entry_by_index(index)
