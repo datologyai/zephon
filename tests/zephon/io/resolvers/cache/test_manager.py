@@ -64,7 +64,7 @@ def test_resolve_raw_only_downloads_and_updates_stats(tmp_path: Path) -> None:
     _make_file(remote / raw_name, data)
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage)
+    mgr = CacheManager(cache_root, storage, num_shards=128)
 
     loc = _locator(
         dataset="demo",
@@ -107,7 +107,7 @@ def test_resolve_with_gzip_decompression_and_keep_zip(tmp_path: Path) -> None:
     storage = LocalFSBackend(root=remote)
 
     # keep_zip = False (default): zip should not be retained
-    mgr1 = CacheManager(cache_root, storage, keep_zip=False)
+    mgr1 = CacheManager(cache_root, storage, num_shards=128, keep_zip=False)
     loc = _locator(
         dataset="ds",
         shard_id=1,
@@ -130,7 +130,9 @@ def test_resolve_with_gzip_decompression_and_keep_zip(tmp_path: Path) -> None:
     mgr1.close()
 
     # keep_zip = True with a fresh session: zip is kept and accounted in stats
-    mgr2 = CacheManager(cache_root, storage, keep_zip=True, persist_state=False)
+    mgr2 = CacheManager(
+        cache_root, storage, num_shards=128, keep_zip=True, persist_state=False
+    )
     ref2 = mgr2.resolve(loc)
     assert ref2.raw.path.is_file()
     assert ref2.zip is not None
@@ -150,7 +152,7 @@ def test_validate_hash_mismatch_raises_and_removes_file(tmp_path: Path) -> None:
     _make_file(remote / raw_name, data)
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage, validate_hash="md5")
+    mgr = CacheManager(cache_root, storage, num_shards=128, validate_hash="md5")
 
     try:
         # Declare wrong hash (all zeros) to force mismatch
@@ -188,7 +190,7 @@ def test_cache_manager_cleanup_runs_on_gc(
         orig(ref)
 
     monkeypatch.setattr(manager_mod, "_close_cache_manager", wrapped)
-    mgr = CacheManager(cache_root, LocalFSBackend(root=remote))
+    mgr = CacheManager(cache_root, LocalFSBackend(root=remote), num_shards=128)
 
     fin = mgr._close_finalizer
     mgr_ref = weakref.ref(mgr)
@@ -215,7 +217,7 @@ def test_blocking_false_raises_not_ready_when_preparing(
     _make_file(remote / raw_name, data)
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage)
+    mgr = CacheManager(cache_root, storage, num_shards=128)
 
     loc = _locator(
         dataset="demo",
@@ -270,7 +272,7 @@ def test_missing_source_raises_permanent(tmp_path: Path) -> None:
     # Deliberately do not create the file
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage)
+    mgr = CacheManager(cache_root, storage, num_shards=128)
 
     try:
         loc = _locator(
@@ -295,7 +297,7 @@ def test_re_resolve_recovers_if_local_file_missing(tmp_path: Path) -> None:
     _make_file(remote / raw_name, data)
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage)
+    mgr = CacheManager(cache_root, storage, num_shards=128)
     try:
         loc = _locator("demo", 5, str(remote), raw_name=raw_name, raw_bytes=len(data))
 
@@ -328,7 +330,7 @@ def test_limit_too_small_raises(tmp_path: Path) -> None:
     slack = max(512 * 1024, int(len(data) * 0.005))
     slack = min(64 * 1024 * 1024, slack)
     limit_bytes = len(data) + slack - 1
-    mgr = CacheManager(cache_root, storage, limit_bytes=limit_bytes)
+    mgr = CacheManager(cache_root, storage, num_shards=128, limit_bytes=limit_bytes)
     try:
         loc = _locator("demo", 6, str(remote), raw_name=raw_name, raw_bytes=len(data))
         with pytest.raises(ValueError):
@@ -349,7 +351,7 @@ def test_eviction_chooses_coldest_when_capacity_exceeded(
     _make_file(remote / "b.bin", data_b)
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage, limit_bytes=6 * 1024)
+    mgr = CacheManager(cache_root, storage, num_shards=128, limit_bytes=6 * 1024)
     try:
         # Only count the declared raw size (no slack) for testing eviction
         monkeypatch.setattr(mgr, "_required_bytes", lambda loc: int(loc.raw.bytes))
@@ -403,7 +405,7 @@ def test_unsupported_compression_raises_and_cleans_part_files(tmp_path: Path) ->
     _make_file(remote / zip_name, b"not actually compressed")
 
     storage = LocalFSBackend(root=remote)
-    mgr = CacheManager(cache_root, storage)
+    mgr = CacheManager(cache_root, storage, num_shards=128)
     try:
         loc = _locator(
             dataset="demo",
@@ -468,7 +470,7 @@ def test_download_retry_succeeds_after_transient_failure(
             return {"size": Path(path).stat().st_size}
 
     storage = FlakyStorage(remote)
-    mgr = CacheManager(cache_root, storage, download_retry=2)
+    mgr = CacheManager(cache_root, storage, num_shards=128, download_retry=2)
 
     try:
         # Speed up retry backoff
@@ -494,19 +496,19 @@ def test_cache_root_reset_when_persist_state_false(tmp_path: Path) -> None:
     storage = LocalFSBackend(root=remote)
     loc = _locator("demo", 40, str(remote), raw_name=raw_name, raw_bytes=len(data))
 
-    mgr1 = CacheManager(cache_root, storage, persist_state=False)
+    mgr1 = CacheManager(cache_root, storage, num_shards=128, persist_state=False)
     ref = mgr1.resolve(loc)
     assert ref.raw.path.exists()
 
     # New manager while first still alive should not reset
-    mgr_same = CacheManager(cache_root, storage, persist_state=False)
+    mgr_same = CacheManager(cache_root, storage, num_shards=128, persist_state=False)
     assert (cache_root / "demo" / raw_name).exists()
 
     # After existing managers close, the next initializer should reset
     mgr1.close()
     mgr_same.close()
 
-    mgr2 = CacheManager(cache_root, storage, persist_state=False)
+    mgr2 = CacheManager(cache_root, storage, num_shards=128, persist_state=False)
     assert not (cache_root / "demo" / raw_name).exists()
     mgr2.close()
 
@@ -532,7 +534,10 @@ def _proc_resolve_slow(
     cache_root: str, remote: str, loc: ShardLocator, q: Queue
 ) -> None:  # type: ignore[no-redef]
     mgr = CacheManager(
-        Path(cache_root), SlowLocalFSBackend(root=Path(remote)), persist_state=True
+        Path(cache_root),
+        SlowLocalFSBackend(root=Path(remote)),
+        num_shards=128,
+        persist_state=True,
     )
     try:
         ref = mgr.resolve(loc)
@@ -565,7 +570,9 @@ def test_multiprocess_preparing_blocks_and_unblocks(tmp_path: Path) -> None:
     assert started_flag.exists()
 
     # Second process attempts non-blocking resolve and gets ShardNotReady
-    mgr2 = CacheManager(cache_root, LocalFSBackend(root=remote), persist_state=True)
+    mgr2 = CacheManager(
+        cache_root, LocalFSBackend(root=remote), num_shards=128, persist_state=True
+    )
     with pytest.raises(ShardNotReady):
         mgr2.resolve(loc, blocking=False)
 
@@ -602,6 +609,7 @@ def _proc_resolve_with_tiny_slack(
     mgr = TinySlackCacheManager(
         Path(cache_root),
         LocalFSBackend(root=Path(remote)),
+        num_shards=128,
         limit_bytes=5 * 1024,
         persist_state=True,
     )
@@ -630,7 +638,7 @@ def test_multiprocess_eviction_coldest(tmp_path: Path) -> None:
 
     # Parent loads A first (older), then a short sleep to ensure access time order
     mgr_parent = TinySlackCacheManager(
-        cache_root, LocalFSBackend(root=remote), limit_bytes=5 * 1024
+        cache_root, LocalFSBackend(root=remote), num_shards=128, limit_bytes=5 * 1024
     )
     _ = mgr_parent.resolve(loc_a)
     time.sleep(0.02)

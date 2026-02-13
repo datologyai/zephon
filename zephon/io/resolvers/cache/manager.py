@@ -6,6 +6,7 @@ import errno
 import gzip
 import io
 import json
+import logging
 import lzma
 import os
 import shutil
@@ -36,6 +37,8 @@ try:  # zstd is optional
 except Exception:
     zstd_mod = None
 
+logger = logging.getLogger(__name__)
+
 _CACHE_LOCK_FILENAME = ".cache.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 Opener = Callable[[Path], BinaryIO]
@@ -64,6 +67,7 @@ class CacheManager(ShardResolver):
         root: Path,
         storage: StorageBackend,
         *,
+        num_shards: int,
         limit_bytes: int | None = None,
         keep_zip: bool = False,
         validate_hash: str | None = None,
@@ -93,7 +97,15 @@ class CacheManager(ShardResolver):
         if not self._persist_state:
             with reset_lock:
                 self._reset_if_first_owner(reset_lock_path)
-        self._shared = CacheSharedState(self._root)
+        self._shared = CacheSharedState(self._root, capacity=num_shards)
+        logger.debug(
+            "Initialized cache at %s (capacity=%d shards, limit=%s)",
+            self._root,
+            self._shared.capacity,
+            f"{self._limit_bytes:,} bytes"
+            if self._limit_bytes is not None
+            else "unlimited",
+        )
         self._cache_lock = FileLock(str(self._root / _CACHE_LOCK_FILENAME))
         # Avoid atexit strong refs so the manager can be collected between runs.
         self._close_finalizer = weakref.finalize(

@@ -8,7 +8,6 @@ import pytest
 
 import zephon.io.resolvers.cache.shared_state as shared_state_mod
 from zephon.io.resolvers.cache.shared_state import (
-    _DEFAULT_MAX_SHARDS,
     CacheEntry,
     CacheSharedState,
     _ShardState,
@@ -35,7 +34,7 @@ def _locator(
 
 def test_shared_state_initializes_and_persists_meta(tmp_path: Path) -> None:
     root = tmp_path / "cache"
-    ss1 = CacheSharedState(root)
+    ss1 = CacheSharedState(root, capacity=64)
     try:
         # Meta directory/files created
         state_dir = root / ".zephon_cache_state"
@@ -44,7 +43,7 @@ def test_shared_state_initializes_and_persists_meta(tmp_path: Path) -> None:
         assert meta_path.is_file()
 
         # Vectors have expected shapes
-        assert ss1.capacity == _DEFAULT_MAX_SHARDS
+        assert ss1.capacity == 64
         assert ss1.shard_states.shape == (ss1.capacity,)
         assert ss1.shard_access_ns.shape == (ss1.capacity,)
         assert ss1.shard_sizes.shape == (ss1.capacity,)
@@ -59,7 +58,7 @@ def test_shared_state_initializes_and_persists_meta(tmp_path: Path) -> None:
         assert e1.raw == "raw0.bin"
 
         # New instance should reload meta mapping
-        ss2 = CacheSharedState(root)
+        ss2 = CacheSharedState(root, capacity=64)
         try:
             e2 = ss2.lookup("ds", 0)
             assert e2 is not None
@@ -73,7 +72,7 @@ def test_shared_state_initializes_and_persists_meta(tmp_path: Path) -> None:
 
 def test_shared_state_updates_entry_metadata(tmp_path: Path) -> None:
     root = tmp_path / "cache"
-    ss = CacheSharedState(root)
+    ss = CacheSharedState(root, capacity=64)
     try:
         loc1 = _locator("demo", 7, "a.bin", None)
         e = ss.ensure_entry(loc1)
@@ -101,7 +100,7 @@ def test_shared_state_updates_entry_metadata(tmp_path: Path) -> None:
 
 def test_shared_state_usage_and_count_local(tmp_path: Path) -> None:
     root = tmp_path / "cache"
-    ss = CacheSharedState(root)
+    ss = CacheSharedState(root, capacity=64)
     try:
         loc = _locator("foo", 1, "x.bin")
         entry = ss.ensure_entry(loc)
@@ -135,7 +134,7 @@ def test_shared_state_usage_and_count_local(tmp_path: Path) -> None:
 def _child_set_local_and_usage(
     root: str, dataset: str, shard_id: int, size: int, q: Queue
 ) -> None:  # type: ignore[no-redef]
-    ss = CacheSharedState(Path(root))
+    ss = CacheSharedState(Path(root), capacity=64)
     try:
         entry = ss.lookup(dataset, shard_id)
         if entry is None:
@@ -152,7 +151,7 @@ def _child_set_local_and_usage(
 
 
 def _child_ensure_entry(root: str, loc: ShardLocator, q: Queue) -> None:  # type: ignore[no-redef]
-    ss = CacheSharedState(Path(root))
+    ss = CacheSharedState(Path(root), capacity=64)
     try:
         entry = ss.ensure_entry(loc)
         q.put({"ok": True, "index": entry.index})
@@ -162,7 +161,7 @@ def _child_ensure_entry(root: str, loc: ShardLocator, q: Queue) -> None:  # type
 
 def test_shared_state_is_visible_across_processes(tmp_path: Path) -> None:
     root = tmp_path / "cache"
-    ss = CacheSharedState(root)
+    ss = CacheSharedState(root, capacity=64)
     try:
         # Create entry in parent
         loc = _locator("multi", 1, "raw.bin")
@@ -213,7 +212,7 @@ def test_cache_shared_state_cleanup_runs_on_gc(
         orig(ref)
 
     monkeypatch.setattr(shared_state_mod, "_close_cache_shared_state", wrapped)
-    ss = CacheSharedState(root)
+    ss = CacheSharedState(root, capacity=64)
     fin = ss._close_finalizer
     ss = None
 
@@ -225,3 +224,63 @@ def test_cache_shared_state_cleanup_runs_on_gc(
 
     assert called["flag"] is True
     assert fin.alive is False
+
+
+def test_ensure_entry_raises_when_capacity_exceeded(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    ss = CacheSharedState(root, capacity=2)
+    try:
+        loc0 = _locator("ds", 0, "a.bin")
+        loc1 = _locator("ds", 1, "b.bin")
+        loc2 = _locator("ds", 2, "c.bin")
+
+        ss.ensure_entry(loc0)
+        ss.ensure_entry(loc1)
+
+        with pytest.raises(IndexError, match="exceeds capacity"):
+            ss.ensure_entry(loc2)
+    finally:
+        ss.close()
+
+
+def test_capacity_resize_recreates_shared_memory(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    ss1 = CacheSharedState(root, capacity=4)
+    try:
+        loc = _locator("ds", 0, "raw.bin")
+        ss1.ensure_entry(loc)
+    finally:
+        ss1.close()
+
+    # Re-open with larger capacity — should resize
+    ss2 = CacheSharedState(root, capacity=16)
+    try:
+        assert ss2.capacity == 16
+        assert ss2.shard_states.shape == (16,)
+        # Old mapping was cleared during resize
+        assert ss2.lookup("ds", 0) is None
+        # Can register shards up to new capacity
+        for i in range(16):
+            ss2.ensure_entry(_locator("ds", i, f"s{i}.bin"))
+    finally:
+        ss2.close()
+
+
+def test_capacity_smaller_or_equal_adopts_stored(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    ss1 = CacheSharedState(root, capacity=32)
+    try:
+        loc = _locator("ds", 0, "raw.bin")
+        ss1.ensure_entry(loc)
+    finally:
+        ss1.close()
+
+    # Re-open with smaller capacity — should keep stored (32)
+    ss2 = CacheSharedState(root, capacity=16)
+    try:
+        assert ss2.capacity == 32
+        e = ss2.lookup("ds", 0)
+        assert e is not None
+        assert e.raw == "raw.bin"
+    finally:
+        ss2.close()

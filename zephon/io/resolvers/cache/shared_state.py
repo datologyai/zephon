@@ -2,7 +2,6 @@
 
 import contextlib
 import json
-import os
 import weakref
 from dataclasses import dataclass
 from enum import IntEnum
@@ -18,7 +17,6 @@ from zephon.io.types import ShardLocator
 _CACHE_STATE_DIR = ".zephon_cache_state"
 _CACHE_META_FILENAME = "meta.json"
 _CACHE_META_LOCK_FILENAME = "meta.lock"
-_DEFAULT_MAX_SHARDS = int(os.environ.get("ZEPHON_CACHE_MAX_SHARDS", "8192"))
 _SHM_KEYS = ("states", "access", "sizes", "usage")
 
 
@@ -54,7 +52,7 @@ class CacheEntry:
 class CacheSharedState:
     """Process-shared bookkeeping for shard residency and usage metrics."""
 
-    def __init__(self, root: Path, *, capacity: int = _DEFAULT_MAX_SHARDS) -> None:
+    def __init__(self, root: Path, *, capacity: int) -> None:
         if capacity <= 0:
             raise ValueError("Shared cache capacity must be positive")
 
@@ -85,17 +83,34 @@ class CacheSharedState:
             if self._meta_path.exists():
                 meta = self._load_meta()
                 stored_capacity = int(meta.get("capacity", self._capacity))
-                if stored_capacity != self._capacity:
-                    self._capacity = stored_capacity
-                self._sync_next_index_locked(meta)
-                self._entries = {}
-                self._entries_by_index = {}
-                meta = self._ensure_names_locked(meta)
-                self._reload_meta_locked(meta)
-                try:
-                    self._attach_shared(create=False)
-                except FileNotFoundError:
+                if self._capacity > stored_capacity:
+                    # Capacity grew beyond what was stored (e.g., dataset changed
+                    # between runs with persist_state=True). Recreate shared
+                    # memory from scratch at the new size. All workers
+                    # synchronize through this FileLock so subsequent processes
+                    # will see the updated meta.json and attach to the new
+                    # correctly-sized regions.
+                    self._unlink_old_regions_locked(meta)
+                    self._names = self._generate_shm_names()
                     self._attach_shared(create=True)
+                    meta = {
+                        "capacity": self._capacity,
+                        "next_index": 0,
+                        "mapping": {},
+                        "names": dict(self._names),
+                    }
+                    self._write_meta(meta)
+                else:
+                    self._capacity = stored_capacity
+                    self._sync_next_index_locked(meta)
+                    self._entries = {}
+                    self._entries_by_index = {}
+                    meta = self._ensure_names_locked(meta)
+                    self._reload_meta_locked(meta)
+                    try:
+                        self._attach_shared(create=False)
+                    except FileNotFoundError:
+                        self._attach_shared(create=True)
             else:
                 self._next_index = 0
                 self._entries = {}
@@ -113,6 +128,22 @@ class CacheSharedState:
     # ------------------------------------------------------------------
     # Shared memory accessors
     # ------------------------------------------------------------------
+
+    def _unlink_old_regions_locked(self, meta: dict) -> None:
+        """Unlink shared memory regions referenced by *meta*."""
+        old_names = meta.get("names", {})
+        if not isinstance(old_names, dict):
+            return
+        for key in _SHM_KEYS:
+            name = old_names.get(key)
+            if not isinstance(name, str):
+                continue
+            try:
+                shm = shared_memory.SharedMemory(name=name, create=False)
+                shm.unlink()
+                shm.close()
+            except FileNotFoundError:
+                pass
 
     def _generate_shm_names(self) -> dict[str, str]:
         make_filename = getattr(shared_memory, "_make_filename", None)
@@ -342,6 +373,12 @@ class CacheSharedState:
             payload = dataset_map.get(shard_key)
             if payload is None:
                 index = self._next_index
+                if index >= self._capacity:
+                    raise IndexError(
+                        f"Cache shard index {index} exceeds capacity "
+                        f"{self._capacity}. The dataset has more unique "
+                        f"shards than the cache can track."
+                    )
                 self._next_index += 1
                 payload = {
                     "index": index,
@@ -486,5 +523,4 @@ __all__ = [
     "CacheEntry",
     "CacheSharedState",
     "_ShardState",
-    "_DEFAULT_MAX_SHARDS",
 ]

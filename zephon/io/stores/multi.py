@@ -17,6 +17,7 @@ from zephon.io.types import ShardLocator
 
 
 def build_resolver(
+    num_shards: int,
     options: StoreOptions | None = None,
     storage: StorageBackend | None = None,
 ) -> ShardResolver:
@@ -28,6 +29,8 @@ def build_resolver(
     ensure consistent cache behavior.
 
     Args:
+        num_shards: Total number of shards across all datasets. Used to
+            size the shared-memory cache state arrays.
         options: Store configuration options. If None, uses defaults.
         storage: Optional storage backend override.
 
@@ -43,6 +46,7 @@ def build_resolver(
         return CacheManager(
             cache_root,
             storage,
+            num_shards=num_shards,
             limit_bytes=store_opts.cache.limit_bytes,
             keep_zip=store_opts.cache.keep_zip,
             validate_hash=store_opts.cache.validate_hash,
@@ -81,7 +85,8 @@ def build_resolver_with_locators(
         (dataset_id, shard_id) to ShardLocator.
     """
     store_opts = StoreOptions.from_any(options)
-    resolver = build_resolver(options=store_opts, storage=storage)
+    total_shards = sum(len(ds.shard_index) for ds in datasets.values())
+    resolver = build_resolver(total_shards, options=store_opts, storage=storage)
 
     ensure_builtin_formats()
     locators: dict[tuple[int, int], ShardLocator] = {}
@@ -131,7 +136,8 @@ def build_multi_dataset_store(
         A MultiDatasetShardStore registry.
     """
     store_opts = StoreOptions.from_any(options)
-    resolver = build_resolver(options=store_opts, storage=storage)
+    total_shards = sum(len(ds.shard_index) for ds in datasets.values())
+    resolver = build_resolver(total_shards, options=store_opts, storage=storage)
 
     registry = DatasetStoreRegistry()
     for dataset_id, dataset in datasets.items():
