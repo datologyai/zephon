@@ -592,18 +592,19 @@ def test_process_runner_partial_iteration_shutdown_no_underflow() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _NamedQueue feeder error detection
+# NamedQueue feeder error detection
 # ---------------------------------------------------------------------------
 
-from zephon.runners.process import QueueFeederError, _NamedQueue
+from zephon.runners.queue import NamedQueue, QueueFeederError
+from zephon.utils.shm import is_shm_error, shm_has_free_space
 
 
 class TestFeederErrorDetection:
-    """Tests for _NamedQueue's feeder-error-to-sentinel mechanism."""
+    """Tests for NamedQueue's feeder-error-to-sentinel mechanism."""
 
-    def _make_queue(self, maxsize: int = 0) -> _NamedQueue:
+    def _make_queue(self, maxsize: int = 0) -> NamedQueue:
         ctx = multiprocessing.get_context("spawn")
-        return _NamedQueue("test", maxsize=maxsize, ctx=ctx)
+        return NamedQueue("test", maxsize=maxsize, ctx=ctx)
 
     def test_sentinel_round_trip(self) -> None:
         """_on_queue_feeder_error should enqueue a sentinel that get() raises on."""
@@ -615,15 +616,14 @@ class TestFeederErrorDetection:
             q.put("_start")
             assert q.get(timeout=5) == "_start"
 
-            # Simulate what CPython's _feed does: raise, then call onerror.
+            # Simulate a non-SHM serialization failure (e.g. unpicklable object).
+            # SHM errors now enter the retry loop instead of creating a sentinel.
             try:
-                raise RuntimeError(
-                    "unable to write to file </torch_xxx>: No space left on device (28)"
-                )
-            except RuntimeError as e:
+                raise TypeError("cannot pickle 'generator' object")
+            except TypeError as e:
                 q._on_queue_feeder_error(e, "dummy_obj")
 
-            with pytest.raises(QueueFeederError, match="unable to write to file"):
+            with pytest.raises(QueueFeederError, match="cannot pickle"):
                 q.get(timeout=5)
         finally:
             q.close()
@@ -690,23 +690,456 @@ class TestFeederErrorDetection:
 
             # Monkey-patch _FEEDER_SHORT_TIMEOUT and _FEEDER_LONG_TIMEOUT
             # to avoid waiting 125s in a test.
-            import zephon.runners.process as proc_mod
+            import zephon.runners.queue as queue_mod
 
-            orig_short = proc_mod._FEEDER_SHORT_TIMEOUT
-            orig_long = proc_mod._FEEDER_LONG_TIMEOUT
-            proc_mod._FEEDER_SHORT_TIMEOUT = 0.01
-            proc_mod._FEEDER_LONG_TIMEOUT = 0.01
+            orig_short = queue_mod._FEEDER_SHORT_TIMEOUT
+            orig_long = queue_mod._FEEDER_LONG_TIMEOUT
+            queue_mod._FEEDER_SHORT_TIMEOUT = 0.01
+            queue_mod._FEEDER_LONG_TIMEOUT = 0.01
             try:
                 try:
                     raise RuntimeError("timeout_test")
                 except RuntimeError as e:
                     q._on_queue_feeder_error(e, "obj")
             finally:
-                proc_mod._FEEDER_SHORT_TIMEOUT = orig_short
-                proc_mod._FEEDER_LONG_TIMEOUT = orig_long
+                queue_mod._FEEDER_SHORT_TIMEOUT = orig_short
+                queue_mod._FEEDER_LONG_TIMEOUT = orig_long
 
             captured = capsys.readouterr()
             assert "CRITICAL" in captured.err
             assert "timeout_test" in captured.err
+        finally:
+            q.close()
+
+
+# ---------------------------------------------------------------------------
+# SHM backpressure retry
+# ---------------------------------------------------------------------------
+
+import errno
+from multiprocessing.reduction import ForkingPickler
+from unittest.mock import patch
+
+import zephon.runners.queue as _queue_mod
+
+
+@pytest.fixture()
+def _fast_shm_retry():
+    """Speed up SHM retry constants so tests don't sleep for seconds."""
+    orig = (
+        _queue_mod._SHM_RETRY_BASE_BACKOFF,
+        _queue_mod._SHM_RETRY_MAX_BACKOFF,
+        _queue_mod._SHM_RETRY_MAX_JITTER,
+    )
+    _queue_mod._SHM_RETRY_BASE_BACKOFF = 0.001
+    _queue_mod._SHM_RETRY_MAX_BACKOFF = 0.01
+    _queue_mod._SHM_RETRY_MAX_JITTER = 0
+    yield
+    (
+        _queue_mod._SHM_RETRY_BASE_BACKOFF,
+        _queue_mod._SHM_RETRY_MAX_BACKOFF,
+        _queue_mod._SHM_RETRY_MAX_JITTER,
+    ) = orig
+
+
+class TestShmBackpressureRetry:
+    """Tests for SHM-aware retry in _on_queue_feeder_error."""
+
+    def _make_queue(self, maxsize: int = 0) -> NamedQueue:
+        ctx = multiprocessing.get_context("spawn")
+        return NamedQueue("test", maxsize=maxsize, ctx=ctx)
+
+    # -- is_shm_error classification --
+
+    def test_is_shm_error_enospc_oserror(self) -> None:
+        assert is_shm_error(OSError(errno.ENOSPC, "No space left on device"))
+
+    def test_is_shm_error_torch_runtime_error(self) -> None:
+        err = RuntimeError(
+            "unable to write to file </torch_xxx>: No space left on device (28)"
+        )
+        assert is_shm_error(err)
+
+    def test_is_shm_error_chained_cause(self) -> None:
+        inner = OSError(errno.ENOSPC, "No space left on device")
+        outer = RuntimeError("pickle failed")
+        outer.__cause__ = inner
+        assert is_shm_error(outer)
+
+    def test_is_shm_error_chained_context(self) -> None:
+        inner = OSError(errno.ENOSPC, "No space left on device")
+        outer = RuntimeError("pickle failed")
+        outer.__context__ = inner
+        assert is_shm_error(outer)
+
+    def test_is_shm_error_non_shm_errors(self) -> None:
+        assert not is_shm_error(TypeError("cannot pickle"))
+        assert not is_shm_error(ValueError("bad value"))
+        assert not is_shm_error(OSError(errno.EPERM, "permission denied"))
+        assert not is_shm_error(RuntimeError("some other error"))
+
+    # -- shm_has_free_space --
+
+    def test_shm_has_free_space_returns_true_on_oserror(self) -> None:
+        """On non-Linux (e.g. macOS) statvfs raises OSError — should not block."""
+        with patch("zephon.utils.shm.os.statvfs", side_effect=OSError):
+            assert shm_has_free_space() is True
+
+    def test_shm_has_free_space_cgroup_limit(self) -> None:
+        """When cgroup limit < tmpfs total, cgroup limit is the effective total."""
+        import os as _os
+
+        # Simulate 1000GB tmpfs with 50GB free, but cgroup limit of 200GB
+        fake_st = _os.statvfs_result(
+            (4096, 4096, 262144000, 13107200, 13107200, 0, 0, 0, 0, 255)
+            # f_bsize=4096, f_frsize=4096, f_blocks=262144000 (=1000GB),
+            # f_bfree=13107200 (=50GB), f_bavail=13107200
+        )
+        cgroup_limit = 200 * 1024**3  # 200GB
+
+        with (
+            patch("zephon.utils.shm.os.statvfs", return_value=fake_st),
+            patch(
+                "zephon.utils.shm.read_cgroup_memory_limit",
+                return_value=cgroup_limit,
+            ),
+        ):
+            # used = 1000GB - 50GB = 950GB, effective_total = 200GB
+            # free = max(0, 200GB - 950GB) = 0  → 0% free → should return False
+            assert shm_has_free_space(threshold=0.05) is False
+
+    # -- Retry behavior --
+
+    @pytest.mark.usefixtures("_fast_shm_retry")
+    def test_shm_retry_requeues_item(self, capsys: pytest.CaptureFixture) -> None:
+        """SHM error + space available → item re-queued, no sentinel."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+                try:
+                    raise RuntimeError(
+                        "unable to write to file </torch_xxx>: "
+                        "No space left on device (28)"
+                    )
+                except RuntimeError as e:
+                    q._on_queue_feeder_error(e, "retry_obj")
+
+            # The original object should be re-queued, NOT a sentinel
+            item = q.get(timeout=5)
+            assert item == "retry_obj"
+        finally:
+            q.close()
+
+    @pytest.mark.usefixtures("_fast_shm_retry")
+    def test_shm_retry_waits_for_space(self, capsys: pytest.CaptureFixture) -> None:
+        """Retry should wait until SHM has free space."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            # Return False 3 times, then True
+            side_effects = [False, False, False, True]
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=side_effects,
+            ):
+                try:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                except OSError as e:
+                    q._on_queue_feeder_error(e, "waited_obj")
+
+            item = q.get(timeout=5)
+            assert item == "waited_obj"
+
+            captured = capsys.readouterr()
+            assert "SHM pressure" in captured.err
+        finally:
+            q.close()
+
+    @pytest.mark.usefixtures("_fast_shm_retry")
+    def test_shm_retry_logs_warning(self, capsys: pytest.CaptureFixture) -> None:
+        """First backoff should log a WARNING."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            # First check finds no space (triggers backoff + warning),
+            # second check finds space (re-queues).
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=[False, True],
+            ):
+                try:
+                    raise RuntimeError("No space left on device")
+                except RuntimeError as e:
+                    q._on_queue_feeder_error(e, "obj")
+
+            # Consume the re-queued item
+            assert q.get(timeout=5) == "obj"
+
+            captured = capsys.readouterr()
+            assert "WARNING" in captured.err
+            assert "SHM pressure" in captured.err
+            assert "attempt 1" in captured.err
+        finally:
+            q.close()
+
+    @pytest.mark.usefixtures("_fast_shm_retry")
+    def test_shm_retry_success_log(self, capsys: pytest.CaptureFixture) -> None:
+        """After multi-attempt retry, should log success with attempt count."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            # Fail 2 times, then succeed
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=[False, False, True],
+            ):
+                try:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                except OSError as e:
+                    q._on_queue_feeder_error(e, "obj")
+
+            # Consume the re-queued item
+            assert q.get(timeout=5) == "obj"
+
+            captured = capsys.readouterr()
+            assert "succeeded after" in captured.err
+        finally:
+            q.close()
+
+    def test_non_shm_error_creates_sentinel(self) -> None:
+        """Non-SHM errors should still create a sentinel (regression test)."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            try:
+                raise TypeError("cannot pickle 'generator' object")
+            except TypeError as e:
+                q._on_queue_feeder_error(e, "obj")
+
+            with pytest.raises(QueueFeederError, match="cannot pickle"):
+                q.get(timeout=5)
+        finally:
+            q.close()
+
+    def test_shm_usage_in_sentinel_message(self) -> None:
+        """Sentinel error message should include SHM usage stats."""
+        q = self._make_queue(maxsize=10)
+        try:
+            q.put("_start")
+            assert q.get(timeout=5) == "_start"
+
+            try:
+                raise TypeError("bad object")
+            except TypeError as e:
+                q._on_queue_feeder_error(e, "obj")
+
+            with pytest.raises(QueueFeederError) as exc_info:
+                q.get(timeout=5)
+            assert "shm=" in str(exc_info.value)
+        finally:
+            q.close()
+
+
+# ---------------------------------------------------------------------------
+# SHM backpressure E2E (real _feed thread, simulated ENOSPC)
+# ---------------------------------------------------------------------------
+
+
+class _ShmPressureItem:
+    """Test payload whose serialization raises ENOSPC for the first N attempts.
+
+    Each instance carries a mutable ``_attempts`` counter.  Because
+    ``_on_queue_feeder_error`` re-queues the *same object reference* via
+    ``appendleft``, the counter survives across retries and the reducer
+    eventually succeeds once ``_attempts > fail_count``.
+    """
+
+    def __init__(self, value: int, fail_count: int = 0):
+        self.value = value
+        self.fail_count = fail_count
+        self._attempts = 0
+
+
+def _shm_pressure_reduce(item: _ShmPressureItem) -> tuple:
+    """ForkingPickler reducer — raises ENOSPC for the first *fail_count* attempts."""
+    item._attempts += 1
+    if item._attempts <= item.fail_count:
+        raise OSError(errno.ENOSPC, "No space left on device")
+    # Success — return a normal reduction tuple.
+    return (_ShmPressureItem, (item.value, 0))
+
+
+class TestShmBackpressureE2E:
+    """E2E tests using the real Queue._feed thread with simulated SHM pressure.
+
+    A custom ``ForkingPickler`` reducer is registered for ``_ShmPressureItem``
+    so that serialization inside the ``_feed`` thread raises ``OSError(ENOSPC)``
+    a configurable number of times before succeeding.  This exercises the full
+    ``_feed`` → ``_on_queue_feeder_error`` → backoff → ``shm_has_free_space``
+    → ``appendleft`` → re-serialize path without needing actual ``/dev/shm``
+    pressure.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_reducer(self, _fast_shm_retry):
+        """Register custom reducer for SHM pressure simulation."""
+        ForkingPickler.register(_ShmPressureItem, _shm_pressure_reduce)
+        yield
+        ForkingPickler._extra_reducers.pop(_ShmPressureItem, None)
+
+    def _make_queue(self, maxsize: int = 0) -> NamedQueue:
+        ctx = multiprocessing.get_context("spawn")
+        return NamedQueue("test-shm-e2e", maxsize=maxsize, ctx=ctx)
+
+    def test_occasional_pressure_delivers_all_items(self) -> None:
+        """Mix of normal and pressure items — all delivered, none lost."""
+        q = self._make_queue(maxsize=20)
+        try:
+            items = [
+                _ShmPressureItem(0),  # ok
+                _ShmPressureItem(1, fail_count=1),  # fails 1×
+                _ShmPressureItem(2),  # ok
+                _ShmPressureItem(3, fail_count=2),  # fails 2×
+                _ShmPressureItem(4),  # ok
+                _ShmPressureItem(5, fail_count=1),  # fails 1×
+                _ShmPressureItem(6),  # ok
+                _ShmPressureItem(7),  # ok
+                _ShmPressureItem(8, fail_count=3),  # fails 3×
+                _ShmPressureItem(9),  # ok
+            ]
+
+            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+                for item in items:
+                    q.put(item)
+
+                received = []
+                for _ in range(len(items)):
+                    result = q.get(timeout=10)
+                    received.append(result.value)
+
+            assert sorted(received) == list(range(10))
+        finally:
+            q.close()
+
+    def test_pressure_items_preserve_order(self) -> None:
+        """Failed items retry at the front of the buffer, preserving order."""
+        q = self._make_queue(maxsize=20)
+        try:
+            items = [
+                _ShmPressureItem(0),
+                _ShmPressureItem(1, fail_count=1),
+                _ShmPressureItem(2),
+            ]
+
+            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+                for item in items:
+                    q.put(item)
+
+                received = []
+                for _ in range(len(items)):
+                    result = q.get(timeout=10)
+                    received.append(result.value)
+
+            # appendleft re-queues the failed item before items behind it,
+            # so ordering is preserved.
+            assert received == [0, 1, 2]
+        finally:
+            q.close()
+
+    def test_retry_fast_path_no_warning(self, capsys: pytest.CaptureFixture) -> None:
+        """Momentary pressure that clears immediately produces no warning."""
+        q = self._make_queue(maxsize=10)
+        try:
+            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+                q.put(_ShmPressureItem(42, fail_count=1))
+                result = q.get(timeout=10)
+                assert result.value == 42
+
+            captured = capsys.readouterr()
+            assert "WARNING" not in captured.err
+        finally:
+            q.close()
+
+    def test_retry_logs_warnings(self, capsys: pytest.CaptureFixture) -> None:
+        """Retried items produce SHM pressure warnings when space is tight."""
+        q = self._make_queue(maxsize=10)
+        try:
+            # First check finds no space (triggers backoff + warning),
+            # second check finds space (re-queues).
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=[False, True],
+            ):
+                q.put(_ShmPressureItem(42, fail_count=1))
+                result = q.get(timeout=10)
+                assert result.value == 42
+
+            captured = capsys.readouterr()
+            assert "SHM pressure" in captured.err
+            assert "attempt 1" in captured.err
+        finally:
+            q.close()
+
+    def test_retry_success_logged_after_space_wait(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """When shm_has_free_space returns False first, success is logged with count."""
+        q = self._make_queue(maxsize=10)
+        try:
+            # False twice → True: _on_queue_feeder_error loops 3 times (attempt=3)
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=[False, False, True],
+            ):
+                q.put(_ShmPressureItem(42, fail_count=1))
+                result = q.get(timeout=10)
+                assert result.value == 42
+
+            captured = capsys.readouterr()
+            assert "SHM pressure" in captured.err
+            assert "succeeded after" in captured.err
+        finally:
+            q.close()
+
+    def test_retry_waits_for_free_space(self) -> None:
+        """Retry blocks until shm_has_free_space returns True."""
+        q = self._make_queue(maxsize=10)
+        try:
+            with patch(
+                "zephon.runners.queue.shm_has_free_space",
+                side_effect=[False, False, False, True],
+            ):
+                q.put(_ShmPressureItem(7, fail_count=1))
+                result = q.get(timeout=10)
+                assert result.value == 7
+        finally:
+            q.close()
+
+    def test_no_sentinel_for_transient_pressure(self) -> None:
+        """SHM errors must retry — never produce FeederError sentinels."""
+        q = self._make_queue(maxsize=10)
+        try:
+            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+                q.put(_ShmPressureItem(1, fail_count=2))
+                q.put(_ShmPressureItem(2))
+
+                r1 = q.get(timeout=10)
+                r2 = q.get(timeout=10)
+
+            # Both are real items, not FeederError sentinels.
+            assert isinstance(r1, _ShmPressureItem)
+            assert isinstance(r2, _ShmPressureItem)
+            assert {r1.value, r2.value} == {1, 2}
         finally:
             q.close()

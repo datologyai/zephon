@@ -29,7 +29,6 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Semaphore
@@ -93,6 +92,9 @@ def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
         ts = time.strftime("%H:%M:%S", time.localtime())
         ms = int((time.time() % 1) * 1000)
         print(f"[Shutdown {ts}.{ms:03d}] {msg}", file=sys.stderr, flush=True)
+
+
+from zephon.runners.queue import NamedQueue
 
 
 def _startup_log(msg: str) -> None:  # pragma: no cover - diagnostics helper
@@ -171,170 +173,10 @@ def _log_worker_modules(worker_index: int) -> None:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _FeederError:
-    """Sentinel enqueued when the feeder thread fails to serialize an item.
-
-    Placed on a queue's internal ``_buffer`` when serialization fails (e.g.
-    ``/dev/shm`` exhaustion with torch tensors).  Contains only strings so it
-    serializes without touching ``/dev/shm``.  The consumer's ``get()`` override
-    checks for it and raises :class:`QueueFeederError`.
-    """
-
-    queue_name: str
-    traceback: str
-
-
-class QueueFeederError(RuntimeError):
-    """Raised when a queue's background feeder thread fails to serialize an item.
-
-    CPython's ``Queue._feed`` thread silently drops items on serialization
-    failure.  This exception surfaces that failure with the original traceback
-    so the pipeline can fail loudly instead of silently losing batches.
-    """
-
-
-# Timeouts for the escalating retry in _on_queue_feeder_error.
-_FEEDER_SHORT_TIMEOUT = 5.0
-_FEEDER_LONG_TIMEOUT = 120.0
-
 # Interval between gc.collect() calls in worker processes (nanoseconds).
 # Time-based rather than batch-count so it adapts to both fast workers
 # (many short batches) and slow workers (few long batches).
 _WORKER_GC_INTERVAL_NS = 60_000_000_000  # 60 seconds
-
-
-class _NamedQueue(mp_queues.Queue):
-    """Queue that tags its feeder thread with a friendly name.
-
-    Uses SafeSemLock for all internal semaphores to ensure proper cleanup in
-    free-threaded Python where GC finalizers run in background threads and can
-    race with explicit cleanup.
-
-    Overrides ``_on_queue_feeder_error`` so that serialization failures in the
-    background feeder thread (e.g. ``/dev/shm`` exhaustion when pickling torch
-    tensors) are re-enqueued as :class:`_FeederError` sentinels through the
-    queue's own pipe.  The ``get()`` override detects these and raises
-    :class:`QueueFeederError` with the full original traceback.
-    """
-
-    def __init__(self, name: str, maxsize: int = 0, *, ctx: BaseContext):
-        super().__init__(maxsize, ctx=ctx)
-        self._ignore_epipe = True
-        self._name_label = name
-
-        # Wrap all semaphores with SafeSemLock for coordinated cleanup
-        # in free-threaded Python where GC finalizers run in background threads
-        self._sem = SafeSemLock.wrap(self._sem, source=f"queue:{name}:_sem")
-        self._rlock = SafeSemLock.wrap(self._rlock, source=f"queue:{name}:_rlock")
-        self._wlock = SafeSemLock.wrap(self._wlock, source=f"queue:{name}:_wlock")
-
-    # -- Feeder error detection ---------------------------------------------
-
-    def _on_queue_feeder_error(self, e: BaseException, obj: object) -> None:
-        """Called by CPython's ``Queue._feed`` thread on serialization failure.
-
-        Re-enqueues a :class:`_FeederError` sentinel through the queue's own
-        internal buffer so the consumer's ``get()`` raises
-        :class:`QueueFeederError` with the full original traceback.
-
-        The ``_feed`` thread survives serialization errors (it only exits on
-        EPIPE or process shutdown), so the sentinel is picked up on the next
-        loop iteration and sent through the pipe like any normal item.
-
-        Uses an escalating timeout to ensure the error reaches the consumer:
-
-        1. Short wait (5 s) — should succeed immediately since ``_feed``
-           already released a semaphore slot.
-        2. Warn to stderr and block longer (120 s).
-        3. Give up — log aggressively to stderr.
-        """
-        import traceback as tb_mod
-
-        tb_str = tb_mod.format_exc()
-        sentinel = _FeederError(self._name_label, tb_str)
-        try:
-            # Stage 1: short wait — _feed already released a semaphore slot.
-            if self._sem.acquire(block=True, timeout=_FEEDER_SHORT_TIMEOUT):
-                with self._notempty:
-                    self._buffer.append(sentinel)
-                    self._notempty.notify()
-                return
-
-            # Stage 2: warn and block longer.
-            print(
-                f"WARNING: Queue '{self._name_label}' feeder thread failed to "
-                f"serialize an item and cannot re-enqueue the error sentinel "
-                f"(queue full for {_FEEDER_SHORT_TIMEOUT}s). Retrying for "
-                f"{_FEEDER_LONG_TIMEOUT}s before dropping.\n{tb_str}",
-                file=sys.stderr,
-                flush=True,
-            )
-            if self._sem.acquire(block=True, timeout=_FEEDER_LONG_TIMEOUT):
-                with self._notempty:
-                    self._buffer.append(sentinel)
-                    self._notempty.notify()
-                return
-
-            # Stage 3: give up after 2+ minutes — log aggressively.
-            msg = (
-                f"\n{'!' * 72}\n"
-                f"CRITICAL: Queue '{self._name_label}' feeder thread DROPPED "
-                f"an item after failing to serialize it AND failing to enqueue "
-                f"the error sentinel for "
-                f"{_FEEDER_SHORT_TIMEOUT + _FEEDER_LONG_TIMEOUT}s.\n"
-                f"Training results may be SILENTLY INCORRECT.\n"
-                f"Original error:\n{tb_str}"
-                f"\n{'!' * 72}\n"
-            )
-            print(msg, file=sys.stderr, flush=True)
-        except Exception:
-            # Last resort — something is deeply wrong.
-            print(
-                f"CRITICAL: Queue '{self._name_label}' feeder error AND failed "
-                f"to report it:\n{tb_str}",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        """Retrieve an item, raising on feeder-thread errors."""
-        item = super().get(block, timeout)
-        if isinstance(item, _FeederError):
-            raise QueueFeederError(
-                f"Queue '{item.queue_name}' feeder thread failed to serialize "
-                f"an item (likely /dev/shm exhaustion).  The item was silently "
-                f"dropped by CPython's Queue._feed thread.\n\n"
-                f"Original traceback from feeder thread:\n{item.traceback}"
-            )
-        return item
-
-    # -- Thread naming & lifecycle ------------------------------------------
-
-    def _start_thread(self) -> None:
-        super()._start_thread()  # type: ignore[attr-defined]
-        thread = getattr(self, "_thread", None)
-        if thread is not None:
-            thread.name = f"QueueFeederThread[{self._name_label}]"
-
-    def close(self) -> None:
-        """Close the queue and clean up all internal semaphores."""
-        try:
-            super().close()
-        finally:
-            self._sem.cleanup()
-            self._rlock.cleanup()
-            self._wlock.cleanup()
-
-    # -- Pickling (process spawning only) -----------------------------------
-
-    def __getstate__(self) -> Any:  # noqa: D401 - custom pickle payload
-        base_state = super().__getstate__()  # type: ignore[attr-defined]
-        return (self._name_label, base_state)
-
-    def __setstate__(self, state: Any) -> None:
-        self._name_label, base_state = state
-        super().__setstate__(base_state)  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -779,7 +621,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         size = 0 if maxsize is None else maxsize
         return cast(
             _ClosableQueue[Any],
-            _NamedQueue(name, maxsize=size, ctx=self._mp_context),
+            NamedQueue(name, maxsize=size, ctx=self._mp_context),
         )
 
     @staticmethod
@@ -790,7 +632,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         try:
             q.close()
         except Exception:
-            name = "unnamed" if not isinstance(q, _NamedQueue) else q._name_label
+            name = "unnamed" if not isinstance(q, NamedQueue) else q._name_label
             print(
                 f"Error closing queue {name!r}.",
                 file=sys.stderr,
