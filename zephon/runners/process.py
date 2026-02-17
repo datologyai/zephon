@@ -19,6 +19,7 @@ Set ZEPHON_SHUTDOWN_WATCHDOG=<seconds> to dump thread stacks if shutdown takes t
 from __future__ import annotations
 
 import copy
+import gc
 import multiprocessing as mp
 import os
 import queue
@@ -118,6 +119,11 @@ class QueueFeederError(RuntimeError):
 # Timeouts for the escalating retry in _on_queue_feeder_error.
 _FEEDER_SHORT_TIMEOUT = 5.0
 _FEEDER_LONG_TIMEOUT = 120.0
+
+# Interval between gc.collect() calls in worker processes (nanoseconds).
+# Time-based rather than batch-count so it adapts to both fast workers
+# (many short batches) and slow workers (few long batches).
+_WORKER_GC_INTERVAL_NS = 60_000_000_000  # 60 seconds
 
 
 class _NamedQueue(mp_queues.Queue):
@@ -334,6 +340,13 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
         op_instance = copy.deepcopy(op_proto)
+        # Free the deserialized prototype immediately.  With spawn/forkserver
+        # each worker gets its own cloudpickle.loads() result so the deepcopy
+        # above already produced an independent instance.  Without this del,
+        # op_proto (which includes everything captured in the operator closure —
+        # tokenizers, transform functions, etc.) stays alive for the entire
+        # worker lifetime as an unused local variable.
+        del op_proto
         ctx = OpContext(dict(config.ctx_services))
         op_instance.setup(
             ctx,
@@ -342,6 +355,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
             config.op_index,
             config.collect_stats,
         )
+        _last_gc_ns = time.monotonic_ns()
         while True:
             command = config.task_queue.get()
             if command.kind == "stop":
@@ -378,6 +392,17 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 ack=config.worker_index,
             )
             config.result_queue.put(result)
+
+            # Periodic GC: reclaim cyclic garbage (PyArrow internals, torch
+            # storage objects, orphaned closures) and let the allocator
+            # consolidate freed pages.  Time-based rather than batch-count
+            # to adapt to both fast workers (many short batches) and slow
+            # workers (few long batches).  The monotonic_ns() check is
+            # essentially free (~20 ns vdso call).
+            now_ns = time.monotonic_ns()
+            if now_ns - _last_gc_ns >= _WORKER_GC_INTERVAL_NS:
+                gc.collect()
+                _last_gc_ns = now_ns
     except BaseException as exc:  # noqa: BLE001
         try:
             config.backpressure.acquire()
