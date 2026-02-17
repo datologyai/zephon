@@ -781,18 +781,28 @@ class Pipeline:
         use_monotone_notify = self._plan.preserves_cursor_order
         for item in source:
             if isinstance(item, SampleBatch):
-                assert len(list(set(item.lane_ids))) == 1
                 if not item.records:
                     raise TypeError("SampleBatch must contain at least one record")
                 lane_id = item.lane_ids[0]
                 if use_monotone_notify:
-                    max_chunk_id = max(item.chunk_ids)
-                    progress_cursors = [
-                        record.meta.cursor
-                        for record in item.records
-                        if record.meta.chunk_id == max_chunk_id
-                    ]
-                    engine.notify_monotone(lane_id, max_chunk_id, progress_cursors)
+                    # Compute cursor count and max in a single pass —
+                    # no list allocation, just scalar comparisons.
+                    chunk_ids = item.chunk_ids
+                    max_cid = chunk_ids[0]
+                    n_cursors = 0
+                    max_cursor: SampleCursor | None = None
+                    for i, r in enumerate(item.records):
+                        cid = chunk_ids[i]
+                        if cid > max_cid:
+                            max_cid = cid
+                            n_cursors = 1
+                            max_cursor = r.meta.cursor
+                        elif cid == max_cid:
+                            n_cursors += 1
+                            c = r.meta.cursor
+                            if max_cursor is None or c > max_cursor:
+                                max_cursor = c
+                    engine.notify_monotone(lane_id, max_cid, n_cursors, max_cursor)
                     yield item
                     continue
 
@@ -805,10 +815,12 @@ class Pipeline:
             elif isinstance(item, SampleRecord):  # pyright: ignore[reportUnnecessaryIsInstance]
                 lane_id = item.meta.lane_id
                 if use_monotone_notify:
-                    max_chunk_id = item.meta.chunk_id
-                    record_cursor = item.meta.cursor
-                    progress_cursors = [record_cursor]
-                    engine.notify_monotone(lane_id, max_chunk_id, progress_cursors)
+                    engine.notify_monotone(
+                        lane_id,
+                        item.meta.chunk_id,
+                        1,
+                        item.meta.cursor,
+                    )
                     if not item.meta.tombstone:
                         yield item
                     continue

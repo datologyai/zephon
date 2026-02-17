@@ -263,30 +263,48 @@ class SampleRecord:
     payload: "SamplePayload"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SampleBatch:
     """A batch of SampleRecord."""
 
     records: tuple[SampleRecord, ...]
+
+    # Eagerly computed (hot path) — direct slot access, zero cost after init.
+    lane_ids: tuple[LaneId, ...] = field(init=False, repr=False, compare=False)
+    chunk_ids: tuple[ChunkId, ...] = field(init=False, repr=False, compare=False)
+
+    # Lazily computed (cold path) — only built on first access.
+    _ids: "tuple[SampleId, ...] | None" = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
+    _lineage_paths: "tuple[LineagePath, ...] | None" = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        self.lane_ids = tuple(r.meta.lane_id for r in self.records)
+        self.chunk_ids = tuple(r.meta.chunk_id for r in self.records)
 
     def __len__(self) -> int:
         return len(self.records)
 
     @property
     def ids(self) -> tuple[SampleId, ...]:
-        return tuple(r.meta.sample_id for r in self.records)
+        if self._ids is None:
+            self._ids = tuple(r.meta.sample_id for r in self.records)
+        return self._ids
 
     @property
     def lineage_paths(self) -> tuple[LineagePath, ...]:
-        return tuple(r.meta.lineage for r in self.records)
-
-    @property
-    def lane_ids(self) -> tuple[LaneId, ...]:
-        return tuple(r.meta.lane_id for r in self.records)
-
-    @property
-    def chunk_ids(self) -> tuple[ChunkId, ...]:
-        return tuple(r.meta.chunk_id for r in self.records)
+        if self._lineage_paths is None:
+            self._lineage_paths = tuple(r.meta.lineage for r in self.records)
+        return self._lineage_paths
 
     def _extract_from_dicts(
         self,

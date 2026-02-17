@@ -1118,7 +1118,7 @@ class Engine:
             return
 
         def lane_progress_tuple(lane: int) -> tuple[int, int, int]:
-            ptr = self._lane_progress.get(lane, LanePtr())
+            ptr = self._lane_progress[lane]  # defaultdict auto-creates
             return (int(ptr.chunk_id), int(ptr.offset), int(lane))
 
         next_lane = min(lanes, key=lane_progress_tuple)
@@ -1352,33 +1352,44 @@ class Engine:
         yield from final_stream
 
     def notify_monotone(
-        self, lane_id: int, max_chunk_id: int, cursors: Iterable[SampleCursor]
+        self,
+        lane_id: int,
+        max_chunk_id: int,
+        add_k: int,
+        max_cursor: SampleCursor | None,
     ) -> None:
         """Cursor-ordered notify path (no cross-chunk reordering or packing).
 
-        Mirrors the pre-contributors behavior: evict chunks older than
-        ``max_chunk_id``, advance lane progress by the number of cursors provided
-        from that chunk, and track the max cursor for replay.
+        Evict chunks older than *max_chunk_id*, advance lane progress by
+        *add_k* delivered records, and update the replay cursor.
+
+        The caller pre-computes *add_k* (number of records whose chunk_id
+        equals *max_chunk_id*) and *max_cursor* (greatest cursor among those
+        records) so this method performs zero allocations on the common path.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
-        cursor_list = cursors if isinstance(cursors, list) else list(cursors)
 
-        # 1) Evict older inflight chunks (no bitmap bookkeeping in this path).
-        cids_to_evict = [cid for cid in list(inflight_lane) if cid < max_chunk_id]
-        for cid in cids_to_evict:
-            inflight_lane.pop(cid, None)
-        if cids_to_evict:
-            with self._mixture_lock:
-                for cid in cids_to_evict:
-                    self._chunk_mixtures.pop((lane_id, cid), None)
+        # 1) Evict older inflight chunks — O(1) fast-path skip.
+        if inflight_lane:
+            first_cid = next(iter(inflight_lane))
+            if first_cid < max_chunk_id:
+                to_evict = [cid for cid in inflight_lane if cid < max_chunk_id]
+                for cid in to_evict:
+                    inflight_lane.pop(cid, None)
+                with self._mixture_lock:
+                    for cid in to_evict:
+                        self._chunk_mixtures.pop((lane_id, cid), None)
 
-        add_k = len(cursor_list)
-        cur = self._lane_progress.get(lane_id, LanePtr())
-        seen_offset = cur.offset if (cur.chunk_id == max_chunk_id) else 0
-        self._lane_progress[lane_id] = LanePtr(max_chunk_id, seen_offset + add_k)
+        # 2) Lane progress — mutate LanePtr in-place (mutable dataclass).
+        cur = self._lane_progress[lane_id]  # defaultdict auto-creates
+        if cur.chunk_id == max_chunk_id:
+            cur.offset += add_k
+        else:
+            cur.chunk_id = max_chunk_id
+            cur.offset = add_k
 
-        if cursor_list:
-            max_cursor = max(cursor_list)
+        # 3) Cursor tracking.
+        if max_cursor is not None:
             previous = self._lane_last_cursor.get(lane_id)
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
@@ -1422,7 +1433,8 @@ class Engine:
                 done_count[cid] += 1
 
         # 2) Evict fully-completed chunks in cid order
-        last_completed_ptr: LanePtr | None = None
+        last_completed_cid = -1
+        last_completed_offset = 0
         cids_to_evict: list[int] = []
         # Chunk IDs increase monotonically per lane; dict preserves insertion order.
         for cid in list(inflight_lane.keys()):
@@ -1430,7 +1442,8 @@ class Engine:
             if cid not in done:
                 break
             if done_count[cid] >= len(chunk):
-                last_completed_ptr = LanePtr(cid, len(chunk))
+                last_completed_cid = cid
+                last_completed_offset = len(chunk)
                 cids_to_evict.append(cid)
             else:
                 break  # earliest incomplete chunk blocks later evictions (keep inflight contiguous)
@@ -1444,17 +1457,16 @@ class Engine:
                 for cid in cids_to_evict:
                     self._chunk_mixtures.pop((lane_id, cid), None)
 
-        # 3) Maintain lane progress for fairness diagnostics
+        # 3) Maintain lane progress for fairness diagnostics — mutate in-place.
+        cur = self._lane_progress[lane_id]  # defaultdict auto-creates
         if inflight_lane:
             front_cid = min(inflight_lane.keys())
-            # A chunk may be inflight without any completions yet; default completed to 0.
-            self._lane_progress[lane_id] = LanePtr(
-                front_cid, done_count.get(front_cid, 0)
-            )
-        elif last_completed_ptr is not None:
-            self._lane_progress[lane_id] = last_completed_ptr
-        else:
-            self._lane_progress.setdefault(lane_id, LanePtr())
+            cur.chunk_id = front_cid
+            cur.offset = done_count.get(front_cid, 0)
+        elif last_completed_cid >= 0:
+            cur.chunk_id = last_completed_cid
+            cur.offset = last_completed_offset
+        # else: cur stays at default (chunk_id=-1, offset=0)
 
         # 4) Track latest record-level cursor for replay
         if record_cursor is not None:
