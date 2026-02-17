@@ -13,6 +13,7 @@ Debugging hangs and crashes
 Set ZEPHON_FAULTHANDLER=1 to enable faulthandler, which will dump all thread stacks
 on SIGSEGV, SIGFPE, SIGABRT, SIGBUS, SIGILL crashes and on SIGUSR1 (for manual trigger).
 Set ZEPHON_DEBUG_SHUTDOWN=1 to enable detailed shutdown logging.
+Set ZEPHON_DEBUG_WORKER_STARTUP=1 to log per-worker startup timing, RSS, and module inventory.
 Set ZEPHON_SHUTDOWN_WATCHDOG=<seconds> to dump thread stacks if shutdown takes too long.
 """
 
@@ -77,6 +78,7 @@ class _ClosableQueue(_QueueLike[Q], Protocol):
 
 _DEBUG = bool(os.environ.get("ZEPHON_DEBUG_PROCESS_RUNNER"))
 _SHUTDOWN_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_SHUTDOWN"))
+_STARTUP_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_WORKER_STARTUP"))
 _SHUTDOWN_WATCHDOG_TIMEOUT = float(os.environ.get("ZEPHON_SHUTDOWN_WATCHDOG", "0"))
 
 
@@ -91,6 +93,82 @@ def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
         ts = time.strftime("%H:%M:%S", time.localtime())
         ms = int((time.time() % 1) * 1000)
         print(f"[Shutdown {ts}.{ms:03d}] {msg}", file=sys.stderr, flush=True)
+
+
+def _startup_log(msg: str) -> None:  # pragma: no cover - diagnostics helper
+    """Debug logging for worker startup diagnostics."""
+    if _STARTUP_DEBUG:
+        print(f"[WorkerStartup] {msg}", file=sys.stderr, flush=True)
+
+
+def _get_rss_mb() -> float:
+    """Return current process RSS in MB.
+
+    Uses /proc/self/statm on Linux (current RSS) and resource.getrusage
+    on macOS (peak RSS — macOS doesn't expose current RSS cheaply).
+    """
+    try:
+        # Linux: /proc/self/statm field 1 = resident pages
+        with open("/proc/self/statm", "r") as f:
+            resident_pages = int(f.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    # macOS fallback: ru_maxrss is in bytes
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    if sys.platform == "darwin":
+        return usage.ru_maxrss / (1024 * 1024)
+    return usage.ru_maxrss / 1024  # Linux ru_maxrss is in KB
+
+
+def _log_worker_startup(
+    worker_index: int,
+    total_ns: int,
+    deser_ns: int,
+    setup_ns: int,
+    wall_ns: int,
+    rss_entry_mb: float,
+    rss_deser_mb: float,
+    rss_ready_mb: float,
+) -> None:
+    """Log per-worker startup timing and RSS breakdown."""
+    total_s = total_ns / 1e9
+    deser_s = deser_ns / 1e9
+    setup_s = setup_ns / 1e9
+    wall_s = wall_ns / 1e9
+    _startup_log(
+        f"worker[{worker_index}] ready in {total_s:.2f}s "
+        f"(deserialize={deser_s:.2f}s, setup={setup_s:.2f}s, "
+        f"wall={wall_s:.2f}s from spawn)"
+    )
+    _startup_log(
+        f"worker[{worker_index}] RSS: entry={rss_entry_mb:.0f} MB, "
+        f"post-deserialize={rss_deser_mb:.0f} MB (+{rss_deser_mb - rss_entry_mb:.0f}), "
+        f"ready={rss_ready_mb:.0f} MB (+{rss_ready_mb - rss_deser_mb:.0f})"
+    )
+
+
+def _log_worker_modules(worker_index: int) -> None:
+    """Log module inventory, separating stdlib from external packages."""
+    stdlib_names = sys.stdlib_module_names
+    all_mods = sorted(sys.modules.keys())
+
+    # Classify: skip dunder/private internal modules, split by stdlib vs external
+    external = sorted(
+        m
+        for m in all_mods
+        if not m.startswith("_") and m.split(".")[0] not in stdlib_names
+    )
+    stdlib = sorted(
+        m for m in all_mods if not m.startswith("_") and m.split(".")[0] in stdlib_names
+    )
+
+    _startup_log(
+        f"worker[{worker_index}] {len(all_mods)} modules "
+        f"({len(external)} external, {len(stdlib)} stdlib)"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +405,7 @@ class _ProcessWorkerConfig:
     task_queue: _QueueLike[_WorkerCommand]
     result_queue: _QueueLike[RunnerResult]
     backpressure: Semaphore | SafeSemLock
+    spawn_wall_ns: int = 0  # Main process wall-clock time at spawn start
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
@@ -335,11 +414,16 @@ ProcessFactory = Callable[..., BaseProcess]
 
 
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
+    startup_t0 = time.perf_counter_ns()
+    rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
         op_instance = copy.deepcopy(op_proto)
+        deser_ns = time.perf_counter_ns() - startup_t0
+        rss_deser_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
+
         # Free the deserialized prototype immediately.  With spawn/forkserver
         # each worker gets its own cloudpickle.loads() result so the deepcopy
         # above already produced an independent instance.  Without this del,
@@ -355,6 +439,24 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
             config.op_index,
             config.collect_stats,
         )
+        total_ns = time.perf_counter_ns() - startup_t0
+        setup_ns = total_ns - deser_ns
+        wall_ns = time.time_ns() - config.spawn_wall_ns if config.spawn_wall_ns else 0
+        rss_ready_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
+
+        if _STARTUP_DEBUG:
+            _log_worker_startup(
+                config.worker_index,
+                total_ns,
+                deser_ns,
+                setup_ns,
+                wall_ns,
+                rss_entry_mb,
+                rss_deser_mb,
+                rss_ready_mb,
+            )
+            _log_worker_modules(config.worker_index)
+
         _last_gc_ns = time.monotonic_ns()
         while True:
             command = config.task_queue.get()
@@ -657,6 +759,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             features.append("ZEPHON_DEBUG_PROCESS_RUNNER")
         if _SHUTDOWN_DEBUG:
             features.append("ZEPHON_DEBUG_SHUTDOWN")
+        if _STARTUP_DEBUG:
+            features.append("ZEPHON_DEBUG_WORKER_STARTUP")
         if _SHUTDOWN_WATCHDOG_TIMEOUT > 0:
             features.append(f"ZEPHON_SHUTDOWN_WATCHDOG={_SHUTDOWN_WATCHDOG_TIMEOUT}s")
         if os.environ.get("ZEPHON_FAULTHANDLER"):
@@ -970,6 +1074,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # Serialize operator once using cloudpickle to support lambdas/closures
         op_proto_bytes = cloudpickle.dumps(state.node.op)
 
+        # Record wall-clock time so workers can compute cross-process startup duration
+        spawn_wall_ns = time.time_ns()
+
         # Phase 1: Create all worker configs and Process objects
         worker_infos: list[
             tuple[
@@ -1004,6 +1111,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 task_queue=task_queue,
                 result_queue=result_queue,
                 backpressure=semaphore,
+                spawn_wall_ns=spawn_wall_ns,
             )
             proc: BaseProcess = self._process_factory(
                 target=_process_worker_main,
@@ -1019,6 +1127,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # For fork, we start sequentially because fork() in a multithreaded program
         # is unsafe: the child inherits locks held by threads that no longer exist,
         # leading to potential deadlocks. Concurrent fork() calls exacerbate this.
+        spawn_t0 = time.perf_counter_ns()
         start_method = self._mp_context.get_start_method()
         if start_method in ("spawn", "forkserver"):
             spawn_threads: list[threading.Thread] = []
@@ -1031,6 +1140,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         else:
             for _, _, proc, _, _ in worker_infos:
                 proc.start()
+        spawn_s = (time.perf_counter_ns() - spawn_t0) / 1e9
+        _startup_log(
+            f"spawned {state.parallelism} workers for {queue_label} "
+            f"in {spawn_s:.2f}s ({start_method})"
+        )
 
         # Phase 3: Bookkeeping after all processes have started
         for idx, worker_id, proc, semaphore, resp_queue in worker_infos:

@@ -44,7 +44,7 @@ def test_litdata_reader_handles_dataset(
     writer.merge()
 
     dataset = Dataset.from_path(name="lit", path=str(dataset_dir))
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
     locators = handler.build_locators(dataset)
     assert dataset.path is not None
@@ -104,7 +104,7 @@ def test_litdata_reader_handles_dict_with_numpy_ints(tmp_path: Path) -> None:
     writer.merge()
 
     dataset = Dataset.from_path(name="lit-numpy", path=str(dataset_dir))
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
     locators = handler.build_locators(dataset)
     assert dataset.path is not None
@@ -143,7 +143,7 @@ def test_litdata_reader_handles_no_header_numpy(tmp_path: Path) -> None:
     writer.merge()
 
     dataset = Dataset.from_path(name="lit-no-header", path=str(dataset_dir))
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
     locators = handler.build_locators(dataset)
     assert dataset.path is not None
@@ -204,7 +204,7 @@ def test_litdata_shard_getsamples_batch_loading(tmp_path: Path) -> None:
     writer.merge()
 
     dataset = Dataset.from_path(name="lit-getsamples", path=str(dataset_dir))
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
     locators = handler.build_locators(dataset)
     assert dataset.path is not None

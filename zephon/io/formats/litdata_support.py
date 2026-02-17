@@ -12,39 +12,132 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from io import BytesIO, FileIO
-from typing import Any, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Optional
 
 import numpy as np
 import optree
 from optree import treespec
 
-try:  # pragma: no cover - optional dependency
-    import torch
-except Exception:  # pragma: no cover - optional dependency
-    torch = None  # type: ignore[assignment]
+# ---------------------------------------------------------------------------
+# Lazy imports — torch and litdata internals
+#
+# litdata.constants (third-party) does ``import torch`` at module level, and
+# litdata.streaming.serializers transitively imports it too.  Importing *any*
+# litdata submodule therefore pulls in torch (~700 MB RSS).  In worker
+# processes that register the litdata format but never open a shard, this is
+# pure waste.
+#
+# We defer ALL litdata (and torch) imports to ``_ensure_litdata_deps()``,
+# which runs on first call to ``_get_serializers()`` — i.e. at shard-open
+# time, not at format-registration time.
+#
+# ``_ensure_torch()`` provides standalone lazy access to the torch module
+# for ``TokensLoader``, which needs ``torch.frombuffer`` / ``torch.empty``.
+# Once ``_ensure_litdata_deps()`` has run torch is already in sys.modules,
+# so ``_ensure_torch()`` is effectively a dict lookup at that point.
+# ---------------------------------------------------------------------------
 
-from litdata.constants import _NUMPY_DTYPES_MAPPING, _TORCH_DTYPES_MAPPING
-from litdata.streaming.serializers import (
-    _SERIALIZERS as LITDATA_SERIALIZERS,
-)
-from litdata.streaming.serializers import (
-    NoHeaderNumpySerializer,
-    NoHeaderTensorSerializer,
-    PILSerializer,
-    Serializer,
-)
+if TYPE_CHECKING:
+    from litdata.streaming.serializers import (
+        NoHeaderNumpySerializer,
+        NoHeaderTensorSerializer,
+        PILSerializer,
+        Serializer,
+    )
+
+# -- Lazy torch (used only by TokensLoader) --------------------------------
+
+_torch_mod = None
+
+
+def _ensure_torch():  # pragma: no cover - optional dependency
+    """Import torch on first use.  Returns the torch module."""
+    global _torch_mod
+    if _torch_mod is None:
+        try:
+            import torch
+
+            _torch_mod = torch
+        except ImportError:
+            raise ImportError("PyTorch is required for the TokensLoader")
+    return _torch_mod
+
+
+# -- Lazy litdata deps (serializers + dtype mappings) -----------------------
+
+_litdata_deps_ready = False
+
+_SERIALIZERS: OrderedDict[str, Any] = OrderedDict()
+_NUMPY_DTYPES_REVERSE: dict[Any, int] = {}
+_TORCH_DTYPES_MAPPING: dict[int, Any] = {}
+_NUMPY_DTYPES_MAPPING: dict[int, Any] = {}
+
+
+def _ensure_litdata_deps() -> None:
+    """Populate serializer and dtype mappings from litdata on first use.
+
+    This triggers ``import torch`` (via ``litdata.constants``).  Called from
+    ``_get_serializers()``, which runs during ``BaseItemLoader.setup()`` —
+    i.e. when a worker actually opens a shard, not at format registration
+    time.
+    """
+    global _litdata_deps_ready
+    if _litdata_deps_ready:
+        return
+
+    from litdata.constants import (
+        _NUMPY_DTYPES_MAPPING as _ndm,
+    )
+    from litdata.constants import (
+        _TORCH_DTYPES_MAPPING as _tdm,
+    )
+    from litdata.streaming.serializers import (
+        _SERIALIZERS as _litdata_serializers,
+    )
+    from litdata.streaming.serializers import (
+        NoHeaderNumpySerializer,
+        NoHeaderTensorSerializer,
+        PILSerializer,
+        Serializer,
+    )
+
+    _SERIALIZERS.update(_litdata_serializers)
+    _NUMPY_DTYPES_MAPPING.update(_ndm)
+    _TORCH_DTYPES_MAPPING.update(_tdm)
+    _NUMPY_DTYPES_REVERSE.update({dtype: idx for idx, dtype in _ndm.items()})
+
+    # Make litdata types accessible as module attributes so that external
+    # code (e.g. tests) can ``from litdata_support import Serializer``.
+    globals().update(
+        {
+            "NoHeaderNumpySerializer": NoHeaderNumpySerializer,
+            "NoHeaderTensorSerializer": NoHeaderTensorSerializer,
+            "PILSerializer": PILSerializer,
+            "Serializer": Serializer,
+        }
+    )
+
+    _litdata_deps_ready = True
+
+
+def __getattr__(name: str) -> Any:
+    """Module-level __getattr__ (PEP 562) for lazy litdata type access.
+
+    Triggers ``_ensure_litdata_deps()`` so that ``from litdata_support
+    import Serializer`` works without eagerly importing litdata/torch.
+    """
+    _ensure_litdata_deps()
+    try:
+        return globals()[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
 
 logger = logging.getLogger("zephon.litdata")
 
 # -----------------------------------------------------------------------------
 # Serializers
 # -----------------------------------------------------------------------------
-
-_SERIALIZERS: OrderedDict[str, Serializer] = OrderedDict(LITDATA_SERIALIZERS)
-
-_NUMPY_DTYPES_REVERSE: dict[np.dtype, int] = {
-    dtype: idx for idx, dtype in _NUMPY_DTYPES_MAPPING.items()
-}
 
 
 @dataclass(slots=True)
@@ -82,6 +175,7 @@ def _get_serializers(
     overrides: Optional[Mapping[str, Serializer]] = None,
 ) -> dict[str, Serializer]:
     """Return serializer instances, allowing overrides for testing."""
+    _ensure_litdata_deps()
     serializers: OrderedDict[str, Serializer] = OrderedDict(_SERIALIZERS)
     if overrides:
         for key, value in overrides.items():
@@ -446,8 +540,7 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
     """Loader specialised for token-block shards produced by LitData."""
 
     def __init__(self, block_size: int | None = None) -> None:
-        if torch is None:
-            raise ImportError("Torch is required for the tokens loader")
+        _ensure_torch()
         super().__init__()
         self._block_size = block_size
         self._mmaps: dict[int, np.memmap] = {}
@@ -467,8 +560,7 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         serializers: Mapping[str, Serializer],
         region_of_interest: Optional[list[tuple[int, int]]] = None,
     ) -> None:
-        if torch is None:
-            raise ImportError("Torch is required for the tokens loader")
+        _ensure_torch()
         super().setup(config, chunks, serializers, region_of_interest)
         self._shift_idx = 0
 
@@ -478,7 +570,9 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
 
         if serializer_name == "no_header_tensor":
             self._dtype = _TORCH_DTYPES_MAPPING[int(dtype_index)]
-            self._elem_size = int(torch.empty((), dtype=self._dtype).element_size())
+            self._elem_size = int(
+                _ensure_torch().empty((), dtype=self._dtype).element_size()
+            )
         else:
             self._dtype = _NUMPY_DTYPES_MAPPING[int(dtype_index)]
             self._elem_size = int(np.dtype(self._dtype).itemsize)  # type: ignore[arg-type]
@@ -589,8 +683,9 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         )
         rel_offset = start_abs - self._header_bytes[chunk_index]
 
-        if torch is not None and self._dtype in _TORCH_DTYPES_MAPPING.values():
-            return torch.frombuffer(
+        _t = _ensure_torch()
+        if _t is not None and self._dtype in _TORCH_DTYPES_MAPPING.values():
+            return _t.frombuffer(
                 buffer, dtype=self._dtype, count=self._block_size, offset=rel_offset
             )
         return np.frombuffer(

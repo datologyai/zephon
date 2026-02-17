@@ -5,32 +5,34 @@
 
 from zephon.io.formats.base import get_format
 
-_INITIALIZED = False
+_INITIALIZED_FORMATS: set[str] = set()
+
+_FORMAT_MODULES: dict[str, str] = {
+    "jsonl": "zephon.io.formats.jsonl",
+    "mds": "zephon.io.formats.mds",
+    "parquet": "zephon.io.formats.parquet",
+    "vortex": "zephon.io.formats.vortex",
+    "litdata": "zephon.io.formats.litdata",
+}
 
 
-def ensure_builtin_formats() -> None:
-    """Ensure that the built-in format handlers are registered."""
-    global _INITIALIZED
-    if _INITIALIZED:
-        return
+def ensure_builtin_formats(required: set[str]) -> None:
+    """Register format handlers for the given format kinds.
 
-    # Importing these modules registers their handlers via side effects.
+    Only the requested formats are loaded.  Formats that have already been
+    registered in a previous call are skipped (idempotent).  Each format
+    module is expected to handle its own optional dependencies internally
+    (e.g. parquet defers pyarrow, litdata defers optree/litdata).
+    """
     import importlib
 
-    importlib.import_module("zephon.io.formats.jsonl")
-    importlib.import_module("zephon.io.formats.mds")
-
-    # Optional formats - parquet and vortex handle missing deps internally
-    importlib.import_module("zephon.io.formats.parquet")
-    importlib.import_module("zephon.io.formats.vortex")
-
-    # litdata requires optree and litdata packages at import time
-    try:
-        importlib.import_module("zephon.io.formats.litdata")
-    except ImportError:
-        pass
-
-    _INITIALIZED = True
+    needed = required - _INITIALIZED_FORMATS
+    for kind in needed:
+        mod = _FORMAT_MODULES.get(kind)
+        if mod is None:
+            raise ValueError(f"Unknown format kind: {kind!r}")
+        importlib.import_module(mod)
+        _INITIALIZED_FORMATS.add(kind)
 
 
 __all__ = ["ensure_builtin_formats", "get_format"]

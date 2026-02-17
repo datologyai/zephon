@@ -11,10 +11,21 @@ try:
 except Exception:  # pragma: no cover - numpy may be optional
     _np = None  # type: ignore[assignment]
 
-try:
-    import torch as _torch
-except Exception:  # pragma: no cover - torch is optional
-    _torch = None  # type: ignore[assignment]
+_torch_mod = None
+_torch_checked = False
+
+
+def _lazy_torch():  # pragma: no cover - torch may or may not be installed
+    global _torch_mod, _torch_checked
+    if not _torch_checked:
+        try:
+            import torch
+
+            _torch_mod = torch
+        except Exception:
+            pass
+        _torch_checked = True
+    return _torch_mod
 
 
 def _estimate_sequence_bytes(obj: Sequence[Any], visited: set[int]) -> int:
@@ -53,7 +64,8 @@ def estimate_bytes(obj: Any, visited: set[int] | None = None) -> int:
         return len(obj.encode("utf-8"))
     if _np is not None and isinstance(obj, _np.ndarray):
         return int(obj.nbytes)
-    if _torch is not None and isinstance(obj, _torch.Tensor):
+    _t = _lazy_torch()
+    if _t is not None and isinstance(obj, _t.Tensor):
         return int(obj.element_size() * obj.nelement())
     if isinstance(obj, Mapping):
         return _estimate_mapping_bytes(obj, visited)

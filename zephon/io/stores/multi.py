@@ -88,7 +88,14 @@ def build_resolver_with_locators(
     total_shards = sum(len(ds.shard_index) for ds in datasets.values())
     resolver = build_resolver(total_shards, options=store_opts, storage=storage)
 
-    ensure_builtin_formats()
+    kinds: set[str] = {
+        kind
+        for d in datasets.values()
+        if isinstance((backend := d.backend), dict)
+        and isinstance((kind := backend.get("kind")), str)
+        and kind != "inmem"
+    }
+    ensure_builtin_formats(required=kinds)
     locators: dict[tuple[int, int], ShardLocator] = {}
 
     for dataset_id, dataset in datasets.items():
@@ -150,7 +157,7 @@ def build_multi_dataset_store(
             )
         elif isinstance(kind, str):
             # Defer to any registered file-backed format handler (e.g. jsonl, mds, litdata)
-            ensure_builtin_formats()
+            ensure_builtin_formats(required={kind})
             try:
                 handler = get_format(kind)
             except KeyError as exc:

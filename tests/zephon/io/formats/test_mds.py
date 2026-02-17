@@ -43,7 +43,7 @@ def test_mds_reader_handles_streaming_variants(
             writer.write(sample)
 
     dataset = Dataset.from_path(name=f"streaming_{description}", path=str(dataset_dir))
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"mds"})
     handler = get_format("mds")
     locators = handler.build_locators(dataset)
     assert dataset.path is not None
@@ -154,7 +154,7 @@ def test_mds_reader_handles_root_index_with_subdir_basenames(tmp_path):
     dataset = Dataset.from_path(
         name="root_with_subdir_basenames", path=str(dataset_root)
     )
-    ensure_builtin_formats()
+    ensure_builtin_formats(required={"mds"})
     handler = get_format("mds")
     locators = handler.build_locators(dataset)
 

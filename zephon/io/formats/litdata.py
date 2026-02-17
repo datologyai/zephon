@@ -1,22 +1,37 @@
 """LitData shard format integration."""
 
+from __future__ import annotations
+
 import json
 import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from zephon.io.formats.base import FormatHandler, register_format
-from zephon.io.formats.litdata_support import (
-    BaseItemLoader,
-    Interval,
-    PyTreeLoader,
-    TokensLoader,
-    _get_serializers,
-    treespec_loads,
-)
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
+
+# litdata_support requires numpy, optree, and (lazily) litdata+torch.
+# Defer the import so that registering the format handler does not pull in
+# heavy dependencies — they are only needed when discover/open_shard run.
+_litdata_support = None
+
+
+def _ensure_litdata_support():
+    global _litdata_support
+    if _litdata_support is None:
+        try:
+            from zephon.io.formats import litdata_support
+
+            _litdata_support = litdata_support
+        except ImportError as exc:
+            raise ImportError(
+                "LitData format requires numpy, optree, and litdata packages. "
+                "Install with: pip install zephon[litdata]"
+            ) from exc
+    return _litdata_support
+
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
@@ -28,8 +43,9 @@ class _StreamingTemplateDict(dict[str, Any]):
 
 def _select_item_loader(
     config: Mapping[str, Any], chunks: list[Mapping[str, Any]] | None = None
-) -> BaseItemLoader:
+) -> Any:
     """Choose the appropriate item loader based on the config metadata."""
+    support = _ensure_litdata_support()
     loader_spec = config.get("item_loader")
     loader_name: str | None = None
     block_size: int | None = None
@@ -67,10 +83,10 @@ def _select_item_loader(
                             break
         if block_size is None:
             raise ValueError("LitData tokens loader requires an integer 'block_size'")
-        return TokensLoader(block_size=block_size)
+        return support.TokensLoader(block_size=block_size)
 
     flag = config.get("return_flat_leaves")
-    return PyTreeLoader(
+    return support.PyTreeLoader(
         return_flat_leaves=bool(flag) if isinstance(flag, bool) else False
     )
 
@@ -141,7 +157,7 @@ def _normalize_config(raw: Mapping[str, Any]) -> _StreamingTemplateDict:
     config = _StreamingTemplateDict(raw)
     data_spec = config.get("data_spec")
     if isinstance(data_spec, str):
-        config["data_spec"] = treespec_loads(data_spec)
+        config["data_spec"] = _ensure_litdata_support().treespec_loads(data_spec)
     return config
 
 
@@ -195,8 +211,9 @@ class LitDataFormat(FormatHandler):
             chunk = _normalize_chunk(entry, shard_id)
             chunks.append(chunk)
 
+        support = _ensure_litdata_support()
         loader = _select_item_loader(config, chunks)
-        serializers = _get_serializers()
+        serializers = support._get_serializers()
         loader.setup(config, chunks, serializers, None)
         intervals = loader.generate_intervals()
         if len(intervals) != len(chunks):
@@ -205,7 +222,7 @@ class LitDataFormat(FormatHandler):
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}
         for shard_id, interval in enumerate(intervals):
-            assert isinstance(interval, Interval)
+            assert isinstance(interval, support.Interval)
             shard_length = int(interval.chunk_end - interval.chunk_start)
             shard_index[shard_id] = shard_length
             shard_meta[shard_id] = {
@@ -273,7 +290,9 @@ class LitDataFormat(FormatHandler):
                     "chunk": chunk,
                     "chunk_index": shard_id,
                     **(
-                        {"interval": interval} if isinstance(interval, Interval) else {}
+                        {"interval": interval}
+                        if isinstance(interval, _ensure_litdata_support().Interval)
+                        else {}
                     ),
                 },
             )
@@ -290,6 +309,7 @@ class LitDataFormat(FormatHandler):
         if not isinstance(config, Mapping) or not isinstance(chunk, Mapping):
             raise RuntimeError("LitData shard extras missing config or chunk metadata")
         interval = extra.get("interval")
+        Interval = _ensure_litdata_support().Interval
         cached_interval = interval if isinstance(interval, Interval) else None
         return _LitDataShard(locator.root, config, chunk, local_ref, cached_interval)
 
@@ -303,8 +323,9 @@ class _LitDataShard(RandomAccessShard):
         config: Mapping[str, Any],
         chunk: Mapping[str, Any],
         local_ref: LocalShardRef,
-        interval: Interval | None = None,
+        interval: Any | None = None,
     ) -> None:
+        support = _ensure_litdata_support()
         self._root = root
         self._raw_path = local_ref.raw.path
         if isinstance(config, _StreamingTemplateDict):
@@ -315,16 +336,16 @@ class _LitDataShard(RandomAccessShard):
         self._chunk_bytes = int(self._chunk.get("chunk_bytes", local_ref.raw.bytes))
 
         loader = _select_item_loader(self._config, [self._chunk])
-        serializers = _get_serializers()
+        serializers = support._get_serializers()
         loader.setup(self._config, [self._chunk], serializers, None)
-        if isinstance(interval, Interval):
+        if isinstance(interval, support.Interval):
             self._interval = interval
             self._length = int(interval.chunk_end - interval.chunk_start)
         else:
             intervals = loader.generate_intervals()
             if not intervals:
                 self._length = 0
-                self._interval = Interval(0, 0, 0, 0)
+                self._interval = support.Interval(0, 0, 0, 0)
             else:
                 self._interval = intervals[0]
                 self._length = int(

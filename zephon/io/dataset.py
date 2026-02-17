@@ -85,7 +85,7 @@ class Dataset:
         if kind is None:
             raise ValueError(f"Unsupported dataset format at path: {root_str}")
 
-        ensure_builtin_formats()
+        ensure_builtin_formats(required={kind})
         handler = get_format(kind)
         shard_index, shard_meta = handler.discover(root_str, storage)
         backend = {"kind": kind, "path": root_str, "shards": shard_meta}
