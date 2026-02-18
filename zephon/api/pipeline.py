@@ -39,6 +39,7 @@ from zephon.ops import (
     Batch,
     DecodeText,
     FetchOp,
+    MapBatchTransform,
     MapTransform,
     Materialize,
     PackSequences,
@@ -319,6 +320,45 @@ class Pipeline:
         self._tail = node
         return self
 
+    def map_batch(
+        self,
+        transform_fn: Callable[[SampleBatch], SampleBatch | None],
+        *,
+        drop_none: bool = True,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Add a batch-level map transformation operator.
+
+        Applies a user-provided transformation function to each ``SampleBatch``.
+        This operator must be placed **after** a ``batch()`` call in the pipeline.
+        For per-sample transforms (before batching), use ``map_transform()`` instead.
+
+        Args:
+            transform_fn: Callable that transforms a ``SampleBatch``.
+                If it returns None and drop_none=True, the batch is filtered out.
+                Supports lambdas, closures, and nested functions.
+            drop_none: If True, drop batches where transform_fn returns None.
+            placement: Placement hint for this operator.
+            parallelism: Override default parallelism for this operator.
+
+        Returns:
+            Self for method chaining.
+
+        Example:
+            >>> pipeline.batch(32).map_batch(lambda b: process(b))
+        """
+        op = MapBatchTransform(transform_fn, drop_none=drop_none)
+        node = self._graph.add(
+            "map_batch",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
     def stateful_transform(
         self,
         name: str,
@@ -331,6 +371,7 @@ class Pipeline:
         placement: str = "auto",
         parallelism: int = 1,
         indexable: bool = False,
+        preserves_cursor_order: bool = True,
     ) -> "Pipeline":
         """Add a stateful transformation with custom accumulation logic.
 
@@ -365,6 +406,10 @@ class Pipeline:
             parallelism: Worker parallelism. Use >1 when transform is expensive.
             indexable: Whether this operator preserves indexability (default False).
                 Set True only if the transform is 1:1 and deterministic.
+            preserves_cursor_order: Whether outputs maintain monotone cursor order.
+                Set False when the transform reorders or packs items (e.g.,
+                shuffle, bin-packing). This affects which chunk-eviction path
+                the engine uses for the entire plan.
 
         Returns:
             Self for method chaining.
@@ -417,6 +462,7 @@ class Pipeline:
             transform_fn=transform,
             parallelism=parallelism,
             indexable=indexable,
+            preserves_cursor_order=preserves_cursor_order,
         )
         node = self._graph.add(
             name,

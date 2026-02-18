@@ -3,10 +3,11 @@
 
 """Helpers for child/contributor-aware metadata construction."""
 
-from collections.abc import Iterable
-from typing import Any
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
+from typing import Any, Callable
 
-from zephon.core.constants import ContributorRef, SampleCursor, SampleMeta
+from zephon.core.constants import ContributorRef, SampleCursor, SampleMeta, SampleRecord
 
 
 def spawn_child(
@@ -128,3 +129,33 @@ def tombstone_meta(ref: ContributorRef, lane_id: int) -> SampleMeta:
         tags={"_tombstone": True},
     ).with_contributors((ref,))
     return meta
+
+
+def collect_pack_contributions(
+    samples: Sequence[SampleRecord],
+    length_fn: Callable[[SampleRecord], int],
+) -> tuple[list[ContributorRef], dict[int, int], dict[int, int]]:
+    """Gather contributors and aggregate component counts from packed samples.
+
+    Returns ``(contributors, component_sample_counts, component_token_counts)``
+    ready for ``pack_meta()``.  Used by ``PackSequences`` and any external
+    packing operator (e.g. legacy shuffle+pack).
+    """
+    contributors: list[ContributorRef] = []
+    component_sample_counts: dict[int, int] = defaultdict(int)
+    component_token_counts: dict[int, int] = defaultdict(int)
+
+    for sample in samples:
+        contributors.extend(sample.meta.contribution_refs())
+        seq_len = length_fn(sample)
+        for cid, count in sample.meta.component_sample_counts.items():
+            component_sample_counts[cid] += count
+        if sample.meta.component_token_counts is not None:
+            for cid, tokens in sample.meta.component_token_counts.items():
+                component_token_counts[cid] += tokens
+        else:
+            total_samples = sum(sample.meta.component_sample_counts.values())
+            for cid, count in sample.meta.component_sample_counts.items():
+                component_token_counts[cid] += round(seq_len * count / total_samples)
+
+    return contributors, dict(component_sample_counts), dict(component_token_counts)

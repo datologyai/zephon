@@ -263,6 +263,27 @@ class TestStatefulTransformOp:
         traits = op.traits()
         assert traits.indexable is True
 
+    def test_preserves_cursor_order_configurable(self) -> None:
+        """Test that preserves_cursor_order can be set to False."""
+        op = StatefulTransformOp(
+            init_state=lambda: {},
+            push_fn=lambda s, items: (s, items),
+            preserves_cursor_order=False,
+        )
+        _setup(op)
+
+        traits = op.traits()
+        assert traits.preserves_cursor_order is False
+
+    def test_preserves_cursor_order_defaults_true(self) -> None:
+        """Test that preserves_cursor_order defaults to True."""
+        op = StatefulTransformOp(
+            init_state=lambda: {},
+            push_fn=lambda s, items: (s, items),
+        )
+        traits = op.traits()
+        assert traits.preserves_cursor_order is True
+
     def test_custom_parallelism(self) -> None:
         """Test that parallelism can be customized."""
         op = StatefulTransformOp(

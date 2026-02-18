@@ -3,7 +3,7 @@
 
 import pytest
 
-from zephon.core.constants import SampleMeta, SampleRecord
+from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
 from zephon.core.op_base import OpContext
 from zephon.ops.map_transform import MapTransform
 
@@ -58,7 +58,7 @@ def test_map_transform_full_payload() -> None:
 
 
 def test_map_transform_filtering_drop_none() -> None:
-    """Test filtering samples by returning None."""
+    """Test filtering samples by returning None emits tombstones."""
 
     def transform(payload: dict) -> dict | None:
         if payload.get("text") == "":
@@ -73,10 +73,12 @@ def test_map_transform_filtering_drop_none() -> None:
     assert len(out1) == 1
     assert _payload_dict(out1[0])["kept"] is True
 
-    # Should be dropped
+    # Should be dropped — emits a tombstone instead of []
     r2 = _rec({"text": ""})
     out2 = op.process_one(r2)
-    assert len(out2) == 0
+    assert len(out2) == 1
+    assert out2[0].meta.tombstone is True
+    assert out2[0].payload is None
 
 
 def test_map_transform_filtering_keep_none() -> None:
@@ -194,7 +196,7 @@ def test_map_transform_non_dict_payload() -> None:
 
 
 def test_map_transform_filtering_with_process_many() -> None:
-    """Test filtering works correctly in batch processing."""
+    """Test filtering emits tombstones in batch processing."""
 
     def transform(payload: dict) -> dict | None:
         if payload.get("text", "").startswith("drop"):
@@ -208,9 +210,13 @@ def test_map_transform_filtering_with_process_many() -> None:
         _rec({"text": "keep2"}),
     ]
     results = op.process_many(records)
-    # Should have 2 results (one dropped)
-    assert len(results) == 2
-    assert all(_payload_dict(r)["kept"] is True for r in results)
+    # 2 kept + 1 tombstone for the dropped record
+    assert len(results) == 3
+    kept = [r for r in results if not r.meta.tombstone]
+    tombstones = [r for r in results if r.meta.tombstone]
+    assert len(kept) == 2
+    assert len(tombstones) == 1
+    assert all(_payload_dict(r)["kept"] is True for r in kept)
 
 
 def test_map_transform_empty_payload() -> None:
@@ -224,3 +230,18 @@ def test_map_transform_empty_payload() -> None:
     out = op.process_one(r)[0]
     payload = _payload_dict(out)
     assert payload["empty"] is True
+
+
+def test_map_transform_does_not_accept_sample_batch() -> None:
+    """MapTransform.process_one is typed for SampleRecord only.
+
+    The planner enforces this at graph-analysis time; at runtime the narrowed
+    signature means a SampleBatch would produce an AttributeError rather than
+    silently succeeding.
+    """
+    op = _setup(MapTransform(lambda p: p))
+    records = tuple(_rec({"text": f"hello{i}"}, sample_id=(0, 0, i)) for i in range(3))
+    batch = SampleBatch(records=records)
+
+    with pytest.raises(AttributeError):
+        op.process_one(batch)  # type: ignore[arg-type]

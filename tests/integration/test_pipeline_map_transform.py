@@ -1,7 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests for MapTransform operator in pipeline context."""
+"""Integration tests for MapTransform and MapBatchTransform operators in pipeline context."""
 
 import json
 from pathlib import Path
@@ -399,5 +399,54 @@ def test_pipeline_map_transform_with_process_runner_lambda(tmp_path: Path) -> No
                 assert payload.get("doubled") is True
                 # Value should be doubled
                 assert payload.get("value") % 2 == 0
+    finally:
+        iterator.close()
+
+
+def test_pipeline_map_batch_after_batch(tmp_path: Path) -> None:
+    """Test map_batch() applied after batch() transforms entire batches."""
+    shard0 = tmp_path / "shard0.jsonl"
+    shard0.write_text(
+        "\n".join(json.dumps({"text": f"sample {i}"}) for i in range(4)),
+        encoding="utf-8",
+    )
+    jsonl_dataset = Dataset.from_path("demo", str(tmp_path))
+
+    from zephon.core.constants import SampleBatch, SampleRecord
+
+    def transform_batch(batch: SampleBatch) -> SampleBatch:
+        new_records = []
+        for record in batch.records:
+            payload = record.payload
+            assert isinstance(payload, dict)
+            new_payload = {"text": payload["text"].upper(), "batch_transformed": True}
+            new_records.append(SampleRecord(meta=record.meta, payload=new_payload))
+        return SampleBatch(records=tuple(new_records))
+
+    work_source = StaticMixtureWorkSource(
+        [jsonl_dataset],
+        mixture=MixtureSpec({jsonl_dataset.name: 1.0}).weights,
+        chunk_size=1,
+        seed=11,
+        shuffle_shards=False,
+    )
+    pipe = (
+        PublicPipeline(work_source)
+        .decode_text()
+        .batch(microbatch_size=2, drop_last=False)
+        .map_batch(transform_batch)
+    )
+
+    iterator = iter(pipe)
+    try:
+        batches = list(iterator)
+        total_samples = sum(len(batch.records) for batch in batches)
+        assert total_samples >= 2
+        for batch in batches:
+            for record in batch.records:
+                payload = record.payload
+                assert isinstance(payload, dict)
+                assert payload.get("batch_transformed") is True
+                assert "SAMPLE" in payload.get("text", "")
     finally:
         iterator.close()

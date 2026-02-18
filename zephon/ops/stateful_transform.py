@@ -49,7 +49,17 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
             self._state = self._init_state()
             self._initialized = True
 
-        items_list = items if isinstance(items, list) else list(items)
+        # Tombstones pass through unchanged — they must not enter user state.
+        tombstones = [r for r in items if r.meta.tombstone]
+        real_items = [r for r in items if not r.meta.tombstone]
+
+        result: list[ReadyBatch[SampleRecord]] = []
+        if tombstones:
+            result.append((tombstones, 0))
+        if not real_items:
+            return result
+
+        items_list = real_items if isinstance(real_items, list) else list(real_items)
         self._state, outputs = self._push_fn(self._state, items_list)
 
         if self._should_flush_fn and self._should_flush_fn(self._state):
@@ -58,8 +68,8 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
             outputs.extend(flush_outputs)
 
         if outputs:
-            return [(outputs, len(outputs))]
-        return []
+            result.append((outputs, len(outputs)))
+        return result
 
     def flush(self) -> list[ReadyBatch[SampleRecord]]:
         """Called at end-of-stream to emit any remaining buffered items."""
@@ -135,6 +145,7 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         ] = None,
         parallelism: int = 1,
         indexable: bool = False,
+        preserves_cursor_order: bool = True,
     ):
         DefaultSetup.__init__(self)
         if not callable(init_state):
@@ -155,11 +166,12 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         self._transform_fn = transform_fn
         self._parallelism = parallelism
         self._indexable = indexable
+        self._preserves_cursor_order = preserves_cursor_order
 
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=self._indexable,
-            preserves_cursor_order=True,
+            preserves_cursor_order=self._preserves_cursor_order,
             parallelism=self._parallelism,
             batch_shape_sensitive=True,  # State depends on batch boundaries
             # Note: requires_serial_state=False because the accumulator already
@@ -178,6 +190,13 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
             should_flush_fn=self._should_flush_fn,
         )
 
+    # TODO: StatefulTransform does not auto-emit tombstones when push_fn or
+    # transform_fn drops items. Unlike MapTransform (which emits tombstones
+    # for drops via _tombstones_for), items silently filtered here will have
+    # their chunk offsets never closed — a memory leak in the general notify
+    # path. Investigate adding tombstone support, e.g. by tracking input vs
+    # output records in process_many and emitting tombstones for the diff.
+
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         """Transform a single record (runs in parallel workers).
 
@@ -185,6 +204,8 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         calls transform_fn, and unwraps. For best performance with batch-oriented
         transforms (GPU batching, etc.), use process_many.
         """
+        if elem.meta.tombstone:
+            return [elem]
         if self._transform_fn is None:
             return [elem]
         return self._transform_fn([elem])
@@ -197,4 +218,11 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         """
         if self._transform_fn is None:
             return elems
-        return self._transform_fn(elems)
+        # Tombstones pass through unchanged.
+        tombstones = [r for r in elems if r.meta.tombstone]
+        real = [r for r in elems if not r.meta.tombstone]
+        if not real:
+            return tombstones
+        result = self._transform_fn(real)
+        result.extend(tombstones)
+        return result

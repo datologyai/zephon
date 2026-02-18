@@ -839,8 +839,11 @@ class Engine:
             ):
                 chosen = "threads"
 
-            if getattr(stage, "runner_hint", None) == "inline":
+            hint = getattr(stage, "runner_hint", None)
+            if hint == "inline":
                 chosen = "inline"
+            elif hint == "threads":
+                chosen = "threads"
             allow_latency = self._opts.allow_latency_flush_in_deterministic
             if self._opts.deterministic:
                 has_sensitive = any(

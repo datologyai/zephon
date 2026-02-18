@@ -128,10 +128,16 @@ class ShuffleBuffer(DefaultSetup):
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         if not elems:
             return []
-        rng = Random(batch_seed(self.seed, elems))
-        rng.shuffle(elems)
-        _redistribute_closers_in_place(elems)
-        return elems
+        # Tombstones pass through unchanged — they carry no payload to shuffle.
+        tombstones = [r for r in elems if r.meta.tombstone]
+        real = [r for r in elems if not r.meta.tombstone]
+        if not real:
+            return tombstones
+        rng = Random(batch_seed(self.seed, real))
+        rng.shuffle(real)
+        _redistribute_closers_in_place(real)
+        real.extend(tombstones)
+        return real
 
 
 __all__ = ["ShuffleBuffer"]

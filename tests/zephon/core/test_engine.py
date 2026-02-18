@@ -18,6 +18,7 @@ from zephon.ops.delay import DelayById
 from zephon.ops.fetch import FetchOp
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
+from zephon.runners.threads import ThreadStageRunner
 from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -298,7 +299,31 @@ def test_autotune_mode_not_implemented() -> None:
         )
 
 
-def test_engine_forces_inline_runner_for_batch_stage() -> None:
+def test_engine_forces_inline_runner_for_terminal_batch_stage() -> None:
+    """When batch is the last op (no post-batch ops), it stays inline."""
+    g = Graph()
+    src = g.add("src", DelayById(max_delay_ms=0.0))
+    g.add("batch", Batch(microbatch_size=4), src)
+
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    eng = Engine(
+        plan,
+        RuntimeOptions(
+            runner="process", worker_allocation="per_stage_fixed", max_workers=1
+        ),
+        work,
+    )
+    try:
+        assert len(eng._runners) == 2
+        assert isinstance(eng._runners[0], ProcessStageRunner)
+        assert isinstance(eng._runners[1], InlineStageRunner)
+    finally:
+        eng.close()
+
+
+def test_engine_batch_with_post_ops_not_inline() -> None:
+    """When post-batch ops exist, batch + post-batch merge into one non-inline stage."""
     g = Graph()
     src = g.add("src", DelayById(max_delay_ms=0.0))
     batch = g.add("batch", Batch(microbatch_size=4), src)
@@ -314,9 +339,8 @@ def test_engine_forces_inline_runner_for_batch_stage() -> None:
         work,
     )
     try:
-        assert len(eng._runners) == 3
-        assert isinstance(eng._runners[1], InlineStageRunner)
+        assert len(eng._runners) == 2
         assert isinstance(eng._runners[0], ProcessStageRunner)
-        assert isinstance(eng._runners[2], ProcessStageRunner)
+        assert isinstance(eng._runners[1], ThreadStageRunner)
     finally:
         eng.close()

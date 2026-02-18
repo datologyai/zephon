@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Literal, Optional, Sequence
 
 from zephon.core.accumulators import Accumulator, ReadyBatch
-from zephon.core.children import pack_meta
-from zephon.core.constants import ContributorRef, SampleRecord
+from zephon.core.children import collect_pack_contributions, pack_meta
+from zephon.core.constants import SampleRecord
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
 from zephon.utils.length_extraction import extract_length
@@ -78,8 +78,13 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if not elems:
             return []
 
-        # Convert to list for potential reordering
-        work_list = list(elems)
+        # Tombstones pass through unchanged — they carry no payload to pack.
+        work_list = [r for r in elems if not r.meta.tombstone]
+        tombstone_batches: list[ReadyBatch[SampleRecord]] = [
+            ([r], 0) for r in elems if r.meta.tombstone
+        ]
+        if not work_list:
+            return tombstone_batches
 
         # Apply shuffle strategy to order sequences
         if self.shuffle_strategy == "random":
@@ -116,6 +121,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             for rec in packed:
                 ready.append(([rec], 0))
 
+        ready.extend(tombstone_batches)
         return ready
 
     def flush(self) -> list[ReadyBatch[SampleRecord]]:
@@ -248,34 +254,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             "packed_samples": packed_payload_value,
         }
 
-        contributors: list[ContributorRef] = []
-        for sample in samples:
-            contributors.extend(sample.meta.contribution_refs())
-
-        # Aggregate component contributions from all samples being packed.
-        # This tracks how many original samples and tokens from each component
-        # are combined into this packed record.
-        component_sample_counts: dict[int, int] = defaultdict(int)
-        component_token_counts: dict[int, int] = defaultdict(int)
-
-        for sample in samples:
-            seq_len = self.length_fn(sample)
-            # Aggregate sample counts from this sample's components
-            for cid, count in sample.meta.component_sample_counts.items():
-                component_sample_counts[cid] += count
-            # Compute token counts: if sample already has token counts, use them;
-            # otherwise distribute this sample's tokens by its sample count ratios.
-            if sample.meta.component_token_counts is not None:
-                for cid, tokens in sample.meta.component_token_counts.items():
-                    component_token_counts[cid] += tokens
-            else:
-                # Sample doesn't have token counts (e.g., single-component sample).
-                # Distribute seq_len proportionally by sample counts.
-                total_samples = sum(sample.meta.component_sample_counts.values())
-                for cid, count in sample.meta.component_sample_counts.items():
-                    component_token_counts[cid] += round(
-                        seq_len * count / total_samples
-                    )
+        contributors, component_sample_counts, component_token_counts = (
+            collect_pack_contributions(samples, self.length_fn)
+        )
 
         base_meta = samples[0].meta
         primary_cursor = base_meta.cursor.child(0)
@@ -284,8 +265,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             primary_cursor=primary_cursor,
             contributors=contributors,
             lane_id=lane_id,
-            component_sample_counts=dict(component_sample_counts),
-            component_token_counts=dict(component_token_counts),
+            component_sample_counts=component_sample_counts,
+            component_token_counts=component_token_counts,
             tags={
                 "_packing_metadata": {
                     "num_sequences": num_sequences,

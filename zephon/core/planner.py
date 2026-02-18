@@ -5,6 +5,7 @@
 
 from zephon.core.graph import Graph, Node, Plan, Stage
 from zephon.ops.batch import Batch
+from zephon.ops.map_transform import MapBatchTransform, MapTransform
 from zephon.ops.replay_filter import ReplayFilter
 
 
@@ -38,6 +39,7 @@ class Planner:
         diagnostics for the data-loading plan.
         """
         nodes = self._with_replay_filters(graph)
+        self._validate_map_batch_ordering(nodes)
 
         stages: list[Stage] = []
         current_nodes: list[Node] = []
@@ -115,6 +117,20 @@ class Planner:
             batch_size_hint=batch_size_hint,
         )
 
+    def _validate_map_batch_ordering(self, nodes: list[Node]) -> None:
+        """Ensure map operators appear on the correct side of Batch."""
+        seen_batch = False
+        for node in nodes:
+            if isinstance(node.op, Batch):
+                seen_batch = True
+            elif isinstance(node.op, MapTransform) and seen_batch:
+                raise ValueError(
+                    "map_transform() cannot be used after batch(); "
+                    "use map_batch() instead."
+                )
+            elif isinstance(node.op, MapBatchTransform) and not seen_batch:
+                raise ValueError("map_batch() requires a preceding batch() operator.")
+
     def _split_batch_stages(self, stages: list[Stage]) -> list[Stage]:
         expanded: list[Stage] = []
         for stage in stages:
@@ -122,11 +138,19 @@ class Planner:
         return expanded
 
     def _split_stage_for_batch(self, stage: Stage) -> list[Stage]:
+        """Split a stage around Batch operators.
+
+        When a Batch op has post-batch operators after it (before the next
+        Batch or end of stage), they are merged into the same segment and
+        the segment uses the default runner (threads) instead of inline.
+        When Batch is the terminal op with nothing after it, the segment
+        is kept inline for lower overhead.
+        """
         nodes = stage.nodes
         if not any(isinstance(nd.op, Batch) for nd in nodes):
             return [stage]
 
-        segments: list[tuple[list[Node], bool]] = []
+        segments: list[tuple[list[Node], str | None]] = []
         idx = 0
         total = len(nodes)
         while idx < total:
@@ -136,7 +160,7 @@ class Planner:
             )
             if batch_idx is None:
                 if idx < total:
-                    segments.append((nodes[idx:], False))
+                    segments.append((nodes[idx:], None))
                 break
 
             inline_start = batch_idx
@@ -149,19 +173,49 @@ class Planner:
                 ):
                     inline_start = batch_idx - 1
 
+            # Pre-batch segment
             if inline_start > idx:
-                segments.append((nodes[idx:inline_start], False))
+                segments.append((nodes[idx:inline_start], None))
 
-            segments.append((nodes[inline_start : batch_idx + 1], True))
-            idx = batch_idx + 1
+            # Find where this batch's segment ends: next Batch or end of stage.
+            next_batch_idx = next(
+                (
+                    i
+                    for i in range(batch_idx + 1, total)
+                    if isinstance(nodes[i].op, Batch)
+                ),
+                None,
+            )
+            if next_batch_idx is not None:
+                # Stop before the next Batch's ReplayFilter if present.
+                segment_end = next_batch_idx
+                if next_batch_idx > 0:
+                    prev_next = nodes[next_batch_idx - 1]
+                    next_node = nodes[next_batch_idx]
+                    if (
+                        isinstance(prev_next.op, ReplayFilter)
+                        and prev_next.name == f"{next_node.name}_replay_filter"
+                    ):
+                        segment_end = next_batch_idx - 1
+            else:
+                segment_end = total
+
+            has_post_batch_ops = segment_end > batch_idx + 1
+            if has_post_batch_ops:
+                # Post-batch ops (e.g. tensor construction) must use threads
+                # to avoid expensive IPC serialization of tensors across processes.
+                segments.append((nodes[inline_start:segment_end], "threads"))
+            else:
+                segments.append((nodes[inline_start : batch_idx + 1], "inline"))
+            idx = segment_end
 
         result: list[Stage] = []
-        for seg_idx, (seg_nodes, inline) in enumerate(segments):
+        for seg_idx, (seg_nodes, hint) in enumerate(segments):
             if not seg_nodes:
                 continue
             name = stage.name if seg_idx == 0 else f"{stage.name}#{seg_idx}"
             break_reason = stage.break_reason if seg_idx == 0 else "batch-inline"
-            runner_hint = "inline" if inline else stage.runner_hint
+            runner_hint = hint if hint is not None else stage.runner_hint
             result.append(
                 Stage(
                     name=name,

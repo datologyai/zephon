@@ -59,6 +59,7 @@ On `load_state_dict()`:
 - `meta.contributors` should enumerate all contributors whose content is inside a record. Contributors that close offsets must set `is_last_child=True`; others set it to `False`.
 - `meta.cursor` is the identity of the *record* for replay. Contributors capture which base offsets that record depends on for eviction.
 - A packed record may carry multiple contributors and can close multiple offsets (across chunks) at once.
+- **Safe default rule**: Operators that drop items SHOULD always emit tombstones, regardless of `preserves_cursor_order`. An operator cannot know at build time which notify path the plan will use (it depends on the AND of all operators' traits). Tombstones are harmless in the monotone path (notified then skipped) and required in the general path (close per-offset bitmaps). Always emitting tombstones is correct in all configurations.
 
 ### Eviction details and why it is safe
 - **Simple path assumptions**: Tail emission per lane is monotone in `SampleCursor` and each output has exactly one contributor (no packing/tombstones). Under these assumptions, seeing chunk `N` implies no future outputs will reference chunks `< N`, so evicting `cid < N` is safe and no bitmaps are required.
@@ -90,14 +91,34 @@ On `load_state_dict()`:
   - Use `spawn_child(parent, idx, is_last_child=...)` when a single base sample produces multiple outputs so lineage matches emission order and you can mark the one that closes the base offset. If you emit exactly one record per base sample, the default single-contributor behavior is sufficient.
   - Exactly one contributor per base offset (or tombstone) must set `is_last_child=True`. If all real outputs are dropped, emit a tombstone closing that offset.
 - **Packing operators**:
-  - Choose a deterministic `primary_cursor` for the packed record (often one contributor’s cursor plus an extra lineage step if needed) and ensure uniqueness per lane.
+  - Choose a deterministic `primary_cursor` for the packed record (often one contributor's cursor plus an extra lineage step if needed) and ensure uniqueness per lane.
   - Build `contributors` for every included contributor; set `is_last_child=True` on contributors that close their base offsets. Use `pack_meta(...)` to assemble the metadata.
   - A single packed record may close multiple offsets across chunks; the engine will evict chunks once all offsets are closed.
+  - Example (see `PackSequences._create_packed_record` for the canonical implementation):
+    ```python
+    from zephon.core.children import pack_meta
+    contributors = []
+    for sample in samples:
+        contributors.extend(sample.meta.contribution_refs())
+    primary_cursor = samples[0].meta.cursor.child(0)
+    packed_meta = pack_meta(
+        primary_cursor=primary_cursor,
+        contributors=contributors,
+        lane_id=samples[0].meta.lane_id,
+        component_sample_counts=aggregated_counts,
+    )
+    packed_record = SampleRecord(meta=packed_meta, payload=packed_payload)
+    ```
 - **Filtering / dropping**:
   - If dropping the final contributor for an offset (or dropping all contributors), emit `tombstone_meta(ref, lane_id)` so eviction can progress. Batching forwards tombstones without affecting batch shapes; the pipeline hides them from the training consumer.
+  - `MapTransform` handles this automatically when `drop_none=True`. For custom operators, iterate `contribution_refs()` and emit a tombstone for each ref with `is_last_child=True`.
+- **Stateful transforms** (`Pipeline.stateful_transform()`):
+  - Set `preserves_cursor_order=False` when your push/transform function reorders items (shuffle) or packs multiple records into one. The default is `True`, which selects the monotone notify path. If your transform actually reorders, this can lead to premature chunk eviction.
+  - If your transform drops items (e.g., dedup filtering in `push_fn` or length filtering in `transform_fn`), those drops happen inside the operator and do NOT automatically emit tombstones. You must track which items were dropped and emit tombstone records from `transform_fn` or `push_fn`. Alternatively, perform filtering in a preceding `MapTransform` with `drop_none=True` which handles tombstones automatically.
 - **Map-style transforms**:
   - If you only mutate payloads and keep a 1:1 mapping, reuse the incoming `SampleMeta`. The default `contribution_refs()` handles eviction/replay correctly.
-  - If you conditionally drop records, ensure the drop still produces a tombstone when the dropped record would have been the last contributor for its base offset.
+  - `MapTransform` with `drop_none=True` automatically emits tombstones for every closing contributor in a dropped item (both `SampleRecord` and `SampleBatch`). No manual tombstone handling is needed when using the `Pipeline.map_transform()` API.
+  - Custom operators that conditionally drop records must emit tombstones for every closing contributor (`is_last_child=True`) in the dropped item's `contribution_refs()`. See `MapTransform._tombstones_for()` for reference.
 - **Shuffle/cross-chunk buffering**:
   - Reordering is allowed; replay remains correct. Still respect the contributor/tombstone contract so eviction can safely remove chunks whose offsets are fully closed.
 - **Closing contributors after reordering/packing**:

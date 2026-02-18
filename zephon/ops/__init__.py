@@ -8,7 +8,7 @@ from zephon.ops.batch import Batch
 from zephon.ops.decode_text import DecodeText
 from zephon.ops.ensure_mixture import EnsureMixture
 from zephon.ops.fetch import FetchOp
-from zephon.ops.map_transform import MapTransform
+from zephon.ops.map_transform import MapBatchTransform, MapTransform
 from zephon.ops.materialize import Materialize
 from zephon.ops.pack_sequences import PackSequences
 from zephon.ops.prefetch import PrefetchOp
@@ -22,6 +22,7 @@ __all__ = [
     "DecodeText",
     "EnsureMixture",
     "FetchOp",
+    "MapBatchTransform",
     "MapTransform",
     "Materialize",
     "PackSequences",
