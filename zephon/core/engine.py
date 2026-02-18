@@ -1374,9 +1374,13 @@ class Engine:
 
         # 1) Evict older inflight chunks — O(1) fast-path skip.
         if inflight_lane:
-            first_cid = next(iter(inflight_lane))
-            if first_cid < max_chunk_id:
-                to_evict = [cid for cid in inflight_lane if cid < max_chunk_id]
+            # Free-threaded Python: dict iteration can race; skipping is safe (retried next call).
+            try:
+                snapshot = list(inflight_lane)
+            except RuntimeError:
+                snapshot = []
+            if snapshot and snapshot[0] < max_chunk_id:
+                to_evict = [cid for cid in snapshot if cid < max_chunk_id]
                 for cid in to_evict:
                     inflight_lane.pop(cid, None)
                 with self._mixture_lock:
@@ -1440,8 +1444,15 @@ class Engine:
         last_completed_offset = 0
         cids_to_evict: list[int] = []
         # Chunk IDs increase monotonically per lane; dict preserves insertion order.
-        for cid in list(inflight_lane.keys()):
-            chunk = inflight_lane[cid]
+        # Free-threaded Python: dict iteration can race; skipping is safe (retried next call).
+        try:
+            cid_snapshot = list(inflight_lane.keys())
+        except RuntimeError:
+            cid_snapshot = []
+        for cid in cid_snapshot:
+            chunk = inflight_lane.get(cid)
+            if chunk is None:
+                continue  # concurrently evicted
             if cid not in done:
                 break
             if done_count[cid] >= len(chunk):
@@ -1462,8 +1473,12 @@ class Engine:
 
         # 3) Maintain lane progress for fairness diagnostics — mutate in-place.
         cur = self._lane_progress[lane_id]  # defaultdict auto-creates
-        if inflight_lane:
-            front_cid = min(inflight_lane.keys())
+        # Free-threaded Python: dict iteration can race; stale progress is harmless.
+        try:
+            front_cid = next(iter(inflight_lane), None)
+        except RuntimeError:
+            front_cid = None
+        if front_cid is not None:
             cur.chunk_id = front_cid
             cur.offset = done_count.get(front_cid, 0)
         elif last_completed_cid >= 0:
