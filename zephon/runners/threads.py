@@ -32,6 +32,28 @@ class _ThreadOperatorState(ConcurrentOperatorState):
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
     result_queue: _QueueLike[RunnerResult] = field(init=False)
 
+    #: Thread identity of the pump thread that owns this operator state.
+    #: Set at the start of ``_operator_loop`` via ``_on_pump_started``.
+    pump_thread_id: int = field(init=False, default=0)
+
+    #: Holds a single result produced by a synchronous ``done_callback``
+    #: that ran on the pump thread.
+    #:
+    #: When ``future.add_done_callback(cb)`` is called on an already-completed
+    #: future, Python invokes ``cb`` synchronously on the calling thread — which
+    #: is the pump thread.  The callback normally puts the result into
+    #: ``result_queue``, but the pump is the *only* thread that drains that
+    #: queue.  If the queue is full the pump blocks on its own queue and
+    #: deadlocks: no other thread will ever make space.
+    #:
+    #: To break this cycle the callback detects that it is running on the pump
+    #: thread (via ``pump_thread_id``) and stashes the result here instead of
+    #: blocking on the queue.  ``_post_schedule_batch`` returns immediately,
+    #: control flows back to ``_operator_loop``, and the pump handles the
+    #: stashed result inline — draining queues, forwarding downstream, etc. —
+    #: without ever blocking on a queue it is responsible for draining.
+    sync_result: RunnerResult | None = field(init=False, default=None)
+
     def __post_init__(self) -> None:
         super().__post_init__()
         self._instance_queue = queue.Queue()
@@ -244,6 +266,20 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
             stop_event=threading.Event(),
         )
 
+    def _on_pump_started(self, state: _ThreadOperatorState) -> None:
+        state.pump_thread_id = threading.get_ident()
+
+    def _post_schedule_batch(
+        self,
+        state: _ThreadOperatorState,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+    ) -> None:
+        sr = state.sync_result
+        if sr is not None:
+            state.sync_result = None
+            self._handle_result(state, sr, next_queue, context)
+
     def _put_result(
         self,
         state: _ThreadOperatorState,
@@ -349,10 +385,16 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
                 )
 
                 if should_put:
-                    try:
-                        self._put_result(state, payload, context)
-                    finally:
+                    if threading.get_ident() == state.pump_thread_id:
+                        # Synchronous callback on the pump thread — stash
+                        # instead of blocking (see sync_result docstring).
+                        state.sync_result = payload
                         state.pending_puts.decrement()
+                    else:
+                        try:
+                            self._put_result(state, payload, context)
+                        finally:
+                            state.pending_puts.decrement()
                 elif collect_stats:
                     # Non-deterministic + empty payload: record metrics only
                     self._record_result_metrics(state, payload)

@@ -302,6 +302,22 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     def _after_run(self, context: ConcurrentRunContext) -> None:
         """Hook invoked once the iterator exits and pumps are joined."""
 
+    def _on_pump_started(self, state: S) -> None:
+        """Hook invoked at the start of ``_operator_loop`` on the pump thread."""
+
+    def _post_schedule_batch(
+        self,
+        state: S,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+    ) -> None:
+        """Hook invoked after every ``_schedule_batch`` call.
+
+        Subclasses can override this to handle results that were produced
+        synchronously during scheduling (e.g. the thread runner's
+        ``sync_result`` stash).
+        """
+
     def _ack_result(
         self,
         state: S,
@@ -449,6 +465,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
         state.reset_buffers()
         upstream_closed = False
+        self._on_pump_started(state)
 
         try:
             while True:
@@ -489,18 +506,26 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                     upstream_closed = True
                     ready = state.enqueue([], force=True)
                     for batch, wait_ns in ready:
+                        self._drain_results(state, next_queue, context)
                         self._schedule_batch(
                             state,
                             batch,
                             wait_ns=wait_ns,
                             context=context,
                         )
+                        self._post_schedule_batch(state, next_queue, context)
                     continue
 
+                # Try non-blocking get first so we don't stall for 50 ms
+                # when input is already available.
                 try:
-                    item = self._queue_get(state.input_queue, timeout=0.05)
+                    item = self._queue_get_nowait(state.input_queue)
                 except queue.Empty:
-                    continue
+                    self._drain_results(state, next_queue, context)
+                    try:
+                        item = self._queue_get(state.input_queue, timeout=0.05)
+                    except queue.Empty:
+                        continue
 
                 if isinstance(item, _Stop):
                     upstream_closed = True
@@ -508,17 +533,16 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 else:
                     ready = state.enqueue(item, force=False)
 
-                if ready:
-                    burst = max(1, state.parallelism)
-                    for i, (batch, wait_ns) in enumerate(ready):
-                        self._schedule_batch(
-                            state,
-                            batch,
-                            wait_ns=wait_ns,
-                            context=context,
-                        )
-                        if (i + 1) % burst == 0:
-                            self._drain_results(state, next_queue, context)
+                # Drain results after every dispatch to keep workers unblocked.
+                for batch, wait_ns in ready:
+                    self._schedule_batch(
+                        state,
+                        batch,
+                        wait_ns=wait_ns,
+                        context=context,
+                    )
+                    self._post_schedule_batch(state, next_queue, context)
+                    self._drain_results(state, next_queue, context)
         except BaseException as exc:  # noqa: BLE001
             # Any unexpected failure in the pump should propagate as a stage error
             # so the iterator can stop cleanly rather than killing the thread.
