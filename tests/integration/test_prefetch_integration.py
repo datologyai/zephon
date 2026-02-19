@@ -163,6 +163,8 @@ def test_prefetch_with_sufficient_cache(tmp_path, capture_metrics):
             }
         },
         execution_tracking=ExecutionTrackingMode.NODES,
+        # Metrics patches live in this process; need inline mode.
+        mtp_mode=False,
     )
 
     pipe = pipe.batch(microbatch_size=80, drop_last=False)
@@ -297,6 +299,8 @@ def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics)
             }
         },
         execution_tracking=ExecutionTrackingMode.NODES,
+        # Metrics patches live in this process; need inline mode.
+        mtp_mode=False,
     )
 
     # Use small batches to create multiple process_many calls
@@ -451,6 +455,8 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
             }
         },
         execution_tracking=ExecutionTrackingMode.NODES,
+        # Metrics patches live in this process; need inline mode.
+        mtp_mode=False,
     )
 
     # CRITICAL: microbatch_size=1 creates 40 separate batches (one per sample)
@@ -632,6 +638,8 @@ def test_backpressure_callback_simple(tmp_path):
         default_stage_prefetch=4,
         max_workers=20,
         execution_tracking=ExecutionTrackingMode.NODES,
+        # Metrics patches live in this process; need inline mode.
+        mtp_mode=False,
     )
     pipe = pipe.prefetch(buffer_size=1, parallelism=4, placement="local")
     pipe = pipe.fetch(max_batch=1, parallelism=1)

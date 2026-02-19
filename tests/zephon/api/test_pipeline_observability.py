@@ -37,6 +37,8 @@ def test_pipeline_metrics_snapshot_contains_stage_data(
             max_workers=1,
             default_stage_prefetch=0,
             prefetch_batches=0,
+            # Metrics collector lives inside the Engine process; needs inline mode.
+            mtp_mode=False,
         )
     )
 
@@ -47,9 +49,7 @@ def test_pipeline_metrics_snapshot_contains_stage_data(
     finally:
         it.close()
 
-    engine = pipe._engine
-    assert engine is not None
-    summary = engine.metrics_snapshot()
+    summary = pipe.metrics_snapshot()
     assert summary is not None
     records = summary.to_records()
     assert records, "expected at least one metrics record"

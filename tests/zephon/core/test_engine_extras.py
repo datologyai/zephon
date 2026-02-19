@@ -18,6 +18,7 @@ from zephon.core.engine import (
 )
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
+from zephon.core.runtime_spec import resolve_runtime_spec
 from zephon.ops.delay import DelayById
 from zephon.work.base import WorkChunk, WorkSource
 
@@ -65,7 +66,9 @@ def _mk_engine_with_opts(**opts: Any) -> Engine:
         import tempfile
 
         o["aggregate_dir"] = os.path.join(tempfile.gettempdir(), "zephon_test_agg")
-    return Engine(plan, RuntimeOptions(**o), work)
+    opts = RuntimeOptions(**o)
+    spec = resolve_runtime_spec(plan, opts)
+    return Engine(plan, opts, work, spec)
 
 
 def test_world_mapping_contiguous_and_interleaved() -> None:
@@ -82,23 +85,6 @@ def test_world_mapping_contiguous_and_interleaved() -> None:
     )
     mapping_i = eng_i._world.lanes_for_dp_group  # type: ignore[attr-defined]
     assert mapping_i == {0: [0, 3, 6], 1: [1, 4, 7], 2: [2, 5]}
-
-
-def test_apportion_edge_cases_and_fairness() -> None:
-    ap = Engine._apportion
-
-    assert ap(0, [1, 2, 3]) == [0, 0, 0]
-    assert ap(5, []) == []
-    # Non-positive weights → equal split
-    assert ap(5, [0, 0, -1, 0]) in (
-        [2, 1, 1, 1],
-        [1, 1, 2, 1],
-        [1, 1, 1, 2],
-    )  # distribution may pick first slots
-
-    # Largest remainder proportional split
-    parts = ap(16, [2, 5, 1])
-    assert parts == [4, 10, 2]
 
 
 def _mk_rec(lane: int, chunk: int, local: int = 0) -> SampleRecord:

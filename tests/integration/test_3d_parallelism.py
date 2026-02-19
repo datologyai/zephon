@@ -63,6 +63,7 @@ def _build_pipeline(
     aggregate_dir: str | None = None,
     run_id: str | None = None,
     seed: int = 42,
+    mtp_mode: bool = False,
 ) -> PublicPipeline:
     """Build a minimal pipeline with 3D parallelism parameters."""
     work = StaticMixtureWorkSource(
@@ -88,6 +89,7 @@ def _build_pipeline(
         "dp_degree": dp_degree,
         "dp_group_id": dp_group_id,
         "mapping_strategy": mapping_strategy,
+        "mtp_mode": mtp_mode,
     }
     if aggregate_dir is not None:
         opts["aggregate_dir"] = aggregate_dir
@@ -99,23 +101,24 @@ def _build_pipeline(
 
 def consume_n(pipe: PublicPipeline, n: int) -> list[str]:
     """Consume exactly n samples from pipeline."""
-    pipe._ensure()
-    assert pipe._engine is not None
-    engine = pipe._engine
-
     texts: list[str] = []
+    it = iter(pipe)
     try:
-        for item in pipe:
+        for item in it:
             texts.extend(_extract_texts(item))
             if len(texts) >= n:
                 break
     finally:
-        engine.close()
+        it.close()
     return texts[:n]
 
 
 def get_lanes_for_dp_group(pipe: PublicPipeline, dp_group_id: int) -> list[int]:
-    """Get the lanes assigned to a DP group from a built pipeline."""
+    """Get the lanes assigned to a DP group from a built pipeline.
+
+    Needs inline mode to inspect internal world topology — no public API for this.
+    """
+    pipe = pipe.options(mtp_mode=False)
     pipe._ensure()
     assert pipe._engine is not None
     lanes = pipe._engine._world.lanes_for_dp_group[dp_group_id]
@@ -339,7 +342,8 @@ class TestElastic3DParallelism:
     aspect (world_size > dp_degree) is validated via configuration checks.
     """
 
-    def test_resume_same_config(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+    def test_resume_same_config(self, tmp_path: Path, mtp_mode: bool) -> None:
         """Checkpoint and resume with identical config reproduces baseline.
 
         Uses dp_degree=1 so single process owns all lanes for aggregation.
@@ -350,6 +354,7 @@ class TestElastic3DParallelism:
         n_total = 24
         n_prefix = 12
 
+        kw = dict(mtp_mode=mtp_mode)
         # Baseline: full run (dp_degree=1 -> owns all lanes)
         baseline = consume_n(
             _build_pipeline(
@@ -360,6 +365,7 @@ class TestElastic3DParallelism:
                 global_rank=0,
                 dp_degree=1,
                 dp_group_id=0,
+                **kw,
             ),
             n=n_total,
         )
@@ -375,18 +381,18 @@ class TestElastic3DParallelism:
             dp_group_id=0,
             aggregate_dir=str(tmp_path),
             run_id="p1",
+            **kw,
         )
-        pipe1._ensure()
-        engine1 = pipe1._engine
-        assert engine1 is not None
-
         prefix: list[str] = []
-        for item in pipe1:
-            prefix.extend(_extract_texts(item))
-            if len(prefix) >= n_prefix:
-                break
-        ckpt = engine1.state_dict()
-        engine1.close()
+        it1 = iter(pipe1)
+        try:
+            for item in it1:
+                prefix.extend(_extract_texts(item))
+                if len(prefix) >= n_prefix:
+                    break
+            ckpt = pipe1.checkpoint()
+        finally:
+            it1.close()
         prefix = prefix[:n_prefix]
 
         assert prefix == baseline[:n_prefix]
@@ -402,17 +408,16 @@ class TestElastic3DParallelism:
             dp_group_id=0,
             aggregate_dir=str(tmp_path),
             run_id="p2",
+            **kw,
         )
-        pipe2._ensure()
-        engine2 = pipe2._engine
-        assert engine2 is not None
-        engine2.load_state_dict(ckpt, replay=True)
+        pipe2.restore(ckpt)
 
         suffix = consume_n(pipe2, n=n_total - n_prefix)
 
         assert prefix + suffix == baseline
 
-    def test_resume_different_mp_degree(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+    def test_resume_different_mp_degree(self, tmp_path: Path, mtp_mode: bool) -> None:
         """Resume with changed world_size (mp_degree) but same dp config.
 
         Phase 1: world_size=2, dp_degree=1, mp_degree=2
@@ -421,6 +426,7 @@ class TestElastic3DParallelism:
         ds = make_dataset("a", 64)
         chunk_size = 8
 
+        kw = dict(mtp_mode=mtp_mode)
         # Baseline for comparison
         baseline = consume_n(
             _build_pipeline(
@@ -431,6 +437,7 @@ class TestElastic3DParallelism:
                 global_rank=0,
                 dp_degree=1,
                 dp_group_id=0,
+                **kw,
             ),
             n=16,
         )
@@ -446,18 +453,18 @@ class TestElastic3DParallelism:
             dp_group_id=0,
             aggregate_dir=str(tmp_path),
             run_id="mp1",
+            **kw,
         )
-        pipe1._ensure()
-        engine1 = pipe1._engine
-        assert engine1 is not None
-
         prefix: list[str] = []
-        for item in pipe1:
-            prefix.extend(_extract_texts(item))
-            if len(prefix) >= 8:
-                break
-        ckpt = engine1.state_dict()
-        engine1.close()
+        it1 = iter(pipe1)
+        try:
+            for item in it1:
+                prefix.extend(_extract_texts(item))
+                if len(prefix) >= 8:
+                    break
+            ckpt = pipe1.checkpoint()
+        finally:
+            it1.close()
         prefix = prefix[:8]
 
         # Phase 2: world_size=4, mp_degree=4
@@ -471,18 +478,17 @@ class TestElastic3DParallelism:
             dp_group_id=0,
             aggregate_dir=str(tmp_path),
             run_id="mp2",
+            **kw,
         )
-        pipe2._ensure()
-        engine2 = pipe2._engine
-        assert engine2 is not None
-        engine2.load_state_dict(ckpt, replay=True)
+        pipe2.restore(ckpt)
 
         suffix = consume_n(pipe2, n=8)
 
         # Should match baseline exactly
         assert prefix + suffix == baseline
 
-    def test_mp_peers_resume_identically(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+    def test_mp_peers_resume_identically(self, tmp_path: Path, mtp_mode: bool) -> None:
         """Multiple MP ranks resume to identical state.
 
         Uses dp_degree=1 for checkpoint. After resume, different global_ranks
@@ -491,6 +497,7 @@ class TestElastic3DParallelism:
         ds = make_dataset("a", 64)
         chunk_size = 8
 
+        kw = dict(mtp_mode=mtp_mode)
         # Checkpoint from rank 0 (dp_degree=1 owns all lanes)
         pipe1 = _build_pipeline(
             ds,
@@ -502,15 +509,15 @@ class TestElastic3DParallelism:
             dp_group_id=0,
             aggregate_dir=str(tmp_path),
             run_id="mp_peers",
+            **kw,
         )
-        pipe1._ensure()
-        engine1 = pipe1._engine
-        assert engine1 is not None
-
-        for item in pipe1:
-            break  # Consume 1 item
-        ckpt = engine1.state_dict()
-        engine1.close()
+        it1 = iter(pipe1)
+        try:
+            for item in it1:
+                break  # Consume 1 item
+            ckpt = pipe1.checkpoint()
+        finally:
+            it1.close()
 
         # Resume from different global_ranks (all dp_group_id=0)
         resumed: list[list[str]] = []
@@ -525,11 +532,9 @@ class TestElastic3DParallelism:
                 dp_group_id=0,
                 aggregate_dir=str(tmp_path),
                 run_id=f"mp_peers_r{rank}",
+                **kw,
             )
-            pipe._ensure()
-            engine = pipe._engine
-            assert engine is not None
-            engine.load_state_dict(ckpt, replay=True)
+            pipe.restore(ckpt)
             resumed.append(consume_n(pipe, n=8))
 
         # All ranks should get identical samples

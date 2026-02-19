@@ -11,6 +11,7 @@ from zephon.core.constants import SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
+from zephon.core.runtime_spec import resolve_runtime_spec
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
 from zephon.ops.batch import Batch
@@ -61,7 +62,8 @@ def _run_engine(
         mixture_config=MixtureReadConfig(mode=mode, seed=999),
         default_stage_prefetch=0,
     )
-    eng = Engine(plan, opts, work)
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
 
     # Collect a fixed number of outputs to make the test bounded
     out_ids: list[tuple[int, int, int]] = []
@@ -103,7 +105,9 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
     g.add("noop", DelayById(max_delay_ms=0.0))
     plan = Planner().make_plan(g)
     work = _DummyWorkSource()
-    eng = Engine(plan, RuntimeOptions(aggregate_dir=str(tmp_path)), work)
+    opts = RuntimeOptions(aggregate_dir=str(tmp_path))
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
 
     called = {"flag": False}
 
@@ -189,7 +193,8 @@ def _mk_three_stage_plan(
     work = _DummyWorkSource()
     # Options are test-specific; callers will set allocation knobs later
     opts = RuntimeOptions()
-    eng = Engine(plan, opts, work)
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
     expected = [pars[0], pars[1], pars[2]]
     return eng, expected
 
@@ -207,8 +212,9 @@ def _rebuild_with_opts(eng: Engine, **opts: Any) -> Engine:
     # Recreate the engine with new options but same plan/work
     plan = eng._plan  # type: ignore[attr-defined]
     work = eng._work  # type: ignore[attr-defined]
-    new = Engine(plan, RuntimeOptions(**opts), work)
-    return new
+    new_opts = RuntimeOptions(**opts)
+    spec = resolve_runtime_spec(plan, new_opts)
+    return Engine(plan, new_opts, work, spec)
 
 
 def test_fit_to_ops_caps_and_explain() -> None:
@@ -307,13 +313,11 @@ def test_engine_forces_inline_runner_for_terminal_batch_stage() -> None:
 
     plan = Planner().make_plan(g)
     work = _DummyWorkSource()
-    eng = Engine(
-        plan,
-        RuntimeOptions(
-            runner="process", worker_allocation="per_stage_fixed", max_workers=1
-        ),
-        work,
+    opts = RuntimeOptions(
+        runner="process", worker_allocation="per_stage_fixed", max_workers=1
     )
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
     try:
         assert len(eng._runners) == 2
         assert isinstance(eng._runners[0], ProcessStageRunner)
@@ -331,13 +335,11 @@ def test_engine_batch_with_post_ops_not_inline() -> None:
 
     plan = Planner().make_plan(g)
     work = _DummyWorkSource()
-    eng = Engine(
-        plan,
-        RuntimeOptions(
-            runner="process", worker_allocation="per_stage_fixed", max_workers=1
-        ),
-        work,
+    opts = RuntimeOptions(
+        runner="process", worker_allocation="per_stage_fixed", max_workers=1
     )
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
     try:
         assert len(eng._runners) == 2
         assert isinstance(eng._runners[0], ProcessStageRunner)

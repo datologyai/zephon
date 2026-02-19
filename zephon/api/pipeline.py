@@ -21,10 +21,8 @@ from typing import (
 )
 
 from zephon.core.constants import (
-    ContributorRef,
     EngineSample,
     SampleBatch,
-    SampleCursor,
     SampleId,
     SamplePayload,
     SampleRecord,
@@ -33,6 +31,7 @@ from zephon.core.constants import (
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Node, Plan
 from zephon.core.planner import Planner
+from zephon.core.runtime_spec import RuntimeSpec, resolve_runtime_spec
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
@@ -127,9 +126,8 @@ class TorchPipelineIterableDataset(_RTIterableDatasetBase):
                 "Warning! You seem to be using neither torchdata.StatefulDataloader nor torch.DataLoader. You might want to consider iterating over the Pipeline directly, as the TorchDataset wrapper is mostly used as a tool to integrate with legacy setups that require the DataLoader class."
             )
 
-        # If engine already exists (typical after iteration started), use pipeline.checkpoint().
-        eng = self._pipeline._engine
-        if eng is not None:
+        # If an active iteration exists (inline engine or subprocess), use pipeline.checkpoint().
+        if self._pipeline._engine is not None or self._pipeline._sp is not None:
             return {"engine": self._pipeline.checkpoint()}
         # If iteration hasn’t begun in this process, return whatever pending state we have (or None).
         return {"engine": self._pending_ckpt}
@@ -151,7 +149,12 @@ class Pipeline:
         self.ws = work_source
         self._graph = Graph()
         self._plan: Plan | None = None
+        self._runtime_spec: RuntimeSpec | None = None
         self._engine: Engine | None = None
+        self._sp: Any = None  # MTPPipeline handle (lazy import)
+        self._pending_restore: dict[str, Any] | None = None
+        self._last_state: dict[str, Any] | None = None
+        self._iterating: bool = False
         self._options = RuntimeOptions()
         self._fetch_node: Node[FetchOp] = self._graph.add(
             "fetch", FetchOp(), placement="local"
@@ -755,13 +758,40 @@ class Pipeline:
                 self._options.io_options = self._options.io_options.merge(new_opts)
             else:
                 setattr(self._options, key, value)
+        # Invalidate cached RuntimeSpec — options may have changed runner
+        # selection, parallelism, or other compile-time decisions.
+        self._runtime_spec = None
         return self
 
-    def _ensure(self) -> None:
+    def _ensure_plan(self) -> None:
+        """Build Plan only (cheap graph analysis, no Engine)."""
         if self._plan is None:
-            plan = Planner().make_plan(self._graph)
-            self._plan = plan
-            self._engine = Engine(plan, self._options, self.ws)
+            self._plan = Planner().make_plan(self._graph)
+
+    def compile(self) -> RuntimeSpec:
+        """Compile pipeline into a RuntimeSpec. Cheap, no Engine construction.
+
+        Always re-evaluates ``inside_torch_worker()`` because the worker
+        context can change between calls (e.g. parent process vs forked
+        DataLoader worker).  ``resolve_runtime_spec`` is a pure function
+        with negligible cost — no I/O or resource allocation.
+        """
+        from zephon.core.engine import inside_torch_worker
+
+        self._ensure_plan()
+        assert self._plan is not None
+        self._runtime_spec = resolve_runtime_spec(
+            self._plan,
+            self._options,
+            inside_worker=inside_torch_worker(),
+        )
+        return self._runtime_spec
+
+    def _ensure(self) -> None:
+        spec = self.compile()
+        assert self._plan is not None
+        if self._engine is None or self._engine._closed:
+            self._engine = Engine(self._plan, self._options, self.ws, spec)
 
     def to_torch_dataset(self, stateful: bool = True) -> TorchIterableDatasetType:
         if _importlib_util.find_spec("torch.utils.data") is None:
@@ -793,108 +823,156 @@ class Pipeline:
 
     @property
     def is_indexable(self) -> bool:
-        self._ensure()
+        self._ensure_plan()
         assert self._plan is not None
         supports = getattr(self.ws, "supports_indexing", lambda: False)()
         return self._plan.indexable and supports
 
     def __iter__(self) -> Iterator[Any]:
+        if self._iterating:
+            raise RuntimeError(
+                "Pipeline is already being iterated. "
+                "Close the existing iterator before starting a new one."
+            )
+        self._iterating = True
+        try:
+            if self._options.mtp_mode:
+                import multiprocessing as _mp
+
+                if _mp.current_process().daemon:
+                    import warnings
+
+                    warnings.warn(
+                        "[zephon] mtp_mode=True but running inside a daemon "
+                        "process (e.g. PyTorch DataLoader worker). Falling back "
+                        "to inline mode. Set mtp_mode=False explicitly to "
+                        "silence this warning.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    yield from self._iter_inline()
+                else:
+                    yield from self._iter_mtp()
+            else:
+                yield from self._iter_inline()
+        finally:
+            self._iterating = False
+
+    def _build_raw_iter(
+        self,
+        restore_ckpt: dict[str, Any] | None = None,
+    ) -> tuple[Engine, Iterator[StreamItem], bool]:
+        """Build the raw engine iterator without notification wrapping.
+
+        Returns ``(engine, iterator, use_monotone)``.  The iterator includes
+        final-prefetch buffering when configured.  Used by both the inline
+        path and the MTP subprocess worker.
+        """
         self._ensure()
-        assert self._engine is not None
-        iterator = self._engine.build_iter()
+        engine = self._engine
+        assert engine is not None
+        if restore_ckpt is not None:
+            engine.load_state_dict(restore_ckpt, replay=True)
+        assert self._plan is not None
+        use_monotone = self._plan.preserves_cursor_order
+        iterator: Iterator[StreamItem] = engine.build_iter()
         final_prefetch = self._options.prefetch_batches or 0
         if final_prefetch > 0:
-            iterator = buffered_iterable(
-                iterator, final_prefetch, on_stop=self._engine.close
-            )
+            iterator = buffered_iterable(iterator, final_prefetch, on_stop=engine.close)
+        return engine, iterator, use_monotone
+
+    def _iter_inline(self) -> Iterator[Any]:
+        """Original inline iteration path — Engine runs in this process."""
+        ckpt = self._pending_restore
+        self._pending_restore = None
+        engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
         try:
             yield from self._yield_while_notifying(iterator)
         finally:
-            self._engine.close()
+            engine.close()
+
+    def _iter_mtp(self) -> Iterator[Any]:
+        """MTP iteration path — Engine runs in a child process."""
+        from zephon.core._mtp import MTPPipeline
+
+        self._last_state = None
+        sp = MTPPipeline(
+            self,
+            buffer_size=self._options.mtp_buffer,
+            restore_ckpt=self._pending_restore,
+        )
+        self._sp = sp
+        self._pending_restore = None
+        _completed = False
+        try:
+            yield from sp
+            _completed = True
+        finally:
+            # Inner try/finally ensures sp.close() always runs even if
+            # the checkpoint attempt raises (timeout, dead child, etc.).
+            try:
+                if not sp._closed:
+                    if _completed:
+                        # Normal completion: subprocess is in _wait_for_shutdown
+                        # and can always handle CHECKPOINT.
+                        if self._options.mtp_auto_checkpoint:
+                            self._last_state = sp.checkpoint()
+                    else:
+                        # Early break: subprocess may be blocked on data_q.put()
+                        # or in next(iterator).  Best-effort capture by draining
+                        # data_q (without ACKs) to unblock the put-retry loop,
+                        # which calls _drain_ctrl and sees our CHECKPOINT.
+                        #
+                        # NOTE: This works when the subprocess is blocked on
+                        # data_q.put (the common case — queue is full because
+                        # main stopped consuming).  It does NOT work when the
+                        # subprocess is blocked inside next(iterator) doing slow
+                        # computation, because it can't reach _drain_ctrl until
+                        # the item is produced.  In that case capture_final_state
+                        # times out and _last_state retains whatever was cached
+                        # from any prior explicit checkpoint() call (or None).
+                        # TODO: To handle the stuck-in-next(iterator) case, we'd
+                        # need a background thread in the subprocess listening on
+                        # ctrl_conn, or a signal-based interrupt mechanism.
+                        sp.capture_final_state()
+                        self._last_state = sp._last_state
+            finally:
+                sp.close()
+                self._sp = None
 
     def _yield_while_notifying(
         self, source: Iterable[StreamItem]
     ) -> Iterator[StreamItem]:
-        """Wrap an iterable that yields stream elements (SampleRecord or SampleBatch).
+        """Wrap an iterable that yields stream elements, notifying the engine.
 
-        - If item is SampleBatch -> yield item.
-        - If item is SampleRecord -> yield the item.
-        - Otherwise -> raise TypeError.
+        Uses the shared ``_notify_item`` helper (also called by the subprocess
+        ACK path) so the bookkeeping logic is never duplicated.
         """
+        from zephon.core.notify import _is_tombstone, _notify_item
+
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
-        use_monotone_notify = self._plan.preserves_cursor_order
+        use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            if isinstance(item, SampleBatch):
-                if not item.records:
-                    raise TypeError("SampleBatch must contain at least one record")
-                lane_id = item.lane_ids[0]
-                if use_monotone_notify:
-                    # Compute cursor count and max in a single pass —
-                    # no list allocation, just scalar comparisons.
-                    chunk_ids = item.chunk_ids
-                    max_cid = chunk_ids[0]
-                    n_cursors = 0
-                    max_cursor: SampleCursor | None = None
-                    for i, r in enumerate(item.records):
-                        cid = chunk_ids[i]
-                        if cid > max_cid:
-                            max_cid = cid
-                            n_cursors = 1
-                            max_cursor = r.meta.cursor
-                        elif cid == max_cid:
-                            n_cursors += 1
-                            c = r.meta.cursor
-                            if max_cursor is None or c > max_cursor:
-                                max_cursor = c
-                    engine.notify_monotone(lane_id, max_cid, n_cursors, max_cursor)
-                    yield item
-                    continue
-
-                contributors: list[ContributorRef] = []
-                record_cursor: SampleCursor | None = item.records[-1].meta.cursor
-                for record in item.records:
-                    contributors.extend(record.meta.contribution_refs())
-                engine.notify(lane_id, contributors, record_cursor=record_cursor)
+            _notify_item(engine, item, use_monotone)
+            if not _is_tombstone(item):
                 yield item
-            elif isinstance(item, SampleRecord):  # pyright: ignore[reportUnnecessaryIsInstance]
-                lane_id = item.meta.lane_id
-                if use_monotone_notify:
-                    engine.notify_monotone(
-                        lane_id,
-                        item.meta.chunk_id,
-                        1,
-                        item.meta.cursor,
-                    )
-                    if not item.meta.tombstone:
-                        yield item
-                    continue
-
-                record_cursor = item.meta.cursor
-                refs = item.meta.contribution_refs()
-                if item.meta.tombstone:
-                    engine.notify(lane_id, refs, record_cursor=record_cursor)
-                    continue
-                engine.notify(lane_id, refs, record_cursor=record_cursor)
-                yield item
-            else:
-                raise TypeError(
-                    f"Unsupported element type: {type(item)!r}; "
-                    + "expected SampleBatch or SampleRecord"
-                )
 
     def explain(self) -> str:
-        self._ensure()
+        spec = self.compile()
         assert self._plan is not None
-        # Compose static plan plus execution graph.
         parts: list[str] = [self._plan.explain]
         if self._engine is not None:
             runtime = self._engine.explain()
-            if runtime:
-                parts.append("")
-                parts.append("Execution Graph:")
-                parts.append(runtime)
+        else:
+            runtime = spec.explain(self._plan)
+        if runtime:
+            parts.append("")
+            parts.append("Execution Graph:")
+            parts.append(runtime)
+        if self._options.mtp_mode:
+            parts.append("GIL-isolation=mtp (Engine runs in child process)")
         return "\n".join(parts)
 
     def _eval_one(self, sample_id: Any) -> Any:
@@ -913,15 +991,40 @@ class Pipeline:
             pass
         return self._engine.eval_one(value)
 
+    def metrics_snapshot(self) -> Any:
+        """Return a clone of the current pipeline metrics summary, or None."""
+        if self._engine is not None:
+            return self._engine.metrics_snapshot()
+        return None
+
     def checkpoint(self) -> dict[str, Any]:
+        # Live subprocess — ask it for a checkpoint.
+        if self._sp is not None:
+            return self._sp.checkpoint()
+        # restore() was called but iteration hasn't started yet —
+        # the pending checkpoint supersedes any stale engine / _last_state.
+        if self._pending_restore is not None:
+            return dict(self._pending_restore)
+        # Inline engine (live or closed) — state_dict() works either way.
+        # Checked before _last_state so a subsequent inline iteration
+        # takes precedence over a stale cached subprocess checkpoint.
+        if self._engine is not None:
+            return self._engine.state_dict()
+        # Cached state from a completed subprocess iteration.
+        if self._last_state is not None:
+            return self._last_state
         self._ensure()
         assert self._engine is not None
         return self._engine.state_dict()
 
     def restore(self, ckpt: dict[str, Any]) -> None:
-        self._ensure()
-        assert self._engine is not None
-        self._engine.load_state_dict(ckpt, replay=True)
+        from zephon.core.engine import validate_checkpoint
+
+        validate_checkpoint(ckpt)
+        # Always stash — applied lazily at the start of iteration in both
+        # _iter_inline() and _iter_mtp().  This keeps restore()
+        # lightweight and avoids eagerly building an Engine.
+        self._pending_restore = ckpt
 
     def __getstate__(self):
         """
@@ -966,6 +1069,13 @@ class Pipeline:
         d = self.__dict__.copy()
         d["_engine"] = None
         d["_plan"] = None
+        d["_runtime_spec"] = None
+        d["_sp"] = None
+        d["_iterating"] = False
+        d["_last_state"] = None
+        # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
+        # data) that should survive pickle so restore() + pickle doesn't silently
+        # lose the stashed checkpoint.
         return d
 
     def __setstate__(self, state: dict[Any, Any]):
@@ -980,5 +1090,5 @@ class Pipeline:
           `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.
         """
         self.__dict__.update(state)
-        self._engine = None
-        self._plan = None
+        # _engine, _plan, _runtime_spec, _sp are already None in the
+        # pickled state (set by __getstate__).  _pending_restore is kept.

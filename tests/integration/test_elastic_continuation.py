@@ -53,10 +53,6 @@ def consume_until(
     """
     from zephon.core.constants import SampleBatch, SampleRecord
 
-    pipe._ensure()
-    assert pipe._engine is not None
-    engine = pipe._engine
-
     out: list = []
     ckpt: dict | None = None
     it = iter(pipe)
@@ -73,15 +69,15 @@ def consume_until(
                     lane = int(lids[0])
                 out.append((lane, texts))
                 if elem_limit is not None and len(out) >= elem_limit:
-                    ckpt = engine.state_dict()
+                    ckpt = pipe.checkpoint()
                     break
             else:
                 out.extend(texts)
                 if flat_limit is not None and len(out) >= flat_limit:
-                    ckpt = engine.state_dict()
+                    ckpt = pipe.checkpoint()
                     break
     finally:
-        engine.close()
+        it.close()
     return out, ckpt
 
 
@@ -105,6 +101,7 @@ def _build_pipe_params(
     aggregate_dir: str | None = None,
     run_id: str | None = None,
     op_queue_capacity: int | None = None,
+    mtp_mode: bool = False,
 ) -> PublicPipeline:
     work = StaticMixtureWorkSource(
         [ds],
@@ -140,6 +137,7 @@ def _build_pipe_params(
         max_workers=8,
         allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
         aggregate_dir=aggregate_dir,
+        mtp_mode=mtp_mode,
         **({"run_id": run_id} if run_id is not None else {}),
         **(
             {"op_queue_capacity": op_queue_capacity}
@@ -220,23 +218,25 @@ def _is_cyclic_rotation_elems(
     return False
 
 
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
 @pytest.mark.parametrize("lanes", [1, 2, 4])
 @pytest.mark.parametrize("stage_prefetch,final_prefetch", [(0, 0), (4, 16)])
 def test_resume_equivalence_no_batch(
-    lanes: int, stage_prefetch: int, final_prefetch: int
+    lanes: int, stage_prefetch: int, final_prefetch: int, mtp_mode: bool
 ) -> None:
     """Resume mid-run without batching across lane counts and prefetch settings."""
     ds = make_dataset("alpha", 256)
     chunk_size = 8
 
+    kw = dict(mtp_mode=mtp_mode)
     baseline = _build_pipe_params(
         ds,
-        #      f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-baseline",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
     baseline_flat, _ = consume_until(baseline)
     assert baseline_flat
@@ -245,12 +245,12 @@ def test_resume_equivalence_no_batch(
 
     p1 = _build_pipe_params(
         ds,
-        #     f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-p1",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
     prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
     assert ckpt is not None
@@ -258,23 +258,22 @@ def test_resume_equivalence_no_batch(
 
     p2 = _build_pipe_params(
         ds,
-        #    f"rqnb-{lanes}-{stage_prefetch}-{final_prefetch}-p2",
         chunk_size=chunk_size,
         canonical_replicas=lanes,
         with_batch=False,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
-    p2._ensure()
-    assert p2._engine is not None
-    p2._engine.load_state_dict(ckpt, replay=True)
+    p2.restore(ckpt)
     suffix_flat, _ = consume_until(p2)
     assert prefix_flat + suffix_flat == baseline_flat
 
 
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
 @pytest.mark.parametrize("workers_a,workers_b", [(4, 8), (8, 2)])
 def test_checkpoint_resume_with_workers_change_no_batch(
-    workers_a: int, workers_b: int
+    workers_a: int, workers_b: int, mtp_mode: bool
 ) -> None:
     """
     No batching, single lane; resume with a different number of workers.
@@ -283,6 +282,7 @@ def test_checkpoint_resume_with_workers_change_no_batch(
     ds = make_dataset("alpha", 96)
     chunk_size = 8
 
+    kw = dict(mtp_mode=mtp_mode)
     # Ground truth (any worker count is fine; use A for consistency)
     base = _build_pipe_params(
         ds,
@@ -291,6 +291,7 @@ def test_checkpoint_resume_with_workers_change_no_batch(
         canonical_replicas=1,
         with_batch=False,
         stage_prefetch=4,
+        **kw,
     )
     base = base.options(max_workers=workers_a)
     baseline_flat, _ = consume_until(base)
@@ -303,6 +304,7 @@ def test_checkpoint_resume_with_workers_change_no_batch(
         canonical_replicas=1,
         with_batch=False,
         stage_prefetch=4,
+        **kw,
     ).options(max_workers=workers_a)
     prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
     assert ckpt is not None
@@ -314,25 +316,26 @@ def test_checkpoint_resume_with_workers_change_no_batch(
         canonical_replicas=1,
         with_batch=False,
         stage_prefetch=4,
+        **kw,
     ).options(max_workers=workers_b)
-    p2._ensure()
-    assert p2._engine is not None
-    p2._engine.load_state_dict(ckpt, replay=True)
+    p2.restore(ckpt)
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
 
 
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
 @pytest.mark.parametrize("lanes", [1, 4])
 @pytest.mark.parametrize("stage_prefetch,final_prefetch", [(0, 0), (4, 16)])
 def test_resume_equivalence_with_batch(
-    lanes: int, stage_prefetch: int, final_prefetch: int
+    lanes: int, stage_prefetch: int, final_prefetch: int, mtp_mode: bool
 ) -> None:
     """Resume mid-run with batching across lane counts and prefetch settings."""
     ds = make_dataset("alpha", 512)
     chunk_size = 16  # divisible by batch_size
     batch_size = 8
 
+    kw = dict(mtp_mode=mtp_mode)
     baseline = _build_pipe_params(
         ds,
         chunk_size=chunk_size,
@@ -341,6 +344,7 @@ def test_resume_equivalence_with_batch(
         batch_size=batch_size,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
     baseline_flat, _ = consume_until(baseline)
     assert baseline_flat
@@ -359,6 +363,7 @@ def test_resume_equivalence_with_batch(
         batch_size=batch_size,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
     prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
     assert ckpt is not None
@@ -372,16 +377,16 @@ def test_resume_equivalence_with_batch(
         batch_size=batch_size,
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     )
-    p2._ensure()
-    assert p2._engine is not None
-    p2._engine.load_state_dict(ckpt, replay=True)
+    p2.restore(ckpt)
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
 
 
-def test_checkpoint_records_inflight_pruned() -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_checkpoint_records_inflight_pruned(mtp_mode: bool) -> None:
     """
     Sanity: When we checkpoint mid-run, inflight chunks recorded in the engine state
     must not include any chunk_id strictly older than the lane's current progress.
@@ -389,12 +394,14 @@ def test_checkpoint_records_inflight_pruned() -> None:
     ds = make_dataset("alpha", 64)
     chunk_size = 8
 
+    kw = dict(mtp_mode=mtp_mode)
     p1 = _build_pipe_params(
         ds,
         chunk_size=chunk_size,
         canonical_replicas=1,
         with_batch=False,
         stage_prefetch=8,  # allow multiple chunks in flight
+        **kw,
     )
     # Consume a handful of records then checkpoint
     prefix_flat, ckpt = consume_until(p1, flat_limit=10)
@@ -415,16 +422,19 @@ def test_checkpoint_records_inflight_pruned() -> None:
 
 
 # ---- 2) Resume mid-chunk, no batch (explicitly cut off boundary)
-def test_checkpoint_resume_mid_chunk_no_batch() -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
     ds = make_dataset("alpha", 200)
     chunk_size = 8
 
+    kw = dict(mtp_mode=mtp_mode)
     baseline = _build_pipe_params(
         ds,
         chunk_size=chunk_size,
         canonical_replicas=2,
         with_batch=False,
         stage_prefetch=0,
+        **kw,
     )
     baseline_flat, _ = consume_until(baseline)
     assert baseline_flat, "Baseline produced no output"
@@ -439,6 +449,7 @@ def test_checkpoint_resume_mid_chunk_no_batch() -> None:
         canonical_replicas=2,
         with_batch=False,
         stage_prefetch=0,
+        **kw,
     )
     prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
     assert ckpt is not None
@@ -450,20 +461,24 @@ def test_checkpoint_resume_mid_chunk_no_batch() -> None:
         canonical_replicas=2,
         with_batch=False,
         stage_prefetch=0,
+        **kw,
     )
-    p2._ensure()
-    assert p2._engine is not None
-    p2._engine.load_state_dict(ckpt, replay=True)
+    p2.restore(ckpt)
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
 
 
 # ---- 3) Scale-down equivalence, no batch (simulate N ranks vs. 1 rank)
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
 @pytest.mark.parametrize("with_batch", [False, True])
 @pytest.mark.parametrize("stage_prefetch,final_prefetch", [(0, 0), (4, 16)])
 def test_scale_down_equivalence_truth_checkpnts(
-    with_batch: bool, stage_prefetch: int, final_prefetch: int, tmp_path: Path
+    with_batch: bool,
+    stage_prefetch: int,
+    final_prefetch: int,
+    tmp_path: Path,
+    mtp_mode: bool,
 ) -> None:
     """Compare N-rank merged stream to 1-rank truth across batch/prefetch modes."""
     N = 4
@@ -476,6 +491,7 @@ def test_scale_down_equivalence_truth_checkpnts(
         chunk_size = 8
         batch_size = None  # type: ignore[assignment]
 
+    kw = dict(mtp_mode=mtp_mode)
     pipe_all = _build_pipe_params(
         ds,
         chunk_size=chunk_size,
@@ -484,6 +500,7 @@ def test_scale_down_equivalence_truth_checkpnts(
         batch_size=(batch_size or 8),
         stage_prefetch=stage_prefetch,
         final_prefetch=final_prefetch,
+        **kw,
     ).options(
         dp_degree=1,
         dp_group_id=0,
@@ -502,11 +519,13 @@ def test_scale_down_equivalence_truth_checkpnts(
             stage_prefetch=stage_prefetch,
             final_prefetch=final_prefetch,
             aggregate_dir=str(tmp_path),
+            **kw,
         ).options(
             world_size=N,
             global_rank=r,
             dp_degree=N,
             dp_group_id=r,
+            mtp_auto_checkpoint=False,
         )
         flat, _ = consume_until(pipe)
         per_rank_flats.append(flat)
@@ -521,11 +540,13 @@ def test_scale_down_equivalence_truth_checkpnts(
 
 
 # ---- 6) Multiple resumes (same size segments), no batch
-def test_multiple_resumes_same_size_no_batch_current_api() -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_multiple_resumes_same_size_no_batch_current_api(mtp_mode: bool) -> None:
     ds = make_dataset("alpha", 400)
     chunk_size = 8
     canonical_replicas = 4
 
+    kw = dict(mtp_mode=mtp_mode)
     # Canonical baseline
     baseline = _build_pipe_params(
         ds,
@@ -533,6 +554,7 @@ def test_multiple_resumes_same_size_no_batch_current_api() -> None:
         canonical_replicas=canonical_replicas,
         with_batch=False,
         stage_prefetch=0,
+        **kw,
     )
     baseline_flat, _ = consume_until(baseline, flat_limit=240)
     assert baseline_flat
@@ -548,11 +570,10 @@ def test_multiple_resumes_same_size_no_batch_current_api() -> None:
             canonical_replicas=canonical_replicas,
             with_batch=False,
             stage_prefetch=0,
+            **kw,
         )
         if ckpt is not None:
-            pipe._ensure()
-            assert pipe._engine is not None
-            pipe._engine.load_state_dict(ckpt, replay=True)
+            pipe.restore(ckpt)
         part, ckpt = consume_until(pipe, flat_limit=seg)
         collected.extend(part)
 
@@ -560,7 +581,10 @@ def test_multiple_resumes_same_size_no_batch_current_api() -> None:
 
 
 # ---- 7) Multiple resizes across phases (ranks/strategy change), with batch
-def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_multiple_resizes_equivalence_with_batch_truthchkpnts(
+    tmp_path: Path, mtp_mode: bool
+) -> None:
     """
     Stitch phases with different world sizes & mappings; contract is:
     - element-level RR across lanes
@@ -581,6 +605,7 @@ def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) ->
         (4, "interleaved", 128),
     ]
 
+    kw = dict(mtp_mode=mtp_mode)
     ckpt: dict | None = None  # carry checkpoint across phases
 
     for phase_idx, (ranks, strat, flat_budget) in enumerate(phases):
@@ -599,14 +624,13 @@ def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) ->
             stage_prefetch=2,
             final_prefetch=2,
             run_id=f"mrrb-truth-p{phase_idx}",
+            **kw,
         ).options(
             dp_degree=1,
             dp_group_id=0,
         )
-        truth_pipe._ensure()
-        assert truth_pipe._engine is not None
         if ckpt is not None:
-            truth_pipe._engine.load_state_dict(ckpt, replay=True)
+            truth_pipe.restore(ckpt)
         truth_phase_elems, ckpt_next = consume_until(
             truth_pipe, elem_limit=phase_elem_budget, return_elems=True
         )
@@ -625,17 +649,17 @@ def test_multiple_resizes_equivalence_with_batch_truthchkpnts(tmp_path: Path) ->
                 final_prefetch=0,
                 aggregate_dir=str(tmp_path),
                 run_id=f"mrrb-sim-p{phase_idx}",
+                **kw,
             ).options(
                 world_size=ranks,
                 global_rank=r,
                 dp_degree=ranks,
                 dp_group_id=r,
                 mapping_strategy=strat,
+                mtp_auto_checkpoint=False,
             )
-            rank_pipe._ensure()
-            assert rank_pipe._engine is not None
             if ckpt is not None:
-                rank_pipe._engine.load_state_dict(ckpt, replay=True)
+                rank_pipe.restore(ckpt)
             per_rank_elems.append(consume_until(rank_pipe, return_elems=True)[0])
 
         merged_phase = rr_merge(
@@ -730,10 +754,8 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
             dp_degree=1,
             dp_group_id=0,
         )
-        truth_pipe._ensure()
-        assert truth_pipe._engine is not None
         if ckpt is not None:
-            truth_pipe._engine.load_state_dict(ckpt, replay=True)
+            truth_pipe.restore(ckpt)
         truth_phase_elems, ckpt_next = consume_until(
             truth_pipe, elem_limit=phase_elem_budget, return_elems=True
         )
@@ -759,10 +781,8 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
                 dp_group_id=r,
                 mapping_strategy=strat,
             )
-            rank_pipe._ensure()
-            assert rank_pipe._engine is not None
             if ckpt is not None:
-                rank_pipe._engine.load_state_dict(ckpt, replay=True)
+                rank_pipe.restore(ckpt)
             per_rank_elems.append(consume_until(rank_pipe, return_elems=True)[0])
 
         merged_phase = rr_merge(
@@ -784,9 +804,11 @@ def test_resize_and_microbatch_change_equivalence_current_api_using_truthcheckpo
     assert Counter(observed_flat) == Counter(oracle_flat)
 
 
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
 @pytest.mark.parametrize("where", ["boundary", "within"])  # checkpoint location
 def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
     where: str,
+    mtp_mode: bool,
 ) -> None:
     """
     Single-lane, batched pipeline: resume from a checkpoint taken exactly at a
@@ -796,6 +818,7 @@ def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
     chunk_size = 16
     batch_size = 8  # divides chunk_size so boundary in terms of batches is integral
 
+    kw = dict(mtp_mode=mtp_mode)
     # Canonical baseline (full run)
     baseline = _build_pipe_params(
         ds,
@@ -805,6 +828,7 @@ def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
         batch_size=batch_size,
         stage_prefetch=0,
         final_prefetch=0,
+        **kw,
     )
     baseline_flat, _ = consume_until(baseline)
     assert baseline_flat
@@ -828,6 +852,7 @@ def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
         batch_size=batch_size,
         stage_prefetch=0,
         final_prefetch=0,
+        **kw,
     )
     prefix_elems, ckpt = consume_until(p1, elem_limit=elem_limit, return_elems=True)
     assert ckpt is not None and prefix_elems
@@ -844,16 +869,18 @@ def test_checkpoint_at_chunk_boundary_and_within_with_batch_current_api(
         batch_size=batch_size,
         stage_prefetch=0,
         final_prefetch=0,
+        **kw,
     )
-    p2._ensure()
-    assert p2._engine is not None
-    p2._engine.load_state_dict(ckpt, replay=True)
+    p2.restore(ckpt)
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
 
 
-def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_scale_down_then_up_with_microbatch_change_current_api(
+    tmp_path: Path, mtp_mode: bool
+) -> None:
     """
     Three phases with resume:
     - Phase A: 4 ranks, microbatch 8
@@ -871,6 +898,7 @@ def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -
         (4, "contiguous", 8, 64),
     ]
 
+    kw = dict(mtp_mode=mtp_mode)
     ckpt: dict | None = None
 
     for phase_idx, (ranks, strat, batch_size, flat_budget) in enumerate(phases):
@@ -888,14 +916,13 @@ def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -
             final_prefetch=2,
             aggregate_dir=str(tmp_path),
             run_id=f"scaleudownnomp-p{phase_idx}-truth",
+            **kw,
         ).options(
             dp_degree=1,
             dp_group_id=0,
         )
-        truth._ensure()
-        assert truth._engine is not None
         if ckpt is not None:
-            truth._engine.load_state_dict(ckpt, replay=True)
+            truth.restore(ckpt)
         truth_elems, ckpt_next = consume_until(
             truth, elem_limit=phase_elem_budget, return_elems=True
         )
@@ -914,17 +941,17 @@ def test_scale_down_then_up_with_microbatch_change_current_api(tmp_path: Path) -
                 final_prefetch=0,
                 aggregate_dir=str(tmp_path),
                 run_id=f"scaleudownnomp-p{phase_idx}-simulation",
+                **kw,
             ).options(
                 world_size=ranks,
                 global_rank=r,
                 dp_degree=ranks,
                 dp_group_id=r,
                 mapping_strategy=strat,
+                mtp_auto_checkpoint=False,
             )
-            rp._ensure()
-            assert rp._engine is not None
             if ckpt is not None:
-                rp._engine.load_state_dict(ckpt, replay=True)
+                rp.restore(ckpt)
             per_rank_elems.append(consume_until(rp, return_elems=True)[0])
 
         merged = rr_merge(per_rank_elems, mode="elem", limit=len(truth_elems))
@@ -1011,11 +1038,10 @@ def _rank_worker_proc(
         run_id=run_id,
         op_queue_capacity=op_queue_capacity,
     )
-    pipe._ensure()
-    eng = pipe._engine
-    assert eng is not None
+    # Already running in a spawned subprocess worker — disable nested MTP mode.
+    pipe = pipe.options(mtp_mode=False)
     if start_ckpt is not None:
-        eng.load_state_dict(start_ckpt, replay=True)
+        pipe.restore(start_ckpt)
 
     it = iter(pipe)
     try:
@@ -1027,15 +1053,14 @@ def _rank_worker_proc(
             out_q.put((rank, w, buf), timeout=45.0)
             win_barrier.wait()
         ckpt_barrier.wait()
-        merged = eng.state_dict()  # triggers file aggregation for multi-rank
+        merged = pipe.checkpoint()  # triggers file aggregation for multi-rank
         ckpt_q.put((rank, merged))
     finally:
         ckpt_barrier.wait(timeout=45.0)  # wait that everybody is done at the end
         try:
-            del it
+            it.close()
         except Exception:
             pass
-        eng.close()
 
 
 def _phase_run_and_checkpoint_mp(

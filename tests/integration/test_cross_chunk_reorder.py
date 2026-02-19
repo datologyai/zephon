@@ -76,7 +76,7 @@ class _DeferFirstOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
         return list(elems)
 
 
-def _make_pipe(sample_count: int) -> PublicPipeline:
+def _make_pipe(sample_count: int, mtp_mode: bool = False) -> PublicPipeline:
     rows = [{"text": f"s{i}"} for i in range(sample_count)]
     ds = Dataset.from_dict("demo", {0: InMemoryShard(rows)})
     work = StaticMixtureWorkSource(
@@ -101,33 +101,30 @@ def _make_pipe(sample_count: int) -> PublicPipeline:
         deterministic=True,
         default_stage_prefetch=0,
         prefetch_batches=0,
+        mtp_mode=mtp_mode,
     )
     return pipe
 
 
-def test_checkpoint_breaks_on_cross_chunk_reorder() -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+def test_checkpoint_breaks_on_cross_chunk_reorder(mtp_mode: bool) -> None:
     """Reordering newer chunk ahead of older causes the older to disappear on resume."""
     total = 4
 
     # Baseline: full run without checkpoint
-    baseline_pipe = _make_pipe(total)
+    baseline_pipe = _make_pipe(total, mtp_mode=mtp_mode)
     baseline_texts = list(iter(baseline_pipe))
 
     # Run again, checkpoint immediately after first emitted record (chunk 1), then resume.
-    pipe1 = _make_pipe(total)
-    pipe1._ensure()
-    assert pipe1._engine is not None
-    eng1 = pipe1._engine
+    pipe1 = _make_pipe(total, mtp_mode=mtp_mode)
     it1 = iter(pipe1)
     first = next(it1)  # emits chunk_id=1, leaving chunk_id=0 buffered
-    ckpt = eng1.state_dict()
-    eng1.close()
+    ckpt = pipe1.checkpoint()
+    it1.close()
 
     # Resume from checkpoint
-    pipe2 = _make_pipe(total)
-    pipe2._ensure()
-    assert pipe2._engine is not None
-    pipe2._engine.load_state_dict(ckpt, replay=True)
+    pipe2 = _make_pipe(total, mtp_mode=mtp_mode)
+    pipe2.restore(ckpt)
     resumed_texts = list(iter(pipe2))
 
     observed = [first] + resumed_texts

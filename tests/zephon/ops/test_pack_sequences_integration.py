@@ -43,7 +43,13 @@ def test_pack_sequences_chunk_eviction() -> None:
     pipeline.pack_sequences(
         max_length=10, length_fn="length", algorithm="best_fit", num_bins=100
     )
-    pipeline.options(deterministic=True, max_workers=1, default_stage_prefetch=0)
+    pipeline.options(
+        # Needs inline mode to inspect inflight_chunks_per_lane internal state.
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=0,
+        mtp_mode=False,
+    )
 
     # Collect all packed records and track contributors
     packed_records: list[SampleRecord] = []

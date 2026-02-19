@@ -31,7 +31,6 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 """
 
 import json
-import math
 import multiprocessing as mp
 import os
 import re
@@ -65,14 +64,14 @@ from zephon.core.constants import (
     SampleRecord,
     StreamItem,
 )
-from zephon.core.graph import Plan, Stage
+from zephon.core.graph import Plan
 from zephon.core.replay import ReplayConfigService
+from zephon.core.runtime_spec import RuntimeSpec
 from zephon.core.world import World
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.emitter import MetricsReporter
-from zephon.ops.replay_filter import ReplayFilter
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
@@ -174,7 +173,7 @@ class RuntimeOptions:
     per_stage_runner: dict[int, str] = field(
         default_factory=dict
     )  # Manual override for runner per-stage. Mostly useful for debugging and advanced usage.
-    allow_subprocess_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
+    allow_mtp_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
     mp_context: Any = mp.get_context("spawn")
     worker_allocation: Literal[
         "fit_to_ops", "per_stage_fixed", "global", "autotune"
@@ -197,6 +196,18 @@ class RuntimeOptions:
     # a batch-shape sensitive operator (in which case we auto-disable it for that stage).
     # When False, latency flush is always disabled in deterministic mode.
     allow_latency_flush_in_deterministic: bool = True
+
+    # === MTP Mode (GIL isolation) ===
+    # When True, the Engine runs in a non-daemon subprocess for GIL isolation.
+    # The main process only dequeues finished batches via IPC.
+    mtp_mode: bool = False
+    # Bounded IPC queue depth for MTP mode.
+    mtp_buffer: int = 16
+    # Automatically capture a checkpoint from the MTP subprocess after normal
+    # iteration completion.  Set to False when multi-rank aggregation is not
+    # available (e.g. no aggregate_dir, or ranks run sequentially rather than
+    # in parallel).
+    mtp_auto_checkpoint: bool = True
 
     # === Global Coordination ===
     # Total number of ranks (GPUs) in the distributed job.
@@ -289,11 +300,88 @@ class RuntimeOptions:
 # =============================================================================
 
 
+def validate_checkpoint(state: Any) -> None:
+    """Validate checkpoint structure.
+
+    Raises TypeError / ValueError for malformed checkpoints.  Does not
+    require an Engine — only inspects the dict shape so callers can
+    fail-fast at ``restore()`` time.
+    """
+    if not isinstance(state, dict):
+        raise TypeError(f"Expected dict checkpoint, got {type(state).__name__}")
+
+    required = {
+        "world",
+        "progress",
+        "lane_next_cid",
+        "lane_ws_state",
+        "last_round_id",
+        "checkpoint_reload_count",
+    }
+    missing = required - state.keys()
+    if missing:
+        raise ValueError(f"Checkpoint missing required keys: {sorted(missing)}")
+
+    # -- dict-typed fields ---------------------------------------------
+    for field in ("world", "progress", "lane_next_cid", "lane_ws_state"):
+        if not isinstance(state[field], dict):
+            raise TypeError(
+                f"Checkpoint '{field}' must be a dict, "
+                f"got {type(state[field]).__name__}"
+            )
+
+    # -- world (extra checks) ------------------------------------------
+    world = state["world"]
+    if "canonical_replicas" not in world:
+        raise ValueError("Checkpoint 'world' missing 'canonical_replicas'")
+    try:
+        int(world["canonical_replicas"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"'canonical_replicas' must be int-like, got {world['canonical_replicas']!r}"
+        ) from exc
+
+    # -- progress (extra checks) ---------------------------------------
+    for lane_key, entry in state["progress"].items():
+        if not isinstance(entry, dict):
+            raise TypeError(
+                f"progress[{lane_key!r}] must be a dict, got {type(entry).__name__}"
+            )
+        for field in ("chunk_id", "offset"):
+            if field not in entry:
+                raise ValueError(
+                    f"progress[{lane_key!r}] missing required field '{field}'"
+                )
+
+    # -- last_round_id -------------------------------------------------
+    last_round_id = state["last_round_id"]
+    if last_round_id is not None and not isinstance(last_round_id, str):
+        raise TypeError(
+            f"'last_round_id' must be str or None, got {type(last_round_id).__name__}"
+        )
+
+    # -- checkpoint_reload_count ---------------------------------------
+    try:
+        int(state["checkpoint_reload_count"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"'checkpoint_reload_count' must be int-like, "
+            f"got {state['checkpoint_reload_count']!r}"
+        ) from exc
+
+
 class Engine:
     """Bind a `Plan` to concrete runners and orchestrate streaming execution."""
 
-    def __init__(self, plan: Plan, opts: RuntimeOptions, work: WorkSource) -> None:
+    def __init__(
+        self,
+        plan: Plan,
+        opts: RuntimeOptions,
+        work: WorkSource,
+        runtime_spec: RuntimeSpec,
+    ) -> None:
         """Initialize stage runners and prepare to stream work items."""
+        self._runtime_spec = runtime_spec
         self._plan = plan
         self._preserves_cursor_order = bool(plan.preserves_cursor_order)
         base_ctx: dict[str, Any] = {
@@ -423,6 +511,8 @@ class Engine:
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
         # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
+        self._closed = False
+
         self._cleanup_finalizer = weakref.finalize(
             self, _call_engine_cleanup, weakref.ref(self)
         )
@@ -640,279 +730,92 @@ class Engine:
     def explain(self) -> str:
         """ASCII execution graph showing where buffers exist and their sizes.
 
-        Visualizes:
-        - Per-op input queues inside stages (as -[in_q=Q]-> between ops)
-        - Stage output queue (as --[stage_out=Q]-->)
-        - Boundary prefetch between stages (as ==[prefetch=Q]==>)
-        - Final pipeline prefetch to the consumer
+        Delegates to :meth:`RuntimeSpec.explain` for the base output, then
+        augments ``process`` stage headers with live runner details
+        (``ipc_batch_size``, ``direct_ipc``) that are only available after
+        runner construction.
         """
-        lines: list[str] = []
+        base = self._runtime_spec.explain(self._plan)
 
-        mode = self._opts.worker_allocation
-        if mode == "global":
-            lines.append(
-                f"Allocation=global total={self._opts.max_workers} weighting={self._opts.stage_weighting}"
-            )
-        elif mode == "per_stage_fixed":
-            lines.append(
-                f"Allocation=per_stage_fixed per_stage={self._opts.max_workers}"
-            )
-        else:
-            lines.append("Allocation=fit_to_ops (cap=sum(node.parallelism), min 1/op)")
-        bookkeeping = (
-            "simple chunk-watermark (preserves_cursor_order=True)"
-            if self._preserves_cursor_order
-            else "contributor-aware (packing/shuffle-safe)"
-        )
-        lines.append(f"Bookkeeping={bookkeeping}")
-
-        for idx, (stage, runner) in enumerate(zip(self._plan.stages, self._runners)):
-            runner_kind = "unknown"
-            op_in_q: int | None = None
-            stage_prefetch: int | None = None
-            cap: int | None = None
-            forward_mode = (
-                "microbatches"
-                if getattr(runner, "_emit_microbatches", False)
-                else "stream_items"
-            )
-
-            if isinstance(runner, ThreadStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
-                runner_kind = "threads"
-                op_in_q = getattr(runner, "_queue_capacity", None)
-                stage_prefetch = getattr(runner, "_prefetch_capacity", None)
-                cap = getattr(runner, "_max_workers", None)  # <- show cap
-            elif isinstance(runner, ProcessStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
-                runner_kind = "process"
-                op_in_q = getattr(runner, "_queue_capacity", None)
-                stage_prefetch = getattr(runner, "_prefetch_capacity", None)
-                cap = getattr(runner, "_max_workers", None)
-            elif isinstance(runner, InlineStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
-                runner_kind = "inline"
-                stage_prefetch = getattr(runner, "_prefetch_capacity", None)
-                cap = getattr(runner, "_max_workers", None)
-
-            # Header with placement and runner only (buffers are shown inline)
-            header = (
-                f"Stage[{idx}] place={stage.placement} runner={runner_kind} "
-                + f"cap={cap} mode={forward_mode}"
-            )
+        # Augment process-runner stage headers with IPC details
+        process_annotations: dict[int, str] = {}
+        for idx, runner in enumerate(self._runners):
             if isinstance(runner, ProcessStageRunner):  # pyright: ignore[reportUnnecessaryIsInstance]
                 ipc = getattr(runner, "_ipc_batch_size", None)
                 direct = getattr(runner, "_single_op_direct_ipc", False)
-                header += (
+                process_annotations[idx] = (
                     f" first_op_ipc_batch={ipc} "
-                    + f"direct_ipc={'enabled' if direct else 'disabled'}"
+                    f"direct_ipc={'enabled' if direct else 'disabled'}"
                 )
-            lines.append(header)
 
-            # Inside-stage ops with input buffers between them
-            nodes = [f"{nd.name}@p{nd.parallelism}" for nd in stage.nodes]
-            if not nodes:
-                lines.append("  [empty stage]")
-            else:
-                if len(nodes) == 1:
-                    lines.append(f"  {nodes[0]}")
-                else:
-                    if op_in_q is not None:
-                        connector = f" -[in_q={op_in_q}]-> "
-                    else:
-                        connector = " -> "
-                    lines.append("  " + connector.join(nodes))
+        if not process_annotations:
+            return base
 
-            # Stage output queue capacity follows ThreadStageRunner logic
-            # out_capacity = max(1, stage_prefetch or op_in_q)
-            out_q: int | None = None
-            if op_in_q is not None:
-                sp = stage_prefetch or 0
-                out_q = max(1, sp or op_in_q)
-            elif stage_prefetch and stage_prefetch > 0:
-                out_q = max(1, stage_prefetch)
-
-            # Boundary: to next stage or pipeline end
-            if out_q is not None:
-                lines.append(f"  --[stage_out={out_q}]-->")
-            else:
-                lines.append("  --[stage_out=?]-->")
-
-            is_last = idx + 1 == len(self._runners)
-            if not is_last:
-                if stage_prefetch and stage_prefetch > 0:
-                    lines.append(f"  ==[prefetch={stage_prefetch}]==> Stage[{idx + 1}]")
-                else:
-                    lines.append(f"  ==> Stage[{idx + 1}]")
-            else:
-                final_prefetch = self._opts.prefetch_batches or 0
-                if final_prefetch > 0:
-                    lines.append(
-                        f"  ==[final_prefetch={final_prefetch}]==> pipeline_end"
-                    )
-                else:
-                    lines.append("  ==> pipeline_end")
-
+        lines = base.split("\n")
+        for i, line in enumerate(lines):
+            for stage_idx, annotation in process_annotations.items():
+                prefix = f"Stage[{stage_idx}] "
+                if line.startswith(prefix):
+                    lines[i] = line + annotation
         return "\n".join(lines)
 
-    @staticmethod
-    def _apportion(total: int, weights: list[int]) -> list[int]:
-        """Split `total` into integer parts proportional to `weights`.
-
-        Uses largest-remainder (Hamilton) method; guarantees sum(parts) == total.
-        If all weights are non-positive, falls back to an equal split.
-        """
-        if total <= 0 or not weights:
-            return [0] * len(weights)
-        wpos = [max(0, int(w)) for w in weights]
-        wsum = sum(wpos)
-        n = len(wpos)
-        if wsum == 0:
-            base = total // n
-            parts = [base] * n
-            for i in range(total - base * n):
-                parts[i] += 1
-            return parts
-        quotas = [total * (w / wsum) for w in wpos]
-        floors = [int(math.floor(q)) for q in quotas]
-        remaining = total - sum(floors)
-        order = sorted(range(n), key=lambda i: quotas[i] - floors[i], reverse=True)
-        for i in range(remaining):
-            floors[order[i]] += 1
-        return floors
-
     def _build_runners(self) -> None:
-        """Instantiate per-stage runners according to placement and options."""
-        inside_worker = inside_torch_worker()
-        default_runner = self._opts.runner or "auto"
-        mode = self._opts.worker_allocation
-        num_stages = len(self._plan.stages)
-        if mode == "autotune":
-            raise NotImplementedError(
-                "worker_allocation='autotune' is reserved for future auto-tuning. "
-                + "Use 'per_stage_fixed' or 'global' for now."
+        """Instantiate per-stage runners from the pre-computed RuntimeSpec.
+
+        All decision logic (runner type, worker cap, queue depth) lives in
+        :func:`~zephon.core.runtime_spec.resolve_runtime_spec`.  This method
+        only does resource allocation.
+        """
+        runner_tracking_mode = (
+            self._collector.tracking_mode
+            if self._collector is not None
+            else ExecutionTrackingMode.OFF
+        )
+
+        for stage, spec in zip(self._plan.stages, self._runtime_spec.stages):
+            common = dict(
+                prefetch_capacity=spec.prefetch_capacity,
+                deterministic=self._opts.deterministic,
+                allow_latency_flush_in_deterministic=spec.allow_latency_flush,
+                stage_index=spec.stage_index,
+                tracking_mode=runner_tracking_mode,
+                stage_output_mode=spec.output_mode,
             )
 
-        if mode == "global":
-            total = self._opts.max_workers
-            if total < num_stages:
-                warnings.warn(
-                    f"[zephon] max_workers_total={total} < number of stages={num_stages}; "
-                    + f"bumping to {num_stages} (1 thread per stage).",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                total = num_stages
-
-            if self._opts.stage_weighting == "equal":
-                weights = [1 for _ in range(num_stages)]
-            else:  # by_declared_parallelism
-                weights = [
-                    self._stage_parallelism(stage) for stage in self._plan.stages
-                ]
-            per_stage_caps = self._apportion(total, weights)
-        elif mode == "per_stage_fixed":
-            # per_stage_fixed: same cap for each stage
-            cap = self._opts.max_workers
-            per_stage_caps = [cap for _ in range(num_stages)]
-        else:
-            per_stage_caps = [
-                self._stage_parallelism(stage) for stage in self._plan.stages
-            ]
-
-        for idx, stage in enumerate(self._plan.stages):
-            is_last_stage = idx == num_stages - 1
-            cap_for_stage = per_stage_caps[idx]
-
-            prefetch = self._opts.per_stage_prefetch.get(
-                idx, self._opts.default_stage_prefetch
-            )
-            chosen = self._opts.per_stage_runner.get(idx, default_runner)
-            if chosen == "auto":
-                if inside_worker and not self._opts.allow_subprocess_in_worker:
-                    chosen = "threads"
-                elif stage.placement == "remote":
-                    chosen = "remote"
-                else:
-                    chosen = "threads"
-            if (
-                inside_worker
-                and chosen == "process"
-                and not self._opts.allow_subprocess_in_worker
-            ):
-                chosen = "threads"
-
-            hint = getattr(stage, "runner_hint", None)
-            if hint == "inline":
-                chosen = "inline"
-            elif hint == "threads":
-                chosen = "threads"
-            allow_latency = self._opts.allow_latency_flush_in_deterministic
-            if self._opts.deterministic:
-                has_sensitive = any(
-                    getattr(nd.op.traits(), "batch_shape_sensitive", False)
-                    for nd in stage.nodes
-                )
-                if has_sensitive and allow_latency:
-                    print(
-                        "Deterministic mode: disabling time-based flush for Stage[%d] due to batch-shape sensitive op.",
-                        idx,
-                    )
-                    allow_latency = False
-
-            runner_tracking_mode = (
-                self._collector.tracking_mode
-                if self._collector is not None
-                else ExecutionTrackingMode.OFF
-            )
-            output_mode = "stream_items" if is_last_stage else "microbatches"
-
-            if chosen == "threads":
+            if spec.runner_type == "threads":
                 self._runners.append(
                     ThreadStageRunner(
                         stage,
                         self._ctx,
-                        cap_for_stage,
-                        prefetch_capacity=prefetch,
-                        deterministic=self._opts.deterministic,
-                        allow_latency_flush_in_deterministic=allow_latency,
-                        queue_capacity=self._opts.op_queue_capacity,
-                        stage_index=idx,
-                        tracking_mode=runner_tracking_mode,
-                        stage_output_mode=output_mode,
+                        spec.worker_cap,
+                        queue_capacity=spec.queue_capacity,
+                        **common,
                     )
                 )
-            elif chosen == "inline":
+            elif spec.runner_type == "inline":
                 self._runners.append(
                     InlineStageRunner(
                         stage,
                         self._ctx,
-                        cap_for_stage,
-                        prefetch_capacity=prefetch,
-                        deterministic=self._opts.deterministic,
-                        allow_latency_flush_in_deterministic=allow_latency,
-                        stage_index=idx,
-                        tracking_mode=runner_tracking_mode,
-                        stage_output_mode=output_mode,
+                        spec.worker_cap,
+                        **common,
                     )
                 )
-            elif chosen == "remote":
-                raise NotImplementedError("Remote workers are not yet implemented.")
-            elif chosen == "process":
+            elif spec.runner_type == "process":
                 self._runners.append(
                     ProcessStageRunner(
                         stage,
                         self._ctx,
-                        cap_for_stage,
-                        prefetch_capacity=prefetch,
-                        deterministic=self._opts.deterministic,
-                        allow_latency_flush_in_deterministic=allow_latency,
-                        queue_capacity=self._opts.op_queue_capacity,
-                        stage_index=idx,
-                        tracking_mode=runner_tracking_mode,
-                        stage_output_mode=output_mode,
+                        spec.worker_cap,
+                        queue_capacity=spec.queue_capacity,
                         mp_context=self._mp_context,
+                        **common,
                     )
                 )
+            elif spec.runner_type == "remote":
+                raise NotImplementedError("Remote workers are not yet implemented.")
             else:
-                raise ValueError(f"Unknown runner '{chosen}'")
+                raise ValueError(f"Unknown runner '{spec.runner_type}'")
 
     def metrics_snapshot(self):
         """Return a clone of the current pipeline metrics summary when enabled."""
@@ -1142,22 +1045,6 @@ class Engine:
             else:
                 snapshot[lane] = cursor
         self._replay_config.set_snapshot(snapshot)
-
-    def _stage_parallelism(self, stage: Stage) -> int:
-        total = 0
-        filter_parallelism = 0
-        for nd in stage.nodes:
-            dop = max(1, (nd.parallelism or 1))
-            if isinstance(nd.op, ReplayFilter):
-                # TODO: if we ever fuse ReplayFilter into Batch, revisit how we account for its DOP.
-                filter_parallelism = max(filter_parallelism, dop)
-                continue
-            total += dop
-        if total == 0:
-            total = filter_parallelism
-        else:
-            total = max(total, filter_parallelism)
-        return max(1, total)
 
     @property
     def _owned_lanes(self) -> list[LaneId]:
@@ -1499,6 +1386,9 @@ class Engine:
 
     def close(self) -> None:
         """Close all stage runners, suppressing teardown errors."""
+        if self._closed:
+            return
+        self._closed = True
         for runner in self._runners:
             try:
                 runner.close()
@@ -1905,6 +1795,7 @@ class Engine:
 
     def load_state_dict(self, state: dict[str, Any], *, replay: bool = True) -> None:
         """Restore engine & WorkSource; enter replay mode if 'replay' is True."""
+        validate_checkpoint(state)
         if int(state["world"]["canonical_replicas"]) != self._world.canonical_replicas:
             raise RuntimeError("canonical_replicas changed; migration required")
 
