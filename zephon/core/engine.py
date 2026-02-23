@@ -197,6 +197,11 @@ class RuntimeOptions:
     # When False, latency flush is always disabled in deterministic mode.
     allow_latency_flush_in_deterministic: bool = True
 
+    # === Shutdown ===
+    # "graceful" (default) waits generously for threads/processes to finish.
+    # "hard" slashes all join timeouts for fast exit (useful for benchmarks).
+    shutdown_mode: Literal["graceful", "hard"] = "graceful"
+
     # === MTP Mode (GIL isolation) ===
     # When True, the Engine runs in a non-daemon subprocess for GIL isolation.
     # The main process only dequeues finished batches via IPC.
@@ -1389,9 +1394,10 @@ class Engine:
         if self._closed:
             return
         self._closed = True
+        hard = self._opts.shutdown_mode == "hard"
         for runner in self._runners:
             try:
-                runner.close()
+                runner.close(hard=hard)
             except Exception:
                 print(
                     f"Error closing runner {runner!r}.",

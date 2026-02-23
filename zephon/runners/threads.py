@@ -407,7 +407,7 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
         target = max(1, min(new_parallelism, self._max_workers))
         self.ops[op_index].adjust_parallelism(target)
 
-    def close(self) -> None:
+    def close(self, *, hard: bool = False) -> None:
         with self._context_lock:
             ctx = self._active_context
 
@@ -415,6 +415,6 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
             # tell everyone to stop
             ctx.stop_event.set()
             self._put_stage_stop(ctx)
-            self._join_threads(ctx)
+            self._join_threads(ctx, hard=hard)
 
-        self._executor.shutdown(wait=True)
+        self._executor.shutdown(wait=not hard, cancel_futures=hard)

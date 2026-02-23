@@ -227,6 +227,47 @@ def test_thread_runner_emits_microbatches_and_accepts_batch_input() -> None:
     assert _extract_values(out[2]) == [2, 3, 4]
 
 
+def test_thread_runner_close_hard() -> None:
+    """close(hard=True) should tear down quickly without hanging."""
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    data = list(range(20))
+    assert _collect(runner, data) == data
+    runner.close(hard=True)
+
+
+def test_thread_runner_close_hard_with_inflight() -> None:
+    """Hard close during iteration should not hang or raise."""
+    op = DelayById(max_delay_ms=5.0)
+    node = Node(name="slow", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=False,
+        stage_output_mode="stream_items",
+    )
+    iterator = runner.run(iter(_mk_records(range(50))))
+    # Consume a few items to get workers busy
+    for _ in range(3):
+        try:
+            next(iterator)
+        except StopIteration:
+            break
+    runner.close(hard=True)
+
+
 def test_thread_runner_stream_mode_flattens_microbatch_input() -> None:
     op = _IdentityOp()
     node = Node(name="identity", op=op)

@@ -55,6 +55,21 @@ def test_inline_prefetch_iterator_close_is_clean() -> None:
         iterator.close()  # type: ignore[call-arg]
 
 
+def test_inline_close_hard() -> None:
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = InlineStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    list(runner.run(iter(_mk_records(range(5)))))
+    runner.close(hard=True)
+
+
 def test_inline_passthrough_stage_forwards_stream() -> None:
     stage = Stage(name="empty", nodes=[], placement="auto", break_reason="test")
     runner = InlineStageRunner(

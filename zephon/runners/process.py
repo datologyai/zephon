@@ -80,6 +80,18 @@ _SHUTDOWN_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_SHUTDOWN"))
 _STARTUP_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_WORKER_STARTUP"))
 _SHUTDOWN_WATCHDOG_TIMEOUT = float(os.environ.get("ZEPHON_SHUTDOWN_WATCHDOG", "0"))
 
+# -- Shutdown timeout constants (seconds) -----------------------------------
+_GRACEFUL_QUEUE_FLUSH: float = 5.0
+_HARD_QUEUE_FLUSH: float = 0.5
+_GRACEFUL_SERVICE_JOIN: float = 10.0
+_HARD_SERVICE_JOIN: float = 1.0
+_GRACEFUL_DRAIN_TIMEOUT: float = 5.0
+_HARD_DRAIN_TIMEOUT: float = 0.5
+_GRACEFUL_WORKER_JOIN: float = 10.0
+_HARD_WORKER_JOIN: float = 0.5
+_GRACEFUL_TERMINATE_JOIN: float = 5.0
+_HARD_TERMINATE_JOIN: float = 0.5
+
 
 def _debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
     if _DEBUG:
@@ -625,7 +637,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         )
 
     @staticmethod
-    def _close_ipc_queue(q: Any) -> None:
+    def _close_ipc_queue(q: Any, *, hard: bool = False) -> None:
         if q is None:
             return
 
@@ -639,16 +651,17 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             )
             traceback.print_exc(file=sys.stderr)
 
+        flush_timeout = _HARD_QUEUE_FLUSH if hard else _GRACEFUL_QUEUE_FLUSH
         t = getattr(q, "_thread", None)
         if t is not None:
             try:
-                t.join(timeout=5)
+                t.join(timeout=flush_timeout)
             except Exception:
                 pass
 
             if t.is_alive():
                 print(
-                    "Queue failed to flush within 5 seconds. "
+                    f"Queue failed to flush within {flush_timeout} seconds. "
                     + "Force-closing pipe to unblock feeder thread (data loss possible).",
                     file=sys.stderr,
                 )
@@ -726,7 +739,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         thread.start()
         self._service_thread = thread
 
-    def _stop_service_thread(self) -> None:
+    def _stop_service_thread(self, *, hard: bool = False) -> None:
         if self._service_thread is None:
             _shutdown_debug("_stop_service_thread: no service thread")
             return
@@ -737,16 +750,17 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         except (FileNotFoundError, EOFError, OSError, ValueError):
             pass  # i think we right now do this multiple times but anyways
 
+        join_timeout = _HARD_SERVICE_JOIN if hard else _GRACEFUL_SERVICE_JOIN
         _shutdown_debug("_stop_service_thread: joining service thread")
-        self._service_thread.join(timeout=10.0)
+        self._service_thread.join(timeout=join_timeout)
         if self._service_thread.is_alive():
             _shutdown_debug(
-                "_stop_service_thread: WARNING - service thread still alive after 10s join"
+                f"_stop_service_thread: WARNING - service thread still alive after {join_timeout}s join"
             )
         self._service_thread = None
         _shutdown_debug("_stop_service_thread: closing response queues")
         for resp in self._service_responses.values():
-            self._close_ipc_queue(resp)
+            self._close_ipc_queue(resp, hard=hard)
         self._service_responses.clear()
         _shutdown_debug("_stop_service_thread: done")
 
@@ -1004,7 +1018,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # workers -> main (result queue): main is consumer-only
         _close_writer_end(result_queue)
 
-    def _shutdown_workers(self) -> None:
+    def _shutdown_workers(self, *, hard: bool = False) -> None:
         with self._shutdown_lock:
             if self._workers_shutdown:
                 _shutdown_debug("_shutdown_workers: already complete, skipping")
@@ -1028,7 +1042,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 + f"{len(state.workers)} workers, inflight={state.inflight._count}"
             )
             drain_start = time.time()
-            drain_timeout = 5.0  # Give up after 5 seconds of draining
+            drain_timeout = _HARD_DRAIN_TIMEOUT if hard else _GRACEFUL_DRAIN_TIMEOUT
             drained_total = 0
             while time.time() - drain_start < drain_timeout:
                 drained_any = False
@@ -1084,19 +1098,23 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             # Wait for workers to finish, with reasonable timeout
             # We don't block indefinitely - if workers don't terminate quickly,
             # they're likely hung and we log a warning
+            join_timeout = _HARD_WORKER_JOIN if hard else _GRACEFUL_WORKER_JOIN
+            terminate_timeout = (
+                _HARD_TERMINATE_JOIN if hard else _GRACEFUL_TERMINATE_JOIN
+            )
             _shutdown_debug(f"_shutdown_workers: op[{op_idx}] joining workers")
             for worker_idx, proc in enumerate(state.workers):
                 _shutdown_debug(
                     f"_shutdown_workers: op[{op_idx}] joining worker[{worker_idx}] pid={proc.pid}"
                 )
-                proc.join(timeout=10.0)
+                proc.join(timeout=join_timeout)
                 if proc.is_alive():
                     _shutdown_debug(
                         f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] did NOT exit cleanly, terminating"
                     )
                     proc.terminate()
                     # Give it a moment to die gracefully, then kill
-                    proc.join(timeout=5)
+                    proc.join(timeout=terminate_timeout)
                     if proc.is_alive():
                         _shutdown_debug(
                             f"_shutdown_workers: op[{op_idx}] worker[{worker_idx}] still alive, killing"
@@ -1129,7 +1147,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             )
             for wid in state.worker_ids:
                 resp = self._service_responses.pop(wid, None)
-                self._close_ipc_queue(resp)
+                self._close_ipc_queue(resp, hard=hard)
 
             state.workers.clear()
             state.worker_ids.clear()
@@ -1143,13 +1161,13 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             _shutdown_debug(
                 f"_shutdown_workers: op[{op_idx}] closing task/result queues"
             )
-            self._close_ipc_queue(state.task_queue)
-            self._close_ipc_queue(state.result_queue)
+            self._close_ipc_queue(state.task_queue, hard=hard)
+            self._close_ipc_queue(state.result_queue, hard=hard)
 
             state.task_queue = None
 
         _shutdown_debug("_shutdown_workers: closing service queue")
-        self._close_ipc_queue(self._service_queue)
+        self._close_ipc_queue(self._service_queue, hard=hard)
         # Final cleanup: more aggressive GC for any remaining semaphores.
         collect_with_finalizers(cycles=5, yield_ms=2.0)
         # Dump semaphore debug info if ZEPHON_SEMAPHORE_DEBUG=1
@@ -1348,7 +1366,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
     def set_parallelism(self, op_index: int, new_parallelism: int) -> None:
         raise NotImplementedError("ProcessStageRunner does not support live scaling")
 
-    def close(self) -> None:
+    def close(self, *, hard: bool = False) -> None:
         _shutdown_debug("close() called")
         with ShutdownWatchdog(_SHUTDOWN_WATCHDOG_TIMEOUT, "close()"):
             with self._context_lock:
@@ -1360,11 +1378,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 self._put_stage_stop(ctx)
 
             _shutdown_debug("close(): calling _shutdown_workers")
-            self._shutdown_workers()
+            self._shutdown_workers(hard=hard)
             _shutdown_debug("close(): calling _stop_service_thread")
-            self._stop_service_thread()
+            self._stop_service_thread(hard=hard)
 
             if ctx is not None:
                 _shutdown_debug("close(): calling _join_threads")
-                self._join_threads(ctx)
+                self._join_threads(ctx, hard=hard)
             _shutdown_debug("close(): done")

@@ -591,6 +591,47 @@ def test_process_runner_partial_iteration_shutdown_no_underflow() -> None:
     runner.close()
 
 
+def test_process_runner_close_hard() -> None:
+    """close(hard=True) should tear down quickly without hanging."""
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    data = list(range(20))
+    assert _collect(runner, data) == data
+    runner.close(hard=True)
+
+
+def test_process_runner_close_hard_with_inflight() -> None:
+    """Hard close during iteration should not hang or raise."""
+    op = DelayById(max_delay_ms=50)
+    node = Node(name="slow", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=False,
+        stage_output_mode="stream_items",
+    )
+    records = _mk_records(range(30))
+    iterator = runner.run(iter(records))
+    for _ in range(3):
+        try:
+            next(iterator)
+        except StopIteration:
+            break
+    runner.close(hard=True)
+
+
 # ---------------------------------------------------------------------------
 # NamedQueue feeder error detection
 # ---------------------------------------------------------------------------

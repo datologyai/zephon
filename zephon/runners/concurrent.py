@@ -26,6 +26,10 @@ S = TypeVar("S", bound="ConcurrentOperatorState")
 _T = TypeVar("_T")
 _QItem = TypeVar("_QItem")
 
+# -- Shutdown timeout constants (seconds) -----------------------------------
+_GRACEFUL_THREAD_JOIN: float = 5.0
+_HARD_THREAD_JOIN: float = 0.1
+
 
 class _QueueLike(Protocol[_T]):
     def put(
@@ -679,11 +683,14 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
             thread.start()
             context.pumps.append(thread)
 
-    def _join_threads(self, context: ConcurrentRunContext) -> None:
+    def _join_threads(
+        self, context: ConcurrentRunContext, *, hard: bool = False
+    ) -> None:
+        timeout = _HARD_THREAD_JOIN if hard else _GRACEFUL_THREAD_JOIN
         for thread in context.pumps:
-            thread.join(timeout=5.0)
+            thread.join(timeout=timeout)
         if context.feeder is not None:
-            context.feeder.join(timeout=5.0)
+            context.feeder.join(timeout=timeout)
 
     # -- Public API -----------------------------------------------------
     def run(self, upstream: Iterable[RunnerStageIn]) -> Iterator[RunnerStageOut]:

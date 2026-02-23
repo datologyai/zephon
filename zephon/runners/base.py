@@ -225,6 +225,14 @@ class StageRunnerBase(Generic[StateT], ABC):
             "Passthrough stage received unsupported element " + f"{type(elem)!r}"
         )
 
+    @abstractmethod
+    def close(self, *, hard: bool = False) -> None:
+        """Tear down all runner resources.
+
+        Args:
+            hard: When True, use minimal join timeouts for fast exit.
+        """
+
     def run_one(self, elem: RunnerStreamIn) -> StreamItem:
         if not self.ops:
             if not isinstance(elem, (SampleRecord, SampleBatch)):

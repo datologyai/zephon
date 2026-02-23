@@ -250,6 +250,6 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
             )
         return stream
 
-    def close(self) -> None:
+    def close(self, *, hard: bool = False) -> None:
         with self._context_lock:
             self._active = False
