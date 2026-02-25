@@ -169,6 +169,6 @@ for batch in pipeline:
 
 ## Next Steps
 
-- See the [API Reference](api/index) for detailed documentation
+- Check out the [Understanding Zephon](understanding/worksources.md) section to learn more about Zephon's concepts and what's happening behind the scenes
+- See the [API Reference](api/zephon_api) for detailed documentation
 - Check out [Examples](examples/index) for more complete examples
-- Read the [Developer Guide](guides/dev_guide) for advanced usage

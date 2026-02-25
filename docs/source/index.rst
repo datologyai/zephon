@@ -48,25 +48,48 @@ Quick Example
    :maxdepth: 2
    :caption: Getting Started
 
-   quickstart
+   🚀 Quick Start <quickstart>
+   📖 Basic Concepts <basic_concepts>
+   🧩 Transitioning from Streaming <transitioning>
 
 .. toctree::
    :maxdepth: 2
-   :caption: API Reference
+   :caption: Understanding Zephon
 
-   api/index
+   understanding/worksources
+   understanding/sample_lifecycle
+   understanding/checkpointing
+   understanding/distributed_training
+   understanding/determinism
+   understanding/accumulators_operators
 
 .. toctree::
    :maxdepth: 2
-   :caption: Guides
+   :caption: Developer Resources
 
-   guides/index
+   guides/dev_guide
+   guides/prefetch_op
+   guides/sample_lifecycle
 
 .. toctree::
    :maxdepth: 2
    :caption: Examples
 
    examples/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Reference
+
+   api/zephon_api
+   api/zephon_io
+   api/zephon_work
+   api/zephon_core
+   api/zephon_ops
+   api/zephon_runners
+   api/zephon_observability
+   api/zephon_tools
+   api/zephon_utils
 
 
 Indices and Tables
