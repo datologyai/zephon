@@ -181,15 +181,14 @@ def test_cache_manager_cleanup_runs_on_gc(
     remote = tmp_path / "remote"
     remote.mkdir(parents=True, exist_ok=True)
     cache_root = tmp_path / "cache"
-    called = {"flag": False}
+    called: list[bool] = []
+    orig = manager_mod._close_cache_manager_resources
 
-    orig = manager_mod._close_cache_manager
+    def wrapped(*args, **kwargs) -> None:
+        called.append(True)
+        orig(*args, **kwargs)
 
-    def wrapped(ref) -> None:
-        called["flag"] = True
-        orig(ref)
-
-    monkeypatch.setattr(manager_mod, "_close_cache_manager", wrapped)
+    monkeypatch.setattr(manager_mod, "_close_cache_manager_resources", wrapped)
     mgr = CacheManager(cache_root, LocalFSBackend(root=remote), num_shards=128)
 
     fin = mgr._close_finalizer
@@ -202,7 +201,7 @@ def test_cache_manager_cleanup_runs_on_gc(
         gc.collect()
         time.sleep(0.01)
 
-    assert called["flag"] is True
+    assert len(called) == 1
     assert fin.alive is False
     assert mgr_ref() is None
 

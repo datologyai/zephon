@@ -44,11 +44,63 @@ _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 Opener = Callable[[Path], BinaryIO]
 
 
-def _close_cache_manager(manager_ref: weakref.ReferenceType["CacheManager"]) -> None:
-    manager = manager_ref()
-    if manager is None:
-        return
-    manager.close()
+def _close_cache_manager_resources(
+    persist_state: bool,
+    shared: "CacheSharedState",
+    reset_lock: "BaseFileLock",
+    session_path: Path,
+    pid: int,
+) -> None:
+    """Release all resources owned by a ``CacheManager``.
+
+    Designed for use as a ``weakref.finalize`` callback: receives the
+    resources directly so cleanup succeeds even when the
+    ``CacheManager`` is already being garbage-collected.
+    """
+    if not persist_state:
+        with contextlib.suppress(Exception):
+            _release_session_owner(reset_lock, session_path, pid)
+    shared.close()
+
+
+def _release_session_owner(
+    reset_lock: "BaseFileLock",
+    session_path: Path,
+    pid: int,
+) -> None:
+    """Remove *pid* from the session owner file.
+
+    Module-level helper so it can be called from a ``weakref.finalize``
+    callback (where ``self`` is already dead).
+    """
+    with reset_lock:
+        if not session_path.exists():
+            return
+        try:
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        owners = session.get("owners", {})
+        owner_key = str(pid)
+        entry = owners.get(owner_key)
+        if isinstance(entry, dict):
+            instances = int(entry.get("instances", 1))
+            if instances > 1:
+                entry["instances"] = instances - 1
+                owners[owner_key] = entry
+                session["owners"] = owners
+                tmp = session_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
+                tmp.replace(session_path)
+                return
+        owners.pop(owner_key, None)
+        if owners:
+            session["owners"] = owners
+            tmp = session_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
+            tmp.replace(session_path)
+        else:
+            session_path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -107,9 +159,17 @@ class CacheManager(ShardResolver):
             else "unlimited",
         )
         self._cache_lock = FileLock(str(self._root / _CACHE_LOCK_FILENAME))
-        # Avoid atexit strong refs so the manager can be collected between runs.
+        # Ensure all resources are released even if close() is never called.
+        # Pass the resources directly so the callback works after the manager
+        # has been collected (weakref.ref(self) would be dead).
         self._close_finalizer = weakref.finalize(
-            self, _close_cache_manager, weakref.ref(self)
+            self,
+            _close_cache_manager_resources,
+            self._persist_state,
+            self._shared,
+            self._reset_lock,
+            self._session_path,
+            self._pid,
         )
 
     def stats(self) -> CacheStats:
@@ -119,23 +179,11 @@ class CacheManager(ShardResolver):
                 shards=self._shared.count_local(),
             )
 
-    def __del__(self) -> None:
-        with contextlib.suppress(Exception):
-            if (
-                not getattr(self, "_persist_state", True)
-                and hasattr(self, "_reset_lock")
-                and hasattr(self, "_session_path")
-            ):
-                self._release_session_owner()
-        with contextlib.suppress(Exception):
-            self._shared.close()
-
     def close(self) -> None:
-        with contextlib.suppress(Exception):
-            if not self._persist_state:
-                self._release_session_owner()
-        with contextlib.suppress(Exception):
-            self._shared.close()
+        # Delegate to the finalizer which handles session owner release +
+        # shared state cleanup.  Calling it is idempotent — a second call
+        # (or GC triggering it later) is a harmless no-op.
+        self._close_finalizer()
 
     def touch(self, locator: ShardLocator) -> None:
         """Record a shard access without taking the global lock."""
@@ -491,27 +539,6 @@ class CacheManager(ShardResolver):
         owners[owner_key] = owner_entry
         session["owners"] = owners
         self._write_session(session)
-
-    def _release_session_owner(self) -> None:
-        with self._reset_lock:
-            session = self._load_session()
-            owners = self._prune_dead_owners(session.get("owners", {}))
-            owner_key = str(self._pid)
-            entry = owners.get(owner_key)
-            if isinstance(entry, dict):
-                instances = int(entry.get("instances", 1))
-                if instances > 1:
-                    entry["instances"] = instances - 1
-                    owners[owner_key] = entry
-                    session["owners"] = owners
-                    self._write_session(session)
-                    return
-            owners.pop(owner_key, None)
-            if owners:
-                session["owners"] = owners
-                self._write_session(session)
-            else:
-                self._session_path.unlink(missing_ok=True)
 
     def _load_session(self) -> dict:
         if not self._session_path.exists():

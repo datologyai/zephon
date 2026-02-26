@@ -204,16 +204,20 @@ def test_cache_shared_state_cleanup_runs_on_gc(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "cache"
-    called = {"flag": False}
-    orig = shared_state_mod._close_cache_shared_state
+    closed_names: list[str] = []
+    orig = shared_state_mod._cleanup_shared_memory_regions
 
-    def wrapped(ref) -> None:
-        called["flag"] = True
-        orig(ref)
+    def wrapped(owns_regions: bool, shms: list) -> None:
+        for shm in shms:
+            if shm is not None:
+                closed_names.append(shm.name)
+        orig(owns_regions, shms)
 
-    monkeypatch.setattr(shared_state_mod, "_close_cache_shared_state", wrapped)
+    monkeypatch.setattr(shared_state_mod, "_cleanup_shared_memory_regions", wrapped)
     ss = CacheSharedState(root, capacity=64)
     fin = ss._close_finalizer
+    # Expect 4 shared memory regions to be cleaned up
+    assert ss._states_mem is not None
     ss = None
 
     for _ in range(200):
@@ -222,8 +226,8 @@ def test_cache_shared_state_cleanup_runs_on_gc(
         gc.collect()
         time.sleep(0.01)
 
-    assert called["flag"] is True
     assert fin.alive is False
+    assert len(closed_names) == 4
 
 
 def test_ensure_entry_raises_when_capacity_exceeded(tmp_path: Path) -> None:

@@ -20,13 +20,27 @@ _CACHE_META_LOCK_FILENAME = "meta.lock"
 _SHM_KEYS = ("states", "access", "sizes", "usage")
 
 
-def _close_cache_shared_state(
-    state_ref: weakref.ReferenceType["CacheSharedState"],
+def _cleanup_shared_memory_regions(
+    owns_regions: bool,
+    shms: list,
 ) -> None:
-    state = state_ref()
-    if state is None:
-        return
-    state.close()
+    """Release shared memory regions.
+
+    Designed for use as a ``weakref.finalize`` callback: receives the
+    resources directly so cleanup succeeds even when the parent object
+    is already being garbage-collected.
+    """
+    if owns_regions:
+        for shm in shms:
+            if shm is None:
+                continue
+            with contextlib.suppress(Exception):
+                shm.unlink()
+    for shm in shms:
+        if shm is None:
+            continue
+        with contextlib.suppress(Exception):
+            shm.close()
 
 
 class _ShardState(IntEnum):
@@ -277,9 +291,14 @@ class CacheSharedState:
 
         self._owns_regions = owns_regions
         self._closed = False
-        # Avoid atexit strong refs so GC can reclaim shared state instances.
+        # Ensure shared memory regions are released even if close() is never
+        # called.  Pass the resources directly so the callback works after the
+        # parent object has been collected (weakref.ref(self) would be dead).
         self._close_finalizer = weakref.finalize(
-            self, _close_cache_shared_state, weakref.ref(self)
+            self,
+            _cleanup_shared_memory_regions,
+            owns_regions,
+            [self._states_mem, self._access_mem, self._sizes_mem, self._usage_mem],
         )
 
     # ------------------------------------------------------------------
@@ -496,18 +515,11 @@ class CacheSharedState:
             return
         self._closed = True
 
-        shms = [self._states_mem, self._access_mem, self._sizes_mem, self._usage_mem]
-        if self._owns_regions:
-            for shm in shms:
-                if shm is None:
-                    continue
-                with contextlib.suppress(Exception):
-                    shm.unlink()
-        for shm in shms:
-            if shm is None:
-                continue
-            with contextlib.suppress(Exception):
-                shm.close()
+        # Delegate to the finalizer callback which handles unlink + close.
+        # Calling a weakref.finalize object is idempotent — a second call
+        # (or GC triggering it later) is a harmless no-op.
+        if self._close_finalizer is not None:
+            self._close_finalizer()
         self._states_mem = None
         self._access_mem = None
         self._sizes_mem = None
