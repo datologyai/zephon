@@ -38,6 +38,7 @@ def build_pipeline_with_prefetch() -> Pipeline:
         .prefetch(buffer_size=64)  # Enable prefetch with default parallelism=4
         .decode_text()
     )
+    pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=1, padding=True)
     pipe = pipe.options(io_options={"cache": {"enabled": True, "root": cache_root}})
     pipe = pipe.batch(microbatch_size=8, drop_last=False)
     return pipe
@@ -58,6 +59,7 @@ def build_pipeline_without_prefetch() -> Pipeline:
     )
 
     pipe = Pipeline(work_source).decode_text()  # No prefetch
+    pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=1, padding=True)
     pipe = pipe.options(io_options={"cache": {"enabled": True, "root": cache_root}})
     pipe = pipe.batch(microbatch_size=8, drop_last=False)
     return pipe
