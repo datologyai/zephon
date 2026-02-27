@@ -46,3 +46,13 @@ def test_run_with_prefetch(capsys):
     captured = capsys.readouterr().out
     assert "Zephon Prefetch Example" in captured
     assert "COMPARISON" in captured
+
+
+def test_run_your_first_pipeline(capsys):
+    """Test that your_first_pipeline.py example runs without error."""
+    from examples.your_first_pipeline import main
+
+    main()
+    captured = capsys.readouterr().out
+    assert "Your First Zephon Pipeline" in captured
+    assert "Done! You processed 3 samples in 2 batch(es)." in captured

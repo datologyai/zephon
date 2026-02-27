@@ -79,14 +79,56 @@ ws = StaticMixtureWorkSource(
 # 4. Build the pipeline
 pipeline = (
     Pipeline(ws)
-    .decode_text()       # Extract text from samples
-    .batch(microbatch_size=2)  # Group into batches
+    .decode_text()  # Extract text from samples
+    .tokenize(
+        tokenizer_id="__fallback__",
+        parallelism=1,
+        preserve_upstream_payload=True,  # Keep "text" field for display
+    )
+    .batch(
+        microbatch_size=2, drop_last=False
+    )  # Group into batches; keep last partial batch
 )
 
 # 5. Iterate over batches
-for batch in pipeline:
-    training_batch = batch.to_training()
-    print(training_batch["texts"])
+batch_count = 0
+for batch_num, batch in enumerate(pipeline):
+    training_batch = batch.to_training(dtype=None)  # Use Python lists (not numpy/torch) to avoid requiring torch
+    texts = training_batch["texts"]
+    batch_count += 1
+    print(f"   Batch {batch_num}: {texts}")
+```
+
+You can run that first pipeline with the following commands:
+```shell
+cd zephon
+uv run python examples/your_first_pipeline.py
+
+...
+
+============================================================
+Your First Zephon Pipeline
+============================================================
+
+1. Creating sample data (3 records in a single shard)...
+   Shard 0 contains 3 samples
+
+2. Creating a Dataset from the shards...
+   Dataset 'demo' has 3 total samples
+
+3. Creating a StaticMixtureWorkSource...
+   Work source configured with mixture={'demo': 1.0}, chunk_size=1, seed=42
+
+4. Building the pipeline (decode_text -> tokenize -> batch with microbatch_size=2)...
+   Pipeline ready. decode_text() extracts the 'text' field; tokenize() adds input_ids; batch() groups 2 samples.
+
+5. Iterating over batches:
+------------------------------------------------------------
+   Batch 0: ['Hello world', 'Zephon is fast']
+   Batch 1: ['Data loading made easy']
+------------------------------------------------------------
+
+Done! You processed 3 samples in 2 batch(es).
 ```
 
 ## Reading from Files
