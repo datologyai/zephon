@@ -1,8 +1,11 @@
 import json
 
 import numpy as np
-import optree
 import pytest
+
+pytest.importorskip("optree")
+pytest.importorskip("litdata")
+import optree
 from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
 from litdata.streaming.writer import BinaryWriter
 

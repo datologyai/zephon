@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
+pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
 from zephon.io.dataset import Dataset
