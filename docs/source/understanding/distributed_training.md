@@ -172,6 +172,7 @@ When `canonical_replicas > dp_degree`, a single DP group may own multiple
 lanes; this is the basis of
 [elastic determinism](determinism.md).
 
+(compute-everywhere-discard-locally)=
 ### 2. Compute-everywhere, discard-locally
 
 The current

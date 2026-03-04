@@ -341,6 +341,7 @@ Checkpoint
 3. **Filter the prefix.**  The ReplayFilter drops the already-consumed
    prefix so the training loop only sees new records.
 
+(the-replayfilter)=
 #### The ReplayFilter
 
 The ReplayFilter is an operator that Zephon **automatically inserts** into
