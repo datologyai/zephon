@@ -140,6 +140,7 @@ exclude = [
     "build/**",
     "docs/**",
     "node_modules/**",
+    "zephon/_version.py",
 ]
 
 [tool.ruff.lint.pydocstyle]

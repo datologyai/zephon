@@ -24,6 +24,9 @@ cd zephon
 
 # Install dependencies (dev + test groups)
 make setup
+
+# Install pre-commit hooks (runs ruff format + ruff check before each commit)
+pre-commit install
 ```
 
 ## Running Tests
