@@ -3,6 +3,7 @@
 
 """User-facing pipeline wrapper that layers ergonomics atop core planning."""
 
+import functools
 import importlib.util as _importlib_util
 import warnings
 from collections.abc import Iterable
@@ -52,6 +53,9 @@ from zephon.work import WorkSource
 
 # TypeVar for stateful_transform state type
 _S = TypeVar("_S")
+
+# TypeVar for Pipeline methods that mutate the graph or cached plan state
+_PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
 
 
 # ---------- Private protocol fallbacks (non-public => no D101) ----------
@@ -142,6 +146,24 @@ class TorchPipelineIterableDataset(_RTIterableDatasetBase):
         self._pending_ckpt = sd.get("engine")
 
 
+def _mutates_graph(method: _PipelineMethod) -> _PipelineMethod:
+    """Decorator for Pipeline methods that mutate the graph or cached plan state.
+
+    Automatically calls ``_invalidate_plan()`` before the method body so that
+    the plan/engine cache is always cleared when the graph changes.  Applying
+    this decorator makes the intent explicit and is enforced by the structural
+    test ``test_all_graph_mutating_methods_invalidate_plan``.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "Pipeline", *args: Any, **kwargs: Any) -> Any:
+        self._invalidate_plan()
+        return method(self, *args, **kwargs)
+
+    wrapper._mutates_graph = True  # type: ignore[attr-defined]
+    return wrapper  # type: ignore[return-value]
+
+
 class Pipeline:
     """Fluent builder that compiles user ops into an executable pipeline."""
 
@@ -163,6 +185,7 @@ class Pipeline:
         # Optional prefetch node inserted before fetch
         self._prefetch_node: Node[PrefetchOp] | None = None
 
+    @_mutates_graph
     def fetch_parallelism(
         self, parallelism: int | None, max_batch: int | None = None
     ) -> "Pipeline":
@@ -196,6 +219,7 @@ class Pipeline:
         """
         return self.fetch_parallelism(parallelism, max_batch)
 
+    @_mutates_graph
     def prefetch(
         self,
         buffer_size: int = 1024,
@@ -271,6 +295,7 @@ class Pipeline:
 
         return self
 
+    @_mutates_graph
     def decode_text(
         self, parallelism: Optional[int] = None, **kwargs: Any
     ) -> "Pipeline":
@@ -284,6 +309,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def map_transform(
         self,
         transform_fn: Callable[[SamplePayload], SamplePayload | None],
@@ -323,6 +349,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def map_batch(
         self,
         transform_fn: Callable[[SampleBatch], SampleBatch | None],
@@ -362,6 +389,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def stateful_transform(
         self,
         name: str,
@@ -477,6 +505,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def tokenize(
         self,
         tokenizer: Any | None = None,
@@ -513,6 +542,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def shuffle(
         self,
         buffer_size: int,
@@ -533,6 +563,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def ensure_mixture(
         self,
         *,
@@ -624,6 +655,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def materialize(
         self, placement: str = "auto", parallelism: Optional[int] = None
     ) -> "Pipeline":
@@ -637,6 +669,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def batch(
         self,
         microbatch_size: int,
@@ -649,6 +682,7 @@ class Pipeline:
         self._tail = node
         return self
 
+    @_mutates_graph
     def pack_sequences(
         self,
         max_length: int,
@@ -721,6 +755,7 @@ class Pipeline:
         return self
 
     # Internal/testing helper: insert a small deterministic delay stage.
+    @_mutates_graph
     def _delay(
         self,
         *,
@@ -762,6 +797,14 @@ class Pipeline:
         # selection, parallelism, or other compile-time decisions.
         self._runtime_spec = None
         return self
+
+    def _invalidate_plan(self) -> None:
+        """Invalidate cached plan and derived state when the graph is mutated."""
+        self._plan = None
+        self._runtime_spec = None
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
 
     def _ensure_plan(self) -> None:
         """Build Plan only (cheap graph analysis, no Engine)."""
