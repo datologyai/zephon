@@ -991,7 +991,7 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon.core.notify import _notify_item, is_tombstone
+        from zephon.core.notify import _notify_item, is_sentinel
 
         engine = self._engine
         assert engine is not None
@@ -999,7 +999,7 @@ class Pipeline:
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
             _notify_item(engine, item, use_monotone)
-            if not is_tombstone(item):
+            if not is_sentinel(item):
                 yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,

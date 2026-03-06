@@ -65,7 +65,7 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.graph import Plan
-from zephon.core.notify import is_tombstone
+from zephon.core.notify import is_sentinel
 from zephon.core.replay import ReplayConfigService
 from zephon.core.runtime_spec import RuntimeSpec
 from zephon.core.world import World
@@ -1206,12 +1206,12 @@ class Engine:
                 break  # move to drain regime
 
             # Emit exactly one from the current lane, then advance RR pointer.
-            # Tombstones are transparent to RR scheduling — they must not
-            # consume a slot, otherwise the interleaving order diverges from
-            # the pre-checkpoint baseline after a replay that emits tombstones.
+            # Sentinels (tombstones, etc.) are transparent to RR scheduling —
+            # they must not consume a slot, otherwise the interleaving order
+            # diverges from the pre-checkpoint baseline after a replay.
             item = buffers[lane].popleft()
             yield item
-            if not is_tombstone(item):
+            if not is_sentinel(item):
                 idx = (idx + 1) % len(lanes)
                 self._rr_next_idx[key] = idx
 
@@ -1225,7 +1225,7 @@ class Engine:
                 if buffers[lane]:
                     item = buffers[lane].popleft()
                     yield item
-                    if not is_tombstone(item):
+                    if not is_sentinel(item):
                         idx = (idx + 1) % len(lanes)
                         self._rr_next_idx[key] = idx
                     emitted = True

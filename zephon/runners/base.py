@@ -20,6 +20,7 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.graph import Node, Stage
+from zephon.core.notify import is_sentinel
 from zephon.core.op_base import Op, OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
@@ -111,6 +112,10 @@ class BaseOperatorState:
         The accumulator runs on the pump thread (serial) and maintains
         any cross-invocation state needed for deterministic batching.
 
+        Sentinel records (tombstones, flush signals, etc.) bypass the
+        accumulator entirely and are emitted as individual ready batches.
+        This ensures operators never see sentinels unless they create them.
+
         Args:
             elems: Input elements to accumulate.
             force: If True, flush all remaining buffered elements.
@@ -123,13 +128,27 @@ class BaseOperatorState:
         if not elems and not force:
             return ready
 
-        # Push elements through accumulator
+        # Separate sentinels from regular elements before the accumulator.
+        sentinels: list[RunnerStreamIn] = []
+        regular: list[RunnerStreamIn] = []
         if elems:
-            ready.extend(self.accumulator_impl.push_many(elems))
+            for e in elems:
+                if is_sentinel(e):
+                    sentinels.append(e)
+                else:
+                    regular.append(e)
+
+        # Push regular elements through accumulator
+        if regular:
+            ready.extend(self.accumulator_impl.push_many(regular))
 
         # Flush remaining on force
         if force:
             ready.extend(self.accumulator_impl.flush())
+
+        # Sentinels bypass the accumulator as individual ready batches.
+        for s in sentinels:
+            ready.append(([s], 0))
 
         return ready
 

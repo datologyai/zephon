@@ -3,10 +3,12 @@ from typing import Iterable
 from tests.zephon.runners._helpers import (
     _ctx_services,
     _extract_values,
+    _mk_record,
     _mk_records,
 )
-from zephon.core.constants import SampleRecord
+from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.graph import Node, Stage
+from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.runners.inline import InlineStageRunner
 
@@ -82,3 +84,50 @@ def test_inline_passthrough_stage_forwards_stream() -> None:
     data = _mk_records(range(6))
     out = list(runner.run(iter(data)))
     assert out == data
+
+
+def test_inline_sentinel_bypass_accumulator_and_process_many() -> None:
+    """Sentinels bypass accumulator and process_many at the runner level.
+
+    The Batch operator with microbatch_size=3 buffers regular records in its
+    accumulator and wraps them into SampleBatch via process_many.  Sentinels
+    (tombstones) must not be buffered or wrapped — they should pass through
+    unchanged.
+    """
+    op = Batch(3)
+    node = Node(name="batch", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = InlineStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    tomb_meta = SampleMeta(sample_id=(0, 0, 99), lane_id=0, chunk_id=0).with_tombstone(
+        True
+    )
+    tomb = SampleRecord(meta=tomb_meta, payload={})
+
+    # Feed: 3 regular records, then a tombstone, then 3 more regular records.
+    inputs: list[SampleRecord] = [_mk_record(i) for i in range(3)]
+    inputs.append(tomb)
+    inputs.extend(_mk_record(i) for i in range(3, 6))
+
+    out = list(runner.run(iter(inputs)))
+
+    # The tombstone must appear as a bare SampleRecord (not inside a SampleBatch).
+    tombstones_out = [
+        item for item in out if isinstance(item, SampleRecord) and item.meta.tombstone
+    ]
+    assert len(tombstones_out) == 1
+    assert tombstones_out[0] is tomb
+
+    # The 6 regular records should be batched into SampleBatches.
+    from zephon.core.constants import SampleBatch
+
+    batches_out = [item for item in out if isinstance(item, SampleBatch)]
+    total_regular = sum(len(b.records) for b in batches_out)
+    assert total_regular == 6

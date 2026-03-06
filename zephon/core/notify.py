@@ -108,3 +108,8 @@ def _notify_item(engine: Any, item: StreamItem, use_monotone: bool) -> None:
 def is_tombstone(item: StreamItem) -> bool:
     """Check if a stream item is a tombstone (should be notified but not yielded)."""
     return isinstance(item, SampleRecord) and item.meta.tombstone
+
+
+def is_sentinel(item: StreamItem) -> bool:
+    """Check if a stream item is a sentinel (should be notified but not yielded)."""
+    return isinstance(item, SampleRecord) and item.meta.is_sentinel

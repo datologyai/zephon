@@ -49,17 +49,10 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
             self._state = self._init_state()
             self._initialized = True
 
-        # Tombstones pass through unchanged — they must not enter user state.
-        tombstones = [r for r in items if r.meta.tombstone]
-        real_items = [r for r in items if not r.meta.tombstone]
-
         result: list[ReadyBatch[SampleRecord]] = []
-        if tombstones:
-            result.append((tombstones, 0))
-        if not real_items:
+        items_list = items if isinstance(items, list) else list(items)
+        if not items_list:
             return result
-
-        items_list = real_items if isinstance(real_items, list) else list(real_items)
         self._state, outputs = self._push_fn(self._state, items_list)
 
         if self._should_flush_fn and self._should_flush_fn(self._state):
@@ -204,8 +197,6 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         calls transform_fn, and unwraps. For best performance with batch-oriented
         transforms (GPU batching, etc.), use process_many.
         """
-        if elem.meta.tombstone:
-            return [elem]
         if self._transform_fn is None:
             return [elem]
         return self._transform_fn([elem])
@@ -218,11 +209,4 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         """
         if self._transform_fn is None:
             return elems
-        # Tombstones pass through unchanged.
-        tombstones = [r for r in elems if r.meta.tombstone]
-        real = [r for r in elems if not r.meta.tombstone]
-        if not real:
-            return tombstones
-        result = self._transform_fn(real)
-        result.extend(tombstones)
-        return result
+        return self._transform_fn(elems)

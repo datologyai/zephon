@@ -45,16 +45,8 @@ class BatchAccumulator(Accumulator[SampleRecord]):
         for elem in elems:
             lane_id = elem.meta.lane_id
             buf = self._buffers[lane_id]
-
-            # Tombstones must not affect batch shapes; flush full batches
-            # then emit the tombstone in its own batch.
-            if elem.meta.tombstone:
-                ready.extend(self._flush_full_batches(lane_id))
-                # Emit tombstone in its own batch so operator can handle it
-                ready.append(([elem], 0))
-            else:
-                buf.append(elem)
-                ready.extend(self._flush_full_batches(lane_id))
+            buf.append(elem)
+            ready.extend(self._flush_full_batches(lane_id))
 
         return ready
 
@@ -148,16 +140,10 @@ class Batch(DefaultSetup):
     ) -> list[SampleBatch | SampleRecord]:
         """Wrap lane-pure batch into SampleBatch.
 
-        The accumulator ensures we receive either:
-        - A lane-pure batch of regular records -> wrap into SampleBatch
-        - A single tombstone record -> pass through unchanged
+        The accumulator provides lane-pure batches of regular records.
         """
         if not elems:
             return []
-
-        # Check if this is a tombstone batch (single tombstone record)
-        if len(elems) == 1 and elems[0].meta.tombstone:
-            return [elems[0]]
 
         # Sanity check: ensure lane purity
         if __debug__:

@@ -633,6 +633,60 @@ def test_process_runner_close_hard_with_inflight() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel bypass in process runner
+# ---------------------------------------------------------------------------
+
+
+def test_process_sentinel_bypass_accumulator_and_process_many() -> None:
+    """Sentinels bypass worker processes and pass through unchanged.
+
+    Uses DelayById (known to work with ProcessStageRunner).  A tombstone
+    injected among regular records must emerge as a bare SampleRecord —
+    it must not be sent to worker processes or modified in any way.
+    """
+    from zephon.core.constants import SampleMeta
+
+    op = DelayById(max_delay_ms=0.0)
+    node = Node(name="delay", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    tomb_meta = SampleMeta(sample_id=(0, 0, 99), lane_id=0, chunk_id=0).with_tombstone(
+        True
+    )
+    tomb = SampleRecord(meta=tomb_meta, payload={})
+
+    # Feed: 3 regular records, then a tombstone, then 3 more regular records.
+    inputs: list[SampleRecord] = [_mk_record(i) for i in range(3)]
+    inputs.append(tomb)
+    inputs.extend(_mk_record(i) for i in range(3, 6))
+
+    out = list(runner.run(iter(inputs)))
+
+    # The tombstone must appear as a bare SampleRecord.
+    tombstones_out = [
+        item for item in out if isinstance(item, SampleRecord) and item.meta.tombstone
+    ]
+    assert len(tombstones_out) == 1
+    assert tombstones_out[0].meta.tombstone
+
+    # All 6 regular records should pass through.
+    regular_out = [
+        item
+        for item in out
+        if isinstance(item, SampleRecord) and not item.meta.tombstone
+    ]
+    assert len(regular_out) == 6
+
+
+# ---------------------------------------------------------------------------
 # NamedQueue feeder error detection
 # ---------------------------------------------------------------------------
 

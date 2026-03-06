@@ -9,8 +9,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
-from zephon.core.constants import RunnerStageOut, RunnerStreamIn, StreamItem
+from zephon.core.constants import (
+    RunnerStageOut,
+    RunnerStreamIn,
+    StreamItem,
+)
 from zephon.core.graph import Node, Stage
+from zephon.core.notify import is_sentinel
 from zephon.core.op_base import Op, OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
@@ -32,27 +37,37 @@ class _ThreadOperatorState(ConcurrentOperatorState):
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
     result_queue: _QueueLike[RunnerResult] = field(init=False)
 
-    #: Thread identity of the pump thread that owns this operator state.
-    #: Set at the start of ``_operator_loop`` via ``_on_pump_started``.
+    # Thread identity of the pump thread that owns this operator state.
+    # Set at the start of ``_operator_loop`` via ``_on_pump_started``.
     pump_thread_id: int = field(init=False, default=0)
 
-    #: Holds a single result produced by a synchronous ``done_callback``
-    #: that ran on the pump thread.
-    #:
-    #: When ``future.add_done_callback(cb)`` is called on an already-completed
-    #: future, Python invokes ``cb`` synchronously on the calling thread — which
-    #: is the pump thread.  The callback normally puts the result into
-    #: ``result_queue``, but the pump is the *only* thread that drains that
-    #: queue.  If the queue is full the pump blocks on its own queue and
-    #: deadlocks: no other thread will ever make space.
-    #:
-    #: To break this cycle the callback detects that it is running on the pump
-    #: thread (via ``pump_thread_id``) and stashes the result here instead of
-    #: blocking on the queue.  ``_post_schedule_batch`` returns immediately,
-    #: control flows back to ``_operator_loop``, and the pump handles the
-    #: stashed result inline — draining queues, forwarding downstream, etc. —
-    #: without ever blocking on a queue it is responsible for draining.
-    sync_result: RunnerResult | None = field(init=False, default=None)
+    # Results produced on the pump thread that must bypass ``result_queue``.
+    #
+    # The pump thread is the *only* thread that drains ``result_queue``
+    # (via ``_drain_results``).  If any code running on the pump thread
+    # calls ``_put_result`` while the queue is full, the pump blocks on
+    # its own queue and deadlocks: no other thread will ever make space.
+    #
+    # Two code paths hit this problem and stash results here instead:
+    #
+    # 1. **Sentinel batches** — ``_schedule_batch`` creates a RunnerResult
+    #    for sentinel control signals directly on the pump thread.
+    #    Sentinels bypass ``process_many`` entirely (they are never sent
+    #    to the worker pool), so the result must be produced inline.
+    #
+    # 2. **Synchronous done_callbacks** — when ``future.add_done_callback``
+    #    is called on an already-completed future, Python invokes the
+    #    callback synchronously on the calling thread — which is the pump
+    #    thread.  To break the cycle the callback detects that it is
+    #    running on the pump thread (via ``pump_thread_id``) and appends
+    #    the result here instead of blocking on the queue.
+    #
+    # ``_post_schedule_batch`` drains this list via ``_handle_result``
+    # after every ``_schedule_batch`` call.  Control flows back to
+    # ``_operator_loop``, and the pump handles stashed results inline —
+    # draining queues, forwarding downstream, etc. — without ever
+    # blocking on a queue it is responsible for draining.
+    _local_results: list[RunnerResult] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -275,10 +290,9 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        sr = state.sync_result
-        if sr is not None:
-            state.sync_result = None
-            self._handle_result(state, sr, next_queue, context)
+        for result in state._local_results:
+            self._handle_result(state, result, next_queue, context)
+        state._local_results.clear()
 
     def _put_result(
         self,
@@ -318,6 +332,28 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
     ) -> None:
         if not batch or context.stop_event.is_set():
             return
+
+        # Sentinel batches (tombstones, flush signals) bypass process_many
+        # entirely — they are control signals that operators should never see.
+        # Create a RunnerResult inline and stash it in _local_results so the
+        # pump thread never blocks on result_queue (see _local_results docstring).
+        if is_sentinel(batch[0]):
+            seq = state.next_seq
+            state.next_seq += 1
+            result = RunnerResult(
+                seq=seq,
+                payload=batch,
+                wait_ns=0,
+                consumed_elements=0,
+                consumed_bytes=0,
+                queue_depth_snapshot=-1,
+                proc_ns=0,
+                collect_metrics=False,
+                from_worker=False,
+            )
+            state._local_results.append(result)
+            return
+
         instance = state.acquire_instance()
 
         seq = state.next_seq
@@ -387,8 +423,8 @@ class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
                 if should_put:
                     if threading.get_ident() == state.pump_thread_id:
                         # Synchronous callback on the pump thread — stash
-                        # instead of blocking (see sync_result docstring).
-                        state.sync_result = payload
+                        # instead of blocking (see _local_results docstring).
+                        state._local_results.append(payload)
                         state.pending_puts.decrement()
                     else:
                         try:

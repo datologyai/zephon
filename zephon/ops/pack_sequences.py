@@ -78,13 +78,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if not elems:
             return []
 
-        # Tombstones pass through unchanged — they carry no payload to pack.
-        work_list = [r for r in elems if not r.meta.tombstone]
-        tombstone_batches: list[ReadyBatch[SampleRecord]] = [
-            ([r], 0) for r in elems if r.meta.tombstone
-        ]
-        if not work_list:
-            return tombstone_batches
+        work_list = list(elems)
 
         # Apply shuffle strategy to order sequences
         if self.shuffle_strategy == "random":
@@ -121,7 +115,6 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             for rec in packed:
                 ready.append(([rec], 0))
 
-        ready.extend(tombstone_batches)
         return ready
 
     def flush(self) -> list[ReadyBatch[SampleRecord]]:

@@ -54,6 +54,7 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.graph import Node, Stage
+from zephon.core.notify import is_sentinel
 from zephon.core.op_base import OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
@@ -393,6 +394,19 @@ class _ProcessOperatorState(ConcurrentOperatorState):
         init=False, default_factory=list
     )
     worker_ids: list[int] = field(init=False, default_factory=list)
+
+    # Results produced on the pump thread that must bypass ``result_queue``.
+    #
+    # The main process is the consumer side of the IPC result pipe/queue.
+    # Writing a result into it from the main process would deadlock when the
+    # pipe buffer is full (the reader — also the main process — is blocked
+    # on writing, not reading).
+    #
+    # Sentinel batches create RunnerResults inline on the pump thread and
+    # stash them here.  ``_post_schedule_batch`` drains this list via
+    # ``_handle_result``, keeping sentinel results on the fast path without
+    # touching the IPC pipe.
+    _local_results: list[RunnerResult] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -846,6 +860,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 wait_ns=wait_ns,
                 context=context,
             )
+            # Drain locally stashed sentinel results before draining the IPC queue.
+            self._post_schedule_batch(state, None, context)
             # next_queue=None: results go to stage output (correct for single-op stages)
             self._drain_results(state, None, context)
 
@@ -1263,9 +1279,33 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
         Invocation boundaries are defined by the operator's accumulator.
         Each batch is sent to workers as-is.
+
+        Sentinel batches (tombstones, flush signals) bypass worker execution
+        entirely — they are control signals that operators should never see.
+        A RunnerResult is created inline and stashed in ``_local_results``
+        so the pump thread never writes to the IPC result pipe.
         """
         if not batch or context.stop_event.is_set():
             return
+
+        # Sentinel batches bypass workers — create result inline.
+        if is_sentinel(batch[0]):
+            seq = state.next_seq
+            state.next_seq += 1
+            result = RunnerResult(
+                seq=seq,
+                payload=batch,
+                wait_ns=0,
+                consumed_elements=0,
+                consumed_bytes=0,
+                queue_depth_snapshot=-1,
+                proc_ns=0,
+                collect_metrics=False,
+                from_worker=False,
+            )
+            state._local_results.append(result)
+            return
+
         seq = state.next_seq
         state.next_seq += 1
         collect_stats = self._tracking_mode.collects_nodes
@@ -1294,6 +1334,16 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         _debug(f"scheduled batch seq={seq}")
         state.inflight.increment()
 
+    def _post_schedule_batch(
+        self,
+        state: _ProcessOperatorState,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+    ) -> None:
+        for result in state._local_results:
+            self._handle_result(state, result, next_queue, context)
+        state._local_results.clear()
+
     def _ack_result(
         self,
         state: _ProcessOperatorState,
@@ -1321,7 +1371,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         # already cleared the counter while pump threads are still processing results.
         # This races when buffered_iterable's 1s join timeout expires before
         # _join_threads completes, allowing _shutdown_workers to run concurrently.
-        state.inflight.try_decrement()
+        # Skip non-worker results: sentinel RunnerResults are created inline by
+        # _schedule_batch (stashed in _local_results) without incrementing inflight.
+        if result.from_worker:
+            state.inflight.try_decrement()
         super()._handle_result(state, result, next_queue, context)
 
     def _wait_for_result(

@@ -1,3 +1,5 @@
+import queue
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,13 +10,15 @@ from tests.zephon.runners._helpers import (
     _mk_records,
 )
 from zephon.core.accumulators import Accumulator, PassthroughAccumulator
-from zephon.core.constants import SampleRecord
+from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import DefaultSetup, Op
 from zephon.core.traits import OpTraits
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
+from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
+from zephon.runners.concurrent import RunnerResult
 from zephon.runners.threads import ThreadStageRunner
 
 
@@ -284,3 +288,135 @@ def test_thread_runner_stream_mode_flattens_microbatch_input() -> None:
     microbatch = _mk_records(range(5))
     out = list(runner.run(iter([microbatch])))
     assert out == microbatch
+
+
+# ---------------------------------------------------------------------------
+# Sentinel bypass in thread runner
+# ---------------------------------------------------------------------------
+
+
+def test_thread_sentinel_bypass_accumulator_and_process_many() -> None:
+    """Sentinels bypass accumulator and process_many in the thread runner.
+
+    The Batch operator with microbatch_size=3 buffers regular records in its
+    accumulator and wraps them into SampleBatch via process_many.  Sentinels
+    (tombstones) must not be buffered or wrapped — they should pass through
+    unchanged, just like in the inline runner.
+    """
+    op = Batch(3)
+    node = Node(name="batch", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    tomb_meta = SampleMeta(sample_id=(0, 0, 99), lane_id=0, chunk_id=0).with_tombstone(
+        True
+    )
+    tomb = SampleRecord(meta=tomb_meta, payload={})
+
+    # Feed: 3 regular records, then a tombstone, then 3 more regular records.
+    inputs: list[SampleRecord] = [_mk_record(i) for i in range(3)]
+    inputs.append(tomb)
+    inputs.extend(_mk_record(i) for i in range(3, 6))
+
+    out = list(runner.run(iter(inputs)))
+
+    # The tombstone must appear as a bare SampleRecord (not inside a SampleBatch).
+    tombstones_out = [
+        item for item in out if isinstance(item, SampleRecord) and item.meta.tombstone
+    ]
+    assert len(tombstones_out) == 1
+    assert tombstones_out[0] is tomb
+
+    # The 6 regular records should be batched into SampleBatches.
+    batches_out = [item for item in out if isinstance(item, SampleBatch)]
+    total_regular = sum(len(b.records) for b in batches_out)
+    assert total_regular == 6
+
+
+# ---------------------------------------------------------------------------
+# Sentinel deadlock on full result_queue
+# ---------------------------------------------------------------------------
+
+
+def test_thread_sentinel_does_not_deadlock_on_full_result_queue() -> None:
+    """Sentinel scheduling must not block when the result_queue is full.
+
+    Bug: ThreadStageRunner._schedule_batch puts sentinel results directly
+    into result_queue via _put_result.  The pump thread is the only thread
+    that drains result_queue (via _drain_results).  If the queue is already
+    full (e.g. a worker completed between drain and sentinel scheduling),
+    _put_result blocks → pump can never drain → self-deadlock.
+
+    The fix stashes sentinel results in _local_results (a plain list) that
+    _post_schedule_batch drains inline on the pump thread.
+    """
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        queue_capacity=1,
+        stage_output_mode="stream_items",
+    )
+
+    state = runner.ops[0]
+    context = runner._create_context()
+
+    # Pre-fill result_queue to capacity.  This simulates a worker whose
+    # done_callback put a result into result_queue between the pump's
+    # _drain_results and the sentinel's _schedule_batch.
+    dummy = RunnerResult(
+        seq=0,
+        payload=[],
+        wait_ns=0,
+        consumed_elements=0,
+        consumed_bytes=0,
+        queue_depth_snapshot=-1,
+        proc_ns=0,
+        collect_metrics=False,
+    )
+    state.result_queue.put(dummy)
+    state.next_seq = 1  # dummy consumed seq 0
+
+    tomb_meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_tombstone(
+        True
+    )
+    sentinel = SampleRecord(meta=tomb_meta, payload={})
+
+    # Schedule sentinel in a helper thread so we can detect blocking.
+    completed = threading.Event()
+
+    def schedule() -> None:
+        runner._schedule_batch(state, [sentinel], wait_ns=0, context=context)
+        completed.set()
+
+    t = threading.Thread(target=schedule, daemon=True)
+    t.start()
+    t.join(timeout=2.0)
+
+    deadlocked = not completed.is_set()
+
+    # Cleanup: unblock the stuck thread by draining result_queue.
+    if deadlocked:
+        try:
+            state.result_queue.get_nowait()
+        except queue.Empty:
+            pass
+        t.join(timeout=1.0)
+
+    assert not deadlocked, (
+        "Sentinel scheduling deadlocked: _schedule_batch called _put_result "
+        "on the pump thread while result_queue was full.  The pump thread is "
+        "the only consumer of result_queue, so it blocked on itself."
+    )

@@ -183,11 +183,6 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         # Phase 1: Buffer all incoming records
         for elem in elems:
-            # Pass through tombstones immediately without buffering
-            if elem.meta.tombstone:
-                ready.append(([elem], 0))
-                continue
-
             lane_id = elem.meta.lane_id
             chunk_id = elem.meta.chunk_id
 

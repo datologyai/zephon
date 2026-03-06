@@ -131,6 +131,7 @@ class RunnerResult:
     collect_metrics: bool = True
     ack: Any | None = None
     error: WorkerErrorInfo | None = None
+    from_worker: bool = True
 
 
 @dataclass

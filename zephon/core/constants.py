@@ -236,6 +236,11 @@ class SampleMeta:
     def tombstone(self) -> bool:
         return bool(self.tags.get("_tombstone", False))
 
+    @property
+    def is_sentinel(self) -> bool:
+        """True if this record is a control signal (tombstone, flush, etc.)."""
+        return self.tombstone
+
     def with_contributors(self, value: Iterable[ContributorRef] | None) -> "SampleMeta":
         """Return a new ``SampleMeta`` with contributors set/cleared in tags."""
         tags = dict(self.tags)

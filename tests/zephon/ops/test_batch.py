@@ -121,28 +121,6 @@ def test_batch_traits_and_accumulator() -> None:
     assert acc_keep.drop_last is False
 
 
-def test_batch_accumulator_tombstone_handling() -> None:
-    """Test that tombstones flush current batch and are emitted in their own batch."""
-    acc = BatchAccumulator(3, drop_last=False)
-    tomb_meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_tombstone(
-        True
-    )
-    tomb = SampleRecord(meta=tomb_meta, payload={})
-    kept = _rec(1)
-
-    # Push tombstone - should emit in its own batch
-    ready = acc.push_many([tomb, kept])
-    assert len(ready) == 1  # Just the tombstone batch
-    assert len(ready[0][0]) == 1  # [0] is (batch, wait_ns), [0] is batch
-    assert ready[0][0][0].meta.tombstone
-
-    # Flush remaining
-    ready = acc.flush()
-    assert len(ready) == 1  # The kept record
-    assert len(ready[0][0]) == 1
-    assert ready[0][0][0] is kept
-
-
 def test_batch_operator_process_many_wraps_batch() -> None:
     """Test that the operator wraps lane-pure batches into SampleBatch."""
     op = Batch(2)
@@ -153,18 +131,6 @@ def test_batch_operator_process_many_wraps_batch() -> None:
     batch = result[0]
     assert hasattr(batch, "records")
     assert len(batch.records) == 2
-
-
-def test_batch_operator_passes_through_tombstone() -> None:
-    """Test that tombstones are passed through unchanged by the operator."""
-    op = Batch(2)
-    tomb_meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_tombstone(
-        True
-    )
-    tomb = SampleRecord(meta=tomb_meta, payload={})
-    result = op.process_many([tomb])
-    assert len(result) == 1
-    assert result[0] is tomb
 
 
 def test_batch_has_pending_data() -> None:

@@ -14,6 +14,7 @@ from zephon.core.constants import (
     RunnerStreamIn,
 )
 from zephon.core.graph import Node, Stage
+from zephon.core.notify import is_sentinel
 from zephon.core.op_base import Op
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
@@ -113,7 +114,12 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         ready = state.enqueue(inputs, force=force)
         outputs: Microbatch = []
         for batch, wait_ns in ready:
-            outputs.extend(self._process_batch(state, batch, wait_ns))
+            # Sentinel batches bypass process_many — they are control signals
+            # that operators should never see (unless they created them).
+            if batch and is_sentinel(batch[0]):
+                outputs.extend(batch)
+            else:
+                outputs.extend(self._process_batch(state, batch, wait_ns))
         return outputs
 
     def _process_batch(
