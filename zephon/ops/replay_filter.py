@@ -10,6 +10,7 @@ of the pipeline when no batching is used.
 from typing import Any
 
 from zephon.core.accumulators import Accumulator, PassthroughAccumulator
+from zephon.core.children import tombstones_for_record
 from zephon.core.constants import LaneId, SampleCursor, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.replay import ReplayConfigService
@@ -104,7 +105,7 @@ class ReplayFilter(DefaultSetup):
         if self._disabled:
             return [elem]
         if self._should_drop(elem):
-            return []
+            return tombstones_for_record(elem)
         return [elem]
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
@@ -112,9 +113,11 @@ class ReplayFilter(DefaultSetup):
         if self._disabled:
             return elems
         out: list[SampleRecord] = []
-        for e in elems:  # TODO: can we vectorize?
-            if not self._should_drop(e):
+        any_dropped = False
+        for e in elems:
+            if self._should_drop(e):
+                out.extend(tombstones_for_record(e))
+                any_dropped = True
+            else:
                 out.append(e)
-        # If nothing was dropped, return original list to avoid copy overhead
-        # TODO: we already materialized out though, we can avoid that by first collecting the resutls of should drop
-        return elems if len(out) == len(elems) else out
+        return elems if not any_dropped else out

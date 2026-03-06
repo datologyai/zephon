@@ -18,9 +18,9 @@ from zephon.core.notify import (
     _apply_notify_args,
     _ContributorNotify,
     _extract_notify_args,
-    _is_tombstone,
     _MonotoneNotify,
     _notify_item,
+    is_tombstone,
 )
 
 # ---------------------------------------------------------------------------
@@ -162,16 +162,16 @@ def test_notify_item_smoke():
 
 
 # ---------------------------------------------------------------------------
-# _is_tombstone
+# is_tombstone
 # ---------------------------------------------------------------------------
 
 
 class TestIsTombstone:
     def test_normal_record(self):
-        assert _is_tombstone(_record()) is False
+        assert is_tombstone(_record()) is False
 
     def test_tombstone_record(self):
-        assert _is_tombstone(_record(tombstone=True)) is True
+        assert is_tombstone(_record(tombstone=True)) is True
 
     def test_batch_is_not_tombstone(self):
-        assert _is_tombstone(_batch(_record())) is False
+        assert is_tombstone(_batch(_record())) is False

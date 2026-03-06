@@ -63,7 +63,7 @@ from zephon.core.notify import (
     NotifyArgs,
     _apply_notify_args,
     _extract_notify_args,
-    _is_tombstone,
+    is_tombstone,
 )
 
 # ---------------------------------------------------------------------------
@@ -411,7 +411,7 @@ class MTPPipeline:
             item, seq = msg
             # ACK immediately on dequeue — seq number only, no payload
             self._main_conn.send((_ACK, seq))
-            if not _is_tombstone(item):
+            if not is_tombstone(item):
                 yield item
 
     def checkpoint(self, *, timeout: float = _CHECKPOINT_TIMEOUT_S) -> dict[str, Any]:

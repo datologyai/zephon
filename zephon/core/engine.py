@@ -65,6 +65,7 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.graph import Plan
+from zephon.core.notify import is_tombstone
 from zephon.core.replay import ReplayConfigService
 from zephon.core.runtime_spec import RuntimeSpec
 from zephon.core.world import World
@@ -1205,9 +1206,14 @@ class Engine:
                 break  # move to drain regime
 
             # Emit exactly one from the current lane, then advance RR pointer.
-            yield buffers[lane].popleft()
-            idx = (idx + 1) % len(lanes)
-            self._rr_next_idx[key] = idx
+            # Tombstones are transparent to RR scheduling — they must not
+            # consume a slot, otherwise the interleaving order diverges from
+            # the pre-checkpoint baseline after a replay that emits tombstones.
+            item = buffers[lane].popleft()
+            yield item
+            if not is_tombstone(item):
+                idx = (idx + 1) % len(lanes)
+                self._rr_next_idx[key] = idx
 
         # -------- DRAIN REGIME: upstream ended, flush everything in RR ----------
         while any(buffers[l] for l in lanes):
@@ -1217,9 +1223,11 @@ class Engine:
             while rotated < len(lanes):
                 lane = lanes[idx]
                 if buffers[lane]:
-                    yield buffers[lane].popleft()
-                    idx = (idx + 1) % len(lanes)
-                    self._rr_next_idx[key] = idx
+                    item = buffers[lane].popleft()
+                    yield item
+                    if not is_tombstone(item):
+                        idx = (idx + 1) % len(lanes)
+                        self._rr_next_idx[key] = idx
                     emitted = True
                     break
                 idx = (idx + 1) % len(lanes)
@@ -1348,11 +1356,17 @@ class Engine:
             if cid not in done:
                 break
             if done_count[cid] >= len(chunk):
+                # Cursor pinning: do not evict the chunk that the current
+                # record's cursor references — otherwise
+                # _publish_replay_snapshot() will see the cursor as stale
+                # and disable ReplayFilter on restore.
+                if record_cursor is not None and cid == record_cursor.chunk_id:
+                    break
                 last_completed_cid = cid
                 last_completed_offset = len(chunk)
                 cids_to_evict.append(cid)
             else:
-                break  # earliest incomplete chunk blocks later evictions (keep inflight contiguous)
+                break  # earliest incomplete chunk blocks later evictions
 
         for cid in cids_to_evict:
             inflight_lane.pop(cid, None)

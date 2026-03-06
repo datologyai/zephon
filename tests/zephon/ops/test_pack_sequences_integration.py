@@ -3,6 +3,11 @@
 
 """Integration tests for PackSequences operator."""
 
+from typing import Any
+
+import pytest
+
+from tests.zephon.ops.conftest import mk_dataset
 from zephon.api.pipeline import Pipeline
 from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.io import InMemoryShard
@@ -10,13 +15,12 @@ from zephon.io.dataset import Dataset
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 
-def _mk_dataset(name: str, shards: dict[int, int]) -> Dataset:
-    """Create a dataset with specified shards and counts."""
-    data: dict[int, InMemoryShard] = {}
-    for sid, count in shards.items():
-        rows = [{"text": f"{name}:{sid}:{i}", "length": 3} for i in range(count)]
-        data[int(sid)] = InMemoryShard(rows)
-    return Dataset.from_dict(name, data)
+def _mk_varlen_dataset(name: str, lengths: list[int]) -> Dataset:
+    """Create a single-shard dataset with per-sample lengths."""
+    rows = [
+        {"text": f"{name}:0:{i}", "length": lengths[i]} for i in range(len(lengths))
+    ]
+    return Dataset.from_dict(name, {0: InMemoryShard(rows)})
 
 
 def test_pack_sequences_chunk_eviction() -> None:
@@ -28,7 +32,7 @@ def test_pack_sequences_chunk_eviction() -> None:
     3. Packing across chunks doesn't prevent eviction
     """
     # Create dataset with multiple chunks
-    ds = _mk_dataset("test", {0: 6})  # 6 samples
+    ds = mk_dataset("test", {0: 6})  # 6 samples
     work = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
@@ -102,7 +106,7 @@ def test_pack_sequences_reproducibility() -> None:
     This is important for reproducibility, especially if we remove requires_serial_state.
     """
     # Create dataset
-    ds = _mk_dataset("test", {0: 20})
+    ds = mk_dataset("test", {0: 20})
 
     def _make_work_source() -> StaticMixtureWorkSource:
         return StaticMixtureWorkSource(
@@ -169,4 +173,367 @@ def test_pack_sequences_reproducibility() -> None:
     run4_shuffle = _run_pack_sequences(shuffle=True, seed=42)
     assert run1_shuffle == run4_shuffle, (
         "Should be reproducible across multiple runs with same seed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint / resume + eviction
+# ---------------------------------------------------------------------------
+
+
+def _make_pack_pipeline(ds: Dataset, chunk_size: int = 4) -> Pipeline:
+    """Build a deterministic inline pipeline with pack_sequences."""
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=chunk_size,
+        seed=42,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = Pipeline(work)
+    pipeline.pack_sequences(
+        max_length=10,
+        length_fn="length",
+        algorithm="best_fit",
+        num_bins=100,
+    )
+    pipeline.options(
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=0,
+        mtp_mode=False,
+    )
+    return pipeline
+
+
+def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
+    """Chunks must evict after checkpoint/restore with pack_sequences.
+
+    Regression test for the issue where ReplayFilter drops the already-consumed
+    prefix on resume but does not emit tombstones for their closing
+    contributors.  Without tombstones the engine's per-offset bitmaps are never
+    rebuilt for those offsets, so the oldest inflight chunk from the previous
+    run can never complete → blocks eviction of all subsequent chunks.
+
+    The test:
+    1. Creates a pipeline with pack_sequences (preserves_cursor_order=False →
+       general eviction path using per-offset bitmaps).
+    2. Consumes some records, checkpoints.
+    3. Restores on a fresh pipeline and fully drains it.
+    4. Asserts that **no** inflight chunks remain (all evicted).
+    """
+    # 20 samples, chunk_size=4 → 5 chunks (cid 0..4), each with 4 offsets.
+    # length=3 per sample, max_length=10 → ~3 samples per packed record.
+    # We use enough data so that:
+    #  - checkpoint captures several inflight chunks with partially-consumed offsets
+    #  - the resume run has to process both replayed and new chunks
+    ds = mk_dataset("ckpt", {0: 20})
+
+    # -- baseline: full run without checkpoint, verify eviction works ----------
+    baseline_pipe = _make_pack_pipeline(ds)
+    baseline_records: list[SampleRecord] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_records.append(rec)
+
+    assert baseline_pipe._engine is not None
+    baseline_inflight = baseline_pipe._engine.inflight_chunks_per_lane.get(0, {})
+    assert len(baseline_inflight) == 0, (
+        f"Baseline (no checkpoint) should evict all chunks, "
+        f"but {len(baseline_inflight)} remain: {list(baseline_inflight.keys())}"
+    )
+    n_baseline = len(baseline_records)
+    assert n_baseline > 0, "Baseline must produce records"
+
+    # -- run 1: consume only 1 record and checkpoint ---------------------------
+    # Consuming just 1 packed record means we are mid-stream: some chunk offsets
+    # have been consumed (via the packed record's contributors), but most chunks
+    # still have incomplete bitmaps.  This maximises the number of inflight
+    # chunks that will need tombstone-based bitmap rebuild on resume.
+    pipe1 = _make_pack_pipeline(ds)
+    it = iter(pipe1)
+    try:
+        first_rec = next(it)
+        assert isinstance(first_rec, SampleRecord)
+        ckpt: dict[str, Any] = pipe1.checkpoint()
+    finally:
+        it.close()
+
+    # Sanity: checkpoint contains inflight chunks
+    inflight_ckpt = ckpt.get("inflight", {})
+    assert inflight_ckpt, "Checkpoint should have inflight chunks"
+
+    # -- run 2: restore and drain ----------------------------------------------
+    pipe2 = _make_pack_pipeline(ds)
+    pipe2.restore(ckpt)
+
+    suffix: list[SampleRecord] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix.append(rec)
+
+    # Sanity: we got records after resume
+    assert len(suffix) > 0, "Should produce records after resume"
+
+    # -- the critical assertion: all chunks must have evicted -------------------
+    assert pipe2._engine is not None
+    eng = pipe2._engine
+    inflight_after = eng.inflight_chunks_per_lane.get(0, {})
+
+    assert len(inflight_after) == 0, (
+        f"After checkpoint/restore and full drain, all chunks should be "
+        f"evicted, but {len(inflight_after)} chunks remain inflight: "
+        f"{sorted(inflight_after.keys())}. "
+        f"This indicates ReplayFilter dropped records without emitting "
+        f"tombstones for their closing contributors."
+    )
+
+
+def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint() -> None:
+    """Checkpoint/restore must not duplicate samples from cross-chunk packed records.
+
+    Setup (12 samples, chunk_size=4, length=3, max_length=10 → 3 per pack):
+
+        Baseline packing:
+          P0 = [s0, s1, s2]          ← all from chunk 0
+          P1 = [s3, s4, s5]          ← s3 from chunk 0, s4/s5 from chunk 1
+          P2 = [s6, s7, s8]          ← s6/s7 from chunk 1, s8 from chunk 2
+          P3 = [s9, s10, s11]        ← all from chunk 2
+
+    After consuming P0 + P1 and checkpointing:
+      - P1's contributors close chunk 0 offset 3 → chunk 0 fully done → evicted
+      - Checkpoint inflight = {chunk 1, chunk 2}
+      - Replay cursor = P1's cursor (chunk_id=0) → evicted chunk
+
+    On restore:
+      - _publish_replay_snapshot sees cursor.chunk_id=0 not in inflight
+        → sets snapshot[lane]=None → ReplayFilter becomes a no-op
+      - PackSequences re-packs only chunks 1+2 from scratch → different bins
+      - All re-packed records pass through (no filtering)
+      - Samples s4, s5 appear in BOTH the prefix (P1) and the suffix
+    """
+    ds = mk_dataset("xchunk", {0: 12})
+
+    # -- baseline: full run without checkpoint ---------------------------------
+    baseline_pipe = _make_pack_pipeline(ds)
+    baseline_texts: list[list[str]] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    n_baseline = len(baseline_texts)
+    assert n_baseline == 4, f"Expected 4 packed records, got {n_baseline}"
+
+    # -- run 1: consume 2 records → triggers cross-chunk eviction --------------
+    pipe1 = _make_pack_pipeline(ds)
+    it = iter(pipe1)
+    prefix_texts: list[list[str]] = []
+    try:
+        for _ in range(2):
+            rec = next(it)
+            assert isinstance(rec, SampleRecord)
+            prefix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+        ckpt: dict[str, Any] = pipe1.checkpoint()
+    finally:
+        it.close()
+
+    # Sanity: cursor pinning keeps chunk 0 in inflight (the cursor c0:3
+    # references it), which is exactly the fix — ReplayFilter stays enabled.
+    inflight_ckpt = ckpt.get("inflight", {}).get(
+        0, ckpt.get("inflight", {}).get("0", {})
+    )
+    inflight_cids = sorted(int(c) for c in inflight_ckpt.keys())
+    assert 0 in inflight_cids, (
+        f"Cursor pinning should keep chunk 0 in inflight (cursor references it), "
+        f"but inflight contains: {inflight_cids}"
+    )
+
+    # -- run 2: restore and drain ----------------------------------------------
+    pipe2 = _make_pack_pipeline(ds)
+    pipe2.restore(ckpt)
+
+    suffix_texts: list[list[str]] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    # -- data correctness: no duplicates, exact match with baseline ------------
+    all_prefix_samples = [s for packed in prefix_texts for s in packed]
+    all_suffix_samples = [s for packed in suffix_texts for s in packed]
+    all_combined = all_prefix_samples + all_suffix_samples
+    all_baseline = [s for packed in baseline_texts for s in packed]
+
+    assert all_combined == all_baseline, (
+        f"prefix + suffix should reconstruct the baseline sample stream.\n"
+        f"  prefix samples:  {all_prefix_samples}\n"
+        f"  suffix samples:  {all_suffix_samples}\n"
+        f"  baseline:        {all_baseline}\n"
+        f"  combined:        {all_combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-chunk packing: variable-length data (Layer 2 bug)
+# ---------------------------------------------------------------------------
+
+
+def _make_varlen_pack_pipeline(
+    ds: Dataset,
+    chunk_size: int = 4,
+    max_length: int = 6,
+    num_bins: int = 2,
+    flush_strategy: str = "fullest",
+) -> Pipeline:
+    """Build a deterministic inline pipeline with variable-length packing."""
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=chunk_size,
+        seed=42,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = Pipeline(work)
+    pipeline.pack_sequences(
+        max_length=max_length,
+        length_fn="length",
+        algorithm="best_fit",
+        num_bins=num_bins,
+        flush_strategy=flush_strategy,
+    )
+    pipeline.options(
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=0,
+        mtp_mode=False,
+    )
+    return pipeline
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Layer 2 cross-chunk packing bug: variable-length data with best_fit + "
+        "fullest flush produces non-monotonic packed cursors. After eviction of "
+        "early chunks, replay without those chunks changes bin state → different "
+        "packing → data duplication. Cursor pinning alone does NOT fix this case "
+        "because the cursor IS in inflight but earlier chunks that influenced "
+        "accumulator state have already been evicted. "
+        "See docs/_internal/cross_chunk_packing_bug.md for full analysis."
+    ),
+)
+def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -> None:
+    """Variable-length packing: cursor pinning alone is insufficient.
+
+    Setup (12 samples, chunk_size=4, lengths=[5,5,5,5, 1,1,1,1, 5,5,5,5]):
+      - max_length=6, num_bins=2, flush_strategy="fullest"
+      - Chunk 0: large items (len=5), Chunk 1: small items (len=1), Chunk 2: large (len=5)
+
+    Baseline packing (9 packed records):
+      P0=[s0]  P1=[s1]  P2=[s2,s4]  P3=[s3,s5]  P4=[s8]
+      P5=[s9]  P6=[s10]  P7=[s6,s7]  P8=[s11]
+
+    Cursors: [c0, c0, c0, c0, c2, c2, c2, c1, c2] — NON-MONOTONIC.
+
+    The cross-chunk packing of P2=[s2,s4] and P3=[s3,s5] means chunk 0 items
+    are packed together with chunk 1 items into the same bins.
+
+    After consuming 5 records (P0..P4) and checkpointing:
+      - Chunk 0 fully closed → evicted.  Inflight = {chunk 1, chunk 2}.
+      - Cursor = c2:0 — IS in inflight (cursor pinning would not help).
+      - ReplayFilter correctly filters the prefix.
+
+    On restore with only chunks 1+2:
+      - Chunk 1's small items (len=1) are packed fresh without chunk 0's large
+        items occupying the bins → different bin layout → s4,s5 duplicated.
+    """
+    # Large-Small-Large pattern
+    lengths = [5, 5, 5, 5, 1, 1, 1, 1, 5, 5, 5, 5]
+    ds = _mk_varlen_dataset("vlxc", lengths)
+
+    # -- baseline: full run without checkpoint ---------------------------------
+    baseline_pipe = _make_varlen_pack_pipeline(ds)
+    baseline_texts: list[list[str]] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    n_baseline = len(baseline_texts)
+    assert n_baseline > 0, "Baseline must produce records"
+
+    # Verify non-monotonic cursors (the key precondition for this bug)
+    baseline_pipe2 = _make_varlen_pack_pipeline(ds)
+    cursor_cids = []
+    for rec in baseline_pipe2:
+        assert isinstance(rec, SampleRecord)
+        cursor_cids.append(rec.meta.cursor.chunk_id)
+    is_monotone = all(
+        cursor_cids[i] <= cursor_cids[i + 1] for i in range(len(cursor_cids) - 1)
+    )
+    assert not is_monotone, (
+        f"Expected non-monotonic cursors for this config, got {cursor_cids}"
+    )
+
+    # -- run 1: consume 5 records → cursor IS in inflight but data corrupts ----
+    consume_count = 5
+    pipe1 = _make_varlen_pack_pipeline(ds)
+    it = iter(pipe1)
+    prefix_texts: list[list[str]] = []
+    try:
+        for _ in range(consume_count):
+            rec = next(it)
+            assert isinstance(rec, SampleRecord)
+            prefix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+        ckpt: dict[str, Any] = pipe1.checkpoint()
+    finally:
+        it.close()
+
+    # Sanity: cursor IS in inflight (this distinguishes Layer 2 from Layer 1)
+    assert pipe1._engine is not None
+    cursor = pipe1._engine._lane_last_cursor.get(0)
+    inflight_ckpt = ckpt.get("inflight", {}).get(
+        0, ckpt.get("inflight", {}).get("0", {})
+    )
+    inflight_cids = sorted(int(c) for c in inflight_ckpt.keys())
+    assert cursor is not None and cursor.chunk_id in inflight_cids, (
+        f"Expected cursor chunk_id={cursor.chunk_id if cursor else None} to be "
+        f"in inflight {inflight_cids}. This test requires a Layer 2 scenario "
+        f"where cursor IS in inflight."
+    )
+
+    # Chunk 0 must have been evicted (its absence causes the replay divergence)
+    assert 0 not in inflight_cids, (
+        f"Chunk 0 should have been evicted, but inflight contains: {inflight_cids}"
+    )
+
+    # -- run 2: restore and drain ----------------------------------------------
+    pipe2 = _make_varlen_pack_pipeline(ds)
+    pipe2.restore(ckpt)
+
+    suffix_texts: list[list[str]] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    # -- data correctness: no duplicates, exact match with baseline ------------
+    all_prefix_samples = [s for packed in prefix_texts for s in packed]
+    all_suffix_samples = [s for packed in suffix_texts for s in packed]
+    all_combined = all_prefix_samples + all_suffix_samples
+    all_baseline = [s for packed in baseline_texts for s in packed]
+
+    # Check for duplicates specifically (the symptom of this bug)
+    dupes = set(all_prefix_samples) & set(all_suffix_samples)
+    assert not dupes, (
+        f"Samples duplicated across prefix and suffix: {sorted(dupes)}\n"
+        f"  prefix samples: {all_prefix_samples}\n"
+        f"  suffix samples: {all_suffix_samples}"
+    )
+
+    assert all_combined == all_baseline, (
+        f"prefix + suffix should reconstruct the baseline sample stream.\n"
+        f"  prefix samples:  {all_prefix_samples}\n"
+        f"  suffix samples:  {all_suffix_samples}\n"
+        f"  baseline:        {all_baseline}\n"
+        f"  combined:        {all_combined}"
     )

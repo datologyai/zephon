@@ -7,7 +7,7 @@ import logging
 from typing import Any, Callable, Optional
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.children import tombstone_meta
+from zephon.core.children import tombstones_for_record
 from zephon.core.constants import SampleBatch, SamplePayload, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
@@ -53,24 +53,11 @@ class _BaseMapTransform(DefaultSetup):
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
     def _tombstones_for(self, elem: SampleRecord | SampleBatch) -> list[SampleRecord]:
-        """Emit tombstone records for every closing contributor in *elem*.
-
-        Each record tracks which chunk offsets it contributes to via
-        ``contribution_refs()``.  Only refs with ``is_last_child=True`` need a
-        tombstone — intermediate children (from split/spawn) don't close the
-        base offset, so the engine doesn't need a signal for them.
-        """
-        tombstones: list[SampleRecord] = []
+        """Emit tombstone records for every closing contributor in *elem*."""
         records = (elem,) if isinstance(elem, SampleRecord) else elem.records
+        tombstones: list[SampleRecord] = []
         for record in records:
-            for ref in record.meta.contribution_refs():
-                if ref.is_last_child:
-                    tombstones.append(
-                        SampleRecord(
-                            meta=tombstone_meta(ref, record.meta.lane_id),
-                            payload=None,
-                        )
-                    )
+            tombstones.extend(tombstones_for_record(record))
         return tombstones
 
 

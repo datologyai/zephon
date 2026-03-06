@@ -18,6 +18,7 @@ class _StubEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[int, list[ContributorRef], SampleCursor | None]] = []
         self.monotone_calls: list[tuple[int, int, list[SampleCursor] | None]] = []
+        self.inflight_chunks_per_lane: dict[int, dict[int, object]] = {}
 
     def notify(
         self,

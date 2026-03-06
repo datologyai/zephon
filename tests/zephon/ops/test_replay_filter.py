@@ -4,6 +4,11 @@ from zephon.core.replay import ReplayConfigService
 from zephon.ops.replay_filter import ReplayFilter
 
 
+def _only_tombstones(records: list[SampleRecord]) -> bool:
+    """Check that every record in the list is a tombstone."""
+    return len(records) > 0 and all(r.meta.tombstone for r in records)
+
+
 def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
     return None
 
@@ -44,9 +49,9 @@ def test_replay_filter_drops_until_past_checkpoint_cursor() -> None:
     service.set_snapshot({0: cursor})
     op = _filter(service)
 
-    assert op.process_one(_record(3)) == []
-    # Target itself is also dropped, then pass-through resumes.
-    assert op.process_one(_record(4)) == []
+    assert _only_tombstones(op.process_one(_record(3)))
+    # Target itself is also dropped (tombstones emitted), then pass-through resumes.
+    assert _only_tombstones(op.process_one(_record(4)))
     accept = _record(5)
     assert op.process_one(accept) == [accept]
     assert service.snapshot()[0] == cursor
@@ -58,9 +63,9 @@ def test_replay_filter_allows_non_monotone_suffix() -> None:
     service.set_snapshot({0: cursor})
     op = _filter(service)
 
-    # Drop records until the exact target is seen.
-    assert op.process_one(_record(3)) == []
-    assert op.process_one(_record(2)) == []
+    # Drop records until the exact target is seen (tombstones emitted).
+    assert _only_tombstones(op.process_one(_record(3)))
+    assert _only_tombstones(op.process_one(_record(2)))
 
     # After the flip, even "earlier" cursors must pass through.
     late = _record(1)

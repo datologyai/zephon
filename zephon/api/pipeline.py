@@ -991,7 +991,7 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon.core.notify import _is_tombstone, _notify_item
+        from zephon.core.notify import _notify_item, is_tombstone
 
         engine = self._engine
         assert engine is not None
@@ -999,8 +999,16 @@ class Pipeline:
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
             _notify_item(engine, item, use_monotone)
-            if not _is_tombstone(item):
+            if not is_tombstone(item):
                 yield item
+
+        # After drain, flush cursor-pinned chunks.  During iteration,
+        # notify() pins the record_cursor's chunk to keep it in inflight
+        # for checkpoint correctness.  A final notify with record_cursor=None
+        # releases the pin and lets fully-completed chunks evict.
+        if not use_monotone:
+            for lane_id in engine.inflight_chunks_per_lane:
+                engine.notify(lane_id, [], record_cursor=None)
 
     def explain(self) -> str:
         spec = self.compile()

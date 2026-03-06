@@ -131,6 +131,26 @@ def tombstone_meta(ref: ContributorRef, lane_id: int) -> SampleMeta:
     return meta
 
 
+def tombstones_for_record(record: SampleRecord) -> list[SampleRecord]:
+    """Emit tombstone records for every closing contributor in *record*.
+
+    Each record tracks which chunk offsets it contributes to via
+    ``contribution_refs()``.  Only refs with ``is_last_child=True`` need a
+    tombstone — intermediate children (from split/spawn) don't close the
+    base offset, so the engine doesn't need a signal for them.
+    """
+    tombstones: list[SampleRecord] = []
+    for ref in record.meta.contribution_refs():
+        if ref.is_last_child:
+            tombstones.append(
+                SampleRecord(
+                    meta=tombstone_meta(ref, record.meta.lane_id),
+                    payload=None,
+                )
+            )
+    return tombstones
+
+
 def collect_pack_contributions(
     samples: Sequence[SampleRecord],
     length_fn: Callable[[SampleRecord], int],

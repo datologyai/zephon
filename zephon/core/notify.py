@@ -105,6 +105,6 @@ def _notify_item(engine: Any, item: StreamItem, use_monotone: bool) -> None:
     _apply_notify_args(engine, _extract_notify_args(item, use_monotone))
 
 
-def _is_tombstone(item: StreamItem) -> bool:
+def is_tombstone(item: StreamItem) -> bool:
     """Check if a stream item is a tombstone (should be notified but not yielded)."""
     return isinstance(item, SampleRecord) and item.meta.tombstone

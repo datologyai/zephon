@@ -413,6 +413,20 @@ Packing and shuffling interact with checkpointing in two ways:
    lane, replay deduplication works the same way regardless of how records
    were assembled.
 
+```{warning}
+When a packed record combines samples from two chunks and its delivery
+completes the earlier chunk, that chunk evicts before the checkpoint is
+taken.  On resume the replay cursor references an evicted chunk, which
+disables the ReplayFilter for that lane — causing samples from the later
+chunk that were already delivered as part of the cross-chunk packed record
+to appear a second time.  This is an edge case that requires the packed
+record to straddle the exact chunk boundary where eviction occurs; it does
+not affect monotone-eviction pipelines or packing that stays within a single
+chunk.  The issue is isolated by
+`test_pack_sequences_cross_chunk_data_correctness_after_checkpoint` in
+`tests/zephon/ops/test_pack_sequences_integration.py` (currently xfail).
+```
+
 Operators that **buffer samples across chunk boundaries** must cooperate
 with the eviction protocol.  Specifically, they must track which base
 offsets their buffered and emitted records derive from via contributor

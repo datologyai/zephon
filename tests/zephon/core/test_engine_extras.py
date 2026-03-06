@@ -184,6 +184,9 @@ def test_notify_updates_progress_and_cursor() -> None:
     assert eng._lane_progress[lane].chunk_id == 0  # type: ignore[attr-defined]
     assert eng._lane_progress[lane].offset == 2  # type: ignore[attr-defined]
     assert eng._lane_last_cursor[lane] == cursor1  # type: ignore[attr-defined]
+    # Cursor pinning keeps chunk 0 (record_cursor references it); flush to release.
+    assert 0 in eng.inflight_chunks_per_lane[lane]
+    eng.notify(lane, [], record_cursor=None)
     assert eng.inflight_chunks_per_lane[lane] == {}
 
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(
@@ -200,6 +203,9 @@ def test_notify_updates_progress_and_cursor() -> None:
     assert eng._lane_progress[lane].chunk_id == 1  # type: ignore[attr-defined]
     assert eng._lane_progress[lane].offset == 1  # type: ignore[attr-defined]
     assert eng._lane_last_cursor[lane] == cursor2  # type: ignore[attr-defined]
+    # Cursor pinning keeps chunk 1; flush to release.
+    assert 1 in eng.inflight_chunks_per_lane[lane]
+    eng.notify(lane, [], record_cursor=None)
     assert eng.inflight_chunks_per_lane[lane] == {}
 
 
@@ -255,6 +261,9 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
         entries=[ContributorRef(cursor=c0_1.cursor, is_last_child=True)],
         record_cursor=c0_1.cursor,
     )
+    # Cursor pinning keeps chunk 0 (record_cursor references it); flush to release.
+    assert 0 in eng.inflight_chunks_per_lane[lane]
+    eng.notify(lane, [], record_cursor=None)
     assert eng.inflight_chunks_per_lane[lane] == {}
 
 
