@@ -205,9 +205,54 @@ block shuffle).  After construction, producing the next batch of pointers
 is a simple array slice with no RNG calls or shard metadata lookups.
 
 When a chunk is requested, the WorkSource pulls `quota[component]` pointers
-from each cursor and assembles them into a work chunk.  If any cursor has
-fewer remaining samples than its quota, the WorkSource is 
-exhausted and returns `None`.
+from each cursor and assembles them into a work chunk.  What happens when a
+cursor runs out of samples depends on the **exhaustion policy**.
+
+### Exhaustion policies
+
+The `exhausted_policy` parameter controls what
+{py:class}`~zephon.work.StaticMixtureWorkSource` does when a mixture
+component can no longer fill its per-chunk quota:
+
+| Policy | Behaviour |
+|---|---|
+| `"stop"` (default) | Return `None` as soon as **any** component is exhausted. The training loop sees end-of-data. |
+| `"repeat"` | Reset the exhausted component's cursor to position 0 and keep going. Each component restarts independently — a small dataset may cycle several times while a large one is still on its first pass. The source never returns `None` (unless `max_repeats` is set). |
+
+```python
+ws = StaticMixtureWorkSource(
+    datasets=[large_corpus, small_corpus],
+    mixture={"large": 0.6, "small": 0.4},
+    chunk_size=1024,
+    seed=42,
+    exhausted_policy="repeat",      # restart components that run out
+    reshuffle_on_repeat=True,       # different sample order each epoch
+    max_repeats=3,                  # stop after 3 restarts (optional)
+)
+```
+
+**`reshuffle_on_repeat`** (default `True`): when a component restarts, rebuild
+its sample-order array with a deterministic epoch-derived seed so each pass
+through the data sees a different traversal order.  Set to `False` to replay
+the exact same order every epoch.
+
+**`max_repeats`** (default `None` = unlimited): cap the number of times any
+single component may restart.  Once a component hits the cap, the source
+returns `None` just like `"stop"`.  This is useful as a safety valve when
+you want repetition but do not want to rely solely on `max_steps` to stop
+training.
+
+```{note}
+A `"redistribute"` policy (shift an exhausted component's quota
+proportionally to the remaining components) is planned but not yet
+implemented.
+```
+
+**Tail-drop semantics.** When a component exhausts with fewer remaining
+samples than its quota, those leftover samples are dropped — the same
+`drop_last` semantics already implicit in `"stop"` mode.  For typical
+dataset sizes this is negligible (at most `quota - 1` samples per epoch
+boundary).
 
 ### Lane partitioning
 

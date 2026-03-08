@@ -77,12 +77,13 @@ class _DatasetCursor:
       This is where samples from different datasets interleave.
     """
 
-    def __init__(
-        self,
+    @staticmethod
+    def _build_order(
         dataset_id: int,
         shard_index: Mapping[int, int],
         knobs: _DatasetKnobs,
-    ) -> None:
+    ) -> np.ndarray:
+        """Build the deterministic sample-order array for a single dataset."""
         shard_ids = list(shard_index.keys())
         # Shuffle the shards
         if knobs.shuffle_shards and len(shard_ids) > 1:
@@ -114,9 +115,48 @@ class _DatasetCursor:
                 end = min(start + block_size, len(order))
                 rng.shuffle(order[start:end])
 
-        self._order: np.ndarray = order
+        return order
+
+    def __init__(
+        self,
+        dataset_id: int,
+        shard_index: Mapping[int, int],
+        knobs: _DatasetKnobs,
+    ) -> None:
+        self._dataset_id = dataset_id
+        self._shard_index = shard_index
+        self._epoch = 0
+        self._order: np.ndarray = _DatasetCursor._build_order(
+            dataset_id, shard_index, knobs
+        )
         self._position = 0
-        self.remaining = len(order)
+        self.remaining = len(self._order)
+
+    def _seek_epoch(
+        self, epoch: int, *, reshuffle: bool, base_knobs: _DatasetKnobs
+    ) -> None:
+        """Jump directly to the given epoch, rebuilding order at most once."""
+        self._epoch = epoch
+        if epoch > 0 and reshuffle:
+            epoch_knobs = _DatasetKnobs(
+                seed=base_knobs.seed + epoch * _GOLDEN_RATIO_64,
+                shuffle_shards=base_knobs.shuffle_shards,
+                shuffle_within_shard=base_knobs.shuffle_within_shard,
+                shuffle_block_size=base_knobs.shuffle_block_size,
+            )
+            self._order = _DatasetCursor._build_order(
+                self._dataset_id, self._shard_index, epoch_knobs
+            )
+        self._position = 0
+        self.remaining = len(self._order)
+
+    def reset(self, *, reshuffle: bool, base_knobs: _DatasetKnobs) -> None:
+        """Reset the cursor to position 0, starting a new epoch.
+
+        If *reshuffle* is True, rebuilds the order array with an epoch-derived
+        seed so each epoch sees a different traversal order.
+        """
+        self._seek_epoch(self._epoch + 1, reshuffle=reshuffle, base_knobs=base_knobs)
 
     def next_many(self, limit: int) -> list[SampleId]:
         if limit <= 0 or self._position >= len(self._order):
@@ -156,6 +196,8 @@ class StaticMixtureWorkSource(WorkSource):
         shuffle_within_shard: bool = False,
         shuffle_block_size: int | None = None,
         exhausted_policy: str = "stop",
+        reshuffle_on_repeat: bool = True,
+        max_repeats: int | None = None,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -211,15 +253,40 @@ class StaticMixtureWorkSource(WorkSource):
             )
         self._chunk_quota = self._compute_chunk_quota()
         self._seed = seed
-        self._remaining = sum(cursor.remaining for cursor in self._cursors.values())
-        self.total_samples = len(self)
-
         valid_policies = {"stop", "redistribute", "repeat"}
         if exhausted_policy not in valid_policies:
             raise ValueError(
                 "exhausted_policy must be one of 'stop', 'redistribute', 'repeat'"
             )
         self._exhausted_policy = exhausted_policy
+        self._reshuffle_on_repeat = reshuffle_on_repeat
+        self._max_repeats = max_repeats
+
+        if max_repeats is not None and exhausted_policy != "repeat":
+            warnings.warn(
+                f"max_repeats={max_repeats} has no effect with "
+                f"exhausted_policy='{exhausted_policy}'",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        # Guard: with repeat policy, each dataset must have at least as many
+        # samples as its per-chunk quota, otherwise reset() would loop forever.
+        if exhausted_policy == "repeat":
+            for name in self._component_order:
+                quota = self._chunk_quota[name]
+                cursor = self._cursors[name]
+                if len(cursor._order) < quota:
+                    raise ValueError(
+                        f"Dataset '{name}' has {len(cursor._order)} samples but "
+                        f"repeat policy requires at least {quota} per chunk "
+                        f"(chunk_size={chunk_size}). "
+                        f"Increase dataset size or decrease chunk_size."
+                    )
+
+        self.total_samples: int | float = (
+            float("inf") if self._exhausted_policy == "repeat" else len(self)
+        )
 
     def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource:
         """Lightweight clone that avoids deepcopying large cursor buffers.
@@ -247,6 +314,8 @@ class StaticMixtureWorkSource(WorkSource):
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
         clone._exhausted_policy = self._exhausted_policy
+        clone._reshuffle_on_repeat = self._reshuffle_on_repeat
+        clone._max_repeats = self._max_repeats
         clone._knobs = self._knobs
 
         # Create fresh cursors that share the immutable order buffer but have
@@ -257,9 +326,11 @@ class StaticMixtureWorkSource(WorkSource):
             new_cur._order = cur._order
             new_cur._position = cur._position
             new_cur.remaining = cur.remaining
+            new_cur._epoch = cur._epoch
+            new_cur._dataset_id = cur._dataset_id
+            new_cur._shard_index = cur._shard_index
             clone._cursors[name] = new_cur
 
-        clone._remaining = self._remaining
         clone.total_samples = self.total_samples
 
         clone._cloned = True
@@ -377,15 +448,24 @@ class StaticMixtureWorkSource(WorkSource):
     def _next_chunk(self) -> WorkChunk | None:
         if self._exhausted_policy == "redistribute":
             raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
-        if self._exhausted_policy == "repeat":
-            raise NotImplementedError("Exhausted policy 'repeat' not implemented")
 
-        # Check if all components still have sufficient samples available to generate a full chunk.
+        # Check exhaustion per component and either stop or reset.
         for name in self._component_order:
             quota = self._chunk_quota[name]
             cursor = self._cursors[name]
             if cursor.remaining < quota:
-                return None
+                if self._exhausted_policy == "repeat":
+                    if (
+                        self._max_repeats is not None
+                        and cursor._epoch >= self._max_repeats
+                    ):
+                        return None  # hit repeat cap
+                    cursor.reset(
+                        reshuffle=self._reshuffle_on_repeat,
+                        base_knobs=self._knobs,
+                    )
+                else:
+                    return None  # "stop" policy
 
         components: dict[str, list[SampleId]] = {}
         for name in self._component_order:
@@ -404,9 +484,8 @@ class StaticMixtureWorkSource(WorkSource):
         if not components:
             return None
 
-        emitted = sum(len(ids) for ids in components.values())
-        self._remaining -= emitted
-        self.total_samples = len(self)
+        if self._exhausted_policy != "repeat":
+            self.total_samples = len(self)
 
         return WorkChunk(
             components=components,
@@ -415,13 +494,16 @@ class StaticMixtureWorkSource(WorkSource):
 
     def __len__(self) -> int:
         """Returns the number of available _samples_ across all chunks that can be yielded."""
-        if hasattr(self, "exhausted_policy"):
+        if hasattr(self, "_exhausted_policy"):
             if self._exhausted_policy == "redistribute":
                 raise NotImplementedError(
                     "Exhausted policy 'redistribute' not implemented"
                 )
             if self._exhausted_policy == "repeat":
-                raise NotImplementedError("Exhausted policy 'repeat' not implemented")
+                raise TypeError(
+                    "len() is not defined for an infinite work source "
+                    "(exhausted_policy='repeat')"
+                )
 
         if not self._chunk_quota:
             return 0
@@ -464,6 +546,12 @@ class StaticMixtureWorkSource(WorkSource):
             "cursor_positions": {
                 name: int(cur._position) for name, cur in self._cursors.items()
             },
+            "cursor_epochs": {
+                name: int(cur._epoch) for name, cur in self._cursors.items()
+            },
+            "exhausted_policy": self._exhausted_policy,
+            "reshuffle_on_repeat": self._reshuffle_on_repeat,
+            "max_repeats": self._max_repeats,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -483,6 +571,28 @@ class StaticMixtureWorkSource(WorkSource):
         # Persist restored knobs for future state_dict() calls
         self._knobs = knobs
 
+        # Restore repeat-related settings (defaults match "stop" policy for v1 compat)
+        ckpt_reshuffle = state.get("reshuffle_on_repeat", self._reshuffle_on_repeat)
+        ckpt_max_repeats = state.get("max_repeats", self._max_repeats)
+
+        if ckpt_reshuffle != self._reshuffle_on_repeat:
+            raise RuntimeError(
+                f"Checkpoint has reshuffle_on_repeat={ckpt_reshuffle} but "
+                f"the current instance was constructed with "
+                f"reshuffle_on_repeat={self._reshuffle_on_repeat}. "
+                f"These must match for deterministic continuation."
+            )
+        if ckpt_max_repeats != self._max_repeats:
+            raise RuntimeError(
+                f"Checkpoint has max_repeats={ckpt_max_repeats} but "
+                f"the current instance was constructed with "
+                f"max_repeats={self._max_repeats}. "
+                f"These must match for deterministic continuation."
+            )
+        self._reshuffle_on_repeat = ckpt_reshuffle
+        self._max_repeats = ckpt_max_repeats
+        cursor_epochs: dict[str, int] = state.get("cursor_epochs", {})
+
         # Rebuild cursors deterministically and set positions
         self._cursors.clear()
         self._dataset_ids.clear()
@@ -491,7 +601,12 @@ class StaticMixtureWorkSource(WorkSource):
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
+            epoch = int(cursor_epochs.get(ds.name, 0))
+
             cur = _DatasetCursor(dataset_id, ds.shard_index, knobs)
+            cur._seek_epoch(
+                epoch, reshuffle=self._reshuffle_on_repeat, base_knobs=knobs
+            )
             self._cursors[ds.name] = cur
 
         # Restore positions
@@ -508,6 +623,6 @@ class StaticMixtureWorkSource(WorkSource):
         # Recompute per-chunk quota to reflect restored chunk_size/weights/components
         self._chunk_quota = self._compute_chunk_quota()
 
-        # Recompute remaining/total samples with the new cursor positions
-        self._remaining = sum(cur.remaining for cur in self._cursors.values())
-        self.total_samples = len(self)
+        self.total_samples = (
+            float("inf") if self._exhausted_policy == "repeat" else len(self)
+        )

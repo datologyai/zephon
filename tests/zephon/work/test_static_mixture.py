@@ -314,6 +314,381 @@ def test_chunk_samples_match_components_and_counts_25_75() -> None:
     assert ws.next_chunk() is None
 
 
+# ── repeat policy tests ──────────────────────────────────────────────
+
+
+def test_repeat_continues_past_exhaustion() -> None:
+    """With repeat, the source keeps producing chunks beyond one epoch."""
+    ds = make_dataset("alpha", 10)
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    # 10 samples / 5 per chunk = 2 chunks per epoch.  Pull 5 chunks (2.5 epochs).
+    chunks = []
+    for _ in range(5):
+        ch = ws.next_chunk()
+        assert ch is not None
+        chunks.append(ch)
+
+    # First two chunks == third and fourth (same order, no reshuffle)
+    assert _flatten_components(chunks[0]) == _flatten_components(chunks[2])
+    assert _flatten_components(chunks[1]) == _flatten_components(chunks[3])
+
+
+def test_repeat_per_component_independent() -> None:
+    """Smaller dataset resets while larger one continues."""
+    small = make_dataset("small", 4)
+    large = make_dataset("large", 20)
+    work = StaticMixtureWorkSource(
+        [small, large],
+        {"small": 0.5, "large": 0.5},
+        chunk_size=4,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    # quota: small=2, large=2.  small has 4 samples → exhausts after 2 chunks.
+    c1 = ws.next_chunk()
+    c2 = ws.next_chunk()
+    c3 = ws.next_chunk()  # small should have reset here
+    assert c1 is not None and c2 is not None and c3 is not None
+
+    # small's samples in chunk 3 should repeat chunk 1's samples
+    assert c3.components["small"] == c1.components["small"]
+    # large's samples in chunk 3 should be *new* (not repeated)
+    assert c3.components["large"] != c1.components["large"]
+
+
+def test_repeat_reshuffle_changes_order() -> None:
+    """With reshuffle_on_repeat=True, the second epoch has a different order."""
+    ds = make_sharded_dataset("alpha", [5, 5, 5])
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=42,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    # Collect first epoch (15 samples / 5 per chunk = 3 chunks)
+    epoch1_ids: list[tuple[int, int, int]] = []
+    for _ in range(3):
+        ch = ws.next_chunk()
+        assert ch is not None
+        epoch1_ids.extend(ch.components[ds.name])
+
+    # Collect second epoch
+    epoch2_ids: list[tuple[int, int, int]] = []
+    for _ in range(3):
+        ch = ws.next_chunk()
+        assert ch is not None
+        epoch2_ids.extend(ch.components[ds.name])
+
+    # Same set of (dataset_id, shard_id, offset) but different order
+    assert set(epoch1_ids) == set(epoch2_ids)
+    assert epoch1_ids != epoch2_ids
+
+
+def test_repeat_no_reshuffle_same_order() -> None:
+    """With reshuffle_on_repeat=False, the second epoch has identical order."""
+    ds = make_dataset("alpha", 10)
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=7,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    epoch1 = [_flatten_components(ws.next_chunk()) for _ in range(2)]
+    epoch2 = [_flatten_components(ws.next_chunk()) for _ in range(2)]
+    assert epoch1 == epoch2
+
+
+def test_repeat_determinism() -> None:
+    """Two identical instances produce identical sequences across epochs."""
+    ds = make_dataset("alpha", 10)
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=99,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    )
+    ws1 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws2 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(8):  # 4 epochs worth
+        c1 = ws1.next_chunk()
+        c2 = ws2.next_chunk()
+        assert c1 is not None and c2 is not None
+        assert _flatten_components(c1) == _flatten_components(c2)
+
+
+def test_repeat_checkpoint_restore() -> None:
+    """Checkpoint mid-epoch, restore, verify continuation matches."""
+    ds = make_dataset("alpha", 10)
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    )
+
+    # Baseline: run 7 chunks straight through
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = [_flatten_components(ws_baseline.next_chunk()) for _ in range(7)]
+
+    # Run 3 chunks, checkpoint, restore, run 4 more
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = [_flatten_components(ws_save.next_chunk()) for _ in range(3)]
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = [_flatten_components(ws_load.next_chunk()) for _ in range(4)]
+
+    assert prefix + suffix == baseline
+
+
+def test_repeat_checkpoint_restore_with_reshuffle() -> None:
+    """Checkpoint mid-epoch with reshuffle, verify continuation matches."""
+    ds = make_sharded_dataset("alpha", [5, 5])
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=42,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    )
+
+    # Baseline: 7 chunks (3.5 epochs)
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = [_flatten_components(ws_baseline.next_chunk()) for _ in range(7)]
+
+    # Checkpoint after 4 chunks (2 epochs), restore, continue
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = [_flatten_components(ws_save.next_chunk()) for _ in range(4)]
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = [_flatten_components(ws_load.next_chunk()) for _ in range(3)]
+
+    assert prefix + suffix == baseline
+
+
+def test_repeat_len_raises() -> None:
+    """len() raises TypeError for an infinite work source."""
+    ds = make_dataset("alpha", 10)
+    ws = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(TypeError):
+        len(ws)
+
+
+def test_repeat_total_samples_inf() -> None:
+    """total_samples is inf for repeat policy."""
+    ds = make_dataset("alpha", 10)
+    ws = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    assert ws.total_samples == float("inf")
+
+
+def test_repeat_v1_checkpoint_loads() -> None:
+    """A v1 checkpoint (no cursor_epochs) loads correctly as epoch 0."""
+    ds = make_dataset("alpha", 10)
+    # Build a "stop" source, consume 1 chunk, get state_dict
+    stop_ws = StaticMixtureWorkSource(
+        [ds], {ds.name: 1.0}, chunk_size=5, seed=0, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    stop_ws.next_chunk()
+    saved_state = stop_ws.state_dict()
+    # All epochs should be 0 (never repeated)
+    assert all(e == 0 for e in saved_state.get("cursor_epochs", {}).values())
+
+    # Load into a repeat source with matching reshuffle/max_repeats defaults
+    ws_load = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(saved_state)
+
+    # Should continue producing chunks (repeat policy)
+    ch = ws_load.next_chunk()
+    assert ch is not None
+
+
+def test_repeat_small_dataset_guard() -> None:
+    """Dataset with fewer samples than quota raises at construction."""
+    ds = make_dataset("tiny", 2)
+    with pytest.raises(ValueError, match="repeat policy requires at least"):
+        StaticMixtureWorkSource(
+            [ds],
+            {ds.name: 1.0},
+            chunk_size=5,
+            exhausted_policy="repeat",
+        )
+
+
+def test_repeat_load_mismatch_raises() -> None:
+    """Loading a checkpoint with different reshuffle/max_repeats raises."""
+    ds = make_dataset("alpha", 10)
+    ws_save = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_save.next_chunk()
+    state = ws_save.state_dict()
+
+    # Mismatched reshuffle_on_repeat
+    ws_load = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="reshuffle_on_repeat"):
+        ws_load.load_state_dict(state)
+
+    # Mismatched max_repeats
+    ws_load2 = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+        max_repeats=5,
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="max_repeats"):
+        ws_load2.load_state_dict(state)
+
+
+def test_max_repeats_warns_with_stop_policy() -> None:
+    """max_repeats with stop policy emits a warning."""
+    ds = make_dataset("alpha", 10)
+    with pytest.warns(RuntimeWarning, match="max_repeats.*no effect"):
+        StaticMixtureWorkSource(
+            [ds],
+            {ds.name: 1.0},
+            chunk_size=5,
+            exhausted_policy="stop",
+            max_repeats=3,
+        )
+
+
+def test_repeat_max_repeats() -> None:
+    """With max_repeats=2, the source stops after 2 resets."""
+    ds = make_dataset("alpha", 10)
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+        max_repeats=2,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    # 2 chunks per epoch × (1 initial + 2 repeats) = 6 chunks, then None
+    chunks = []
+    for _ in range(10):
+        ch = ws.next_chunk()
+        if ch is None:
+            break
+        chunks.append(ch)
+    assert len(chunks) == 6
+
+
+def test_repeat_max_repeats_checkpoint() -> None:
+    """Checkpoint/restore mid-way through capped repeats."""
+    ds = make_dataset("alpha", 10)
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+        max_repeats=3,
+    )
+
+    # Baseline: drain fully
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = []
+    for _ in range(20):
+        ch = ws_baseline.next_chunk()
+        if ch is None:
+            break
+        baseline.append(_flatten_components(ch))
+
+    # Checkpoint after 3 chunks (1.5 epochs)
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = [_flatten_components(ws_save.next_chunk()) for _ in range(3)]
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = []
+    for _ in range(20):
+        ch = ws_load.next_chunk()
+        if ch is None:
+            break
+        suffix.append(_flatten_components(ch))
+
+    assert prefix + suffix == baseline
+
+
 def test_seeded_shuffle_is_deterministic() -> None:
     shards_alpha = {
         0: InMemoryShard([{"text": "a-0"}, {"text": "a-1"}]),
