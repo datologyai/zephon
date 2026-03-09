@@ -70,10 +70,12 @@ class OpenViaDownloadMixin:
         os.close(fd)
         tmp = Path(tmpname)
         try:
-            self.download(path, str(tmp))  # type: ignore[attr-defined]
+            # Full read of entire file!
+            self.download(path, str(tmp))  # type: ignore[attr-defined].
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
+        # Reads from local temp
         wrapper = TempLocalFile(tmp, mode)
         if kwargs:
             wrapper.open(**kwargs)

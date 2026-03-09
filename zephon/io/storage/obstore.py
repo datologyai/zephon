@@ -79,6 +79,33 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
         store = self._get_store(bucket)
         self._download_with_store(store, key, src, dst)
 
+    def read_range(
+        self,
+        path: str,
+        start: int,
+        *,
+        end: int | None = None,
+        length: int | None = None,
+    ) -> memoryview:
+        """Read a byte range from a cloud object."""
+        scheme, bucket, key = split_url(path)
+        if scheme not in self.valid_schemes or not bucket or not key:
+            raise ValueError(f"Invalid URL: {path}")
+
+        import obstore as obs
+
+        store = self._get_store(bucket)
+        try:
+            data = obs.get_range(store, key, start=start, end=end, length=length)
+            return memoryview(data)
+        except Exception as e:
+            err = str(e)
+            if "403" in err or "AccessDenied" in err:
+                raise FileNotFoundError(f"Access denied: {path}") from e
+            if "404" in err or "NoSuchKey" in err or "NotFound" in err:
+                raise FileNotFoundError(f"Object not found: {path}") from e
+            raise
+
     def listdir(self, path: str) -> list[str]:
         """List files in a cloud directory (prefix)."""
         scheme, bucket, prefix = split_url(path)

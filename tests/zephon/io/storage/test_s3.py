@@ -96,6 +96,36 @@ def test_s3_open_downloads_to_temp(
     assert not temp_path.exists()
 
 
+def test_s3_read_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test S3 byte-range reads."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "prefix/file.bin")] = b"abcdef"
+
+    backend = S3Backend()
+
+    assert backend.read_range("s3://bucket/prefix/file.bin", 1, length=3) == b"bcd"
+    assert backend.read_range("s3://bucket/prefix/file.bin", 2, end=5) == b"cde"
+    assert state["range_calls"] == [
+        {
+            "bucket": "bucket",
+            "key": "prefix/file.bin",
+            "start": 1,
+            "end": None,
+            "length": 3,
+        },
+        {
+            "bucket": "bucket",
+            "key": "prefix/file.bin",
+            "start": 2,
+            "end": 5,
+            "length": None,
+        },
+    ]
+
+
 def test_s3_invalid_url_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test handling of invalid S3 URLs."""
     _install_obstore_stubs(monkeypatch)

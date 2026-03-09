@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import IO, Any, Mapping
+from typing import IO, Any, Mapping, cast
 
 from .base import StorageBackend
 from .local import LocalFSBackend
@@ -58,6 +58,32 @@ class RouterStorageBackend(StorageBackend):
 
     def download(self, src: str, dst: str, timeout: float | None = None) -> None:
         return self._backend_for(src).download(src, dst, timeout)
+
+    def read_range(
+        self,
+        path: str,
+        start: int,
+        *,
+        end: int | None = None,
+        length: int | None = None,
+    ) -> bytes | memoryview:
+        if start < 0:
+            raise ValueError("start must be non-negative")
+        if end is not None and length is not None:
+            raise ValueError("Specify at most one of end or length")
+
+        backend = self._backend_for(path)
+        try:
+            return backend.read_range(path, start, end=end, length=length)
+        except (AttributeError, NotImplementedError):
+            with backend.open(path, "rb") as handle:
+                fh = cast(IO[bytes], handle)
+                fh.seek(start)
+                if end is not None:
+                    return fh.read(max(0, end - start))
+                if length is not None:
+                    return fh.read(length)
+                return fh.read()
 
     def listdir(self, path: str) -> list[str]:
         return self._backend_for(path).listdir(path)

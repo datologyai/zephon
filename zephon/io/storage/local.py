@@ -82,6 +82,28 @@ class LocalFSBackend(StorageBackend):
                 target.unlink()
             raise
 
+    def read_range(
+        self,
+        path: str,
+        start: int,
+        *,
+        end: int | None = None,
+        length: int | None = None,
+    ) -> bytes | memoryview:
+        """Read a byte range from a local file."""
+        if start < 0:
+            raise ValueError("start must be non-negative")
+        if end is not None and length is not None:
+            raise ValueError("Specify at most one of end or length")
+
+        with self._abspath(path).open("rb") as handle:
+            handle.seek(start)
+            if end is not None:
+                return handle.read(max(0, end - start))
+            if length is not None:
+                return handle.read(length)
+            return handle.read()
+
     def listdir(self, path: str) -> list[str]:
         abspath = self._abspath(path)
         if not abspath.is_dir():

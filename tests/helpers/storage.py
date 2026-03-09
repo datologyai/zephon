@@ -169,6 +169,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
         "objects": {},  # (bucket, key) -> bytes
         "configs": [],  # track configs passed to from_url
         "store_type": [],  # track which store type was used
+        "range_calls": [],  # track byte-range reads
     }
 
     class MockS3Store:
@@ -212,6 +213,25 @@ def _install_obstore_stubs(monkeypatch) -> dict:
             raise Exception(f"404 NotFound: {key}")
         return MockGetResult(data)
 
+    def mock_get_range(store, key, *, start, end=None, length=None):
+        url = getattr(store, "_url", "")
+        bucket = url.replace("s3://", "").replace("gs://", "")
+        data = state["objects"].get((bucket, key))
+        if data is None:
+            raise Exception(f"404 NotFound: {key}")
+        if end is not None and length is not None:
+            raise ValueError("Specify at most one of end or length")
+
+        state["range_calls"].append(
+            {"bucket": bucket, "key": key, "start": start, "end": end, "length": length}
+        )
+
+        if end is not None:
+            return data[start:end]
+        if length is not None:
+            return data[start : start + length]
+        return data[start:]
+
     def mock_head(store, key):
         url = getattr(store, "_url", "")
         bucket = url.replace("s3://", "").replace("gs://", "")
@@ -244,6 +264,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
         state["objects"].pop((bucket, key), None)
 
     obstore_mod.get = mock_get
+    obstore_mod.get_range = mock_get_range
     obstore_mod.head = mock_head
     obstore_mod.list = mock_list
     obstore_mod.put = mock_put

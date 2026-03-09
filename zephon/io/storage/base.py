@@ -37,6 +37,23 @@ class StorageBackend(Protocol):
         """Copy ``src`` from the backend onto the local filesystem at ``dst``."""
         ...
 
+    def read_range(
+        self,
+        path: str,
+        start: int,
+        *,
+        end: int | None = None,
+        length: int | None = None,
+    ) -> bytes | memoryview:
+        """Read a byte range from ``path``.
+
+        Implementations should return binary data (``bytes`` or
+        ``memoryview``) in the half-open interval ``[start, end)`` when
+        ``end`` is provided, or ``length`` bytes starting at ``start`` when
+        ``length`` is provided.
+        """
+        raise NotImplementedError
+
     def listdir(self, path: str) -> list[str]:
         """List entries directly contained in ``path``."""
         ...

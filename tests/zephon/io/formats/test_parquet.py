@@ -4,6 +4,7 @@
 """Tests for Parquet format support."""
 
 import json
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,11 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 from zephon.io.formats.parquet import ParquetFormat, ParquetShard
 from zephon.io.storage import LocalFSBackend
+from zephon.io.storage.router import RouterStorageBackend
 from zephon.tools.parquet_index import ParquetIndexBuilder
 
 
@@ -144,6 +147,82 @@ class TestParquetFormatDiscovery:
         # Metadata should be the same as index-based discovery
         meta0 = shard_meta[0]
         assert "row_groups" in meta0["extra"]
+
+    def test_discover_from_files_s3_does_not_download_full_object(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Test cloud discovery does not rely on full-object downloads."""
+        state = _install_obstore_stubs(monkeypatch)
+
+        dataset_dir = tmp_path / "parquet_dataset"
+        dataset_dir.mkdir()
+        shard_path = dataset_dir / "data_000.parquet"
+        create_test_parquet_file(shard_path, num_rows=1000, row_group_size=250)
+        state["objects"][("bucket", "dataset/data_000.parquet")] = (
+            shard_path.read_bytes()
+        )
+
+        from zephon.io.storage.s3 import S3Backend
+
+        backend = S3Backend()
+
+        def fail_download(src: str, dst: str, timeout: float | None = None) -> None:
+            del src, dst, timeout
+            pytest.fail("discover() performed a full-object download")
+
+        backend.download = fail_download  # type: ignore[assignment]
+
+        format_handler = ParquetFormat()
+        shard_index, shard_meta = format_handler.discover(
+            "s3://bucket/dataset", backend
+        )
+
+        assert shard_index == {0: 1000}
+        assert shard_meta[0]["raw"]["basename"] == "data_000.parquet"
+        assert shard_meta[0]["extra"]["num_row_groups"] == 4
+
+    def test_discover_from_files_router_falls_back_without_read_range(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        class _S3NoRangeBackend:
+            def __init__(self, object_data: bytes) -> None:
+                self._object_data = object_data
+
+            def exists(self, path: str) -> bool:
+                del path
+                return False
+
+            def listdir(self, path: str) -> list[str]:
+                assert path == "s3://bucket/dataset"
+                return ["data_000.parquet"]
+
+            def stat(self, path: str) -> dict[str, int]:
+                assert path == "s3://bucket/dataset/data_000.parquet"
+                return {"size": len(self._object_data)}
+
+            def open(self, path: str, mode: str = "rb", **kwargs):
+                del kwargs
+                assert path == "s3://bucket/dataset/data_000.parquet"
+                assert mode == "rb"
+                return BytesIO(self._object_data)
+
+        dataset_dir = tmp_path / "parquet_dataset"
+        dataset_dir.mkdir()
+        shard_path = dataset_dir / "data_000.parquet"
+        create_test_parquet_file(shard_path, num_rows=1000, row_group_size=250)
+
+        backend = _S3NoRangeBackend(shard_path.read_bytes())
+        monkeypatch.setattr(
+            "zephon.io.storage.router._make_s3_backend", lambda: backend
+        )
+
+        router = RouterStorageBackend()
+        format_handler = ParquetFormat()
+        shard_index, shard_meta = format_handler.discover("s3://bucket/dataset", router)
+
+        assert shard_index == {0: 1000}
+        assert shard_meta[0]["raw"]["basename"] == "data_000.parquet"
+        assert shard_meta[0]["extra"]["num_row_groups"] == 4
 
     def test_discover_no_files(self, tmp_path):
         """Test error when no Parquet files found."""

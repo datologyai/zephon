@@ -121,6 +121,36 @@ def test_gcs_open_downloads_to_temp(
     assert not paths[0].exists()
 
 
+def test_gcs_read_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test GCS byte-range reads."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "prefix/file.bin")] = b"abcdef"
+
+    backend = GCSBackend()
+
+    assert backend.read_range("gs://bucket/prefix/file.bin", 0, length=2) == b"ab"
+    assert backend.read_range("gs://bucket/prefix/file.bin", 3, end=6) == b"def"
+    assert state["range_calls"] == [
+        {
+            "bucket": "bucket",
+            "key": "prefix/file.bin",
+            "start": 0,
+            "end": None,
+            "length": 2,
+        },
+        {
+            "bucket": "bucket",
+            "key": "prefix/file.bin",
+            "start": 3,
+            "end": 6,
+            "length": None,
+        },
+    ]
+
+
 def test_gcs_invalid_url_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test handling of invalid GCS URLs."""
     _install_obstore_stubs(monkeypatch)
