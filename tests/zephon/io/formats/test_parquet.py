@@ -20,6 +20,7 @@ from zephon.io.dataset import Dataset
 from zephon.io.formats.parquet import ParquetFormat, ParquetShard
 from zephon.io.storage import LocalFSBackend
 from zephon.io.storage.router import RouterStorageBackend
+from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
 from zephon.tools.parquet_index import ParquetIndexBuilder
 
 
@@ -378,6 +379,60 @@ class TestParquetShard:
 
         with pytest.raises(IndexError):
             shard.getsamples([0, -1, 100])
+
+
+class TestParquetMetadataCaching:
+    """Tests for cached metadata reuse during shard opens."""
+
+    def test_open_shard_reuses_cached_metadata(self, tmp_path: Path) -> None:
+        shard_path = tmp_path / "cached.parquet"
+        create_test_parquet_file(shard_path, num_rows=200, row_group_size=20)
+
+        metadata = pq.read_metadata(str(shard_path))
+        row_groups = [
+            {
+                "num_rows": metadata.row_group(i).num_rows,
+                "total_byte_size": metadata.row_group(i).total_byte_size,
+            }
+            for i in range(metadata.num_row_groups)
+        ]
+        format_handler = ParquetFormat()
+        local_ref = LocalShardRef(
+            raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
+            extra={"row_groups": row_groups},
+        )
+        locator = ShardLocator(
+            dataset="test",
+            shard_id=0,
+            format="parquet",
+            root=str(tmp_path),
+            raw=ShardFile(
+                basename=shard_path.name,
+                bytes=shard_path.stat().st_size,
+                hashes={},
+            ),
+            extra={"row_groups": row_groups},
+        )
+
+        calls = 0
+        real_read_metadata = pq.read_metadata
+
+        def counting_read_metadata(path_arg):
+            nonlocal calls
+            calls += 1
+            return real_read_metadata(path_arg)
+
+        original = pq.read_metadata
+        pq.read_metadata = counting_read_metadata
+        try:
+            shard1 = format_handler.open_shard(locator, local_ref)
+            shard1.close()
+            shard2 = format_handler.open_shard(locator, local_ref)
+            shard2.close()
+        finally:
+            pq.read_metadata = original
+
+        assert calls == 1
 
 
 class TestParquetAutoDetection:

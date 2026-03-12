@@ -17,7 +17,8 @@ import bisect
 import json
 import os
 import struct
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from numbers import Integral
 from pathlib import Path
@@ -67,6 +68,7 @@ class ParquetShard(RandomAccessShard):
         self,
         path: Path,
         row_groups: list[dict],
+        metadata: Any | None = None,
     ) -> None:
         """Initialize Parquet shard.
 
@@ -78,13 +80,15 @@ class ParquetShard(RandomAccessShard):
 
         self._path = path
         self._row_groups = row_groups
+        self._metadata = metadata
 
         # Build cumulative index: [0, rg0_rows, rg0_rows+rg1_rows, ...]
         self._rg_boundaries = self._build_cumulative_index(row_groups)
         self._length = self._rg_boundaries[-1] if self._rg_boundaries else 0
 
-        # Open file handle (will be closed after this batch per architecture)
-        self._pq_file = _pq.ParquetFile(self._path)
+        # Reuse cached file metadata when available to avoid reparsing the footer
+        # on every open/close cycle.
+        self._pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
 
     def _build_cumulative_index(self, row_groups: list[dict]) -> list[int]:
         """Build cumulative row count index for O(log n) lookup.
@@ -207,6 +211,11 @@ class ParquetFormat(FormatHandler):
     """
 
     kind = "parquet"
+    _METADATA_CACHE_MAX_SIZE = 256
+
+    def __init__(self) -> None:
+        self._metadata_cache: OrderedDict[str, Any] = OrderedDict()
+        self._metadata_lock = threading.Lock()
 
     def _read_metadata_only(
         self, path: str, storage: StorageBackend, *, size: int
@@ -523,10 +532,34 @@ class ParquetFormat(FormatHandler):
                 f"Missing row_groups metadata for shard {locator.shard_id}"
             )
 
+        metadata = self._get_cached_metadata(local_ref.raw.path)
+
         return ParquetShard(
             path=local_ref.raw.path,
             row_groups=row_groups,
+            metadata=metadata,
         )
+
+    def _get_cached_metadata(self, path: Path) -> Any:
+        cache_key = str(path)
+        with self._metadata_lock:
+            metadata = self._metadata_cache.get(cache_key)
+            if metadata is not None:
+                self._metadata_cache.move_to_end(cache_key)
+                return metadata
+
+        _, pq = _ensure_pyarrow()
+        metadata = pq.read_metadata(path)
+
+        with self._metadata_lock:
+            existing = self._metadata_cache.get(cache_key)
+            if existing is not None:
+                self._metadata_cache.move_to_end(cache_key)
+                return existing
+            self._metadata_cache[cache_key] = metadata
+            while len(self._metadata_cache) > self._METADATA_CACHE_MAX_SIZE:
+                self._metadata_cache.popitem(last=False)
+            return metadata
 
 
 # Register format
