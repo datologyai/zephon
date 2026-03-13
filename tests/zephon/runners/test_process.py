@@ -12,6 +12,7 @@ from tests.zephon.runners._helpers import (
 )
 from zephon.core.accumulators import (
     Accumulator,
+    CountingAccumulator,
     PassthroughAccumulator,
 )
 from zephon.core.constants import SampleRecord
@@ -28,6 +29,9 @@ def _collect(runner: ProcessStageRunner, data: list[int]) -> list[int]:
     records = _mk_records(data)
     out_records = list(runner.run(iter(records)))
     return _extract_values(out_records)
+
+
+torch = pytest.importorskip("torch")
 
 
 def test_process_runner_emits_in_input_order_when_deterministic() -> None:
@@ -176,6 +180,95 @@ class _MultiplyValueOp(_ValueMappingOp):
 
     def _map(self, value: int) -> int:
         return value * self.factor
+
+
+@dataclass
+class _TensorizeValueOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return PassthroughAccumulator[SampleRecord]()
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        out: list[SampleRecord] = []
+        for elem in elems:
+            payload = dict(elem.payload)
+            payload["tensor"] = torch.tensor([int(payload["value"])], dtype=torch.int64)
+            out.append(SampleRecord(meta=elem.meta, payload=payload))
+        return out
+
+
+@dataclass
+class _EncodeLargeBytesOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return PassthroughAccumulator[SampleRecord]()
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        out: list[SampleRecord] = []
+        for elem in elems:
+            value = int(elem.payload["value"])
+            payload = dict(elem.payload)
+            payload["text"] = (f"value-{value}|".encode("utf-8")) * 1024
+            out.append(SampleRecord(meta=elem.meta, payload=payload))
+        return out
+
+
+@dataclass
+class _DecodeAndAnnotateBatchOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+    max_batch: int = 3
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return CountingAccumulator[SampleRecord](
+            max_batch=self.max_batch,
+            max_latency_ms=None if deterministic else 1,
+        )
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        batch_size = len(elems)
+        out: list[SampleRecord] = []
+        for elem in elems:
+            payload = dict(elem.payload)
+            payload["text"] = payload["text"].decode("utf-8")
+            payload["batch_size"] = batch_size
+            out.append(SampleRecord(meta=elem.meta, payload=payload))
+        return out
 
 
 @dataclass
@@ -393,6 +486,126 @@ def test_process_runner_multi_op_draining_forwards_to_next_op() -> None:
     # Expected: v + 1 + 10 = v + 11
     expected = [v + 11 for v in data]
     assert out == expected
+
+
+def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None:
+    tensorize = Node(name="tensorize", op=_TensorizeValueOp())
+    delay = Node(name="delay", op=DelayById(max_delay_ms=1.5), inputs=[tensorize])
+    stage = Stage(
+        name="coalesced_tensors",
+        nodes=[tensorize, delay],
+        placement="auto",
+        break_reason="test",
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        coalesce_tensors=True,
+    )
+
+    data = list(range(30))
+    out = list(runner.run(iter(_mk_records(data))))
+    assert _extract_values(out) == data
+    for expected, rec in zip(data, out, strict=True):
+        assert int(rec.payload["tensor"][0]) == expected
+
+
+@dataclass
+class _BatchTensorizeOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+    """Tensorize with batching so multiple records land in one microbatch."""
+
+    max_batch: int = 8
+
+    def __post_init__(self) -> None:
+        DefaultSetup.__init__(self)
+
+    def traits(self) -> OpTraits:
+        return OpTraits(
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+            batch_shape_sensitive=False,
+        )
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return CountingAccumulator[SampleRecord](
+            max_batch=self.max_batch, max_latency_ms=None
+        )
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        out: list[SampleRecord] = []
+        for elem in elems:
+            payload = dict(elem.payload)
+            payload["tensor"] = torch.tensor([int(payload["value"])], dtype=torch.int64)
+            out.append(SampleRecord(meta=elem.meta, payload=payload))
+        return out
+
+
+def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
+    """Restored tensors after IPC should be views into the same SHM storage."""
+    tensorize = Node(name="tensorize", op=_BatchTensorizeOp(max_batch=8))
+    stage = Stage(
+        name="coalesced_zerocopy",
+        nodes=[tensorize],
+        placement="auto",
+        break_reason="test",
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        coalesce_tensors=True,
+    )
+
+    # 8 records with max_batch=8 → one microbatch → one coalesced buffer
+    data = list(range(8))
+    out = list(runner.run(iter(_mk_records(data))))
+    assert _extract_values(out) == data
+
+    # All tensors from the same coalesced microbatch share one storage
+    storages = {rec.payload["tensor"].untyped_storage().data_ptr() for rec in out}
+    assert len(storages) == 1, (
+        f"Expected all tensors to share one SHM storage, got {len(storages)}"
+    )
+
+
+def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() -> None:
+    encode = Node(name="encode", op=_EncodeLargeBytesOp())
+    decode = Node(
+        name="decode",
+        op=_DecodeAndAnnotateBatchOp(max_batch=3),
+        inputs=[encode],
+    )
+    stage = Stage(
+        name="coalesced_bytes",
+        nodes=[encode, decode],
+        placement="auto",
+        break_reason="test",
+    )
+
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=4,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        coalesce_tensors=True,
+    )
+
+    out = list(runner.run(iter(_mk_records(range(7)))))
+    assert _extract_values(out) == list(range(7))
+    assert [rec.payload["batch_size"] for rec in out] == [3, 3, 3, 3, 3, 3, 1]
+    for rec in out:
+        assert rec.payload["text"].startswith(f"value-{rec.payload['value']}|")
 
 
 @dataclass

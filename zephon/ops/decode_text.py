@@ -6,7 +6,12 @@
 from typing import Any, Optional, Sequence
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import SamplePayload, SamplePayloadDict, SampleRecord
+from zephon.core.constants import (
+    SamplePayload,
+    SamplePayloadDict,
+    SampleRecord,
+    is_bytes_like,
+)
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
 
@@ -46,7 +51,7 @@ class DecodeText(DefaultSetup):
         )
 
     def _decode(self, value: Any) -> str:
-        if isinstance(value, bytes):
+        if is_bytes_like(value):
             result = value.decode(self.encoding, errors=self.errors)
         else:
             result = str(value)

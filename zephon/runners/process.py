@@ -48,6 +48,7 @@ from zephon.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
 setup_faulthandler()
 
 from zephon.core.constants import (
+    Microbatch,
     RunnerStageIn,
     RunnerStageOut,
     RunnerStreamIn,
@@ -68,6 +69,7 @@ from zephon.runners.concurrent import (
     WorkerErrorInfo,
     _QueueLike,
 )
+from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE, coalesce_microbatch
 
 Q = TypeVar("Q")
 
@@ -261,6 +263,13 @@ class _ProcessWorkerConfig:
     result_queue: _QueueLike[RunnerResult]
     backpressure: Semaphore | SafeSemLock
     spawn_wall_ns: int = 0  # Main process wall-clock time at spawn start
+    #: When True, coalesce all tensors in the microbatch into per-dtype SHM
+    #: buffers before serialization.  Reduces N POSIX SHM segments to K
+    #: (K = distinct dtypes, usually 1–2).
+    coalesce_tensors: bool = True
+    #: Minimum payload size in bytes for SHM coalescing.  Payloads smaller
+    #: than this are left inline in the pickle stream.
+    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
@@ -322,19 +331,28 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 _debug(
                     f"worker[{config.worker_index}] processing batch seq={command.seq}"
                 )
+                batch = command.batch
                 start_ns = time.perf_counter_ns() if command.collect_metrics else 0
                 try:
-                    outputs = op_instance.process_many(command.batch)
+                    outputs = op_instance.process_many(batch)
                 except (NotImplementedError, AttributeError):
                     outputs = None
                 if outputs is None:
                     out: list[StreamItem] = []
-                    for element in command.batch:
+                    for element in batch:
                         out.extend(op_instance.process_one(element))
                     outputs = out
                 proc_ns = (
                     time.perf_counter_ns() - start_ns if command.collect_metrics else 0
                 )
+
+            # Optionally coalesce tensors into per-dtype SHM buffers.
+            # CoalescedMicrobatch.__reduce__ unpickles as Microbatch on the
+            # consumer side, so the cast is safe.
+            if config.coalesce_tensors and outputs:
+                coalesced = coalesce_microbatch(outputs, config.shm_min_size)
+                if coalesced is not None:
+                    outputs = cast(Microbatch, coalesced)
 
             config.backpressure.acquire()
             result = RunnerResult(
@@ -586,7 +604,11 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         mp_context: BaseContext | None = None,
+        coalesce_tensors: bool = True,
+        shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
     ) -> None:
+        self._coalesce_tensors = coalesce_tensors
+        self._shm_min_size = shm_min_size
         self._queue_capacity = max(1, queue_capacity)
         ctx = mp_context or mp.get_context("spawn")
         self._mp_context: BaseContext = ctx
@@ -754,7 +776,10 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         self._service_thread = thread
 
     def _stop_service_thread(self, *, hard: bool = False) -> None:
-        if self._service_thread is None:
+        # Grab a local ref to avoid races with concurrent callers
+        # (_after_run and close() can both reach here).
+        thread = self._service_thread
+        if thread is None:
             _shutdown_debug("_stop_service_thread: no service thread")
             return
         _shutdown_debug("_stop_service_thread: setting stop flag")
@@ -766,8 +791,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
         join_timeout = _HARD_SERVICE_JOIN if hard else _GRACEFUL_SERVICE_JOIN
         _shutdown_debug("_stop_service_thread: joining service thread")
-        self._service_thread.join(timeout=join_timeout)
-        if self._service_thread.is_alive():
+        thread.join(timeout=join_timeout)
+        if thread.is_alive():
             _shutdown_debug(
                 f"_stop_service_thread: WARNING - service thread still alive after {join_timeout}s join"
             )
@@ -945,6 +970,7 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
 
         # Serialize operator once using cloudpickle to support lambdas/closures
         op_proto_bytes = cloudpickle.dumps(state.node.op)
+        coalesce_tensors = self._coalesce_tensors
 
         # Record wall-clock time so workers can compute cross-process startup duration
         spawn_wall_ns = time.time_ns()
@@ -984,6 +1010,8 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
                 result_queue=result_queue,
                 backpressure=semaphore,
                 spawn_wall_ns=spawn_wall_ns,
+                coalesce_tensors=coalesce_tensors,
+                shm_min_size=self._shm_min_size,
             )
             proc: BaseProcess = self._process_factory(
                 target=_process_worker_main,

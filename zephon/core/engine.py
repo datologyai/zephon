@@ -76,6 +76,7 @@ from zephon.observability.emitter import MetricsReporter
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
+from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
 from zephon.work import MixtureReadConfig, WorkSource
 from zephon.work.base import WorkChunk
 
@@ -236,6 +237,13 @@ class RuntimeOptions:
     # - 'contiguous': dp groups own contiguous blocks of replicas (locality-friendly)
     # - 'interleaved': replicas are round-robin across dp groups (balanced progress)
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
+
+    # === IPC serialization ===
+    # Coalesce all tensors in a microbatch by dtype into a single SHM
+    # buffer before serialization. Reduces POSIX SHM segments from N to K
+    # (K = number of distinct dtypes). Only consumed by process runners.
+    coalesce_tensors: bool = True
+    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
 
     # Autotune placeholders (intentionally not implemented yet)
     autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
@@ -815,6 +823,8 @@ class Engine:
                         spec.worker_cap,
                         queue_capacity=spec.queue_capacity,
                         mp_context=self._mp_context,
+                        coalesce_tensors=spec.coalesce_tensors,
+                        shm_min_size=spec.shm_min_size,
                         **common,
                     )
                 )

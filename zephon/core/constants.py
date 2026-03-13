@@ -465,6 +465,19 @@ class SampleBatch:
 
 # Payload typing --------------------------------------------------------------
 SampleNumeric: TypeAlias = int | float | complex
+
+
+def is_bytes_like(value: object) -> bool:
+    """Check if *value* is bytes-like (bytes, memoryview, bytearray, or SHM-backed).
+
+    Covers built-in types via isinstance and SHM-backed wrappers (e.g.
+    ``_ShmBytes``) via duck-typing (must have ``__bytes__`` and ``decode``).
+    """
+    if isinstance(value, (bytes, memoryview, bytearray)):
+        return True
+    return hasattr(value, "__bytes__") and hasattr(value, "decode")
+
+
 SamplePayloadAtom: TypeAlias = (
     bytes | memoryview | str | SampleNumeric | SamplePayloadArray
 )

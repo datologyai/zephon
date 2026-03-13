@@ -42,6 +42,8 @@ class StageRuntimeSpec:
     prefetch_capacity: int
     output_mode: str  # "microbatches" | "stream_items"
     allow_latency_flush: bool
+    coalesce_tensors: bool
+    shm_min_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +305,8 @@ def resolve_runtime_spec(
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
                 allow_latency_flush=allow_latency,
+                coalesce_tensors=opts.coalesce_tensors,
+                shm_min_size=opts.shm_min_size,
             )
         )
 

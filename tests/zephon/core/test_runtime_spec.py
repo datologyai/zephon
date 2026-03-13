@@ -210,6 +210,12 @@ def test_deterministic_flag():
     assert spec2.deterministic is False
 
 
+def test_coalesce_tensors_defaults_on() -> None:
+    plan = _mk_simple_plan()
+    spec = resolve_runtime_spec(plan, RuntimeOptions())
+    assert spec.stages[0].coalesce_tensors is True
+
+
 def test_final_prefetch():
     plan = _mk_simple_plan()
     spec = resolve_runtime_spec(plan, RuntimeOptions(prefetch_batches=8))
