@@ -1,0 +1,108 @@
+# Copyright 2025 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for CountingAccumulator lane-aware buffering.
+
+CountingAccumulator routes elements to per-lane buffers via ``key_fn``,
+ensuring each emitted batch is lane-pure.  This is critical for
+deterministic shuffle: ``batch_seed`` must not depend on the cross-lane
+interleaving order from the source stream.
+"""
+
+from __future__ import annotations
+
+from zephon.core.accumulators.counting import CountingAccumulator
+from zephon.core.constants import SampleMeta, SampleRecord, lane_of
+
+
+def _rec(lane_id: int, offset: int) -> SampleRecord:
+    return SampleRecord(
+        meta=SampleMeta(
+            sample_id=(0, 0, offset),
+            lane_id=lane_id,
+            chunk_id=0,
+            chunk_offset=offset,
+        ),
+        payload={"text": f"L{lane_id}:{offset}"},
+    )
+
+
+def test_batches_identical_regardless_of_interleaving_order() -> None:
+    """Same records, different lane interleaving -> identical batches."""
+    acc_a = CountingAccumulator[SampleRecord](max_batch=4, key_fn=lane_of)
+    acc_b = CountingAccumulator[SampleRecord](max_batch=4, key_fn=lane_of)
+
+    lane0 = [_rec(0, i) for i in range(4)]
+    lane1 = [_rec(1, i) for i in range(4)]
+
+    # Interleaving A: lane 0 first, then lane 1
+    batches_a = acc_a.push_many(lane0 + lane1)
+
+    # Interleaving B: alternating
+    interleaved = [r for pair in zip(lane0, lane1) for r in pair]
+    batches_b = acc_b.push_many(interleaved)
+
+    def batch_lanes(batches: list) -> list[list[int]]:
+        return [[r.meta.lane_id for r in batch] for batch, _ in batches]
+
+    lanes_a = batch_lanes(batches_a)
+    lanes_b = batch_lanes(batches_b)
+
+    assert lanes_a == lanes_b
+
+
+def test_batches_are_lane_pure() -> None:
+    """Batches from a multi-lane stream should each contain a single lane."""
+    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+
+    # Alternating lanes, as _source_stream round-robin would produce
+    records = [_rec(lane_id=i % 2, offset=i) for i in range(6)]
+
+    batches = acc.push_many(records)
+    assert len(batches) == 2
+
+    for batch, _ in batches:
+        lane_ids = {r.meta.lane_id for r in batch}
+        assert len(lane_ids) == 1, (
+            f"Batch contains mixed lanes {lane_ids}; "
+            f"expected lane-pure batches for deterministic shuffle."
+        )
+
+
+def test_drop_last_discards_partial_batches() -> None:
+    """drop_last=True discards partial per-lane buffers on flush."""
+    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of, drop_last=True)
+    acc.push_many([_rec(0, 0), _rec(0, 1)])  # partial lane 0
+    assert acc.has_pending_data()
+    assert acc.flush() == []
+    assert not acc.has_pending_data()
+
+
+def test_flush_emits_partial_batches() -> None:
+    """drop_last=False emits partial per-lane buffers on flush."""
+    acc = CountingAccumulator[SampleRecord](
+        max_batch=3, key_fn=lane_of, drop_last=False
+    )
+    acc.push_many([_rec(0, 0), _rec(1, 0)])  # 1 per lane
+    flushed = acc.flush()
+    assert len(flushed) == 2
+    for batch, _ in flushed:
+        assert len(batch) == 1
+
+
+def test_engine_sample_keying() -> None:
+    """EngineSample tuples are keyed by lane_id at index 1."""
+    acc = CountingAccumulator[tuple](max_batch=2, key_fn=lane_of)
+    # EngineSample = (sample_id, lane_id, chunk_id, offset, component_id)
+    elems = [
+        ((0, 0, 0), 0, 0, 0, 0),  # lane 0
+        ((0, 0, 1), 1, 0, 0, 0),  # lane 1
+        ((0, 0, 2), 0, 0, 1, 0),  # lane 0
+        ((0, 0, 3), 1, 0, 1, 0),  # lane 1
+    ]
+    batches = acc.push_many(elems)
+    assert len(batches) == 2
+    # Each batch should be lane-pure
+    for batch, _ in batches:
+        lanes = {e[1] for e in batch}
+        assert len(lanes) == 1

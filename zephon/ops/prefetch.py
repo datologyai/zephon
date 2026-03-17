@@ -6,7 +6,7 @@
 from typing import Any, Callable
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import EngineSample
+from zephon.core.constants import EngineSample, lane_of
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.io.options import StoreOptions
@@ -104,6 +104,7 @@ class PrefetchOp(DefaultSetup):
         return CountingAccumulator[EngineSample](
             max_batch=self.buffer_size,
             max_latency_ms=None if deterministic else 10,
+            key_fn=lane_of,
         )
 
     def process_one(self, elem: EngineSample) -> list[EngineSample]:

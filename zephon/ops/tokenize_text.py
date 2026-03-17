@@ -38,6 +38,7 @@ from zephon.core.constants import (
     SamplePayload,
     SamplePayloadDict,
     SampleRecord,
+    lane_of,
 )
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
@@ -252,6 +253,7 @@ class TokenizeText(DefaultSetup):
         return CountingAccumulator[SampleRecord](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
+            key_fn=lane_of,
         )
 
     def _extract_text(self, payload: SamplePayload) -> tuple[str, SamplePayloadDict]:

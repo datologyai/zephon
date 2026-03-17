@@ -496,3 +496,16 @@ RunnerStageIn: TypeAlias = RunnerStreamIn | Microbatch
 # Downstream stages read either micro-batches (preferred) or flattened stream
 # items depending on how the runner is configured.
 RunnerStageOut: TypeAlias = StreamItem | Microbatch
+
+
+def lane_of(elem: RunnerStreamIn) -> LaneId:
+    """Extract lane_id from any element that flows through the pipeline.
+
+    Works with SampleRecord (.meta.lane_id), SampleBatch (first record's
+    lane_id), and EngineSample tuples (index 1).
+    """
+    if isinstance(elem, tuple):
+        return elem[1]  # EngineSample
+    if isinstance(elem, SampleBatch):
+        return elem.lane_ids[0]
+    return elem.meta.lane_id  # SampleRecord

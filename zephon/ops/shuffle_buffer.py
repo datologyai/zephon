@@ -7,7 +7,7 @@ from random import Random
 from typing import Any, TypeVar
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import ContributorRef, SampleRecord
+from zephon.core.constants import ContributorRef, SampleRecord, lane_of
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.utils.seeding import batch_seed
@@ -118,9 +118,9 @@ class ShuffleBuffer(DefaultSetup):
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
-        # Use count-only accumulator (no time-based flushing) to ensure
-        # deterministic batch boundaries for shuffling.
-        return CountingAccumulator[SampleRecord](max_batch=self.buffer_size)
+        return CountingAccumulator[SampleRecord](
+            max_batch=self.buffer_size, key_fn=lane_of
+        )
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
         return self.process_many([elem])

@@ -6,10 +6,11 @@ from typing import Any
 import pytest
 
 from tests.zephon.runners._helpers import _ctx_services
+from zephon.core.accumulators.counting import CountingAccumulator
 from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import Op
-from zephon.ops.batch import Batch, BatchAccumulator
+from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.runners.threads import ThreadStageRunner
 
@@ -28,13 +29,22 @@ def test_batch_invalid_microbatch_size_raises() -> None:
 
 def test_batch_accumulator_invalid_microbatch_size_raises() -> None:
     with pytest.raises(ValueError):
-        BatchAccumulator(0)
+        CountingAccumulator(0, key_fn=lambda r: r.meta.lane_id)
     with pytest.raises(ValueError):
-        BatchAccumulator(-2)
+        CountingAccumulator(-2, key_fn=lambda r: r.meta.lane_id)
+
+
+def _lane_acc(size: int, drop_last: bool = True) -> CountingAccumulator[SampleRecord]:
+    """Create a lane-keyed CountingAccumulator matching Batch's usage."""
+    return CountingAccumulator[SampleRecord](
+        max_batch=size,
+        key_fn=lambda r: r.meta.lane_id,
+        drop_last=drop_last,
+    )
 
 
 def test_batch_accumulator_single_lane_drop_last_true() -> None:
-    acc = BatchAccumulator(2, drop_last=True)
+    acc = _lane_acc(2, drop_last=True)
     # First record - not enough for a batch
     ready = acc.push_many([_rec(0)])
     assert ready == []
@@ -51,7 +61,7 @@ def test_batch_accumulator_single_lane_drop_last_true() -> None:
 
 
 def test_batch_accumulator_single_lane_drop_last_false() -> None:
-    acc = BatchAccumulator(3, drop_last=False)
+    acc = _lane_acc(3, drop_last=False)
     # Feed 5 -> one batch of 3, remainder 2 emitted on flush
     ready = acc.push_many([_rec(i) for i in range(5)])
     assert len(ready) == 1
@@ -63,7 +73,7 @@ def test_batch_accumulator_single_lane_drop_last_false() -> None:
 
 
 def test_batch_accumulator_multi_lane_interleaving_lane_purity() -> None:
-    acc = BatchAccumulator(2, drop_last=False)
+    acc = _lane_acc(2, drop_last=False)
     # Interleave lanes 0 and 1
     items = [_rec(0, lane=0), _rec(1, lane=1), _rec(2, lane=0), _rec(3, lane=1)]
     ready = acc.push_many(items)
@@ -80,8 +90,8 @@ def test_batch_accumulator_multi_lane_interleaving_lane_purity() -> None:
 
 def test_batch_accumulator_process_equivalence() -> None:
     """Test that batch size and accumulation works correctly."""
-    acc_a = BatchAccumulator(2, drop_last=False)
-    acc_b = BatchAccumulator(2, drop_last=False)
+    acc_a = _lane_acc(2, drop_last=False)
+    acc_b = _lane_acc(2, drop_last=False)
     items = [_rec(i) for i in range(4)]
 
     # Process one-by-one
@@ -109,16 +119,17 @@ def test_batch_traits_and_accumulator() -> None:
     assert traits.indexable is False
     assert traits.batch_shape_sensitive is False
 
-    # Verify accumulator configuration is passed through correctly
+    # Verify accumulator is a lane-keyed CountingAccumulator
     acc = op.accumulator(deterministic=False, ctx={})
-    assert acc.microbatch_size == 2
-    assert acc.drop_last is True
+    assert isinstance(acc, CountingAccumulator)
+    assert acc._max_batch == 2
+    assert acc._drop_last is True
 
-    # Verify drop_last=False is also passed through
     op_keep = Batch(4, drop_last=False)
     acc_keep = op_keep.accumulator(deterministic=False, ctx={})
-    assert acc_keep.microbatch_size == 4
-    assert acc_keep.drop_last is False
+    assert isinstance(acc_keep, CountingAccumulator)
+    assert acc_keep._max_batch == 4
+    assert acc_keep._drop_last is False
 
 
 def test_batch_operator_process_many_wraps_batch() -> None:
@@ -135,7 +146,7 @@ def test_batch_operator_process_many_wraps_batch() -> None:
 
 def test_batch_has_pending_data() -> None:
     """Test has_pending_data method."""
-    acc = BatchAccumulator(3, drop_last=False)
+    acc = _lane_acc(3, drop_last=False)
     assert not acc.has_pending_data()
 
     acc.push_many([_rec(0)])

@@ -6,7 +6,13 @@
 from typing import Any, Callable, Optional, cast
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import EngineSample, SampleMeta, SamplePayload, SampleRecord
+from zephon.core.constants import (
+    EngineSample,
+    SampleMeta,
+    SamplePayload,
+    SampleRecord,
+    lane_of,
+)
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.io import build_multi_dataset_store
@@ -63,6 +69,7 @@ class FetchOp(DefaultSetup):
         return CountingAccumulator[EngineSample](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
+            key_fn=lane_of,
         )
 
     def process_one(self, elem: EngineSample) -> list[SampleRecord]:

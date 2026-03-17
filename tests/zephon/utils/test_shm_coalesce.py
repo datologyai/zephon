@@ -10,7 +10,7 @@ from multiprocessing.reduction import ForkingPickler
 import pytest
 
 from zephon.core.accumulators import CountingAccumulator
-from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
+from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord, lane_of
 from zephon.ops.decode_text import DecodeText
 from zephon.utils.shm_coalesce import (
     CoalescedMicrobatch,
@@ -436,7 +436,9 @@ class TestCoalesceBytes:
 
     def test_restored_bytes_flow_through_counting_accumulator(self) -> None:
         """Round-tripped coalesced items keep count-based batching semantics."""
-        acc = CountingAccumulator[SampleRecord](max_batch=3, max_latency_ms=None)
+        acc = CountingAccumulator[SampleRecord](
+            max_batch=3, max_latency_ms=None, key_fn=lane_of
+        )
         records = [
             SampleRecord(
                 meta=_meta(i),

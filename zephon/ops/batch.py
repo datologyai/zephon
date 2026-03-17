@@ -3,96 +3,19 @@
 
 """Batching operator for grouping sample records (lane-pure)."""
 
-from collections import defaultdict
-from typing import Any, Sequence
+from typing import Any
 
-from zephon.core.accumulators import Accumulator, ReadyBatch
-from zephon.core.constants import SampleBatch, SampleRecord
+from zephon.core.accumulators import Accumulator, CountingAccumulator
+from zephon.core.constants import SampleBatch, SampleRecord, lane_of
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
-
-
-class BatchAccumulator(Accumulator[SampleRecord]):
-    """Accumulator that groups records into lane-pure batches.
-
-    This accumulator runs on the pump thread and maintains per-lane buffers.
-    It emits ready batches when a lane reaches the microbatch size. Tombstones
-    are handled specially: they trigger a flush of the lane's buffer and are
-    then emitted in their own batch.
-
-    The Batch operator receives these lane-pure batches and wraps them
-    into SampleBatch objects. Tombstones are passed through unchanged.
-    """
-
-    def __init__(self, microbatch_size: int, drop_last: bool = True) -> None:
-        if microbatch_size <= 0:
-            raise ValueError("microbatch_size must be positive")
-        self.microbatch_size = microbatch_size
-        self.drop_last = drop_last
-        # lane_id -> list[SampleRecord]
-        self._buffers: defaultdict[int, list[SampleRecord]] = defaultdict(list)
-
-    def has_pending_data(self) -> bool:
-        """Return True if there are any buffered records."""
-        return any(self._buffers.values())
-
-    def push_many(
-        self, elems: Sequence[SampleRecord]
-    ) -> list[ReadyBatch[SampleRecord]]:
-        """Accumulate records and emit lane-pure batches when ready."""
-        ready: list[ReadyBatch[SampleRecord]] = []
-
-        for elem in elems:
-            lane_id = elem.meta.lane_id
-            buf = self._buffers[lane_id]
-            buf.append(elem)
-            ready.extend(self._flush_full_batches(lane_id))
-
-        return ready
-
-    def flush(self) -> list[ReadyBatch[SampleRecord]]:
-        """Emit any remaining buffered records."""
-        if not self._buffers:
-            return []
-
-        if self.drop_last:
-            # Drop any residual partial microbatches for all lanes
-            self._buffers.clear()
-            return []
-
-        # Emit remaining (possibly smaller) batches per lane
-        ready: list[ReadyBatch[SampleRecord]] = []
-        for buf in self._buffers.values():
-            if buf:
-                ready.append((list(buf), 0))
-        self._buffers.clear()
-        return ready
-
-    def _flush_full_batches(self, lane_id: int) -> list[ReadyBatch[SampleRecord]]:
-        """Emit all full batches for a lane."""
-        buf = self._buffers[lane_id]
-        if not buf or len(buf) < self.microbatch_size:
-            return []
-
-        ready: list[ReadyBatch[SampleRecord]] = []
-        while len(buf) >= self.microbatch_size:
-            chunk = buf[: self.microbatch_size]
-            ready.append((list(chunk), 0))
-            del buf[: self.microbatch_size]
-
-        if buf:
-            self._buffers[lane_id] = buf
-        else:
-            self._buffers.pop(lane_id, None)
-
-        return ready
 
 
 class Batch(DefaultSetup):
     """Collect sample records into mini-batches, one lane per batch.
 
-    This operator uses a BatchAccumulator to group records into lane-pure
-    batches on the pump thread. The process_many method receives lane-pure
+    Uses a lane-keyed CountingAccumulator to group records into lane-pure
+    batches on the pump thread.  The process_many method receives lane-pure
     batches and wraps them into SampleBatch objects.
 
     Since batch formation happens in the accumulator (on the serial pump thread),
@@ -119,7 +42,6 @@ class Batch(DefaultSetup):
             indexable=False,
             preserves_cursor_order=True,
             batch_shape_sensitive=False,
-            # No longer needs serial state - accumulator handles it
             requires_serial_state=False,
             parallelism=self._parallelism,
         )
@@ -127,9 +49,8 @@ class Batch(DefaultSetup):
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
-        return BatchAccumulator(
-            microbatch_size=self.microbatch_size,
-            drop_last=self.drop_last,
+        return CountingAccumulator[SampleRecord](
+            max_batch=self.microbatch_size, key_fn=lane_of, drop_last=self.drop_last
         )
 
     def process_one(self, elem: SampleRecord) -> list[SampleBatch | SampleRecord]:

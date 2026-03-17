@@ -271,11 +271,13 @@ waiting.  This reduces latency for bursty workloads.  In deterministic
 mode, the time-based flush is disabled so that micro-batch boundaries depend
 only on element counts, never on wall-clock timing.
 
-#### BatchAccumulator
+#### Batch (via CountingAccumulator)
 
-Used by the {py:class}`~zephon.ops.Batch` operator.  Maintains per-lane
+The {py:class}`~zephon.ops.Batch` operator uses a
+{py:class}`~zephon.core.accumulators.CountingAccumulator` with
+``key_fn=lane_of`` and ``drop_last`` support.  Maintains per-lane
 buffers and emits a micro-batch when a lane's buffer reaches
-`microbatch_size` records.
+``microbatch_size`` records.
 
 #### PackingAccumulator
 
