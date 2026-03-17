@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.protocols import RandomAccessShard
@@ -177,6 +181,46 @@ def _normalize_chunk(
     return cast(Mapping[str, Any], chunk)
 
 
+def _read_chunk_metadata_only(
+    path: str, basename: str, storage: StorageBackend, size: int
+) -> dict[str, Any]:
+    """Read LitData chunk metadata via range reads (header only).
+
+    Chunk format: [num_items (4B)] [offset_array (4*(N+1)B)] [item_data]
+    Only the header is read; avoids full file download.
+    """
+    if size < 8:
+        raise ValueError(f"Chunk too small to be valid LitData: {path}")
+
+    # Read first 4 bytes for num_items
+    num_items_bytes = storage.read_range(path, 0, length=4)
+    num_items = struct.unpack("<I", num_items_bytes)[0]
+
+    header_size = 4 + (num_items + 1) * 4
+    if header_size > size:
+        raise ValueError(f"Chunk header extends past file size for {path}")
+
+    # Read offset array
+    offset_bytes = storage.read_range(path, 4, length=(num_items + 1) * 4)
+    offsets = np.frombuffer(offset_bytes, dtype=np.uint32)
+
+    # Compute dim (total tokens) for TokensLoader: sum of (item_size - 4) / 4 per item
+    shift_idx = 4  # no_header_tensor has 4-byte per-item size header
+    elem_size = 4  # uint32
+    dim = 0
+    for i in range(num_items):
+        item_bytes = int(offsets[i + 1] - offsets[i])
+        payload = max(item_bytes - shift_idx, 0)
+        dim += payload // elem_size
+
+    return {
+        "filename": basename,
+        "chunk_size": num_items,
+        "chunk_bytes": size,
+        "dim": dim,
+    }
+
+
 class LitDataFormat(FormatHandler):
     """Format handler for LitData datasets."""
 
@@ -189,8 +233,8 @@ class LitDataFormat(FormatHandler):
         try:
             with storage.open(index_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
-        except FileNotFoundError as exc:
-            raise ValueError(f"Missing LitData index: {index_path}") from exc
+        except FileNotFoundError:
+            return self._discover_from_files(path, storage)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Failed to parse LitData index: {index_path}") from exc
 
@@ -210,6 +254,89 @@ class LitDataFormat(FormatHandler):
         for shard_id, entry in enumerate(raw_chunks):
             chunk = _normalize_chunk(entry, shard_id)
             chunks.append(chunk)
+
+        support = _ensure_litdata_support()
+        loader = _select_item_loader(config, chunks)
+        serializers = support._get_serializers()
+        loader.setup(config, chunks, serializers, None)
+        intervals = loader.generate_intervals()
+        if len(intervals) != len(chunks):
+            raise ValueError("LitData loader returned inconsistent interval counts")
+
+        shard_index: dict[int, int] = {}
+        shard_meta: dict[int, dict[str, Any]] = {}
+        for shard_id, interval in enumerate(intervals):
+            assert isinstance(interval, support.Interval)
+            shard_length = int(interval.chunk_end - interval.chunk_start)
+            shard_index[shard_id] = shard_length
+            shard_meta[shard_id] = {
+                "config": config,
+                "chunk": chunks[shard_id],
+                "interval": interval,
+            }
+
+        return shard_index, shard_meta
+
+    def _discover_from_files(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
+        """Fallback: read chunk metadata from each .bin file via range reads.
+
+        Uncompressed .bin files: use range reads (header only, ~40KB per chunk).
+        Compressed .bin.zst files: not supported (require full download/decompress);
+        if only .bin.zst files exist, raises a clear error.
+        """
+        all_entries = storage.listdir(path)
+        entries = sorted(name for name in all_entries if name.endswith(".bin"))
+        zst_entries = [n for n in all_entries if n.endswith(".bin.zst")]
+
+        if not entries:
+            if zst_entries:
+                raise ValueError(
+                    f"Only compressed .bin.zst chunks found under {path}. "
+                    "Range-read discovery is not supported for compressed chunks; "
+                    "index.json is required for .bin.zst datasets."
+                )
+            raise ValueError(f"No .bin chunks found under {path}")
+
+        # Default config for token datasets (common case)
+        config = _StreamingTemplateDict(
+            {
+                "data_format": ["no_header_tensor:0"],
+                "block_size": 4096,
+                "item_loader": {"name": "tokens", "block_size": 4096},
+            }
+        )
+
+        chunks: list[dict[str, Any]] = []
+
+        def read_metadata(shard_id: int, name: str) -> tuple[int, dict, dict]:
+            full_path = os.path.join(path, name)
+            stats = storage.stat(full_path)
+            size = int(stats.get("size", 0))
+            meta = _read_chunk_metadata_only(full_path, name, storage, size)
+            chunk = {
+                "filename": meta["filename"],
+                "chunk_size": meta["chunk_size"],
+                "chunk_bytes": meta["chunk_bytes"],
+                "dim": meta["dim"],
+                "column_sizes": [],
+            }
+            return shard_id, meta, chunk
+
+        max_workers = min(32, (len(entries) + 4) // 5)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(read_metadata, shard_id, name): shard_id
+                for shard_id, name in enumerate(entries)
+            }
+            results: list[tuple[int, dict, dict]] = []
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Sort by shard_id to preserve order
+        results.sort(key=lambda x: x[0])
+        chunks = [r[2] for r in results]
 
         support = _ensure_litdata_support()
         loader = _select_item_loader(config, chunks)

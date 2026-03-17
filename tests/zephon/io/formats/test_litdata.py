@@ -7,11 +7,15 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
+from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
+from zephon.io.formats.litdata import LitDataFormat
 from zephon.io.resolvers import DirectResolver
 from zephon.io.storage import LocalFSBackend
+from zephon.io.storage.base import StorageBackend
+from zephon.io.storage.s3 import S3Backend
 
 
 @pytest.mark.parametrize("loader_kind", ["pytree", "tokens"])
@@ -169,6 +173,149 @@ def test_litdata_reader_handles_no_header_numpy(tmp_path: Path) -> None:
         assert isinstance(value, np.ndarray)
         assert value.dtype == expected["payload"].dtype
         assert np.array_equal(value, expected["payload"])
+
+
+def test_discover_from_files_s3_does_not_download_full_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test cloud discovery does not rely on full-object downloads.
+
+    When index.json is absent, LitData discover() uses read_range() to read
+    only chunk headers (~40KB per chunk) instead of downloading full .bin files.
+    """
+    pytest.importorskip("torch")
+
+    state = _install_obstore_stubs(monkeypatch)
+
+    dataset_dir = tmp_path / "litdata_dataset"
+    dataset_dir.mkdir()
+    block_size = 4
+    samples = [
+        np.arange(i * block_size, (i + 1) * block_size, dtype=np.int32)
+        for i in range(4)
+    ]
+    writer = _binary_writer_for_samples(
+        dataset_dir, len(samples), "tokens", block_size=block_size
+    )
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
+
+    # Use only the first chunk file; do NOT add index.json to simulate fallback
+    chunk_path = dataset_dir / "chunk-0-0.bin"
+    assert chunk_path.exists()
+    state["objects"][("bucket", "dataset/chunk-0-0.bin")] = chunk_path.read_bytes()
+
+    backend = S3Backend()
+
+    def fail_download(src: str, dst: str, timeout: float | None = None) -> None:
+        del dst, timeout
+        if "index.json" in src:
+            raise FileNotFoundError(f"Missing LitData index: {src}")
+        pytest.fail("discover() performed a full-object download")
+
+    backend.download = fail_download  # type: ignore[assignment]
+
+    format_handler = LitDataFormat()
+    shard_index, shard_meta = format_handler.discover("s3://bucket/dataset", backend)
+
+    # Discovery succeeded using only read_range (no full-object download)
+    assert len(shard_index) == 1
+    assert len(shard_meta) == 1
+    assert shard_meta[0]["chunk"]["filename"] == "chunk-0-0.bin"
+
+
+def test_discover_from_files_reads_large_headers_via_range_reads(
+    tmp_path: Path,
+) -> None:
+    """Large chunk headers (many items) are read via targeted range reads, not full-file reads."""
+    pytest.importorskip("torch")
+
+    dataset_dir = tmp_path / "litdata_large_header"
+    dataset_dir.mkdir()
+    block_size = 4
+    num_samples = 4
+    samples = [
+        np.arange(i * block_size, (i + 1) * block_size, dtype=np.int32)
+        for i in range(num_samples)
+    ]
+    writer = _binary_writer_for_samples(
+        dataset_dir, num_samples, "tokens", block_size=block_size
+    )
+    for idx, sample in enumerate(samples):
+        writer.add_item(idx, sample)
+    writer.done()
+    writer.merge()
+
+    (dataset_dir / "index.json").unlink(missing_ok=True)
+
+    class _TrackingStorage(StorageBackend):
+        """Delegates to LocalFSBackend but records all read_range calls."""
+
+        def __init__(self, root: Path):
+            self._local = LocalFSBackend(root=root)
+            self.range_reads: list[tuple[str, int, int | None]] = []
+
+        def read_range(
+            self,
+            path: str,
+            start: int,
+            *,
+            end: int | None = None,
+            length: int | None = None,
+        ) -> bytes:
+            self.range_reads.append((path, start, length))
+            return self._local.read_range(path, start, end=end, length=length)
+
+        def open(self, path: str, mode: str = "rb", **kwargs):
+            return self._local.open(path, mode, **kwargs)
+
+        def exists(self, path: str) -> bool:
+            return self._local.exists(path)
+
+        def download(self, src: str, dst: str, timeout: float | None = None) -> None:
+            return self._local.download(src, dst, timeout)
+
+        def listdir(self, path: str) -> list[str]:
+            return self._local.listdir(path)
+
+        def stat(self, path: str) -> Mapping:
+            return self._local.stat(path)
+
+        def put(self, path: str, data: bytes) -> None:
+            return self._local.put(path, data)
+
+        def delete(self, path: str) -> None:
+            return self._local.delete(path)
+
+        def glob(self, pattern: str) -> list[str]:
+            return self._local.glob(pattern)
+
+        def mkdir(
+            self, path: str, parents: bool = False, exist_ok: bool = False
+        ) -> None:
+            return self._local.mkdir(path, parents, exist_ok)
+
+    backend = _TrackingStorage(tmp_path)
+    format_handler = LitDataFormat()
+    shard_index, shard_meta = format_handler.discover(
+        str(dataset_dir.relative_to(tmp_path)), backend
+    )
+
+    assert len(shard_index) >= 1
+    assert shard_meta[0]["chunk"]["filename"] == "chunk-0-0.bin"
+
+    # Every range read should be a targeted header read (4 bytes for num_items,
+    # then the offset table), never a full-file read.
+    for path, start, length in backend.range_reads:
+        if not path.endswith(".bin"):
+            continue
+        file_size = int(backend._local.stat(path).get("size", 0))
+        assert length is not None and length < file_size, (
+            f"read_range fetched the full file ({length} bytes) for {path}; "
+            "expected a targeted header-only read"
+        )
 
 
 def _binary_writer_for_samples(
