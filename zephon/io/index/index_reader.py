@@ -16,7 +16,7 @@ from typing import Any
 from zephon.io.storage.base import StorageBackend
 
 # TODO @danielzayas: add _index.json to the list of index files
-_INDEX_FILENAMES: list[str] = ["index.json"]
+_INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 
 def find_and_load_index(dir_path: str, storage: StorageBackend) -> Any | None:

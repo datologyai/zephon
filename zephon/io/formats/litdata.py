@@ -12,7 +12,6 @@ import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
-from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
