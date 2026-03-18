@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import struct
 from collections.abc import Mapping
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -229,15 +229,11 @@ class LitDataFormat(FormatHandler):
     def discover(
         self, path: str, storage: StorageBackend
     ) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
-        index_path = os.path.join(path, "index.json")
-        try:
-            with storage.open(index_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except FileNotFoundError:
+        result = find_and_load_index(path, storage)
+        if result is None:
             return self._discover_from_files(path, storage)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Failed to parse LitData index: {index_path}") from exc
 
+        data = result
         if not isinstance(data, Mapping):
             raise ValueError("LitData index must be a mapping")
 

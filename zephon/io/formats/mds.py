@@ -3,12 +3,12 @@
 
 """MDS shard format integration via mosaicml-streaming."""
 
-import json
 import os
 from copy import deepcopy
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol, TypedDict, cast
 
 from zephon.io.formats.base import FormatHandler, register_format
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -70,15 +70,11 @@ class MDSFormat(FormatHandler):
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
         """Parse ``index.json`` under ``path`` and build shard metadata."""
-        index_path = os.path.join(path, "index.json")
-        try:
-            with storage.open(index_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except FileNotFoundError as exc:
-            raise ValueError(f"Missing MDS index: {index_path}") from exc
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Failed to parse MDS index: {index_path}") from exc
+        result = find_and_load_index(path, storage)
+        if result is None:
+            raise ValueError("Missing MDS index")
 
+        data = result
         shards = data.get("shards")
         if not isinstance(shards, list):
             raise ValueError("MDS index missing 'shards' list")

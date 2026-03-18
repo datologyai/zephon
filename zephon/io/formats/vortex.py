@@ -7,12 +7,12 @@ Vortex is a next-generation columnar file format designed for high-performance
 data processing with zero-copy Arrow integration and GPU-friendly design.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from zephon.io.formats.base import FormatHandler, register_format
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -101,23 +101,19 @@ class VortexFormat(FormatHandler):
         ``python -m zephon.tools.vortex_index``), it will be used for O(1)
         discovery instead of opening each file.
         """
-        # Check for pre-built index first
-        index_path = os.path.join(path, "index.json")
-        if storage.exists(index_path):
-            return self._discover_from_index(path, storage, index_path)
+        result = find_and_load_index(path, storage)
+        if result is not None:
+            return self._discover_from_index_data(result)
 
         return self._discover_by_scanning(path, storage)
 
-    def _discover_from_index(
-        self, path: str, storage: StorageBackend, index_path: str
+    def _discover_from_index_data(
+        self, index: Mapping[str, Any]
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
-        """Load shard metadata from a pre-built index.json."""
-        with storage.open(index_path, "r", encoding="utf-8") as f:
-            index = json.load(f)
-
+        """Load shard metadata from pre-built index data."""
         shards = index.get("shards", [])
         if not shards:
-            raise ValueError(f"index.json at {index_path} contains no shards")
+            raise ValueError(f"index.json contains no shards")
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}

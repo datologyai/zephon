@@ -14,7 +14,6 @@ Key features:
 """
 
 import bisect
-import json
 import os
 import struct
 import threading
@@ -25,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from zephon.io.formats.base import FormatHandler, register_format
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage.base import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -291,61 +291,28 @@ class ParquetFormat(FormatHandler):
         """
         _ensure_pyarrow()
 
-        # Try index.json first (fast path)
-        index_path = os.path.join(path, "index.json")
-        if self._try_read_index(index_path, storage):
-            return self._discover_from_index(index_path, storage)
+        result = find_and_load_index(path, storage)
+        if result is not None:
+            if self._is_valid_parquet_index(result):
+                return self._discover_from_index_data(result)
 
-        # Fallback: read Parquet metadata directly
         return self._discover_from_files(path, storage)
 
-    def _try_read_index(self, index_path: str, storage: StorageBackend) -> bool:
-        """Check if index.json exists and is valid for Parquet.
-
-        Args:
-            index_path: Path to index.json
-            storage: Storage backend
-
-        Returns:
-            True if valid Parquet index exists, False otherwise
-        """
-        try:
-            if not storage.exists(index_path):
-                return False
-
-            with storage.open(index_path, "r") as f:
-                data = json.load(f)
-
-            # Check if this is a Parquet index
-            if "shards" in data and data["shards"]:
-                first_shard = data["shards"][0]
-                extra = first_shard.get("extra", {})
-                # Check for Parquet-specific field in extra
-                if "row_groups" in extra:
-                    return True
-
+    def _is_valid_parquet_index(self, data: object) -> bool:
+        """Check if data is a valid Parquet index (has shards with row_groups)."""
+        if not isinstance(data, dict) or "shards" not in data or not data["shards"]:
             return False
-        except Exception:
-            return False
+        first_shard = data["shards"][0]
+        extra = first_shard.get("extra", {}) if isinstance(first_shard, dict) else {}
+        return isinstance(extra, dict) and "row_groups" in extra
 
-    def _discover_from_index(
-        self, index_path: str, storage: StorageBackend
+    def _discover_from_index_data(
+        self, data: Mapping[str, object]
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
-        """Fast O(1) discovery from preprocessed index.json.
-
-        Args:
-            index_path: Path to index.json
-            storage: Storage backend
-
-        Returns:
-            Tuple of (shard_index, shard_meta)
-        """
-        with storage.open(index_path, "r") as f:
-            data = json.load(f)
-
+        """Fast O(1) discovery from preprocessed index data."""
         shards = data.get("shards", [])
         if not shards:
-            raise ValueError(f"Empty shards list in {index_path}")
+            raise ValueError("Empty shards list in Parquet index")
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, object]] = {}

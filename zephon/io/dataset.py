@@ -1,6 +1,5 @@
 """User-facing dataset descriptors and detectors."""
 
-import json
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any, Mapping
 
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import RouterStorageBackend
 
@@ -105,59 +105,25 @@ __all__ = ["Dataset"]
 def _auto_detect_format(
     storage: RouterStorageBackend, root_str: str, root_path: Path | None
 ) -> str | None:
-    index_uri: str
-    if root_path is not None:
-        index_file = root_path / "index.json"
-        if index_file.is_file():
-            return _detect_index_format(index_file)
-        entries = [p.name for p in root_path.iterdir() if p.is_file()]
-        if any(name.endswith(".jsonl") for name in entries):
-            return "jsonl"
-        if any(name.endswith(".vortex") for name in entries):
-            return "vortex"
-        if any(name.endswith(".parquet") for name in entries):
-            return "parquet"
-        index_uri = str(index_file)
-    else:
-        base = root_str.rstrip("/")
-        index_uri = f"{base}/index.json" if base else f"{root_str}/index.json"
-        try:
-            if storage.exists(index_uri):
-                data = _load_index_json(storage, index_uri)
-                return _classify_index_payload(data)
-        except Exception:
-            return None
+    result = find_and_load_index(root_str, storage)
+    if result is not None:
+        return _classify_index_payload(result)
 
+    if root_path is not None:
+        entries = [p.name for p in root_path.iterdir() if p.is_file()]
+    else:
         try:
             entries = storage.listdir(root_str)
         except Exception:
             entries = []
-        if any(name.endswith(".jsonl") for name in entries):
-            return "jsonl"
-        if any(name.endswith(".vortex") for name in entries):
-            return "vortex"
-        if any(name.endswith(".parquet") for name in entries):
-            return "parquet"
-        return None
 
-    if storage.exists(index_uri):
-        data = _load_index_json(storage, index_uri)
-        return _classify_index_payload(data)
+    if any(name.endswith(".jsonl") for name in entries):
+        return "jsonl"
+    if any(name.endswith(".vortex") for name in entries):
+        return "vortex"
+    if any(name.endswith(".parquet") for name in entries):
+        return "parquet"
     return None
-
-
-def _detect_index_format(index_path: Path) -> str:
-    try:
-        with index_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return "mds"
-    return _classify_index_payload(data)
-
-
-def _load_index_json(storage: RouterStorageBackend, path: str) -> Any:
-    with storage.open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def _classify_index_payload(data: Any) -> str:
