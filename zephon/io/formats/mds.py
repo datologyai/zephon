@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Mapping, Protocol, TypedDict, cast
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index.index_types import is_mds_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -73,6 +74,11 @@ class MDSFormat(FormatHandler):
         result = find_and_load_index(path, storage)
         if result is None:
             raise ValueError("Missing MDS index")
+
+        if not is_mds_index(result):
+            raise ValueError(
+                "Invalid MDS index: must have 'shards' and no 'format_version'"
+            )
 
         data = result
         shards = data.get("shards")

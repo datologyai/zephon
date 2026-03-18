@@ -23,7 +23,9 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from zephon.io.index.index_types import ShardIndex, ShardInfoDict
 
 
 @dataclass
@@ -94,7 +96,7 @@ class IndexBuilder(ABC):
         *,
         progress: bool = True,
         progress_interval: int = 100,
-    ) -> dict[str, Any]:
+    ) -> ShardIndex:
         """Build the index structure for a dataset.
 
         Args:
@@ -103,7 +105,7 @@ class IndexBuilder(ABC):
             progress_interval: Print progress every N files
 
         Returns:
-            Index dictionary ready to be written as JSON
+            A :class:`ShardIndex` ready to be written as JSON.
         """
         dataset_dir = Path(dataset_dir)
         entries = self.scan_directory(dataset_dir)
@@ -113,18 +115,18 @@ class IndexBuilder(ABC):
                 f"Found {len(entries)} {self.file_pattern} files, reading metadata..."
             )
 
-        shards: list[dict[str, Any]] = []
+        shards: list[ShardInfoDict] = []
         for i, name in enumerate(entries, 1):
             full_path = dataset_dir / name
             file_size = os.path.getsize(full_path)
 
             info = self.extract_shard_info(str(full_path), file_size)
-            shards.append(asdict(info))
+            shards.append(cast(ShardInfoDict, asdict(info)))
 
             if progress and i % progress_interval == 0:
                 print(f"  Processed {i}/{len(entries)} files...")
 
-        return {"format_version": 1, "shards": shards}
+        return ShardIndex(format_version=1, shards=shards)
 
     def create_index(
         self,

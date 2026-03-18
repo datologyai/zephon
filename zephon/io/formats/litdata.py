@@ -12,6 +12,7 @@ import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index.index_types import LitDataIndex, is_litdata_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -233,9 +234,10 @@ class LitDataFormat(FormatHandler):
         if result is None:
             raise ValueError("Missing LitData index")
 
-        data = result
-        if not isinstance(data, Mapping):
-            raise ValueError("LitData index must be a mapping")
+        if not is_litdata_index(result):
+            raise ValueError("LitData index must contain 'config' and 'chunks'")
+
+        data: LitDataIndex = result
 
         raw_config = data.get("config")
         if not isinstance(raw_config, Mapping):

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index.index_types import ShardIndex, is_shard_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -102,13 +103,13 @@ class VortexFormat(FormatHandler):
         discovery instead of opening each file.
         """
         result = find_and_load_index(path, storage)
-        if result is not None:
+        if result is not None and is_shard_index(result):
             return self._discover_from_index_data(result)
 
         return self._discover_by_scanning(path, storage)
 
     def _discover_from_index_data(
-        self, index: Mapping[str, Any]
+        self, index: ShardIndex
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
         """Load shard metadata from pre-built index data."""
         shards = index.get("shards", [])

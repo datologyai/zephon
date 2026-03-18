@@ -3,11 +3,12 @@
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index.index_types import IndexData
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import RouterStorageBackend
 
@@ -126,7 +127,7 @@ def _auto_detect_format(
     return None
 
 
-def _classify_index_payload(data: Any) -> str:
+def _classify_index_payload(data: IndexData) -> str:
     if isinstance(data, dict):
         if "chunks" in data and "config" in data:
             return "litdata"

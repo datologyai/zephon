@@ -11,15 +11,15 @@ in a dataset directory.
 from __future__ import annotations
 
 import json
-from typing import Any
 
+from zephon.io.index.index_types import IndexData, is_index_data
 from zephon.io.storage.base import StorageBackend
 
 # TODO @danielzayas: add _index.json to the list of index files
 _INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 
-def find_and_load_index(dir_path: str, storage: StorageBackend) -> Any | None:
+def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | None:
     """Find and load the first existing index file in a dataset directory.
 
     Tries each candidate in _INDEX_FILENAMES in order. Returns parsed JSON data
@@ -31,14 +31,17 @@ def find_and_load_index(dir_path: str, storage: StorageBackend) -> Any | None:
         storage: Storage backend for file access.
 
     Returns:
-        Parsed index data for the first existing file, or None.
+        Parsed :class:`IndexData` for the first existing file, or ``None``.
     """
     base = dir_path.rstrip("/") or dir_path
     for filename in _INDEX_FILENAMES:
         path = f"{base}/{filename}"
         if storage.exists(path):
             with storage.open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if is_index_data(data):
+                    return data
+                raise ValueError(f"Invalid index format: {path}")
     return None
 
 

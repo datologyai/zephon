@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index.index_types import ShardIndex, is_shard_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage.base import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -292,22 +293,22 @@ class ParquetFormat(FormatHandler):
         _ensure_pyarrow()
 
         result = find_and_load_index(path, storage)
-        if result is not None:
+        if result is not None and is_shard_index(result):
             if self._is_valid_parquet_index(result):
                 return self._discover_from_index_data(result)
 
         return self._discover_from_files(path, storage)
 
-    def _is_valid_parquet_index(self, data: object) -> bool:
+    def _is_valid_parquet_index(self, data: ShardIndex) -> bool:
         """Check if data is a valid Parquet index (has shards with row_groups)."""
-        if not isinstance(data, dict) or "shards" not in data or not data["shards"]:
+        if not data["shards"]:
             return False
         first_shard = data["shards"][0]
-        extra = first_shard.get("extra", {}) if isinstance(first_shard, dict) else {}
+        extra = first_shard.get("extra", {})
         return isinstance(extra, dict) and "row_groups" in extra
 
     def _discover_from_index_data(
-        self, data: Mapping[str, object]
+        self, data: ShardIndex
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
         """Fast O(1) discovery from preprocessed index data."""
         shards = data.get("shards", [])
