@@ -15,7 +15,6 @@ import json
 from zephon.io.index.index_types import IndexData, is_index_data
 from zephon.io.storage.base import StorageBackend
 
-# TODO @danielzayas: add _index.json to the list of index files
 _INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 

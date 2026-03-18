@@ -232,7 +232,7 @@ class LitDataFormat(FormatHandler):
     ) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
         result = find_and_load_index(path, storage)
         if result is None:
-            raise ValueError("Missing LitData index")
+            return self._discover_from_files(path, storage)
 
         if not is_litdata_index(result):
             raise ValueError("LitData index must contain 'config' and 'chunks'")
