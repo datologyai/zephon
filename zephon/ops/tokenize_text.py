@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import sys
 import threading
 import traceback
@@ -42,6 +41,7 @@ from zephon.core.constants import (
 )
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
+from zephon.utils.thread_utils import suppress_library_threads
 from zephon.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
     _gil_disabled,
@@ -86,30 +86,6 @@ class TokenizerLike(Protocol):
     def __call__(
         self, texts: Sequence[str] | str, **kwargs: Any
     ) -> TokenizerOutput: ...
-
-
-def _prep_env() -> None:
-    """Disables parallelism within the hf tokenizer."""
-    os.environ["TOKENIZERS_PARALLELISM"] = "False"
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["RAYON_NUM_THREADS"] = "1"
-
-    try:
-        import torch
-
-        torch.set_num_threads(1)
-    except Exception:
-        pass
-
-    try:
-        import tensorflow as tf
-
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-    except Exception:
-        pass
 
 
 class TokenizeText(DefaultSetup):
@@ -201,7 +177,7 @@ class TokenizeText(DefaultSetup):
             # Before importing hf tokenizers we tell it we handle the parallelism
             # and not hf tokenizers. This avoids unforeseen effects when running
             # multiple op instances.
-            _prep_env()
+            suppress_library_threads()
 
             if self.tokenizer_id in (None, "__fallback__"):
                 self.tok = _fallback_tokenizer()

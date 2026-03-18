@@ -59,6 +59,9 @@ mosaic = [
 mds = [
     "zephon[streaming]",
 ]
+ray = [
+    "ray[default]>=2.0.0; python_version < '3.14'",
+]
 docs = [
     "sphinx>=7.0.0",
     "furo>=2023.0.0",
@@ -84,6 +87,7 @@ test = [
     "torchdata>=0.11.0",
     "pytest-timeout>=2.4.0",
     "obstore>=0.3.0",
+    "zephon[ray]",
 ]
 
 [project.urls]
