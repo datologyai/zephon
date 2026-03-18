@@ -7,17 +7,17 @@ Creates index.json for Vortex datasets to avoid opening every file
 during discovery.
 
 Usage:
-    python -m zephon.tools.vortex_index <dataset_dir>
+    python -m zephon.io.index.vortex_index <dataset_dir>
 
 Or from Python:
-    from zephon.tools.vortex_index import VortexIndexBuilder
+    from zephon.io.index.vortex_index import VortexIndexBuilder
     builder = VortexIndexBuilder()
     builder.create_index('/path/to/vortex/dataset')
 """
 
 from typing import Any
 
-from zephon.tools.index_builder import IndexBuilder, ShardInfo, register_builder
+from zephon.io.index.index_builder import IndexBuilder, ShardInfo, register_builder
 
 try:
     import vortex as _vortex
@@ -61,7 +61,7 @@ def main() -> None:
     import sys
 
     if len(sys.argv) != 2:
-        print("Usage: python -m zephon.tools.vortex_index <dataset_dir>")
+        print("Usage: python -m zephon.io.index.vortex_index <dataset_dir>")
         print()
         print("Creates index.json for fast Vortex dataset discovery.")
         sys.exit(1)

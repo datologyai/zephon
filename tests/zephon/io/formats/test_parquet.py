@@ -18,10 +18,10 @@ import pyarrow.parquet as pq
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 from zephon.io.formats.parquet import ParquetFormat, ParquetShard
+from zephon.io.index.parquet_index import ParquetIndexBuilder
 from zephon.io.storage import LocalFSBackend
 from zephon.io.storage.router import RouterStorageBackend
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
-from zephon.tools.parquet_index import ParquetIndexBuilder
 
 
 def create_test_parquet_file(path: Path, num_rows: int, row_group_size: int) -> None:

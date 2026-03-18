@@ -7,15 +7,15 @@ Creates index.json for Parquet datasets to avoid reading metadata from every
 file during discovery.
 
 Usage:
-    python -m zephon.tools.parquet_index <dataset_dir>
+    python -m zephon.io.index.parquet_index <dataset_dir>
 
 Or from Python:
-    from zephon.tools.parquet_index import ParquetIndexBuilder
+    from zephon.io.index.parquet_index import ParquetIndexBuilder
     builder = ParquetIndexBuilder()
     builder.create_index('/path/to/parquet/dataset')
 """
 
-from zephon.tools.index_builder import IndexBuilder, ShardInfo, register_builder
+from zephon.io.index.index_builder import IndexBuilder, ShardInfo, register_builder
 
 try:
     import pyarrow.parquet as _pq
@@ -69,7 +69,7 @@ def main() -> None:
     import sys
 
     if len(sys.argv) != 2:
-        print("Usage: python -m zephon.tools.parquet_index <dataset_dir>")
+        print("Usage: python -m zephon.io.index.parquet_index <dataset_dir>")
         print()
         print("Creates index.json for fast Parquet dataset discovery.")
         print("This is optional but recommended for datasets with 100+ shards.")

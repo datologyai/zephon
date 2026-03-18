@@ -12,6 +12,7 @@ import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
+from zephon.io.index import find_and_load_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
@@ -231,7 +232,7 @@ class LitDataFormat(FormatHandler):
     ) -> tuple[dict[int, int], dict[int, dict[str, Any]]]:
         result = find_and_load_index(path, storage)
         if result is None:
-            return self._discover_from_files(path, storage)
+            raise ValueError("Missing LitData index")
 
         data = result
         if not isinstance(data, Mapping):

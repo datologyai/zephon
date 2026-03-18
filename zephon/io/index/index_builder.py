@@ -8,10 +8,10 @@ O(1) dataset discovery instead of O(N) file scanning. Each format can
 implement its own IndexBuilder subclass to extract format-specific metadata.
 
 Usage:
-    python -m zephon.tools.index_builder <format> <dataset_dir>
+    python -m zephon.io.index.index_builder <format> <dataset_dir>
 
 Or from Python:
-    from zephon.tools.index_builder import create_index
+    from zephon.io.index.index_builder import create_index
     create_index('jsonl', '/path/to/dataset')
 """
 
@@ -215,13 +215,13 @@ def main() -> None:
 
     if len(sys.argv) < 3:
         available = ", ".join(sorted(_BUILDERS.keys())) or "(none registered)"
-        print("Usage: python -m zephon.tools.index_builder <format> <dataset_dir>")
+        print("Usage: python -m zephon.io.index.index_builder <format> <dataset_dir>")
         print()
         print("Creates index.json for fast dataset discovery.")
         print(f"Available formats: {available}")
         print()
         print("To register format builders, import the format module first:")
-        print("  from zephon.tools import jsonl_index  # registers 'jsonl'")
+        print("  from zephon.io.index import jsonl_index  # registers 'jsonl'")
         sys.exit(1)
 
     format_name = sys.argv[1]
