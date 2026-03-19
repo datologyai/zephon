@@ -15,7 +15,7 @@ jobs:
   unit:
     name: Unit Tests
     timeout-minutes: 20
-    runs-on: ${{ (startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't')) && 'LargeGithubRunner' || 'ubuntu-latest' }}
+    runs-on: LargeGithubRunner
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     strategy:

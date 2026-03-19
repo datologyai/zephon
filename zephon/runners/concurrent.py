@@ -464,9 +464,18 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         for elem in elements:
             self._put_into_queue(context.stage_out_queue, elem, context)
 
+    def _next_queue_for(
+        self, state: S
+    ) -> _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None:
+        """Return the input queue of the next operator, or None for the last."""
+        next_index = state.op_index + 1
+        if next_index < len(self.ops):
+            return self.ops[next_index].input_queue
+        return None
+
     def _operator_loop(self, idx: int, context: ConcurrentRunContext) -> None:
         state = self.ops[idx]
-        next_queue = self.ops[idx + 1].input_queue if idx + 1 < len(self.ops) else None
+        next_queue = self._next_queue_for(state)
 
         state.reset_buffers()
         upstream_closed = False

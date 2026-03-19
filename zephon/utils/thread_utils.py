@@ -7,6 +7,17 @@ from __future__ import annotations
 
 import os
 
+# Env vars that suppress internal thread pools in numerical libraries.
+# Shared between suppress_library_threads() (set at runtime) and the
+# Ray runner (baked into runtime_env so they're set before import time).
+THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
+    "TOKENIZERS_PARALLELISM": "False",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+}
+
 
 def suppress_library_threads() -> None:
     """Prevent numerical libraries from spawning their own thread pools.
@@ -17,11 +28,7 @@ def suppress_library_threads() -> None:
     the resulting N*C threads cause severe contention; calling this once
     at worker/actor startup avoids that.
     """
-    os.environ["TOKENIZERS_PARALLELISM"] = "False"
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["RAYON_NUM_THREADS"] = "1"
+    os.environ.update(THREAD_SUPPRESSION_ENV_VARS)
 
     try:
         import torch

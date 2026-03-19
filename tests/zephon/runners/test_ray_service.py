@@ -1,12 +1,11 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ray service: RaySingleOpActor and _RayResultQueueAdapter."""
+"""Tests for ray service: RaySingleOpActor and _RayActorGroup."""
 
 from __future__ import annotations
 
 import os
-import queue
 
 import pytest
 
@@ -33,41 +32,44 @@ def ray_init():
         ray.shutdown()
 
 
-def _make_pool(*, num_actors: int = 2, max_delay_ms: float = 0.0):
-    """Create a pool with DelayById actors for testing."""
+def _make_group(
+    *, num_actors: int = 2, tokens_per_actor: int = 1, max_delay_ms: float = 0.0
+):
+    """Create an actor group with DelayById actors for testing."""
     from zephon.core.graph import Node
     from zephon.ops.delay import DelayById
-    from zephon.runners.ray.service import _RayOperatorPool
+    from zephon.runners.ray.service import _RayActorGroup
 
     op = DelayById(max_delay_ms=max_delay_ms)
     node = Node(name="test_op", op=op, parallelism=num_actors)
-    pool = _RayOperatorPool(
+    group = _RayActorGroup(
         node=node,
         op_index=0,
         num_actors=num_actors,
+        tokens_per_actor=tokens_per_actor,
         stage_index=0,
         stage_name="test",
         collect_stats=False,
         ctx_services={},
     )
-    pool.init(num_cpus_per_actor=0.1)
-    return pool
+    group.init(num_cpus_per_actor=0.1)
+    return group
 
 
 @pytest.fixture
-def pool():
-    """Create a pool and guarantee shutdown even if the test fails."""
-    p = _make_pool(num_actors=2)
-    yield p
-    p.shutdown()
+def group():
+    """Create a group and guarantee shutdown even if the test fails."""
+    g = _make_group(num_actors=2)
+    yield g
+    g.shutdown()
 
 
 @pytest.fixture
-def single_actor_pool():
-    """Single-actor pool for tests that need exactly one worker."""
-    p = _make_pool(num_actors=1)
-    yield p
-    p.shutdown()
+def single_actor_group():
+    """Single-actor group for tests that need exactly one worker."""
+    g = _make_group(num_actors=1)
+    yield g
+    g.shutdown()
 
 
 # ===================================================================
@@ -175,90 +177,61 @@ class TestRaySingleOpActor:
 
 
 # ===================================================================
-# _RayResultQueueAdapter
+# _RayActorGroup
 # ===================================================================
 
 
-class TestRayResultQueueAdapter:
-    """Tests for the _RayResultQueueAdapter."""
+class TestRayActorGroup:
+    """Tests for the _RayActorGroup."""
 
-    def test_get_returns_runner_result(self, pool) -> None:
-        """get() returns RunnerResult directly from the pool."""
+    def test_init_populates_idle_queue(self, group) -> None:
+        """After init, all actor indices are in the idle queue."""
+        # 2 actors → idle_queue should have 2 entries.
+        assert group.idle_queue.qsize() == 2
+
+    def test_release_returns_actor_to_idle_queue(self, single_actor_group) -> None:
+        """release() puts the actor index back into the idle queue."""
+        # Drain the idle queue (simulating the submit thread taking the actor).
+        idx = single_actor_group.idle_queue.get_nowait()
+        assert single_actor_group.idle_queue.empty()
+
+        single_actor_group.release(idx)
+        assert single_actor_group.idle_queue.qsize() == 1
+
+    def test_direct_actor_dispatch_and_get(self, group) -> None:
+        """Dispatch directly to an actor and get the result."""
         from zephon.runners.concurrent import RunnerResult
-        from zephon.runners.ray.service import _RayResultQueueAdapter
 
         records = _mk_records([10, 20, 30])
-        pool.submit(records, seq=0)
-
-        rq = _RayResultQueueAdapter(pool)
-        result = rq.get(timeout=5.0)
+        actor_idx = group.idle_queue.get_nowait()
+        ref = group.actors[actor_idx].process.remote(records, 0)
+        result = ray.get(ref)
 
         assert isinstance(result, RunnerResult)
         assert _extract_values(result.payload) == [10, 20, 30]
         assert result.seq == 0
         assert result.error is None
 
-    def test_get_nowait_raises_empty_when_nothing_ready(
-        self, single_actor_pool
-    ) -> None:
-        """get_nowait() raises queue.Empty when no results are available."""
-        from zephon.runners.ray.service import _RayResultQueueAdapter
+        group.release(actor_idx)
 
-        rq = _RayResultQueueAdapter(single_actor_pool)
-
-        with pytest.raises(queue.Empty):
-            rq.get_nowait()
-
-    def test_empty_reflects_pool_state(self, single_actor_pool) -> None:
-        """empty() returns True when no work is pending."""
-        from zephon.runners.ray.service import _RayResultQueueAdapter
-
-        rq = _RayResultQueueAdapter(single_actor_pool)
-
-        assert rq.empty()
-
-        single_actor_pool.submit([1], seq=0)
-        assert not rq.empty()
-
-        rq.get(timeout=5.0)
-        assert rq.empty()
-
-    def test_error_result_has_worker_error_info(self) -> None:
-        """Errors in actor come back as WorkerErrorInfo in RunnerResult."""
-        from zephon.core.graph import Node
-        from zephon.core.op_base import DefaultSetup
-        from zephon.core.traits import OpTraits
-        from zephon.runners.ray.service import _RayOperatorPool, _RayResultQueueAdapter
-
-        class FailOp(DefaultSetup):
-            def traits(self) -> OpTraits:
-                return OpTraits(indexable=True, preserves_cursor_order=True)
-
-            def process_one(self, elem):
-                raise ValueError("test error")
-
-            def process_many(self, elems):
-                raise ValueError("test error")
-
-        node = Node(name="fail", op=FailOp(), parallelism=1)
-        pool = _RayOperatorPool(
-            node=node,
-            op_index=0,
-            num_actors=1,
-            stage_index=0,
-            stage_name="test",
-            collect_stats=False,
-            ctx_services={},
-        )
-        pool.init(num_cpus_per_actor=0.1)
-
+    def test_multi_token_idle_queue_seeding(self) -> None:
+        """Multiple tokens per actor are seeded correctly."""
+        g = _make_group(num_actors=2, tokens_per_actor=3)
         try:
-            pool.submit(_mk_records([1]), seq=0)
+            assert g.idle_queue.qsize() == 6
 
-            rq = _RayResultQueueAdapter(pool)
-            result = rq.get(timeout=5.0)
-
-            assert result.error is not None
-            assert "test error" in result.error.message
+            # Drain all tokens and verify each actor appears exactly 3 times.
+            tokens: list[int] = []
+            while not g.idle_queue.empty():
+                tokens.append(g.idle_queue.get_nowait())
+            assert tokens.count(0) == 3
+            assert tokens.count(1) == 3
         finally:
-            pool.shutdown()
+            g.shutdown()
+
+    def test_shutdown_kills_actors(self) -> None:
+        """shutdown() kills all actors and clears the list."""
+        g = _make_group(num_actors=1)
+        assert len(g.actors) == 1
+        g.shutdown()
+        assert len(g.actors) == 0

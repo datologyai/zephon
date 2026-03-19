@@ -3,12 +3,12 @@
 
 """Ray runner subpackage — only usable when ``ray`` is installed."""
 
+from zephon.runners.ray.runner import RemoteStageRunner
 from zephon.runners.ray.service import (
-    _RayOperatorPool,
-    _RayResultQueueAdapter,
+    _RayActorGroup,
 )
 
 __all__ = [
-    "_RayOperatorPool",
-    "_RayResultQueueAdapter",
+    "RemoteStageRunner",
+    "_RayActorGroup",
 ]

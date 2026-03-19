@@ -869,7 +869,17 @@ class Engine:
                     )
                 )
             elif spec.runner_type == "remote":
-                raise NotImplementedError("Remote workers are not yet implemented.")
+                from zephon.runners.ray import RemoteStageRunner
+
+                self._runners.append(
+                    RemoteStageRunner(
+                        stage,
+                        self._ctx,
+                        spec.worker_cap,
+                        queue_capacity=spec.queue_capacity,
+                        **common,
+                    )
+                )
             else:
                 raise ValueError(f"Unknown runner '{spec.runner_type}'")
 

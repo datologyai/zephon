@@ -890,14 +890,6 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             # next_queue=None: results go to stage output (correct for single-op stages)
             self._drain_results(state, None, context)
 
-    def _next_queue_for(
-        self, state: _ProcessOperatorState
-    ) -> _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None:
-        next_index = state.op_index + 1
-        if next_index < len(self.ops):
-            return self.ops[next_index].input_queue
-        return None
-
     def _drain_until_idle(
         self,
         state: _ProcessOperatorState,
