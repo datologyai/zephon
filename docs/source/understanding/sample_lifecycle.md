@@ -37,13 +37,17 @@ Every record flowing through the pipeline carries a
 components that uniquely identifies it within its lane:
 
 ```
-SampleCursor = (chunk_id, chunk_offset, lineage, sample_id)
-                 │           │            │         │
-                 │           │            │         └─ (dataset, shard, local_id)
-                 │           │            └─ path through fan-out operators
-                 │           └─ position within the chunk
-                 └─ which chunk this sample came from
+SampleCursor sort key = (chunk_id, chunk_offset, lineage, sample_id)
+                           │           │            │         │
+                           │           │            │         └─ (dataset, shard, local_id)
+                           │           │            └─ path through fan-out operators
+                           │           └─ position within the chunk
+                           └─ which chunk this sample came from
 ```
+
+Note: the dataclass constructor order is `(chunk_id, chunk_offset, sample_id,
+lineage)` — the sort key swaps `lineage` before `sample_id` so children of the
+same offset sort together.
 
 You can think of the cursor as a passport: it says where the record was born
 (`chunk_id`, `chunk_offset`, `sample_id`) and what happened to it along the
@@ -233,10 +237,10 @@ invisible to your model.
 
 The safe default rule for operator authors: **always emit tombstones when
 dropping records**, regardless of pipeline configuration.  Whether the
-pipeline uses monotone or per-offset eviction is decided at compile time
+pipeline uses monotone or epoch-based eviction is decided at compile time
 based on operator traits, and your operator cannot know which path will be
 chosen.  Tombstones are harmless in the monotone path (notified then
-discarded) and required in the per-offset path.
+discarded) and required in the epoch-based path.
 
 ### Chunks as the Unit of State
 
@@ -247,10 +251,19 @@ have not all been delivered yet.
 
 As contributors (and tombstones) signal offset completion, the engine
 [evicts](checkpointing.md#chunk-eviction) fully-consumed chunks from the
-inflight set.  At checkpoint time, only the remaining inflight chunks are
-saved.  On resume, only those chunks are replayed through the pipeline.
-This is what keeps checkpoints small and resume fast, regardless of how far
-into training you are.
+inflight set.  For non-monotonic pipelines (packing, shuffling, mixture
+correction), the engine also injects **flush sentinels** every
+`flush_every_k_chunks` chunks to create epoch boundaries — points where
+history-dependent accumulators reset to clean state so that earlier chunks
+can be safely evicted.  See
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction) for the
+full model.
+
+At checkpoint time, only the remaining inflight chunks (plus epoch
+boundary positions for non-monotonic pipelines) are saved.  On resume,
+only those chunks are replayed through the pipeline.  This is what keeps
+checkpoints small and resume fast, regardless of how far into training
+you are.
 
 The lifecycle, end to end:
 
@@ -336,7 +349,7 @@ for ref in dropped_record.meta.contribution_refs():
     if ref.is_last_child:
         tombstone = SampleRecord(
             meta=tombstone_meta(ref, lane_id=dropped_record.meta.lane_id),
-            payload={},
+            payload=None,
         )
         yield tombstone
 ```
@@ -424,9 +437,10 @@ your operator into the pipeline:
 
 | Trait | Default | What it means |
 |---|---|---|
-| `preserves_cursor_order` | `True` | Records emerge in the same chunk/offset order they entered.  Set to `False` for shuffling, packing, or any cross-chunk buffering.  This switches the engine from monotone to per-offset eviction. |
-| `requires_serial_state` | `False` | The operator maintains cross-invocation state (e.g., shuffle buffers).  Forces `parallelism=1` in deterministic mode. |
+| `preserves_cursor_order` | Required | Records emerge in the same chunk/offset order they entered.  Set to `False` for shuffling, packing, or any cross-chunk buffering.  This switches the engine from monotone to [epoch-based eviction](checkpointing.md#epoch-based-eviction). |
+| `requires_serial_state` | `False` | The operator maintains cross-invocation state (e.g., shuffle buffers).  Raises `RuntimeError` if `parallelism != 1` in deterministic mode. |
 | `batch_shape_sensitive` | `False` | Outputs depend on how inputs are grouped into micro-batches.  Disables latency-flush in deterministic mode. |
+| `stall_on_epoch_boundary` | `False` | Skip `flush(reset=True)` at epoch boundaries and hold the sentinel until the accumulator naturally drains.  In the current design this is only supported for `Batch(drop_last=True)`; other operators would need additional replay-capsule support, and for those operators a mid-stream flush must leave no pending data.  See [Accumulator stalling](accumulators_operators.md#stalling-stall_on_epoch_boundary). |
 
 Getting `preserves_cursor_order` wrong is the most impactful mistake: if
 your operator reorders but claims to preserve cursor order, the monotone
@@ -449,4 +463,3 @@ eviction path may evict chunks too early, losing data needed for replay.
   reorders leads to premature chunk eviction.  Claiming `False`
   unnecessarily is safe but slightly less efficient (per-offset bitmaps
   instead of the simple watermark).
-

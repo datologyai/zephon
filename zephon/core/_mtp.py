@@ -58,7 +58,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.util import Finalize
 from typing import Any, Iterator
 
-from zephon.core.constants import StreamItem
+from zephon.core.constants import SampleRecord, StreamItem
 from zephon.core.notify import (
     NotifyArgs,
     _apply_notify_args,
@@ -156,7 +156,14 @@ def _mtp_worker(
             # scope), so pending never holds full payloads.  All items
             # including tombstones go through the ACK path to preserve
             # notification ordering.
-            pending[seq] = _extract_notify_args(item, use_monotone)
+            # Flush sentinels carry dummy cursor data — skip tracking to
+            # avoid corrupting engine state.  When the consumer ACKs a
+            # sentinel's seq, pending.pop returns None and the notify is
+            # simply skipped.
+            if isinstance(item, SampleRecord) and item.meta.is_flush_sentinel:
+                pass  # don't add to pending
+            else:
+                pending[seq] = _extract_notify_args(item, use_monotone)
 
             # Put item on queue, draining ctrl while waiting if queue is full
             while True:

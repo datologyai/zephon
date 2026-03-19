@@ -108,7 +108,7 @@ class CountingAccumulator(Accumulator[T]):
 
         return ready
 
-    def flush(self) -> list[ReadyBatch[T]]:
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[T]]:
         """Emit any remaining buffered elements (or discard if drop_last)."""
         if self._drop_last:
             self._buffers.clear()

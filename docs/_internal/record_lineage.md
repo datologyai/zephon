@@ -1107,7 +1107,7 @@ Add tests to guide and validate implementation:
 
 6. **Replay equality tests**:
 
-   - Tail output with non-monotone cursor order.
+   - Tail output with non-monotonic cursor order.
    - Checkpoint after record `Rk`.
    - On replay, ensure suffix after replay is exactly `[R(k+1)..]` per lane.
 

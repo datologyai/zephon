@@ -40,7 +40,7 @@ class _DeferringAccumulator(Accumulator[SampleRecord]):
                 ready.append(([elem], 0))
         return ready
 
-    def flush(self) -> list[ReadyBatch[SampleRecord]]:
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
         if self._first is None:
             return []
         elem = self._first
@@ -99,7 +99,7 @@ def _make_pipe(sample_count: int, mtp_mode: bool = False) -> PublicPipeline:
     pipe._tail = node
     pipe = pipe.options(
         deterministic=True,
-        default_stage_prefetch=0,
+        default_stage_prefetch=16,
         prefetch_batches=0,
         mtp_mode=mtp_mode,
     )

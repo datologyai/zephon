@@ -18,6 +18,7 @@ from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
+from zephon.ops.pack_sequences import PackSequences
 from zephon.runners.concurrent import RunnerResult
 from zephon.runners.threads import ThreadStageRunner
 
@@ -393,6 +394,139 @@ def test_thread_sentinel_does_not_deadlock_on_full_result_queue() -> None:
         True
     )
     sentinel = SampleRecord(meta=tomb_meta, payload={})
+
+    # Schedule sentinel in a helper thread so we can detect blocking.
+    completed = threading.Event()
+
+    def schedule() -> None:
+        runner._schedule_batch(state, [sentinel], wait_ns=0, context=context)
+        completed.set()
+
+    t = threading.Thread(target=schedule, daemon=True)
+    t.start()
+    t.join(timeout=2.0)
+
+    deadlocked = not completed.is_set()
+
+    # Cleanup: unblock the stuck thread by draining result_queue.
+    if deadlocked:
+        try:
+            state.result_queue.get_nowait()
+        except queue.Empty:
+            pass
+        t.join(timeout=1.0)
+
+    assert not deadlocked, (
+        "Sentinel scheduling deadlocked: _schedule_batch called _put_result "
+        "on the pump thread while result_queue was full.  The pump thread is "
+        "the only consumer of result_queue, so it blocked on itself."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Epoch floor protocol
+# ---------------------------------------------------------------------------
+
+
+def _rec_with_chunk(value: int, *, chunk_id: int) -> SampleRecord:
+    meta = SampleMeta(
+        sample_id=(0, 0, value),
+        lane_id=0,
+        chunk_id=chunk_id,
+        chunk_offset=value,
+    )
+    return SampleRecord(meta=meta, payload={"value": value, "length": 1})
+
+
+def test_thread_runner_epoch_floor() -> None:
+    """ThreadStageRunner exposes the same epoch_floor() protocol as the base."""
+    op = PackSequences(
+        max_length=10, num_bins=2, length_fn=lambda r: r.payload["length"]
+    )
+    node = Node(name="pack", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    assert runner.epoch_floor() is None
+
+    runner.ops[0].enqueue(
+        [_rec_with_chunk(0, chunk_id=4), _rec_with_chunk(1, chunk_id=2)]
+    )
+    assert runner.epoch_floor() == 2
+
+    runner.close()
+
+
+# ---------------------------------------------------------------------------
+# Sentinel deadlock on full result_queue
+# ---------------------------------------------------------------------------
+
+
+def _flush_sentinel(*, lane_id: int = 0, boundary_cid: int = 0) -> SampleRecord:
+    """Create a flush sentinel record."""
+    meta = SampleMeta(
+        sample_id=(0, 0, 0),
+        lane_id=lane_id,
+        chunk_id=0,
+        chunk_offset=0,
+        tags={"_flush_sentinel": True, "_boundary_cid": boundary_cid},
+    )
+    return SampleRecord(meta=meta, payload={})
+
+
+def test_thread_sentinel_does_not_deadlock_on_full_result_queue() -> None:
+    """Sentinel scheduling must not block when the result_queue is full.
+
+    Bug: ThreadStageRunner._schedule_batch puts sentinel results directly
+    into result_queue via _put_result.  The pump thread is the only thread
+    that drains result_queue (via _drain_results).  If the queue is already
+    full (e.g. a worker completed between drain and sentinel scheduling),
+    _put_result blocks → pump can never drain → self-deadlock.
+
+    The process runner avoids this by stashing sentinel results in a local
+    list (_local_results) handled inline by _post_schedule_batch.  The
+    thread runner should use its equivalent mechanism (sync_result stash).
+    """
+    op = _IdentityOp()
+    node = Node(name="identity", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        queue_capacity=1,
+        stage_output_mode="stream_items",
+    )
+
+    state = runner.ops[0]
+    context = runner._create_context()
+
+    # Pre-fill result_queue to capacity.  This simulates a worker whose
+    # done_callback put a result into result_queue between the pump's
+    # _drain_results and the sentinel's _schedule_batch.
+    dummy = RunnerResult(
+        seq=0,
+        payload=[],
+        wait_ns=0,
+        consumed_elements=0,
+        consumed_bytes=0,
+        queue_depth_snapshot=-1,
+        proc_ns=0,
+        collect_metrics=False,
+    )
+    state.result_queue.put(dummy)
+    state.next_seq = 1  # dummy consumed seq 0
+
+    sentinel = _flush_sentinel()
 
     # Schedule sentinel in a helper thread so we can detect blocking.
     completed = threading.Event()

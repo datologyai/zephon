@@ -139,7 +139,7 @@ single new batch.
 
 Zephon's chunk-based design falls in the middle of both.  The goal is to
 **replay only the chunks that were in flight (not yet fully consumed) at
-checkpoint time**, which typically a handful of chunks, regardless of how far
+checkpoint time**, which is typically a handful of chunks, regardless of how far
 into training you are.
 
 ### Chunks and Inflight State
@@ -151,14 +151,22 @@ each lane has a small number of **inflight chunks**: chunks whose samples
 have entered the pipeline but whose results have not all been delivered to
 the training loop yet.
 
-The checkpoint captures two things per lane:
+The checkpoint captures, per lane:
 
 1. **Inflight chunks** — serialized in full (sample pointers, component
    order, seed).  On restore these are deserialized directly; the
    WorkSource is never asked to regenerate them.  Only inflight chunks
    are replayed through the operator pipeline.
 
-2. **WorkSource state** — each per-lane WorkSource serializes its internal
+2. **Epoch boundaries** — for non-monotonic pipelines, the list of
+   sentinel `chunk_id`s that mark flush points.  This can include a
+   trailing boundary just beyond the last inflight chunk, which preserves
+   the flush point between replayed inflight data and newly fetched data.
+   On restore these are re-injected at the same positions so accumulators
+   flush at the same points as the original run (see
+   [Epoch boundary persistence](#epoch-boundary-persistence)).
+
+3. **WorkSource state** — each per-lane WorkSource serializes its internal
    state via `state_dict()` so that `next_chunk()` can resume producing
    *new* chunks from where it left off.  The WorkSource is not replayed or
    re-advanced; `load_state_dict()` restores its position directly.
@@ -207,8 +215,8 @@ everything.  The challenge is evicting chunks at exactly the right time:
 too early and we lose data; too late and checkpoints are unnecessarily
 large.
 
-Zephon selects one of two eviction strategies during pipeline compilation,
-based on operator properties:
+Zephon selects an eviction strategy during pipeline compilation based on
+operator properties:
 
 ```
 Pipeline compiled
@@ -217,15 +225,16 @@ Pipeline compiled
       / \
     Yes   No (packing, shuffling, ...)
      |     |
-  Monotone   Per-offset
+  Monotone   Epoch-based
   eviction   eviction
-  (faster)   (bitmap tracking)
+  (simple    (flush sentinels +
+  watermark)  per-offset bitmaps)
 ```
 
 The planner determines this by checking each operator's
 `preserves_cursor_order` trait.  If every operator in the pipeline
-preserves it, the fast path is used. Otherwise the per-offset path
-kicks in.
+preserves it, the fast monotone path is used.  Otherwise the epoch-based
+path kicks in.
 
 #### Monotone Eviction (Simple Pipelines)
 
@@ -237,15 +246,117 @@ immediately.
 
 Most pipelines without shuffling or packing qualify for this fast path.
 
-#### Per-Offset Eviction (Packing and Shuffling)
+(epoch-based-eviction)=
+#### Epoch-Based Eviction (Packing and Shuffling)
 
-Operators like `pack_sequences` and `shuffle` can reorder samples across
-chunk boundaries.  A packed record might combine fragments from chunks 5
-and 7, and chunk 5's last sample might be delivered *after* something from
-chunk 7.  The simple "evict everything older than *N*" rule would
-prematurely evict chunk 5.
+Operators like `pack_sequences`, `shuffle`, and `ensure_mixture` can
+reorder samples across chunk boundaries.  A packed record might combine
+fragments from chunks 5 and 7, and chunk 5's last sample might be
+delivered *after* something from chunk 7.  The simple "evict everything
+older than *N*" rule would prematurely evict chunk 5.
 
-For these pipelines, Zephon tracks completion at the **per-offset** level.
+These operators also introduce a deeper problem: **accumulator history
+dependence**.  The packing accumulator's bin state — which bins exist,
+their sizes, their remaining capacity — depends on the **full history** of
+inputs it has seen, not just the samples currently in the bins.  After a
+chunk's samples have all left the bins (been packed and emitted), their
+influence on bin placement persists.  Two packer instances starting from
+different states and processing identical subsequent input may **never
+converge**: with 2 bins of capacity 10 and an input stream of
+`[3, 3, 3, …]`, starting from states `(10, 10)` vs `(10, 5)` produces the
+same periodic bin-emission cycle but permanently phase-shifted.
+
+This creates a tension:
+
+- **Chunk eviction** must free memory by discarding fully consumed chunks.
+- **Deterministic replay** must reconstruct identical accumulator state on
+  resume — but the accumulator state was shaped by inputs from the now-evicted
+  chunks.
+
+Without intervention, replaying from a checkpoint would start the packer
+from empty state instead of the state it had in the original run, producing
+different packed record boundaries.  The ReplayFilter's target cursor may
+never appear in the replay stream, causing data loss.  The same reasoning
+applies to `EnsureMixtureAccumulator` (whose SWRR deficit state depends on
+full emission history) and `ShuffleBuffer` (whose buffer contents span
+chunk boundaries).
+
+Zephon solves this with **flush sentinels** and **per-epoch atomic
+eviction**.  The core idea is to periodically force history-dependent
+accumulators to emit all buffered data and reset to a clean state,
+creating boundaries where replay can start fresh without needing evicted
+chunks.  This introduces an inherent tradeoff: the periodic flush
+interrupts the accumulator's natural operation — a packer emits partially
+filled bins (more padding waste), a shuffle buffer emits a
+smaller-than-usual batch (less randomisation), a mixture corrector drains
+mid-rebalance.  The epoch size (`flush_every_k_chunks`) controls how often
+this interruption happens, balancing output quality against replay safety.
+
+##### Flush sentinels and epoch boundaries
+
+A **flush sentinel** is a lightweight record that the engine injects into
+the source stream every `flush_every_k_chunks` chunks per lane.  The
+sentinel flows through the pipeline like any other record, but at each
+operator boundary the runner intercepts it:
+
+- The runner calls `flush(reset=True)` on the accumulator, which
+  emits all buffered data and **fully resets** its internal state.  For
+  history-dependent accumulators (`preserves_cursor_order=False`) this is
+  the load-bearing reset.  For order-preserving accumulators the flush is
+  harmless (a no-op or trivial drain).  The only built-in operator that
+  intentionally stalls instead of flushing is `Batch(drop_last=True)`; all
+  non-monotonic built-ins flush to a fresh state at the sentinel (see
+  [Accumulator stalling](accumulators_operators.md#stalling-stall_on_epoch_boundary)).
+
+The sentinel divides the source stream into **epochs** — windows of K
+chunks between consecutive flush points.  Within an epoch, the
+accumulator builds up state normally.  At the epoch boundary, the
+sentinel forces a flush that clears all state, making the next epoch
+independent of all prior ones:
+
+```
+Epoch 0          Epoch 1          Epoch 2
+[chunk 0, 1]  →  [chunk 2, 3]  →  [chunk 4, 5]  → ...
+             ↑                ↑
+         sentinel          sentinel
+          (flush)            (flush)
+```
+
+On resume, only the inflight chunks need to be replayed.  The engine
+re-injects sentinels at the same positions (stored in the checkpoint),
+so the accumulator hits the flush at the same point and starts the next
+epoch from empty state — identical to the original run.
+
+**Choosing `flush_every_k_chunks`.**  The epoch size K is a three-way
+tradeoff:
+
+- **Replay speed.**  On resume, all inflight chunks must be replayed
+  through the operator pipeline.  The number of inflight epochs depends
+  on buffering depth, prefetch, and how far the pump runs ahead of the
+  consumer — replay cost grows with K.  Smaller K means faster resume.
+- **Output quality.**  Each flush interrupts the accumulator's natural
+  operation.  A packer emits partially filled bins (more padding waste),
+  a shuffle buffer emits a smaller-than-usual batch (less randomisation),
+  a mixture corrector resets its deficit tracking.  Larger K means fewer
+  such interruptions and higher output quality.
+- **Memory.**  Inflight chunks consume memory (fetched data, operator
+  buffers, prefetch queues).  Since at least one full epoch must stay
+  inflight until eviction, memory usage is proportional to K.
+
+For non-monotonic pipelines, `flush_every_k_chunks` must be positive —
+setting it to 0 is an error, since without flush sentinels the
+accumulator's state would depend on the full input history and safe
+eviction would be impossible.  The default is 8, which is a reasonable
+balance for most workloads.  You can tune it via
+{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>`.  Monotone pipelines do not need flush sentinels.  If you explicitly set a
+positive value for a monotone pipeline, the engine emits a warning but
+still injects sentinels unnecessarily.  That can perturb batch boundaries
+and Batch stalling behavior without improving replay safety.  Remove the
+explicit setting or set `flush_every_k_chunks=0` to avoid this.
+
+##### Per-offset tracking
+
+Within an epoch, Zephon tracks completion at the **per-offset** level.
 Each sample in a chunk occupies a specific offset (its position within the
 chunk).  As a sample flows through the pipeline, operators may split it
 into multiple **children** (e.g., a long document tokenized into several
@@ -255,7 +366,7 @@ delivered.  To track this, every record carries **contributor metadata** —
 a `ContributorRef` that references the base offset(s) it was derived from,
 plus an `is_last_child` flag indicating whether it is the final child for
 that offset.  When the last child for every offset in a chunk has been
-delivered, the chunk is fully consumed and can be evicted.  See
+delivered, the chunk is fully consumed.  See
 [Sample Lifecycle](sample_lifecycle.md) for more on how samples spawn
 children as they flow through operators.
 
@@ -264,29 +375,91 @@ Chunk 5 (4 offsets):  [x] [x] [ ] [x]    ← 3 of 4 offsets closed
 Chunk 6 (4 offsets):  [x] [x] [x] [x]    ← all closed, but NOT evicted yet
 Chunk 7 (4 offsets):  [ ] [ ] [ ] [ ]    ← none closed
 
-→ Nothing is evicted: chunk 5 is incomplete and blocks chunk 6.
-
-Later:
-Chunk 5 (4 offsets):  [x] [x] [x] [x]    ← all closed
-Chunk 6 (4 offsets):  [x] [x] [x] [x]    ← all closed
-
-→ Chunks 5 and 6 are evicted together.
+→ Nothing is evicted: chunks 5 and 6 are in the same epoch,
+  and chunk 5 is incomplete.
 ```
-
-The Engine maintains a per-chunk bitmap tracking which offsets are closed.
-When the bitmap is full, the chunk is complete.  Eviction proceeds
-**from the front** — only the oldest contiguous run of completed chunks is
-evicted.  This ensures that on resume, all inflight chunks form a gapless
-sequence that can be replayed in order without skipping any chunks in
-between.
 
 When an operator drops all fragments for a given offset (e.g., a filter
 that removes invalid samples), it emits a **tombstone** — a special record
 that signals completion of that offset without carrying any training
 payload.  Tombstones flow through the operator pipeline but are stripped
-at the Engine's delivery boundary before reaching the training loop.  They
-allow the Engine to mark the
-offset as closed so the containing chunk can eventually be evicted.
+at the Engine's delivery boundary before reaching the training loop.
+
+##### Atomic per-epoch eviction
+
+Chunks within an epoch share accumulator history — the bin placement for
+chunk 1's samples depends on what chunk 0 put into the bins.  Evicting
+chunk 0 while chunk 1 is still inflight would break replay (replay starts
+the packer from empty state instead of the state shaped by chunk 0).
+Therefore, chunks within an epoch must be evicted **atomically**: either
+all chunks in the epoch are done, or none are evicted.
+
+Once all offsets in all chunks of an epoch are closed (all bitmaps full),
+the epoch can be evicted as a unit.  Epoch boundaries established by flush
+sentinels guarantee that no accumulator state from the evicted epoch
+influences subsequent output.  This makes cross-epoch eviction safe:
+evicting epoch 0 while epoch 1 is still in-flight is correct because
+epoch 1's accumulator started from empty state (after the sentinel flush).
+
+This guarantee assumes that history-dependent accumulators actually flush
+and reset at the sentinel.  Zephon intentionally does **not** support
+stalled non-monotonic operators at the moment: if an operator both
+reorders and stalls, the delayed reset point depends on cross-boundary
+consumption history that is not encoded in the checkpoint payload.
+`Batch(drop_last=True)` is the special exception because it preserves
+cursor order and is handled by the ReplayFilter-before-Batch path
+described below.
+
+```
+Epoch 0 (chunks 0-1):  all offsets closed  → evict together
+Epoch 1 (chunks 2-3):  still in progress   → keep
+Epoch 2 (chunks 4-5):  not started yet     → keep
+```
+
+The engine also tracks an **epoch floor** per operator — the lowest
+`chunk_id` that could still influence a `preserves_cursor_order=False`
+accumulator's state.  After a sentinel flush the floor advances to the
+first chunk of the new epoch; between sentinels it is lowered if a record
+with a smaller `chunk_id` enters.  This prevents considering epochs whose
+chunks are still being processed by the accumulator.
+
+**Before the first sentinel fires** (i.e., during the first K chunks of a
+lane), no epoch boundary exists yet and all chunks belong to a single
+open epoch.  The engine falls back to treating everything below the epoch
+floor as one atomic group: if all chunks below the floor are fully done
+(all offsets closed), they can be evicted together.  This matters in
+practice because the pump thread in the thread and process runners runs
+ahead of the consumer — by the time the first record is delivered, the
+pump may have processed many chunks and the floor may have advanced well
+past them.  Without this fallback, those early chunks would stay inflight
+until the first sentinel creates a proper epoch boundary, unnecessarily
+inflating memory.  The atomic "all below floor" check is safe because all
+those chunks are in a single epoch with shared accumulator history — either
+they all evict (replay starts from scratch, which is correct since nothing
+was evicted before them) or none do.
+
+##### Cursor pinning
+
+The replay cursor (the last delivered record's identity) must always
+reference an inflight chunk, otherwise the ReplayFilter cannot find its
+target on resume.  If the cursor references a chunk in an epoch that is
+eligible for eviction, the engine skips that epoch's eviction until the
+cursor advances past it.  This typically resolves within a few deliveries
+after the sentinel flush, when the first post-sentinel record is
+delivered.
+
+##### Epoch boundary persistence
+
+Epoch boundary positions (the list of sentinel `chunk_id`s per lane) are
+persisted in the checkpoint.  On replay, the engine re-injects sentinels at
+these stored positions during Phase 1 (inflight chunk replay).  Without
+this, the accumulator on replay would process pre-sentinel and
+post-sentinel chunks as one continuous stream, building up state that
+differs from the original run.
+
+When the inflight set spans multiple epochs (possible when the pipeline has
+deep prefetch buffers), all intermediate sentinel positions are stored and
+re-injected.
 
 The bitmap state is runtime-only and **not** persisted in the checkpoint.
 On resume, it is rebuilt as the replayed inflight chunks flow through the
@@ -304,6 +477,7 @@ Checkpoint
   │
   │  saved: inflight chunks + replay cursor per lane
   │         + WorkSource state per lane
+  │         + epoch boundaries (non-monotonic only)
   v
 ┌──────────────────────────────────────────────────────┐
 │ Engine source stream                                  │
@@ -319,7 +493,7 @@ Checkpoint
                          │
                          v  records
 ┌─── ReplayFilter ─────────────────────────────────────┐
-│  Per lane: drop until cursor == sentinel, then emit   │
+│  Per lane: drop until cursor == target, then emit      │
 └────────────────────────┬─────────────────────────────┘
                          │
                          v  new records only
@@ -331,10 +505,13 @@ Checkpoint
    so that subsequent `next_chunk()` calls resume from the right position.
 
 2. **Replay inflight chunks.**  The Engine yields the restored inflight
-   chunks first, before fetching any new ones.  These chunks flow through
+   chunks first, before fetching any new ones.  For non-monotonic
+   pipelines, flush sentinels are re-injected at the stored epoch
+   boundary positions so that accumulators flush at exactly the same
+   points as the original run.  These chunks (and sentinels) flow through
    the full operator pipeline — fetch, tokenize, pack, batch — just as
-   they did in the original run.  Because the pipeline is deterministic,
-   the replay produces the exact same sequence of output records, including
+   they did originally.  Because the pipeline is deterministic, the
+   replay produces the exact same sequence of output records, including
    any stateful accumulator state (e.g., packing bins) that gets rebuilt
    as a side effect of processing the same inputs.
 
@@ -364,6 +541,23 @@ Stage[1] place=local runner=inline cap=1 mode=stream_items
 On a fresh run (no checkpoint), the ReplayFilter is a no-op — it passes
 every record through unchanged.  It only activates on resume.
 
+This placement immediately before `Batch` is what makes
+`Batch(drop_last=True)` the only supported stalling special case today.
+Because Batch only emits complete batches, the consumer-visible checkpoint
+cut is between full batches.  On resume, ReplayFilter drops the replay
+prefix before batching, so Batch rebuilds the suffix from an empty buffer
+at the same batch boundary.  No extra Batch state needs to be
+checkpointed.
+This remains timing-safe even if the pump thread runs far ahead of the
+consumer: the checkpoint cut is defined by delivered full batches, and the
+replay prefix is removed before Batch ever rebuilds its suffix state.
+
+When the ReplayFilter drops a record during the replay prefix, it emits
+**tombstones** for that record (via `tombstones_for_record`).  This is
+essential for correctness: without these tombstones, per-offset completion
+tracking would never close offsets for replayed records, and their chunks
+could never be evicted.
+
 At checkpoint time, the Engine records the **replay cursor** per lane, i.e., a
 {py:class}`~zephon.core.constants.SampleCursor` identifying the most
 recently delivered record.  A SampleCursor is a tuple of
@@ -371,7 +565,7 @@ recently delivered record.  A SampleCursor is a tuple of
 deterministically identifies every record within a lane.  Because the
 cursor is a unique identity rather than an ordinal position, this works
 regardless of whether the pipeline preserves cursor order.  On resume, the
-ReplayFilter reads these saved cursors and uses them as sentinels:
+ReplayFilter reads these saved cursors and uses them as replay targets:
 
 - For each lane, drop every record until the record whose cursor
   **equals** the saved sentinel.  Drop the sentinel itself too.
@@ -379,7 +573,7 @@ ReplayFilter reads these saved cursors and uses them as sentinels:
 
 The filter uses **equality** matching (`==`), not a threshold (`<=`).
 Consider a pipeline with shuffling where the tail output
-for a lane arrives in non-monotone cursor order:
+for a lane arrives in non-monotonic cursor order:
 
 ```
 Original run:   C2  C1  C3  C4  C5  ...
@@ -398,47 +592,66 @@ is correct regardless of output ordering.
 
 ### Cross-Chunk Packing and Shuffling
 
-Packing and shuffling interact with checkpointing in two ways:
+Packing and shuffling interact with checkpointing through the
+[epoch-based eviction model](#epoch-based-eviction) described above.  Safe
+eviction of a chunk requires two conditions: all samples delivered
+([per-offset tracking](#per-offset-tracking)) and no accumulator influence
+remaining ([flush sentinels](#flush-sentinels-and-epoch-boundaries)).
+A packed record that combines fragments from chunks 5 and 7 carries
+contributor references for both; chunk 5 is not complete until its last
+offset closes, even if all of chunk 7 is done.  For monotone pipelines
+the second condition is trivially met — order-preserving accumulators have
+no cross-invocation history, so replay reconstructs the same state
+regardless of prior eviction.  Non-monotonic accumulators require the
+epoch flush to make this verifiable.
+[Cursor pinning](#cursor-pinning) adds a further constraint: the replay
+cursor's chunk is never evicted even if both conditions are met, preventing
+the edge case where a cross-chunk packed record's delivery completes an
+earlier chunk that the cursor references.
 
-1. **Eviction correctness.**  The per-offset eviction path with
-   contributor tracking handles cross-chunk packing correctly.  A packed
-   record that combines fragments from chunks 5 and 7 carries contributor
-   references for both, and chunk 5 is not evicted until its last offset
-   is closed — even if chunk 7's offsets close first.
-
-2. **Replay correctness.**  The ReplayFilter operates on the final output
-   stream, after packing and shuffling.  It does not care about chunk
-   boundaries or contributor tracking — it only looks at the record-level
-   cursor.  Because the cursor is deterministic and unique per record per
-   lane, replay deduplication works the same way regardless of how records
-   were assembled.
+Together these guarantee **replay correctness**: flush sentinels ensure the
+accumulator starts each epoch from the same clean state as the original
+run, all inflight chunks are preserved, so replay produces identical
+output and the ReplayFilter finds its target cursor.
 
 ```{warning}
-When a packed record combines samples from two chunks and its delivery
-completes the earlier chunk, that chunk evicts before the checkpoint is
-taken.  On resume the replay cursor references an evicted chunk, which
-disables the ReplayFilter for that lane — causing samples from the later
-chunk that were already delivered as part of the cross-chunk packed record
-to appear a second time.  This is an edge case that requires the packed
-record to straddle the exact chunk boundary where eviction occurs; it does
-not affect monotone-eviction pipelines or packing that stays within a single
-chunk.  The issue is isolated by
-`test_pack_sequences_cross_chunk_data_correctness_after_checkpoint` in
-`tests/zephon/ops/test_pack_sequences_integration.py` (currently xfail).
+**Known limitation: cross-lane shuffle determinism with multi-lane
+workers.**  When a single worker serves multiple lanes, the internal
+round-robin that interleaves records from those lanes is not restored on
+resume.  For most accumulators (packing, mixture correction) this is
+irrelevant because they are keyed per-lane.  However, the shuffle buffer
+uses a shared `CountingAccumulator` whose microbatch composition — and
+therefore `batch_seed` — can differ after resume, producing a different
+shuffle permutation within the buffer window.
+
+In a `shuffle → pack` pipeline this can break replay: different shuffle
+order → different bin composition → `pack_meta` produces different output
+cursors → the ReplayFilter's target cursor never appears.  The typical
+`pack → shuffle` ordering is safe because shuffle preserves existing
+cursors (it only reorders), so the ReplayFilter always finds its target
+regardless of permutation.  We need to fix this.
 ```
 
 Operators that **buffer samples across chunk boundaries** must cooperate
 with the eviction protocol.  Specifically, they must track which base
 offsets their buffered and emitted records derive from via contributor
 metadata, so the Engine does not evict a chunk while buffered samples from
-that chunk still exist.  Zephon's built-in `pack_sequences` and `shuffle`
-operators satisfy this.  A custom operator that buffers across chunks must
-propagate contributor metadata in the same way — the requirements are:
+that chunk still exist.  Zephon's built-in `pack_sequences`, `shuffle`,
+and `ensure_mixture` operators satisfy this.  A custom operator that
+buffers across chunks must propagate contributor metadata in the same
+way — the requirements are:
 
 - Set `preserves_cursor_order=False` in `OpTraits` if the operator
   reorders records.
 - Propagate or set `is_last_child` on contributor metadata.
 - Emit tombstones for dropped final fragments.
+- Implement `flush(reset=True)` to fully reset accumulator
+  state (see [Accumulators and Operators](accumulators_operators.md)).
+  Do not rely on intentional stalling unless your operator is
+  `Batch(drop_last=True)` or a future replay-capsule mechanism exists.
+  After a mid-stream flush, your accumulator must no longer report
+  pending data; Zephon treats any remaining pending state as a contract
+  violation and raises.
 
 See [Sample Lifecycle](sample_lifecycle.md) for the full
 contract.

@@ -420,7 +420,7 @@ class Pipeline:
         1. State is lazily initialized on first batch via init_state()
         2. Each batch calls push(state, items) -> (new_state, outputs)
         3. If should_flush returns True, flush is called and state is reset
-        4. On stream end, flush() emits any remaining buffered items
+        4. On stream end (or epoch boundary), flush() emits remaining buffered items
         5. Each output item goes through transform (if provided) in parallel
 
         Args:
@@ -428,7 +428,9 @@ class Pipeline:
             init_state: Factory that creates initial state (called once per worker).
             push: Called with (state, batch) -> (new_state, outputs).
                 Outputs are emitted immediately; state carries forward.
-            flush: Optional. Called at end-of-stream to emit remaining buffered items.
+            flush: Optional. Called at end-of-stream to emit remaining buffered
+                items.  In non-monotonic pipelines, also called mid-stream at
+                epoch boundaries; state is re-initialized afterward.
             should_flush: Optional. If returns True, triggers early flush and state reset.
             transform: Optional. Batch-level transform that runs in parallel workers.
                 Receives the full batch from the accumulator, preserving batch structure
@@ -998,7 +1000,10 @@ class Pipeline:
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            _notify_item(engine, item, use_monotone)
+            # Flush sentinels carry dummy cursor data — skip notification to
+            # avoid corrupting offset_done bitmaps and cursor pinning.
+            if not (isinstance(item, SampleRecord) and item.meta.is_flush_sentinel):
+                _notify_item(engine, item, use_monotone)
             if not is_sentinel(item):
                 yield item
 
@@ -1009,6 +1014,14 @@ class Pipeline:
         if not use_monotone:
             for lane_id in engine.inflight_chunks_per_lane:
                 engine.notify(lane_id, [], record_cursor=None)
+
+        # Pipeline fully drained — evict all remaining inflight chunks.
+        # All accumulators have been force-flushed and every record has been
+        # delivered and notified.  No further checkpoints will be taken, so
+        # eviction is unconditionally safe.  Mid-stream eviction is gated by
+        # the epoch-floor watermark, but end-of-stream is pure cleanup.
+        for lane_id in list(engine.inflight_chunks_per_lane):
+            engine.inflight_chunks_per_lane[lane_id].clear()
 
     def explain(self) -> str:
         spec = self.compile()

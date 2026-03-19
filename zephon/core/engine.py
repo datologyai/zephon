@@ -61,6 +61,7 @@ from zephon.core.constants import (
     SampleBatch,
     SampleCursor,
     SampleId,
+    SampleMeta,
     SampleRecord,
     StreamItem,
 )
@@ -198,6 +199,14 @@ class RuntimeOptions:
     # a batch-shape sensitive operator (in which case we auto-disable it for that stage).
     # When False, latency flush is always disabled in deterministic mode.
     allow_latency_flush_in_deterministic: bool = True
+
+    # === Epoch flush ===
+    # Flush sentinel cadence: inject a flush sentinel every K chunks per lane.
+    # Forces history-dependent accumulators (preserves_cursor_order=False) to flush,
+    # creating clean epoch boundaries for deterministic replay after eviction.
+    # None = auto (8 for non-monotonic pipelines, 0 for monotone).
+    # Explicitly setting 0 for non-monotonic pipelines is an error.
+    flush_every_k_chunks: int | None = None
 
     # === Shutdown ===
     # "graceful" (default) waits generously for threads/processes to finish.
@@ -421,6 +430,37 @@ class Engine:
         self._offset_done_count: dict[LaneId, dict[ChunkId, int]] = defaultdict(dict)
 
         self._lane_next_cid: dict[LaneId, int] = defaultdict(int)
+        self._epoch_boundaries: dict[LaneId, list[int]] = defaultdict(list)
+        # Resolve flush_every_k_chunks: auto-detect for non-monotonic pipelines.
+        _flush_k = opts.flush_every_k_chunks
+        if _flush_k is None:
+            self._flush_every_k_chunks: int = 0 if self._preserves_cursor_order else 8
+        elif not isinstance(_flush_k, int) or _flush_k < 0:
+            raise ValueError(
+                f"flush_every_k_chunks must be a non-negative integer, got {_flush_k!r}"
+            )
+        elif _flush_k == 0 and not self._preserves_cursor_order:
+            raise ValueError(
+                "flush_every_k_chunks=0 is not allowed for pipelines with "
+                "preserves_cursor_order=False operators (e.g. PackSequences, "
+                "ShuffleBuffer). These operators create cross-chunk accumulator "
+                "coupling that requires flush sentinels for safe eviction. "
+                "Remove the explicit flush_every_k_chunks=0 to use the default, "
+                "or set a positive value (typical: 4-16)."
+            )
+        else:
+            if _flush_k > 0 and self._preserves_cursor_order:
+                warnings.warn(
+                    f"flush_every_k_chunks={_flush_k} ignored for monotonic "
+                    "pipeline (all operators have preserves_cursor_order=True). "
+                    "Flush sentinels are only needed for non-monotonic operators "
+                    "(e.g. PackSequences, ShuffleBuffer, EnsureMixture). "
+                    "Setting to 0.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _flush_k = 0
+            self._flush_every_k_chunks = _flush_k
         self._warned_once_about_runid = False
         self._checkpoint_reload_count = 0
         self._checkpoint_lock = threading.Lock()
@@ -926,7 +966,26 @@ class Engine:
         with self._mixture_lock:
             self._chunk_mixtures[(lane_id, chunk_id)] = id_mixture
 
-    def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample]:
+    @staticmethod
+    def _make_flush_sentinel(lane_id: LaneId, *, boundary_cid: int = 0) -> SampleRecord:
+        """Create a flush sentinel record for the given lane.
+
+        Args:
+            lane_id: The lane this sentinel belongs to.
+            boundary_cid: First chunk_id of the new epoch.  All chunks below
+                this value belong to the completed epoch and are eligible for
+                eviction (subject to the all_done check).
+        """
+        meta = SampleMeta(
+            sample_id=(0, 0, 0),
+            lane_id=lane_id,
+            chunk_id=0,
+            chunk_offset=0,
+            tags={"_flush_sentinel": True, "_boundary_cid": boundary_cid},
+        )
+        return SampleRecord(meta=meta, payload={})
+
+    def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
 
         Maintains inflight_chunks_per_lane[lane_id][chunk_id] -> chunk_obj.
@@ -936,10 +995,21 @@ class Engine:
 
         WorkChunk yields (sample_id, component_name) tuples; we convert
         component_name to component_id for efficient downstream processing.
+
+        When ``flush_every_k_chunks > 0``, a flush sentinel SampleRecord is
+        injected after every K-th chunk.  In Phase 1 (replay), sentinels are
+        re-injected at stored epoch boundary positions.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
-        # Phase 1: replay restored inflight chunks first (ascending chunk_id)
-        for cid in sorted(inflight_lane.keys()):
+
+        # Phase 1: replay restored inflight chunks first (ascending chunk_id).
+        # Re-inject flush sentinels at stored epoch boundary positions so that
+        # accumulators see the same flush points as the original run.
+        epoch_boundary_set = set(self._epoch_boundaries.get(lane_id, []))
+        sorted_inflight_cids = sorted(inflight_lane.keys())
+        for cid in sorted_inflight_cids:
+            if cid in epoch_boundary_set:
+                yield self._make_flush_sentinel(lane_id, boundary_cid=cid)
             chunk = inflight_lane[cid]
             # Store mixture for restored chunks (may already exist, but idempotent)
             self._store_chunk_mixture(lane_id, cid, chunk)
@@ -948,15 +1018,38 @@ class Engine:
                 # Note that we yield the _entire_ chunk here. This can break with elastic continuation in case a batch is cross-chunk boundaries.
                 yield (sample_id, lane_id, int(cid), offset, component_id)
 
-        # Phase 2: fetch new chunks and assign stable per-lane ids
+        # Trailing boundary: if a boundary exceeds all inflight cids, the
+        # sentinel between the last Phase 1 chunk and the first Phase 2 chunk
+        # must still fire so the accumulator flushes at the epoch edge.
+        if sorted_inflight_cids and epoch_boundary_set:
+            max_inflight = sorted_inflight_cids[-1]
+            for b in sorted(b for b in epoch_boundary_set if b > max_inflight):
+                yield self._make_flush_sentinel(lane_id, boundary_cid=b)
+
+        # Phase 2: fetch new chunks and assign stable per-lane ids.
+        # Inject a flush sentinel every K chunks per lane.
         ws = self._lane_ws[lane_id]
+        K = self._flush_every_k_chunks
+        # After Phase 1 replay, account for the partial epoch at the tail.
+        # Chunks >= the last boundary are in the current (incomplete) epoch.
+        # Both _epoch_boundaries and inflight_lane are captured atomically
+        # under _checkpoint_lock, so this derivation is consistent.
+        phase1_boundaries = self._epoch_boundaries.get(lane_id, [])
+        if K > 0 and inflight_lane and phase1_boundaries:
+            last_boundary = max(phase1_boundaries)
+            chunks_in_epoch = sum(1 for cid in inflight_lane if cid >= last_boundary)
+        elif K > 0 and inflight_lane and not phase1_boundaries:
+            # No boundaries yet → all inflight chunks are in the first epoch.
+            chunks_in_epoch = len(inflight_lane)
+        else:
+            chunks_in_epoch = 0
         while True:
             with self._checkpoint_lock:
                 # Since internally we prefetch, this could overlap with a checkpointing call.
                 # We need to ensure that we are not prefetching while updating the lane state.
                 chunk = ws.next_chunk()
                 if chunk is None:
-                    return  # lane exhausted
+                    break  # lane exhausted → emit final sentinel below
 
                 cid = int(self._lane_next_cid[lane_id])
                 self._lane_next_cid[lane_id] = cid + 1
@@ -964,9 +1057,29 @@ class Engine:
                 # Store mixture weights for this chunk
                 self._store_chunk_mixture(lane_id, cid, chunk)
 
+                # Epoch accounting and boundary append in the SAME lock block
+                # as chunk admission.  If they were separate, a checkpoint
+                # between the two blocks would capture the K-th chunk but not
+                # its boundary, breaking deterministic replay on restore.
+                chunks_in_epoch += 1
+                # boundary_cid = first chunk of the new epoch
+                emit_boundary: int | None = None
+                if K > 0 and chunks_in_epoch >= K:
+                    emit_boundary = cid + 1
+                    # Record boundary under checkpoint lock BEFORE yielding
+                    # the sentinel.  This ensures any checkpoint snapshot that
+                    # includes the chunks also includes the boundary —
+                    # critical for the thread/process runners where the feeder
+                    # and checkpoint run on different threads.
+                    self._epoch_boundaries[lane_id].append(emit_boundary)
+                    chunks_in_epoch = 0
+
             for offset, (sample_id, component_name) in enumerate(chunk):
                 component_id = self._get_component_id(component_name)
                 yield (sample_id, lane_id, cid, offset, component_id)
+
+            if emit_boundary is not None:
+                yield self._make_flush_sentinel(lane_id, boundary_cid=emit_boundary)
 
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)
@@ -1077,12 +1190,12 @@ class Engine:
             lane for idx, lane in enumerate(lanes_all) if (idx % active) == worker_id
         ]
 
-    def _source_stream(self) -> Iterator[EngineSample]:
+    def _source_stream(self) -> Iterator[EngineSample | SampleRecord]:
         """Yield sample identifiers from the backing work source."""
         owned = self._owned_lanes
 
         # Build one generator per lane
-        gens: dict[LaneId, Iterator[EngineSample]] = {
+        gens: dict[LaneId, Iterator[EngineSample | SampleRecord]] = {
             lane: self._lane_stream(lane) for lane in owned
         }
 
@@ -1311,6 +1424,24 @@ class Engine:
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
 
+    def _accumulator_eviction_floor(self) -> int | None:
+        """Return the global minimum epoch floor across all runners.
+
+        The epoch floor is the lowest chunk_id that influenced any
+        ``preserves_cursor_order=False`` accumulator since the last sentinel
+        flush.  Chunks below this floor are candidates for atomic eviction
+        (subject to the ``all_done`` bitmap check).
+
+        Returns None if no records have entered any accumulator yet or if
+        the floor was just reset after a sentinel flush.
+        """
+        floor: int | None = None
+        for runner in self._runners:
+            wm = runner.epoch_floor()
+            if wm is not None:
+                floor = min(floor, wm) if floor is not None else wm
+        return floor
+
     def notify(
         self,
         lane_id: int,
@@ -1349,34 +1480,87 @@ class Engine:
                 done[cid].set(off)
                 done_count[cid] += 1
 
-        # 2) Evict fully-completed chunks in cid order
+        # 2) Per-epoch eviction: walk epoch boundaries bottom-up, evict
+        #    completed epochs contiguously from the lowest.
+        #
+        #    The pump (feeder thread) runs ahead of delivery, so the
+        #    accumulator epoch floor may span many epoch boundaries.
+        #    Instead of requiring ALL chunks below the floor to be done
+        #    (which never passes when the pump is ahead), we evaluate
+        #    each epoch independently via _epoch_boundaries.
+        #
+        #    Epoch i covers [boundaries[i-1], boundaries[i]).
+        #    We stop at the cursor's epoch or the first incomplete epoch
+        #    to keep eviction contiguous from the bottom.
         last_completed_cid = -1
         last_completed_offset = 0
         cids_to_evict: list[int] = []
-        # Chunk IDs increase monotonically per lane; dict preserves insertion order.
-        # Free-threaded Python: dict iteration can race; skipping is safe (retried next call).
-        try:
-            cid_snapshot = list(inflight_lane.keys())
-        except RuntimeError:
-            cid_snapshot = []
-        for cid in cid_snapshot:
-            chunk = inflight_lane.get(cid)
-            if chunk is None:
-                continue  # concurrently evicted
-            if cid not in done:
-                break
-            if done_count[cid] >= len(chunk):
-                # Cursor pinning: do not evict the chunk that the current
-                # record's cursor references — otherwise
-                # _publish_replay_snapshot() will see the cursor as stale
-                # and disable ReplayFilter on restore.
-                if record_cursor is not None and cid == record_cursor.chunk_id:
+        accum_floor = self._accumulator_eviction_floor()
+        # Snapshot inflight keys and boundaries under the same lock so the
+        # two views are consistent.  The feeder thread mutates both under
+        # _checkpoint_lock; without the lock, free-threaded Python can
+        # observe mid-iteration appends, causing premature epoch eviction.
+        with self._checkpoint_lock:
+            try:
+                cid_snapshot = list(inflight_lane.keys())
+            except RuntimeError:
+                cid_snapshot = []
+            boundaries = list(self._epoch_boundaries.get(lane_id, []))
+
+        if boundaries and cid_snapshot:
+            # Per-epoch eviction: walk boundaries ascending, evaluate each
+            # epoch independently.
+            cursor_cid = record_cursor.chunk_id if record_cursor is not None else None
+            already_queued: set[int] = set()
+
+            for boundary_cid in sorted(boundaries):
+                epoch_cids = [
+                    cid
+                    for cid in cid_snapshot
+                    if cid < boundary_cid
+                    and cid not in already_queued
+                    and inflight_lane.get(cid) is not None
+                ]
+                if not epoch_cids:
+                    continue  # already evicted or empty
+
+                # Cursor pinning: stop at the cursor's epoch.
+                if cursor_cid is not None and cursor_cid in epoch_cids:
                     break
-                last_completed_cid = cid
-                last_completed_offset = len(chunk)
-                cids_to_evict.append(cid)
-            else:
-                break  # earliest incomplete chunk blocks later evictions
+
+                # all_done per epoch — the load-bearing safety invariant.
+                if not all(
+                    cid in done and done_count[cid] >= len(inflight_lane[cid])
+                    for cid in epoch_cids
+                ):
+                    break  # first incomplete epoch stops contiguous eviction
+
+                cids_to_evict.extend(epoch_cids)
+                already_queued.update(epoch_cids)
+                last_completed_cid = max(epoch_cids)
+                last_completed_offset = len(inflight_lane[last_completed_cid])
+
+        elif accum_floor is not None and cid_snapshot:
+            # Fallback: no epoch boundaries (flush_every_k_chunks=0 or no
+            # sentinel fired yet).  All chunks below accum_floor are in a
+            # single epoch — use the original atomic "all below floor" check.
+            below = [
+                cid
+                for cid in cid_snapshot
+                if cid < accum_floor and inflight_lane.get(cid) is not None
+            ]
+            all_below_done = all(
+                cid in done and done_count[cid] >= len(inflight_lane[cid])
+                for cid in below
+            )
+            if all_below_done and below:
+                # Cursor pinning: abort if cursor is in the eviction set.
+                if record_cursor is not None and record_cursor.chunk_id in below:
+                    pass  # don't evict
+                else:
+                    cids_to_evict = below
+                    last_completed_cid = max(below)
+                    last_completed_offset = len(inflight_lane[last_completed_cid])
 
         for cid in cids_to_evict:
             inflight_lane.pop(cid, None)
@@ -1386,6 +1570,15 @@ class Engine:
             with self._mixture_lock:
                 for cid in cids_to_evict:
                     self._chunk_mixtures.pop((lane_id, cid), None)
+            # Prune stale epoch boundaries below evicted range.
+            # Must hold _checkpoint_lock so the read-filter-replace is atomic
+            # w.r.t. feeder appends and checkpoint reads.
+            if lane_id in self._epoch_boundaries:
+                max_evicted = max(cids_to_evict)
+                with self._checkpoint_lock:
+                    self._epoch_boundaries[lane_id] = [
+                        b for b in self._epoch_boundaries[lane_id] if b > max_evicted
+                    ]
 
         # 3) Maintain lane progress for fairness diagnostics — mutate in-place.
         cur = self._lane_progress[lane_id]  # defaultdict auto-creates
@@ -1455,6 +1648,7 @@ class Engine:
                 "_lane_last_cursor",
                 "_offset_done",
                 "_offset_done_count",
+                "_epoch_boundaries",
             ]:
                 # print(f"length of {purge_candidate_str} is {len(getattr(self, purge_candidate_str))}")
                 for lane in list(getattr(self, purge_candidate_str)):
@@ -1516,6 +1710,11 @@ class Engine:
                     cursor.as_key() if cursor is not None else None
                 )
 
+            epoch_boundaries: dict[int, list[int]] = {}
+            for lane, boundaries in self._epoch_boundaries.items():
+                if boundaries:
+                    epoch_boundaries[int(lane)] = [int(cid) for cid in boundaries]
+
             return {
                 "version": 1,
                 "world": world,
@@ -1528,6 +1727,7 @@ class Engine:
                 "checkpoint_reload_count": self._checkpoint_reload_count,
                 "rr_next_idx": rr_next_idx,
                 "replay_cursors": replay_cursors,
+                "epoch_boundaries": epoch_boundaries,
             }
 
     # ---------- FS utilities ----------
@@ -1809,6 +2009,14 @@ class Engine:
                     )
                 replay_cursors[lane] = key
 
+        epoch_boundaries: dict[int, list[int]] = {}
+        for st in states:
+            for lane_s, boundaries in st.get("epoch_boundaries", {}).items():
+                lane = int(lane_s)
+                if lane in epoch_boundaries:
+                    raise RuntimeError(f"duplicate epoch_boundaries for lane {lane}")
+                epoch_boundaries[lane] = [int(cid) for cid in boundaries]
+
         return {
             "version": 1,
             "world": {"canonical_replicas": C, "world_size": merged_world_size},
@@ -1821,6 +2029,7 @@ class Engine:
             "checkpoint_reload_count": list(checkpoint_reload_counts)[0],
             "rr_next_idx": rr_next_idx,
             "replay_cursors": replay_cursors,
+            "epoch_boundaries": epoch_boundaries,
         }
 
     def load_state_dict(self, state: dict[str, Any], *, replay: bool = True) -> None:
@@ -1924,6 +2133,13 @@ class Engine:
         else:
             for lane in owned:
                 self._lane_last_cursor[lane] = None
+
+        # Restore epoch boundaries for flush sentinel re-injection on replay.
+        self._epoch_boundaries.clear()
+        for lane_s, boundaries in state.get("epoch_boundaries", {}).items():
+            lane = int(lane_s)
+            if lane in owned:
+                self._epoch_boundaries[lane] = [int(cid) for cid in boundaries]
 
         self._refresh_rr_from_progress()
         self._publish_replay_snapshot()

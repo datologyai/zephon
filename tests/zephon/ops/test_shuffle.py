@@ -82,9 +82,14 @@ def test_shuffle_buffer_keeps_closer_after_non_closer_for_same_base() -> None:
 
 
 def _make_shuffle_pipeline(
-    ds: Dataset, buffer_size: int = 5, seed: int = 0
+    ds: Dataset,
+    buffer_size: int = 5,
+    seed: int = 0,
+    *,
+    flush_every_k_chunks: int | None = None,
+    runner: str | None = None,
 ) -> Pipeline:
-    """Build a deterministic inline pipeline with shuffle."""
+    """Build a deterministic pipeline with shuffle."""
     work = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
@@ -95,25 +100,28 @@ def _make_shuffle_pipeline(
     )
     pipeline = Pipeline(work)
     pipeline.shuffle(buffer_size=buffer_size, seed=seed)
-    pipeline.options(
+    opts: dict[str, Any] = dict(
         deterministic=True,
         max_workers=1,
-        default_stage_prefetch=0,
+        default_stage_prefetch=16,
         mtp_mode=False,
     )
+    if flush_every_k_chunks is not None:
+        opts["flush_every_k_chunks"] = flush_every_k_chunks
+    if runner is not None:
+        opts["runner"] = runner
+    pipeline.options(**opts)
     return pipeline
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Cross-chunk shuffle buffer causes data duplication after resume when "
-        "the replay cursor references an evicted chunk. "
-        "Same root cause as the packing variant: "
-        "see docs/_internal/cross_chunk_packing_bug.md for full analysis."
-    ),
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
 )
-def test_shuffle_cross_chunk_data_correctness_after_checkpoint() -> None:
+def test_shuffle_cross_chunk_data_correctness_after_checkpoint(
+    runner_kind: str,
+) -> None:
     """Checkpoint/restore must not duplicate samples from cross-chunk shuffle buffers.
 
     Setup (12 samples, chunk_size=4, buffer_size=5):
@@ -122,16 +130,15 @@ def test_shuffle_cross_chunk_data_correctness_after_checkpoint() -> None:
         Buffer 2: [s5, s6, s7, s8, s9]  -- chunk 1 (3) + chunk 2 (2)
         Buffer 3: [s10, s11]            -- chunk 2 (2), flushed at end
 
-    After consuming all records from buffer 1, all chunk 0 offsets are done
-    so chunk 0 evicts.  The cursor at that point references whichever sample
-    was consumed last; if it was a chunk 0 sample the cursor references an
-    evicted chunk.  The test dynamically finds the first record after which
-    the cursor references an evicted chunk and checkpoints there.
+    With atomic eviction (gated by flush sentinel epoch floor), chunks that
+    share shuffle-buffer state are never evicted independently.  The cursor
+    never references an evicted chunk, and on restore all chunks are replayed
+    → same buffer state → same shuffle output → no data corruption.
     """
     ds = mk_dataset("shuf", {0: 12})
 
     # -- baseline: full run without checkpoint ---------------------------------
-    baseline_pipe = _make_shuffle_pipeline(ds)
+    baseline_pipe = _make_shuffle_pipeline(ds, runner=runner_kind)
     baseline_texts: list[str] = []
     for rec in baseline_pipe:
         assert isinstance(rec, SampleRecord)
@@ -140,7 +147,10 @@ def test_shuffle_cross_chunk_data_correctness_after_checkpoint() -> None:
     assert len(baseline_texts) == 12, f"Expected 12 records, got {len(baseline_texts)}"
 
     # -- run 1: consume until cursor references evicted chunk ------------------
-    pipe1 = _make_shuffle_pipeline(ds)
+    # With atomic eviction the cursor never lands on an evicted chunk.
+    # We iterate the full stream: if no eviction-triggered checkpoint fires,
+    # we checkpoint after the last record instead.
+    pipe1 = _make_shuffle_pipeline(ds, runner=runner_kind)
     it = iter(pipe1)
     prefix_texts: list[str] = []
     ckpt: dict[str, Any] | None = None
@@ -159,23 +169,24 @@ def test_shuffle_cross_chunk_data_correctness_after_checkpoint() -> None:
     finally:
         it.close()
 
-    assert ckpt is not None, (
-        "Could not trigger cross-chunk eviction — the shuffle order for this "
-        "seed never leaves the cursor on an evicted chunk."
-    )
-
-    # Sanity: confirm cross-chunk eviction actually happened
-    inflight_ckpt = ckpt.get("inflight", {}).get(
-        0, ckpt.get("inflight", {}).get("0", {})
-    )
-    inflight_cids = sorted(int(c) for c in inflight_ckpt.keys())
-    assert 0 not in inflight_cids, (
-        f"Chunk 0 should have been evicted before checkpoint, "
-        f"but inflight contains: {inflight_cids}"
-    )
+    if ckpt is None:
+        # Atomic eviction prevented the cursor from ever referencing an
+        # evicted chunk — this is the expected (fixed) behavior.  Checkpoint
+        # mid-stream instead to verify restore correctness.
+        pipe1b = _make_shuffle_pipeline(ds, runner=runner_kind)
+        it2 = iter(pipe1b)
+        prefix_texts = []
+        try:
+            for _ in range(6):
+                rec = next(it2)
+                assert isinstance(rec, SampleRecord)
+                prefix_texts.append(rec.payload["text"])
+            ckpt = pipe1b.checkpoint()
+        finally:
+            it2.close()
 
     # -- run 2: restore and drain ----------------------------------------------
-    pipe2 = _make_shuffle_pipeline(ds)
+    pipe2 = _make_shuffle_pipeline(ds, runner=runner_kind)
     pipe2.restore(ckpt)
 
     suffix_texts: list[str] = []
@@ -194,4 +205,211 @@ def test_shuffle_cross_chunk_data_correctness_after_checkpoint() -> None:
         f"  suffix:   {suffix_texts}\n"
         f"  baseline: {baseline_texts}\n"
         f"  combined: {all_combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream eviction + data correctness with flush sentinels
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_shuffle_mid_stream_eviction_after_checkpoint(runner_kind: str) -> None:
+    """Mid-stream eviction + checkpoint/restore with shuffle.
+
+    Like test_shuffle_cross_chunk_data_correctness_after_checkpoint but with
+    flush_every_k_chunks=2 and more data.  Verifies both:
+    1. Chunks from completed epochs evict DURING iteration (not cleanup)
+    2. Checkpoint/restore after eviction produces identical output to baseline
+
+    Setup (32 samples, chunk_size=4, buffer_size=5, flush_every_k_chunks=2):
+      - 8 chunks, sentinels after chunks 1, 3, 5, 7
+      - Shuffle buffer spans chunk boundaries → cross-chunk state
+    """
+    ds = mk_dataset("shms", {0: 32})
+    total_chunks = 32 // 4  # 8
+
+    # -- baseline: full run without checkpoint ---------------------------------
+    baseline_pipe = _make_shuffle_pipeline(
+        ds, flush_every_k_chunks=2, runner=runner_kind
+    )
+    baseline_texts: list[str] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_texts.append(rec.payload["text"])
+
+    assert len(baseline_texts) == 32, f"Expected 32 records, got {len(baseline_texts)}"
+
+    # -- run 1: iterate partway, verify mid-stream eviction, checkpoint --------
+    pipe1 = _make_shuffle_pipeline(ds, flush_every_k_chunks=2, runner=runner_kind)
+    it = iter(pipe1)
+
+    max_inflight = 0
+    eviction_decrease_seen = False
+    prefix_texts: list[str] = []
+    checkpoint_after = len(baseline_texts) // 2
+    ckpt: dict[str, Any] | None = None
+
+    try:
+        for rec in it:
+            assert isinstance(rec, SampleRecord)
+            prefix_texts.append(rec.payload["text"])
+
+            inflight = pipe1._engine.inflight_chunks_per_lane.get(0, {})
+            n = len(inflight)
+            if n > max_inflight:
+                max_inflight = n
+            elif n < max_inflight and max_inflight > 0:
+                eviction_decrease_seen = True
+
+            if len(prefix_texts) >= checkpoint_after:
+                ckpt = pipe1.checkpoint()
+                break
+    finally:
+        it.close()
+
+    assert max_inflight < total_chunks or eviction_decrease_seen, (
+        f"Expected mid-stream eviction: either bounded inflight "
+        f"(max_inflight={max_inflight} < total_chunks={total_chunks}) "
+        f"or visible decrease (seen={eviction_decrease_seen}). "
+        f"Consumed {len(prefix_texts)} records."
+    )
+    assert ckpt is not None
+
+    # -- run 2: restore and drain ----------------------------------------------
+    pipe2 = _make_shuffle_pipeline(ds, flush_every_k_chunks=2, runner=runner_kind)
+    pipe2.restore(ckpt)
+
+    suffix_texts: list[str] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix_texts.append(rec.payload["text"])
+
+    assert len(suffix_texts) > 0, "Should produce records after resume"
+
+    # -- data correctness: no duplicates, exact match with baseline ------------
+    all_combined = prefix_texts + suffix_texts
+
+    dupes = set(prefix_texts) & set(suffix_texts)
+    assert not dupes, (
+        f"Samples duplicated across prefix and suffix: {sorted(dupes)}\n"
+        f"  prefix: {prefix_texts}\n"
+        f"  suffix: {suffix_texts}"
+    )
+
+    assert all_combined == baseline_texts, (
+        f"prefix + suffix should reconstruct baseline.\n"
+        f"  prefix:   {prefix_texts}\n"
+        f"  suffix:   {suffix_texts}\n"
+        f"  baseline: {baseline_texts}\n"
+        f"  combined: {all_combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# flush_every_k_chunks cadence change across checkpoint/restore
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_flush_cadence_change_across_checkpoint(runner_kind: str) -> None:
+    """Changing flush_every_k_chunks across checkpoint/restore must not lose data.
+
+    Replay (Phase 1) re-injects sentinels at the stored epoch boundary
+    positions from the checkpoint — it does not use the new K value.
+    Phase 2 (fresh chunks) uses the new K value.
+
+    Setup (64 samples, chunk_size=4, buffer_size=5):
+      - K_old=2: 16 chunks, sentinels after every 2 chunks
+      - Checkpoint after mid-stream eviction (epoch 0 evicted)
+      - K_new=4: Phase 2 fires sentinels every 4 fresh chunks
+
+    Verifies:
+    1. Mid-stream eviction happens before checkpoint (epoch 0 removed)
+    2. prefix + suffix covers the exact same records as baseline (no loss)
+    3. No duplicates across prefix and suffix
+    """
+    ds = mk_dataset("cadence", {0: 64})
+
+    # -- baseline: full run with K=2 ------------------------------------------
+    baseline_pipe = _make_shuffle_pipeline(
+        ds, flush_every_k_chunks=2, runner=runner_kind
+    )
+    baseline_texts: list[str] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_texts.append(rec.payload["text"])
+    assert len(baseline_texts) == 64
+
+    # -- run 1: iterate partway, verify mid-stream eviction, checkpoint (K=2) -
+    total_chunks = 64 // 4  # 16
+    pipe1 = _make_shuffle_pipeline(ds, flush_every_k_chunks=2, runner=runner_kind)
+    it = iter(pipe1)
+
+    max_inflight = 0
+    eviction_decrease_seen = False
+    prefix_texts: list[str] = []
+    checkpoint_after = len(baseline_texts) // 2
+    ckpt: dict[str, Any] | None = None
+
+    try:
+        for rec in it:
+            assert isinstance(rec, SampleRecord)
+            prefix_texts.append(rec.payload["text"])
+
+            inflight = pipe1._engine.inflight_chunks_per_lane.get(0, {})
+            n = len(inflight)
+            if n > max_inflight:
+                max_inflight = n
+            elif n < max_inflight and max_inflight > 0:
+                eviction_decrease_seen = True
+
+            if len(prefix_texts) >= checkpoint_after:
+                ckpt = pipe1.checkpoint()
+                break
+    finally:
+        it.close()
+
+    assert max_inflight < total_chunks or eviction_decrease_seen, (
+        f"Expected mid-stream eviction: either bounded inflight "
+        f"(max_inflight={max_inflight} < total_chunks={total_chunks}) "
+        f"or visible decrease (seen={eviction_decrease_seen}). "
+        f"Consumed {len(prefix_texts)} records."
+    )
+    assert ckpt is not None
+
+    # -- run 2: restore with DIFFERENT K=4, drain ------------------------------
+    pipe2 = _make_shuffle_pipeline(ds, flush_every_k_chunks=4, runner=runner_kind)
+    pipe2.restore(ckpt)
+
+    suffix_texts: list[str] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix_texts.append(rec.payload["text"])
+
+    assert len(suffix_texts) > 0, "Should produce records after resume"
+
+    # -- no duplicates across prefix and suffix --------------------------------
+    all_combined = prefix_texts + suffix_texts
+    dupes = set(prefix_texts) & set(suffix_texts)
+    assert not dupes, (
+        f"Samples duplicated across prefix and suffix: {sorted(dupes)}\n"
+        f"  prefix ({len(prefix_texts)}): {prefix_texts[:10]}...\n"
+        f"  suffix ({len(suffix_texts)}): {suffix_texts[:10]}..."
+    )
+
+    # -- same set of records as baseline (ordering may differ in suffix due
+    #    to different sentinel cadence in Phase 2) -----------------------------
+    assert sorted(all_combined) == sorted(baseline_texts), (
+        f"All records from baseline must appear in prefix + suffix.\n"
+        f"  combined ({len(all_combined)}): {sorted(all_combined)[:10]}...\n"
+        f"  baseline ({len(baseline_texts)}): {sorted(baseline_texts)[:10]}..."
     )

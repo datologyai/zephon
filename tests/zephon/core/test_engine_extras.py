@@ -157,6 +157,13 @@ def test_torch_worker_helpers_with_stubbed_torch(
     assert get_torch_worker_info() == (3, 7)
 
 
+def _set_accum_floor(eng: Engine, floor: int) -> None:
+    """Set epoch floor on all runner ops so _accumulator_eviction_floor() returns *floor*."""
+    for runner in eng._runners:  # type: ignore[attr-defined]
+        for op_state in runner.ops:
+            op_state._epoch_floor = floor
+
+
 def test_notify_updates_progress_and_cursor() -> None:
     eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
 
@@ -164,6 +171,9 @@ def test_notify_updates_progress_and_cursor() -> None:
     eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
         components={"X": [(1, 2, 3), (4, 5, 6)]}, seed=None
     )
+    # Set epoch floor above chunk 0 so atomic eviction can proceed.
+    _set_accum_floor(eng, 1)
+
     cursor0 = SampleMeta(
         sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0
     ).cursor
@@ -192,6 +202,8 @@ def test_notify_updates_progress_and_cursor() -> None:
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(
         components={"Y": [(7, 8, 9)]}, seed=None
     )
+    _set_accum_floor(eng, 2)
+
     cursor2 = SampleMeta(
         sample_id=(0, 0, 2), lane_id=lane, chunk_id=1, chunk_offset=0
     ).cursor
@@ -235,8 +247,10 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
         components={"X": [(1,), (2,)]}
     )  # two offsets
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(components={"Y": [(3,)]})
+    # Set epoch floor above both chunks so atomic eviction can proceed.
+    _set_accum_floor(eng, 2)
 
-    # Close only offset 0 of chunk 0 -> no eviction
+    # Close only offset 0 of chunk 0 -> no eviction (all_done fails)
     c0_0 = SampleMeta(sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0)
     eng.notify(
         lane,
@@ -245,7 +259,7 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
     )
     assert 0 in eng.inflight_chunks_per_lane[lane]
 
-    # Close offset of chunk 1 -> chunk 0 still present
+    # Close offset of chunk 1 -> chunk 0 still present (chunk 0 incomplete)
     c1_0 = SampleMeta(sample_id=(0, 0, 1), lane_id=lane, chunk_id=1, chunk_offset=0)
     eng.notify(
         lane,
@@ -254,14 +268,14 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
     )
     assert 0 in eng.inflight_chunks_per_lane[lane]  # chunk 0 not evicted yet
 
-    # Close remaining offset of chunk 0 -> both chunks can evict in order
+    # Close remaining offset of chunk 0 -> both chunks all_done, atomic eviction fires
     c0_1 = SampleMeta(sample_id=(0, 0, 2), lane_id=lane, chunk_id=0, chunk_offset=1)
     eng.notify(
         lane,
         entries=[ContributorRef(cursor=c0_1.cursor, is_last_child=True)],
         record_cursor=c0_1.cursor,
     )
-    # Cursor pinning keeps chunk 0 (record_cursor references it); flush to release.
+    # Cursor pinning keeps chunk 0 (record_cursor references it) → aborts eviction.
     assert 0 in eng.inflight_chunks_per_lane[lane]
     eng.notify(lane, [], record_cursor=None)
     assert eng.inflight_chunks_per_lane[lane] == {}

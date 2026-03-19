@@ -24,6 +24,29 @@ def test_lane_ptr_defaults() -> None:
     assert ptr.offset == 0
 
 
+def test_flush_sentinel_properties() -> None:
+    """is_flush_sentinel and is_sentinel work for flush sentinels."""
+    meta = SampleMeta(
+        sample_id=(0, 0, 0), lane_id=0, chunk_id=0, tags={"_flush_sentinel": True}
+    )
+    assert meta.is_flush_sentinel is True
+    assert meta.is_sentinel is True
+    assert meta.tombstone is False
+
+    # Regular record
+    plain = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    assert plain.is_flush_sentinel is False
+    assert plain.is_sentinel is False
+
+
+def test_tombstone_is_sentinel_but_not_flush() -> None:
+    """Tombstones are sentinels but not flush sentinels."""
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_tombstone(True)
+    assert meta.is_sentinel is True
+    assert meta.is_flush_sentinel is False
+    assert meta.tombstone is True
+
+
 def test_sample_meta_frozen() -> None:
     meta = SampleMeta(sample_id=(1, 2, 3), lane_id=0, chunk_id=0)
     # Frozen dataclass should prevent assignment via normal attribute set

@@ -322,39 +322,19 @@ class TestStatefulTransformOp:
         assert len(result) == 5
         assert result == records
 
-    def test_invalid_init_state_raises(self) -> None:
-        """Test that non-callable init_state raises TypeError."""
-        with pytest.raises(TypeError, match="init_state must be callable"):
-            StatefulTransformOp(
-                init_state="not callable",  # type: ignore
-                push_fn=lambda s, items: (s, items),
-            )
-
-    def test_invalid_push_fn_raises(self) -> None:
-        """Test that non-callable push_fn raises TypeError."""
-        with pytest.raises(TypeError, match="push_fn must be callable"):
-            StatefulTransformOp(
-                init_state=lambda: {},
-                push_fn="not callable",  # type: ignore
-            )
-
-    def test_invalid_flush_fn_raises(self) -> None:
-        """Test that non-callable flush_fn raises TypeError."""
-        with pytest.raises(TypeError, match="flush_fn must be callable"):
-            StatefulTransformOp(
-                init_state=lambda: {},
-                push_fn=lambda s, items: (s, items),
-                flush_fn="not callable",  # type: ignore
-            )
-
-    def test_invalid_should_flush_fn_raises(self) -> None:
-        """Test that non-callable should_flush_fn raises TypeError."""
-        with pytest.raises(TypeError, match="should_flush_fn must be callable"):
-            StatefulTransformOp(
-                init_state=lambda: {},
-                push_fn=lambda s, items: (s, items),
-                should_flush_fn="not callable",  # type: ignore
-            )
+    @pytest.mark.parametrize(
+        "kwarg",
+        ["init_state", "push_fn", "flush_fn", "should_flush_fn", "transform_fn"],
+    )
+    def test_invalid_callable_raises(self, kwarg: str) -> None:
+        """Non-callable arguments must raise TypeError."""
+        defaults: dict[str, object] = {
+            "init_state": lambda: {},
+            "push_fn": lambda s, items: (s, items),
+        }
+        defaults[kwarg] = "not callable"
+        with pytest.raises(TypeError, match=f"{kwarg} must be callable"):
+            StatefulTransformOp(**defaults)  # type: ignore[arg-type]
 
     def test_accumulator_creation(self) -> None:
         """Test that accumulator is created correctly."""
@@ -690,15 +670,6 @@ class TestParallelTransform:
         assert _payload_dict(results[0])["value"] == 10
         assert _payload_dict(results[1])["value"] == 20
 
-    def test_invalid_transform_fn_raises(self) -> None:
-        """Test that non-callable transform_fn raises TypeError."""
-        with pytest.raises(TypeError, match="transform_fn must be callable"):
-            StatefulTransformOp(
-                init_state=lambda: {},
-                push_fn=lambda s, items: (s, items),
-                transform_fn="not callable",  # type: ignore
-            )
-
     def test_no_transform_fn_passthrough(self) -> None:
         """Test that without transform_fn, process_many is passthrough."""
         op = StatefulTransformOp(
@@ -851,3 +822,123 @@ class TestParallelTransform:
         assert len(flush_batches) == 1
         remaining, _ = flush_batches[0]
         assert len(remaining) == 2
+
+
+# =============================================================================
+# Mid-stream flush: flush(reset=True) must reset state
+# =============================================================================
+
+
+class TestStatefulTransformAccumulatorMidStreamFlush:
+    """Verify that flush(reset=True) resets state for continued use.
+
+    After a mid-stream flush the accumulator must be indistinguishable from
+    a freshly constructed instance.  The current implementation has three
+    compounding bugs:
+    1. ``_flushed = True`` permanently — ``has_pending_data()`` returns False
+    2. ``_state = None`` without resetting ``_initialized``
+    3. No re-initialization — next ``push_many()`` calls ``push_fn(None, ...)``
+    """
+
+    def test_mid_stream_flush_allows_continued_use(self) -> None:
+        """After flush(reset=True), push_many must work (not crash).
+
+        Uses a dedup accumulator: push [a,b], flush, push [c,d] → should
+        emit [c,d] (fresh dedup state, not carrying over seen set from epoch 1).
+        """
+
+        def push(
+            seen: set, items: list[SampleRecord]
+        ) -> tuple[set, list[SampleRecord]]:
+            outputs = []
+            for item in items:
+                item_id = item.payload["id"]
+                if item_id not in seen:
+                    seen.add(item_id)
+                    outputs.append(item)
+            return seen, outputs
+
+        acc = StatefulTransformAccumulator(
+            init_state=lambda: set(),
+            push_fn=push,
+            flush_fn=lambda s: [],
+            should_flush_fn=None,
+        )
+
+        # Epoch 1
+        epoch1 = [_rec({"id": "a"}), _rec({"id": "b"})]
+        acc.push_many(epoch1)
+        acc.flush(reset=True)
+
+        # Epoch 2 — must not crash, must produce output
+        epoch2 = [_rec({"id": "c"}), _rec({"id": "d"})]
+        batches = acc.push_many(epoch2)
+        output = [rec for batch, _ in batches for rec in batch]
+        assert len(output) == 2, (
+            f"Expected 2 records after mid-stream flush, got {len(output)}"
+        )
+
+    def test_mid_stream_flush_resets_has_pending_data(self) -> None:
+        """After flush(reset=True) + push, has_pending_data must be True."""
+        acc = StatefulTransformAccumulator(
+            init_state=lambda: {"buffer": []},
+            push_fn=lambda s, items: (s, items),
+            flush_fn=lambda s: s["buffer"],
+            should_flush_fn=None,
+        )
+
+        acc.push_many([_rec({"x": 1})])
+        assert acc.has_pending_data() is True
+
+        acc.flush(reset=True)
+        assert acc.has_pending_data() is False, (
+            "has_pending_data() should be False immediately after a mid-stream "
+            "flush resets the accumulator"
+        )
+
+        # Push new data — has_pending_data should be True again
+        acc.push_many([_rec({"x": 2})])
+        assert acc.has_pending_data() is True, (
+            "has_pending_data() should become True again after pushing data post-flush"
+        )
+
+    def test_mid_stream_flush_resets_user_state(self) -> None:
+        """After flush(reset=True), user state must be fresh.
+
+        Dedup accumulator: push [a,b], flush, push [a,c] → fresh state means
+        'a' is NOT in the seen set → both [a,c] emitted.  With stale state,
+        'a' would be filtered → only [c] emitted.
+        """
+
+        def push(
+            seen: set, items: list[SampleRecord]
+        ) -> tuple[set, list[SampleRecord]]:
+            outputs = []
+            for item in items:
+                item_id = item.payload["id"]
+                if item_id not in seen:
+                    seen.add(item_id)
+                    outputs.append(item)
+            return seen, outputs
+
+        acc = StatefulTransformAccumulator(
+            init_state=lambda: set(),
+            push_fn=push,
+            flush_fn=lambda s: [],
+            should_flush_fn=None,
+        )
+
+        # Epoch 1: see 'a' and 'b'
+        epoch1 = [_rec({"id": "a"}), _rec({"id": "b"})]
+        acc.push_many(epoch1)
+        acc.flush(reset=True)
+
+        # Epoch 2: push 'a' again — with fresh state, 'a' should pass through
+        epoch2 = [_rec({"id": "a"}), _rec({"id": "c"})]
+        batches = acc.push_many(epoch2)
+        output = [rec for batch, _ in batches for rec in batch]
+        ids = [r.payload["id"] for r in output]
+        assert ids == ["a", "c"], (
+            f"Expected ['a', 'c'] (fresh dedup state), got {ids}. "
+            f"Stale seen set from epoch 1 leaked across flush boundary."
+        )

@@ -28,6 +28,14 @@ class OpTraits:
             trait will automatically run with parallelism=1. This prevents
             nondeterministic behavior when multiple worker instances would each
             maintain separate buffers.
+        stall_on_epoch_boundary: If True, the runner preserves the accumulator's
+            buffer across epoch boundaries (flush sentinels) instead of calling
+            ``flush(reset=True)`` immediately. The sentinel is stalled
+            behind buffered data until ``try_epoch_reset()`` can release it.
+            In the current design this is intentionally narrow: built-in support
+            is limited to ``Batch(drop_last=True)``. General stalled operators
+            would need extra replay-capsule state to make checkpoint/restore
+            exact after eviction.
     """
 
     indexable: bool = True
@@ -35,3 +43,4 @@ class OpTraits:
     parallelism: int = 1
     batch_shape_sensitive: bool = False
     requires_serial_state: bool = False
+    stall_on_epoch_boundary: bool = False

@@ -1,19 +1,20 @@
 import gc
 import re
+import threading
 import time
 import types
 import weakref
-from typing import Any, Mapping
+from collections import defaultdict
+from typing import Any
 
 import pytest
 
-from zephon.core.constants import SampleRecord
+from tests._helpers import mk_dataset
+from zephon.core.constants import ContributorRef, SampleCursor, SampleRecord
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
 from zephon.core.runtime_spec import resolve_runtime_spec
-from zephon.io import InMemoryShard
-from zephon.io.dataset import Dataset
 from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.ops.fetch import FetchOp
@@ -24,20 +25,12 @@ from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 
-def _mk_dataset(name: str, shards: Mapping[int, int]) -> Dataset:
-    data: dict[int, InMemoryShard] = {}
-    for sid, count in shards.items():
-        rows = [{"text": f"{name}:{sid}:{i}"} for i in range(count)]
-        data[int(sid)] = InMemoryShard(rows)
-    return Dataset.from_dict(name, data)
-
-
 def _run_engine(
     deterministic: bool, workers: int, mode: MixtureReadMode
 ) -> list[tuple[int, int, int]]:
     # Two small in-memory datasets with two shards each
-    ds_a = _mk_dataset("A", {0: 20, 1: 20})
-    ds_b = _mk_dataset("B", {0: 15, 1: 15})
+    ds_a = mk_dataset("A", {0: 20, 1: 20})
+    ds_b = mk_dataset("B", {0: 15, 1: 15})
 
     mixture = {"A": 0.6, "B": 0.4}
     work = StaticMixtureWorkSource(
@@ -60,7 +53,7 @@ def _run_engine(
         deterministic=deterministic,
         max_workers=workers,
         mixture_config=MixtureReadConfig(mode=mode, seed=999),
-        default_stage_prefetch=0,
+        default_stage_prefetch=16,
     )
     spec = resolve_runtime_spec(plan, opts)
     eng = Engine(plan, opts, work, spec)
@@ -346,3 +339,195 @@ def test_engine_batch_with_post_ops_not_inline() -> None:
         assert isinstance(eng._runners[1], ThreadStageRunner)
     finally:
         eng.close()
+
+
+# ---------------------------------------------------------------------------
+# flush_every_k_chunks validation
+# ---------------------------------------------------------------------------
+
+
+def _make_non_monotone_engine(flush_k: int | None) -> Engine:
+    """Build an Engine with a non-monotone pipeline for validation tests."""
+    from zephon.ops.shuffle_buffer import ShuffleBuffer
+
+    ds = mk_dataset("V", {0: 8})
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=4,
+        seed=0,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    g = Graph()
+    g.add("shuf", ShuffleBuffer(buffer_size=4, seed=0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=16,
+        flush_every_k_chunks=flush_k,
+    )
+    spec = resolve_runtime_spec(plan, opts)
+    return Engine(plan, opts, work, spec)
+
+
+def test_flush_every_k_chunks_rejects_negative() -> None:
+    """Negative flush_every_k_chunks must raise ValueError."""
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _make_non_monotone_engine(flush_k=-1)
+
+
+def _make_monotone_engine(flush_k: int | None) -> Engine:
+    """Build an Engine with a monotone pipeline for validation tests."""
+    ds = mk_dataset("V", {0: 8})
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=4,
+        seed=0,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    g = Graph()
+    g.add("d", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=16,
+        flush_every_k_chunks=flush_k,
+    )
+    spec = resolve_runtime_spec(plan, opts)
+    return Engine(plan, opts, work, spec)
+
+
+def test_flush_every_k_chunks_rejects_negative_monotone() -> None:
+    """Negative flush_every_k_chunks is rejected even for monotone pipelines."""
+    with pytest.raises(ValueError, match="non-negative integer"):
+        _make_monotone_engine(flush_k=-1)
+
+
+def test_flush_every_k_chunks_zero_non_monotone_raises() -> None:
+    """flush_every_k_chunks=0 with non-monotone ops must raise ValueError."""
+    with pytest.raises(ValueError, match="flush_every_k_chunks=0 is not allowed"):
+        _make_non_monotone_engine(flush_k=0)
+
+
+def test_flush_every_k_chunks_zero_monotone_ok() -> None:
+    """flush_every_k_chunks=0 is fine for monotone pipelines."""
+    eng = _make_monotone_engine(flush_k=0)
+    eng.close()
+
+
+def test_flush_every_k_chunks_positive_monotone_warns_and_clamps() -> None:
+    """flush_every_k_chunks>0 with a monotone pipeline warns and clamps to 0."""
+    with pytest.warns(UserWarning, match="ignored for monotonic"):
+        eng = _make_monotone_engine(flush_k=4)
+    assert eng._flush_every_k_chunks == 0, (
+        "flush_every_k_chunks should be clamped to 0 for monotonic pipelines"
+    )
+    eng.close()
+
+
+# ---------------------------------------------------------------------------
+# _epoch_boundaries pruning race in notify()
+# ---------------------------------------------------------------------------
+
+
+class _InterceptBoundaryDict(defaultdict):
+    """``_epoch_boundaries`` replacement that pauses ``__setitem__`` mid-prune.
+
+    When *armed*, the next ``__setitem__`` with a list value will:
+
+    1. Set ``entered`` (signaling the list comprehension is done).
+    2. Wait on ``resume`` (or time out) before completing the write.
+
+    This opens a window where a concurrent feeder can append to the **old**
+    list.  If the prune doesn't hold ``_checkpoint_lock``, that append is
+    silently overwritten by the new list.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(list)
+        self.entered = threading.Event()
+        self.resume = threading.Event()
+        self.armed = False
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if self.armed and isinstance(value, list):
+            self.armed = False
+            self.entered.set()
+            # Timeout prevents deadlock after the fix: when notify() holds
+            # _checkpoint_lock, the feeder blocks on the lock and can never
+            # set ``resume``.  The 200 ms timeout lets __setitem__ complete
+            # so the lock is released and the feeder can proceed.
+            self.resume.wait(timeout=0.2)
+        super().__setitem__(key, value)
+
+
+def test_notify_epoch_boundary_prune_concurrent_append(monkeypatch: Any) -> None:
+    """notify() must not lose boundaries appended under ``_checkpoint_lock``.
+
+    engine.py:1555-1558 prunes ``_epoch_boundaries[lane]`` via a
+    read-filter-replace **without** ``_checkpoint_lock``.  A concurrent
+    feeder append (under the lock) can be lost when the list-comprehension
+    replacement overwrites the list containing the append.
+
+    Before fix: prune is unlocked -> feeder appends during the window ->
+        append is overwritten -> test FAILS.
+    After fix: prune holds _checkpoint_lock -> feeder blocks until prune
+        finishes -> append goes to the post-prune list -> test PASSES.
+    """
+    from zephon.work.base import WorkChunk
+
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    opts = RuntimeOptions()
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
+
+    LANE = 0
+    NEW_BOUNDARY = 99
+
+    # 4 single-sample chunks forming 2 epochs: [0,2) and [2,4).
+    for cid in range(4):
+        eng.inflight_chunks_per_lane[LANE][cid] = WorkChunk(
+            components={"default": [(0, 0, cid)]}
+        )
+    eng._lane_next_cid[LANE] = 4
+
+    # Swap in the intercepting dict.
+    intercept = _InterceptBoundaryDict()
+    intercept[LANE] = [2, 4]  # boundary after each 2-chunk epoch
+    eng._epoch_boundaries = intercept
+
+    def feeder() -> None:
+        intercept.entered.wait()  # prune comprehension is done
+        with eng._checkpoint_lock:
+            eng._epoch_boundaries[LANE].append(NEW_BOUNDARY)
+        intercept.resume.set()
+
+    intercept.armed = True
+    t = threading.Thread(target=feeder, name="boundary-feeder")
+    t.start()
+
+    # Complete all 4 chunks in one notify → triggers eviction + prune.
+    entries = [
+        ContributorRef(
+            cursor=SampleCursor(chunk_id=cid, chunk_offset=0, sample_id=(0, 0, cid)),
+            is_last_child=True,
+        )
+        for cid in range(4)
+    ]
+    eng.notify(LANE, entries)
+    t.join(timeout=5.0)
+
+    assert NEW_BOUNDARY in eng._epoch_boundaries[LANE], (
+        f"Epoch boundary {NEW_BOUNDARY} was lost by notify() prune. "
+        f"Final boundaries: {list(eng._epoch_boundaries[LANE])}"
+    )

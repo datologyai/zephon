@@ -249,7 +249,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         return ready
 
-    def flush(self) -> list[ReadyBatch[SampleRecord]]:
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
         """Emit all remaining buffered records using SWRR ordering.
 
         Emits batched per-lane to minimize scheduling overhead.
@@ -280,6 +280,20 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
             if emitted_batch:
                 ready.append((emitted_batch, 0))
+
+        # Mid-stream flush: reset emission history so the next epoch starts
+        # with clean SWRR state, identical to a freshly constructed accumulator.
+        # We null out swrr (not just reset()) so that _update_lane_swrr creates
+        # a fresh instance with sorted _order — otherwise update_target() on the
+        # old instance preserves stale _order/_index entries, which can cause
+        # divergent tie-breaking if mixture components change across epochs.
+        if reset:
+            for state in self._lanes.values():
+                state.emitted_by_component.clear()
+                state.total_emitted = 0.0
+                state.emissions_since_obsolete_drain = 0
+                state.current_chunk_id = None
+                state.swrr = None
 
         return ready
 
@@ -687,6 +701,7 @@ class EnsureMixture(DefaultSetup):
             batch_shape_sensitive=False,
             requires_serial_state=False,
             parallelism=self._parallelism,
+            stall_on_epoch_boundary=False,
         )
 
     def accumulator(

@@ -239,7 +239,12 @@ class SampleMeta:
     @property
     def is_sentinel(self) -> bool:
         """True if this record is a control signal (tombstone, flush, etc.)."""
-        return self.tombstone
+        return self.tombstone or self.is_flush_sentinel
+
+    @property
+    def is_flush_sentinel(self) -> bool:
+        """True if this record is a flush sentinel (triggers accumulator flush)."""
+        return bool(self.tags.get("_flush_sentinel", False))
 
     def with_contributors(self, value: Iterable[ContributorRef] | None) -> "SampleMeta":
         """Return a new ``SampleMeta`` with contributors set/cleared in tags."""

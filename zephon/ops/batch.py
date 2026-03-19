@@ -11,6 +11,32 @@ from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
 
 
+class BatchAccumulator(CountingAccumulator[SampleRecord]):
+    """Lane-keyed counting accumulator with chunk-aware ``try_epoch_reset``.
+
+    Subclasses ``CountingAccumulator`` with two Batch-specific additions:
+
+    1. ``key_fn`` is hardcoded to ``lane_of`` (Batch always groups by lane).
+    2. ``try_epoch_reset`` checks ``chunk_id`` so that a stalled flush
+       sentinel can be released as soon as all pre-boundary records have
+       left the buffer, even if post-boundary records remain.
+    """
+
+    def __init__(self, max_batch: int, *, drop_last: bool = True) -> None:
+        super().__init__(max_batch, key_fn=lane_of, drop_last=drop_last)
+
+    def try_epoch_reset(self, boundary_chunk_id: int) -> bool:
+        """Return True once no buffered record has chunk_id < boundary_chunk_id."""
+        for buf in self._buffers.values():
+            for elem in buf:
+                if (
+                    isinstance(elem, SampleRecord)
+                    and elem.meta.chunk_id < boundary_chunk_id
+                ):
+                    return False
+        return True
+
+
 class Batch(DefaultSetup):
     """Collect sample records into mini-batches, one lane per batch.
 
@@ -44,13 +70,14 @@ class Batch(DefaultSetup):
             batch_shape_sensitive=False,
             requires_serial_state=False,
             parallelism=self._parallelism,
+            stall_on_epoch_boundary=self.drop_last,
         )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
-        return CountingAccumulator[SampleRecord](
-            max_batch=self.microbatch_size, key_fn=lane_of, drop_last=self.drop_last
+        return BatchAccumulator(
+            max_batch=self.microbatch_size, drop_last=self.drop_last
         )
 
     def process_one(self, elem: SampleRecord) -> list[SampleBatch | SampleRecord]:

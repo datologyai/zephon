@@ -82,9 +82,9 @@ requirement is that any logic that needs to see elements in stream order
 *must* live in the accumulator.
 
 ```{note}
-We should investigate this a bit more. The shuffling and packing _should_
-actually happen within the operator to optimize performance. This is most likely
-a (performance) bug.
+Known limitation: shuffling and packing currently run entirely in the
+accumulator (pump thread).  Moving the heavy work into parallel workers
+would improve throughput but requires careful state splitting.
 ```
 
 
@@ -221,15 +221,28 @@ this diversity through a simple interface:
 
 - **`push_many(elems)`**: consume new elements from upstream.  Buffer
   them internally and return zero or more ready micro-batches.
-- **`flush()`**: called when upstream closes.  Return any remaining
-  partial micro-batches.
+- **`flush(*, reset=False)`**: emit remaining buffered data.
+  Called in two contexts:
+  - **End of stream** (`reset=False`, the default): the lane is done.
+    Emit any remaining partial micro-batches.
+  - **Mid-stream** (`reset=True`): a flush sentinel has
+    arrived (see [Flush sentinels](checkpointing.md#flush-sentinels-and-epoch-boundaries)).
+    The accumulator must emit **all** buffered data and **fully reset**
+    its internal state so it is indistinguishable from a freshly
+    constructed instance.  This is what makes epoch boundaries safe for
+    replay: the next epoch starts from clean state.
+    The only built-in operator that intentionally stalls instead of
+    flushing is {py:class}`~zephon.ops.Batch` with `drop_last=True`.
+    Other operators must flush to a fresh state at the sentinel.  See
+    [Flush sentinels and accumulator stalling](#flush-sentinels-and-accumulator-stalling)
+    below.
 - **`has_pending_data()`**: returns whether the accumulator has buffered
   data that would be emitted on `flush()`.  The runner uses this to avoid
-  premature termination.
+  premature termination and to detect
+  [stalling](#flush-sentinels-and-accumulator-stalling).
 
-`flush()` is also deterministic: it is called exactly once when the stream
-ends, and because the accumulator's internal state is fully determined by
-the elements it has seen, the flushed micro-batch is reproducible.
+`flush()` is deterministic: its output depends only on the elements the
+accumulator has seen, so the flushed micro-batch is reproducible.
 
 This interface is all a runner needs.  The runner calls `push_many` each
 time new elements arrive, dispatches any returned micro-batches to workers,
@@ -344,8 +357,8 @@ stateful.  If multiple workers each maintained their own bins, bin
 assignment would depend on which worker sees which element first, that
 is, on scheduling timing.
 
-Instead, all bin state lives in the `PackingAccumulator`, which runs on the
-accumulator, which runs serially.  It receives elements in stream order and
+Instead, all bin state lives in the `PackingAccumulator`, which runs
+serially on the pump thread.  It receives elements in stream order and
 runs first-fit or best-fit bin assignment without any parallelism.  In the
 current implementation, the accumulator also assembles the packed payloads
 and emits finished records, making `process_many` a passthrough.  The key
@@ -369,6 +382,14 @@ together.  This is essential for
 [elastic determinism](determinism.md#lanes-zephons-approach): each lane's
 packing decisions are independent of how many GPUs are in use.
 
+Note that bin state is **history-dependent**: which bins exist and their
+remaining capacity depends on the full sequence of inputs the packer has
+seen, not just the samples currently in the bins.  This has important
+implications for checkpointing — evicting a chunk whose samples shaped
+the current bin state would break replay.  See
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction) for how
+flush sentinels solve this by periodically resetting the accumulator.
+
 ---
 
 ## Example: data-derived seeds in the shuffle buffer
@@ -390,6 +411,94 @@ The shuffle buffer uses a `CountingAccumulator` with `max_batch` set to the
 full `buffer_size`, ensuring deterministic micro-batch boundaries.  The
 data-derived seed then makes the permutation within each micro-batch
 reproducible.
+
+## Flush sentinels and accumulator stalling
+
+Non-monotonic pipelines (those with packing, shuffling, or mixture
+correction) use **flush sentinels** to create epoch boundaries for safe
+checkpoint eviction.  Every `flush_every_k_chunks` chunks per lane, the
+engine injects a sentinel that triggers `flush(reset=True)` on
+each history-dependent accumulator.  For the full motivation and eviction
+model, see [Epoch-Based Eviction](checkpointing.md#epoch-based-eviction).
+
+This section covers the accumulator side: which accumulators are flushed,
+what "fully reset" means, and the stalling mechanism.
+
+### Which accumulators are flushed
+
+The runner calls `flush(reset=True)` on **every** accumulator
+when a flush sentinel arrives, unless the operator sets
+`stall_on_epoch_boundary=True` (see [below](#stalling-stall_on_epoch_boundary)).
+For history-dependent accumulators (`preserves_cursor_order=False`) this
+flush is critical — it resets state so the next epoch can replay
+independently.  For order-preserving accumulators, the flush is harmless
+(a no-op or an empty drain) and only the epoch-floor bookkeeping differs.
+
+| Accumulator | Behavior at sentinel | Why |
+|---|---|---|
+| `PackingAccumulator` | Flushed (emits padded partial bins, resets all bin state) | Bin state is history-dependent |
+| `EnsureMixtureAccumulator` | Flushed | SWRR deficit state is history-dependent and must reset at the epoch boundary for replay after eviction |
+| `ShuffleBuffer` (via `CountingAccumulator`) | Flushed (drains buffer) | Buffer contents span chunk boundaries |
+| `CountingAccumulator` | Flushed (no-op: stateless grouping) | Flush is harmless; returns whatever is buffered |
+| `BatchAccumulator` (`drop_last=False`) | Flushed (emits partial batch) | Flush is harmless; partial batch is acceptable |
+| `BatchAccumulator` (`drop_last=True`) | Stalled | Cannot emit partial batches; this is the only built-in stalling special case |
+| `PassthroughAccumulator` | Flushed (no-op: no state) | `flush()` returns `[]` |
+
+### What "fully reset" means
+
+After `flush(reset=True)`, the accumulator must be
+indistinguishable from a freshly constructed instance.  All internal
+buffers, counters, and derived state must be cleared.  For the packing
+accumulator, this means all bins are emptied and partially filled bins are
+emitted with padding.  For the mixture corrector, SWRR deficit weights are
+reset.  This guarantee is what allows the next epoch to replay
+independently from a clean state.
+
+### Stalling: `stall_on_epoch_boundary`
+
+Stalling is intentionally narrow in the current design.  Zephon only
+supports it for {py:class}`~zephon.ops.Batch` with `drop_last=True`.
+
+Why the restriction exists:
+
+- For a general stalled operator, the effective reset point is later than
+  the stored epoch boundary.
+- After eviction, replay would need the cross-boundary consumption state
+  that determined that delayed reset point.
+- Zephon checkpoints inflight chunks, epoch boundaries, and replay
+  cursors, but it does **not** checkpoint a general operator replay
+  capsule.
+
+So a non-Batch operator that wants to stall would need additional
+replay-specific state to make restore exact.  The runtime rejects that
+configuration today.
+
+`Batch(drop_last=True)` is the special case that still works:
+
+- it preserves input order
+- it only emits complete batches
+- the planner inserts `ReplayFilter` immediately before `Batch`
+- the consumer-visible checkpoint cut is therefore between complete
+  batches, so the live Batch buffer is empty at the replay cursor
+
+Live execution can still produce a cross-epoch batch such as
+`[old, old, new]` before the sentinel is released.  That is expected.
+What matters is that on resume the pre-cursor prefix is filtered *before*
+Batch, and Batch rebuilds the suffix from an empty buffer at the same
+batch boundary.
+
+When the runner sees a flush sentinel for a supported stalling accumulator
+with pending data, it skips the mid-stream flush and holds the sentinel
+behind the buffered data.  The sentinel is released once the accumulator's
+carry has drained enough that `try_epoch_reset()` succeeds.
+
+Operators that do **not** opt into the supported Batch stalling path must
+fully flush at the sentinel.  If `flush(reset=True)` returns
+while `has_pending_data()` is still `True`, the flush contract has been
+violated and the runner raises.  Leaving residual cross-boundary state
+would break the checkpoint/replay contract.
+
+---
 
 ## User-defined operators
 
@@ -435,7 +544,9 @@ serially in the accumulator, with an optional parallel
   first data).
 - **`push(state, items)`**: called serially for each incoming
   micro-batch.  Returns `(new_state, outputs)`.
-- **`flush(state)`**: called on stream end to emit any buffered items.
+- **`flush(state)`**: called at end-of-stream to emit remaining buffered
+  items.  In non-monotonic pipelines, also called mid-stream at epoch
+  boundaries; state is re-initialized afterward via `init_state()`.
 - **`should_flush(state)`**: optional early-flush predicate.
 
 ```python

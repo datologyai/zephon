@@ -90,7 +90,7 @@ GPU 7 ─┘ (TP peers)
 
 This is a deliberate trade-off: each TP peer does redundant I/O and
 preprocessing, but the design stays simple and fully decentralised.  In
-practice, data loading is rarely the bottleneck in model-parallel training
+practice, data loading is typically not the bottleneck in model-parallel training
 because forward/backward computation and all-reduce dominate wall-clock time.
 
 ### FSDP, DDP, and HSDP

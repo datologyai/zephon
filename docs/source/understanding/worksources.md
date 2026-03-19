@@ -13,7 +13,7 @@ In a training run, the **curriculum** is the global ordering of training
 samples.  Some data loaders treat the curriculum as a byproduct of how data happens to be
 stored and partitioned.  In Zephon, the curriculum is an explicit concept
 owned by the WorkSource.
-These choice of curriculum (potentially) affects what the model learns.  
+The choice of curriculum affects what the model learns.
 By placing it in a dedicated component, it
 is easy to inspect, configure, checkpoint, and eventually swap out
 without touching any of the downstream processing logic.
@@ -156,7 +156,7 @@ The component grouping also enables downstream operators like `ensure_mixture`
 to know which mixture component a sample belongs to, even after
 transformations like tokenization or packing have altered sample boundaries.
 
-Chunks also play a key role in reudcing checkpointing time.  Because the Engine tracks
+Chunks also play a key role in reducing checkpointing time.  Because the Engine tracks
 progress at chunk granularity, only the small number of chunks currently
 in flight need to be saved and replayed on resume, not the entire
 history of consumed samples.   See

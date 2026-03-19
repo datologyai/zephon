@@ -1052,3 +1052,149 @@ class TestObsoleteComponentDraining:
             # (unless we're at the very end of emissions)
             # This is a soft check - the main point is that B appears in the output
             assert b_emitted >= 1, f"Expected at least 1 B sample, got {b_emitted}"
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream flush: flush(reset=True) must reset state
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureMixtureAccumulatorMidStreamFlush:
+    """Verify that flush(reset=True) resets SWRR state.
+
+    After a mid-stream flush the accumulator must be indistinguishable from
+    a freshly constructed instance.  This is required for correctness when
+    flush sentinels fire between epochs: on checkpoint/restore the
+    accumulator is rebuilt from scratch (no SWRR history), so the live run
+    must match by resetting at the same boundary.
+    """
+
+    def test_mid_stream_flush_resets_swrr_state(self) -> None:
+        """After flush(reset=True), output must match a fresh accumulator.
+
+        Epoch 1: push 20 records (component 0 only) → builds SWRR history.
+        Mid-stream flush.
+        Epoch 2: push 10 records (50/50 components 0 and 1).
+
+        A fresh accumulator given only epoch 2 data should produce identical
+        output.  If SWRR history from epoch 1 leaks, the ordering diverges.
+        """
+        mixture: dict[int, float] = {0: 0.5, 1: 0.5}
+
+        # --- live accumulator: epoch 1 + flush + epoch 2 ---
+        live_acc = _make_accumulator_with_chunk_mixture(mixture, max_buffer_size=50)
+        epoch1 = [_rec(i, component_id=0, chunk=0) for i in range(20)]
+        live_acc.push_many(epoch1)
+        live_acc.flush(reset=True)
+
+        epoch2 = []
+        for i in range(10):
+            epoch2.append(_rec(100 + i, component_id=i % 2, chunk=1))
+        live_ready = live_acc.push_many(epoch2)
+        live_ready.extend(live_acc.flush())
+        live_output = _flatten_ready(live_ready)
+
+        # --- fresh accumulator: only epoch 2 ---
+        fresh_acc = _make_accumulator_with_chunk_mixture(mixture, max_buffer_size=50)
+        fresh_ready = fresh_acc.push_many(epoch2)
+        fresh_ready.extend(fresh_acc.flush())
+        fresh_output = _flatten_ready(fresh_ready)
+
+        # Ordering must be identical — stale SWRR state must not influence
+        # epoch 2 selection.
+        live_ids = [r.meta.sample_id for r in live_output]
+        fresh_ids = [r.meta.sample_id for r in fresh_output]
+        assert live_ids == fresh_ids, (
+            f"SWRR state leaked across mid-stream flush.\n"
+            f"  live (with epoch 1 history):  {live_ids}\n"
+            f"  fresh (no history):           {fresh_ids}"
+        )
+
+    def test_mid_stream_flush_resets_emission_counters(self) -> None:
+        """After flush(reset=True), emitted_by_component and
+        total_emitted must be zero (fresh state)."""
+        acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=50)
+        records = [_rec(i, component_id=i % 2, chunk=0) for i in range(10)]
+        acc.push_many(records)
+
+        # Verify counters are non-zero before flush
+        lane_state = acc._lanes[0]
+        assert lane_state.total_emitted > 0
+
+        acc.flush(reset=True)
+
+        # After mid-stream flush, counters must be reset
+        lane_state = acc._lanes[0]
+        assert lane_state.total_emitted == 0.0, (
+            f"total_emitted should be 0 after mid-stream flush, "
+            f"got {lane_state.total_emitted}"
+        )
+        assert all(v == 0.0 for v in lane_state.emitted_by_component.values()), (
+            f"emitted_by_component should be zeroed after mid-stream flush, "
+            f"got {dict(lane_state.emitted_by_component)}"
+        )
+
+    def test_mid_stream_flush_produces_fresh_equivalent_state(self) -> None:
+        """After flush(reset=True), internal state must match a fresh accumulator.
+
+        This is the enforcement test for the reset contract: if someone adds
+        a new stateful field to _LaneState, this test will catch it if
+        flush() forgets to reset it.
+        """
+        from zephon.ops.ensure_mixture import _LaneState
+
+        mixture: dict[int, float] = {0: 0.7, 1: 0.3}
+        acc = _make_accumulator_with_chunk_mixture(mixture, max_buffer_size=50)
+
+        # Build up state across multiple chunks
+        records = [_rec(i, component_id=i % 2, chunk=0) for i in range(10)]
+        records += [_rec(i + 10, component_id=i % 2, chunk=1) for i in range(10)]
+        acc.push_many(records)
+
+        # Verify state is non-trivial before flush
+        lane_state = acc._lanes[0]
+        assert lane_state.total_emitted > 0
+        assert lane_state.current_chunk_id is not None
+        assert lane_state.swrr is not None
+
+        acc.flush(reset=True)
+
+        # After mid-stream flush, every field on _LaneState must match
+        # a freshly constructed instance (except buffers, which were
+        # drained by the flush itself — they should be empty).
+        lane_state = acc._lanes[0]
+        fresh = _LaneState()
+
+        # Compare all fields.  If a new field is added to _LaneState and
+        # flush() doesn't reset it, this will fail.
+        for field_name in [f.name for f in lane_state.__dataclass_fields__.values()]:
+            live_val = getattr(lane_state, field_name)
+            fresh_val = getattr(fresh, field_name)
+            # Buffers are drained (empty deques remain keyed by component)
+            # rather than replaced, so check that no actual records remain.
+            if field_name == "buffers":
+                has_records = any(len(d) > 0 for d in live_val.values())
+                assert not has_records, (
+                    f"_LaneState.buffers should have no records after flush, "
+                    f"got {live_val}"
+                )
+                continue
+            if field_name == "multi_component_buffer":
+                assert len(live_val) == 0, (
+                    f"_LaneState.multi_component_buffer should be empty "
+                    f"after flush, got {live_val}"
+                )
+            else:
+                assert live_val == fresh_val, (
+                    f"_LaneState.{field_name} not reset by flush.\n"
+                    f"  after flush: {live_val!r}\n"
+                    f"  fresh:       {fresh_val!r}"
+                )
+
+
+def test_stall_trait_default_is_false() -> None:
+    """EnsureMixture defaults to stall_on_epoch_boundary=False (flush)."""
+    from zephon.ops.ensure_mixture import EnsureMixture
+
+    op = EnsureMixture()
+    assert op.traits().stall_on_epoch_boundary is False

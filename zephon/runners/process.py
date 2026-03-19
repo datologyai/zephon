@@ -1317,6 +1317,9 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
             return
 
         # Sentinel batches bypass workers — create result inline.
+        # _post_schedule_batch drains _local_results via _handle_result,
+        # which respects deterministic sequence ordering — sentinels cannot
+        # overtake prior worker results.
         if is_sentinel(batch[0]):
             seq = state.next_seq
             state.next_seq += 1

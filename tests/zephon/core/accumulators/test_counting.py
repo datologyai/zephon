@@ -90,6 +90,31 @@ def test_flush_emits_partial_batches() -> None:
         assert len(batch) == 1
 
 
+def test_flush_reset_produces_fresh_equivalent_state() -> None:
+    """After flush(reset=True), internal state must match a fresh instance.
+
+    CountingAccumulator's only state is _buffers and _first_ts_ns, both of
+    which are cleared by flush().  This test ensures that flush(reset=True)
+    actually produces fresh-equivalent state — catching future fields that
+    might be added without corresponding reset logic.
+    """
+    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+
+    # Build up state across multiple lanes
+    acc.push_many([_rec(0, i) for i in range(5)])
+    acc.push_many([_rec(1, i) for i in range(3)])
+    assert acc.has_pending_data()
+
+    acc.flush(reset=True)
+
+    fresh = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+
+    # Compare all instance attributes (excluding callables/config)
+    assert not acc.has_pending_data()
+    assert acc._buffers == fresh._buffers
+    assert acc._first_ts_ns == fresh._first_ts_ns
+
+
 def test_engine_sample_keying() -> None:
     """EngineSample tuples are keyed by lane_id at index 1."""
     acc = CountingAccumulator[tuple](max_batch=2, key_fn=lane_of)

@@ -41,6 +41,7 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
         self._state: S | None = None
         self._initialized = False
         self._flushed = False
+        self._has_pending = False
 
     def push_many(
         self, items: Sequence[SampleRecord]
@@ -53,35 +54,54 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
         items_list = items if isinstance(items, list) else list(items)
         if not items_list:
             return result
+        if self._flush_fn is not None:
+            self._has_pending = True
         self._state, outputs = self._push_fn(self._state, items_list)
 
         if self._should_flush_fn and self._should_flush_fn(self._state):
             flush_outputs = self._flush_fn(self._state) if self._flush_fn else []
             self._state = self._init_state()
+            self._has_pending = False
             outputs.extend(flush_outputs)
 
         if outputs:
             result.append((outputs, len(outputs)))
         return result
 
-    def flush(self) -> list[ReadyBatch[SampleRecord]]:
-        """Called at end-of-stream to emit any remaining buffered items."""
-        self._flushed = True
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
+        """Emit any remaining buffered items.
+
+        Args:
+            reset: If True (epoch boundary), re-initialize state so the
+                accumulator is ready for the next epoch. If False (default),
+                this is the final flush — mark as done and discard state.
+        """
+        result: list[ReadyBatch[SampleRecord]] = []
         if self._flush_fn and self._initialized and self._state is not None:
             outputs = self._flush_fn(self._state)
-            self._state = None
             if outputs:
-                return [(outputs, len(outputs))]
-        return []
+                result.append((outputs, len(outputs)))
+
+        if not reset:
+            # Final flush — mark as done, discard state.
+            self._flushed = True
+            self._state = None
+        else:
+            # Mid-stream flush — re-initialize for the next epoch.
+            # _initialized stays True (init_state already called).
+            # _flushed stays False (accumulator continues to accept data).
+            self._state = self._init_state()
+        self._has_pending = False
+
+        return result
 
     def has_pending_data(self) -> bool:
-        """Return True if state might contain buffered data."""
+        """Return True if the accumulator may still need a flush."""
         if self._flushed:
             return False
         if not self._initialized or self._state is None:
             return False
-        # If there's a flush function, assume state might have pending data
-        return self._flush_fn is not None
+        return self._has_pending
 
 
 class StatefulTransformOp(DefaultSetup, Generic[S]):

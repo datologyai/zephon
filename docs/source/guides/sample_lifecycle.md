@@ -41,12 +41,13 @@ Helper builders (in `zephon/core/children.py`):
 - **Per-offset completion (general path)**: `_offset_done[lane][chunk_id]` is a bitset of offsets that have seen `is_last_child=True`. `_offset_done_count` tracks how many offsets are closed per chunk. These are runtime-only (not checkpointed).
 - **Eviction**:
   - **Simple path** (`preserves_cursor_order=True`): evicts all inflight chunks with `cid < max_chunk_id` because tail emission is monotone and each output has a single contributor.
-  - **General path** (`preserves_cursor_order=False`): evicts chunks in increasing `chunk_id` order once `done_count == len(chunk)`. The earliest incomplete chunk blocks eviction of later chunks to avoid evicting needed base data.
+  - **Epoch-based path** (`preserves_cursor_order=False`): chunks are grouped into epochs by flush sentinels (injected every `flush_every_k_chunks` chunks per lane). An epoch is evicted atomically once all offsets in all its chunks are closed. Before the first sentinel fires, a fallback "all below epoch floor" check enables eviction of early chunks (important for thread/process runners where the pump runs ahead). The replay cursor's chunk is pinned — its epoch is never evicted until the cursor advances past it.
 - **Lane progress**: `_lane_progress[lane] = LanePtr(front_chunk, completed_offsets_in_front_chunk)` for fairness diagnostics and RR seeding.
 - **Replay sentinel**: `_lane_last_cursor[lane] = record_cursor` (last delivered record for that lane).
 
 State persisted in `state_dict()` (one shard per worker, merged across ranks):
 - Inflight chunks per lane (`WorkChunk.state_dict()`), lane progress (`LanePtr`), next chunk id per lane, `WorkSource` state per lane and global, RR pointer map, last round metadata, checkpoint reload count, and **one replay cursor per lane** (`SampleCursorKey` or `None`).
+- **Epoch boundaries** (non-monotonic only): list of sentinel `chunk_id`s per lane marking flush points.  This can include a trailing boundary just beyond the last inflight chunk, preserving the flush point between replayed data and newly fetched data.  On restore, sentinels are re-injected at these positions during Phase 1 so accumulators flush at the same points as the original run.
 - **Not persisted**: `_offset_done` bitmaps and counts; they are rebuilt by deterministic replay of inflight chunks after restore.
 
 On `load_state_dict()`:
@@ -62,16 +63,17 @@ On `load_state_dict()`:
 - **Safe default rule**: Operators that drop items SHOULD always emit tombstones, regardless of `preserves_cursor_order`. An operator cannot know at build time which notify path the plan will use (it depends on the AND of all operators' traits). Tombstones are harmless in the monotone path (notified then skipped) and required in the general path (close per-offset bitmaps). Always emitting tombstones is correct in all configurations.
 
 ### Eviction details and why it is safe
-- **Simple path assumptions**: Tail emission per lane is monotone in `SampleCursor` and each output has exactly one contributor (no packing/tombstones). Under these assumptions, seeing chunk `N` implies no future outputs will reference chunks `< N`, so evicting `cid < N` is safe and no bitmaps are required.
-- **General path trigger**: a chunk can evict once **every** offset in that chunk has a closing contributor or tombstone (`is_last_child=True`). The engine tracks this with per-chunk offset bitmaps plus a popcount.
-- **Order**: eviction walks chunk ids in ascending order and stops at the first incomplete chunk. Later chunks are not evicted until all earlier ones are complete, keeping the inflight window contiguous and avoiding “holes” in buffers that might still reference earlier chunks.
-- **Replay/checkpoint**: only inflight chunks are persisted. Evicted chunks never replay; on restore, inflight chunks re-stream their contributors/tombstones to rebuild the bitmaps, so eviction state is recovered deterministically.
-- **Safety**: forgetting a closing contributor/tombstone for an offset prevents eviction of that chunk (and later ones) instead of silently dropping needed data—memory pressure will surface the bug.
+- **Monotone path assumptions**: Tail emission per lane is monotone in `SampleCursor` and each output has exactly one contributor (no packing/tombstones). Under these assumptions, seeing chunk `N` implies no future outputs will reference chunks `< N`, so evicting `cid < N` is safe and no bitmaps are required.
+- **Epoch-based path**: Safe eviction requires two conditions: (1) all offsets in the chunk are closed (per-offset bitmaps), and (2) no accumulator state influenced by the chunk affects future output. Condition 2 is guaranteed by epoch boundaries — flush sentinels reset history-dependent accumulators, so cross-epoch eviction is safe. Chunks within an epoch are evicted atomically.
+- **Cursor pinning**: the replay cursor's chunk is never evicted, even if both conditions are met, to ensure the ReplayFilter can find its target on resume.
+- **Before first sentinel**: a fallback “all below epoch floor” atomic check enables eviction before any epoch boundary exists. This matters for thread/process runners where the pump runs ahead of the consumer.
+- **Replay/checkpoint**: only inflight chunks (plus epoch boundary positions) are persisted. Evicted chunks never replay; on restore, inflight chunks re-stream their contributors/tombstones to rebuild the bitmaps, and sentinels are re-injected at stored positions, so eviction state is recovered deterministically.
+- **Safety**: forgetting a closing contributor/tombstone for an offset prevents eviction of that chunk (and later ones) instead of silently dropping needed data — memory pressure will surface the bug.
 
 ## Replay and checkpoint/restart behavior
-- **Stored state per lane**: The last delivered record cursor (a sentinel), plus inflight chunks and lane pointers. No high-watermark math is used.
+- **Stored state per lane**: The last delivered record cursor (a sentinel), plus inflight chunks, lane pointers, and epoch boundary positions (non-monotonic only). No high-watermark math is used.
 - **ReplayFilter** (auto-inserted before batching or at the tail) drops records until it sees the sentinel again (inclusive), then emits the suffix. Targets initialize to `None` (emit everything) if no prior progress.
-- **Non-monotone safe**: Equality-based replay works even if tail emission order is non-monotone in `SampleCursor` (e.g., cross-chunk shuffle or packing).
+- **Non-monotonic safe**: Equality-based replay works even if tail emission order is non-monotonic in `SampleCursor` (e.g., cross-chunk shuffle or packing).
 - **Evicted sentinels**: If the sentinel’s chunk is already evicted at checkpoint time, `_publish_replay_snapshot()` sets the replay target to `None` because that record will not reappear; emitting everything on resume is then correct.
 - **Multi-lane independence**: Each lane replays independently. Cross-lane interleave may differ after remap, but each lane’s suffix matches the crash-free run.
 - **Batches**: For a `SampleBatch`, the replay sentinel is the last record’s cursor; the batch containing the checkpoint boundary is dropped entirely on resume.
@@ -115,10 +117,16 @@ On `load_state_dict()`:
 - **Stateful transforms** (`Pipeline.stateful_transform()`):
   - Set `preserves_cursor_order=False` when your push/transform function reorders items (shuffle) or packs multiple records into one. The default is `True`, which selects the monotone notify path. If your transform actually reorders, this can lead to premature chunk eviction.
   - If your transform drops items (e.g., dedup filtering in `push_fn` or length filtering in `transform_fn`), those drops happen inside the operator and do NOT automatically emit tombstones. You must track which items were dropped and emit tombstone records from `transform_fn` or `push_fn`. Alternatively, perform filtering in a preceding `MapTransform` with `drop_none=True` which handles tombstones automatically.
+  - If your transform buffers across chunk boundaries and cannot meaningfully flush mid-stream, note that Zephon does not currently support intentional stalling for custom stateful transforms. Only `Batch(drop_last=True)` uses stalling today; general stalled operators would need additional replay-capsule support.
 - **Map-style transforms**:
   - If you only mutate payloads and keep a 1:1 mapping, reuse the incoming `SampleMeta`. The default `contribution_refs()` handles eviction/replay correctly.
   - `MapTransform` with `drop_none=True` automatically emits tombstones for every closing contributor in a dropped item (both `SampleRecord` and `SampleBatch`). No manual tombstone handling is needed when using the `Pipeline.map_transform()` API.
   - Custom operators that conditionally drop records must emit tombstones for every closing contributor (`is_last_child=True`) in the dropped item's `contribution_refs()`. See `MapTransform._tombstones_for()` for reference.
+- **Flush contract** (for operators with `preserves_cursor_order=False`):
+  - `flush(reset=True)` must emit all buffered data and **fully reset** internal state so the accumulator is indistinguishable from a freshly constructed instance. This is called at epoch boundaries (flush sentinels) to guarantee clean replay.
+  - `flush()` (default `reset=False`) is called at end of stream. Semantics are operator-defined (e.g., `Batch` with `drop_last=True` discards partial batches).
+  - The only supported intentional stalling case is `Batch(drop_last=True)`. For general operators, relying on `stall_on_epoch_boundary=True` is not supported today because replay after eviction would need extra cross-boundary state beyond the current checkpoint payload.
+  - For non-Batch operators, `has_pending_data()` must be `False` after `flush(reset=True)`. If pending data remains, Zephon treats that as a contract violation and raises.
 - **Shuffle/cross-chunk buffering**:
   - Reordering is allowed; replay remains correct. Still respect the contributor/tombstone contract so eviction can safely remove chunks whose offsets are fully closed.
 - **Closing contributors after reordering/packing**:
@@ -128,7 +136,7 @@ On `load_state_dict()`:
   - When dropping an input that was the last child for a base offset, emit a tombstone to keep eviction unblocked; batching and packing must forward tombstones unchanged.
   - Helpers:
     - `SampleCursor.base_offset` exposes the `(chunk_id, chunk_offset)` pair used for eviction bookkeeping; use it instead of rolling your own tuple construction.
-    - Operators that only reorder (no drops/inserts) can reuse a shared helper to rewrite `is_last_child` onto the last occurrence per base offset; the helper must not be used when dropping closers (emit tombstones instead).  Currently lives in the shuffle buffer impl, but might wanna move for the packing impl.
+    - Operators that only reorder (no drops/inserts) can reuse a shared helper to rewrite `is_last_child` onto the last occurrence per base offset; the helper must not be used when dropping closers (emit tombstones instead).  Currently lives in the shuffle buffer implementation.
 - **Avoiding pitfalls**:
   - Do not generate multiple `is_last_child=True` contributors for the same base offset.
   - Do not pick a non-deterministic `primary_cursor` for packed outputs.
@@ -147,7 +155,7 @@ On `load_state_dict()`:
 - Packer creates `R0 = pack(f10_0a, f10_0b)` with contributors: `f10_0a` (`is_last_child=False`), `f10_0b` (`True`, closes (10,0)).
 - Packer creates `R1 = pack(f10_1, f11_1)` with contributors both marked `True` (closes (10,1) and (11,1)).
 - Filter emits a tombstone for `(11,0)` using `tombstone_meta(ref_for_11_0, lane_id=0)`.
-- Engine sees closures for all offsets in chunks 10 and 11; evicts both in order. Replay stores only the record-level last cursor; suffix replay works even though emission order is non-monotone in cursor space.
+- Engine sees closures for all offsets in chunks 10 and 11; evicts both in order. Replay stores only the record-level last cursor; suffix replay works even though emission order is non-monotonic in cursor space.
 
 ### Example: dedup filter dropping a last contributor
 - Suppose `(12,4)` would produce a single child marked `is_last_child=True`, but a dedup filter decides to drop it.

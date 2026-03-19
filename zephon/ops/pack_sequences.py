@@ -117,7 +117,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
         return ready
 
-    def flush(self) -> list[ReadyBatch[SampleRecord]]:
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
         """Emit any remaining partially-filled bins."""
         ready: list[ReadyBatch[SampleRecord]] = []
         for lane_id, bins in self._bins.items():

@@ -55,9 +55,17 @@ class BaseOperatorState:
     )
     parallelism: int = field(init=False)
     accumulator_impl: Accumulator[RunnerStreamIn] = field(init=False)
+    _preserves_cursor_order: bool = field(init=False)
+    _stall_on_epoch_boundary: bool = field(init=False)
+    _epoch_floor: int | None = field(init=False, default=None)
+    _stalled_sentinels: list[tuple[SampleRecord, int]] = field(
+        init=False, default_factory=list
+    )
 
     def __post_init__(self) -> None:
         traits = self.node.op.traits()
+        self._preserves_cursor_order = bool(traits.preserves_cursor_order)
+        self._stall_on_epoch_boundary = bool(traits.stall_on_epoch_boundary)
         self.parallelism = max(1, self.node.parallelism or traits.parallelism or 1)
         # Enforce parallelism=1 for operators that require serial state in deterministic mode
         if (
@@ -69,6 +77,29 @@ class BaseOperatorState:
             raise RuntimeError(
                 f"{op_name} operator must run with parallelism=1 in deterministic mode "
                 + "because it requires serial state (requires_serial_state=True)"
+            )
+        # Stalling at epoch boundaries is currently only supported for the
+        # built-in Batch(drop_last=True) operator.  Its replay story relies on
+        # Batch-specific properties: it only emits complete batches and the
+        # planner inserts ReplayFilter immediately before Batch.
+        if self._stall_on_epoch_boundary:
+            from zephon.ops.batch import Batch
+
+            if isinstance(self.node.op, Batch):
+                pass
+            else:
+                op_name = type(self.node.op).__name__
+                raise RuntimeError(
+                    f"{op_name}: stall_on_epoch_boundary=True is only supported "
+                    "for Batch(drop_last=True). Other stalled operators need "
+                    "replay capsule support (not yet implemented)."
+                )
+
+        if self._stall_on_epoch_boundary and not self._preserves_cursor_order:
+            op_name = type(self.node.op).__name__
+            raise RuntimeError(
+                f"{op_name}: stall_on_epoch_boundary=True requires "
+                "preserves_cursor_order=True."
             )
 
         base_ctx = dict(self.ctx_proto)
@@ -91,6 +122,62 @@ class BaseOperatorState:
             deterministic=self.deterministic,
             ctx=base_ctx,
         )
+
+    def _update_epoch_floor(self, elems: Sequence[RunnerStreamIn]) -> None:
+        """Track the minimum chunk_id that entered this operator.
+
+        Only tracked for ``preserves_cursor_order=False`` ops — order-preserving
+        ops (Batch, passthrough) don't have the cross-chunk state problem.
+        """
+        if self._preserves_cursor_order:
+            return
+        for e in elems:
+            cid: int | None = None
+            if isinstance(e, SampleRecord):
+                cid = e.meta.chunk_id
+            elif isinstance(e, SampleBatch):
+                for r in e.records:
+                    c = r.meta.chunk_id
+                    if self._epoch_floor is None or c < self._epoch_floor:
+                        self._epoch_floor = c
+                continue
+            if cid is not None and (
+                self._epoch_floor is None or cid < self._epoch_floor
+            ):
+                self._epoch_floor = cid
+
+    def reset_epoch_floor(self) -> None:
+        """Reset epoch floor after sentinel flush (new epoch starts)."""
+        self._epoch_floor = None
+
+    def _try_release_stalled_sentinels(
+        self, ready: list[tuple[list[RunnerStreamIn], int]]
+    ) -> None:
+        """Release stalled sentinels whose pre-boundary records have drained.
+
+        Processes sentinels FIFO.  For each, calls
+        ``accumulator.try_epoch_reset(boundary_cid)``.  If the reset succeeds
+        (no pre-boundary records remain and ordering state has been reset),
+        the sentinel is released downstream and ``_epoch_floor`` advances.
+        The first sentinel that cannot be released stops the walk.
+        """
+        while self._stalled_sentinels:
+            sentinel, boundary_cid = self._stalled_sentinels[0]
+            if not self.accumulator_impl.try_epoch_reset(boundary_cid):
+                break  # pre-boundary records still buffered
+            self._stalled_sentinels.pop(0)
+            ready.append(([sentinel], 0))
+            # Advance epoch floor now that the reset is committed.
+            if not self._preserves_cursor_order:
+                self._epoch_floor = boundary_cid
+
+    def _force_release_all_stalled_sentinels(
+        self, ready: list[tuple[list[RunnerStreamIn], int]]
+    ) -> None:
+        """Unconditionally release all stalled sentinels (end-of-stream)."""
+        for sentinel, _boundary_cid in self._stalled_sentinels:
+            ready.append(([sentinel], 0))
+        self._stalled_sentinels.clear()
 
     def reset_buffers(self) -> None:
         """Reset the accumulator by recreating it.
@@ -116,6 +203,49 @@ class BaseOperatorState:
         accumulator entirely and are emitted as individual ready batches.
         This ensures operators never see sentinels unless they create them.
 
+        Flush sentinels trigger ``accumulator.flush(reset=True)``
+        to drain buffered data before the sentinel passes downstream.
+        This is critical: if the sentinel overtakes buffered data,
+        downstream stateful operators see the epoch boundary before the
+        data, breaking deterministic replay.
+
+        Operators that set ``stall_on_epoch_boundary=True`` in their
+        traits opt out of the immediate mid-stream flush. When the
+        accumulator has pending data, the flush is skipped and the
+        sentinel is **stalled** — held in ``_stalled_sentinels`` until
+        the accumulator can reach a replay-safe reset point. In the
+        current built-ins, this path is only supported for
+        ``Batch(drop_last=True)``.
+
+        Operators without the trait must fully flush at epoch boundaries.
+        If ``flush(reset=True)`` returns while ``has_pending_data()``
+        is still True, the flush contract has been violated and the runner
+        raises. This keeps unsupported delayed-reset behavior from slipping
+        past the checkpoint/replay contract.
+
+        Stalling semantics ("delayed but guaranteed reset"):
+
+        - The sentinel is held behind buffered data.
+        - After each ``push_many()`` call, ``try_epoch_reset()`` checks
+          whether all pre-boundary records have left the buffer.
+        - Once they have, the accumulator resets its epoch-dependent
+          ordering state and the sentinel is released downstream.
+
+        Stalling is currently only supported for ``Batch(drop_last=True)``.
+        Its replay story relies on Batch-specific properties: the consumer
+        cursor is batch-aligned, the live Batch buffer is empty at every
+        checkpoint cut, and the planner inserts ``ReplayFilter`` immediately
+        before Batch.  Other stalled operators would need a replay capsule to
+        reconstruct cross-epoch consumption state after eviction.
+
+        For ``preserves_cursor_order=False`` ops, flush sentinels also
+        advance the epoch floor to ``_boundary_cid``.
+
+        Elements are processed in order — regular elements before a flush
+        sentinel enter ``push_many()`` before the flush fires.  This
+        preserves the invariant that pre-sentinel data is in the old epoch
+        and post-sentinel data starts a new epoch.
+
         Args:
             elems: Input elements to accumulate.
             force: If True, flush all remaining buffered elements.
@@ -128,27 +258,87 @@ class BaseOperatorState:
         if not elems and not force:
             return ready
 
-        # Separate sentinels from regular elements before the accumulator.
-        sentinels: list[RunnerStreamIn] = []
-        regular: list[RunnerStreamIn] = []
-        if elems:
-            for e in elems:
-                if is_sentinel(e):
-                    sentinels.append(e)
+        # Collect non-sentinel elements between sentinel boundaries.
+        # When a sentinel is encountered, the preceding regular elements
+        # are flushed through push_many() first so they enter the
+        # accumulator before the sentinel triggers its flush/stall.
+        pre_sentinel: list[RunnerStreamIn] = []
+
+        for e in elems:
+            if is_sentinel(e):
+                # Flush preceding regular elements into the accumulator.
+                if pre_sentinel:
+                    self._update_epoch_floor(pre_sentinel)
+                    batches = self.accumulator_impl.push_many(pre_sentinel)
+                    ready.extend(batches)
+                    self._try_release_stalled_sentinels(ready)
+                    pre_sentinel = []
+
+                # Tombstones contribute to epoch floor tracking — their chunk_id
+                # must constrain eviction even though they bypass the accumulator.
+                # Flush sentinels have dummy chunk_id=0 and must NOT affect the floor.
+                if not e.meta.is_flush_sentinel:
+                    self._update_epoch_floor([e])
+
+                if e.meta.is_flush_sentinel:
+                    boundary_cid_tag = e.meta.tags.get("_boundary_cid")
+                    bcid = int(boundary_cid_tag) if boundary_cid_tag is not None else 0
+                    stalled = False
+
+                    if (
+                        self._stall_on_epoch_boundary
+                        and self.accumulator_impl.has_pending_data()
+                    ):
+                        # Explicit stall: skip flush, preserve buffer across
+                        # epoch boundary.  The sentinel is held behind the
+                        # buffered data and released via try_epoch_reset()
+                        # once all pre-boundary records have been emitted.
+                        self._stalled_sentinels.append((e, bcid))
+                        stalled = True
+                    else:
+                        # Flush accumulator to drain buffered data before the
+                        # sentinel passes downstream.
+                        flushed = self.accumulator_impl.flush(reset=True)
+                        ready.extend(flushed)
+
+                        if self.accumulator_impl.has_pending_data():
+                            op_name = type(self.node.op).__name__
+                            raise RuntimeError(
+                                f"{op_name}: flush(reset=True) left "
+                                "pending data at an epoch boundary. "
+                                "Intentional stalling is only supported for "
+                                "Batch(drop_last=True); other operators must "
+                                "fully flush and reset at the sentinel."
+                            )
+                        else:
+                            ready.append(([e], 0))
+
+                    # Epoch floor advance (preserves_cursor_order=False only).
+                    # Only advance when the sentinel actually passes through.
+                    # When stalled, the floor stays at the old value so that
+                    # accum_floor blocks eviction until the delayed reset.
+                    if not stalled and not self._preserves_cursor_order:
+                        if boundary_cid_tag is not None:
+                            self._epoch_floor = bcid
+                        else:
+                            self.reset_epoch_floor()
                 else:
-                    regular.append(e)
+                    # Non-flush sentinels (tombstones) pass through immediately.
+                    ready.append(([e], 0))
+            else:
+                pre_sentinel.append(e)
 
-        # Push regular elements through accumulator
-        if regular:
-            ready.extend(self.accumulator_impl.push_many(regular))
+        # Process remaining regular elements after the last sentinel.
+        if pre_sentinel:
+            self._update_epoch_floor(pre_sentinel)
+            batches = self.accumulator_impl.push_many(pre_sentinel)
+            ready.extend(batches)
+            self._try_release_stalled_sentinels(ready)
 
-        # Flush remaining on force
+        # Force-flush on upstream close.
         if force:
             ready.extend(self.accumulator_impl.flush())
-
-        # Sentinels bypass the accumulator as individual ready batches.
-        for s in sentinels:
-            ready.append(([s], 0))
+            self._force_release_all_stalled_sentinels(ready)
 
         return ready
 
@@ -243,6 +433,21 @@ class StageRunnerBase(Generic[StateT], ABC):
         raise TypeError(
             "Passthrough stage received unsupported element " + f"{type(elem)!r}"
         )
+
+    def epoch_floor(self) -> int | None:
+        """Return the minimum epoch floor across all operator states.
+
+        The epoch floor is the lowest chunk_id that influenced any
+        ``preserves_cursor_order=False`` accumulator since the last sentinel
+        flush.  Chunks below this floor are safe to consider for eviction
+        (subject to the ``all_done`` bitmap check).
+        """
+        floor: int | None = None
+        for op_state in self.ops:
+            wm = op_state._epoch_floor
+            if wm is not None:
+                floor = min(floor, wm) if floor is not None else wm
+        return floor
 
     @abstractmethod
     def close(self, *, hard: bool = False) -> None:

@@ -23,7 +23,12 @@ def _mk_varlen_dataset(name: str, lengths: list[int]) -> Dataset:
     return Dataset.from_dict(name, {0: InMemoryShard(rows)})
 
 
-def test_pack_sequences_chunk_eviction() -> None:
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_pack_sequences_chunk_eviction(runner_kind: str) -> None:
     """Test that chunk eviction works correctly with PackSequences.
 
     Verifies that:
@@ -48,11 +53,10 @@ def test_pack_sequences_chunk_eviction() -> None:
         max_length=10, length_fn="length", algorithm="best_fit", num_bins=100
     )
     pipeline.options(
-        # Needs inline mode to inspect inflight_chunks_per_lane internal state.
         deterministic=True,
         max_workers=1,
-        default_stage_prefetch=0,
-        mtp_mode=False,
+        default_stage_prefetch=16,
+        runner=runner_kind,
     )
 
     # Collect all packed records and track contributors
@@ -99,7 +103,12 @@ def test_pack_sequences_chunk_eviction() -> None:
         )
 
 
-def test_pack_sequences_reproducibility() -> None:
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_pack_sequences_reproducibility(runner_kind: str) -> None:
     """Test that PackSequences produces deterministic output.
 
     Runs PackSequences multiple times with the same seed and verifies identical output.
@@ -132,7 +141,12 @@ def test_pack_sequences_reproducibility() -> None:
             shuffle_seed=seed,
             num_bins=100,  # Large enough to avoid premature flushing affecting determinism
         )
-        pipeline.options(deterministic=True, max_workers=1, default_stage_prefetch=0)
+        pipeline.options(
+            deterministic=True,
+            max_workers=1,
+            default_stage_prefetch=16,
+            runner=runner_kind,
+        )
 
         results: list[tuple[int, int, int]] = []
         for rec in pipeline:
@@ -181,8 +195,14 @@ def test_pack_sequences_reproducibility() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_pack_pipeline(ds: Dataset, chunk_size: int = 4) -> Pipeline:
-    """Build a deterministic inline pipeline with pack_sequences."""
+def _make_pack_pipeline(
+    ds: Dataset,
+    chunk_size: int = 4,
+    *,
+    runner: str = "inline",
+    flush_every_k_chunks: int | None = None,
+) -> Pipeline:
+    """Build a deterministic pipeline with pack_sequences."""
     work = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
@@ -198,16 +218,24 @@ def _make_pack_pipeline(ds: Dataset, chunk_size: int = 4) -> Pipeline:
         algorithm="best_fit",
         num_bins=100,
     )
-    pipeline.options(
+    opts: dict[str, Any] = dict(
         deterministic=True,
         max_workers=1,
-        default_stage_prefetch=0,
-        mtp_mode=False,
+        default_stage_prefetch=16,
+        runner=runner,
     )
+    if flush_every_k_chunks is not None:
+        opts["flush_every_k_chunks"] = flush_every_k_chunks
+    pipeline.options(**opts)
     return pipeline
 
 
-def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_pack_sequences_chunk_eviction_after_checkpoint(runner_kind: str) -> None:
     """Chunks must evict after checkpoint/restore with pack_sequences.
 
     Regression test for the issue where ReplayFilter drops the already-consumed
@@ -231,7 +259,7 @@ def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
     ds = mk_dataset("ckpt", {0: 20})
 
     # -- baseline: full run without checkpoint, verify eviction works ----------
-    baseline_pipe = _make_pack_pipeline(ds)
+    baseline_pipe = _make_pack_pipeline(ds, runner=runner_kind)
     baseline_records: list[SampleRecord] = []
     for rec in baseline_pipe:
         assert isinstance(rec, SampleRecord)
@@ -251,7 +279,7 @@ def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
     # have been consumed (via the packed record's contributors), but most chunks
     # still have incomplete bitmaps.  This maximises the number of inflight
     # chunks that will need tombstone-based bitmap rebuild on resume.
-    pipe1 = _make_pack_pipeline(ds)
+    pipe1 = _make_pack_pipeline(ds, runner=runner_kind)
     it = iter(pipe1)
     try:
         first_rec = next(it)
@@ -265,7 +293,7 @@ def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
     assert inflight_ckpt, "Checkpoint should have inflight chunks"
 
     # -- run 2: restore and drain ----------------------------------------------
-    pipe2 = _make_pack_pipeline(ds)
+    pipe2 = _make_pack_pipeline(ds, runner=runner_kind)
     pipe2.restore(ckpt)
 
     suffix: list[SampleRecord] = []
@@ -290,7 +318,14 @@ def test_pack_sequences_chunk_eviction_after_checkpoint() -> None:
     )
 
 
-def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint() -> None:
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint(
+    runner_kind: str,
+) -> None:
     """Checkpoint/restore must not duplicate samples from cross-chunk packed records.
 
     Setup (12 samples, chunk_size=4, length=3, max_length=10 → 3 per pack):
@@ -316,7 +351,7 @@ def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint() -> None:
     ds = mk_dataset("xchunk", {0: 12})
 
     # -- baseline: full run without checkpoint ---------------------------------
-    baseline_pipe = _make_pack_pipeline(ds)
+    baseline_pipe = _make_pack_pipeline(ds, runner=runner_kind)
     baseline_texts: list[list[str]] = []
     for rec in baseline_pipe:
         assert isinstance(rec, SampleRecord)
@@ -326,7 +361,7 @@ def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint() -> None:
     assert n_baseline == 4, f"Expected 4 packed records, got {n_baseline}"
 
     # -- run 1: consume 2 records → triggers cross-chunk eviction --------------
-    pipe1 = _make_pack_pipeline(ds)
+    pipe1 = _make_pack_pipeline(ds, runner=runner_kind)
     it = iter(pipe1)
     prefix_texts: list[list[str]] = []
     try:
@@ -350,7 +385,7 @@ def test_pack_sequences_cross_chunk_data_correctness_after_checkpoint() -> None:
     )
 
     # -- run 2: restore and drain ----------------------------------------------
-    pipe2 = _make_pack_pipeline(ds)
+    pipe2 = _make_pack_pipeline(ds, runner=runner_kind)
     pipe2.restore(ckpt)
 
     suffix_texts: list[list[str]] = []
@@ -384,8 +419,11 @@ def _make_varlen_pack_pipeline(
     max_length: int = 6,
     num_bins: int = 2,
     flush_strategy: str = "fullest",
+    *,
+    runner: str = "inline",
+    flush_every_k_chunks: int | None = None,
 ) -> Pipeline:
-    """Build a deterministic inline pipeline with variable-length packing."""
+    """Build a deterministic pipeline with variable-length packing."""
     work = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
@@ -402,58 +440,44 @@ def _make_varlen_pack_pipeline(
         num_bins=num_bins,
         flush_strategy=flush_strategy,
     )
-    pipeline.options(
+    opts: dict[str, Any] = dict(
         deterministic=True,
         max_workers=1,
-        default_stage_prefetch=0,
-        mtp_mode=False,
+        default_stage_prefetch=16,
+        runner=runner,
     )
+    if flush_every_k_chunks is not None:
+        opts["flush_every_k_chunks"] = flush_every_k_chunks
+    pipeline.options(**opts)
     return pipeline
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Layer 2 cross-chunk packing bug: variable-length data with best_fit + "
-        "fullest flush produces non-monotonic packed cursors. After eviction of "
-        "early chunks, replay without those chunks changes bin state → different "
-        "packing → data duplication. Cursor pinning alone does NOT fix this case "
-        "because the cursor IS in inflight but earlier chunks that influenced "
-        "accumulator state have already been evicted. "
-        "See docs/_internal/cross_chunk_packing_bug.md for full analysis."
-    ),
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
 )
-def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -> None:
-    """Variable-length packing: cursor pinning alone is insufficient.
+def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint(
+    runner_kind: str,
+) -> None:
+    """Variable-length packing: atomic eviction prevents data corruption.
 
     Setup (12 samples, chunk_size=4, lengths=[5,5,5,5, 1,1,1,1, 5,5,5,5]):
       - max_length=6, num_bins=2, flush_strategy="fullest"
       - Chunk 0: large items (len=5), Chunk 1: small items (len=1), Chunk 2: large (len=5)
 
-    Baseline packing (9 packed records):
-      P0=[s0]  P1=[s1]  P2=[s2,s4]  P3=[s3,s5]  P4=[s8]
-      P5=[s9]  P6=[s10]  P7=[s6,s7]  P8=[s11]
-
-    Cursors: [c0, c0, c0, c0, c2, c2, c2, c1, c2] — NON-MONOTONIC.
-
-    The cross-chunk packing of P2=[s2,s4] and P3=[s3,s5] means chunk 0 items
-    are packed together with chunk 1 items into the same bins.
-
-    After consuming 5 records (P0..P4) and checkpointing:
-      - Chunk 0 fully closed → evicted.  Inflight = {chunk 1, chunk 2}.
-      - Cursor = c2:0 — IS in inflight (cursor pinning would not help).
-      - ReplayFilter correctly filters the prefix.
-
-    On restore with only chunks 1+2:
-      - Chunk 1's small items (len=1) are packed fresh without chunk 0's large
-        items occupying the bins → different bin layout → s4,s5 duplicated.
+    Cross-chunk packing (P2=[s2,s4], P3=[s3,s5]) means chunk 0 and chunk 1
+    items share bin state.  Atomic eviction (gated by flush sentinel epoch
+    floor) prevents chunk 0 from being evicted while chunk 1 is still
+    inflight, so on restore all three chunks are replayed → same accumulator
+    state → same packing → no data corruption.
     """
     # Large-Small-Large pattern
     lengths = [5, 5, 5, 5, 1, 1, 1, 1, 5, 5, 5, 5]
     ds = _mk_varlen_dataset("vlxc", lengths)
 
     # -- baseline: full run without checkpoint ---------------------------------
-    baseline_pipe = _make_varlen_pack_pipeline(ds)
+    baseline_pipe = _make_varlen_pack_pipeline(ds, runner=runner_kind)
     baseline_texts: list[list[str]] = []
     for rec in baseline_pipe:
         assert isinstance(rec, SampleRecord)
@@ -463,7 +487,7 @@ def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -
     assert n_baseline > 0, "Baseline must produce records"
 
     # Verify non-monotonic cursors (the key precondition for this bug)
-    baseline_pipe2 = _make_varlen_pack_pipeline(ds)
+    baseline_pipe2 = _make_varlen_pack_pipeline(ds, runner=runner_kind)
     cursor_cids = []
     for rec in baseline_pipe2:
         assert isinstance(rec, SampleRecord)
@@ -477,7 +501,7 @@ def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -
 
     # -- run 1: consume 5 records → cursor IS in inflight but data corrupts ----
     consume_count = 5
-    pipe1 = _make_varlen_pack_pipeline(ds)
+    pipe1 = _make_varlen_pack_pipeline(ds, runner=runner_kind)
     it = iter(pipe1)
     prefix_texts: list[list[str]] = []
     try:
@@ -489,26 +513,22 @@ def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -
     finally:
         it.close()
 
-    # Sanity: cursor IS in inflight (this distinguishes Layer 2 from Layer 1)
+    # Verify all chunks remain inflight — atomic eviction keeps them because
+    # the epoch floor hasn't been advanced past them yet (only 5 of 9 records
+    # consumed, so the flush sentinel from end-of-stream was never reached).
     assert pipe1._engine is not None
-    cursor = pipe1._engine._lane_last_cursor.get(0)
     inflight_ckpt = ckpt.get("inflight", {}).get(
         0, ckpt.get("inflight", {}).get("0", {})
     )
     inflight_cids = sorted(int(c) for c in inflight_ckpt.keys())
-    assert cursor is not None and cursor.chunk_id in inflight_cids, (
-        f"Expected cursor chunk_id={cursor.chunk_id if cursor else None} to be "
-        f"in inflight {inflight_cids}. This test requires a Layer 2 scenario "
-        f"where cursor IS in inflight."
-    )
-
-    # Chunk 0 must have been evicted (its absence causes the replay divergence)
-    assert 0 not in inflight_cids, (
-        f"Chunk 0 should have been evicted, but inflight contains: {inflight_cids}"
+    assert 0 in inflight_cids, (
+        f"Chunk 0 must remain inflight (atomic eviction prevents premature "
+        f"eviction of chunks whose data influenced accumulator state). "
+        f"Inflight: {inflight_cids}"
     )
 
     # -- run 2: restore and drain ----------------------------------------------
-    pipe2 = _make_varlen_pack_pipeline(ds)
+    pipe2 = _make_varlen_pack_pipeline(ds, runner=runner_kind)
     pipe2.restore(ckpt)
 
     suffix_texts: list[list[str]] = []
@@ -536,4 +556,128 @@ def test_pack_sequences_varlen_cross_chunk_data_correctness_after_checkpoint() -
         f"  suffix samples:  {all_suffix_samples}\n"
         f"  baseline:        {all_baseline}\n"
         f"  combined:        {all_combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream eviction + data correctness with flush sentinels
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+def test_pack_sequences_varlen_mid_stream_eviction_after_checkpoint(
+    runner_kind: str,
+) -> None:
+    """Mid-stream eviction + checkpoint/restore with variable-length packing.
+
+    Verifies both:
+    1. Chunks from completed epochs evict during iteration (inflight stays
+       bounded rather than growing to total_chunks)
+    2. Checkpoint/restore after eviction produces identical output to baseline
+
+    Setup (32 samples, chunk_size=4, flush_every_k_chunks=2):
+      - 8 chunks total, sentinels after every 2 chunks
+      - Repeating Large-Small length pattern for cross-chunk packing
+
+    Note on observability: cursor pinning in notify() prevents eviction of the
+    epoch containing the current record's cursor.  Eviction of epoch N happens
+    atomically when the first record from epoch N+1 is delivered — in the same
+    next() call that loads epoch N+1's chunks.  So the user always observes a
+    stable inflight count (~flush_every_k_chunks) rather than a visible dip.
+    The proof that mid-stream eviction works is max_inflight < total_chunks.
+    """
+    chunk_size = 4
+    # Repeating Large-Small pattern across 8 chunks
+    lengths = [5, 5, 5, 5, 1, 1, 1, 1] * 4  # 32 samples
+    total_chunks = len(lengths) // chunk_size  # 8
+    ds = _mk_varlen_dataset("vlms", lengths)
+
+    # -- baseline: full run without checkpoint ---------------------------------
+    baseline_pipe = _make_varlen_pack_pipeline(
+        ds, runner=runner_kind, flush_every_k_chunks=2
+    )
+    baseline_texts: list[list[str]] = []
+    for rec in baseline_pipe:
+        assert isinstance(rec, SampleRecord)
+        baseline_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    assert len(baseline_texts) > 0, "Baseline must produce records"
+
+    # -- run 1: iterate partway, verify mid-stream eviction, checkpoint --------
+    pipe1 = _make_varlen_pack_pipeline(ds, runner=runner_kind, flush_every_k_chunks=2)
+    it = iter(pipe1)
+
+    max_inflight = 0
+    eviction_decrease_seen = False
+    prefix_texts: list[list[str]] = []
+    ckpt: dict[str, Any] | None = None
+    checkpoint_after = len(baseline_texts) // 2
+
+    try:
+        for rec in it:
+            assert isinstance(rec, SampleRecord)
+            prefix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+            inflight = pipe1._engine.inflight_chunks_per_lane.get(0, {})
+            n = len(inflight)
+            if n > max_inflight:
+                max_inflight = n
+            elif n < max_inflight and max_inflight > 0:
+                eviction_decrease_seen = True
+
+            if len(prefix_texts) >= checkpoint_after:
+                ckpt = pipe1.checkpoint()
+                break
+    finally:
+        it.close()
+
+    # Mid-stream eviction manifests differently by runner:
+    # - Inline: feeder is synchronous, so eviction + chunk loading happen in
+    #   the same next() call — inflight stays bounded (max < total_chunks)
+    #   but never visibly decreases.
+    # - Threads/process: feeder runs ahead loading all chunks, then eviction
+    #   reduces inflight as records are consumed — visible decrease.
+    # Either condition proves mid-stream eviction is working.
+    assert max_inflight < total_chunks or eviction_decrease_seen, (
+        f"Expected mid-stream eviction: either bounded inflight "
+        f"(max_inflight={max_inflight} < total_chunks={total_chunks}) "
+        f"or visible decrease (seen={eviction_decrease_seen}). "
+        f"Consumed {len(prefix_texts)} records."
+    )
+    assert ckpt is not None
+
+    # -- run 2: restore and drain ----------------------------------------------
+    pipe2 = _make_varlen_pack_pipeline(ds, runner=runner_kind, flush_every_k_chunks=2)
+    pipe2.restore(ckpt)
+
+    suffix_texts: list[list[str]] = []
+    for rec in pipe2:
+        assert isinstance(rec, SampleRecord)
+        suffix_texts.append([s["text"] for s in rec.payload["packed_samples"]])
+
+    assert len(suffix_texts) > 0, "Should produce records after resume"
+
+    # -- data correctness: no duplicates, exact match with baseline ------------
+    all_prefix = [s for packed in prefix_texts for s in packed]
+    all_suffix = [s for packed in suffix_texts for s in packed]
+    all_combined = all_prefix + all_suffix
+    all_baseline = [s for packed in baseline_texts for s in packed]
+
+    dupes = set(all_prefix) & set(all_suffix)
+    assert not dupes, (
+        f"Samples duplicated across prefix and suffix: {sorted(dupes)}\n"
+        f"  prefix: {all_prefix}\n"
+        f"  suffix: {all_suffix}"
+    )
+
+    assert all_combined == all_baseline, (
+        f"prefix + suffix should reconstruct baseline.\n"
+        f"  prefix:   {all_prefix}\n"
+        f"  suffix:   {all_suffix}\n"
+        f"  baseline: {all_baseline}\n"
+        f"  combined: {all_combined}"
     )

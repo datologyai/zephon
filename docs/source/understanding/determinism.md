@@ -233,6 +233,12 @@ The guarantee rests on two layers:
    When the topology changes, the old key no longer matches and the engine
    recomputes a starting point from per-lane progress.
 
+For non-monotonic pipelines (those with packing, shuffling, or mixture
+correction), the checkpoint additionally stores **epoch boundary positions**
+and **inflight chunk state** so that flush sentinels can be re-injected at
+the correct points during replay.  See
+[Checkpointing](checkpointing.md#epoch-based-eviction) for the full model.
+
 Checkpoints should be taken between global training steps, at which point
 every lane has contributed exactly once per round-robin cycle.  All lanes
 are at the same frontier, so the recomputed pointer always starts at the
