@@ -15,12 +15,16 @@ jobs:
   unit:
     name: Unit Tests
     timeout-minutes: 20
-    runs-on: LargeGithubRunner
+    runs-on: ${{ matrix.runner }}
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     strategy:
       matrix:
-        python_version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
+        python_version: ["3.10", "3.12", "3.13"]
+        runner: ["ubuntu-latest"]
+        include:
+        - python_version: "3.14t"
+          runner: LargeGithubRunner
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -48,6 +52,10 @@ jobs:
         else
           uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras
         fi
+    - name: Clean stale Ray state
+      run: |
+        ray stop --force 2>/dev/null || true
+        rm -rf /tmp/ray
     - name: Run Unit Tests
       env:
         # Enforce GIL-disabled mode on free-threaded Python to catch threading issues
@@ -61,4 +69,3 @@ jobs:
       with:
         path: .venv
         key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-

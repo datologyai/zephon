@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
+
+pytestmark = pytest.mark.usefixtures("ray_init")
 
 from tests.zephon.runners._helpers import (
     _extract_values,
@@ -15,21 +15,6 @@ from tests.zephon.runners._helpers import (
 )
 
 ray = pytest.importorskip("ray")
-
-
-@pytest.fixture(scope="module", autouse=True)
-def ray_init():
-    """Initialize Ray for testing."""
-    session_scope = os.environ.get("ZEPHON_RAY_SESSION_SCOPE") == "session"
-    if not ray.is_initialized():
-        ray.init(
-            ignore_reinit_error=True,
-            num_cpus=4,
-            runtime_env={"working_dir": None},
-        )
-    yield
-    if not session_scope and ray.is_initialized():
-        ray.shutdown()
 
 
 def _make_group(

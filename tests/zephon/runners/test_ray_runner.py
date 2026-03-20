@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("ray_init")
+
 from tests.zephon.runners._helpers import (
     _collect,
     _ctx_services,
@@ -33,8 +35,6 @@ from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.batch import Batch
 
 pytest.importorskip("ray")
-
-pytestmark = pytest.mark.usefixtures("ray_init")
 
 
 def _make_runner(

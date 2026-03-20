@@ -16,7 +16,9 @@ def ray_init():
     if not ray.is_initialized():
         ray.init(
             ignore_reinit_error=True,
-            num_cpus=4,
+            num_cpus=2,
+            object_store_memory=100_000_000,
+            include_dashboard=False,
             runtime_env={"working_dir": None},
         )
     yield
