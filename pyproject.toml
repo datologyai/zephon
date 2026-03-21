@@ -216,6 +216,7 @@ markers = [
     "world_size(val)",
     "remote",
     "integration: marks tests as integration (use --run-integration to run)",
+    "requires_ray: tests that spin up a Ray cluster (run on LargeGithubRunner only in CI)",
 ]
 filterwarnings = [
     'ignore:ExtraArgumentWarning',

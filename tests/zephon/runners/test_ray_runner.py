@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("ray_init")
+pytestmark = [pytest.mark.requires_ray, pytest.mark.usefixtures("ray_init")]
 
 from tests.zephon.runners._helpers import (
     _collect,

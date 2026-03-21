@@ -1,5 +1,8 @@
 name: Unit Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -52,20 +55,42 @@ jobs:
         else
           uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras
         fi
-    - name: Clean stale Ray state
-      run: |
-        ray stop --force 2>/dev/null || true
-        rm -rf /tmp/ray
     - name: Run Unit Tests
       env:
         # Enforce GIL-disabled mode on free-threaded Python to catch threading issues
         PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
       run: |
         set -ex
-        uv run --python ${{ matrix.python_version }} pytest -m "not integration" --maxfail=10
+        uv run --python ${{ matrix.python_version }} pytest -m "not integration and not requires_ray" --maxfail=10
     - name: Save venv cache for slow builds
       if: always() && (startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't'))
       uses: actions/cache/save@v4
       with:
         path: .venv
         key: venv-unit-${{ matrix.python_version }}-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+  ray:
+    name: Ray Tests
+    timeout-minutes: 20
+    runs-on: LargeGithubRunner
+    env:
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Setup
+      run: |
+        set -ex
+        uv sync --python 3.12 --group dev --group test --all-extras
+    - name: Clean stale Ray state
+      run: |
+        ray stop --force 2>/dev/null || true
+        rm -rf /tmp/ray
+    - name: Run Ray Tests
+      run: |
+        set -ex
+        uv run --python 3.12 pytest -m "requires_ray" --maxfail=10
