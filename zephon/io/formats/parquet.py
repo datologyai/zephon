@@ -23,6 +23,8 @@ from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+import numpy as np
+
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import ShardIndex, is_shard_index
@@ -57,39 +59,136 @@ def _ensure_pyarrow():
     return _pa, _pq
 
 
+_CachedRG = dict[str, np.ndarray]
+
+
+def _arrow_table_to_numpy(table: Any) -> _CachedRG:
+    """Convert an Arrow table to a dict of numpy arrays, zero-copy when possible."""
+    pa, _ = _ensure_pyarrow()
+    result: _CachedRG = {}
+    for name in table.column_names:
+        col = table.column(name)
+        arr = col.chunk(0) if col.num_chunks == 1 else col.combine_chunks()
+        col_type = arr.type
+
+        if isinstance(col_type, pa.lib.FixedSizeListType):
+            flat = arr.values.to_numpy(zero_copy_only=False)
+            result[name] = flat.reshape(len(arr), col_type.list_size)
+        elif isinstance(col_type, pa.lib.ListType):
+            offsets = arr.offsets.to_numpy(zero_copy_only=False)
+            values = arr.values.to_numpy(zero_copy_only=False)
+            rows = np.empty(len(arr), dtype=object)
+            for i in range(len(arr)):
+                rows[i] = values[offsets[i] : offsets[i + 1]]
+            result[name] = rows
+        else:
+            try:
+                result[name] = arr.to_numpy(zero_copy_only=False)
+            except Exception:
+                result[name] = np.array(arr.to_pylist(), dtype=object)
+    return result
+
+
+def _extract_row(columns: _CachedRG, idx: int) -> dict[str, object]:
+    return {name: arr[idx] for name, arr in columns.items()}
+
+
+_DEFAULT_RG_CACHE_BYTES = 2 * 1024**3  # 2 GiB
+
+
+def _rg_size_bytes(columns: _CachedRG) -> int:
+    return sum(a.nbytes for a in columns.values())
+
+
+class _RowGroupCache:
+    """Thread-safe LRU cache keyed by (file_path, row_group_id) → _CachedRG.
+
+    Evicts LRU entries when total numpy buffer usage exceeds ``max_bytes``.
+    Set ``max_bytes=0`` to disable caching (low-memory mode).
+    """
+
+    def __init__(self, max_bytes: int = _DEFAULT_RG_CACHE_BYTES) -> None:
+        self._cache: OrderedDict[tuple[str, int], _CachedRG] = OrderedDict()
+        self._lock = threading.Lock()
+        self._max_bytes = max_bytes
+        self._used_bytes = 0
+
+    def get(self, path: str, rg_id: int) -> _CachedRG | None:
+        key = (path, rg_id)
+        with self._lock:
+            val = self._cache.get(key)
+            if val is not None:
+                self._cache.move_to_end(key)
+            return val
+
+    def get_many(self, path: str, rg_ids: list[int]) -> dict[int, _CachedRG] | None:
+        """Return all requested row groups if all cached, else None."""
+        with self._lock:
+            result: dict[int, _CachedRG] = {}
+            for rg_id in rg_ids:
+                key = (path, rg_id)
+                val = self._cache.get(key)
+                if val is None:
+                    return None
+                self._cache.move_to_end(key)
+                result[rg_id] = val
+            return result
+
+    def put(self, path: str, rg_id: int, columns: _CachedRG) -> None:
+        if self._max_bytes == 0:
+            return
+        key = (path, rg_id)
+        entry_bytes = _rg_size_bytes(columns)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return
+            self._cache[key] = columns
+            self._used_bytes += entry_bytes
+            while self._used_bytes > self._max_bytes and len(self._cache) > 1:
+                _, evicted = self._cache.popitem(last=False)
+                self._used_bytes -= _rg_size_bytes(evicted)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+            self._used_bytes = 0
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+    @property
+    def used_bytes(self) -> int:
+        with self._lock:
+            return self._used_bytes
+
+
 class ParquetShard(RandomAccessShard):
     """Random access shard backed by a Parquet file.
 
     Optimized for training workloads with:
     - Binary search row group lookup
     - Bulk read optimization (group by row group)
+    - Shared row group cache across open/close cycles
     """
 
     def __init__(
         self,
         path: Path,
         row_groups: list[dict],
+        rg_cache: _RowGroupCache,
         metadata: Any | None = None,
     ) -> None:
-        """Initialize Parquet shard.
-
-        Args:
-            path: Local .parquet file path
-            row_groups: List of dicts with num_rows, total_byte_size
-        """
         _ensure_pyarrow()
 
         self._path = path
         self._row_groups = row_groups
         self._metadata = metadata
+        self._rg_cache = rg_cache
 
-        # Build cumulative index: [0, rg0_rows, rg0_rows+rg1_rows, ...]
         self._rg_boundaries = self._build_cumulative_index(row_groups)
         self._length = self._rg_boundaries[-1] if self._rg_boundaries else 0
-
-        # Reuse cached file metadata when available to avoid reparsing the footer
-        # on every open/close cycle.
-        self._pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
 
     def _build_cumulative_index(self, row_groups: list[dict]) -> list[int]:
         """Build cumulative row count index for O(log n) lookup.
@@ -120,6 +219,20 @@ class ParquetShard(RandomAccessShard):
         local_idx = index - self._rg_boundaries[rg_id]
         return rg_id, local_idx
 
+    def _read_row_group(self, rg_id: int) -> _CachedRG:
+        path_key = str(self._path)
+        cached = self._rg_cache.get(path_key, rg_id)
+        if cached is not None:
+            return cached
+
+        pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
+        table = pq_file.read_row_group(rg_id)
+        del pq_file
+
+        columns = _arrow_table_to_numpy(table)
+        self._rg_cache.put(path_key, rg_id, columns)
+        return columns
+
     def __getitem__(self, index: int) -> dict[str, object]:
         """Single record random access.
 
@@ -136,60 +249,43 @@ class ParquetShard(RandomAccessShard):
             raise IndexError(index)
 
         rg_id, local_idx = self._locate_row_group(index)
-
-        # Read entire row group, extract one row
-        # PyArrow caches row groups internally for efficiency
-        table = self._pq_file.read_row_group(rg_id)
-        row = table.slice(local_idx, 1).to_pylist()[0]
-        return row
+        columns = self._read_row_group(rg_id)
+        return _extract_row(columns, local_idx)
 
     def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
-        """Bulk read optimized for training batches.
-
-        Groups indices by row group to minimize I/O - each row group is read
-        at most once even if multiple samples needed from it. Uses batch
-        extraction via PyArrow's take() for efficient multi-row retrieval.
-
-        Args:
-            indices: List of record indices to fetch
-
-        Returns:
-            List of records in same order as input indices
-
-        Raises:
-            IndexError: If any index is out of bounds
-        """
+        """Bulk read: groups by row group, single file open for cache misses."""
         if not indices:
             return []
 
-        # Validate all indices
         for idx in indices:
             if idx < 0 or idx >= self._length:
                 raise IndexError(idx)
 
-        # Group indices by row group, preserving original order
         rg_groups: defaultdict[int, list[tuple[int, int]]] = defaultdict(list)
         for orig_pos, idx in enumerate(indices):
             rg_id, local_idx = self._locate_row_group(idx)
             rg_groups[rg_id].append((orig_pos, local_idx))
 
-        # Read each row group once, batch extract all needed rows
+        path_key = str(self._path)
+        missing_rg_ids = [
+            rg_id for rg_id in rg_groups if self._rg_cache.get(path_key, rg_id) is None
+        ]
+        if missing_rg_ids:
+            pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
+            for rg_id in missing_rg_ids:
+                table = pq_file.read_row_group(rg_id)
+                self._rg_cache.put(path_key, rg_id, _arrow_table_to_numpy(table))
+            del pq_file
+
         results: list[dict[str, object] | None] = [None] * len(indices)
-        for rg_id in sorted(rg_groups.keys()):
-            table = self._pq_file.read_row_group(rg_id)
+        for rg_id, items in rg_groups.items():
+            columns = self._rg_cache.get(path_key, rg_id)
+            assert columns is not None, (
+                f"row group {rg_id} unexpectedly missing from cache"
+            )
+            for orig_pos, local_idx in items:
+                results[orig_pos] = _extract_row(columns, local_idx)
 
-            # Extract positions and indices for batch processing
-            positions = [orig_pos for orig_pos, _ in rg_groups[rg_id]]
-            local_indices = [local_idx for _, local_idx in rg_groups[rg_id]]
-
-            # Batch extract all rows from this row group using take()
-            rows = table.take(local_indices).to_pylist()
-
-            # Assign back to results in original order
-            for pos, row in zip(positions, rows):
-                results[pos] = row
-
-        # All positions are filled by the loop above
         return results  # type: ignore[return-value]
 
     def __len__(self) -> int:
@@ -197,10 +293,7 @@ class ParquetShard(RandomAccessShard):
         return self._length
 
     def close(self) -> None:
-        """Close file handle."""
-        if self._pq_file is not None:
-            # PyArrow doesn't need explicit close, just release reference
-            self._pq_file = None
+        pass
 
 
 class ParquetFormat(FormatHandler):
@@ -217,6 +310,10 @@ class ParquetFormat(FormatHandler):
     def __init__(self) -> None:
         self._metadata_cache: OrderedDict[str, Any] = OrderedDict()
         self._metadata_lock = threading.Lock()
+        max_bytes = int(
+            os.environ.get("ZEPHON_PARQUET_RG_CACHE_BYTES", _DEFAULT_RG_CACHE_BYTES)
+        )
+        self._rg_cache = _RowGroupCache(max_bytes=max_bytes)
 
     def _read_metadata_only(
         self, path: str, storage: StorageBackend, *, size: int
@@ -506,6 +603,7 @@ class ParquetFormat(FormatHandler):
             path=local_ref.raw.path,
             row_groups=row_groups,
             metadata=metadata,
+            rg_cache=self._rg_cache,
         )
 
     def _get_cached_metadata(self, path: Path) -> Any:
