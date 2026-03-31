@@ -1,7 +1,10 @@
+import random
+
 import pytest
 
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
+from zephon.work.static_mixture import _DatasetCursor, _DatasetKnobs
 
 
 def make_dataset(name: str, sample_count: int) -> Dataset:
@@ -732,3 +735,441 @@ def test_seeded_shuffle_is_deterministic() -> None:
     for comp_name, samples in chunk_one.components.items():
         expected_dataset_id = ids[comp_name]
         assert all(sample[0] == expected_dataset_id for sample in samples)
+
+
+# ---------------------------------------------------------------------------
+# Bit-for-bit equivalence: streaming cursor vs reference implementation
+# ---------------------------------------------------------------------------
+
+_EQUIV_SHARD_INDEX: dict[int, int] = {0: 5, 1: 7, 2: 3}
+
+
+@pytest.mark.parametrize(
+    "shuffle_shards,shuffle_within,block_size",
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (True, True, None),
+        (False, False, 2),
+        (True, False, 2),
+        (False, True, 2),
+        (True, True, 2),
+        (False, False, 4),
+        (True, False, 4),
+        (False, True, 4),
+        (True, True, 4),
+        # Edge: block_size larger than total samples
+        (False, False, 100),
+        (True, False, 100),
+        (False, True, 100),
+        (True, True, 100),
+        (False, False, 1),
+        (True, False, 1),
+        (False, True, 1),
+        (True, True, 1),
+    ],
+)
+def test_streaming_cursor_matches_reference(
+    shuffle_shards: bool,
+    shuffle_within: bool,
+    block_size: int | None,
+) -> None:
+    """Streaming cursor must produce the exact same sequence as the reference."""
+    knobs = _DatasetKnobs(
+        seed=42,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    ref = _DatasetCursor._build_order_reference(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    expected = [tuple(row) for row in ref.tolist()]
+
+    cursor = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    actual = cursor.next_many(cursor._total_samples)
+
+    assert actual == expected, (
+        f"Mismatch for shards={shuffle_shards}, within={shuffle_within}, "
+        f"block={block_size}: {actual[:5]}... vs {expected[:5]}..."
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 99])
+def test_streaming_cursor_reference_multiple_seeds(seed: int) -> None:
+    """Equivalence holds across different seeds."""
+    knobs = _DatasetKnobs(
+        seed=seed,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    )
+    dataset_id = 1
+    ref = _DatasetCursor._build_order_reference(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    expected = [tuple(row) for row in ref.tolist()]
+    cursor = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    actual = cursor.next_many(cursor._total_samples)
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "shuffle_shards,shuffle_within,block_size",
+    [
+        (True, False, None),
+        (False, True, None),
+        (True, True, None),
+        (False, False, 3),
+        (True, False, 3),
+        (False, True, 3),
+        (True, True, 3),
+    ],
+)
+def test_repeat_active_shuffle_determinism_across_epochs(
+    shuffle_shards: bool, shuffle_within: bool, block_size: int | None
+) -> None:
+    """Across epochs, shuffled repeat streams are deterministic between identical instances."""
+    ds = make_sharded_dataset("alpha", [5, 6, 7])
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=6,
+        seed=1234,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    )
+    ws1 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws2 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+
+    # 18 samples / 6 per chunk = 3 chunks per epoch; pull 9 chunks (3 epochs).
+    for _ in range(9):
+        c1 = ws1.next_chunk()
+        c2 = ws2.next_chunk()
+        assert c1 is not None and c2 is not None
+        assert _flatten_components(c1) == _flatten_components(c2)
+
+
+def test_repeat_checkpoint_restore_with_block_shuffle() -> None:
+    """Checkpoint/restore remains deterministic in repeat mode with block shuffle."""
+    ds = make_sharded_dataset("alpha", [5, 5, 5])
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=314,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = [_flatten_components(ws_baseline.next_chunk()) for _ in range(8)]
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = [_flatten_components(ws_save.next_chunk()) for _ in range(5)]
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = [_flatten_components(ws_load.next_chunk()) for _ in range(3)]
+
+    assert prefix + suffix == baseline
+
+
+# ---------------------------------------------------------------------------
+# _seek_to_position round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "shuffle_shards,shuffle_within,block_size",
+    [
+        (False, False, None),
+        (True, True, None),
+        (False, True, 2),
+        (True, True, 3),
+    ],
+)
+@pytest.mark.parametrize("seek_to", [0, 1, 5, 10, 14, 15])
+def test_seek_to_position_produces_correct_tail(
+    shuffle_shards: bool,
+    shuffle_within: bool,
+    block_size: int | None,
+    seek_to: int,
+) -> None:
+    """Seeking to position k then draining must match draining k then draining rest."""
+    knobs = _DatasetKnobs(
+        seed=7,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    total = sum(_EQUIV_SHARD_INDEX.values())  # 15
+
+    # Baseline: advance naturally.
+    baseline = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    baseline.next_many(seek_to)
+    expected_tail = baseline.next_many(total)
+
+    # Seeker: jump directly.
+    seeker = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    seeker._seek_to_position(seek_to)
+    actual_tail = seeker.next_many(total)
+
+    assert actual_tail == expected_tail, (
+        f"seek_to={seek_to}, shards={shuffle_shards}, within={shuffle_within}, "
+        f"block={block_size}"
+    )
+    assert seeker._position == baseline._position
+    assert seeker.remaining == baseline.remaining
+
+
+# ---------------------------------------------------------------------------
+# _clone independence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "shuffle_shards,shuffle_within,block_size",
+    [
+        (False, False, None),
+        (True, True, None),
+        (True, True, 3),
+    ],
+)
+def test_clone_independence(
+    shuffle_shards: bool,
+    shuffle_within: bool,
+    block_size: int | None,
+) -> None:
+    """Advancing a clone must not affect the original cursor."""
+    knobs = _DatasetKnobs(
+        seed=42,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    total = sum(_EQUIV_SHARD_INDEX.values())  # 15
+
+    # Advance the original partway, then snapshot its state via clone.
+    original = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    original.next_many(5)
+    orig_position = original._position
+    orig_remaining = original.remaining
+
+    clone = original._clone()
+
+    # Drain the clone completely.
+    clone_tail = clone.next_many(total)
+    assert len(clone_tail) == total - 5
+
+    # Original must be unaffected.
+    assert original._position == orig_position
+    assert original.remaining == orig_remaining
+
+    # Draining the original from the same point must yield identical results.
+    orig_tail = original.next_many(total)
+    assert orig_tail == clone_tail
+
+
+def _drain_chunks(
+    ws: StaticMixtureWorkSource, limit: int | None = None
+) -> list[dict[str, list[tuple[int, int, int]]]]:
+    out: list[dict[str, list[tuple[int, int, int]]]] = []
+    while limit is None or len(out) < limit:
+        ch = ws.next_chunk()
+        if ch is None:
+            break
+        out.append(_flatten_components(ch))
+    return out
+
+
+@pytest.mark.parametrize("canonical_replicas", [2, 4])
+def test_checkpoint_restore_multilane_matches_baseline(canonical_replicas: int) -> None:
+    """Per-lane checkpoint/restore stays deterministic for canonical_replicas > 1."""
+    ds_a = make_sharded_dataset("alpha", [17, 13, 11, 19])
+    ds_b = make_sharded_dataset("beta", [23, 7, 21, 9])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture=MixtureSpec({ds_a.name: 0.6, ds_b.name: 0.4}).weights,
+        chunk_size=8,
+        seed=2026,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    )
+
+    baseline_per_lane: dict[int, list[dict[str, list[tuple[int, int, int]]]]] = {}
+    for lane in range(canonical_replicas):
+        ws = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        baseline_per_lane[lane] = _drain_chunks(ws)
+        assert baseline_per_lane[lane], f"lane {lane} should produce chunks"
+
+    checkpoint_after_chunks = 2
+    for lane in range(canonical_replicas):
+        ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        prefix = _drain_chunks(ws_save, limit=checkpoint_after_chunks)
+        state = ws_save.state_dict()
+
+        ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        ws_load.load_state_dict(state)
+        suffix = _drain_chunks(ws_load)
+
+        assert prefix + suffix == baseline_per_lane[lane]
+
+
+def test_repeat_checkpoint_restore_with_divergent_component_epochs() -> None:
+    """Repeat-mode restore is deterministic when datasets are at different epochs."""
+    small = make_sharded_dataset("small", [8, 8])  # quota-heavy; resets often
+    medium = make_sharded_dataset("medium", [25, 25])
+    large = make_sharded_dataset("large", [40, 40])
+    kwargs: dict = dict(
+        datasets=[small, medium, large],
+        mixture=MixtureSpec({"small": 0.5, "medium": 0.3, "large": 0.2}).weights,
+        chunk_size=8,
+        seed=314159,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=4,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+        max_repeats=3,
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline, limit=16)
+    assert len(baseline) == 16
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=7)
+    state = ws_save.state_dict()
+    cursor_epochs = state["cursor_epochs"]
+    assert cursor_epochs["small"] > cursor_epochs["medium"]
+    assert cursor_epochs["small"] > cursor_epochs["large"]
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load, limit=9)
+
+    assert prefix + suffix == baseline
+
+
+@pytest.mark.parametrize("cut_position", [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 58])
+def test_checkpoint_restore_cut_sweep_around_block_boundaries(
+    cut_position: int,
+) -> None:
+    """Checkpoint/resume is stable around block-shuffle boundaries."""
+    ds = make_sharded_dataset("alpha", [17, 19, 23])  # total 59
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=1,  # one sample per chunk: checkpoint cut == sample position
+        seed=777,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=8,
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline)
+    assert len(baseline) == 59
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=cut_position)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load)
+
+    assert len(prefix) == cut_position
+    assert prefix + suffix == baseline
+
+
+def test_load_state_dict_lane_mismatch_raises() -> None:
+    """Loading lane-0 checkpoint into lane-1 should fail for deterministic safety."""
+    ds = make_sharded_dataset("alpha", [11, 13, 17, 19])
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=2025,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    )
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=2)
+    _drain_chunks(ws_save, limit=5)
+    state = ws_save.state_dict()
+
+    ws_load_wrong_lane = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        1, canonical_replicas=2
+    )
+    with pytest.raises(RuntimeError):
+        ws_load_wrong_lane.load_state_dict(state)
+
+
+@pytest.mark.parametrize("cfg_seed", [11, 29, 53])
+def test_checkpoint_restore_randomized_property(cfg_seed: int) -> None:
+    """Randomized config smoke-test for deterministic checkpoint continuation."""
+    rng = random.Random(cfg_seed)
+    dataset_count = rng.choice([1, 2, 3])
+    datasets: list[Dataset] = []
+    mixture_raw: dict[str, float] = {}
+
+    for idx in range(dataset_count):
+        shard_count = rng.choice([1, 2, 3, 4])
+        shard_lengths = [rng.randint(18, 36) for _ in range(shard_count)]
+        name = f"ds_{idx}"
+        datasets.append(make_sharded_dataset(name, shard_lengths))
+        mixture_raw[name] = rng.uniform(0.1, 1.0)
+
+    exhausted_policy = rng.choice(["stop", "repeat"])
+    kwargs: dict = dict(
+        datasets=datasets,
+        mixture=MixtureSpec(mixture_raw).weights,
+        chunk_size=rng.randint(dataset_count, dataset_count + 7),
+        seed=rng.randint(0, 10000),
+        shuffle_shards=rng.choice([True, False]),
+        shuffle_within_shard=rng.choice([True, False]),
+        shuffle_block_size=rng.choice([None, 2, 3, 5, 8]),
+        exhausted_policy=exhausted_policy,
+        reshuffle_on_repeat=rng.choice([True, False]),
+        max_repeats=(rng.choice([1, 2, 3]) if exhausted_policy == "repeat" else None),
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline, limit=60)
+    assert baseline
+
+    cut = rng.randint(0, max(0, len(baseline) - 1))
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=cut)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load, limit=max(0, len(baseline) - cut))
+
+    assert prefix + suffix == baseline

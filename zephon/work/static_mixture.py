@@ -55,6 +55,13 @@ class _DatasetCursor:
     - Block shuffles use ``seed ^ _GOLDEN_RATIO_64`` to decorrelate from the
       previous steps while remaining deterministic for a given seed.
 
+    Memory model:
+    Instead of materializing a single ``(total_samples, 3)`` NumPy array,
+    this cursor streams samples shard-by-shard, lazily generating per-shard
+    offset permutations.  Memory usage is O(max_shard_size) rather than
+    O(total_samples).  When block shuffle is active, a block-sized buffer
+    adds O(block_size) on top.
+
     Sketch (one dataset):
       Without any shuffles (default order):
         [ S0: 0 1 2 | S1: 0 1 2 | S2: 0 1 2 ]
@@ -77,23 +84,28 @@ class _DatasetCursor:
       This is where samples from different datasets interleave.
     """
 
+    # ------------------------------------------------------------------
+    # Static helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _build_order(
+    def _build_order_reference(
         dataset_id: int,
         shard_index: Mapping[int, int],
         knobs: _DatasetKnobs,
     ) -> np.ndarray:
-        """Build the deterministic sample-order array for a single dataset."""
+        """Build the full order array for validation/testing.
+
+        This is the original materializing implementation kept as a reference
+        oracle.  The runtime path uses lazy shard-at-a-time iteration instead.
+        """
         shard_ids = list(shard_index.keys())
-        # Shuffle the shards
         if knobs.shuffle_shards and len(shard_ids) > 1:
             random.Random(knobs.seed).shuffle(shard_ids)
 
-        # Pre-compute total sample count and allocate numpy array
         total_samples = sum(int(shard_index[sid]) for sid in shard_ids)
         order = np.empty((total_samples, 3), dtype=np.int32)
 
-        # Fill array using vectorized operations
         pos = 0
         for position, shard_id in enumerate(shard_ids):
             count = int(shard_index[shard_id])
@@ -107,7 +119,6 @@ class _DatasetCursor:
             pos += count
 
         block_size = knobs.shuffle_block_size
-        # Mosaic-style block-based shuffle on top to create cross-shard shuffles
         if block_size is not None and block_size > 0 and len(order) > 1:
             block_size = max(1, int(block_size))
             rng = np.random.default_rng(knobs.seed ^ _GOLDEN_RATIO_64)
@@ -116,6 +127,25 @@ class _DatasetCursor:
                 rng.shuffle(order[start:end])
 
         return order
+
+    @staticmethod
+    def _compute_shard_order(
+        shard_index: Mapping[int, int], knobs: _DatasetKnobs
+    ) -> tuple[int, ...]:
+        """Return shard IDs in traversal order (shuffled if requested)."""
+        shard_ids = list(shard_index.keys())
+        if knobs.shuffle_shards and len(shard_ids) > 1:
+            random.Random(knobs.seed).shuffle(shard_ids)
+        return tuple(shard_ids)
+
+    @staticmethod
+    def _make_block_rng(knobs: _DatasetKnobs) -> np.random.Generator:
+        """Create the block-shuffle RNG for the given knobs."""
+        return np.random.default_rng(knobs.seed ^ _GOLDEN_RATIO_64)
+
+    # ------------------------------------------------------------------
+    # Construction / epoch management
+    # ------------------------------------------------------------------
 
     def __init__(
         self,
@@ -126,47 +156,411 @@ class _DatasetCursor:
         self._dataset_id = dataset_id
         self._shard_index = shard_index
         self._epoch = 0
-        self._order: np.ndarray = _DatasetCursor._build_order(
-            dataset_id, shard_index, knobs
+        # Declare all instance variables for Pyright; _init_cursor_state sets values.
+        self._knobs: _DatasetKnobs = knobs
+        self._shard_order: tuple[int, ...] = ()
+        self._shard_sizes: tuple[int, ...] = ()
+        self._total_samples: int = 0
+        self._shard_cumsum: np.ndarray = np.array([], dtype=np.int64)
+        self._current_shard_idx: int = 0
+        self._current_shard_pos: int = 0
+        self._current_offsets: np.ndarray | None = None
+        self._has_block_shuffle: bool = False
+        self._block_buffer: np.ndarray | None = None
+        self._block_buffer_pos: int = 0
+        self._blocks_consumed: int = 0
+        self._block_rng: np.random.Generator | None = None
+        self._block_rng_state: Mapping[str, Any] | None = None
+        self._pre_fill_rng_state: Mapping[str, Any] | None = None
+        self._pre_fill_block_count: int = 0
+        self._position: int = 0
+        self.remaining: int = 0
+        self._init_cursor_state(knobs)
+
+    def _init_cursor_state(self, knobs: _DatasetKnobs) -> None:
+        """(Re-)initialise all mutable cursor state for the given knobs."""
+        self._knobs = knobs
+
+        # Shard-level metadata (small — one entry per shard).
+        self._shard_order = self._compute_shard_order(self._shard_index, knobs)
+        self._shard_sizes = tuple(
+            int(self._shard_index[sid]) for sid in self._shard_order
         )
+        self._total_samples = sum(self._shard_sizes)
+        self._shard_cumsum = (
+            np.cumsum(self._shard_sizes, dtype=np.int64)
+            if self._shard_sizes
+            else np.array([], dtype=np.int64)
+        )
+
+        # Shard-level cursor.
+        self._current_shard_idx = 0
+        self._current_shard_pos = 0
+        self._current_offsets = None
+
+        # Block shuffle state.
+        block_size = knobs.shuffle_block_size
+        self._has_block_shuffle = block_size is not None and block_size > 0
+        self._block_buffer = None
+        self._block_buffer_pos = 0
+        self._blocks_consumed = 0
+        if self._has_block_shuffle:
+            self._block_rng = self._make_block_rng(knobs)
+            self._block_rng_state = self._block_rng.bit_generator.state
+            self._pre_fill_rng_state = self._block_rng_state
+            self._pre_fill_block_count = 0
+        else:
+            self._block_rng = None
+            self._block_rng_state = None
+            self._pre_fill_rng_state = None
+            self._pre_fill_block_count = 0
+
+        # Public cursor state.
         self._position = 0
-        self.remaining = len(self._order)
+        self.remaining = self._total_samples
 
     def _seek_epoch(
         self, epoch: int, *, reshuffle: bool, base_knobs: _DatasetKnobs
     ) -> None:
-        """Jump directly to the given epoch, rebuilding order at most once."""
+        """Jump directly to the given epoch, rebuilding cursor state."""
         self._epoch = epoch
         if epoch > 0 and reshuffle:
-            epoch_knobs = _DatasetKnobs(
+            knobs = _DatasetKnobs(
                 seed=base_knobs.seed + epoch * _GOLDEN_RATIO_64,
                 shuffle_shards=base_knobs.shuffle_shards,
                 shuffle_within_shard=base_knobs.shuffle_within_shard,
                 shuffle_block_size=base_knobs.shuffle_block_size,
             )
-            self._order = _DatasetCursor._build_order(
-                self._dataset_id, self._shard_index, epoch_knobs
-            )
-        self._position = 0
-        self.remaining = len(self._order)
+        else:
+            knobs = base_knobs
+        self._init_cursor_state(knobs)
 
     def reset(self, *, reshuffle: bool, base_knobs: _DatasetKnobs) -> None:
         """Reset the cursor to position 0, starting a new epoch.
 
-        If *reshuffle* is True, rebuilds the order array with an epoch-derived
-        seed so each epoch sees a different traversal order.
+        If *reshuffle* is True, rebuilds the traversal order with an
+        epoch-derived seed so each epoch sees a different ordering.
         """
         self._seek_epoch(self._epoch + 1, reshuffle=reshuffle, base_knobs=base_knobs)
 
+    # ------------------------------------------------------------------
+    # Lazy shard-level iteration helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_shuffled_shard_offsets(self) -> None:
+        """Lazily generate shuffled offsets for the current shard.
+
+        Only call when ``shuffle_within_shard`` is True — the offsets are
+        always permuted.
+        """
+        if self._current_offsets is not None:
+            return
+        if self._current_shard_idx >= len(self._shard_order):
+            return
+        shard_id = self._shard_order[self._current_shard_idx]
+        count = self._shard_sizes[self._current_shard_idx]
+        offsets = np.arange(count, dtype=np.int32)
+        if count > 1:
+            position = self._current_shard_idx
+            shard_seed = (self._knobs.seed << 32) ^ ((position << 16) + shard_id)
+            np.random.default_rng(shard_seed).shuffle(offsets)
+        self._current_offsets = offsets
+
+    def _pull_from_shards_array(self, n: int) -> np.ndarray:
+        """Advance the shard cursor by up to *n* samples, returning an (M, 3) array."""
+        segments: list[np.ndarray] = []
+        left = n
+        ds_id = self._dataset_id
+        while left > 0 and self._current_shard_idx < len(self._shard_order):
+            shard_id = self._shard_order[self._current_shard_idx]
+            shard_size = self._shard_sizes[self._current_shard_idx]
+            available = shard_size - self._current_shard_pos
+            take = min(left, available)
+
+            seg = np.empty((take, 3), dtype=np.int32)
+            seg[:, 0] = ds_id
+            seg[:, 1] = shard_id
+            if self._knobs.shuffle_within_shard:
+                self._ensure_shuffled_shard_offsets()
+                assert self._current_offsets is not None
+                seg[:, 2] = self._current_offsets[
+                    self._current_shard_pos : self._current_shard_pos + take
+                ]
+            else:
+                seg[:, 2] = np.arange(
+                    self._current_shard_pos,
+                    self._current_shard_pos + take,
+                    dtype=np.int32,
+                )
+
+            segments.append(seg)
+            self._current_shard_pos += take
+            left -= take
+
+            if self._current_shard_pos >= shard_size:
+                self._current_shard_idx += 1
+                self._current_shard_pos = 0
+                self._current_offsets = None
+
+        if not segments:
+            return np.empty((0, 3), dtype=np.int32)
+        if len(segments) == 1:
+            return segments[0]
+        return np.concatenate(segments)
+
+    @property
+    def _remaining_in_shards(self) -> int:
+        """Samples not yet pulled from the shard cursor."""
+        if self._current_shard_idx >= len(self._shard_order):
+            return 0
+        pulled = (
+            int(self._shard_cumsum[self._current_shard_idx - 1])
+            if self._current_shard_idx > 0
+            else 0
+        ) + self._current_shard_pos
+        return self._total_samples - pulled
+
+    # ------------------------------------------------------------------
+    # Block shuffle helpers
+    # ------------------------------------------------------------------
+
+    # How many samples to batch into a single block buffer.  Larger values
+    # amortize the per-fill overhead; the memory cost is modest (~12 bytes
+    # per sample).  The value is rounded up to the next multiple of
+    # block_size during filling.
+    _BLOCK_BUFFER_TARGET = 1 << 16  # 65 536 samples ≈ 768 KiB
+
+    def _fill_block_buffer(self) -> None:
+        """Pull many blocks from shards, shuffle each in-place, and buffer."""
+        block_size = max(1, int(self._knobs.shuffle_block_size))  # type: ignore[arg-type]
+        remaining_in_shards = self._remaining_in_shards
+        # Round target up to a whole number of blocks.
+        target = min(self._BLOCK_BUFFER_TARGET, remaining_in_shards)
+        target = max(target, block_size)  # at least one block
+        n_blocks = (target + block_size - 1) // block_size
+        target = n_blocks * block_size
+
+        arr = self._pull_from_shards_array(target)
+        if len(arr) == 0:
+            self._block_buffer = None
+            return
+
+        # Apply per-block shuffles.  We shuffle a 1D permutation index and
+        # apply via fancy indexing rather than shuffling 2D row-views, because
+        # NumPy's multi-dimensional shuffle path has significant per-call
+        # overhead.  The 1D path advances the RNG identically.
+        if self._block_rng is not None:
+            # Snapshot RNG state before this fill — used for fast checkpoint
+            # restore (partial replay bounded by buffer size).
+            self._pre_fill_rng_state = self._block_rng.bit_generator.state
+            self._pre_fill_block_count = self._blocks_consumed
+            for start in range(0, len(arr), block_size):
+                end = min(start + block_size, len(arr))
+                n = end - start
+                perm = np.arange(n, dtype=np.intp)
+                self._block_rng.shuffle(perm)
+                arr[start:end] = arr[start:end][perm]
+            self._block_rng_state = self._block_rng.bit_generator.state
+
+        actual_blocks = (len(arr) + block_size - 1) // block_size
+        self._block_buffer = arr
+        self._block_buffer_pos = 0
+        self._blocks_consumed += actual_blocks
+
+    # ------------------------------------------------------------------
+    # Public iteration
+    # ------------------------------------------------------------------
+
     def next_many(self, limit: int) -> list[SampleId]:
-        if limit <= 0 or self._position >= len(self._order):
+        if limit <= 0 or self._position >= self._total_samples:
             return []
-        end = min(self._position + limit, len(self._order))
-        chunk_arr = self._order[self._position : end]
-        self._position = end
-        self.remaining -= len(chunk_arr)
-        # Convert numpy rows to tuples for API compatibility
-        return [tuple(row) for row in chunk_arr.tolist()]
+        if self._has_block_shuffle:
+            return self._next_many_block_shuffle(limit)
+        return self._next_many_sequential(limit)
+
+    def _next_many_sequential(self, limit: int) -> list[SampleId]:
+        actual = min(limit, self._total_samples - self._position)
+        arr = self._pull_from_shards_array(actual)
+        self._position += len(arr)
+        self.remaining -= len(arr)
+        return [tuple(row) for row in arr.tolist()]
+
+    def _next_many_block_shuffle(self, limit: int) -> list[SampleId]:
+        actual = min(limit, self._total_samples - self._position)
+        segments: list[np.ndarray] = []
+        collected = 0
+        left = actual
+        while left > 0:
+            if self._block_buffer is None or self._block_buffer_pos >= len(
+                self._block_buffer
+            ):
+                self._fill_block_buffer()
+                if self._block_buffer is None:
+                    break
+
+            available = len(self._block_buffer) - self._block_buffer_pos
+            take = min(left, available)
+            segments.append(
+                self._block_buffer[
+                    self._block_buffer_pos : self._block_buffer_pos + take
+                ]
+            )
+            self._block_buffer_pos += take
+            collected += take
+            left -= take
+
+        self._position += collected
+        self.remaining -= collected
+        if not segments:
+            return []
+        if len(segments) == 1:
+            return [tuple(row) for row in segments[0].tolist()]
+        combined = np.concatenate(segments)
+        return [tuple(row) for row in combined.tolist()]
+
+    # ------------------------------------------------------------------
+    # Seeking (for checkpoint restore and cloning)
+    # ------------------------------------------------------------------
+
+    def _seek_shard_cursor(self, p: int) -> None:
+        """Position the shard-level cursor at global offset *p*."""
+        if p <= 0 or self._total_samples == 0:
+            self._current_shard_idx = 0
+            self._current_shard_pos = 0
+            self._current_offsets = None
+            return
+        if p >= self._total_samples:
+            self._current_shard_idx = len(self._shard_order)
+            self._current_shard_pos = 0
+            self._current_offsets = None
+            return
+        idx = int(np.searchsorted(self._shard_cumsum, p, side="right"))
+        prev_cum = int(self._shard_cumsum[idx - 1]) if idx > 0 else 0
+        self._current_shard_idx = idx
+        self._current_shard_pos = p - prev_cum
+        self._current_offsets = None
+
+    def _seek_to_position(
+        self,
+        p: int,
+        block_rng_snapshot: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Seek the cursor to global position *p* (used by checkpoint restore).
+
+        If *block_rng_snapshot* is provided (from a checkpoint), it contains
+        the RNG state captured before the last buffer fill and the block count
+        at that point.  The seek replays only the blocks between that snapshot
+        and *block_idx* — bounded by the buffer size rather than O(block_idx).
+        """
+        p = max(0, min(p, self._total_samples))
+        self._position = p
+        self.remaining = self._total_samples - p
+
+        if not self._has_block_shuffle:
+            self._seek_shard_cursor(p)
+            return
+
+        block_size = max(1, int(self._knobs.shuffle_block_size))  # type: ignore[arg-type]
+
+        if p == 0:
+            self._seek_shard_cursor(0)
+            self._block_rng = self._make_block_rng(self._knobs)
+            self._block_rng_state = self._block_rng.bit_generator.state
+            self._pre_fill_rng_state = self._block_rng_state
+            self._pre_fill_block_count = 0
+            self._block_buffer = None
+            self._block_buffer_pos = 0
+            self._blocks_consumed = 0
+            return
+
+        if p >= self._total_samples:
+            self._seek_shard_cursor(self._total_samples)
+            self._block_buffer = None
+            self._block_buffer_pos = 0
+            self._block_rng = None
+            self._block_rng_state = None
+            self._pre_fill_rng_state = None
+            return
+
+        block_idx = p // block_size
+        pos_in_block = p % block_size
+        block_start = block_idx * block_size
+
+        # Position the shard cursor at the start of the target block.
+        self._seek_shard_cursor(block_start)
+
+        # Restore the block RNG to the state just before block_idx.
+        replay_from = 0
+        if (
+            block_rng_snapshot is not None
+            and int(block_rng_snapshot["block_count"]) <= block_idx
+        ):
+            # Partial replay from the saved snapshot — at most one buffer's
+            # worth of blocks.
+            replay_from = int(block_rng_snapshot["block_count"])
+            self._block_rng = np.random.default_rng(0)
+            self._block_rng.bit_generator.state = block_rng_snapshot["rng_state"]
+        else:
+            # Full replay from scratch — fallback for old checkpoints.
+            self._block_rng = self._make_block_rng(self._knobs)
+
+        for i in range(replay_from, block_idx):
+            b_start = i * block_size
+            b_end = min(b_start + block_size, self._total_samples)
+            dummy = np.arange(b_end - b_start, dtype=np.intp)
+            self._block_rng.shuffle(dummy)
+
+        self._blocks_consumed = block_idx
+
+        # Fill the block buffer starting from the target block.
+        self._fill_block_buffer()
+        self._block_buffer_pos = pos_in_block
+
+    # ------------------------------------------------------------------
+    # Cloning
+    # ------------------------------------------------------------------
+
+    def _clone(self) -> "_DatasetCursor":
+        """Create an independent copy that shares immutable epoch-level data.
+
+        Mutable state (position, shard cursor, block buffer, RNG) is copied
+        so the clone can advance independently.
+        """
+        c = _DatasetCursor.__new__(_DatasetCursor)
+        # Immutable / epoch-level (shared references).
+        c._dataset_id = self._dataset_id
+        c._shard_index = self._shard_index
+        c._knobs = self._knobs
+        c._shard_order = self._shard_order
+        c._shard_sizes = self._shard_sizes
+        c._shard_cumsum = self._shard_cumsum
+        c._total_samples = self._total_samples
+        c._has_block_shuffle = self._has_block_shuffle
+        # Mutable scalar state (copy by value).
+        c._epoch = self._epoch
+        c._position = self._position
+        c.remaining = self.remaining
+        c._current_shard_idx = self._current_shard_idx
+        c._current_shard_pos = self._current_shard_pos
+        c._blocks_consumed = self._blocks_consumed
+        c._pre_fill_rng_state = self._pre_fill_rng_state
+        c._pre_fill_block_count = self._pre_fill_block_count
+        # Lazy per-shard offsets (immutable once generated, safe to share).
+        c._current_offsets = self._current_offsets
+        # Block buffer (copy if active so the clone can advance independently).
+        c._block_buffer = (
+            self._block_buffer.copy() if self._block_buffer is not None else None
+        )
+        c._block_buffer_pos = self._block_buffer_pos
+        # Restore block RNG from cached state.
+        if self._block_rng_state is not None:
+            c._block_rng = np.random.default_rng(0)
+            c._block_rng.bit_generator.state = self._block_rng_state
+            c._block_rng_state = self._block_rng_state
+        else:
+            c._block_rng = None
+            c._block_rng_state = None
+        return c
 
 
 class StaticMixtureWorkSource(WorkSource):
@@ -276,9 +670,9 @@ class StaticMixtureWorkSource(WorkSource):
             for name in self._component_order:
                 quota = self._chunk_quota[name]
                 cursor = self._cursors[name]
-                if len(cursor._order) < quota:
+                if cursor._total_samples < quota:
                     raise ValueError(
-                        f"Dataset '{name}' has {len(cursor._order)} samples but "
+                        f"Dataset '{name}' has {cursor._total_samples} samples but "
                         f"repeat policy requires at least {quota} per chunk "
                         f"(chunk_size={chunk_size}). "
                         f"Increase dataset size or decrease chunk_size."
@@ -318,18 +712,7 @@ class StaticMixtureWorkSource(WorkSource):
         clone._max_repeats = self._max_repeats
         clone._knobs = self._knobs
 
-        # Create fresh cursors that share the immutable order buffer but have
-        # independent positions/remaining counts.
-        clone._cursors = {}
-        for name, cur in self._cursors.items():
-            new_cur = _DatasetCursor.__new__(_DatasetCursor)
-            new_cur._order = cur._order
-            new_cur._position = cur._position
-            new_cur.remaining = cur.remaining
-            new_cur._epoch = cur._epoch
-            new_cur._dataset_id = cur._dataset_id
-            new_cur._shard_index = cur._shard_index
-            clone._cursors[name] = new_cur
+        clone._cursors = {name: cur._clone() for name, cur in self._cursors.items()}
 
         clone.total_samples = self.total_samples
 
@@ -549,6 +932,14 @@ class StaticMixtureWorkSource(WorkSource):
             "cursor_epochs": {
                 name: int(cur._epoch) for name, cur in self._cursors.items()
             },
+            "cursor_block_rng_snapshots": {
+                name: {
+                    "rng_state": cur._pre_fill_rng_state,
+                    "block_count": cur._pre_fill_block_count,
+                }
+                for name, cur in self._cursors.items()
+                if cur._pre_fill_rng_state is not None
+            },
             "exhausted_policy": self._exhausted_policy,
             "reshuffle_on_repeat": self._reshuffle_on_repeat,
             "max_repeats": self._max_repeats,
@@ -609,12 +1000,12 @@ class StaticMixtureWorkSource(WorkSource):
             )
             self._cursors[ds.name] = cur
 
-        # Restore positions
+        # Restore positions via seek (handles shard cursor + block state).
         pos = state["cursor_positions"]
+        rng_snapshots: dict[str, Any] = state.get("cursor_block_rng_snapshots", {})
         for name, cur in self._cursors.items():
             p = int(pos.get(name, 0))
-            cur._position = max(0, min(p, len(cur._order)))
-            cur.remaining = len(cur._order) - cur._position
+            cur._seek_to_position(p, block_rng_snapshot=rng_snapshots.get(name))
 
         self._weights = dict(state["weights"])
         self._component_order = list(state["component_order"])
