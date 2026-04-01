@@ -562,6 +562,37 @@ class _DatasetCursor:
             c._block_rng_state = None
         return c
 
+    # ------------------------------------------------------------------
+    # Checkpoint / restore
+    # ------------------------------------------------------------------
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Return cursor state needed for deterministic continuation."""
+        state: dict[str, Any] = {
+            "position": int(self._position),
+            "epoch": int(self._epoch),
+        }
+        if self._pre_fill_rng_state is not None:
+            state["block_rng_snapshot"] = {
+                "rng_state": self._pre_fill_rng_state,
+                "block_count": self._pre_fill_block_count,
+            }
+        return state
+
+    def restore_checkpoint_state(
+        self,
+        state: Mapping[str, Any],
+        *,
+        reshuffle: bool,
+        base_knobs: _DatasetKnobs,
+    ) -> None:
+        """Restore cursor state from a serialized checkpoint payload."""
+        epoch = int(state.get("epoch", 0))
+        self._seek_epoch(epoch, reshuffle=reshuffle, base_knobs=base_knobs)
+        position = int(state.get("position", 0))
+        snapshot = state.get("block_rng_snapshot")
+        self._seek_to_position(position, block_rng_snapshot=snapshot)
+
 
 class StaticMixtureWorkSource(WorkSource):
     """Emit SampleId triples from one or more datasets according to a mixture.
@@ -913,6 +944,9 @@ class StaticMixtureWorkSource(WorkSource):
 
     def state_dict(self) -> dict[str, Any]:
         base = super().state_dict()
+        cursor_states = {
+            name: cur.checkpoint_state() for name, cur in self._cursors.items()
+        }
         return base | {
             "version": 1,
             "seed": int(self._seed),
@@ -926,19 +960,14 @@ class StaticMixtureWorkSource(WorkSource):
             "weights": dict(self._weights),
             "component_order": list(self._component_order),
             "dataset_ids": dict(self._dataset_ids),
+            "cursor_states": cursor_states,
             "cursor_positions": {
-                name: int(cur._position) for name, cur in self._cursors.items()
+                name: int(cur_state["position"])
+                for name, cur_state in cursor_states.items()
             },
             "cursor_epochs": {
-                name: int(cur._epoch) for name, cur in self._cursors.items()
-            },
-            "cursor_block_rng_snapshots": {
-                name: {
-                    "rng_state": cur._pre_fill_rng_state,
-                    "block_count": cur._pre_fill_block_count,
-                }
-                for name, cur in self._cursors.items()
-                if cur._pre_fill_rng_state is not None
+                name: int(cur_state["epoch"])
+                for name, cur_state in cursor_states.items()
             },
             "exhausted_policy": self._exhausted_policy,
             "reshuffle_on_repeat": self._reshuffle_on_repeat,
@@ -982,6 +1011,7 @@ class StaticMixtureWorkSource(WorkSource):
             )
         self._reshuffle_on_repeat = ckpt_reshuffle
         self._max_repeats = ckpt_max_repeats
+        cursor_states: dict[str, Any] = state.get("cursor_states", {})
         cursor_epochs: dict[str, int] = state.get("cursor_epochs", {})
 
         # Rebuild cursors deterministically and set positions
@@ -992,20 +1022,24 @@ class StaticMixtureWorkSource(WorkSource):
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
-            epoch = int(cursor_epochs.get(ds.name, 0))
-
             cur = _DatasetCursor(dataset_id, ds.shard_index, knobs)
-            cur._seek_epoch(
-                epoch, reshuffle=self._reshuffle_on_repeat, base_knobs=knobs
-            )
+            if ds.name in cursor_states:
+                cur.restore_checkpoint_state(
+                    cursor_states[ds.name],
+                    reshuffle=self._reshuffle_on_repeat,
+                    base_knobs=knobs,
+                )
+            else:
+                # Legacy cursor state checkpoint
+                cur.restore_checkpoint_state(
+                    {
+                        "epoch": int(cursor_epochs.get(ds.name, 0)),
+                        "position": int(state["cursor_positions"].get(ds.name, 0)),
+                    },
+                    reshuffle=self._reshuffle_on_repeat,
+                    base_knobs=knobs,
+                )
             self._cursors[ds.name] = cur
-
-        # Restore positions via seek (handles shard cursor + block state).
-        pos = state["cursor_positions"]
-        rng_snapshots: dict[str, Any] = state.get("cursor_block_rng_snapshots", {})
-        for name, cur in self._cursors.items():
-            p = int(pos.get(name, 0))
-            cur._seek_to_position(p, block_rng_snapshot=rng_snapshots.get(name))
 
         self._weights = dict(state["weights"])
         self._component_order = list(state["component_order"])
