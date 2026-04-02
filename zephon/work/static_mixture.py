@@ -1014,6 +1014,23 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_states: dict[str, Any] = state.get("cursor_states", {})
         cursor_epochs: dict[str, int] = state.get("cursor_epochs", {})
 
+        # Verify dataset_ids matching
+        ckpt_dataset_ids_raw = state.get("dataset_ids")
+        if not isinstance(ckpt_dataset_ids_raw, dict):
+            raise RuntimeError("Checkpoint missing or invalid dataset_ids mapping.")
+        ckpt_dataset_ids = {
+            str(name): int(dataset_id)
+            for name, dataset_id in ckpt_dataset_ids_raw.items()
+        }
+        current_dataset_ids = {
+            ds.name: dataset_id for dataset_id, ds in enumerate(self._datasets)
+        }
+        if ckpt_dataset_ids != current_dataset_ids:
+            raise RuntimeError(
+                "Checkpoint dataset_ids do not match current dataset ordering. "
+                f"checkpoint={ckpt_dataset_ids}, current={current_dataset_ids}"
+            )
+
         # Rebuild cursors deterministically and set positions
         self._cursors.clear()
         self._dataset_ids.clear()

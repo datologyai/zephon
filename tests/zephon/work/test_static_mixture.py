@@ -1104,6 +1104,36 @@ def test_checkpoint_restore_cut_sweep_around_block_boundaries(
     assert prefix + suffix == baseline
 
 
+def test_load_state_dict_dataset_order_mismatch_raises() -> None:
+    """Loading checkpoint into differently ordered datasets should fail."""
+    ds_a = make_sharded_dataset("alpha", [7, 9, 11])
+    ds_b = make_sharded_dataset("beta", [13, 15, 17])
+
+    ws_save = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        MixtureSpec({"alpha": 0.5, "beta": 0.5}).weights,
+        chunk_size=6,
+        seed=99,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    ).clone_for_lane(0, canonical_replicas=1)
+    _drain_chunks(ws_save, limit=4)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(
+        [ds_b, ds_a],  # reversed order
+        MixtureSpec({"alpha": 0.5, "beta": 0.5}).weights,
+        chunk_size=6,
+        seed=99,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError):
+        ws_load.load_state_dict(state)
+
+
 def test_load_state_dict_lane_mismatch_raises() -> None:
     """Loading lane-0 checkpoint into lane-1 should fail for deterministic safety."""
     ds = make_sharded_dataset("alpha", [11, 13, 17, 19])
