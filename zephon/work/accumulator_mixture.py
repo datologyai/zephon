@@ -193,18 +193,24 @@ class AccumulatorMixtureWorkSource(WorkSource):
         Uses Bresenham-style fractional accumulation:
 
         1. Add ``weight * chunk_size`` to each accumulator.
-        2. Take ``floor(accum)`` as the base quota; subtract it so the
-           accumulator holds only the fractional remainder in [0, 1).
+        2. Take ``int(accum)`` (truncation toward zero) as the base quota;
+           subtract it so the accumulator holds only the remainder.
         3. Apply a largest-remainder correction so ``sum(quotas) == chunk_size``
-           exactly.  The correction is *stateless* — it does not modify the
-           accumulators, keeping them always in [0, 1).
+           exactly, and **debit/credit each correction back into the
+           accumulator** so that future chunks account for the actual
+           (corrected) allocation.
+
+        Accumulators may temporarily go negative after a +1 correction; they
+        recover naturally as ``weight * chunk_size`` is added each chunk.
+        Negative accumulators sort last in the deficit correction, preventing
+        back-to-back over-allocation.
         """
         quotas: dict[str, int] = {}
         total = 0
 
         for name in self._component_order:
             self._accumulators[name] += self._weights[name] * self._chunk_size
-            q = int(self._accumulators[name])  # floor
+            q = int(self._accumulators[name])  # truncation toward zero
             self._accumulators[name] -= q
             quotas[name] = q
             total += q
@@ -222,6 +228,10 @@ class AccumulatorMixtureWorkSource(WorkSource):
                     break
                 quotas[name] += 1
                 deficit -= 1
+
+                # debit each correction back into the accumulator
+                self._accumulators[name] -= 1.0
+
         elif deficit < 0:
             # Remove slots from components with smallest fractional remainder.
             order = sorted(
@@ -234,6 +244,9 @@ class AccumulatorMixtureWorkSource(WorkSource):
                 if quotas[name] > 0:
                     quotas[name] -= 1
                     deficit += 1
+
+                    # credit each correction back into the accumulator
+                    self._accumulators[name] += 1.0
 
         if sum(quotas.values()) != self._chunk_size:
             raise RuntimeError(

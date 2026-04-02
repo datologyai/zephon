@@ -152,3 +152,6 @@ zephon/_version.py
 
 # Local symlink to external repo; do not commit
 /megatron
+
+# Local test output (mix statistics snapshots, etc.)
+tests/out/

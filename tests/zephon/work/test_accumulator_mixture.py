@@ -351,10 +351,12 @@ def test_checkpoint_restore_accumulator_round_trip() -> None:
     state = ws.state_dict()
 
     # Verify accumulators are in the state dict and are floats.
+    # Accumulators can go negative after deficit corrections are fed back,
+    # but should stay within (-1, 1).
     assert "accumulators" in state
     for name, val in state["accumulators"].items():
         assert isinstance(val, float)
-        assert 0.0 <= val < 1.0, f"Accumulator for {name} out of [0, 1): {val}"
+        assert -1.0 < val < 1.0, f"Accumulator for {name} out of (-1, 1): {val}"
 
 
 def test_checkpoint_restore_multilane() -> None:
@@ -616,3 +618,81 @@ def test_load_state_dict_version_mismatch_raises() -> None:
     ws2 = AccumulatorMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
     with pytest.raises(RuntimeError, match="Unsupported"):
         ws2.load_state_dict(state)
+
+
+# ---------------------------------------------------------------------------
+# Deficit correction feedback regression
+# ---------------------------------------------------------------------------
+
+
+def test_deficit_correction_does_not_inflate_small_components() -> None:
+    """Largest-remainder correction must feed back into accumulators.
+
+    Without feedback, small-weight components (w * chunk_size < 1) accumulate
+    phantom credit: their fractional remainder stays high after receiving a +1
+    correction, causing them to win future corrections repeatedly. Over many
+    chunks this inflates their allocation by 30-40%+.
+
+    The fix subtracts 1.0 from the accumulator on each +1 correction (and adds
+    1.0 on each -1), keeping the accumulator aligned with actual allocations.
+    """
+    target = {
+        "bulk": 0.4988,
+        "mid_a": 0.15,
+        "mid_b": 0.10,
+        "med_a": 0.05,
+        "med_b": 0.05,
+        "med_c": 0.03,
+        "med_d": 0.03,
+        "sml_a": 0.02,
+        "sml_b": 0.02,
+        "sml_c": 0.02,
+        "xs_a": 0.01,
+        "xs_b": 0.01,
+        "tiny_a": 0.005,
+        "tiny_b": 0.003,
+        "tiny_c": 0.001,
+        "tiny_d": 0.001,
+        "micro_a": 0.0005,
+        "micro_b": 0.0005,
+        "nano_a": 0.0001,
+        "nano_b": 0.0001,
+    }
+    chunk_size = 1024
+    num_chunks = 250
+
+    datasets = [
+        make_dataset(name, max(200, int(w * chunk_size * num_chunks * 2)))
+        for name, w in target.items()
+    ]
+    ws = AccumulatorMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=chunk_size,
+        seed=42,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(num_chunks):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    total = sum(counts.values())
+    assert total == chunk_size * num_chunks
+
+    worst_name = ""
+    worst_rel = 0.0
+    for name, w in target.items():
+        actual = counts[name] / total
+        rel_err = abs(actual - w) / w
+        if rel_err > worst_rel:
+            worst_rel = rel_err
+            worst_name = name
+
+    assert worst_rel < 0.05, (
+        f"Component '{worst_name}' has {worst_rel:.1%} relative error — "
+        f"deficit correction feedback into accumulators may be missing"
+    )
