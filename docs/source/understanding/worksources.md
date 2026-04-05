@@ -174,7 +174,7 @@ a fixed set of datasets mixed in fixed proportions.
 ws = StaticMixtureWorkSource(
     datasets=[fineweb, dclm],
     mixture=MixtureSpec({"fineweb": 0.7, "dclm": 0.3}),
-    chunk_size=1024,
+    chunk_size=16384,
     seed=42,
 )
 ```
@@ -190,8 +190,8 @@ WorkSource computes a **quota** per component: how many sample pointers each
 component contributes to every chunk.  The allocation guarantees that every
 component gets at least one slot, and the sum of quotas equals `chunk_size`.
 
-For example, with `chunk_size=1024` and weights `{"fineweb": 0.7, "dclm":
-0.3}`, the quotas would be approximately `fineweb=717, dclm=307`.  The
+For example, with `chunk_size=16384` and weights `{"fineweb": 0.7, "dclm":
+0.3}`, the quotas would be approximately `fineweb=11469, dclm=4915`.  The
 exact split uses a largest-remainder method to distribute rounding leftovers
 fairly.
 
@@ -223,7 +223,7 @@ component can no longer fill its per-chunk quota:
 ws = StaticMixtureWorkSource(
     datasets=[large_corpus, small_corpus],
     mixture={"large": 0.6, "small": 0.4},
-    chunk_size=1024,
+    chunk_size=16384,
     seed=42,
     exhausted_policy="repeat",      # restart components that run out
     reshuffle_on_repeat=True,       # different sample order each epoch

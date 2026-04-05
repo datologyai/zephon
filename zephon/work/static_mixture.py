@@ -615,7 +615,7 @@ class StaticMixtureWorkSource(WorkSource):
         self,
         datasets: list[Dataset],
         mixture: MixtureSpec | Mapping[str, float],
-        chunk_size: int = 1024,
+        chunk_size: int = 16384,
         seed: int = 0,
         shuffle_shards: bool = True,
         shuffle_within_shard: bool = False,
@@ -817,13 +817,15 @@ class StaticMixtureWorkSource(WorkSource):
 
         if warn_components:
             joined = ", ".join(warn_components)
-            warnings.warn(
-                (
-                    "Mixture components with ideal < 1 sample per chunk will "
-                    f"receive 1 sample: {joined}."
-                ),
-                RuntimeWarning,
-                stacklevel=2,
+            min_weight = min(self._weights[n] for n in warn_components)
+            min_chunk_size = math.ceil(1.0 / min_weight)
+            min_proportion = 1.0 / self._chunk_size
+            raise ValueError(
+                f"Mixture components have ideal < 1 sample per chunk: {joined}. "
+                f"Either increase chunk_size to at least {min_chunk_size} to "
+                f"support the current MixtureSpec, or ensure every component "
+                f"has a minimum proportion of at least {min_proportion:.4g} "
+                f"(= 1/chunk_size) in the MixtureSpec."
             )
 
         assigned = sum(quota.values())

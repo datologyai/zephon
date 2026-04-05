@@ -54,7 +54,7 @@ dclm = Dataset.from_path("dclm", "/data/dclm")
 ws = StaticMixtureWorkSource(
     datasets=[fineweb, dclm],
     mixture=MixtureSpec({"fineweb": 0.7, "dclm": 0.3}),
-    chunk_size=1024,
+    chunk_size=16384,
     seed=42,
 )
 ```
@@ -140,7 +140,7 @@ fineweb = Dataset.from_path("fineweb", "/data/fineweb")
 ws = StaticMixtureWorkSource(
     datasets=[fineweb],
     mixture=MixtureSpec({"fineweb": 1.0}),
-    chunk_size=1024,
+    chunk_size=16384,
     seed=42,
 )
 

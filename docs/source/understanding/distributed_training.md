@@ -262,7 +262,7 @@ ds = Dataset.from_path("train", "/data/train/")
 ws = StaticMixtureWorkSource(
     [ds],
     mixture=MixtureSpec({"train": 1.0}),
-    chunk_size=1024,
+    chunk_size=16384,
     seed=42,
 )
 

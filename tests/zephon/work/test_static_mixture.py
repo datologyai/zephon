@@ -1,3 +1,4 @@
+import math
 import random
 
 import pytest
@@ -213,18 +214,63 @@ def test_chunk_size_smaller_than_components_raises() -> None:
         )
 
 
-def test_warning_for_small_components() -> None:
-    dataset_a = make_dataset("alpha", 6)
-    dataset_b = make_dataset("beta", 6)
-    dataset_c = make_dataset("gamma", 6)
+def test_small_component_raises_with_chunk_size_suggestion() -> None:
+    """When ideal < 1.0 for any component, a ValueError is raised suggesting a minimum chunk_size."""
+    dataset_a = make_dataset("alpha", 100)
+    dataset_b = make_dataset("beta", 100)
+    dataset_c = make_dataset("gamma", 100)
     mixture = {"alpha": 0.9, "beta": 0.09, "gamma": 0.01}
-    with pytest.warns(RuntimeWarning):
+    with pytest.raises(ValueError, match=r"chunk_size.*at least 100"):
         StaticMixtureWorkSource(
             [dataset_a, dataset_b, dataset_c],
             MixtureSpec(mixture).weights,
             chunk_size=4,
             shuffle_shards=False,
         )
+
+
+def test_small_component_raises_with_proportion_suggestion() -> None:
+    """The error message also suggests the minimum proportion for the current chunk_size."""
+    ds_a = make_dataset("big", 100)
+    ds_b = make_dataset("tiny", 100)
+    mixture = {"big": 0.99, "tiny": 0.01}
+    with pytest.raises(ValueError, match=r"minimum proportion.*0\.5"):
+        StaticMixtureWorkSource(
+            [ds_a, ds_b],
+            MixtureSpec(mixture).weights,
+            chunk_size=2,
+            shuffle_shards=False,
+        )
+
+
+def test_small_component_error_names_offending_components() -> None:
+    """The error message lists the component(s) whose ideal quota is below 1."""
+    ds_a = make_dataset("alpha", 100)
+    ds_b = make_dataset("beta", 100)
+    ds_c = make_dataset("gamma", 100)
+    mixture = {"alpha": 0.9, "beta": 0.09, "gamma": 0.01}
+    with pytest.raises(ValueError, match="beta.*gamma|gamma.*beta"):
+        StaticMixtureWorkSource(
+            [ds_a, ds_b, ds_c],
+            MixtureSpec(mixture).weights,
+            chunk_size=4,
+            shuffle_shards=False,
+        )
+
+
+def test_ideal_exactly_one_does_not_raise() -> None:
+    """When the smallest component has ideal == 1.0 exactly, no error is raised."""
+    ds_a = make_dataset("big", 100)
+    ds_b = make_dataset("small", 100)
+    # weight 0.1 * chunk_size 10 = ideal 1.0 exactly
+    mixture = {"big": 0.9, "small": 0.1}
+    ws = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        MixtureSpec(mixture).weights,
+        chunk_size=10,
+        shuffle_shards=False,
+    )
+    assert ws._chunk_quota["small"] >= 1
 
 
 def test_chunk_samples_match_components_and_counts() -> None:
@@ -1173,11 +1219,15 @@ def test_checkpoint_restore_randomized_property(cfg_seed: int) -> None:
         datasets.append(make_sharded_dataset(name, shard_lengths))
         mixture_raw[name] = rng.uniform(0.1, 1.0)
 
+    spec = MixtureSpec(mixture_raw)
+    min_weight = min(spec.normalized.values())
+    min_cs = max(dataset_count, math.ceil(1.0 / min_weight))
+
     exhausted_policy = rng.choice(["stop", "repeat"])
     kwargs: dict = dict(
         datasets=datasets,
-        mixture=MixtureSpec(mixture_raw).weights,
-        chunk_size=rng.randint(dataset_count, dataset_count + 7),
+        mixture=spec.weights,
+        chunk_size=rng.randint(min_cs, min_cs + 7),
         seed=rng.randint(0, 10000),
         shuffle_shards=rng.choice([True, False]),
         shuffle_within_shard=rng.choice([True, False]),
