@@ -67,6 +67,10 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         # Per-lane state: lane_id -> list[Bin]
         self._bins: defaultdict[int, list[Bin]] = defaultdict(list)
 
+    @property
+    def reads_payload(self) -> bool:
+        return True
+
     def has_pending_data(self) -> bool:
         """Return True if there are any bins with samples."""
         return any(bins for bins in self._bins.values())

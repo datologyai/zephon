@@ -14,9 +14,11 @@ from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord, lane_of
 from zephon.ops.decode_text import DecodeText
 from zephon.utils.shm_coalesce import (
     CoalescedMicrobatch,
+    LazyPayload,
     _ShmBytes,
     _ShmBytesLegacy,
     coalesce_microbatch,
+    resolve_lazy_payloads,
 )
 
 torch = pytest.importorskip("torch")
@@ -33,11 +35,17 @@ def _meta(i: int) -> SampleMeta:
 
 
 def _round_trip(coalesced: CoalescedMicrobatch) -> list:
-    """ForkingPickler round-trip (simulates worker → pump thread)."""
+    """ForkingPickler round-trip — returns records with LazyPayload (unresolved)."""
     blob = _forking_round_trip(coalesced)
     restored = pickle.loads(blob)
-    # Eager __reduce__: unpickle produces list[StreamItem], not CoalescedMicrobatch.
     assert isinstance(restored, list)
+    return restored
+
+
+def _round_trip_resolved(coalesced: CoalescedMicrobatch) -> list:
+    """Full round-trip simulating worker → pump → worker resolve."""
+    restored = _round_trip(coalesced)
+    resolve_lazy_payloads(restored)
     return restored
 
 
@@ -45,7 +53,7 @@ def _round_trip(coalesced: CoalescedMicrobatch) -> list:
 # Basic round-trip
 # ---------------------------------------------------------------------------
 class TestCoalesceMicrobatchRoundTrip:
-    """Coalesce → ForkingPickler → pickle.loads should recover original data."""
+    """Coalesce → ForkingPickler → pickle.loads → resolve should recover original data."""
 
     def test_single_dtype(self) -> None:
         records: list[SampleRecord] = [
@@ -69,7 +77,7 @@ class TestCoalesceMicrobatchRoundTrip:
         buf = coalesced.buffers["torch.int64"]
         assert buf.is_shared()
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert len(restored) == 4
         for i, rec in enumerate(restored):
             assert isinstance(rec, SampleRecord)
@@ -102,7 +110,7 @@ class TestCoalesceMicrobatchRoundTrip:
         assert "torch.int64" in coalesced.buffers
         assert "torch.float32" in coalesced.buffers
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert len(restored) == 2
         for rec in restored:
             assert rec.payload["tokens"].shape == (3,)
@@ -114,7 +122,7 @@ class TestCoalesceMicrobatchRoundTrip:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload["matrix"], t)
         assert restored[0].payload["matrix"].shape == (3, 4)
 
@@ -126,6 +134,14 @@ class TestCoalesceEdgeCases:
     def test_no_tensors_returns_none(self) -> None:
         records = [SampleRecord(meta=_meta(0), payload={"text": "hello", "count": 42})]
         assert coalesce_microbatch(records) is None
+
+    def test_no_tensors_payloads_unchanged(self) -> None:
+        """When coalesce returns None, payloads must not be mutated."""
+        payload = {"text": "hello", "count": 42}
+        records = [SampleRecord(meta=_meta(0), payload=payload)]
+        assert coalesce_microbatch(records) is None
+        assert records[0].payload is payload
+        assert records[0].payload["text"] == "hello"
 
     def test_returns_none_when_torch_is_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
@@ -155,7 +171,7 @@ class TestCoalesceEdgeCases:
         ]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["empty"].numel() == 0
         torch.testing.assert_close(restored[0].payload["ok"], torch.tensor([1.0]))
 
@@ -169,7 +185,7 @@ class TestCoalesceEdgeCases:
         ]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload[0], torch.tensor([1, 2, 3]))
         assert restored[0].payload[1] == "text"
         torch.testing.assert_close(restored[0].payload[2], torch.tensor([4.0, 5.0]))
@@ -189,7 +205,7 @@ class TestCoalesceEdgeCases:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload["sliced"], t_slice)
         torch.testing.assert_close(restored[0].payload["transposed"], t_transposed)
         assert restored[0].payload["sliced"].shape == t_slice.shape
@@ -205,7 +221,7 @@ class TestCoalesceEdgeCases:
         coalesced = coalesce_microbatch([batch])
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert len(restored) == 1
         assert isinstance(restored[0], SampleBatch)
         assert len(restored[0].records) == 2
@@ -265,7 +281,7 @@ class TestCoalesceShmProperties:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         # All restored tensors should share the same storage
         storages = {rec.payload["t"].untyped_storage().data_ptr() for rec in restored}
         assert len(storages) == 1, "All views should share one underlying storage"
@@ -278,7 +294,7 @@ class TestCoalesceShmProperties:
             )
         ]
         coalesced = coalesce_microbatch(records)
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["t"].is_contiguous()
 
 
@@ -298,7 +314,7 @@ class TestCoalesceBytes:
         assert coalesced is not None
         assert "_bytes_uint8" in coalesced.buffers
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert bytes(restored[0].payload["raw"]) == data_a
         assert restored[0].payload["label"] == "hello"
         assert bytes(restored[1].payload["raw"]) == data_b
@@ -310,7 +326,7 @@ class TestCoalesceBytes:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         raw = restored[0].payload["raw"]
         assert isinstance(raw, _ShmBytes)
         assert bytes(raw) == data
@@ -342,7 +358,7 @@ class TestCoalesceBytes:
         assert "torch.int64" in coalesced.buffers
         assert "_bytes_uint8" in coalesced.buffers
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         for rec in restored:
             assert bytes(rec.payload["image"]) == b"\xff" * 10000
             torch.testing.assert_close(
@@ -355,7 +371,7 @@ class TestCoalesceBytes:
         records = [SampleRecord(meta=_meta(0), payload={"mv": memoryview(data)})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert bytes(restored[0].payload["mv"]) == data
         assert isinstance(restored[0].payload["mv"], _ShmBytes)
 
@@ -364,40 +380,31 @@ class TestCoalesceBytes:
 
         Simulates the real pipeline path:
           1. Worker coalesces bytes into SHM, puts CoalescedMicrobatch on queue
-          2. Pump thread unpickles (hop 1) → gets list[StreamItem] with _ShmBytes
-          3. Pump thread puts records on next worker's queue (hop 2)
-          4. Worker 2 unpickles → gets _ShmBytes still backed by same SHM
-
-        The data_ptr must be identical across all hops — proving bytes never
-        leave SHM and only FDs are passed through the pickle stream.
+          2. Pump thread unpickles (hop 1) → gets list[StreamItem] with LazyPayload
+          3. Pump thread re-pickles records to next worker (hop 2) — LazyPayload
+             forwards SHM refs without resolving
+          4. Worker 2 unpickles → gets LazyPayload → resolves → _ShmBytes backed by SHM
         """
         data = b"Z" * 8192
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        # Hop 1: worker → pump thread (CoalescedMicrobatch → list[StreamItem])
+        # Hop 1: worker → pump thread (CoalescedMicrobatch → LazyPayload)
         restored = _round_trip(coalesced)
-        raw1 = restored[0].payload["raw"]
-        assert isinstance(raw1, _ShmBytes)
-        assert bytes(raw1) == data
+        assert isinstance(restored[0].payload, LazyPayload)
 
-        # Hop 2: pump thread → worker 2 (_ShmBytes re-pickled via FD passing)
+        # Hop 2: pump thread → worker 2 (LazyPayload re-pickled via FD passing)
         blob2 = _forking_round_trip(restored)
         restored2 = pickle.loads(blob2)
+        # Still lazy after hop 2
+        assert isinstance(restored2[0].payload, LazyPayload)
+
+        # Worker 2 resolves
+        resolve_lazy_payloads(restored2)
         raw2 = restored2[0].payload["raw"]
         assert isinstance(raw2, _ShmBytes)
         assert bytes(raw2) == data
-
-        # On 3.12+ _ShmBytes312 keeps a tensor view — assert zero-copy.
-        # On older Python the legacy path copies, so skip the pointer check.
-        if sys.version_info >= (3, 12):
-            ptr1 = raw1._tensor_view.data_ptr()
-            ptr2 = raw2._tensor_view.data_ptr()
-            assert ptr1 == ptr2, (
-                f"data_ptr changed across hops ({ptr1:#x} → {ptr2:#x}), "
-                "bytes were copied instead of staying in SHM"
-            )
 
     def test_shm_bytes_decode(self) -> None:
         """_ShmBytes.decode() works for text ops."""
@@ -408,7 +415,7 @@ class TestCoalesceBytes:
         records = [SampleRecord(meta=_meta(0), payload={"text": padded})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         result = restored[0].payload["text"].decode("utf-8")
         assert result.startswith("hello world")
 
@@ -430,12 +437,16 @@ class TestCoalesceBytes:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         decoded = op.process_many(restored)
         assert decoded[0].payload["text"].startswith("hello world|")
 
     def test_restored_bytes_flow_through_counting_accumulator(self) -> None:
-        """Round-tripped coalesced items keep count-based batching semantics."""
+        """Round-tripped coalesced items keep count-based batching semantics.
+
+        Accumulator routes by meta only (lazy payloads stay unresolved),
+        then we resolve after accumulator output to verify data.
+        """
         acc = CountingAccumulator[SampleRecord](
             max_batch=3, max_latency_ms=None, key_fn=lane_of
         )
@@ -450,11 +461,14 @@ class TestCoalesceBytes:
         assert coalesced is not None
 
         restored = _round_trip(coalesced)
+        # Accumulator routes without resolving — only reads .meta
         ready = acc.push_many(restored)
         ready.extend(acc.flush())
 
         assert [len(batch) for batch, _ in ready] == [3, 3, 1]
+        # Now resolve for data verification
         flattened = [rec for batch, _ in ready for rec in batch]
+        resolve_lazy_payloads(flattened)
         assert [int(rec.payload["value"]) for rec in flattened] == list(range(7))
         assert all(isinstance(rec.payload["text"], _ShmBytes) for rec in flattened)
 
@@ -467,7 +481,7 @@ class TestCoalesceBytes:
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         raw = restored[0].payload["raw"]
         t = torch.frombuffer(raw, dtype=torch.uint8)
         assert t.shape == (len(data),)
@@ -500,7 +514,7 @@ class TestCoalesceNdarray:
         assert coalesced is not None
         assert len(coalesced.buffers) == 1
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert len(restored) == 3
         for i, rec in enumerate(restored):
             expected = np.arange(5, dtype=np.float64) + i
@@ -521,7 +535,7 @@ class TestCoalesceNdarray:
         assert coalesced is not None
         assert len(coalesced.buffers) == 2
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(
             restored[0].payload["ints"], np.array([1, 2, 3], dtype=np.int32)
         )
@@ -535,7 +549,7 @@ class TestCoalesceNdarray:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(restored[0].payload["matrix"], arr)
         assert restored[0].payload["matrix"].shape == (3, 4)
 
@@ -551,7 +565,7 @@ class TestCoalesceNdarray:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         # All restored arrays share one underlying torch storage
         ptrs = {rec.payload["arr"].ctypes.data for rec in restored}
         # They should be at different offsets but in the same allocation;
@@ -577,7 +591,7 @@ class TestCoalesceNdarray:
         # Separate buffers: torch.float32 vs np:float32
         assert len(coalesced.buffers) == 2
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(
             restored[0].payload["torch_t"],
             torch.tensor([1.0, 2.0], dtype=torch.float32),
@@ -605,7 +619,7 @@ class TestCoalesceNdarray:
         # Only the float32 array should be coalesced, not the object array.
         assert len(coalesced.buffers) == 1
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(restored[0].payload["objects"], obj_arr)
         assert restored[0].payload["objects"].dtype == object
         np.testing.assert_array_equal(
@@ -627,7 +641,7 @@ class TestCoalesceNdarray:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(restored[0].payload["sliced"], arr_slice)
         np.testing.assert_array_equal(restored[0].payload["fortran"], arr_fortran)
         assert restored[0].payload["fortran"].shape == (3, 4)
@@ -644,6 +658,859 @@ class TestCoalesceNdarray:
         ]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
-        restored = _round_trip(coalesced)
+        restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["empty"].size == 0
         np.testing.assert_array_equal(restored[0].payload["ok"], np.array([1.0]))
+
+
+# ---------------------------------------------------------------------------
+# Lazy payload behavior
+# ---------------------------------------------------------------------------
+class TestLazyPayload:
+    def test_unpickle_produces_lazy_payload(self) -> None:
+        """Unpickled records have LazyPayload on .payload, meta is accessible."""
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"t": torch.tensor([1.0, 2.0])},
+            )
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip(coalesced)
+        assert len(restored) == 1
+        assert isinstance(restored[0].payload, LazyPayload)
+        # Meta is accessible without resolution
+        assert restored[0].meta.chunk_offset == 0
+        assert restored[0].meta.sample_id == (0, 0, 0)
+
+    def test_resolve_produces_correct_data(self) -> None:
+        """LazyPayload.resolve() returns the original payload structure."""
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"t": torch.tensor([1.0, 2.0]), "label": "hello"},
+            )
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip(coalesced)
+        payload = restored[0].payload
+        assert isinstance(payload, LazyPayload)
+        resolved = payload.resolve()
+        assert isinstance(resolved, dict)
+        torch.testing.assert_close(resolved["t"], torch.tensor([1.0, 2.0]))
+        assert resolved["label"] == "hello"
+
+    def test_lazy_payload_survives_repickling(self) -> None:
+        """LazyPayload pickles without resolving and round-trips correctly."""
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"t": torch.arange(5, dtype=torch.float32)},
+            )
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        # Hop 1: CoalescedMicrobatch → list with LazyPayload
+        restored1 = _round_trip(coalesced)
+        assert isinstance(restored1[0].payload, LazyPayload)
+
+        # Hop 2: re-pickle the lazy records (simulating pump → worker)
+        blob2 = _forking_round_trip(restored1)
+        restored2 = pickle.loads(blob2)
+        assert isinstance(restored2[0].payload, LazyPayload)
+
+        # Worker resolves
+        resolve_lazy_payloads(restored2)
+        torch.testing.assert_close(
+            restored2[0].payload["t"], torch.arange(5, dtype=torch.float32)
+        )
+
+    def test_counting_accumulator_routes_lazy_records(self) -> None:
+        """CountingAccumulator routes lazy records by meta without resolving."""
+        acc = CountingAccumulator[SampleRecord](
+            max_batch=2, max_latency_ms=None, key_fn=lane_of
+        )
+        records = [
+            SampleRecord(
+                meta=_meta(i),
+                payload={"t": torch.tensor([float(i)])},
+            )
+            for i in range(3)
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip(coalesced)
+        # All records have lazy payloads
+        assert all(isinstance(r.payload, LazyPayload) for r in restored)
+
+        # Accumulator routes without resolving
+        ready = acc.push_many(restored)
+        ready.extend(acc.flush())
+        assert [len(batch) for batch, _ in ready] == [2, 1]
+
+        # Verify payloads still lazy in batches
+        for batch, _ in ready:
+            assert all(isinstance(r.payload, LazyPayload) for r in batch)
+
+        # Resolve and verify data
+        all_recs = [r for batch, _ in ready for r in batch]
+        resolve_lazy_payloads(all_recs)
+        for i, rec in enumerate(all_recs):
+            torch.testing.assert_close(rec.payload["t"], torch.tensor([float(i)]))
+
+    def test_resolve_is_noop_on_non_lazy(self) -> None:
+        """resolve_lazy_payloads is a no-op for regular records."""
+        records = [
+            SampleRecord(meta=_meta(0), payload={"x": 42}),
+            SampleRecord(meta=_meta(1), payload={"x": 99}),
+        ]
+        resolve_lazy_payloads(records)
+        assert records[0].payload["x"] == 42
+        assert records[1].payload["x"] == 99
+
+    def test_lazy_payload_sample_batch(self) -> None:
+        """LazyPayload works for SampleBatch records."""
+        records = [
+            SampleRecord(meta=_meta(0), payload={"t": torch.tensor([1.0])}),
+            SampleRecord(meta=_meta(1), payload={"t": torch.tensor([2.0])}),
+        ]
+        batch = SampleBatch(records=tuple(records))
+        coalesced = coalesce_microbatch([batch])
+        assert coalesced is not None
+
+        restored = _round_trip(coalesced)
+        assert isinstance(restored[0], SampleBatch)
+        for rec in restored[0].records:
+            assert isinstance(rec.payload, LazyPayload)
+
+        resolve_lazy_payloads(restored)
+        torch.testing.assert_close(
+            restored[0].records[0].payload["t"], torch.tensor([1.0])
+        )
+        torch.testing.assert_close(
+            restored[0].records[1].payload["t"], torch.tensor([2.0])
+        )
+
+
+# ---------------------------------------------------------------------------
+# Structured type support (dataclasses, pydantic, attrs)
+# ---------------------------------------------------------------------------
+import dataclasses
+
+
+@dataclasses.dataclass
+class DCSample:
+    image: object  # torch.Tensor at runtime
+    label: str
+
+
+@dataclasses.dataclass
+class DCNested:
+    inner: DCSample
+    score: float
+
+
+@dataclasses.dataclass
+class DCWithPostInit:
+    values: object  # torch.Tensor at runtime
+    tag: str
+    description: str = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        self.description = f"tag={self.tag}"
+
+
+# Pydantic models — defined only when pydantic is installed.
+try:
+    from pydantic import BaseModel, computed_field
+
+    _has_pydantic = True
+except ImportError:
+    _has_pydantic = False
+
+# Attrs — defined only when attrs is installed.
+try:
+    import attr
+
+    _has_attrs = True
+except ImportError:
+    _has_attrs = False
+
+if _has_pydantic:
+
+    class PydMessage(BaseModel):  # type: ignore[misc]
+        role: str
+        token_ids: list[int]
+
+    class PydConversation(BaseModel):  # type: ignore[misc]
+        messages: list[PydMessage]
+        images: list[object]
+        model_config = {"arbitrary_types_allowed": True}
+
+    class PydSample(BaseModel):  # type: ignore[misc]
+        image: object  # torch.Tensor at runtime
+        label: str
+
+        model_config = {"arbitrary_types_allowed": True}
+
+    class PydNested(BaseModel):  # type: ignore[misc]
+        inner: PydSample
+        score: float
+
+        model_config = {"arbitrary_types_allowed": True}
+
+    class PydWithComputed(BaseModel):  # type: ignore[misc]
+        values: object  # torch.Tensor at runtime
+        tag: str
+
+        model_config = {"arbitrary_types_allowed": True}
+
+        @computed_field  # type: ignore[prop-decorator]
+        @property
+        def description(self) -> str:
+            return f"tag={self.tag}"
+
+
+if _has_attrs:
+
+    @attr.s(auto_attribs=True)
+    class AttrsSample:
+        image: object  # torch.Tensor at runtime
+        label: str
+
+
+class TestStructDataclass:
+    """Dataclass payloads get SHM coalescing through _StructSlot decomposition."""
+
+    def test_dataclass_as_top_level_payload(self) -> None:
+        t = torch.arange(6, dtype=torch.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="cat")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload, DCSample)
+        torch.testing.assert_close(restored[0].payload.image, t)
+        assert restored[0].payload.label == "cat"
+
+    def test_dataclass_inside_dict(self) -> None:
+        t = torch.randn(4)
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"sample": DCSample(image=t, label="dog"), "extra": 42},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload["sample"], DCSample)
+        torch.testing.assert_close(restored[0].payload["sample"].image, t)
+        assert restored[0].payload["sample"].label == "dog"
+        assert restored[0].payload["extra"] == 42
+
+    def test_nested_dataclasses(self) -> None:
+        t = torch.tensor([1.0, 2.0, 3.0])
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=DCNested(inner=DCSample(image=t, label="nested"), score=0.95),
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCNested)
+        assert isinstance(p.inner, DCSample)
+        torch.testing.assert_close(p.inner.image, t)
+        assert p.inner.label == "nested"
+        assert p.score == 0.95
+
+    def test_dataclass_with_post_init(self) -> None:
+        t = torch.tensor([10.0, 20.0])
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCWithPostInit(values=t, tag="test")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCWithPostInit)
+        torch.testing.assert_close(p.values, t)
+        assert p.tag == "test"
+        assert p.description == "tag=test"
+
+    def test_dataclass_no_tensors_returns_none(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=DCSample(image="not_a_tensor", label="text"),
+            ),
+        ]
+        assert coalesce_microbatch(records) is None
+
+    def test_dataclass_multiple_records(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(i),
+                payload=DCSample(
+                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
+                ),
+            )
+            for i in range(5)
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        assert len(coalesced.buffers) == 1
+
+        restored = _round_trip_resolved(coalesced)
+        assert len(restored) == 5
+        for i, rec in enumerate(restored):
+            assert isinstance(rec.payload, DCSample)
+            torch.testing.assert_close(
+                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
+            )
+            assert rec.payload.label == f"s{i}"
+
+    def test_dataclass_lazy_payload_survives_repickling(self) -> None:
+        t = torch.arange(4, dtype=torch.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="re")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        # Hop 1
+        restored1 = _round_trip(coalesced)
+        assert isinstance(restored1[0].payload, LazyPayload)
+
+        # Hop 2
+        blob2 = _forking_round_trip(restored1)
+        restored2 = pickle.loads(blob2)
+        assert isinstance(restored2[0].payload, LazyPayload)
+
+        # Resolve
+        resolve_lazy_payloads(restored2)
+        assert isinstance(restored2[0].payload, DCSample)
+        torch.testing.assert_close(restored2[0].payload.image, t)
+
+
+@pytest.mark.skipif(not _has_pydantic, reason="pydantic not installed")
+class TestStructPydantic:
+    """Pydantic model payloads get SHM coalescing through _StructSlot decomposition."""
+
+    def test_pydantic_as_top_level_payload(self) -> None:
+        t = torch.arange(6, dtype=torch.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="cat")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload, PydSample)
+        torch.testing.assert_close(restored[0].payload.image, t)
+        assert restored[0].payload.label == "cat"
+
+    def test_pydantic_inside_dict(self) -> None:
+        t = torch.randn(4)
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"sample": PydSample(image=t, label="dog"), "extra": 42},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload["sample"], PydSample)
+        torch.testing.assert_close(restored[0].payload["sample"].image, t)
+        assert restored[0].payload["extra"] == 42
+
+    def test_nested_pydantic(self) -> None:
+        t = torch.tensor([1.0, 2.0, 3.0])
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=PydNested(inner=PydSample(image=t, label="nested"), score=0.95),
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, PydNested)
+        assert isinstance(p.inner, PydSample)
+        torch.testing.assert_close(p.inner.image, t)
+        assert p.inner.label == "nested"
+        assert p.score == 0.95
+
+    def test_pydantic_with_computed_field(self) -> None:
+        t = torch.tensor([10.0, 20.0])
+        records = [
+            SampleRecord(meta=_meta(0), payload=PydWithComputed(values=t, tag="test")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, PydWithComputed)
+        torch.testing.assert_close(p.values, t)
+        assert p.tag == "test"
+        assert p.description == "tag=test"
+
+    def test_pydantic_no_tensors_returns_none(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=PydSample(image="not_a_tensor", label="text"),
+            ),
+        ]
+        assert coalesce_microbatch(records) is None
+
+    def test_pydantic_multiple_records(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(i),
+                payload=PydSample(
+                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
+                ),
+            )
+            for i in range(5)
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert len(restored) == 5
+        for i, rec in enumerate(restored):
+            assert isinstance(rec.payload, PydSample)
+            torch.testing.assert_close(
+                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
+            )
+
+    def test_pydantic_lazy_payload_survives_repickling(self) -> None:
+        t = torch.arange(4, dtype=torch.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="re")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored1 = _round_trip(coalesced)
+        assert isinstance(restored1[0].payload, LazyPayload)
+
+        blob2 = _forking_round_trip(restored1)
+        restored2 = pickle.loads(blob2)
+        resolve_lazy_payloads(restored2)
+        assert isinstance(restored2[0].payload, PydSample)
+        torch.testing.assert_close(restored2[0].payload.image, t)
+
+
+@pytest.mark.skipif(not _has_attrs, reason="attrs not installed")
+class TestStructAttrs:
+    """Attrs class payloads get SHM coalescing through _StructSlot decomposition."""
+
+    def test_attrs_as_top_level_payload(self) -> None:
+        t = torch.arange(6, dtype=torch.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=AttrsSample(image=t, label="cat")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload, AttrsSample)
+        torch.testing.assert_close(restored[0].payload.image, t)
+        assert restored[0].payload.label == "cat"
+
+    def test_attrs_inside_dict(self) -> None:
+        t = torch.randn(4)
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"sample": AttrsSample(image=t, label="dog"), "extra": 42},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert isinstance(restored[0].payload["sample"], AttrsSample)
+        torch.testing.assert_close(restored[0].payload["sample"].image, t)
+        assert restored[0].payload["extra"] == 42
+
+
+@pytest.mark.skipif(
+    not (_has_pydantic and _has_attrs), reason="pydantic and/or attrs not installed"
+)
+class TestStructMixed:
+    """Mixed struct types and cross-framework nesting."""
+
+    def test_pydantic_inside_dataclass(self) -> None:
+        t = torch.tensor([1.0, 2.0])
+        inner = PydSample(image=t, label="inner")
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCNested(inner=inner, score=0.5)),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCNested)
+        # inner was PydSample but DCNested.inner is typed as DCSample —
+        # reconstruction uses DCNested(**kwargs) so it just stores whatever
+        # the resolved value is.
+        assert isinstance(p.inner, PydSample)
+        torch.testing.assert_close(p.inner.image, t)
+        assert p.score == 0.5
+
+    def test_dict_of_mixed_structs(self) -> None:
+        t1 = torch.tensor([1.0])
+        t2 = torch.tensor([2.0])
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={
+                    "dc": DCSample(image=t1, label="dc"),
+                    "pyd": PydSample(image=t2, label="pyd"),
+                    "plain": "hello",
+                },
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p["dc"], DCSample)
+        assert isinstance(p["pyd"], PydSample)
+        torch.testing.assert_close(p["dc"].image, t1)
+        torch.testing.assert_close(p["pyd"].image, t2)
+        assert p["plain"] == "hello"
+
+    def test_list_of_structs(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=[
+                    DCSample(image=torch.tensor([float(i)]), label=f"s{i}")
+                    for i in range(3)
+                ],
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert len(p) == 3
+        for i, item in enumerate(p):
+            assert isinstance(item, DCSample)
+            torch.testing.assert_close(item.image, torch.tensor([float(i)]))
+            assert item.label == f"s{i}"
+
+    def test_struct_with_numpy_field(self) -> None:
+        arr = np.arange(6, dtype=np.float32)
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCSample(image=arr, label="numpy")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCSample)
+        np.testing.assert_array_equal(p.image, arr)
+        assert isinstance(p.image, np.ndarray)
+        assert p.label == "numpy"
+
+    def test_struct_with_large_bytes_field(self) -> None:
+        data = b"X" * 8192
+        records = [
+            SampleRecord(meta=_meta(0), payload=DCSample(image=data, label="bytes")),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCSample)
+        assert bytes(p.image) == data
+        assert p.label == "bytes"
+
+    def test_struct_with_mixed_tensor_types(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=DCSample(
+                    image=torch.randn(3, 4, dtype=torch.float32), label="multi"
+                ),
+            ),
+            SampleRecord(
+                meta=_meta(1),
+                payload=DCSample(image=torch.arange(5, dtype=torch.int64), label="int"),
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        assert len(coalesced.buffers) == 2
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload.image.shape == (3, 4)
+        assert restored[0].payload.image.dtype == torch.float32
+        assert restored[1].payload.image.shape == (5,)
+        assert restored[1].payload.image.dtype == torch.int64
+
+
+# ---------------------------------------------------------------------------
+# Primitive-list-as-leaf optimisation
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass
+class DCWithTokenIds:
+    """Mimics a VLM Message: tensor + large List[int] field."""
+
+    image: object  # torch.Tensor at runtime
+    token_ids: list[int]
+    label: str
+
+
+class TestPrimitiveListAsLeaf:
+    """List[int] inside structs must be treated as atomic leaves, not flattened."""
+
+    def test_list_of_ints_round_trips_through_struct(self) -> None:
+        token_ids = list(range(500))
+        t = torch.randn(3, 224, 224)
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload=DCWithTokenIds(image=t, token_ids=token_ids, label="msg"),
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p, DCWithTokenIds)
+        torch.testing.assert_close(p.image, t)
+        assert p.token_ids == token_ids
+        assert p.label == "msg"
+
+    def test_list_of_ints_becomes_numeric_list_slot(self) -> None:
+        """A numeric list becomes a single _NumericListSlot, coalesced into SHM."""
+        from zephon.utils.shm_coalesce import _extract_payload_pytree, _NumericListSlot
+
+        token_ids = list(range(500))
+        payload = {"ids": token_ids, "tensor": torch.randn(4)}
+        collector: dict[str, list] = {}
+        offsets: dict[str, int] = {}
+        skel = _extract_payload_pytree(payload, collector, offsets, shm_min_size=4096)
+        # dict with 2 keys → 2 leaves (the list as 1 + the tensor slot as 1)
+        assert len(skel.slots) == 2
+        int_slots = [s for s in skel.slots if isinstance(s, _NumericListSlot)]
+        assert len(int_slots) == 1
+        assert int_slots[0].length == 500
+        # The list's tensor lands in the int64 buffer alongside other int64 tensors
+        assert str(torch.int64) in collector
+
+    def test_list_of_tensors_still_recurses(self) -> None:
+        """Lists starting with a tensor must NOT be treated as leaf."""
+        tensors = [torch.randn(4) for _ in range(3)]
+        records = [
+            SampleRecord(meta=_meta(0), payload={"items": tensors}),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        for i, t in enumerate(restored[0].payload["items"]):
+            torch.testing.assert_close(t, tensors[i])
+
+    def test_list_of_floats_round_trips(self) -> None:
+        scores = [0.1, 0.2, 0.3, 0.99, -1.5]
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"scores": scores, "t": torch.tensor([1.0])},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["scores"] == pytest.approx(scores)
+
+    def test_list_of_strings_is_leaf_not_coalesced(self) -> None:
+        """String lists are treated as leaves but NOT promoted to SHM."""
+        from zephon.utils.shm_coalesce import _extract_payload_pytree, _NumericListSlot
+
+        payload = {"roles": ["system", "user", "assistant"], "t": torch.ones(2)}
+        collector: dict[str, list] = {}
+        offsets: dict[str, int] = {}
+        skel = _extract_payload_pytree(payload, collector, offsets, shm_min_size=4096)
+        # String list should be inline, not a _NumericListSlot
+        assert not any(isinstance(s, _NumericListSlot) for s in skel.slots)
+
+        records = [SampleRecord(meta=_meta(0), payload=payload)]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["roles"] == ["system", "user", "assistant"]
+
+    def test_empty_list_still_recurses(self) -> None:
+        """Empty lists should not match the primitive heuristic."""
+        records = [
+            SampleRecord(meta=_meta(0), payload={"empty": [], "t": torch.ones(2)}),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["empty"] == []
+
+    def test_multiple_int_lists_coalesce_into_one_buffer(self) -> None:
+        """Several List[int] fields should all land in the same int64 SHM buffer."""
+        ids_a = list(range(100))
+        ids_b = list(range(200, 500))
+        ids_c = list(range(1000, 1050))
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={
+                    "a": ids_a,
+                    "b": ids_b,
+                    "c": ids_c,
+                    "img": torch.randn(2, 2),
+                },
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        # int64 buffer should contain all three lists (+ possibly the float tensor in its own)
+        assert str(torch.int64) in coalesced.buffers
+        assert coalesced.buffers[str(torch.int64)].numel() == 100 + 300 + 50
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert p["a"] == ids_a
+        assert p["b"] == ids_b
+        assert p["c"] == ids_c
+
+    def test_multiple_records_with_int_lists(self) -> None:
+        """Int lists across multiple records coalesce into the same buffer."""
+        records = [
+            SampleRecord(
+                meta=_meta(i),
+                payload={
+                    "token_ids": list(range(i * 100, (i + 1) * 100)),
+                    "t": torch.tensor([float(i)]),
+                },
+            )
+            for i in range(4)
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        # All 4 × 100 ints in one buffer
+        assert coalesced.buffers[str(torch.int64)].numel() == 400
+
+        restored = _round_trip_resolved(coalesced)
+        for i, rec in enumerate(restored):
+            assert rec.payload["token_ids"] == list(range(i * 100, (i + 1) * 100))
+
+    def test_mixed_int_and_float_lists(self) -> None:
+        """Int and float lists go into separate dtype buffers."""
+        int_ids = list(range(50))
+        float_scores = [0.1 * i for i in range(30)]
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={
+                    "ids": int_ids,
+                    "scores": float_scores,
+                    "t": torch.ones(1),
+                },
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        assert str(torch.int64) in coalesced.buffers
+        assert str(torch.float64) in coalesced.buffers
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["ids"] == int_ids
+        assert restored[0].payload["scores"] == pytest.approx(float_scores)
+
+    def test_single_element_list(self) -> None:
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"one": [42], "t": torch.ones(1)},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["one"] == [42]
+
+    def test_numeric_list_only_payload_still_coalesces(self) -> None:
+        """A payload with ONLY numeric lists (no tensors) should still coalesce."""
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"ids": list(range(100)), "more": [1.0, 2.0]},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        assert restored[0].payload["ids"] == list(range(100))
+        assert restored[0].payload["more"] == pytest.approx([1.0, 2.0])
+
+    @pytest.mark.skipif(not _has_pydantic, reason="pydantic not installed")
+    def test_pydantic_with_list_int_field(self) -> None:
+        """End-to-end: Pydantic model with List[int] (the VLM Message pattern)."""
+        msgs = [
+            PydMessage(role="system", token_ids=list(range(200))),
+            PydMessage(role="user", token_ids=list(range(300))),
+        ]
+        images = [torch.randn(3, 224, 224), torch.randn(3, 224, 224)]
+        conv = PydConversation(messages=msgs, images=images)
+
+        records = [
+            SampleRecord(
+                meta=_meta(0),
+                payload={"conversation": conv, "length": 500},
+            ),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+
+        restored = _round_trip_resolved(coalesced)
+        p = restored[0].payload
+        assert isinstance(p["conversation"], PydConversation)
+        assert len(p["conversation"].messages) == 2
+        assert p["conversation"].messages[0].role == "system"
+        assert p["conversation"].messages[0].token_ids == list(range(200))
+        assert p["conversation"].messages[1].token_ids == list(range(300))
+        for i in range(2):
+            torch.testing.assert_close(p["conversation"].images[i], images[i])
+        assert p["length"] == 500

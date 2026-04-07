@@ -58,6 +58,16 @@ class Accumulator(ABC, Generic[T]):
             that were waiting for more elements.
         """
 
+    @property
+    def reads_payload(self) -> bool:
+        """Whether ``push_many()`` may access element payloads.
+
+        When True, the runner resolves lazy SHM payloads before calling
+        ``push_many()``.  Default False — most accumulators only read
+        metadata (e.g. ``lane_id``).
+        """
+        return False
+
     def has_pending_data(self) -> bool:
         """Return True if the accumulator has buffered data that would be emitted on flush().
 

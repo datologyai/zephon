@@ -69,7 +69,11 @@ from zephon.runners.concurrent import (
     WorkerErrorInfo,
     _QueueLike,
 )
-from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE, coalesce_microbatch
+from zephon.utils.shm_coalesce import (
+    DEFAULT_SHM_MIN_SIZE,
+    coalesce_microbatch,
+    resolve_lazy_payloads,
+)
 
 Q = TypeVar("Q")
 
@@ -332,6 +336,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                     f"worker[{config.worker_index}] processing batch seq={command.seq}"
                 )
                 batch = command.batch
+                resolve_lazy_payloads(batch)
                 start_ns = time.perf_counter_ns() if command.collect_metrics else 0
                 try:
                     outputs = op_instance.process_many(batch)
@@ -1366,6 +1371,20 @@ class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
         for result in state._local_results:
             self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
+
+    def _emit_stage_output(
+        self,
+        elements: Microbatch,
+        context: ConcurrentRunContext,
+    ) -> None:
+        """Resolve lazy payloads before they leave the process runner.
+
+        This prevents ``LazyPayload`` instances from leaking to downstream
+        thread stages or the engine iterator.
+        """
+        if elements:
+            resolve_lazy_payloads(elements)
+        super()._emit_stage_output(elements, context)
 
     def _ack_result(
         self,

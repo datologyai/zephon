@@ -25,6 +25,7 @@ from zephon.core.op_base import Op, OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
+from zephon.utils.shm_coalesce import resolve_lazy_payloads
 
 
 @dataclass
@@ -268,6 +269,8 @@ class BaseOperatorState:
             if is_sentinel(e):
                 # Flush preceding regular elements into the accumulator.
                 if pre_sentinel:
+                    if self.accumulator_impl.reads_payload:
+                        resolve_lazy_payloads(pre_sentinel)
                     self._update_epoch_floor(pre_sentinel)
                     batches = self.accumulator_impl.push_many(pre_sentinel)
                     ready.extend(batches)
@@ -330,6 +333,8 @@ class BaseOperatorState:
 
         # Process remaining regular elements after the last sentinel.
         if pre_sentinel:
+            if self.accumulator_impl.reads_payload:
+                resolve_lazy_payloads(pre_sentinel)
             self._update_epoch_floor(pre_sentinel)
             batches = self.accumulator_impl.push_many(pre_sentinel)
             ready.extend(batches)

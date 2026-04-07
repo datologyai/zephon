@@ -167,6 +167,10 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         return False
 
+    @property
+    def reads_payload(self) -> bool:
+        return True
+
     def push_many(
         self, elems: Sequence[SampleRecord]
     ) -> list[ReadyBatch[SampleRecord]]:

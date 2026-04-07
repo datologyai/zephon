@@ -51,7 +51,7 @@ jobs:
           # Free-threaded Python: skip test group (mosaicml-streaming->cryptography doesn't support 3.14t)
           # Install only compatible extras and essential test deps
           uv sync --python ${{ matrix.python_version }} --group dev --extra parquet --extra cloud --extra litdata
-          uv pip install pytest pytest-timeout
+          uv pip install pytest pytest-timeout pydantic attrs
         else
           uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras
         fi

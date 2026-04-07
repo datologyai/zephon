@@ -4595,7 +4595,7 @@ dependencies = [
     { name = "urllib3" },
 ]
 wheels = [
-    { url = "https://files.astralhosted.com/public/95/d4/af694ef718aedbe95a72760ab9ff7a6a7a44ace2d7f70c27bfeb67c5c503/torchdata-0.11.0-py3-none-any.whl", hash = "sha256:52b940fbbe0e00fb21cabddf528449d1bec5bfb0d0823b7487b15f951658ee33", size = 61968, upload-time = "2025-02-20T22:26:31Z", zstd = { hash = "sha256:579eec291add3a2e18ebddc52557a2746b9c041df19d54fe934e794d57b87d00", size = 42053 } },
+    { url = "https://files.astralhosted.com/public/95/d4/af694ef718aedbe95a72760ab9ff7a6a7a44ace2d7f70c27bfeb67c5c503/torchdata-0.11.0-py3-none-any.whl", hash = "sha256:52b940fbbe0e00fb21cabddf528449d1bec5bfb0d0823b7487b15f951658ee33", size = 61968, upload-time = "2025-02-20T22:26:30Z", zstd = { hash = "sha256:579eec291add3a2e18ebddc52557a2746b9c041df19d54fe934e794d57b87d00", size = 42053 } },
 ]
 
 [[package]]
@@ -5082,6 +5082,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
     { name = "numpy" },
+    { name = "optree" },
     { name = "tenacity" },
     { name = "wrapt" },
 ]
@@ -5135,11 +5136,13 @@ dev = [
     { name = "ruff" },
 ]
 test = [
+    { name = "attrs" },
     { name = "litdata" },
     { name = "mosaicml-streaming" },
     { name = "obstore" },
     { name = "optree" },
     { name = "pillow" },
+    { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-timeout" },
     { name = "torchdata" },
@@ -5156,6 +5159,7 @@ requires-dist = [
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "obstore", marker = "extra == 'cloud'", specifier = ">=0.3.0" },
+    { name = "optree", specifier = ">=0.12.0" },
     { name = "optree", marker = "extra == 'litdata'" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=8.0.0" },
     { name = "ray", extras = ["default"], marker = "python_full_version < '3.14' and extra == 'ray'", specifier = ">=2.0.0" },
@@ -5180,11 +5184,13 @@ dev = [
     { name = "ruff", specifier = ">=0.1.0" },
 ]
 test = [
+    { name = "attrs", specifier = ">=21.0.0" },
     { name = "litdata", specifier = ">=0.2.0" },
     { name = "mosaicml-streaming", specifier = ">=0.13.0" },
     { name = "obstore", specifier = ">=0.3.0" },
     { name = "optree", specifier = ">=0.12.0" },
     { name = "pillow", specifier = ">=10.0.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "torchdata", specifier = ">=0.11.0" },

@@ -16,17 +16,18 @@ Supported payload types:
 
 Strategy (single memcpy):
 
-1. Walk the microbatch, extract every torch tensor, numpy array, and
-   bytes payload above a size threshold; replace with a lightweight
-   placeholder.
+1. Flatten each payload via ``optree.tree_flatten``, extract every torch
+   tensor, numpy array, and bytes payload above a size threshold from
+   the flat leaf list; replace with a lightweight placeholder.
 2. For each distinct dtype (plus ``torch.uint8`` for raw bytes), allocate
    a single 1-D ``torch.Tensor``, call ``share_memory_()`` to place it
    in ``/dev/shm`` **before** any data is written, then ``copy_`` each
    sub-tensor directly into the shared buffer.  This means each byte of
    real data is copied exactly once — straight into SHM.
 3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
-   ``__reduce__`` transparently reconstructs the original
-   ``list[StreamItem]`` on unpickle (the consumer never sees the wrapper).
+   ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
+   wrappers.  Payloads are restored only when explicitly resolved
+   (typically in the worker process before ``process_many``).
 
 .. rubric:: Future: torch-free support
 
@@ -38,9 +39,12 @@ the ``__buffer__`` protocol.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
+
+import optree
 
 from zephon.core.constants import SampleBatch, SampleRecord, StreamItem
 
@@ -113,11 +117,100 @@ class _NdarraySlot:
 
 
 @dataclass(slots=True)
+class _NumericListSlot:
+    """Stand-in for a ``list[int]`` or ``list[float]`` promoted to a tensor for SHM.
+
+    Same layout as ``_TensorSlot`` but restored via ``.tolist()`` so the
+    caller gets back a Python list, not a tensor.
+    """
+
+    dtype_key: str
+    offset: int
+    length: int  # original list length (== numel for 1-D)
+
+
+@dataclass(slots=True)
 class _BytesSlot:
     """Lightweight stand-in for a bytes payload moved to the uint8 SHM buffer."""
 
     offset: int  # byte offset into the _BYTES_DTYPE_KEY buffer
     length: int
+
+
+@dataclass(slots=True)
+class _StructSlot:
+    """Stand-in for a structured type (dataclass / pydantic) whose fields were extracted.
+
+    Only stores the class and the inner skeleton.  ``kind`` and
+    ``field_names`` are derived from the class at extraction time (via
+    ``_struct_info``) and at reconstruction time (via ``hasattr`` checks)
+    so they never travel through pickle.
+    """
+
+    cls: type
+    inner_skeleton: "_FlatSkeleton"
+
+
+# ---------------------------------------------------------------------------
+# Structured type detection (dataclasses, pydantic, attrs)
+# ---------------------------------------------------------------------------
+def _is_pydantic_instance(obj: Any) -> bool:
+    """Check if *obj* is an instance of a pydantic ``BaseModel``."""
+    cls = type(obj)
+    return hasattr(cls, "model_fields") and hasattr(cls, "model_construct")
+
+
+def _is_attrs_instance(obj: Any) -> bool:
+    """Check if *obj* is an instance of an attrs-decorated class."""
+    return hasattr(type(obj), "__attrs_attrs__")
+
+
+def _is_struct(obj: Any) -> bool:
+    """Return ``True`` for objects we can safely decompose into named fields."""
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return True
+    if _is_pydantic_instance(obj):
+        return True
+    return _is_attrs_instance(obj)
+
+
+_struct_info_cache: dict[type, tuple[str, ...]] = {}
+
+
+def _struct_info(cls: type) -> tuple[str, ...]:
+    """Return cached field names for a struct class."""
+    cached = _struct_info_cache.get(cls)
+    if cached is not None:
+        return cached
+    if dataclasses.is_dataclass(cls):
+        names = tuple(f.name for f in dataclasses.fields(cls) if f.init)
+    elif hasattr(cls, "model_fields"):
+        names = tuple(cls.model_fields.keys())
+    else:
+        names = tuple(a.name for a in cls.__attrs_attrs__)
+    _struct_info_cache[cls] = names
+    return names
+
+
+def _struct_to_dict(obj: Any) -> tuple[type, tuple[str, ...], dict[str, Any]]:
+    """Decompose a structured object into ``(cls, field_names, fields_dict)``."""
+    cls = type(obj)
+    names = _struct_info(cls)
+    return cls, names, {n: getattr(obj, n) for n in names}
+
+
+# ---------------------------------------------------------------------------
+# Flattened payload skeleton (stored on records during coalescing)
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class _FlatSkeleton:
+    """Flattened payload stored on records between coalescing and pickling.
+
+    Distinct type prevents confusion with real user payloads.
+    """
+
+    slots: list[Any]  # flat list of slots + inline leaf values
+    spec: optree.PyTreeSpec  # structure recipe for tree_unflatten
 
 
 # ---------------------------------------------------------------------------
@@ -181,73 +274,134 @@ _ShmBytes = _make_shm_bytes_class(sys.version_info[:3])
 
 
 # ---------------------------------------------------------------------------
-# Walk a SamplePayload tree, extract tensors, replace with _TensorSlot
+# pytree-based leaf extraction (replaces recursive _extract_payload)
 # ---------------------------------------------------------------------------
-def _extract_payload(
-    payload: Any,
+_PRIMITIVE_TYPES = (int, float, str, bool, type(None))
+
+
+def _is_leaf(obj: Any) -> bool:
+    """Predicate for ``optree.tree_flatten``.
+
+    Treats tuples and structured types (dataclass, pydantic) as leaves.
+    Tuples: ``optree`` flattens them by default but the walker only
+    recurses into dict and list.  Structs: handled in ``_extract_leaf``
+    which decomposes them into a fields dict and recurses via
+    ``_extract_payload_pytree``.
+
+    Lists of primitives (int, float, str, …) are also treated as leaves
+    to avoid inflating the slot count.  A ``List[int]`` with 500 elements
+    would otherwise become 500 individual int leaves — catastrophic for
+    pickle size and restore time at high DOP.  We check the first and
+    last element as an O(1) heuristic; typed fields (pydantic, dataclass)
+    guarantee homogeneity so this is safe in practice.  If wrong, the
+    only consequence is a missed tensor falling back to pickle (perf,
+    not correctness).
+    """
+    if isinstance(obj, tuple) or _is_struct(obj):
+        return True
+    if (
+        isinstance(obj, list)
+        and len(obj) > 0
+        and isinstance(obj[0], _PRIMITIVE_TYPES)
+        and isinstance(obj[-1], _PRIMITIVE_TYPES)
+    ):
+        return True
+    return False
+
+
+def _extract_leaf(
+    leaf: Any,
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
 ) -> Any:
-    """Recursively replace tensors and large bytes with slot placeholders.
+    """Replace a single tensor/ndarray/bytes/struct leaf with a slot placeholder.
 
-    Mutates dicts and lists in-place to avoid allocating copies — the caller
-    (worker process) discards the originals after coalescing.
+    Returns the slot if the leaf was extracted, or the original leaf unchanged.
+    Structured types (dataclass, pydantic) are decomposed into a fields dict
+    and recursively extracted via ``_extract_payload_pytree``.
     """
-    torch = _get_torch()
-    if torch is not None and isinstance(payload, torch.Tensor):
-        if payload.device.type != "cpu":
-            return payload  # leave non-CPU tensors alone
-        if payload.is_shared():
-            return payload  # already in SHM, skip
-        dtype_key = str(payload.dtype)
-        numel = payload.numel()
-        offset = offsets.get(dtype_key, 0)
-        slot = _TensorSlot(
-            dtype_key=dtype_key, offset=offset, shape=tuple(payload.shape)
+    # Structured types: decompose fields → dict, recurse via optree.
+    if _is_struct(leaf):
+        cls, _names, fields_dict = _struct_to_dict(leaf)
+        inner_skel = _extract_payload_pytree(
+            fields_dict, collector, offsets, shm_min_size
         )
+        return _StructSlot(cls=cls, inner_skeleton=inner_skel)
+    # Numeric lists: promote to tensor so they coalesce into SHM with
+    # other same-dtype tensors.  Restored via .tolist() to preserve the
+    # original Python list contract.
+    torch = _get_torch()
+    if (
+        torch is not None
+        and isinstance(leaf, list)
+        and len(leaf) > 0
+        and isinstance(leaf[0], (int, float))
+        and isinstance(leaf[-1], (int, float))
+    ):
+        dtype = torch.int64 if isinstance(leaf[0], int) else torch.float64
+        dtype_key = str(dtype)
+        n = len(leaf)
+        offset = offsets.get(dtype_key, 0)
+        slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
+        offsets[dtype_key] = offset + n
+        collector.setdefault(dtype_key, []).append(torch.tensor(leaf, dtype=dtype))
+        return slot
+    if torch is not None and isinstance(leaf, torch.Tensor):
+        if leaf.device.type != "cpu":
+            return leaf
+        if leaf.is_shared():
+            return leaf
+        dtype_key = str(leaf.dtype)
+        numel = leaf.numel()
+        offset = offsets.get(dtype_key, 0)
+        slot = _TensorSlot(dtype_key=dtype_key, offset=offset, shape=tuple(leaf.shape))
         offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(payload)
+        collector.setdefault(dtype_key, []).append(leaf)
         return slot
     np = _get_numpy()
-    if np is not None and torch is not None and isinstance(payload, np.ndarray):
-        if payload.dtype.hasobject:
-            return payload  # object dtypes can't be memcpy'd
-        dtype_key = _NDARRAY_PREFIX + str(payload.dtype)
-        numel = payload.size
+    if np is not None and torch is not None and isinstance(leaf, np.ndarray):
+        if leaf.dtype.hasobject:
+            return leaf
+        dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
+        numel = leaf.size
         offset = offsets.get(dtype_key, 0)
         slot = _NdarraySlot(
             dtype_key=dtype_key,
             offset=offset,
-            shape=tuple(payload.shape),
-            np_dtype_str=str(payload.dtype),
+            shape=tuple(leaf.shape),
+            np_dtype_str=str(leaf.dtype),
         )
         offsets[dtype_key] = offset + numel
-        # Convert to torch tensor for unified SHM buffer building.
         collector.setdefault(dtype_key, []).append(
-            torch.from_numpy(np.ascontiguousarray(payload))
+            torch.from_numpy(np.ascontiguousarray(leaf))
         )
         return slot
-    if isinstance(payload, (bytes, memoryview)):
-        nbytes = len(payload)
+    if isinstance(leaf, (bytes, memoryview)):
+        nbytes = len(leaf)
         if nbytes >= shm_min_size and _get_torch() is not None:
             offset = offsets.get(_BYTES_DTYPE_KEY, 0)
             slot = _BytesSlot(offset=offset, length=nbytes)
             offsets[_BYTES_DTYPE_KEY] = offset + nbytes
             collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                payload if isinstance(payload, bytes) else bytes(payload)
+                leaf if isinstance(leaf, bytes) else bytes(leaf)
             )
             return slot
-        return payload
-    if isinstance(payload, dict):
-        for k, v in payload.items():
-            payload[k] = _extract_payload(v, collector, offsets, shm_min_size)
-        return payload
-    if isinstance(payload, list):
-        for i, v in enumerate(payload):
-            payload[i] = _extract_payload(v, collector, offsets, shm_min_size)
-        return payload
-    return payload
+        return leaf
+    return leaf
+
+
+def _extract_payload_pytree(
+    payload: Any,
+    collector: dict[str, list[Any]],
+    offsets: dict[str, int],
+    shm_min_size: int,
+) -> _FlatSkeleton:
+    """Flatten payload via optree and replace tensor/bytes leaves with slots."""
+    leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
+    for i, leaf in enumerate(leaves):
+        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_size)
+    return _FlatSkeleton(slots=leaves, spec=spec)
 
 
 def _extract_from_records(
@@ -255,18 +409,26 @@ def _extract_from_records(
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
-) -> None:
-    """Replace tensors in *items* with slot placeholders, mutating in-place."""
+) -> list[tuple[SampleRecord, _FlatSkeleton]]:
+    """Extract tensors from records without mutating payloads yet.
+
+    Returns a list of (record, skeleton) pairs.  The caller must commit
+    the skeletons only after confirming that ``collector`` is non-empty.
+    """
+    skeletons: list[tuple[SampleRecord, _FlatSkeleton]] = []
     for item in items:
         if isinstance(item, SampleRecord):
-            item.payload = _extract_payload(
+            skel = _extract_payload_pytree(
                 item.payload, collector, offsets, shm_min_size
             )
+            skeletons.append((item, skel))
         elif isinstance(item, SampleBatch):
             for rec in item.records:
-                rec.payload = _extract_payload(
+                skel = _extract_payload_pytree(
                     rec.payload, collector, offsets, shm_min_size
                 )
+                skeletons.append((rec, skel))
+    return skeletons
 
 
 # ---------------------------------------------------------------------------
@@ -315,28 +477,119 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Lazy payload (deferred restoration)
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class LazyPayload:
+    """Deferred payload — holds flat slots + pytree spec + SHM buffer refs.
+
+    Created on unpickle (main process).  Resolved explicitly via
+    :func:`resolve_lazy_payloads` in the worker process before
+    ``process_many()``, or on the pump thread for accumulators that
+    declare ``reads_payload = True``.
+    """
+
+    _slots: list[Any]
+    _spec: optree.PyTreeSpec
+    _buffers: dict[str, Any]  # shared ref keeps SHM alive via refcounting
+
+    def resolve(self) -> Any:
+        """Materialize the full payload by replacing slots with SHM views."""
+        restored = _resolve_slots(self._slots, self._buffers)
+        return optree.tree_unflatten(self._spec, restored)
+
+    def __reduce__(self) -> tuple:
+        """Pickle without resolving — forward (slots, spec, buffers) as-is."""
+        return (_make_lazy_payload, (self._slots, self._spec, self._buffers))
+
+
+def _make_lazy_payload(
+    slots: list[Any], spec: optree.PyTreeSpec, buffers: dict[str, Any]
+) -> LazyPayload:
+    """Unpickle constructor for :class:`LazyPayload`."""
+    return LazyPayload(slots, spec, buffers)
+
+
+def _reconstruct_struct(slot: _StructSlot, fields_dict: dict[str, Any]) -> Any:
+    """Rebuild a structured object from its ``_StructSlot`` and resolved fields."""
+    cls = slot.cls
+    # Pydantic: bypass validators via model_construct.
+    if hasattr(cls, "model_construct"):
+        return cls.model_construct(**fields_dict)
+    return cls(**fields_dict)
+
+
+def _resolve_slots(slots: list[Any], buffers: dict[str, Any]) -> list[Any]:
+    """Replace slot placeholders with zero-copy views into SHM buffers.
+
+    Each slot becomes a tensor/ndarray/bytes view backed by the coalesced
+    SHM buffer, or a reconstructed struct for ``_StructSlot``.
+    """
+    result: list[Any] = []
+    for item in slots:
+        if isinstance(item, _StructSlot):
+            inner_leaves = _resolve_slots(item.inner_skeleton.slots, buffers)
+            fields_dict = cast(
+                dict[str, Any],
+                optree.tree_unflatten(item.inner_skeleton.spec, inner_leaves),
+            )
+            result.append(_reconstruct_struct(item, fields_dict))
+            continue
+        if isinstance(item, _NumericListSlot):
+            buf = buffers.get(item.dtype_key)
+            if item.length == 0 or buf is None:
+                result.append([])
+            else:
+                result.append(buf.narrow(0, item.offset, item.length).tolist())
+            continue
+        if isinstance(item, _TensorSlot):
+            numel = 1
+            for s in item.shape:
+                numel *= s
+            buf = buffers.get(item.dtype_key)
+            if numel == 0 or buf is None:
+                torch = _get_torch()
+                dtype = buf.dtype if buf is not None else torch.float32
+                result.append(torch.empty(item.shape, dtype=dtype))
+            else:
+                result.append(buf.narrow(0, item.offset, numel).reshape(item.shape))
+        elif isinstance(item, _NdarraySlot):
+            numel = 1
+            for s in item.shape:
+                numel *= s
+            if numel == 0:
+                np = _get_numpy()
+                result.append(np.empty(item.shape, dtype=item.np_dtype_str))
+            else:
+                buf = buffers[item.dtype_key]
+                result.append(
+                    buf.narrow(0, item.offset, numel).reshape(item.shape).numpy()
+                )
+        elif isinstance(item, _BytesSlot):
+            buf = buffers[_BYTES_DTYPE_KEY]
+            result.append(_ShmBytes(buf.narrow(0, item.offset, item.length)))
+        else:
+            result.append(item)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
 class CoalescedMicrobatch:
     """Microbatch with tensors/bytes coalesced into SHM buffers.
 
-    On unpickle (``__reduce__``), eagerly reconstructs to a plain
-    ``list[StreamItem]``.  Tensor payloads become zero-copy views into
-    the SHM buffers; bytes payloads become version-specific ``_ShmBytes``
-    wrappers. The consumer never sees this wrapper; it transparently
-    becomes the original list.
+    On unpickle (``__reduce__``), produces ``list[StreamItem]`` where each
+    record's payload is a :class:`LazyPayload`.  Call
+    :func:`resolve_lazy_payloads` to materialize before use.
     """
 
     skeleton: list[StreamItem]
     buffers: dict[str, Any]  # dtype_key -> torch.Tensor in SHM
 
     def __reduce__(self) -> tuple:
-        # Eager materialisation: unpickle produces list[StreamItem].
-        # Tensors become zero-copy views (SHM-backed); bytes become
-        # plain bytes objects so the result can safely be forwarded
-        # through accumulators and re-pickled downstream.
-        return (_reconstruct_microbatch, (self.skeleton, self.buffers))
+        return (_reconstruct_microbatch_lazy, (self.skeleton, self.buffers))
 
     def __len__(self) -> int:
         return len(self.skeleton)
@@ -350,82 +603,51 @@ def coalesce_microbatch(
 
     Returns ``None`` when no tensors or large bytes are found.
     Payloads smaller than *shm_min_size* bytes are left inline.
+
+    Uses a two-pass approach: extraction first collects skeletons without
+    mutating payloads, then commits only when tensors were actually found.
     """
     if _get_torch() is None:
         return None
     collector: dict[str, list[Any]] = {}
     offsets: dict[str, int] = {}
-    _extract_from_records(items, collector, offsets, shm_min_size)
+    skeletons = _extract_from_records(items, collector, offsets, shm_min_size)
     if not collector:
         return None
+
+    # Commit: only now mutate record payloads to flat skeleton form.
+    for rec, skel in skeletons:
+        rec.payload = skel  # type: ignore[assignment]
 
     buffers = _build_shm_buffers(collector)
     if not buffers:
         return None
-    # items have been mutated in-place: tensors/bytes replaced with slots.
     return CoalescedMicrobatch(skeleton=items, buffers=buffers)
 
 
 # ---------------------------------------------------------------------------
-# Unpickle reconstruction (called by pickle.loads via __reduce__)
+# Unpickle reconstruction (lazy)
 # ---------------------------------------------------------------------------
-def _restore_payload(payload: Any, buffers: dict[str, Any]) -> Any:
-    """Replace slot placeholders with views into the coalesced SHM buffers.
-
-    Tensor slots become zero-copy tensor views.  Bytes slots become
-    ``_ShmBytes`` backed by the SHM tensor. On Python 3.12+ this stays
-    zero-copy through the buffer protocol; older versions fall back to a
-    copied ``bytes`` subclass for compatibility.
-    """
-    if isinstance(payload, _TensorSlot):
-        numel = 1
-        for s in payload.shape:
-            numel *= s
-        buf = buffers.get(payload.dtype_key)
-        if numel == 0 or buf is None:
-            torch = _get_torch()
-            dtype = buf.dtype if buf is not None else torch.float32
-            return torch.empty(payload.shape, dtype=dtype)
-        return buf.narrow(0, payload.offset, numel).reshape(payload.shape)
-    if isinstance(payload, _NdarraySlot):
-        numel = 1
-        for s in payload.shape:
-            numel *= s
-        if numel == 0:
-            np = _get_numpy()
-            return np.empty(payload.shape, dtype=payload.np_dtype_str)
-        buf = buffers[payload.dtype_key]
-        # Zero-copy: torch view → numpy view, both backed by SHM.
-        return buf.narrow(0, payload.offset, numel).reshape(payload.shape).numpy()
-    if isinstance(payload, _BytesSlot):
-        buf = buffers[_BYTES_DTYPE_KEY]
-        return _ShmBytes(buf.narrow(0, payload.offset, payload.length))
-    if isinstance(payload, dict):
-        return {k: _restore_payload(v, buffers) for k, v in payload.items()}
-    if isinstance(payload, list):
-        return [_restore_payload(v, buffers) for v in payload]
-    return payload
-
-
-def _reconstruct_microbatch(
+def _reconstruct_microbatch_lazy(
     skeleton: list[StreamItem],
     buffers: dict[str, Any],
 ) -> list[StreamItem]:
-    """Unpickle helper — reconstruct records from skeleton + SHM buffers."""
+    """Unpickle helper — wrap payloads in LazyPayload instead of restoring."""
     result: list[StreamItem] = []
     for item in skeleton:
         if isinstance(item, SampleRecord):
+            skel = item.payload  # _FlatSkeleton from extraction
             result.append(
                 SampleRecord(
                     meta=item.meta,
-                    payload=_restore_payload(item.payload, buffers),
+                    payload=LazyPayload(skel.slots, skel.spec, buffers),  # type: ignore[union-attr,assignment]
                 )
             )
         elif isinstance(item, SampleBatch):
             records = tuple(
                 SampleRecord(
                     meta=rec.meta,
-                    payload=_restore_payload(rec.payload, buffers),
+                    payload=LazyPayload(rec.payload.slots, rec.payload.spec, buffers),  # type: ignore[union-attr,assignment]
                 )
                 for rec in item.records
             )
@@ -433,3 +655,20 @@ def _reconstruct_microbatch(
         else:
             result.append(item)
     return result
+
+
+def resolve_lazy_payloads(items: list[Any]) -> None:
+    """Resolve all :class:`LazyPayload` instances in *items* in-place.
+
+    Call this in the worker process before ``process_many()``, or at stage
+    exit boundaries to prevent lazy payloads from leaking downstream.
+
+    No-op for records whose payloads are already materialized.
+    """
+    for item in items:
+        if isinstance(item, SampleRecord) and isinstance(item.payload, LazyPayload):
+            item.payload = item.payload.resolve()
+        elif isinstance(item, SampleBatch):
+            for rec in item.records:
+                if isinstance(rec.payload, LazyPayload):
+                    rec.payload = rec.payload.resolve()
