@@ -260,7 +260,7 @@ class RuntimeOptions:
     # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None
     # How long to wait for all contributors and for the merged file.
-    aggregate_timeout_s: float = 30.0
+    aggregate_timeout_s: float = 180.0
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
@@ -550,7 +550,8 @@ class Engine:
         base = str(base)  # Handle Path objects
         self._agg_is_cloud = self._agg_backend.is_cloud_path(base)
         if self._agg_is_cloud:
-            self._agg_timeout_s = max(self._opts.aggregate_timeout_s, 60.0)
+            # Floor: guard against user-provided values that are too low for cloud I/O.
+            self._agg_timeout_s = max(self._opts.aggregate_timeout_s, 90.0)
             self._agg_poll_base = 0.5  # 500ms base poll interval
         else:
             self._agg_timeout_s = self._opts.aggregate_timeout_s
@@ -1786,7 +1787,7 @@ class Engine:
             age_s = time.time() - stat["mtime"]
         except OSError:
             return None  # File doesn't exist or access denied
-        if age_s > 120:
+        if age_s > self._agg_timeout_s + 30:
             return None
 
         # Guard: if we already consumed this rid, skip if our own shard for
@@ -1843,23 +1844,32 @@ class Engine:
         return self._agg_backend.glob(pattern)
 
     def _read_states_for_round(
-        self, round_id: str, printt: bool = False
-    ) -> tuple[list[dict], set[int]]:
-        states: list[dict] = []
-        covered: set[int] = set()
+        self,
+        round_id: str,
+        *,
+        seen: dict[str, dict[str, Any]] | None = None,
+        covered: set[int] | None = None,
+    ) -> tuple[dict[str, dict[str, Any]], set[int]]:
+        """Read per-rank state files for *round_id*.
+
+        When *seen* and *covered* are supplied, only newly appeared files are
+        fetched — previously read files are skipped.  This turns repeated
+        polling from O(N * polls) GETs into O(N) total.
+        """
+        if seen is None:
+            seen = {}
+        if covered is None:
+            covered = set()
         for fp in self._list_state_files(round_id):
-            st = self._read_json(fp)
-            fname = fp.rsplit("/", 1)[-1]  # Get filename from path
-            if st is None:
-                if printt:
-                    self._log(f"{fname} covers nothing!")
+            if fp in seen:
                 continue
-            states.append(st)
-            for k in st.get("progress", {}).keys():
-                if printt:
-                    self._log(f"{fname} covers lane {k}!")
+            st = self._read_json(fp)
+            if st is None:
+                continue
+            seen[fp] = st
+            for k in st.get("progress", {}):
                 covered.add(int(k))
-        return states, covered
+        return seen, covered
 
     def _log(self, msg: str) -> None:
         worker_id, workers_per_rank = get_torch_worker_info()
@@ -1902,24 +1912,23 @@ class Engine:
 
         merged_path = self._merged_file_path(round_id)
         if is_leader:
-            # Wait for complete lane coverage
             expected_lanes = set(range(int(self._world.canonical_replicas)))
+            seen: dict[str, dict[str, Any]] = {}
+            covered: set[int] = set()
 
             def _have_full_coverage() -> bool:
-                states, covered = self._read_states_for_round(round_id)
-                return bool(states) and expected_lanes.issubset(covered)
+                self._read_states_for_round(round_id, seen=seen, covered=covered)
+                return bool(seen) and expected_lanes.issubset(covered)
 
             if not self._wait_until(_have_full_coverage, self._agg_timeout_s):
-                states, covered = self._read_states_for_round(round_id)
                 missing = sorted(expected_lanes - covered)
                 raise RuntimeError(
                     f"[PID {os.getpid()}] Aggregation timeout after {self._agg_timeout_s}s. "
                     + f"Missing lanes={missing}; files={len(self._list_state_files(round_id))}"
                 )
 
-            # Merge and publish
-            states, _ = self._read_states_for_round(round_id, printt=False)
-            merged = self._merge_state_dicts(states)
+            # States already cached from polling above.
+            merged = self._merge_state_dicts(list(seen.values()))
             assert not self._agg_backend.exists(merged_path)
             self._agg_backend.put(merged_path, json.dumps(merged).encode("utf-8"))
             self._agg_backend.delete(my_path)

@@ -61,6 +61,7 @@ def _build_pipeline(
     dp_group_id: int,
     mapping_strategy: str = "contiguous",
     aggregate_dir: str | None = None,
+    aggregate_timeout_s: float | None = None,
     run_id: str | None = None,
     seed: int = 42,
     mtp_mode: bool = False,
@@ -93,6 +94,8 @@ def _build_pipeline(
     }
     if aggregate_dir is not None:
         opts["aggregate_dir"] = aggregate_dir
+    if aggregate_timeout_s is not None:
+        opts["aggregate_timeout_s"] = aggregate_timeout_s
     if run_id is not None:
         opts["run_id"] = run_id
 
@@ -497,7 +500,12 @@ class TestElastic3DParallelism:
         ds = make_dataset("a", 64)
         chunk_size = 8
 
-        kw = dict(mtp_mode=mtp_mode)
+        # Short aggregate timeout: ranks run sequentially (not in parallel),
+        # so non-leader ranks will always time out waiting for a round file
+        # from a leader that isn't running.  This is harmless — the test only
+        # checks sample identity, not aggregation — but the default 180s
+        # timeout would exceed the pytest timeout.
+        kw = dict(mtp_mode=mtp_mode, aggregate_timeout_s=15)
         # Checkpoint from rank 0 (dp_degree=1 owns all lanes)
         pipe1 = _build_pipeline(
             ds,
