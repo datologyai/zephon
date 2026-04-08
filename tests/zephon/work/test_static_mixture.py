@@ -4,7 +4,6 @@ import pytest
 
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
-    AccumulatorMixtureWorkSource,
     MixtureSpec,
     StaticMixtureWorkSource,
 )
@@ -1072,21 +1071,6 @@ def test_checkpoint_restore_randomized_property(cfg_seed: int) -> None:
 # ===========================================================================
 # Tests ported from AccumulatorMixtureWorkSource
 # ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# Deprecation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.filterwarnings("default::DeprecationWarning")
-def test_deprecation_warning() -> None:
-    """AccumulatorMixtureWorkSource emits a DeprecationWarning on construction."""
-    ds = make_dataset("alpha", 10)
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        AccumulatorMixtureWorkSource(
-            datasets=[ds], mixture={ds.name: 1.0}, chunk_size=4
-        )
 
 
 # ---------------------------------------------------------------------------
