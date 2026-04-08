@@ -3,6 +3,7 @@
 
 """Mixture-aware work source with shard-respecting traversal."""
 
+import enum
 import math
 import random
 import warnings
@@ -594,8 +595,25 @@ class _DatasetCursor:
         self._seek_to_position(position, block_rng_snapshot=snapshot)
 
 
+class AllocationMode(enum.Enum):
+    """How per-chunk quotas are computed for each mixture component."""
+
+    ACCUMULATOR = "accumulator"
+    LEGACY_FIXED = "legacy_fixed"
+
+
 class StaticMixtureWorkSource(WorkSource):
     """Emit SampleId triples from one or more datasets according to a mixture.
+
+    By default this source uses Bresenham-style fractional accumulators to
+    distribute samples across datasets. Over many chunks the running average
+    converges to the exact requested mixture weights with no
+    ``1/chunk_size`` granularity limitation. Individual chunks may have
+    sparse allocations (a dataset may contribute 0 samples in a given chunk).
+
+    When loading a checkpoint that was created by the legacy fixed-quota
+    allocator (pre-accumulator), the source automatically falls back to the
+    original allocation strategy for deterministic continuation.
 
     This source orchestrates ordering only. It builds per-dataset cursors from
     the provided ``Dataset`` descriptors and applies shuffling at three levels:
@@ -672,11 +690,13 @@ class StaticMixtureWorkSource(WorkSource):
         ]
         if not self._component_order:
             raise ValueError("No active mixture components available")
-        if self._chunk_size < len(self._component_order):
-            raise ValueError(
-                "chunk_size must be at least the number of mixture components"
-            )
-        self._chunk_quota = self._compute_chunk_quota()
+
+        # Accumulator-based allocation by default; legacy fixed-quota mode is
+        # activated only when loading a pre-accumulator checkpoint.
+        self._allocation_mode = AllocationMode.ACCUMULATOR
+        self._accumulators: dict[str, float] = dict.fromkeys(self._component_order, 0.0)
+        self._chunk_quota: dict[str, int] = {}  # populated only in legacy mode
+
         self._seed = seed
         valid_policies = {"stop", "redistribute", "repeat"}
         if exhausted_policy not in valid_policies:
@@ -695,18 +715,15 @@ class StaticMixtureWorkSource(WorkSource):
                 stacklevel=2,
             )
 
-        # Guard: with repeat policy, each dataset must have at least as many
-        # samples as its per-chunk quota, otherwise reset() would loop forever.
+        # Guard: with repeat policy, each dataset must have at least 1 sample
+        # so that cursor.reset() can always make progress.
         if exhausted_policy == "repeat":
             for name in self._component_order:
-                quota = self._chunk_quota[name]
                 cursor = self._cursors[name]
-                if cursor._total_samples < quota:
+                if cursor._total_samples < 1:
                     raise ValueError(
-                        f"Dataset '{name}' has {cursor._total_samples} samples but "
-                        f"repeat policy requires at least {quota} per chunk "
-                        f"(chunk_size={chunk_size}). "
-                        f"Increase dataset size or decrease chunk_size."
+                        f"Dataset '{name}' has 0 samples but repeat policy "
+                        f"requires at least 1."
                     )
 
         self.total_samples: int | float = (
@@ -735,13 +752,20 @@ class StaticMixtureWorkSource(WorkSource):
         clone._weights = dict(self._weights)
         clone._component_order = list(self._component_order)
         clone._chunk_size = self._chunk_size
-        clone._chunk_quota = dict(self._chunk_quota)
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
         clone._exhausted_policy = self._exhausted_policy
         clone._reshuffle_on_repeat = self._reshuffle_on_repeat
         clone._max_repeats = self._max_repeats
         clone._knobs = self._knobs
+
+        clone._allocation_mode = self._allocation_mode
+        if self._allocation_mode is AllocationMode.LEGACY_FIXED:
+            clone._chunk_quota = dict(self._chunk_quota)
+            clone._accumulators = {}
+        else:
+            clone._accumulators = dict(self._accumulators)
+            clone._chunk_quota = {}
 
         clone._cursors = {name: cur._clone() for name, cur in self._cursors.items()}
 
@@ -771,7 +795,12 @@ class StaticMixtureWorkSource(WorkSource):
         # We expose a copy to avoid external objects interfering with our internal state.
         return dict(self._dataset_ids)
 
+    # ------------------------------------------------------------------
+    # Legacy fixed-quota allocation (used only for pre-accumulator checkpoints)
+    # ------------------------------------------------------------------
+
     def _compute_chunk_quota(self) -> dict[str, int]:
+        """Largest-remainder allocation for legacy fixed-quota mode."""
         component_count = len(self._component_order)
         base_slots = component_count
         remaining_slots = self._chunk_size - base_slots
@@ -834,6 +863,83 @@ class StaticMixtureWorkSource(WorkSource):
 
         return quota
 
+    # ------------------------------------------------------------------
+    # Accumulator-based quota allocation (default)
+    # ------------------------------------------------------------------
+
+    def _compute_quotas_from_accumulators(self) -> dict[str, int]:
+        """Advance accumulators and return per-component quotas for this chunk.
+
+        Uses Bresenham-style fractional accumulation:
+
+        1. Add ``weight * chunk_size`` to each accumulator.
+        2. Take ``int(accum)`` (truncation toward zero) as the base quota;
+           subtract it so the accumulator holds only the remainder.
+        3. Apply a largest-remainder correction so ``sum(quotas) == chunk_size``
+           exactly, and **debit/credit each correction back into the
+           accumulator** so that future chunks account for the actual
+           (corrected) allocation.
+
+        Accumulators may temporarily go negative after a +1 correction; they
+        recover naturally as ``weight * chunk_size`` is added each chunk.
+        Negative accumulators sort last in the deficit correction, preventing
+        back-to-back over-allocation.
+        """
+        quotas: dict[str, int] = {}
+        total = 0
+
+        for name in self._component_order:
+            self._accumulators[name] += self._weights[name] * self._chunk_size
+            q = int(self._accumulators[name])  # truncation toward zero
+            self._accumulators[name] -= q
+            quotas[name] = q
+            total += q
+
+        deficit = self._chunk_size - total
+
+        if deficit > 0:
+            # Give extra slots to components with largest fractional remainder.
+            order = sorted(
+                enumerate(self._component_order),
+                key=lambda pair: (-self._accumulators[pair[1]], pair[0]),
+            )
+            for _, name in order:
+                if deficit <= 0:
+                    break
+                quotas[name] += 1
+                deficit -= 1
+
+                # debit each correction back into the accumulator
+                self._accumulators[name] -= 1.0
+
+        elif deficit < 0:
+            # Remove slots from components with smallest fractional remainder.
+            order = sorted(
+                enumerate(self._component_order),
+                key=lambda pair: (self._accumulators[pair[1]], pair[0]),
+            )
+            for _, name in order:
+                if deficit >= 0:
+                    break
+                if quotas[name] > 0:
+                    quotas[name] -= 1
+                    deficit += 1
+
+                    # credit each correction back into the accumulator
+                    self._accumulators[name] += 1.0
+
+        if sum(quotas.values()) != self._chunk_size:
+            raise RuntimeError(
+                "Accumulator quota correction failed to hit chunk_size "
+                f"(got {sum(quotas.values())}, expected {self._chunk_size})"
+            )
+
+        return quotas
+
+    # ------------------------------------------------------------------
+    # Chunk production
+    # ------------------------------------------------------------------
+
     def next_chunk(self) -> WorkChunk | None:
         """Return the next chunk for a given canonical lane and worker.
 
@@ -855,13 +961,18 @@ class StaticMixtureWorkSource(WorkSource):
                 return None
             g = self._global_chunk_index
             self._global_chunk_index += 1
-            chunk_lane = g % self._canon  # for which lane is this chunk?
-            if chunk_lane != (self._lane % self._canon):  # are we asking for this lane?
+            chunk_lane = g % self._canon
+            if chunk_lane != (self._lane % self._canon):
                 continue
-
             return chunk
 
     def _next_chunk(self) -> WorkChunk | None:
+        if self._allocation_mode is AllocationMode.LEGACY_FIXED:
+            return self._next_chunk_legacy()
+        return self._next_chunk_accumulator()
+
+    def _next_chunk_legacy(self) -> WorkChunk | None:
+        """Legacy fixed-quota chunk production (pre-accumulator checkpoints)."""
         if self._exhausted_policy == "redistribute":
             raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
 
@@ -908,8 +1019,74 @@ class StaticMixtureWorkSource(WorkSource):
             seed=self._seed,
         )
 
+    def _next_chunk_accumulator(self) -> WorkChunk | None:
+        """Accumulator-based chunk production (default)."""
+        if self._exhausted_policy == "redistribute":
+            raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
+
+        # Compute quotas, then verify cursors can fulfill them.
+        # On exhaustion with repeat policy: rollback accumulators, reset the
+        # exhausted cursor, and retry.
+        while True:
+            saved_accumulators = dict(self._accumulators)
+            quotas = self._compute_quotas_from_accumulators()
+
+            needs_retry = False
+            for name in self._component_order:
+                quota = quotas[name]
+                cursor = self._cursors[name]
+                if cursor.remaining < quota:
+                    if self._exhausted_policy == "repeat":
+                        if (
+                            self._max_repeats is not None
+                            and cursor._epoch >= self._max_repeats
+                        ):
+                            return None
+                        cursor.reset(
+                            reshuffle=self._reshuffle_on_repeat,
+                            base_knobs=self._knobs,
+                        )
+                        self._accumulators = saved_accumulators
+                        needs_retry = True
+                        break
+                    else:
+                        return None  # "stop" policy
+
+            if needs_retry:
+                continue
+            break
+
+        components: dict[str, list[SampleId]] = {}
+        for name in self._component_order:
+            quota = quotas[name]
+            if quota <= 0:
+                continue
+            cursor = self._cursors[name]
+            samples = cursor.next_many(quota)
+            if len(samples) != quota:
+                raise RuntimeError(
+                    f"Cursor for component '{name}' returned {len(samples)}"
+                    f" samples, expected {quota}"
+                )
+            components[name] = samples
+
+        if not components:
+            return None
+
+        if self._exhausted_policy != "repeat":
+            self.total_samples = len(self)
+
+        return WorkChunk(
+            components=components,
+            seed=self._seed,
+        )
+
+    # ------------------------------------------------------------------
+    # Length
+    # ------------------------------------------------------------------
+
     def __len__(self) -> int:
-        """Returns the number of available _samples_ across all chunks that can be yielded."""
+        """Returns the number of available samples across all chunks that can be yielded."""
         if hasattr(self, "_exhausted_policy"):
             if self._exhausted_policy == "redistribute":
                 raise NotImplementedError(
@@ -921,10 +1098,15 @@ class StaticMixtureWorkSource(WorkSource):
                     "(exhausted_policy='repeat')"
                 )
 
+        if self._allocation_mode is AllocationMode.LEGACY_FIXED:
+            return self._len_legacy()
+        return self._len_accumulator()
+
+    def _len_legacy(self) -> int:
         if not self._chunk_quota:
             return 0
         chunk_capacity = self._chunk_size
-        chunks_possible = math.inf
+        chunks_possible: float = math.inf
         for name in self._component_order:
             quota = self._chunk_quota[name]
             if quota <= 0:
@@ -938,18 +1120,49 @@ class StaticMixtureWorkSource(WorkSource):
             return 0
         return int(chunks_possible) * chunk_capacity
 
+    def _len_accumulator(self) -> int:
+        """Estimate of remaining samples using average per-chunk quota.
+
+        Uses ``weight * chunk_size`` (the long-run average quota) as the
+        divisor for each component. This may slightly overestimate because a
+        component could receive a larger-than-average quota in the very next
+        chunk, but it is close to correct and consistent with accumulator
+        convergence. Actual termination is governed by ``_next_chunk``.
+        """
+        chunks_possible: float = math.inf
+        for name in self._component_order:
+            avg_quota = self._weights[name] * self._chunk_size
+            if avg_quota <= 0:
+                continue
+            cursor = self._cursors[name]
+            available = cursor.remaining / avg_quota
+            chunks_possible = min(chunks_possible, available)
+            if chunks_possible <= 0:
+                return 0
+        if chunks_possible is math.inf:
+            return 0
+        return int(chunks_possible) * self._chunk_size
+
+    # ------------------------------------------------------------------
+    # Indexing (not supported)
+    # ------------------------------------------------------------------
+
     def sample_id_at(self, index: int) -> SampleId:
         raise NotImplementedError("StaticMixtureWorkSource is not yet indexable")
 
     def supports_indexing(self) -> bool:
-        return False  # StaticMixtureWorkSource is not yet indexable
+        return False
+
+    # ------------------------------------------------------------------
+    # Checkpoint / restore
+    # ------------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
         base = super().state_dict()
         cursor_states = {
             name: cur.checkpoint_state() for name, cur in self._cursors.items()
         }
-        return base | {
+        common = base | {
             "version": 1,
             "seed": int(self._seed),
             "chunk_size": int(self._chunk_size),
@@ -975,12 +1188,24 @@ class StaticMixtureWorkSource(WorkSource):
             "reshuffle_on_repeat": self._reshuffle_on_repeat,
             "max_repeats": self._max_repeats,
         }
+        if self._allocation_mode is AllocationMode.LEGACY_FIXED:
+            return common
+        return common | {
+            "accumulators": {name: float(v) for name, v in self._accumulators.items()},
+        }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         super().load_state_dict(state)
 
         if int(state.get("version", 0)) != 1:
             raise RuntimeError("Unsupported StaticMixtureWorkSource checkpoint version")
+
+        is_accumulator_ckpt = "accumulators" in state
+        self._allocation_mode = (
+            AllocationMode.ACCUMULATOR
+            if is_accumulator_ckpt
+            else AllocationMode.LEGACY_FIXED
+        )
 
         self._seed = int(state["seed"])
         self._chunk_size = int(state["chunk_size"])
@@ -990,7 +1215,6 @@ class StaticMixtureWorkSource(WorkSource):
             shuffle_within_shard=bool(state["knobs"]["shuffle_within_shard"]),
             shuffle_block_size=state["knobs"]["shuffle_block_size"],
         )
-        # Persist restored knobs for future state_dict() calls
         self._knobs = knobs
 
         # Restore repeat-related settings (defaults match "stop" policy for v1 compat)
@@ -1038,6 +1262,9 @@ class StaticMixtureWorkSource(WorkSource):
         self._dataset_ids.clear()
         self._datasets_by_id.clear()
 
+        if not cursor_states and is_accumulator_ckpt:
+            raise RuntimeError("Accumulator-mode checkpoints require cursor_states")
+
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
@@ -1064,8 +1291,14 @@ class StaticMixtureWorkSource(WorkSource):
         self._component_order = list(state["component_order"])
         self._global_chunk_index = int(state["global_chunk_index"])
 
-        # Recompute per-chunk quota to reflect restored chunk_size/weights/components
-        self._chunk_quota = self._compute_chunk_quota()
+        if self._allocation_mode is AllocationMode.LEGACY_FIXED:
+            self._chunk_quota = self._compute_chunk_quota()
+            self._accumulators = {}
+        else:
+            self._accumulators = {
+                str(k): float(v) for k, v in state["accumulators"].items()
+            }
+            self._chunk_quota = {}
 
         self.total_samples = (
             float("inf") if self._exhausted_policy == "repeat" else len(self)

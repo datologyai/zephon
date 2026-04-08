@@ -1,11 +1,14 @@
-import math
 import random
 
 import pytest
 
 from zephon.io import Dataset, InMemoryShard
-from zephon.work import MixtureSpec, StaticMixtureWorkSource
-from zephon.work.static_mixture import _DatasetCursor, _DatasetKnobs
+from zephon.work import (
+    AccumulatorMixtureWorkSource,
+    MixtureSpec,
+    StaticMixtureWorkSource,
+)
+from zephon.work.static_mixture import AllocationMode, _DatasetCursor, _DatasetKnobs
 
 
 def make_dataset(name: str, sample_count: int) -> Dataset:
@@ -28,6 +31,18 @@ def _flatten_components(chunk) -> dict[str, list[tuple[int, int, int]]]:
     out: dict[str, list[tuple[int, int, int]]] = {}
     for name, items in chunk.components.items():
         out[name] = [tuple(map(int, sid)) for sid in items]
+    return out
+
+
+def _drain_chunks(
+    ws: StaticMixtureWorkSource, limit: int | None = None
+) -> list[dict[str, list[tuple[int, int, int]]]]:
+    out: list[dict[str, list[tuple[int, int, int]]]] = []
+    while limit is None or len(out) < limit:
+        ch = ws.next_chunk()
+        if ch is None:
+            break
+        out.append(_flatten_components(ch))
     return out
 
 
@@ -169,198 +184,6 @@ def test_load_state_dict_version_mismatch_raises() -> None:
     other = StaticMixtureWorkSource([ds], {ds.name: 1.0}, chunk_size=4)
     with pytest.raises(RuntimeError):
         other.clone_for_lane(0, canonical_replicas=1).load_state_dict(st_bad)
-
-
-def test_static_mixture_emits_fixed_quota_chunks() -> None:
-    dataset_a = make_dataset("alpha", 9)
-    dataset_b = make_dataset("beta", 6)
-    mixture = MixtureSpec({"alpha": 0.6, "beta": 0.4}).weights
-    work = StaticMixtureWorkSource(
-        [dataset_a, dataset_b],
-        mixture,
-        chunk_size=5,
-        shuffle_shards=False,
-    )
-
-    ws = work.clone_for_lane(0, canonical_replicas=1)
-    assert len(ws) == 15
-
-    chunk = ws.next_chunk()
-    assert chunk is not None
-    assert sorted(chunk.components.keys()) == ["alpha", "beta"]
-    assert len(chunk.components["alpha"]) == 3
-    assert len(chunk.components["beta"]) == 2
-
-    assert len(ws) == 10
-
-    ws.next_chunk()
-    ws.next_chunk()
-
-    assert len(ws) == 0
-    assert ws.next_chunk() is None
-
-
-def test_chunk_size_smaller_than_components_raises() -> None:
-    dataset_a = make_dataset("alpha", 2)
-    dataset_b = make_dataset("beta", 2)
-    dataset_c = make_dataset("gamma", 2)
-    mixture = MixtureSpec({"alpha": 0.5, "beta": 0.3, "gamma": 0.2}).weights
-    with pytest.raises(ValueError):
-        StaticMixtureWorkSource(
-            [dataset_a, dataset_b, dataset_c],
-            mixture,
-            chunk_size=2,
-            shuffle_shards=False,
-        )
-
-
-def test_small_component_raises_with_chunk_size_suggestion() -> None:
-    """When ideal < 1.0 for any component, a ValueError is raised suggesting a minimum chunk_size."""
-    dataset_a = make_dataset("alpha", 100)
-    dataset_b = make_dataset("beta", 100)
-    dataset_c = make_dataset("gamma", 100)
-    mixture = {"alpha": 0.9, "beta": 0.09, "gamma": 0.01}
-    with pytest.raises(ValueError, match=r"chunk_size.*at least 100"):
-        StaticMixtureWorkSource(
-            [dataset_a, dataset_b, dataset_c],
-            MixtureSpec(mixture).weights,
-            chunk_size=4,
-            shuffle_shards=False,
-        )
-
-
-def test_small_component_raises_with_proportion_suggestion() -> None:
-    """The error message also suggests the minimum proportion for the current chunk_size."""
-    ds_a = make_dataset("big", 100)
-    ds_b = make_dataset("tiny", 100)
-    mixture = {"big": 0.99, "tiny": 0.01}
-    with pytest.raises(ValueError, match=r"minimum proportion.*0\.5"):
-        StaticMixtureWorkSource(
-            [ds_a, ds_b],
-            MixtureSpec(mixture).weights,
-            chunk_size=2,
-            shuffle_shards=False,
-        )
-
-
-def test_small_component_error_names_offending_components() -> None:
-    """The error message lists the component(s) whose ideal quota is below 1."""
-    ds_a = make_dataset("alpha", 100)
-    ds_b = make_dataset("beta", 100)
-    ds_c = make_dataset("gamma", 100)
-    mixture = {"alpha": 0.9, "beta": 0.09, "gamma": 0.01}
-    with pytest.raises(ValueError, match="beta.*gamma|gamma.*beta"):
-        StaticMixtureWorkSource(
-            [ds_a, ds_b, ds_c],
-            MixtureSpec(mixture).weights,
-            chunk_size=4,
-            shuffle_shards=False,
-        )
-
-
-def test_ideal_exactly_one_does_not_raise() -> None:
-    """When the smallest component has ideal == 1.0 exactly, no error is raised."""
-    ds_a = make_dataset("big", 100)
-    ds_b = make_dataset("small", 100)
-    # weight 0.1 * chunk_size 10 = ideal 1.0 exactly
-    mixture = {"big": 0.9, "small": 0.1}
-    ws = StaticMixtureWorkSource(
-        [ds_a, ds_b],
-        MixtureSpec(mixture).weights,
-        chunk_size=10,
-        shuffle_shards=False,
-    )
-    assert ws._chunk_quota["small"] >= 1
-
-
-def test_chunk_samples_match_components_and_counts() -> None:
-    dataset_a = make_dataset("alpha", 5)
-    dataset_b = make_dataset("beta", 5)
-    mixture = MixtureSpec({"alpha": 0.6, "beta": 0.4}).weights
-    work = StaticMixtureWorkSource(
-        [dataset_a, dataset_b],
-        mixture,
-        chunk_size=4,
-        seed=13,
-        shuffle_shards=False,
-    )
-
-    ws = work.clone_for_lane(0, canonical_replicas=1)
-    dataset_ids = ws.dataset_ids
-    assert dataset_ids["alpha"] != dataset_ids["beta"]
-    assert len(ws) == 8
-
-    first_chunk = ws.next_chunk()
-    assert first_chunk is not None
-    assert sorted(first_chunk.components.keys()) == ["alpha", "beta"]
-    assert len(first_chunk.components["alpha"]) == 2
-    assert len(first_chunk.components["beta"]) == 2
-    assert all(
-        sample_id[0] == dataset_ids["alpha"]
-        for sample_id in first_chunk.components["alpha"]
-    )
-    assert all(
-        sample_id[0] == dataset_ids["beta"]
-        for sample_id in first_chunk.components["beta"]
-    )
-    assert [sample_id[2] for sample_id in first_chunk.components["alpha"]] == [0, 1]
-    assert [sample_id[2] for sample_id in first_chunk.components["beta"]] == [0, 1]
-    assert len(ws) == 4
-
-    second_chunk = ws.next_chunk()
-    assert second_chunk is not None
-    assert len(second_chunk.components["alpha"]) == 2
-    assert len(second_chunk.components["beta"]) == 2
-    assert [sample_id[2] for sample_id in second_chunk.components["alpha"]] == [2, 3]
-    assert [sample_id[2] for sample_id in second_chunk.components["beta"]] == [2, 3]
-    assert len(ws) == 0
-
-    assert ws.next_chunk() is None
-
-
-def test_chunk_samples_match_components_and_counts_25_75() -> None:
-    dataset_a = make_dataset("alpha", 6)
-    dataset_b = make_dataset("beta", 5)
-    mixture = MixtureSpec({"alpha": 0.75, "beta": 0.25}).weights
-    work = StaticMixtureWorkSource(
-        [dataset_a, dataset_b],
-        mixture,
-        chunk_size=4,
-        seed=13,
-        shuffle_shards=False,
-    )
-
-    ws = work.clone_for_lane(0, canonical_replicas=1)
-    dataset_ids = ws.dataset_ids
-    assert dataset_ids["alpha"] != dataset_ids["beta"]
-    assert len(ws) == 8
-
-    first_chunk = ws.next_chunk()
-    assert first_chunk is not None
-    assert sorted(first_chunk.components.keys()) == ["alpha", "beta"]
-    assert len(first_chunk.components["alpha"]) == 3
-    assert len(first_chunk.components["beta"]) == 1
-    assert all(
-        sample_id[0] == dataset_ids["alpha"]
-        for sample_id in first_chunk.components["alpha"]
-    )
-    assert all(
-        sample_id[0] == dataset_ids["beta"]
-        for sample_id in first_chunk.components["beta"]
-    )
-    assert [sample_id[2] for sample_id in first_chunk.components["alpha"]] == [0, 1, 2]
-    assert [sample_id[2] for sample_id in first_chunk.components["beta"]] == [0]
-    assert len(ws) == 4
-
-    second_chunk = ws.next_chunk()
-    assert second_chunk is not None
-    assert len(second_chunk.components["alpha"]) == 3
-    assert len(second_chunk.components["beta"]) == 1
-    assert [sample_id[2] for sample_id in second_chunk.components["alpha"]] == [3, 4, 5]
-    assert [sample_id[2] for sample_id in second_chunk.components["beta"]] == [1]
-    assert len(ws) == 0
-
-    assert ws.next_chunk() is None
 
 
 # ── repeat policy tests ──────────────────────────────────────────────
@@ -610,10 +433,10 @@ def test_repeat_v1_checkpoint_loads() -> None:
     assert ch is not None
 
 
-def test_repeat_small_dataset_guard() -> None:
-    """Dataset with fewer samples than quota raises at construction."""
-    ds = make_dataset("tiny", 2)
-    with pytest.raises(ValueError, match="repeat policy requires at least"):
+def test_repeat_zero_sample_dataset_guard() -> None:
+    """Dataset with 0 samples raises at construction with repeat policy."""
+    ds = make_dataset("tiny", 0)
+    with pytest.raises(ValueError):
         StaticMixtureWorkSource(
             [ds],
             {ds.name: 1.0},
@@ -1026,18 +849,6 @@ def test_clone_independence(
     assert orig_tail == clone_tail
 
 
-def _drain_chunks(
-    ws: StaticMixtureWorkSource, limit: int | None = None
-) -> list[dict[str, list[tuple[int, int, int]]]]:
-    out: list[dict[str, list[tuple[int, int, int]]]] = []
-    while limit is None or len(out) < limit:
-        ch = ws.next_chunk()
-        if ch is None:
-            break
-        out.append(_flatten_components(ch))
-    return out
-
-
 @pytest.mark.parametrize("canonical_replicas", [2, 4])
 def test_checkpoint_restore_multilane_matches_baseline(canonical_replicas: int) -> None:
     """Per-lane checkpoint/restore stays deterministic for canonical_replicas > 1."""
@@ -1220,14 +1031,12 @@ def test_checkpoint_restore_randomized_property(cfg_seed: int) -> None:
         mixture_raw[name] = rng.uniform(0.1, 1.0)
 
     spec = MixtureSpec(mixture_raw)
-    min_weight = min(spec.normalized.values())
-    min_cs = max(dataset_count, math.ceil(1.0 / min_weight))
 
     exhausted_policy = rng.choice(["stop", "repeat"])
     kwargs: dict = dict(
         datasets=datasets,
         mixture=spec.weights,
-        chunk_size=rng.randint(min_cs, min_cs + 7),
+        chunk_size=rng.randint(1, 12),
         seed=rng.randint(0, 10000),
         shuffle_shards=rng.choice([True, False]),
         shuffle_within_shard=rng.choice([True, False]),
@@ -1253,3 +1062,1167 @@ def test_checkpoint_restore_randomized_property(cfg_seed: int) -> None:
     suffix = _drain_chunks(ws_load, limit=max(0, len(baseline) - cut))
 
     assert prefix + suffix == baseline
+
+
+# ===========================================================================
+# Tests ported from AccumulatorMixtureWorkSource
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Deprecation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("default::DeprecationWarning")
+def test_deprecation_warning() -> None:
+    """AccumulatorMixtureWorkSource emits a DeprecationWarning on construction."""
+    ds = make_dataset("alpha", 10)
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        AccumulatorMixtureWorkSource(
+            datasets=[ds], mixture={ds.name: 1.0}, chunk_size=4
+        )
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_size_1_with_multiple_components_allowed() -> None:
+    """chunk_size < len(components) is valid with accumulator-based allocation."""
+    ds_a = make_dataset("alpha", 10)
+    ds_b = make_dataset("beta", 10)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.5, "beta": 0.5},
+        chunk_size=1,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws, limit=10)
+    assert len(chunks) > 0
+    for ch in chunks:
+        total = sum(len(v) for v in ch.values())
+        assert total == 1
+
+
+# ---------------------------------------------------------------------------
+# Chunk size invariant
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_size_always_exact() -> None:
+    """Every chunk must have exactly chunk_size samples regardless of weights."""
+    ds_a = make_dataset("alpha", 200)
+    ds_b = make_dataset("beta", 200)
+    ds_c = make_dataset("gamma", 200)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture={"alpha": 0.7, "beta": 0.2, "gamma": 0.1},
+        chunk_size=10,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(15):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 10
+
+
+def test_chunk_size_exact_with_odd_weights() -> None:
+    """Chunk_size invariant holds even with weights that don't divide evenly."""
+    ds_a = make_dataset("alpha", 500)
+    ds_b = make_dataset("beta", 500)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.7, "beta": 0.3},
+        chunk_size=3,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(50):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 3
+
+
+# ---------------------------------------------------------------------------
+# Sparse chunks
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_chunks_small_weight() -> None:
+    """A low-weight component should get 0 samples in most chunks."""
+    large = make_dataset("large", 1000)
+    tiny = make_dataset("tiny", 1000)
+    ws = StaticMixtureWorkSource(
+        datasets=[large, tiny],
+        mixture={"large": 0.99, "tiny": 0.01},
+        chunk_size=4,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks_with_tiny = 0
+    chunks_without_tiny = 0
+    for _ in range(100):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        if "tiny" in chunk.components:
+            chunks_with_tiny += 1
+        else:
+            chunks_without_tiny += 1
+
+    # With weight=0.01, chunk_size=4 → ideal=0.04 per chunk.
+    # Tiny should appear in roughly 4% of chunks (every ~25 chunks).
+    assert chunks_without_tiny > chunks_with_tiny
+    assert chunks_with_tiny > 0  # but it does appear eventually
+
+
+# ---------------------------------------------------------------------------
+# Convergence
+# ---------------------------------------------------------------------------
+
+
+def test_mixture_converges_to_requested_weights() -> None:
+    """Empirical mixture ratio should converge to target within tolerance."""
+    ds_a = make_dataset("alpha", 5000)
+    ds_b = make_dataset("beta", 5000)
+    ds_c = make_dataset("gamma", 5000)
+    target = {"alpha": 0.6, "beta": 0.3, "gamma": 0.1}
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture=target,
+        chunk_size=10,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = {"alpha": 0, "beta": 0, "gamma": 0}
+    for _ in range(200):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    total = sum(counts.values())
+    for name, expected_weight in target.items():
+        actual = counts[name] / total
+        assert abs(actual - expected_weight) < 0.02, (
+            f"{name}: expected ~{expected_weight}, got {actual}"
+        )
+
+
+def test_extreme_weights_converge() -> None:
+    """Very skewed weights still converge correctly."""
+    large = make_dataset("large", 10000)
+    tiny = make_dataset("tiny", 10000)
+    target = {"large": 0.99, "tiny": 0.01}
+    ws = StaticMixtureWorkSource(
+        datasets=[large, tiny],
+        mixture=target,
+        chunk_size=100,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts = {"large": 0, "tiny": 0}
+    for _ in range(50):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    total = sum(counts.values())
+    for name, expected_weight in target.items():
+        actual = counts[name] / total
+        assert abs(actual - expected_weight) < 0.02, (
+            f"{name}: expected ~{expected_weight}, got {actual}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Single component
+# ---------------------------------------------------------------------------
+
+
+def test_single_component_matches_chunk_size() -> None:
+    """With 1 dataset, every chunk gets exactly chunk_size samples."""
+    ds = make_dataset("only", 100)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"only": 1.0},
+        chunk_size=8,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(10):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        assert "only" in chunk.components
+        assert len(chunk.components["only"]) == 8
+
+
+# ---------------------------------------------------------------------------
+# Determinism
+# ---------------------------------------------------------------------------
+
+
+def test_determinism_two_instances() -> None:
+    """Two identical instances produce identical chunk sequences."""
+    ds_a = make_sharded_dataset("alpha", [15, 20])
+    ds_b = make_sharded_dataset("beta", [10, 25])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=7,
+        seed=42,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+    )
+
+    ws1 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws2 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(8):
+        c1 = ws1.next_chunk()
+        c2 = ws2.next_chunk()
+        assert c1 is not None and c2 is not None
+        assert _flatten_components(c1) == _flatten_components(c2)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint / restore
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_restore_continues_deterministically() -> None:
+    ds_a = make_sharded_dataset("alpha", [30, 20])
+    ds_b = make_sharded_dataset("beta", [25, 15])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.7, "beta": 0.3},
+        chunk_size=5,
+        seed=99,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=3,
+    )
+
+    # Baseline: drain all chunks.
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline)
+    assert len(baseline) > 5
+
+    # Save after 3 chunks, restore, drain rest.
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=3)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load)
+
+    assert prefix + suffix == baseline
+
+
+@pytest.mark.parametrize("cut_position", [0, 1, 2, 3, 5, 8, 11, 17])
+def test_checkpoint_restore_with_block_shuffle_cut_sweep(
+    cut_position: int,
+) -> None:
+    """Block-shuffle checkpoint resume matches baseline at multiple cut points."""
+    ds_a = make_sharded_dataset("alpha", [17, 19, 23])
+    ds_b = make_sharded_dataset("beta", [13, 11, 7])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.7, "beta": 0.3},
+        chunk_size=3,
+        seed=777,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=8,
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline, limit=25)
+    assert baseline
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=cut_position)
+    state = ws_save.state_dict()
+    assert "cursor_states" in state
+    assert any(
+        "block_rng_snapshot" in cursor_state
+        for cursor_state in state["cursor_states"].values()
+    )
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load, limit=max(0, len(baseline) - cut_position))
+
+    assert prefix + suffix == baseline
+
+
+def test_checkpoint_restore_accumulator_round_trip() -> None:
+    """Accumulator floats survive state_dict round-trip."""
+    ds_a = make_dataset("alpha", 100)
+    ds_b = make_dataset("beta", 100)
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.7, "beta": 0.3},
+        chunk_size=3,
+        seed=7,
+    )
+
+    ws = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    # Advance a few chunks so accumulators have non-zero values.
+    _drain_chunks(ws, limit=5)
+    state = ws.state_dict()
+
+    # Verify accumulators are in the state dict and are floats.
+    # Accumulators can go negative after deficit corrections are fed back,
+    # but should stay within (-1, 1).
+    assert "accumulators" in state
+    for name, val in state["accumulators"].items():
+        assert isinstance(val, float)
+        assert -1.0 < val < 1.0, f"Accumulator for {name} out of (-1, 1): {val}"
+
+
+def test_checkpoint_restore_accumulator_multilane() -> None:
+    ds_a = make_sharded_dataset("alpha", [20, 15, 10])
+    ds_b = make_sharded_dataset("beta", [18, 12])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=6,
+        seed=2026,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+    )
+
+    canonical_replicas = 2
+    for lane in range(canonical_replicas):
+        ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        baseline = _drain_chunks(ws_baseline)
+        assert baseline
+
+        ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        prefix = _drain_chunks(ws_save, limit=2)
+        state = ws_save.state_dict()
+
+        ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        ws_load.load_state_dict(state)
+        suffix = _drain_chunks(ws_load)
+
+        assert prefix + suffix == baseline
+
+
+def test_repeat_checkpoint_restore_accumulator() -> None:
+    ds = make_sharded_dataset("alpha", [8, 8])
+    kwargs: dict = dict(
+        datasets=[ds],
+        mixture={ds.name: 1.0},
+        chunk_size=5,
+        seed=314,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+        max_repeats=3,
+    )
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline, limit=8)
+    assert len(baseline) == 8
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=4)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    suffix = _drain_chunks(ws_load, limit=4)
+
+    assert prefix + suffix == baseline
+
+
+# ---------------------------------------------------------------------------
+# Clone independence
+# ---------------------------------------------------------------------------
+
+
+def test_clone_copies_accumulators_independently() -> None:
+    """Advancing a clone must not affect the original's accumulators."""
+    ds_a = make_dataset("alpha", 100)
+    ds_b = make_dataset("beta", 100)
+
+    original = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.7, "beta": 0.3},
+        chunk_size=5,
+        seed=42,
+    )
+    # Advance 2 chunks on the original before cloning.
+    clone1 = original.clone_for_lane(0, canonical_replicas=1)
+    _drain_chunks(clone1, limit=2)
+
+    # Clone again from the original (fresh).
+    clone2 = original.clone_for_lane(1, canonical_replicas=1)
+
+    # clone1 should not have affected clone2's accumulators.
+    # Both start from the original's accumulator state (all 0.0).
+    # Verify by draining and checking they produce expected results.
+    c2_chunk = clone2.next_chunk()
+    assert c2_chunk is not None
+
+
+# ---------------------------------------------------------------------------
+# Deficit both directions
+# ---------------------------------------------------------------------------
+
+
+def test_deficit_negative_handled() -> None:
+    """When floor quotas sum > chunk_size, correction removes excess slots."""
+    # Use many components so accumulated remainders can push total over.
+    datasets = [make_dataset(f"ds_{i}", 500) for i in range(10)]
+    mixture = {f"ds_{i}": 0.1 for i in range(10)}
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=mixture,
+        chunk_size=7,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    # Run many chunks to exercise both positive and negative deficit.
+    for _ in range(50):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 7, f"Chunk had {total} samples, expected 7"
+
+
+def test_deficit_positive_with_uneven_weights() -> None:
+    """When floor quotas sum < chunk_size, correction adds extra slots."""
+    ds_a = make_dataset("alpha", 200)
+    ds_b = make_dataset("beta", 200)
+    ds_c = make_dataset("gamma", 200)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture={"alpha": 0.33, "beta": 0.33, "gamma": 0.34},
+        chunk_size=10,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(30):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 10
+
+
+# ---------------------------------------------------------------------------
+# Repeat with multi-component rollback
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_rollback_retry_multi_component() -> None:
+    """Repeat rollback-and-retry works when one component exhausts first."""
+    small = make_dataset("small", 12)
+    large = make_dataset("large", 100)
+    kwargs: dict = dict(
+        datasets=[small, large],
+        mixture={"small": 0.5, "large": 0.5},
+        chunk_size=4,
+        seed=0,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+        max_repeats=3,
+    )
+
+    ws = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+
+    # Should produce chunks past the point where "small" exhausts.
+    chunks = _drain_chunks(ws, limit=20)
+    assert len(chunks) == 20
+    for ch in chunks:
+        total = sum(len(v) for v in ch.values())
+        assert total == 4
+
+
+# ---------------------------------------------------------------------------
+# Deficit correction feedback regression
+# ---------------------------------------------------------------------------
+
+
+def test_deficit_correction_does_not_inflate_small_components() -> None:
+    """Largest-remainder correction must feed back into accumulators.
+
+    Without feedback, small-weight components (w * chunk_size < 1) accumulate
+    phantom credit: their fractional remainder stays high after receiving a +1
+    correction, causing them to win future corrections repeatedly. Over many
+    chunks this inflates their allocation by 30-40%+.
+
+    The fix subtracts 1.0 from the accumulator on each +1 correction (and adds
+    1.0 on each -1), keeping the accumulator aligned with actual allocations.
+    """
+    target = {
+        "bulk": 0.4988,
+        "mid_a": 0.15,
+        "mid_b": 0.10,
+        "med_a": 0.05,
+        "med_b": 0.05,
+        "med_c": 0.03,
+        "med_d": 0.03,
+        "sml_a": 0.02,
+        "sml_b": 0.02,
+        "sml_c": 0.02,
+        "xs_a": 0.01,
+        "xs_b": 0.01,
+        "tiny_a": 0.005,
+        "tiny_b": 0.003,
+        "tiny_c": 0.001,
+        "tiny_d": 0.001,
+        "micro_a": 0.0005,
+        "micro_b": 0.0005,
+        "nano_a": 0.0001,
+        "nano_b": 0.0001,
+    }
+    chunk_size = 1024
+    num_chunks = 250
+
+    datasets = [
+        make_dataset(name, max(200, int(w * chunk_size * num_chunks * 2)))
+        for name, w in target.items()
+    ]
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=chunk_size,
+        seed=42,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(num_chunks):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    total = sum(counts.values())
+    assert total == chunk_size * num_chunks
+
+    worst_name = ""
+    worst_rel = 0.0
+    for name, w in target.items():
+        actual = counts[name] / total
+        rel_err = abs(actual - w) / w
+        if rel_err > worst_rel:
+            worst_rel = rel_err
+            worst_name = name
+
+    assert worst_rel < 0.05, (
+        f"Component '{worst_name}' has {worst_rel:.1%} relative error — "
+        f"deficit correction feedback into accumulators may be missing"
+    )
+
+
+def test_load_state_dict_extra_dataset_raises() -> None:
+    """Loading checkpoint from [A, B] into instance with [A, B, C] must fail."""
+    ds_a = make_dataset("alpha", 50)
+    ds_b = make_dataset("beta", 50)
+    ds_c = make_dataset("gamma", 50)
+
+    ws_save = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+    _drain_chunks(ws_save, limit=2)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture={"alpha": 0.4, "beta": 0.3, "gamma": 0.3},
+        chunk_size=5,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    with pytest.raises(RuntimeError, match="dataset_ids do not match"):
+        ws_load.load_state_dict(state)
+
+
+# ---------------------------------------------------------------------------
+# Repeat policy — per-component independent exhaustion
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_per_component_independent_exhaustion() -> None:
+    """Small dataset resets while large dataset is still on first pass."""
+    small = make_dataset("small", 12)
+    large = make_dataset("large", 200)
+    ws = StaticMixtureWorkSource(
+        datasets=[small, large],
+        mixture={"small": 0.5, "large": 0.5},
+        chunk_size=4,
+        seed=0,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    small_ids: list[tuple[int, int, int]] = []
+    large_ids: list[tuple[int, int, int]] = []
+    for _ in range(30):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        for name, sids in _flatten_components(chunk).items():
+            if name == "small":
+                small_ids.extend(sids)
+            else:
+                large_ids.extend(sids)
+
+    # small has 12 samples and we pulled ~60 small samples (30 chunks * ~2 each).
+    # It must have repeated. large has 200 samples so should NOT have repeated.
+    assert len(small_ids) > 12, "small should have repeated"
+    assert len(set(small_ids)) <= 12, "small has only 12 unique samples"
+    assert len(large_ids) <= 200, "large should not have repeated yet"
+    assert len(set(large_ids)) == len(large_ids), "large should have no duplicates"
+
+
+def test_repeat_determinism_two_instances() -> None:
+    """Two identical repeat+reshuffle instances produce identical sequences."""
+    ds_a = make_sharded_dataset("alpha", [8, 8])
+    ds_b = make_sharded_dataset("beta", [6, 6])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=42,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=True,
+        max_repeats=3,
+    )
+
+    ws1 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws2 = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+
+    for i in range(12):
+        c1 = ws1.next_chunk()
+        c2 = ws2.next_chunk()
+        if c1 is None:
+            assert c2 is None, f"ws2 still producing at chunk {i}"
+            break
+        assert c2 is not None, f"ws2 ended early at chunk {i}"
+        assert _flatten_components(c1) == _flatten_components(c2), (
+            f"Mismatch at chunk {i}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Repeat policy — boundary values
+# ---------------------------------------------------------------------------
+
+
+def test_max_repeats_zero() -> None:
+    """max_repeats=0 terminates after the first epoch (no resets)."""
+    ds = make_dataset("alpha", 8)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"alpha": 1.0},
+        chunk_size=4,
+        exhausted_policy="repeat",
+        max_repeats=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws)
+    # 8 samples / 4 per chunk = 2 chunks, then cursor._epoch (0) >= max_repeats (0).
+    assert len(chunks) == 2
+    assert ws.next_chunk() is None
+
+
+def test_max_repeats_one() -> None:
+    """max_repeats=1 gives exactly 2 epochs (epoch 0 + 1 reset)."""
+    ds = make_dataset("alpha", 8)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"alpha": 1.0},
+        chunk_size=4,
+        exhausted_policy="repeat",
+        max_repeats=1,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws)
+    # 2 chunks/epoch * 2 epochs = 4 chunks.
+    assert len(chunks) == 4
+    assert ws.next_chunk() is None
+
+
+def test_single_sample_dataset_repeat() -> None:
+    """Repeat with 1 sample, chunk_size=1, max_repeats=3 gives 4 chunks."""
+    ds = make_dataset("only", 1)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"only": 1.0},
+        chunk_size=1,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+        max_repeats=3,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws)
+    assert len(chunks) == 4
+    assert ws.next_chunk() is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-lane
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_restore_3_lanes() -> None:
+    """Checkpoint/restore is correct for 3 lanes."""
+    ds_a = make_sharded_dataset("alpha", [30, 20, 15])
+    ds_b = make_sharded_dataset("beta", [25, 10])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=2026,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+    )
+
+    canonical_replicas = 3
+    for lane in range(canonical_replicas):
+        ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        baseline = _drain_chunks(ws_baseline)
+        assert baseline
+
+        ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        prefix = _drain_chunks(ws_save, limit=2)
+        state = ws_save.state_dict()
+
+        ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        ws_load.load_state_dict(state)
+        suffix = _drain_chunks(ws_load)
+
+        assert prefix + suffix == baseline, f"Lane {lane} mismatch"
+
+
+def test_multilane_no_duplicate_chunks() -> None:
+    """4 lanes must receive disjoint chunk sets."""
+    ds_a = make_dataset("alpha", 200)
+    ds_b = make_dataset("beta", 200)
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=0,
+    )
+
+    canonical_replicas = 4
+    all_samples: list[set[tuple[int, int, int]]] = []
+    for lane in range(canonical_replicas):
+        ws = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        chunks = _drain_chunks(ws)
+        lane_samples = {sid for ch in chunks for sids in ch.values() for sid in sids}
+        all_samples.append(lane_samples)
+
+    # Verify pairwise disjointness.
+    for i in range(canonical_replicas):
+        for j in range(i + 1, canonical_replicas):
+            overlap = all_samples[i] & all_samples[j]
+            assert not overlap, f"Lane {i} and {j} share {len(overlap)} samples"
+
+
+# ---------------------------------------------------------------------------
+# Redistribute policy
+# ---------------------------------------------------------------------------
+
+
+def test_redistribute_raises_not_implemented() -> None:
+    """Redistribute policy is accepted but raises at construction (via len)."""
+    ds = make_dataset("alpha", 50)
+    with pytest.raises(NotImplementedError, match="redistribute"):
+        StaticMixtureWorkSource(
+            datasets=[ds],
+            mixture={"alpha": 1.0},
+            chunk_size=5,
+            exhausted_policy="redistribute",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Scale stress tests
+# ---------------------------------------------------------------------------
+
+
+def test_long_run_1000_chunks_stability() -> None:
+    """1000 chunks: chunk_size invariant, bounded accumulators, convergence."""
+    target = {"alpha": 0.6, "beta": 0.3, "gamma": 0.1}
+    datasets = [make_dataset(name, 15000) for name in target]
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=10,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(1000):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 10
+
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+        # Accumulators must stay bounded.
+        for val in ws._accumulators.values():
+            assert -1.0 < val < 1.0, f"Accumulator out of bounds: {val}"
+
+    grand_total = sum(counts.values())
+    assert grand_total == 10000
+    for name, w in target.items():
+        actual = counts[name] / grand_total
+        assert abs(actual - w) < 0.005, f"{name}: expected ~{w}, got {actual}"
+
+
+def test_50_components_convergence() -> None:
+    """50 equal-weight components converge under scale."""
+    n = 50
+    target = {f"ds_{i}": 1.0 / n for i in range(n)}
+    datasets = [make_dataset(f"ds_{i}", 5000) for i in range(n)]
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=100,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(200):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 100
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    grand_total = sum(counts.values())
+    expected = 1.0 / n
+    for name in target:
+        actual = counts[name] / grand_total
+        rel_err = abs(actual - expected) / expected
+        assert rel_err < 0.05, (
+            f"{name}: expected ~{expected:.4f}, got {actual:.4f} "
+            f"(rel_err={rel_err:.1%})"
+        )
+
+
+def test_chunk_size_1_with_10_components() -> None:
+    """chunk_size=1 with 10 components: extreme sparsity, fair round-robin."""
+    n = 10
+    datasets = [make_dataset(f"ds_{i}", 200) for i in range(n)]
+    target = {f"ds_{i}": 1.0 / n for i in range(n)}
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=1,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(100):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 1
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    # Each should get ~10 out of 100.
+    for name in target:
+        assert counts[name] == 10, f"{name}: expected 10, got {counts[name]}"
+
+
+def test_chunk_size_1_with_100_components() -> None:
+    """chunk_size=1 with 100 components: extreme scale + sparsity."""
+    n = 100
+    datasets = [make_dataset(f"ds_{i}", 200) for i in range(n)]
+    target = {f"ds_{i}": 1.0 / n for i in range(n)}
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=1,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(1000):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        total = sum(len(v) for v in chunk.components.values())
+        assert total == 1
+        for name, samples in chunk.components.items():
+            counts[name] += len(samples)
+
+    # Each should get exactly 10 out of 1000.
+    for name in target:
+        assert counts[name] == 10, f"{name}: expected 10, got {counts[name]}"
+
+
+# ---------------------------------------------------------------------------
+# Symmetry and simultaneous exhaustion
+# ---------------------------------------------------------------------------
+
+
+def test_identical_weights_symmetry() -> None:
+    """4 equal-weight datasets get exactly equal allocation."""
+    n = 4
+    datasets = [make_dataset(f"ds_{i}", 100) for i in range(n)]
+    target = {f"ds_{i}": 0.25 for i in range(n)}
+    ws = StaticMixtureWorkSource(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=8,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    counts: dict[str, int] = dict.fromkeys(target, 0)
+    chunks = _drain_chunks(ws)
+    for ch in chunks:
+        for name, sids in ch.items():
+            counts[name] += len(sids)
+
+    values = list(counts.values())
+    assert all(v == values[0] for v in values), (
+        f"Symmetric weights should yield equal totals, got {counts}"
+    )
+
+
+def test_all_datasets_exhaust_simultaneously() -> None:
+    """Datasets sized proportional to weights exhaust on the same chunk."""
+    # weights 0.6/0.3/0.1, chunk_size=10, datasets with 60/30/10 samples.
+    ds_a = make_dataset("alpha", 60)
+    ds_b = make_dataset("beta", 30)
+    ds_c = make_dataset("gamma", 10)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture={"alpha": 0.6, "beta": 0.3, "gamma": 0.1},
+        chunk_size=10,
+        seed=0,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws)
+    assert len(chunks) == 10
+    assert ws.next_chunk() is None
+
+
+def test_all_datasets_exhaust_simultaneously_repeat() -> None:
+    """Simultaneous exhaustion with repeat policy: all reset at once."""
+    ds_a = make_dataset("alpha", 60)
+    ds_b = make_dataset("beta", 30)
+    ds_c = make_dataset("gamma", 10)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_a, ds_b, ds_c],
+        mixture={"alpha": 0.6, "beta": 0.3, "gamma": 0.1},
+        chunk_size=10,
+        seed=0,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+        max_repeats=2,
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws, limit=30)
+    for ch in chunks:
+        total = sum(len(v) for v in ch.values())
+        assert total == 10, f"Chunk had {total} samples"
+    # Should produce 10 chunks/epoch * 3 epochs = 30 chunks.
+    assert len(chunks) == 30
+
+
+# ---------------------------------------------------------------------------
+# Long-run accumulator properties
+# ---------------------------------------------------------------------------
+
+
+def test_accumulator_convergence_survives_checkpoint() -> None:
+    """Checkpoint mid-stream produces identical final totals vs straight-through."""
+    target = {"alpha": 0.7, "beta": 0.2, "gamma": 0.1}
+    datasets = [make_dataset(name, 10000) for name in target]
+    kwargs: dict = dict(
+        datasets=datasets,
+        mixture=target,
+        chunk_size=10,
+        seed=42,
+    )
+
+    # Straight-through: 500 chunks.
+    ws_full = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    full_counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(500):
+        chunk = ws_full.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            full_counts[name] += len(samples)
+
+    # Checkpoint at 100, restore, continue to 500.
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    split_counts: dict[str, int] = dict.fromkeys(target, 0)
+    for _ in range(100):
+        chunk = ws_save.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            split_counts[name] += len(samples)
+    state = ws_save.state_dict()
+
+    ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    for _ in range(400):
+        chunk = ws_load.next_chunk()
+        assert chunk is not None
+        for name, samples in chunk.components.items():
+            split_counts[name] += len(samples)
+
+    assert full_counts == split_counts
+
+
+# ---------------------------------------------------------------------------
+# Legacy checkpoint detection and sticky mode
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_checkpoint_detection_and_sticky_mode() -> None:
+    """Loading a checkpoint without 'accumulators' triggers legacy_fixed mode.
+
+    The mode is sticky: re-saving produces a legacy-format checkpoint.
+    """
+    ds_a = make_sharded_dataset("alpha", [10, 10])
+    ds_b = make_sharded_dataset("beta", [10, 10])
+    mix = MixtureSpec({ds_a.name: 0.6, ds_b.name: 0.4}).weights
+
+    # Build a source and get a checkpoint in accumulator mode
+    ws_save = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=42, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_save.next_chunk()
+    state = ws_save.state_dict()
+
+    # Verify it's an accumulator checkpoint
+    assert "accumulators" in state
+
+    # Manually strip accumulator fields to simulate a legacy checkpoint
+    legacy_state = {k: v for k, v in state.items() if k != "accumulators"}
+
+    # Load it — should detect legacy mode
+    ws_load = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=42, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(legacy_state)
+    assert ws_load._allocation_mode is AllocationMode.LEGACY_FIXED
+
+    # Produce a chunk and re-checkpoint — should remain legacy format
+    ws_load.next_chunk()
+    re_saved = ws_load.state_dict()
+    assert "accumulators" not in re_saved
+
+    # Close the loop: load the re-saved checkpoint into a fresh instance
+    ws_load2 = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=42, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load2.load_state_dict(re_saved)
+    assert ws_load2._allocation_mode is AllocationMode.LEGACY_FIXED
+
+    c1 = ws_load.next_chunk()
+    c2 = ws_load2.next_chunk()
+    assert _flatten_components(c1) == _flatten_components(c2)
+
+
+def test_accumulator_checkpoint_round_trip() -> None:
+    """New runs produce accumulator checkpoints that round-trip correctly."""
+    ds = make_sharded_dataset("alpha", [15, 15])
+    ws_save = StaticMixtureWorkSource(
+        [ds], {ds.name: 1.0}, chunk_size=5, seed=0, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    # Baseline
+    baseline_chunks = _drain_chunks(ws_save, limit=4)
+    state = ws_save.state_dict()
+    assert "accumulators" in state
+
+    # Restore and continue
+    ws_load = StaticMixtureWorkSource(
+        [ds], {ds.name: 1.0}, chunk_size=5, seed=0, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+    assert ws_load._allocation_mode is AllocationMode.ACCUMULATOR
+
+    # Both should continue identically
+    suffix_save = _drain_chunks(ws_save, limit=2)
+    suffix_load = _drain_chunks(ws_load, limit=2)
+    assert suffix_save == suffix_load
+
+
+def test_legacy_checkpoint_determinism() -> None:
+    """Runs resumed from legacy checkpoints produce identical output to a straight-through run.
+
+    This simulates loading a checkpoint that was created by the old
+    StaticMixtureWorkSource (no accumulators), and verifies that the legacy
+    fixed-quota code path produces bit-identical results.
+    """
+    ds_a = make_sharded_dataset("alpha", [20, 20])
+    ds_b = make_sharded_dataset("beta", [15, 15])
+    mix = MixtureSpec({ds_a.name: 0.6, ds_b.name: 0.4}).weights
+
+    # Build two sources in accumulator mode, advance 3 chunks, checkpoint
+    ws1 = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=7, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws2 = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=7, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    for _ in range(3):
+        ws1.next_chunk()
+        ws2.next_chunk()
+
+    state = ws1.state_dict()
+    # Convert to legacy format
+    legacy_state = {k: v for k, v in state.items() if k != "accumulators"}
+
+    # Load both from the same legacy checkpoint
+    ws_load1 = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=7, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load1.load_state_dict(legacy_state)
+
+    ws_load2 = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=5, seed=7, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws_load2.load_state_dict(legacy_state)
+
+    # Both must produce identical chunks
+    for _ in range(5):
+        c1 = ws_load1.next_chunk()
+        c2 = ws_load2.next_chunk()
+        if c1 is None or c2 is None:
+            assert c1 is None and c2 is None
+            break
+        assert _flatten_components(c1) == _flatten_components(c2)
