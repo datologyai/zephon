@@ -8,7 +8,12 @@ from zephon.work import (
     MixtureSpec,
     StaticMixtureWorkSource,
 )
-from zephon.work.static_mixture import AllocationMode, _DatasetCursor, _DatasetKnobs
+from zephon.work.static_mixture import (
+    AccumulatorStrategy,
+    LegacyFixedStrategy,
+    _DatasetCursor,
+    _DatasetKnobs,
+)
 
 
 def make_dataset(name: str, sample_count: int) -> Dataset:
@@ -1764,6 +1769,55 @@ def test_max_repeats_one() -> None:
     assert ws.next_chunk() is None
 
 
+def test_repeat_guard_rejects_too_few_samples() -> None:
+    """Repeat policy must reject datasets that can't fill their per-chunk quota.
+
+    With weight=0.5 and chunk_size=10, the max single-chunk quota is
+    ceil(0.5 * 10) = 5.  A dataset with only 3 samples would cause an
+    infinite retry loop in _next_chunk_accumulator, so the constructor
+    must reject it.
+    """
+    ds_small = make_dataset("small", 3)
+    ds_big = make_dataset("big", 100)
+    with pytest.raises(ValueError, match="requires at least 5"):
+        StaticMixtureWorkSource(
+            datasets=[ds_small, ds_big],
+            mixture={"small": 0.5, "big": 0.5},
+            chunk_size=10,
+            exhausted_policy="repeat",
+        )
+
+
+def test_repeat_guard_rejects_2_samples_chunk5() -> None:
+    """Regression: 2-sample dataset with chunk_size=5 would previously hang."""
+    ds_small = make_dataset("small", 2)
+    ds_big = make_dataset("big", 100)
+    with pytest.raises(ValueError, match="requires at least 3"):
+        StaticMixtureWorkSource(
+            datasets=[ds_small, ds_big],
+            mixture={"small": 0.5, "big": 0.5},
+            chunk_size=5,
+            exhausted_policy="repeat",
+        )
+
+
+def test_repeat_guard_allows_exact_quota() -> None:
+    """When total_samples == ceil(weight * chunk_size), construction succeeds."""
+    # ceil(0.5 * 10) = 5, dataset has exactly 5 samples — should be fine
+    ds_exact = make_dataset("exact", 5)
+    ds_big = make_dataset("big", 100)
+    ws = StaticMixtureWorkSource(
+        datasets=[ds_exact, ds_big],
+        mixture={"exact": 0.5, "big": 0.5},
+        chunk_size=10,
+        exhausted_policy="repeat",
+        max_repeats=2,
+    ).clone_for_lane(0, canonical_replicas=1)
+    # Should produce chunks without hanging
+    chunk = ws.next_chunk()
+    assert chunk is not None
+
+
 def test_single_sample_dataset_repeat() -> None:
     """Repeat with 1 sample, chunk_size=1, max_repeats=3 gives 4 chunks."""
     ds = make_dataset("only", 1)
@@ -1894,7 +1948,7 @@ def test_long_run_1000_chunks_stability() -> None:
             counts[name] += len(samples)
 
         # Accumulators must stay bounded.
-        for val in ws._accumulators.values():
+        for val in ws._strategy._accumulators.values():
             assert -1.0 < val < 1.0, f"Accumulator out of bounds: {val}"
 
     grand_total = sum(counts.values())
@@ -2129,26 +2183,29 @@ def test_legacy_checkpoint_detection_and_sticky_mode() -> None:
     assert "accumulators" in state
 
     # Manually strip accumulator fields to simulate a legacy checkpoint
-    legacy_state = {k: v for k, v in state.items() if k != "accumulators"}
+    legacy_state = {
+        k: v for k, v in state.items() if k not in ("accumulators", "allocation_mode")
+    }
 
     # Load it — should detect legacy mode
     ws_load = StaticMixtureWorkSource(
         [ds_a, ds_b], mix, chunk_size=5, seed=42, shuffle_shards=False
     ).clone_for_lane(0, canonical_replicas=1)
     ws_load.load_state_dict(legacy_state)
-    assert ws_load._allocation_mode is AllocationMode.LEGACY_FIXED
+    assert isinstance(ws_load._strategy, LegacyFixedStrategy)
 
     # Produce a chunk and re-checkpoint — should remain legacy format
     ws_load.next_chunk()
     re_saved = ws_load.state_dict()
     assert "accumulators" not in re_saved
+    assert re_saved.get("allocation_mode") == "legacy_fixed"
 
     # Close the loop: load the re-saved checkpoint into a fresh instance
     ws_load2 = StaticMixtureWorkSource(
         [ds_a, ds_b], mix, chunk_size=5, seed=42, shuffle_shards=False
     ).clone_for_lane(0, canonical_replicas=1)
     ws_load2.load_state_dict(re_saved)
-    assert ws_load2._allocation_mode is AllocationMode.LEGACY_FIXED
+    assert isinstance(ws_load2._strategy, LegacyFixedStrategy)
 
     c1 = ws_load.next_chunk()
     c2 = ws_load2.next_chunk()
@@ -2166,13 +2223,14 @@ def test_accumulator_checkpoint_round_trip() -> None:
     baseline_chunks = _drain_chunks(ws_save, limit=4)
     state = ws_save.state_dict()
     assert "accumulators" in state
+    assert state.get("allocation_mode") == "accumulator"
 
     # Restore and continue
     ws_load = StaticMixtureWorkSource(
         [ds], {ds.name: 1.0}, chunk_size=5, seed=0, shuffle_shards=False
     ).clone_for_lane(0, canonical_replicas=1)
     ws_load.load_state_dict(state)
-    assert ws_load._allocation_mode is AllocationMode.ACCUMULATOR
+    assert isinstance(ws_load._strategy, AccumulatorStrategy)
 
     # Both should continue identically
     suffix_save = _drain_chunks(ws_save, limit=2)
@@ -2205,7 +2263,9 @@ def test_legacy_checkpoint_determinism() -> None:
 
     state = ws1.state_dict()
     # Convert to legacy format
-    legacy_state = {k: v for k, v in state.items() if k != "accumulators"}
+    legacy_state = {
+        k: v for k, v in state.items() if k not in ("accumulators", "allocation_mode")
+    }
 
     # Load both from the same legacy checkpoint
     ws_load1 = StaticMixtureWorkSource(
