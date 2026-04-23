@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-import zephon.runners.queue as _queue_mod
+import zephon.utils.shm as _shm_mod
 from zephon.api import Pipeline
 from zephon.core.constants import SamplePayload, SampleRecord
 from zephon.io import Dataset
@@ -77,19 +77,19 @@ def _fast_retry():
 
     Uses ``fork`` mp_context so workers inherit these patches.
     """
-    orig_base = _queue_mod._SHM_RETRY_BASE_BACKOFF
-    orig_max = _queue_mod._SHM_RETRY_MAX_BACKOFF
-    orig_jitter = _queue_mod._SHM_RETRY_MAX_JITTER
+    orig_base = _shm_mod._SHM_RETRY_BASE_BACKOFF
+    orig_max = _shm_mod._SHM_RETRY_MAX_BACKOFF
+    orig_jitter = _shm_mod._SHM_RETRY_MAX_JITTER
 
-    _queue_mod._SHM_RETRY_BASE_BACKOFF = 0.001
-    _queue_mod._SHM_RETRY_MAX_BACKOFF = 0.01
-    _queue_mod._SHM_RETRY_MAX_JITTER = 0
+    _shm_mod._SHM_RETRY_BASE_BACKOFF = 0.001
+    _shm_mod._SHM_RETRY_MAX_BACKOFF = 0.01
+    _shm_mod._SHM_RETRY_MAX_JITTER = 0
 
     yield
 
-    _queue_mod._SHM_RETRY_BASE_BACKOFF = orig_base
-    _queue_mod._SHM_RETRY_MAX_BACKOFF = orig_max
-    _queue_mod._SHM_RETRY_MAX_JITTER = orig_jitter
+    _shm_mod._SHM_RETRY_BASE_BACKOFF = orig_base
+    _shm_mod._SHM_RETRY_MAX_BACKOFF = orig_max
+    _shm_mod._SHM_RETRY_MAX_JITTER = orig_jitter
 
 
 def _create_dataset(tmp_path: Path, n_records: int = 40) -> Dataset:

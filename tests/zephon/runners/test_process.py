@@ -1029,25 +1029,25 @@ import errno
 from multiprocessing.reduction import ForkingPickler
 from unittest.mock import patch
 
-import zephon.runners.queue as _queue_mod
+import zephon.utils.shm as _shm_mod
 
 
 @pytest.fixture()
 def _fast_shm_retry():
     """Speed up SHM retry constants so tests don't sleep for seconds."""
     orig = (
-        _queue_mod._SHM_RETRY_BASE_BACKOFF,
-        _queue_mod._SHM_RETRY_MAX_BACKOFF,
-        _queue_mod._SHM_RETRY_MAX_JITTER,
+        _shm_mod._SHM_RETRY_BASE_BACKOFF,
+        _shm_mod._SHM_RETRY_MAX_BACKOFF,
+        _shm_mod._SHM_RETRY_MAX_JITTER,
     )
-    _queue_mod._SHM_RETRY_BASE_BACKOFF = 0.001
-    _queue_mod._SHM_RETRY_MAX_BACKOFF = 0.01
-    _queue_mod._SHM_RETRY_MAX_JITTER = 0
+    _shm_mod._SHM_RETRY_BASE_BACKOFF = 0.001
+    _shm_mod._SHM_RETRY_MAX_BACKOFF = 0.01
+    _shm_mod._SHM_RETRY_MAX_JITTER = 0
     yield
     (
-        _queue_mod._SHM_RETRY_BASE_BACKOFF,
-        _queue_mod._SHM_RETRY_MAX_BACKOFF,
-        _queue_mod._SHM_RETRY_MAX_JITTER,
+        _shm_mod._SHM_RETRY_BASE_BACKOFF,
+        _shm_mod._SHM_RETRY_MAX_BACKOFF,
+        _shm_mod._SHM_RETRY_MAX_JITTER,
     ) = orig
 
 
@@ -1127,7 +1127,7 @@ class TestShmBackpressureRetry:
             q.put("_start")
             assert q.get(timeout=5) == "_start"
 
-            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+            with patch("zephon.utils.shm.shm_has_free_space", return_value=True):
                 try:
                     raise RuntimeError(
                         "unable to write to file </torch_xxx>: "
@@ -1153,7 +1153,7 @@ class TestShmBackpressureRetry:
             # Return False 3 times, then True
             side_effects = [False, False, False, True]
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=side_effects,
             ):
                 try:
@@ -1180,7 +1180,7 @@ class TestShmBackpressureRetry:
             # First check finds no space (triggers backoff + warning),
             # second check finds space (re-queues).
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=[False, True],
             ):
                 try:
@@ -1208,7 +1208,7 @@ class TestShmBackpressureRetry:
 
             # Fail 2 times, then succeed
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=[False, False, True],
             ):
                 try:
@@ -1328,7 +1328,7 @@ class TestShmBackpressureE2E:
                 _ShmPressureItem(9),  # ok
             ]
 
-            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+            with patch("zephon.utils.shm.shm_has_free_space", return_value=True):
                 for item in items:
                     q.put(item)
 
@@ -1351,7 +1351,7 @@ class TestShmBackpressureE2E:
                 _ShmPressureItem(2),
             ]
 
-            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+            with patch("zephon.utils.shm.shm_has_free_space", return_value=True):
                 for item in items:
                     q.put(item)
 
@@ -1370,7 +1370,7 @@ class TestShmBackpressureE2E:
         """Momentary pressure that clears immediately produces no warning."""
         q = self._make_queue(maxsize=10)
         try:
-            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+            with patch("zephon.utils.shm.shm_has_free_space", return_value=True):
                 q.put(_ShmPressureItem(42, fail_count=1))
                 result = q.get(timeout=10)
                 assert result.value == 42
@@ -1387,7 +1387,7 @@ class TestShmBackpressureE2E:
             # First check finds no space (triggers backoff + warning),
             # second check finds space (re-queues).
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=[False, True],
             ):
                 q.put(_ShmPressureItem(42, fail_count=1))
@@ -1408,7 +1408,7 @@ class TestShmBackpressureE2E:
         try:
             # False twice → True: _on_queue_feeder_error loops 3 times (attempt=3)
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=[False, False, True],
             ):
                 q.put(_ShmPressureItem(42, fail_count=1))
@@ -1426,7 +1426,7 @@ class TestShmBackpressureE2E:
         q = self._make_queue(maxsize=10)
         try:
             with patch(
-                "zephon.runners.queue.shm_has_free_space",
+                "zephon.utils.shm.shm_has_free_space",
                 side_effect=[False, False, False, True],
             ):
                 q.put(_ShmPressureItem(7, fail_count=1))
@@ -1439,7 +1439,7 @@ class TestShmBackpressureE2E:
         """SHM errors must retry — never produce FeederError sentinels."""
         q = self._make_queue(maxsize=10)
         try:
-            with patch("zephon.runners.queue.shm_has_free_space", return_value=True):
+            with patch("zephon.utils.shm.shm_has_free_space", return_value=True):
                 q.put(_ShmPressureItem(1, fail_count=2))
                 q.put(_ShmPressureItem(2))
 

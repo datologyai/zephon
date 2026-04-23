@@ -11,22 +11,14 @@ them as :class:`QueueFeederError` exceptions so the pipeline can fail loudly.
 
 from __future__ import annotations
 
-import random as _random
 import sys
-import time
 from dataclasses import dataclass
 from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
 from typing import Any
 
 from zephon.utils.semaphore import SafeSemLock
-from zephon.utils.shm import is_shm_error, shm_has_free_space, shm_usage_str
-
-# Backpressure retry tuning for ``_on_queue_feeder_error``.
-_SHM_RETRY_BASE_BACKOFF = 0.5  # initial sleep seconds
-_SHM_RETRY_MAX_BACKOFF = 30.0  # cap on exponential backoff component
-_SHM_RETRY_MAX_JITTER = 5.0  # uniform random jitter added to each sleep
-_SHM_RETRY_LOG_EVERY = 10  # log warning every N attempts (always log first)
+from zephon.utils.shm import is_shm_error, shm_usage_str, wait_for_shm_space
 
 # Timeouts for the escalating sentinel-enqueue in _enqueue_sentinel.
 _FEEDER_SHORT_TIMEOUT = 5.0
@@ -165,36 +157,11 @@ class NamedQueue(mp_queues.Queue):
             self._enqueue_sentinel(tb_str)
             return
 
-        # --- SHM error: retry indefinitely with backpressure ---------------
-        attempt = 0
+        # --- SHM error: wait for space, then re-queue for serialization ----
+        label = f"Queue '{self._name_label}'"
+        total_waits = 0
         while True:
-            # Back off before retrying (skip on first iteration to fast-path
-            # momentary pressure that has already cleared).
-            if attempt > 0:
-                backoff = min(
-                    _SHM_RETRY_BASE_BACKOFF * (2 ** (attempt - 1)),
-                    _SHM_RETRY_MAX_BACKOFF,
-                )
-                jitter = _random.uniform(0, _SHM_RETRY_MAX_JITTER)
-                sleep_time = backoff + jitter
-
-                if attempt == 1 or attempt % _SHM_RETRY_LOG_EVERY == 0:
-                    print(
-                        f"WARNING: Queue '{self._name_label}' SHM pressure — "
-                        f"serialization failed (attempt {attempt}), "
-                        f"retrying in {sleep_time:.1f}s. "
-                        f"{shm_usage_str()} "
-                        f"Original error: {e!r}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-
-                time.sleep(sleep_time)
-
-            attempt += 1
-
-            if not shm_has_free_space():
-                continue
+            total_waits += wait_for_shm_space(label)
 
             # SHM looks available — re-queue the original item for _feed to
             # re-attempt serialization.  The semaphore slot was released by
@@ -204,25 +171,23 @@ class NamedQueue(mp_queues.Queue):
                     with self._notempty:
                         self._buffer.appendleft(obj)
                         self._notempty.notify()
-                    if attempt > 1:
+                    if total_waits > 0:
                         print(
-                            f"INFO: Queue '{self._name_label}' SHM retry "
-                            f"succeeded after {attempt - 1} attempts — "
-                            f"item re-queued for serialization. "
-                            f"{shm_usage_str()}",
+                            f"INFO: {label} SHM retry succeeded after "
+                            f"{total_waits} waits — item re-queued for "
+                            f"serialization. {shm_usage_str()}",
                             file=sys.stderr,
                             flush=True,
                         )
                     return
             except Exception as retry_exc:
                 print(
-                    f"WARNING: Queue '{self._name_label}' SHM retry "
-                    f"re-queue failed: {retry_exc!r} "
-                    f"{shm_usage_str()}",
+                    f"WARNING: {label} SHM retry re-queue failed: "
+                    f"{retry_exc!r} {shm_usage_str()}",
                     file=sys.stderr,
                     flush=True,
                 )
-            # Queue full or re-queue failed — keep waiting
+            # Queue full or re-queue failed — wait again
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
         """Retrieve an item, raising on feeder-thread errors."""

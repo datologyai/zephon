@@ -47,6 +47,7 @@ from typing import Any, cast
 import optree
 
 from zephon.core.constants import SampleBatch, SampleRecord, StreamItem
+from zephon.utils.shm import is_shm_error, wait_for_shm_space
 
 # ---------------------------------------------------------------------------
 # Lazy torch import
@@ -434,22 +435,44 @@ def _extract_from_records(
 # ---------------------------------------------------------------------------
 # Build coalesced SHM buffers
 # ---------------------------------------------------------------------------
+def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
+    """Allocate a 1-D tensor in ``/dev/shm``, retrying with backoff on ENOSPC.
+
+    Wraps ``torch.empty(...).share_memory_()`` with the shared
+    :func:`~zephon.utils.shm.wait_for_shm_space` retry so that transient
+    ``/dev/shm`` exhaustion blocks instead of crashing the worker.
+    """
+    torch = _get_torch()
+    buf = torch.empty(numel, dtype=dtype)
+    while True:
+        try:
+            buf.share_memory_()
+            return buf
+        except Exception as e:
+            if not is_shm_error(e):
+                raise
+            wait_for_shm_space(label)
+
+
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
     Allocates the target in ``/dev/shm`` first (``share_memory_()``), then
     copies each sub-tensor (or bytes chunk) directly into the shared
     region — **one memcpy per item**, no intermediate staging buffer.
+
+    If ``/dev/shm`` is exhausted, retries with exponential backoff via
+    :func:`_alloc_shm_buffer` instead of propagating the error.
     """
-    torch = _get_torch()
     buffers: dict[str, Any] = {}
+    torch = _get_torch()
     for dtype_key, items in collector.items():
         if dtype_key == _BYTES_DTYPE_KEY:
             # Pack raw bytes into a uint8 tensor.
             total = sum(len(b) for b in items)
             if total == 0:
                 continue
-            buf = torch.empty(total, dtype=torch.uint8).share_memory_()
+            buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
             # numpy view for fast memcpy from bytes into SHM
             np_buf = buf.numpy()
             offset = 0
@@ -465,7 +488,7 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
                 continue
             dtype = items[0].dtype
             # Allocate directly in SHM, then write sub-tensors in.
-            buf = torch.empty(total_numel, dtype=dtype).share_memory_()
+            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
             offset = 0
             for t in items:
                 n = t.numel()
@@ -605,7 +628,7 @@ def coalesce_microbatch(
     Payloads smaller than *shm_min_size* bytes are left inline.
 
     Uses a two-pass approach: extraction first collects skeletons without
-    mutating payloads, then commits only when tensors were actually found.
+    mutating payloads, then commits only after SHM allocation succeeds.
     """
     if _get_torch() is None:
         return None
@@ -615,13 +638,16 @@ def coalesce_microbatch(
     if not collector:
         return None
 
+    # Build SHM buffers first.  If a non-SHM error propagates, payloads
+    # are still intact.  ENOSPC is retried internally by _build_shm_buffers.
+    buffers = _build_shm_buffers(collector)
+    if not buffers:
+        return None
+
     # Commit: only now mutate record payloads to flat skeleton form.
     for rec, skel in skeletons:
         rec.payload = skel  # type: ignore[assignment]
 
-    buffers = _build_shm_buffers(collector)
-    if not buffers:
-        return None
     return CoalescedMicrobatch(skeleton=items, buffers=buffers)
 
 

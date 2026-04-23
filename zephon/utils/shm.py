@@ -12,8 +12,17 @@ from __future__ import annotations
 
 import errno
 import os
+import random as _random
+import sys
+import time
 
 _SHM_FREE_THRESHOLD = 0.05  # require 5% free before re-queuing for serialization
+
+# Backpressure retry tuning — shared by NamedQueue and SHM coalescing.
+_SHM_RETRY_BASE_BACKOFF = 0.5  # initial sleep seconds
+_SHM_RETRY_MAX_BACKOFF = 30.0  # cap on exponential backoff component
+_SHM_RETRY_MAX_JITTER = 5.0  # uniform random jitter added to each sleep
+_SHM_RETRY_LOG_EVERY = 10  # log warning every N attempts (always log first)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +100,39 @@ def shm_has_free_space(threshold: float = _SHM_FREE_THRESHOLD) -> bool:
         return (free / total) >= threshold
     except OSError:
         return True  # Non-Linux or /dev/shm unavailable — don't block
+
+
+def wait_for_shm_space(label: str, *, threshold: float = _SHM_FREE_THRESHOLD) -> int:
+    """Block with exponential-jittered backoff until ``/dev/shm`` has free space.
+
+    Intended for use after a ``share_memory_()`` or ``shm_open()`` failure.
+    The caller should catch the ``ENOSPC`` exception, call this function to
+    wait, then retry the allocation.
+
+    Returns the number of backoff sleeps performed (``0`` if space was
+    already available on the first check).
+    """
+    attempt = 0
+    while not shm_has_free_space(threshold):
+        backoff = min(
+            _SHM_RETRY_BASE_BACKOFF * (2**attempt),
+            _SHM_RETRY_MAX_BACKOFF,
+        )
+        jitter = _random.uniform(0, _SHM_RETRY_MAX_JITTER)
+        sleep_time = backoff + jitter
+
+        if attempt == 0 or (attempt + 1) % _SHM_RETRY_LOG_EVERY == 0:
+            print(
+                f"WARNING: {label} — SHM pressure (attempt {attempt + 1}), "
+                f"waiting {sleep_time:.1f}s for /dev/shm space. "
+                f"{shm_usage_str()}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        time.sleep(sleep_time)
+        attempt += 1
+    return attempt
 
 
 def shm_usage_str() -> str:
