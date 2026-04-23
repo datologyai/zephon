@@ -20,17 +20,19 @@ from zephon.core.op_base import Op, OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.runners.concurrent import (
-    ConcurrentOperatorState,
     ConcurrentRunContext,
-    ConcurrentStageRunner,
     RunnerResult,
     StopToken,
     _QueueLike,
 )
+from zephon.runners.queue_drain import (
+    QueueDrainOperatorState,
+    QueueDrainStageRunner,
+)
 
 
 @dataclass
-class _ThreadOperatorState(ConcurrentOperatorState):
+class _ThreadOperatorState(QueueDrainOperatorState):
     _instance_queue: queue.Queue[Op[RunnerStreamIn, StreamItem]] = field(
         init=False, repr=False
     )
@@ -125,7 +127,7 @@ class _ThreadOperatorState(ConcurrentOperatorState):
         self.parallelism = desired
 
 
-class ThreadStageRunner(ConcurrentStageRunner[_ThreadOperatorState]):
+class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
     """Execute a stage locally using threads and bounded in-memory queues.
 
     This runner is a concrete :class:`ConcurrentStageRunner` that uses the

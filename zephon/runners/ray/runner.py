@@ -28,13 +28,15 @@ from zephon.core.graph import Node, Stage
 from zephon.core.notify import is_sentinel
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.runners.concurrent import (
-    ConcurrentOperatorState,
     ConcurrentRunContext,
-    ConcurrentStageRunner,
     RunnerResult,
     StopToken,
     WorkerErrorInfo,
     _QueueLike,
+)
+from zephon.runners.queue_drain import (
+    QueueDrainOperatorState,
+    QueueDrainStageRunner,
 )
 from zephon.runners.ray.service import (
     _RayActorGroup,
@@ -191,7 +193,7 @@ def _collector_loop(
 
 
 @dataclass
-class _RayOperatorState(ConcurrentOperatorState):
+class _RayOperatorState(QueueDrainOperatorState):
     """Operator state for the Ray runner.
 
     Extends ConcurrentOperatorState with an actor group and the bridge
@@ -228,7 +230,7 @@ class _RayOperatorState(ConcurrentOperatorState):
 # ---------------------------------------------------------------------------
 
 
-class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
+class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
     """Stage runner that executes operators on per-operator Ray actor groups.
 
     Each operator in the stage gets its own group of Ray actors. The

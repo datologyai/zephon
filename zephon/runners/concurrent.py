@@ -136,21 +136,39 @@ class RunnerResult:
 
 @dataclass
 class ConcurrentOperatorState(BaseOperatorState):
-    """Operator state shared by concurrent (thread/process) runners."""
+    """Operator state shared by concurrent stage runners.
+
+    Tracks the per-operator machinery common to every concurrent runner:
+    the inbound queue the pump reads from, the deterministic-reordering
+    buffer, the in-flight work counter, and the monotonic seq counters.
+    """
 
     queue_capacity: int = 1
     next_seq: int = field(init=False, default=0)
     emit_seq: int = field(init=False, default=0)
     pending_results: dict[int, RunnerResult] = field(init=False, default_factory=dict)
     inflight: _InflightCounter = field(init=False)
-    pending_puts: _InflightCounter = field(init=False)
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
-    result_queue: _QueueLike[RunnerResult] = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.inflight = _InflightCounter()
-        self.pending_puts = _InflightCounter()
+
+    @property
+    def all_completions_observed(self) -> bool:
+        """True iff every worker completion is visible to the pump thread.
+
+        The pump's upstream-closed termination check uses this to decide
+        whether in-flight work has fully settled. Subclasses that have an
+        async worker→pump handoff gap (e.g. a bounded result_queue the
+        worker pushes to) override this to close that observation window.
+
+        The default is ``True`` because the base class makes no assumption
+        about an async handoff — runners where the pump itself observes
+        every completion synchronously (e.g. direct ``ray.wait()`` on the
+        pump thread) have no such window.
+        """
+        return True
 
 
 @dataclass(slots=True)
@@ -167,9 +185,16 @@ class ConcurrentRunContext:
 
 
 class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
-    """Skeleton for concurrent stage runners (threads, processes, ...).
+    """Skeleton for concurrent stage runners (threads, processes, ray, ...).
 
-    This class implements the control flow shared by all concurrent runners:
+    This class implements the control flow shared by all concurrent runners
+    without assuming how completed work travels from workers back to the pump
+    thread. Subclasses implement two source-specific hooks —
+    :meth:`_drain_results` (non-blocking) and :meth:`_await_one_result`
+    (blocking with timeout) — and the loop drives them. The
+    :class:`QueueDrainStageRunner` subclass provides bounded-queue
+    implementations used by thread and process runners; a Ray-based runner
+    plugs in ``ray.wait()``-based implementations.
 
     * The public API is a pull-driven iterator (:meth:`run`) that yields
       ``RunnerStageOut`` elements to the caller.
@@ -178,9 +203,10 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     * When an input micro-batch is ready, the runner schedules it on a worker
       backend (thread pool, process pool, remote worker, etc.) via
       :meth:`_schedule_batch`.
-    * Worker completions are sent back as :class:`RunnerResult` objects through
-      per-operator result queues.  The operator pump threads drain these
-      queues, optionally re-order results, and push micro-batches downstream.
+    * Completed work is observed by the pump thread via the subclass's
+      :meth:`_drain_results` / :meth:`_await_one_result` hooks. Results flow
+      through :meth:`_handle_result` for optional deterministic reordering
+      and then downstream via :meth:`_forward_ready_result`.
 
     Deterministic vs non-deterministic execution
     -------------------------------------------
@@ -264,8 +290,12 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
       containing a stop token, the stage output queue, and shared stop/event
       state.
     * :meth:`_schedule_batch` – submit a micro-batch to the worker backend,
-      assign a seq, measure processing time, and eventually enqueue a
-      :class:`RunnerResult` on the operator's result queue.
+      assign a seq, measure processing time, and eventually surface a
+      :class:`RunnerResult` to the pump thread.
+    * :meth:`_drain_results` – non-blockingly observe any completed results
+      and forward them via :meth:`_handle_result`.
+    * :meth:`_await_one_result` – block up to ``timeout`` seconds for at
+      least one completion and forward it.
     * :meth:`_ack_result` (optional) – perform backend-specific acknowledgements
       once a result has been forwarded downstream (e.g. freeing shared memory
       in a process-based runner).
@@ -357,24 +387,38 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         except _EMPTY_EXCEPTIONS as exc:
             raise queue.Empty from exc
 
-    # -- Core loops -----------------------------------------------------
+    # -- Source-specific hooks (implemented by subclasses) --------------
     def _drain_results(
         self,
         state: S,
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        while True:
-            try:
-                item = self._queue_get_nowait(state.result_queue)
-            except queue.Empty:
-                break
-            except FileNotFoundError as exc:
-                # Multiprocessing queues can raise when the writer (worker) dies
-                # before the payload is fully handed off (e.g., torch shared fds).
-                self._record_error(context, exc)
-                return
-            self._handle_result(state, item, next_queue, context)
+        """Drain any ready results and forward each via :meth:`_handle_result`.
+
+        Non-blocking. Subclasses implement this per their result source —
+        queue-pop for queue-drain runners, ``ray.wait()`` for ray-based
+        runners, etc.
+        """
+        raise NotImplementedError
+
+    def _await_one_result(
+        self,
+        state: S,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+        timeout: float,
+    ) -> None:
+        """Block up to ``timeout`` for at least one result and forward it.
+
+        Called from the upstream-closed drain path when we're waiting for
+        in-flight work to settle. Forwards via :meth:`_handle_result`. A
+        single-attempt wait is acceptable; the outer loop retries if
+        nothing arrives. Subclasses implement this per their result source.
+        """
+        raise NotImplementedError
+
+    # -- Core loops -----------------------------------------------------
 
     def _handle_result(
         self,
@@ -488,13 +532,14 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 if upstream_closed:
                     if (
                         state.inflight.is_zero()
-                        and state.pending_puts.is_zero()
+                        and state.all_completions_observed
                         and (not state.pending_results or context.error is not None)
                         and not state.accumulator_impl.has_pending_data()
                     ):
                         # Final drain to catch results that arrived after the loop's drain.
-                        # This handles the race where a worker completes put_result() and
-                        # decrements pending_puts between our drain and this check.
+                        # Closes the handoff-observation window: a worker may have completed
+                        # put_result() and decremented its handoff counter between our drain
+                        # and this check, in which case a fresh drain exposes the result.
                         self._drain_results(state, next_queue, context)
 
                         # In the error case, we don't wait for missing seq gaps.
@@ -506,14 +551,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
                         self._signal_downstream_stop(next_queue, context)
                         return
-                    try:
-                        item = self._queue_get(state.result_queue, timeout=0.05)
-                    except queue.Empty:
-                        continue
-                    except FileNotFoundError as exc:
-                        self._record_error(context, exc)
-                        return
-                    self._handle_result(state, item, next_queue, context)
+                    self._await_one_result(state, next_queue, context, timeout=0.05)
                     continue
 
                 if context.stop_event.is_set():

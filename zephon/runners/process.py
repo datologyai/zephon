@@ -60,14 +60,16 @@ from zephon.core.op_base import OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.runners.concurrent import (
-    ConcurrentOperatorState,
     ConcurrentRunContext,
-    ConcurrentStageRunner,
     RunnerResult,
     StopToken,
     WorkerCrashed,
     WorkerErrorInfo,
     _QueueLike,
+)
+from zephon.runners.queue_drain import (
+    QueueDrainOperatorState,
+    QueueDrainStageRunner,
 )
 from zephon.utils.shm_coalesce import (
     DEFAULT_SHM_MIN_SIZE,
@@ -410,7 +412,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
 
 
 @dataclass
-class _ProcessOperatorState(ConcurrentOperatorState):
+class _ProcessOperatorState(QueueDrainOperatorState):
     task_queue: _QueueLike[_WorkerCommand] | None = field(init=False, default=None)
     workers: list[BaseProcess] = field(init=False, default_factory=list)
     result_semaphores: list[Semaphore | SafeSemLock] = field(
@@ -458,7 +460,7 @@ def _close_writer_end(q: Any) -> None:
             pass
 
 
-class ProcessStageRunner(ConcurrentStageRunner[_ProcessOperatorState]):
+class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     """Execute a stage in dedicated worker processes with IPC queues.
 
     This runner is a concrete :class:`ConcurrentStageRunner` that offloads
