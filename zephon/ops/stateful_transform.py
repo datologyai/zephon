@@ -46,7 +46,7 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
     # TODO: StatefulTransformAccumulator delegates to a user-supplied push_fn
     # which *may* read payload. For now we default to False (no eager resolution)
     # so that metadata-only push_fns don't pay the cost. If a push_fn touches
-    # payload it will fail on LazyPayload — the caller should set
+    # payload it will fail on a LazyPayload — the caller should set
     # reads_payload=True at construction time or resolve manually.
 
     def push_many(

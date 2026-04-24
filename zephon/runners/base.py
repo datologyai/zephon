@@ -18,6 +18,7 @@ from zephon.core.constants import (
     SampleBatch,
     SampleRecord,
     StreamItem,
+    resolve_lazy_payloads,
 )
 from zephon.core.graph import Node, Stage
 from zephon.core.notify import is_sentinel
@@ -25,7 +26,6 @@ from zephon.core.op_base import Op, OpContext
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.observability.stopwatch import Stopwatch
-from zephon.utils.shm_coalesce import resolve_lazy_payloads
 
 
 @dataclass

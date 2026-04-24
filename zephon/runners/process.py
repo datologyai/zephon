@@ -53,6 +53,7 @@ from zephon.core.constants import (
     RunnerStageOut,
     RunnerStreamIn,
     StreamItem,
+    resolve_lazy_payloads,
 )
 from zephon.core.graph import Node, Stage
 from zephon.core.notify import is_sentinel
@@ -74,7 +75,6 @@ from zephon.runners.queue_drain import (
 from zephon.utils.shm_coalesce import (
     DEFAULT_SHM_MIN_SIZE,
     coalesce_microbatch,
-    resolve_lazy_payloads,
 )
 
 Q = TypeVar("Q")
@@ -1373,20 +1373,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         for result in state._local_results:
             self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
-
-    def _emit_stage_output(
-        self,
-        elements: Microbatch,
-        context: ConcurrentRunContext,
-    ) -> None:
-        """Resolve lazy payloads before they leave the process runner.
-
-        This prevents ``LazyPayload`` instances from leaking to downstream
-        thread stages or the engine iterator.
-        """
-        if elements:
-            resolve_lazy_payloads(elements)
-        super()._emit_stage_output(elements, context)
 
     def _ack_result(
         self,

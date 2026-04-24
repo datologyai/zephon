@@ -10,15 +10,20 @@ from multiprocessing.reduction import ForkingPickler
 import pytest
 
 from zephon.core.accumulators import CountingAccumulator
-from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord, lane_of
+from zephon.core.constants import (
+    SampleBatch,
+    SampleMeta,
+    SampleRecord,
+    lane_of,
+    resolve_lazy_payloads,
+)
 from zephon.ops.decode_text import DecodeText
 from zephon.utils.shm_coalesce import (
     CoalescedMicrobatch,
-    LazyPayload,
+    ShmLazyPayload,
     _ShmBytes,
     _ShmBytesLegacy,
     coalesce_microbatch,
-    resolve_lazy_payloads,
 )
 
 torch = pytest.importorskip("torch")
@@ -35,7 +40,7 @@ def _meta(i: int) -> SampleMeta:
 
 
 def _round_trip(coalesced: CoalescedMicrobatch) -> list:
-    """ForkingPickler round-trip — returns records with LazyPayload (unresolved)."""
+    """ForkingPickler round-trip — returns records with ShmLazyPayload (unresolved)."""
     blob = _forking_round_trip(coalesced)
     restored = pickle.loads(blob)
     assert isinstance(restored, list)
@@ -380,25 +385,25 @@ class TestCoalesceBytes:
 
         Simulates the real pipeline path:
           1. Worker coalesces bytes into SHM, puts CoalescedMicrobatch on queue
-          2. Pump thread unpickles (hop 1) → gets list[StreamItem] with LazyPayload
-          3. Pump thread re-pickles records to next worker (hop 2) — LazyPayload
+          2. Pump thread unpickles (hop 1) → gets list[StreamItem] with ShmLazyPayload
+          3. Pump thread re-pickles records to next worker (hop 2) — ShmLazyPayload
              forwards SHM refs without resolving
-          4. Worker 2 unpickles → gets LazyPayload → resolves → _ShmBytes backed by SHM
+          4. Worker 2 unpickles → gets ShmLazyPayload → resolves → _ShmBytes backed by SHM
         """
         data = b"Z" * 8192
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        # Hop 1: worker → pump thread (CoalescedMicrobatch → LazyPayload)
+        # Hop 1: worker → pump thread (CoalescedMicrobatch → ShmLazyPayload)
         restored = _round_trip(coalesced)
-        assert isinstance(restored[0].payload, LazyPayload)
+        assert isinstance(restored[0].payload, ShmLazyPayload)
 
-        # Hop 2: pump thread → worker 2 (LazyPayload re-pickled via FD passing)
+        # Hop 2: pump thread → worker 2 (ShmLazyPayload re-pickled via FD passing)
         blob2 = _forking_round_trip(restored)
         restored2 = pickle.loads(blob2)
         # Still lazy after hop 2
-        assert isinstance(restored2[0].payload, LazyPayload)
+        assert isinstance(restored2[0].payload, ShmLazyPayload)
 
         # Worker 2 resolves
         resolve_lazy_payloads(restored2)
@@ -666,9 +671,9 @@ class TestCoalesceNdarray:
 # ---------------------------------------------------------------------------
 # Lazy payload behavior
 # ---------------------------------------------------------------------------
-class TestLazyPayload:
+class TestShmLazyPayload:
     def test_unpickle_produces_lazy_payload(self) -> None:
-        """Unpickled records have LazyPayload on .payload, meta is accessible."""
+        """Unpickled records have ShmLazyPayload on .payload, meta is accessible."""
         records = [
             SampleRecord(
                 meta=_meta(0),
@@ -680,13 +685,13 @@ class TestLazyPayload:
 
         restored = _round_trip(coalesced)
         assert len(restored) == 1
-        assert isinstance(restored[0].payload, LazyPayload)
+        assert isinstance(restored[0].payload, ShmLazyPayload)
         # Meta is accessible without resolution
         assert restored[0].meta.chunk_offset == 0
         assert restored[0].meta.sample_id == (0, 0, 0)
 
     def test_resolve_produces_correct_data(self) -> None:
-        """LazyPayload.resolve() returns the original payload structure."""
+        """ShmLazyPayload.resolve_payload() returns the original payload structure."""
         records = [
             SampleRecord(
                 meta=_meta(0),
@@ -698,14 +703,14 @@ class TestLazyPayload:
 
         restored = _round_trip(coalesced)
         payload = restored[0].payload
-        assert isinstance(payload, LazyPayload)
-        resolved = payload.resolve()
+        assert isinstance(payload, ShmLazyPayload)
+        resolved = payload.resolve_payload()
         assert isinstance(resolved, dict)
         torch.testing.assert_close(resolved["t"], torch.tensor([1.0, 2.0]))
         assert resolved["label"] == "hello"
 
     def test_lazy_payload_survives_repickling(self) -> None:
-        """LazyPayload pickles without resolving and round-trips correctly."""
+        """ShmLazyPayload pickles without resolving and round-trips correctly."""
         records = [
             SampleRecord(
                 meta=_meta(0),
@@ -715,14 +720,14 @@ class TestLazyPayload:
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
-        # Hop 1: CoalescedMicrobatch → list with LazyPayload
+        # Hop 1: CoalescedMicrobatch → list with ShmLazyPayload
         restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
+        assert isinstance(restored1[0].payload, ShmLazyPayload)
 
         # Hop 2: re-pickle the lazy records (simulating pump → worker)
         blob2 = _forking_round_trip(restored1)
         restored2 = pickle.loads(blob2)
-        assert isinstance(restored2[0].payload, LazyPayload)
+        assert isinstance(restored2[0].payload, ShmLazyPayload)
 
         # Worker resolves
         resolve_lazy_payloads(restored2)
@@ -747,7 +752,7 @@ class TestLazyPayload:
 
         restored = _round_trip(coalesced)
         # All records have lazy payloads
-        assert all(isinstance(r.payload, LazyPayload) for r in restored)
+        assert all(isinstance(r.payload, ShmLazyPayload) for r in restored)
 
         # Accumulator routes without resolving
         ready = acc.push_many(restored)
@@ -756,7 +761,7 @@ class TestLazyPayload:
 
         # Verify payloads still lazy in batches
         for batch, _ in ready:
-            assert all(isinstance(r.payload, LazyPayload) for r in batch)
+            assert all(isinstance(r.payload, ShmLazyPayload) for r in batch)
 
         # Resolve and verify data
         all_recs = [r for batch, _ in ready for r in batch]
@@ -775,7 +780,7 @@ class TestLazyPayload:
         assert records[1].payload["x"] == 99
 
     def test_lazy_payload_sample_batch(self) -> None:
-        """LazyPayload works for SampleBatch records."""
+        """ShmLazyPayload works for SampleBatch records."""
         records = [
             SampleRecord(meta=_meta(0), payload={"t": torch.tensor([1.0])}),
             SampleRecord(meta=_meta(1), payload={"t": torch.tensor([2.0])}),
@@ -787,7 +792,7 @@ class TestLazyPayload:
         restored = _round_trip(coalesced)
         assert isinstance(restored[0], SampleBatch)
         for rec in restored[0].records:
-            assert isinstance(rec.payload, LazyPayload)
+            assert isinstance(rec.payload, ShmLazyPayload)
 
         resolve_lazy_payloads(restored)
         torch.testing.assert_close(
@@ -994,12 +999,12 @@ class TestStructDataclass:
 
         # Hop 1
         restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
+        assert isinstance(restored1[0].payload, ShmLazyPayload)
 
         # Hop 2
         blob2 = _forking_round_trip(restored1)
         restored2 = pickle.loads(blob2)
-        assert isinstance(restored2[0].payload, LazyPayload)
+        assert isinstance(restored2[0].payload, ShmLazyPayload)
 
         # Resolve
         resolve_lazy_payloads(restored2)
@@ -1113,7 +1118,7 @@ class TestStructPydantic:
         assert coalesced is not None
 
         restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
+        assert isinstance(restored1[0].payload, ShmLazyPayload)
 
         blob2 = _forking_round_trip(restored1)
         restored2 = pickle.loads(blob2)

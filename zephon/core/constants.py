@@ -3,6 +3,7 @@
 
 """Canonical data model shared across the core data-loading pipeline."""
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypeAlias, cast
 
@@ -491,6 +492,25 @@ SamplePayload: TypeAlias = (
 )
 SamplePayloadDict: TypeAlias = dict[Any, SamplePayload]
 
+
+class LazyPayload(ABC):
+    """A deferred payload; call ``.resolve_payload()`` to materialize.
+
+    Runtime-only wrapper injected by runners that defer materialization
+    across an IPC / plasma-store boundary (SHM for ProcessRunner, ObjectRef
+    for the Ray runner).  Consumers never see this type statically:
+    :attr:`SampleRecord.payload` is typed as :data:`SamplePayload`, and
+    resolution boundaries (accumulator gate, stage exit, worker ingress)
+    materialize any ``LazyPayload`` instances in place before downstream
+    code runs.
+    """
+
+    __slots__ = ()
+
+    @abstractmethod
+    def resolve_payload(self) -> "SamplePayload": ...
+
+
 # Pipeline items and micro-batches travel between operators/stages.
 StreamItem: TypeAlias = SampleRecord | SampleBatch
 Microbatch = list[StreamItem]
@@ -514,3 +534,20 @@ def lane_of(elem: RunnerStreamIn) -> LaneId:
     if isinstance(elem, SampleBatch):
         return elem.lane_ids[0]
     return elem.meta.lane_id  # SampleRecord
+
+
+def resolve_lazy_payloads(items: list[Any]) -> None:
+    """Resolve any :class:`LazyPayload` instances in *items* in-place.
+
+    Call this in the worker process before ``process_many()``, or at stage
+    exit boundaries to prevent lazy payloads from leaking downstream.
+
+    No-op for records whose payloads are already materialized.
+    """
+    for item in items:
+        if isinstance(item, SampleRecord) and isinstance(item.payload, LazyPayload):
+            item.payload = item.payload.resolve_payload()  # type: ignore[assignment]
+        elif isinstance(item, SampleBatch):
+            for rec in item.records:
+                if isinstance(rec.payload, LazyPayload):
+                    rec.payload = rec.payload.resolve_payload()  # type: ignore[assignment]

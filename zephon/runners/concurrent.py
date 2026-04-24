@@ -16,6 +16,7 @@ from zephon.core.constants import (
     RunnerStreamIn,
     SampleBatch,
     SampleRecord,
+    resolve_lazy_payloads,
 )
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.observability.stats import BackpressureDelta, NodeMetricsDelta
@@ -500,8 +501,14 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         elements: Microbatch,
         context: ConcurrentRunContext,
     ) -> None:
+        """Emit elements to the stage output queue.
+
+        Resolves any ``LazyPayload`` instances before emission — downstream
+        thread stages and the engine iterator expect materialized payloads.
+        """
         if not elements:
             return
+        resolve_lazy_payloads(elements)
         if self._emit_microbatches:
             self._put_into_queue(context.stage_out_queue, elements, context)
             return

@@ -25,7 +25,7 @@ Strategy (single memcpy):
    sub-tensor directly into the shared buffer.  This means each byte of
    real data is copied exactly once — straight into SHM.
 3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
-   ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
+   ``__reduce__`` produces ``list[StreamItem]`` with ``ShmLazyPayload``
    wrappers.  Payloads are restored only when explicitly resolved
    (typically in the worker process before ``process_many``).
 
@@ -46,7 +46,13 @@ from typing import Any, cast
 
 import optree
 
-from zephon.core.constants import SampleBatch, SampleRecord, StreamItem
+from zephon.core.constants import (
+    LazyPayload,
+    SampleBatch,
+    SamplePayload,
+    SampleRecord,
+    StreamItem,
+)
 from zephon.utils.shm import is_shm_error, wait_for_shm_space
 
 # ---------------------------------------------------------------------------
@@ -503,8 +509,8 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
 # Lazy payload (deferred restoration)
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
-class LazyPayload:
-    """Deferred payload — holds flat slots + pytree spec + SHM buffer refs.
+class ShmLazyPayload(LazyPayload):
+    """SHM-backed deferred payload — flat slots + pytree spec + SHM buffer refs.
 
     Created on unpickle (main process).  Resolved explicitly via
     :func:`resolve_lazy_payloads` in the worker process before
@@ -516,21 +522,21 @@ class LazyPayload:
     _spec: optree.PyTreeSpec
     _buffers: dict[str, Any]  # shared ref keeps SHM alive via refcounting
 
-    def resolve(self) -> Any:
+    def resolve_payload(self) -> SamplePayload:
         """Materialize the full payload by replacing slots with SHM views."""
         restored = _resolve_slots(self._slots, self._buffers)
-        return optree.tree_unflatten(self._spec, restored)
+        return cast(SamplePayload, optree.tree_unflatten(self._spec, restored))
 
     def __reduce__(self) -> tuple:
         """Pickle without resolving — forward (slots, spec, buffers) as-is."""
-        return (_make_lazy_payload, (self._slots, self._spec, self._buffers))
+        return (_make_shm_lazy_payload, (self._slots, self._spec, self._buffers))
 
 
-def _make_lazy_payload(
+def _make_shm_lazy_payload(
     slots: list[Any], spec: optree.PyTreeSpec, buffers: dict[str, Any]
-) -> LazyPayload:
-    """Unpickle constructor for :class:`LazyPayload`."""
-    return LazyPayload(slots, spec, buffers)
+) -> ShmLazyPayload:
+    """Unpickle constructor for :class:`ShmLazyPayload`."""
+    return ShmLazyPayload(slots, spec, buffers)
 
 
 def _reconstruct_struct(slot: _StructSlot, fields_dict: dict[str, Any]) -> Any:
@@ -604,7 +610,7 @@ class CoalescedMicrobatch:
     """Microbatch with tensors/bytes coalesced into SHM buffers.
 
     On unpickle (``__reduce__``), produces ``list[StreamItem]`` where each
-    record's payload is a :class:`LazyPayload`.  Call
+    record's payload is a :class:`ShmLazyPayload`.  Call
     :func:`resolve_lazy_payloads` to materialize before use.
     """
 
@@ -658,7 +664,7 @@ def _reconstruct_microbatch_lazy(
     skeleton: list[StreamItem],
     buffers: dict[str, Any],
 ) -> list[StreamItem]:
-    """Unpickle helper — wrap payloads in LazyPayload instead of restoring."""
+    """Unpickle helper — wrap payloads in ShmLazyPayload instead of restoring."""
     result: list[StreamItem] = []
     for item in skeleton:
         if isinstance(item, SampleRecord):
@@ -666,14 +672,16 @@ def _reconstruct_microbatch_lazy(
             result.append(
                 SampleRecord(
                     meta=item.meta,
-                    payload=LazyPayload(skel.slots, skel.spec, buffers),  # type: ignore[union-attr,assignment]
+                    payload=ShmLazyPayload(skel.slots, skel.spec, buffers),  # type: ignore[union-attr,assignment]
                 )
             )
         elif isinstance(item, SampleBatch):
             records = tuple(
                 SampleRecord(
                     meta=rec.meta,
-                    payload=LazyPayload(rec.payload.slots, rec.payload.spec, buffers),  # type: ignore[union-attr,assignment]
+                    payload=ShmLazyPayload(
+                        rec.payload.slots, rec.payload.spec, buffers
+                    ),  # type: ignore[union-attr,assignment]
                 )
                 for rec in item.records
             )
@@ -681,20 +689,3 @@ def _reconstruct_microbatch_lazy(
         else:
             result.append(item)
     return result
-
-
-def resolve_lazy_payloads(items: list[Any]) -> None:
-    """Resolve all :class:`LazyPayload` instances in *items* in-place.
-
-    Call this in the worker process before ``process_many()``, or at stage
-    exit boundaries to prevent lazy payloads from leaking downstream.
-
-    No-op for records whose payloads are already materialized.
-    """
-    for item in items:
-        if isinstance(item, SampleRecord) and isinstance(item.payload, LazyPayload):
-            item.payload = item.payload.resolve()
-        elif isinstance(item, SampleBatch):
-            for rec in item.records:
-                if isinstance(rec.payload, LazyPayload):
-                    rec.payload = rec.payload.resolve()
