@@ -1,6 +1,20 @@
 #!/bin/bash
-# NOTE: We don't `set -e` because we want to collect and report all errors in one run.
+# NOTE: We don't `set -e` because we want to collect and report all errors in
+# one run. Instead, we track each tool's exit status in OVERALL_STATUS and
+# exit with that at the end so CI / make / callers see a real failure.
 set -uo pipefail
+
+OVERALL_STATUS=0
+
+# Run a command, preserve its behaviour, but OR its exit code into
+# OVERALL_STATUS so we keep going while still failing at the end.
+run_step() {
+    "$@"
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        OVERALL_STATUS=$rc
+    fi
+}
 
 # Start in the root directory  
 LINTING_DIR=$(realpath $(dirname $0))
@@ -116,25 +130,30 @@ if [ "$CHANGED_ONLY" = true ]; then
 
     # Run `ruff` on the changed files using main project config
     echo -e "${BLUE}Formatting changed files...${NC}"
-    uv run ruff $RUFF_FORMAT_FLAGS $CHANGED_FILES
+    run_step uv run ruff $RUFF_FORMAT_FLAGS $CHANGED_FILES
     echo -e "${BLUE}Linting changed files...${NC}"
-    uv run ruff $RUFF_CHECK_FLAGS $CHANGED_FILES
+    run_step uv run ruff $RUFF_CHECK_FLAGS $CHANGED_FILES
 
     # Run `pyright` on the changed files using main project config
     echo -e "${BLUE}Checking changed files...${NC}"
-    uv run pyright $CHANGED_FILES
+    run_step uv run pyright $CHANGED_FILES
 else
     # Run on all files using main project config
     echo -e "${BLUE}Formatting all files...${NC}"
-    uv run ruff $RUFF_FORMAT_FLAGS . --exclude zephon/_version.py --exclude docs/
+    run_step uv run ruff $RUFF_FORMAT_FLAGS . --exclude zephon/_version.py --exclude docs/
     echo -e "${BLUE}Linting all files...${NC}"
-    uv run ruff $RUFF_CHECK_FLAGS . --exclude zephon/_version.py --exclude docs/
+    run_step uv run ruff $RUFF_CHECK_FLAGS . --exclude zephon/_version.py --exclude docs/
     # Run `pyright` on all files using main project config
     echo -e "${BLUE}Checking all files...${NC}"
-    uv run pyright
+    run_step uv run pyright
 fi
 
 echo -e "${BOLD_BLUE}Finished running all linting component(s).${NC}"
+
+if [ $OVERALL_STATUS -ne 0 ]; then
+    echo -e "${BOLD_RED}One or more linting steps reported errors (see above).${NC}"
+    exit $OVERALL_STATUS
+fi
 
 if [ "$CHECK_MODE" = true ]; then
     echo -e "${BOLD_GREEN}Linting checks completed successfully!${NC}"
@@ -177,4 +196,4 @@ else
         fi
     fi
 fi
-exit 0
+exit $OVERALL_STATUS
