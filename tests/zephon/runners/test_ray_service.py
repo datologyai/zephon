@@ -17,9 +17,7 @@ from tests.zephon.runners._helpers import (
 ray = pytest.importorskip("ray")
 
 
-def _make_group(
-    *, num_actors: int = 2, tokens_per_actor: int = 1, max_delay_ms: float = 0.0
-):
+def _make_group(*, num_actors: int = 2, max_delay_ms: float = 0.0):
     """Create an actor group with DelayById actors for testing."""
     from zephon.core.graph import Node
     from zephon.ops.delay import DelayById
@@ -31,7 +29,6 @@ def _make_group(
         node=node,
         op_index=0,
         num_actors=num_actors,
-        tokens_per_actor=tokens_per_actor,
         stage_index=0,
         stage_name="test",
         collect_stats=False,
@@ -169,50 +166,22 @@ class TestRaySingleOpActor:
 class TestRayActorGroup:
     """Tests for the _RayActorGroup."""
 
-    def test_init_populates_idle_queue(self, group) -> None:
-        """After init, all actor indices are in the idle queue."""
-        # 2 actors → idle_queue should have 2 entries.
-        assert group.idle_queue.qsize() == 2
-
-    def test_release_returns_actor_to_idle_queue(self, single_actor_group) -> None:
-        """release() puts the actor index back into the idle queue."""
-        # Drain the idle queue (simulating the submit thread taking the actor).
-        idx = single_actor_group.idle_queue.get_nowait()
-        assert single_actor_group.idle_queue.empty()
-
-        single_actor_group.release(idx)
-        assert single_actor_group.idle_queue.qsize() == 1
+    def test_init_creates_actors(self, group) -> None:
+        """After init, the requested number of actor handles exist."""
+        assert len(group.actors) == 2
 
     def test_direct_actor_dispatch_and_get(self, group) -> None:
         """Dispatch directly to an actor and get the result."""
         from zephon.runners.concurrent import RunnerResult
 
         records = _mk_records([10, 20, 30])
-        actor_idx = group.idle_queue.get_nowait()
-        ref = group.actors[actor_idx].process.remote(records, 0)
+        ref = group.actors[0].process.remote(records, 0)
         result = ray.get(ref)
 
         assert isinstance(result, RunnerResult)
         assert _extract_values(result.payload) == [10, 20, 30]
         assert result.seq == 0
         assert result.error is None
-
-        group.release(actor_idx)
-
-    def test_multi_token_idle_queue_seeding(self) -> None:
-        """Multiple tokens per actor are seeded correctly."""
-        g = _make_group(num_actors=2, tokens_per_actor=3)
-        try:
-            assert g.idle_queue.qsize() == 6
-
-            # Drain all tokens and verify each actor appears exactly 3 times.
-            tokens: list[int] = []
-            while not g.idle_queue.empty():
-                tokens.append(g.idle_queue.get_nowait())
-            assert tokens.count(0) == 3
-            assert tokens.count(1) == 3
-        finally:
-            g.shutdown()
 
     def test_shutdown_kills_actors(self) -> None:
         """shutdown() kills all actors and clears the list."""

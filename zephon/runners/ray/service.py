@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import queue
 import sys
 import time
 import traceback
@@ -121,42 +120,35 @@ class RaySingleOpActor:
 
 @dataclass
 class _RayActorGroup:
-    """Manages actor lifecycle and idle-actor tracking.
+    """Manages actor lifecycle for a single operator.
 
-    Direct actor management gives us per-actor backpressure via an
-    ``idle_queue``.  Each actor is seeded with ``tokens_per_actor``
-    tokens so that multiple batches can be in-flight to the same actor
-    simultaneously (double-buffering).  The submit thread consumes one
-    token per dispatch; ``_ack_result`` returns one token per completed
-    result, maintaining the invariant that at most ``tokens_per_actor``
-    batches are queued/processing on any single actor.
+    Holds the list of Ray actor handles and owns their init/shutdown.
+    Backpressure has moved into the runner (combined per-actor +
+    global-in-flight cap on the pump thread), so this class no longer
+    tracks idle actors or tokens.
     """
 
     node: Node
     op_index: int
     num_actors: int
-    tokens_per_actor: int
     stage_index: int
     stage_name: str
     collect_stats: bool
     ctx_services: dict[str, Any]
 
     actors: list[ray.actor.ActorHandle] = field(default_factory=list)
-    idle_queue: queue.Queue[int] = field(init=False)
 
     def init(
         self,
         num_cpus_per_actor: float,
         runtime_env: dict[str, Any] | None = None,
     ) -> None:
-        """Create actors and populate the idle queue.
+        """Create actors.
 
         Args:
             num_cpus_per_actor: CPU fraction each actor reserves.
             runtime_env: Optional Ray runtime environment dict.
         """
-        self.idle_queue = queue.Queue(maxsize=self.num_actors * self.tokens_per_actor)
-
         op_bytes = cloudpickle.dumps(self.node.op)
 
         options: dict[str, Any] = {
@@ -176,17 +168,6 @@ class _RayActorGroup:
                 self.collect_stats,
             )
             self.actors.append(actor)
-
-        # Seed idle queue: each actor gets tokens_per_actor tokens so
-        # that the next batch is already in the actor's mailbox when it
-        # finishes the current one (double-buffering).
-        for i in range(self.num_actors):
-            for _ in range(self.tokens_per_actor):
-                self.idle_queue.put(i)
-
-    def release(self, actor_idx: int) -> None:
-        """Return an actor to the idle queue (called by _ack_result)."""
-        self.idle_queue.put(actor_idx)
 
     def shutdown(self) -> None:
         """Kill all actors."""

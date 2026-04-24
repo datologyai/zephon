@@ -50,7 +50,6 @@ setup_faulthandler()
 from zephon.core.constants import (
     Microbatch,
     RunnerStageIn,
-    RunnerStageOut,
     RunnerStreamIn,
     StreamItem,
     resolve_lazy_payloads,
@@ -746,15 +745,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             op_index=op_index,
             collect_stats=collect_op_stats,
             queue_capacity=self._queue_capacity,
-        )
-
-    def _create_context(self) -> ConcurrentRunContext:
-        out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
-        stage_out_queue = queue.Queue[RunnerStageOut | StopToken](maxsize=out_capacity)
-        return ConcurrentRunContext(
-            stop_token=StopToken(),
-            stage_out_queue=stage_out_queue,
-            stop_event=threading.Event(),
         )
 
     def _start_operator_threads(self, context: ConcurrentRunContext) -> None:

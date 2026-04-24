@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
 from zephon.core.constants import (
-    RunnerStageOut,
     RunnerStreamIn,
     StreamItem,
 )
@@ -272,15 +271,6 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             op_index=op_index,
             collect_stats=collect_op_stats,
             queue_capacity=self._queue_capacity,
-        )
-
-    def _create_context(self) -> ConcurrentRunContext:
-        out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
-        stage_out_queue = queue.Queue[RunnerStageOut | StopToken](maxsize=out_capacity)
-        return ConcurrentRunContext(
-            stop_token=StopToken(),
-            stage_out_queue=stage_out_queue,
-            stop_event=threading.Event(),
         )
 
     def _on_pump_started(self, state: _ThreadOperatorState) -> None:

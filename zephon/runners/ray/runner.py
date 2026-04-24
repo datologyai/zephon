@@ -1,50 +1,34 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""RemoteStageRunner: executes pipeline stages on Ray actor pools.
-
-Integrates with ConcurrentStageRunner to reuse the shared pump-thread,
-feeder, deterministic reordering, and shutdown coordination logic.
-
-Backpressure is achieved via per-actor idle tracking: the submit thread
-blocks until an actor is free, and actors are only recycled after the
-pump has forwarded their result downstream (in ``_ack_result``).
-"""
+"""Ray-backed stage runner on top of ConcurrentStageRunner."""
 
 from __future__ import annotations
 
 import logging
 import queue
-import threading
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
 import ray
 
-logger = logging.getLogger(__name__)
-
-from zephon.core.constants import RunnerStageOut, RunnerStreamIn
+from zephon.core.constants import RunnerStreamIn
 from zephon.core.graph import Node, Stage
 from zephon.core.notify import is_sentinel
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.runners.concurrent import (
+    ConcurrentOperatorState,
     ConcurrentRunContext,
+    ConcurrentStageRunner,
     RunnerResult,
     StopToken,
     WorkerErrorInfo,
     _QueueLike,
 )
-from zephon.runners.queue_drain import (
-    QueueDrainOperatorState,
-    QueueDrainStageRunner,
-)
-from zephon.runners.ray.service import (
-    _RayActorGroup,
-)
+from zephon.runners.ray.service import _RayActorGroup
 from zephon.utils.thread_utils import THREAD_SUPPRESSION_ENV_VARS
 
-# Sentinel pushed into the submit queue to tell the submit thread to exit.
-_STOP_SUBMIT = object()
+logger = logging.getLogger(__name__)
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> None:
@@ -52,139 +36,58 @@ def _noop(*_args: Any, **_kwargs: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Submit and collector thread loops
+# Pending-ref bookkeeping
 # ---------------------------------------------------------------------------
 
 
-def _submit_loop(
-    submit_queue: queue.Queue[Any],
-    actors: list[ray.actor.ActorHandle],
-    idle_queue: queue.Queue[int],
-    refs_queue: queue.Queue[tuple[ray.ObjectRef, int]],
-    stop_event: threading.Event,
-) -> None:
-    """Bridge: pull batches from submit_queue, dispatch to idle actors."""
-    while True:
-        # Block until a batch arrives (true sleep — no spin).
-        try:
-            item = submit_queue.get(timeout=0.5)
-        except queue.Empty:
-            if stop_event.is_set():
-                return
-            continue
+@dataclass
+class _PendingRefs:
+    """In-flight ObjectRef tracking with O(1) per-actor load queries.
 
-        if item is _STOP_SUBMIT:
-            return
+    Replaces the prior ``dict[ObjectRef, int]`` + per-query O(N) scan
+    pattern. Only accessed from the pump thread, so no locking.
+    """
 
-        batch, seq = item
+    refs: dict[ray.ObjectRef, int] = field(default_factory=dict)
+    _counts: list[int] = field(default_factory=list)
 
-        # Block until an actor is free (true sleep — no spin).
-        while not stop_event.is_set():
-            try:
-                actor_idx = idle_queue.get(timeout=0.5)
-                break
-            except queue.Empty:
+    def init(self, num_actors: int) -> None:
+        self.refs.clear()
+        self._counts = [0] * num_actors
+
+    def add(self, ref: ray.ObjectRef, actor_idx: int) -> None:
+        self.refs[ref] = actor_idx
+        self._counts[actor_idx] += 1
+
+    def pop(self, ref: ray.ObjectRef) -> int:
+        actor_idx = self.refs.pop(ref)
+        self._counts[actor_idx] -= 1
+        return actor_idx
+
+    def count_for(self, actor_idx: int) -> int:
+        return self._counts[actor_idx]
+
+    def total(self) -> int:
+        return len(self.refs)
+
+    def is_empty(self) -> bool:
+        return not self.refs
+
+    def active(self) -> list[ray.ObjectRef]:
+        """Snapshot of pending refs; ``ray.wait`` needs a list, not a view."""
+        return list(self.refs)
+
+    def least_loaded(self, dead: set[int]) -> int | None:
+        """Return the least-loaded live actor index, or None if all are dead."""
+        best: int | None = None
+        best_count = 0
+        for idx, count in enumerate(self._counts):
+            if idx in dead:
                 continue
-        else:
-            return  # stop_event was set
-
-        ref = actors[actor_idx].process.remote(batch, seq)
-        refs_queue.put((ref, actor_idx))
-
-
-def _collector_loop(
-    refs_queue: queue.Queue[tuple[ray.ObjectRef, int]],
-    result_queue: queue.Queue[RunnerResult],
-    stop_event: threading.Event,
-    num_actors: int,
-    op_name: str,
-) -> None:
-    """Bridge: wait for actor results, push into result_queue."""
-    pending: dict[ray.ObjectRef, int] = {}
-    dead_actors: set[int] = set()
-
-    while True:
-        # Drain newly submitted refs from the submit thread.
-        while True:
-            try:
-                ref, actor_idx = refs_queue.get_nowait()
-                pending[ref] = actor_idx
-            except queue.Empty:
-                break
-
-        if not pending:
-            # No in-flight work. Block on refs_queue for new refs.
-            try:
-                ref, actor_idx = refs_queue.get(timeout=0.5)
-                pending[ref] = actor_idx
-            except queue.Empty:
-                if stop_event.is_set():
-                    return  # shutdown + nothing pending + no new refs coming
-                continue
-
-        # Fast sweep: grab everything that's already ready (no blocking).
-        # list() required: ray.wait needs list[ObjectRef], not dict_keys.
-        refs = list(pending)
-        ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
-        if not ready:
-            # Nothing ready — block until at least one completes (true sleep).
-            ready, _ = ray.wait(refs, num_returns=1, timeout=1.0)
-
-        for ref in ready:
-            actor_idx = pending.pop(ref)
-            try:
-                # TODO(perf): ray.get() deserializes the full payload
-                # (including large tensors) on the driver. For reordering
-                # we only need metadata (seq number). Splitting each actor
-                # return into a metadata ref + payload ref would let us
-                # resolve only metadata here and pass the payload ref
-                # through to the next stage without deserialization.
-                result: RunnerResult = ray.get(ref)
-            except Exception as exc:
-                # Actor died — synthesize error result, do NOT recycle actor.
-                dead_actors.add(actor_idx)
-                alive = num_actors - len(dead_actors)
-                logger.warning(
-                    "Actor %d for op '%s' died: %s (%d/%d actors remaining)",
-                    actor_idx,
-                    op_name,
-                    exc,
-                    alive,
-                    num_actors,
-                )
-                result = RunnerResult(
-                    seq=-1,
-                    payload=[],
-                    wait_ns=0,
-                    consumed_elements=0,
-                    consumed_bytes=0,
-                    queue_depth_snapshot=0,
-                    proc_ns=0,
-                    collect_metrics=False,
-                    error=WorkerErrorInfo(
-                        exc_type=type(exc).__name__,
-                        message=str(exc),
-                        formatted_traceback=str(exc),
-                    ),
-                    from_worker=True,
-                    ack=None,  # dead actor won't be returned to idle_queue
-                )
-                if alive == 0:
-                    logger.error(
-                        "All actors for op '%s' are dead, stopping stage",
-                        op_name,
-                    )
-                    stop_event.set()
-            else:
-                result.ack = actor_idx
-
-            # Block until result_queue has space (output backpressure).
-            while not stop_event.is_set():
-                try:
-                    result_queue.put(result, timeout=0.5)
-                    break
-                except queue.Full:
-                    continue
+            if best is None or count < best_count:
+                best = idx
+                best_count = count
+        return best
 
 
 # ---------------------------------------------------------------------------
@@ -193,36 +96,18 @@ def _collector_loop(
 
 
 @dataclass
-class _RayOperatorState(QueueDrainOperatorState):
-    """Operator state for the Ray runner.
-
-    Extends ConcurrentOperatorState with an actor group and the bridge
-    queues that connect the pump thread to the submit/collector threads.
-    """
+class _RayOperatorState(ConcurrentOperatorState):
+    """Operator state for RemoteStageRunner."""
 
     actor_group: _RayActorGroup | None = field(default=None, init=False)
-    input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
-    result_queue: _QueueLike[RunnerResult] = field(init=False)
+    pending_refs: _PendingRefs = field(init=False, default_factory=_PendingRefs)
+    dead_actors: set[int] = field(init=False, default_factory=set)
 
-    # Bridge queues for submit/collector threads.
-    submit_queue: queue.Queue[Any] = field(init=False)
-    refs_queue: queue.Queue[tuple[ray.ObjectRef, int]] = field(init=False)
-
-    # Thread handles.
-    submit_thread: threading.Thread | None = field(default=None, init=False)
-    collector_thread: threading.Thread | None = field(default=None, init=False)
-
-    # Sentinel results created inline on the pump thread (same pattern
-    # as ThreadStageRunner._local_results).
+    # Sentinel results created inline on the pump thread (same pattern as
+    # ThreadStageRunner._local_results). Sentinel batches bypass actors and
+    # are processed immediately; stashing here avoids the pump-thread put
+    # deadlock the base class documents for _local_results.
     _local_results: list[RunnerResult] = field(init=False, default_factory=list)
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        # Throwaway queues: replaced with real queues in _before_run().
-        self.input_queue = queue.Queue(maxsize=1)
-        self.result_queue = queue.Queue(maxsize=1)
-        self.submit_queue = queue.Queue(maxsize=1)
-        self.refs_queue = queue.Queue()
 
 
 # ---------------------------------------------------------------------------
@@ -230,15 +115,15 @@ class _RayOperatorState(QueueDrainOperatorState):
 # ---------------------------------------------------------------------------
 
 
-class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
+class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
     """Stage runner that executes operators on per-operator Ray actor groups.
 
     Each operator in the stage gets its own group of Ray actors. The
-    inherited ConcurrentStageRunner machinery handles the pump threads,
-    feeder, deterministic reordering, stop propagation, and the
-    pull-driven run() iterator. This subclass provides the Ray-specific
-    wiring: actor group creation, submit/collector bridge threads, batch
-    submission via queues, and backpressure via per-actor idle tracking.
+    inherited :class:`ConcurrentStageRunner` machinery handles the pump
+    threads, feeder, deterministic reordering, stop propagation, and the
+    pull-driven ``run()`` iterator. This subclass provides the Ray-specific
+    wiring: actor group creation, direct ``ray.wait()`` result collection,
+    and combined per-actor + global backpressure.
     """
 
     _OperatorState = _RayOperatorState
@@ -338,17 +223,107 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
             queue_capacity=self._queue_capacity,
         )
 
-    def _create_context(self) -> ConcurrentRunContext:
-        out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
-        stage_out_queue = queue.Queue[RunnerStageOut | StopToken](maxsize=out_capacity)
-        return ConcurrentRunContext(
-            stop_token=StopToken(),
-            stage_out_queue=stage_out_queue,
-            stop_event=threading.Event(),
-        )
+    # -- Ray-specific result collection -------------------------------------
+
+    def _sweep_ready_refs(
+        self,
+        state: _RayOperatorState,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+        *,
+        block: bool = False,
+        timeout: float = 0.5,
+    ) -> int:
+        """Resolve completed ObjectRefs via ``ray.wait`` and forward results.
+
+        Args:
+            block: If True and refs are pending but none ready, block up
+                to ``timeout`` seconds for at least one to complete.
+            timeout: Blocking wait timeout in seconds. Ignored if
+                ``block`` is False.
+
+        Returns:
+            Number of results resolved this call.
+        """
+        if state.pending_refs.is_empty():
+            return 0
+
+        refs = state.pending_refs.active()
+
+        # Non-blocking sweep first.
+        ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
+        if not ready and block:
+            ready, _ = ray.wait(refs, num_returns=1, timeout=timeout)
+
+        resolved = 0
+        for ref in ready:
+            actor_idx = state.pending_refs.pop(ref)
+            try:
+                result: RunnerResult = ray.get(ref)
+            except Exception as exc:
+                # Actor died — synthesize error result.
+                state.dead_actors.add(actor_idx)
+                num_actors = state.actor_group.num_actors if state.actor_group else 0
+                alive = num_actors - len(state.dead_actors)
+                logger.warning(
+                    "Actor %d for op '%s' died: %s (%d/%d actors remaining)",
+                    actor_idx,
+                    state.node.name,
+                    exc,
+                    alive,
+                    num_actors,
+                )
+                result = RunnerResult(
+                    seq=-1,
+                    payload=[],
+                    wait_ns=0,
+                    consumed_elements=0,
+                    consumed_bytes=0,
+                    queue_depth_snapshot=0,
+                    proc_ns=0,
+                    collect_metrics=False,
+                    error=WorkerErrorInfo(
+                        exc_type=type(exc).__name__,
+                        message=str(exc),
+                        formatted_traceback=str(exc),
+                    ),
+                    from_worker=True,
+                )
+                if alive == 0:
+                    logger.error(
+                        "All actors for op '%s' are dead, stopping stage",
+                        state.node.name,
+                    )
+                    context.stop_event.set()
+
+            self._handle_result(state, result, next_queue, context)
+            resolved += 1
+
+        return resolved
+
+    # -- ConcurrentStageRunner hooks ---------------------------------------
+
+    def _drain_results(
+        self,
+        state: _RayOperatorState,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+    ) -> None:
+        """Non-blocking sweep of ready ObjectRefs."""
+        self._sweep_ready_refs(state, next_queue, context, block=False)
+
+    def _await_one_result(
+        self,
+        state: _RayOperatorState,
+        next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
+        context: ConcurrentRunContext,
+        timeout: float,
+    ) -> None:
+        """Block up to ``timeout`` for at least one pending ref to complete."""
+        self._sweep_ready_refs(state, next_queue, context, block=True, timeout=timeout)
 
     def _before_run(self, context: ConcurrentRunContext) -> None:
-        """Initialize actor groups, bridge queues, and submit/collector threads."""
+        """Initialize actor groups and per-operator input queues."""
         actor_ctx = self._build_actor_ctx()
 
         for state in self.ops:
@@ -359,7 +334,6 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
                 node=state.node,
                 op_index=state.op_index,
                 num_actors=num_actors,
-                tokens_per_actor=self._queue_capacity,
                 stage_index=self._stage_index,
                 stage_name=self._stage_name,
                 collect_stats=self._tracking_mode.collects_nodes,
@@ -367,63 +341,14 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
             )
             group.init(self._num_cpus_per_actor, self._runtime_env)
             state.actor_group = group
+            state.pending_refs.init(num_actors)
+            state.dead_actors.clear()
+            state._local_results.clear()
 
             state.input_queue = queue.Queue(maxsize=self._queue_capacity)
-            state.submit_queue = queue.Queue(maxsize=self._queue_capacity)
-            state.result_queue = queue.Queue(maxsize=self._queue_capacity)
-            # Bounded by total tokens: submit thread consumes one token
-            # from idle_queue before each put, so refs_queue can never
-            # exceed num_actors * queue_capacity entries.
-            state.refs_queue = queue.Queue(maxsize=num_actors * self._queue_capacity)
-
-            state.submit_thread = threading.Thread(
-                target=_submit_loop,
-                args=(
-                    state.submit_queue,
-                    group.actors,
-                    group.idle_queue,
-                    state.refs_queue,
-                    context.stop_event,
-                ),
-                daemon=True,
-                name=f"ray-submit-{state.node.name}",
-            )
-            state.collector_thread = threading.Thread(
-                target=_collector_loop,
-                args=(
-                    state.refs_queue,
-                    state.result_queue,
-                    context.stop_event,
-                    num_actors,
-                    state.node.name,
-                ),
-                daemon=True,
-                name=f"ray-collector-{state.node.name}",
-            )
-            state.submit_thread.start()
-            state.collector_thread.start()
 
     def _after_run(self, context: ConcurrentRunContext) -> None:
-        """Shutdown submit/collector threads and actor groups."""
-        for state in self.ops:
-            # Signal submit thread to exit.
-            if state.submit_thread is not None:
-                state.submit_queue.put(_STOP_SUBMIT)
-
-        # Join submit threads first — guarantees refs_queue is sealed.
-        for state in self.ops:
-            if state.submit_thread is not None:
-                state.submit_thread.join(timeout=10.0)
-                state.submit_thread = None
-
-        # Now set stop_event so collector threads know no more refs will arrive.
-        context.stop_event.set()
-
-        for state in self.ops:
-            if state.collector_thread is not None:
-                state.collector_thread.join(timeout=10.0)
-                state.collector_thread = None
-
+        """Shutdown actor groups."""
         for state in self.ops:
             if state.actor_group is not None:
                 state.actor_group.shutdown()
@@ -440,7 +365,8 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
         if not batch or context.stop_event.is_set():
             return
 
-        # Sentinel batches bypass actors — handle inline like ThreadStageRunner.
+        # Sentinel batches bypass actors — handle inline on the pump thread.
+        # Stashed in _local_results; _post_schedule_batch drains them.
         if is_sentinel(batch[0]):
             seq = state.next_seq
             state.next_seq += 1
@@ -460,27 +386,40 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
 
         assert state.actor_group is not None
 
+        max_per_actor = self._queue_capacity
+        next_queue = self._next_queue_for(state)
+
+        # Two-layer backpressure:
+        #   * per-actor cap — fairness across actors
+        #   * global in-flight cap — memory bound that also covers results
+        #     parked in `pending_results` waiting to close a seq gap
+        #     (inflight is decremented in _ack_result AFTER emit downstream,
+        #     so it naturally counts submitted-but-not-yet-emitted work).
+        while True:
+            if context.stop_event.is_set():
+                return
+
+            actor_idx = state.pending_refs.least_loaded(state.dead_actors)
+            if actor_idx is None:
+                context.stop_event.set()
+                return
+
+            n_live = state.actor_group.num_actors - len(state.dead_actors)
+            max_total = max_per_actor * n_live
+
+            at_actor_cap = state.pending_refs.count_for(actor_idx) >= max_per_actor
+            at_total_cap = state.inflight.peek() >= max_total
+            if not at_actor_cap and not at_total_cap:
+                break
+
+            self._sweep_ready_refs(state, next_queue, context, block=True, timeout=0.5)
+
         seq = state.next_seq
         state.next_seq += 1
 
-        # Put into submit_queue with drain-on-full to avoid deadlock.
-        # Increment inflight *after* the put succeeds so an early return
-        # cannot leave inflight permanently inflated (which would hang shutdown).
-        while True:
-            try:
-                state.submit_queue.put((batch, seq), timeout=0.1)
-                state.inflight.increment()
-                break
-            except queue.Full:
-                # Submit queue is full — drain results to release actors
-                # back to idle_queue via _ack_result. The submit thread
-                # must then pop from submit_queue before a slot opens, so
-                # the next put may not succeed immediately (same pattern
-                # as ProcessStageRunner._send_command). The 0.1s timeout
-                # above naturally yields to the submit thread.
-                self._drain_results(state, self._next_queue_for(state), context)
-                if context.stop_event.is_set():
-                    return
+        ref = state.actor_group.actors[actor_idx].process.remote(batch, seq)
+        state.pending_refs.add(ref, actor_idx)
+        state.inflight.increment()
 
     def _post_schedule_batch(
         self,
@@ -488,7 +427,7 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        """Drain locally-stashed results (sentinels + drain_callback results)."""
+        """Drain locally-stashed sentinel results."""
         for result in state._local_results:
             self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
@@ -499,18 +438,19 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
         result: RunnerResult,
         context: ConcurrentRunContext,
     ) -> None:
-        """Acknowledge a result: decrement inflight, recycle actor if alive."""
+        """Decrement inflight once the result has been forwarded downstream.
+
+        Called by :meth:`_forward_ready_result` on the base class, *after*
+        :meth:`_emit_downstream` has placed the payload into the next
+        operator's input queue (or stage output). That ordering makes
+        ``inflight`` a precise count of submitted-but-not-yet-emitted work,
+        which is the quantity the global backpressure cap bounds.
+        """
         if result.from_worker:
             state.inflight.decrement()
-            # ack is None when the actor died (see _collector_loop error path).
-            # group may be None during shutdown (_after_run / close set it to
-            # None after killing actors). Local-bind to avoid TOCTOU race.
-            group = state.actor_group
-            if result.ack is not None and group is not None:
-                group.release(result.ack)
 
     def close(self, *, hard: bool = False) -> None:
-        """Tear down bridge threads, actor groups, and join pump threads."""
+        """Tear down actor groups and join pump threads."""
         with self._context_lock:
             ctx = self._active_context
 
@@ -520,17 +460,6 @@ class RemoteStageRunner(QueueDrainStageRunner["_RayOperatorState"]):
             self._join_threads(ctx, hard=hard)
 
         for state in self.ops:
-            # Ensure bridge threads are stopped.
-            if state.submit_thread is not None:
-                try:
-                    state.submit_queue.put_nowait(_STOP_SUBMIT)
-                except queue.Full:
-                    pass
-                state.submit_thread.join(timeout=5.0)
-                state.submit_thread = None
-            if state.collector_thread is not None:
-                state.collector_thread.join(timeout=5.0)
-                state.collector_thread = None
             if state.actor_group is not None:
                 state.actor_group.shutdown()
                 state.actor_group = None

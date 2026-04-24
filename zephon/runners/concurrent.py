@@ -79,6 +79,18 @@ class _InflightCounter:
         with self._cv:
             return self._count == 0
 
+    def peek(self) -> int:
+        """Return the current count without acquiring the lock.
+
+        Safe ONLY when the caller guarantees serial access — e.g. the Ray
+        runner reads this from the pump thread, which is the sole thread
+        that mutates the counter for that runner's operator state. For
+        callers that share the counter across producer/consumer threads,
+        use :meth:`is_zero` (or add a locked accessor if you need the
+        integer value).
+        """
+        return self._count
+
     def try_decrement(self) -> bool:
         """Atomically decrement if count > 0. Returns True if decremented."""
         with self._cv:
@@ -319,7 +331,19 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
     # -- Abstract hooks -------------------------------------------------
     def _create_context(self) -> ConcurrentRunContext:
-        raise NotImplementedError
+        """Allocate the per-run context.
+
+        Subclasses may override if they need a custom stage-output queue
+        shape; the default is sufficient for thread-, process-, and
+        ray-backed runners.
+        """
+        out_capacity = max(1, self._prefetch_capacity or self._queue_capacity)
+        stage_out_queue = queue.Queue[RunnerStageOut | StopToken](maxsize=out_capacity)
+        return ConcurrentRunContext(
+            stop_token=StopToken(),
+            stage_out_queue=stage_out_queue,
+            stop_event=threading.Event(),
+        )
 
     def _schedule_batch(
         self,

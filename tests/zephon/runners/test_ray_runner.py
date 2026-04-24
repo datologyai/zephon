@@ -717,3 +717,92 @@ class TestMultiTokenParity:
         out_4 = _collect(_make_runner(stage, queue_capacity=4, **common), data)
 
         assert out_1 == out_4 == data
+
+
+class TestBackpressureBounds:
+    """Verify the global in-flight cap bounds `pending_results` growth.
+
+    The risk this guards against: in deterministic mode, if one actor is
+    slow while others are fast, fast actors' results accumulate in
+    `pending_results` waiting for the slow actor's seq to close. Without a
+    global in-flight cap, the pump keeps dispatching and `pending_results`
+    can grow unboundedly. The combined per-actor + global cap in
+    `_schedule_batch` bounds it by construction.
+    """
+
+    def test_pending_results_bounded_under_skew(self) -> None:
+        """Inflight and pending_results stay within the global cap under
+        deterministic mode with per-item latency skew across actors."""
+        from zephon.runners.ray import RemoteStageRunner
+        from zephon.runners.ray.runner import _RayOperatorState
+
+        num_actors = 4
+        queue_capacity = 4
+        max_total = queue_capacity * num_actors
+
+        observed_max_inflight = 0
+        observed_max_pending = 0
+
+        class _TrackingRunner(RemoteStageRunner):
+            def _handle_result(
+                self_inner,  # noqa: N805
+                state: _RayOperatorState,
+                result,
+                next_queue,
+                context,
+            ) -> None:
+                nonlocal observed_max_inflight, observed_max_pending
+                super()._handle_result(state, result, next_queue, context)
+                observed_max_inflight = max(
+                    observed_max_inflight, state.inflight.peek()
+                )
+                observed_max_pending = max(
+                    observed_max_pending, len(state.pending_results)
+                )
+
+            def _schedule_batch(
+                self_inner,  # noqa: N805
+                state: _RayOperatorState,
+                batch,
+                *,
+                wait_ns,
+                context,
+            ) -> None:
+                nonlocal observed_max_inflight, observed_max_pending
+                observed_max_inflight = max(
+                    observed_max_inflight, state.inflight.peek()
+                )
+                observed_max_pending = max(
+                    observed_max_pending, len(state.pending_results)
+                )
+                super()._schedule_batch(state, batch, wait_ns=wait_ns, context=context)
+
+        # Enough items to give slow actors time to accumulate backlog; delay
+        # is bucketed 0..max_delay_ms so skew is real but bounded.
+        data = list(range(200))
+        stage = _make_stage(max_delay_ms=5.0, parallelism=num_actors)
+
+        runner = _TrackingRunner(
+            stage,
+            _ctx_services(),
+            max_workers=num_actors,
+            deterministic=True,
+            queue_capacity=queue_capacity,
+            stage_output_mode="stream_items",
+        )
+
+        out = _collect(runner, data)
+        assert out == data
+
+        # The invariant: inflight (and therefore pending_results) never
+        # exceeds the global cap. Without the cap this bound fails under
+        # the skew above because fast actors accumulate in pending_results
+        # behind a slow seq.
+        assert observed_max_inflight <= max_total, (
+            f"inflight={observed_max_inflight} exceeded cap={max_total}; "
+            "global in-flight cap is not holding"
+        )
+        assert observed_max_pending <= max_total, (
+            f"pending_results={observed_max_pending} exceeded cap={max_total}; "
+            "buffering is not bounded by the global in-flight cap"
+        )

@@ -1,5 +1,8 @@
 name: Integration Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -54,5 +57,31 @@ jobs:
           PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
         run: |
           set -ex
-          uv run --python ${{ matrix.python_version }} pytest -m integration --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
+          uv run --python ${{ matrix.python_version }} pytest -m "integration and not requires_ray" --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
 
+  ray-integration:
+    name: Ray Integration Tests
+    timeout-minutes: 40
+    runs-on: LargeGithubRunner
+    env:
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+      - name: Setup
+        run: |
+          set -ex
+          uv sync --python 3.12 --group dev --group test --all-extras
+      - name: Clean stale Ray state
+        run: |
+          ray stop --force 2>/dev/null || true
+          rm -rf /tmp/ray
+      - name: Run Ray Integration Tests
+        run: |
+          set -ex
+          uv run --python 3.12 pytest -m "integration and requires_ray" --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
