@@ -1,290 +1,209 @@
 import gc
-import json
 import time
+import weakref
 from multiprocessing import Process, Queue
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-import zephon.io.resolvers.cache.shared_state as shared_state_mod
 from zephon.io.resolvers.cache.shared_state import (
-    CacheEntry,
     CacheSharedState,
     _ShardState,
 )
-from zephon.io.types import ShardFile, ShardLocator
 
 
-def _locator(
-    dataset: str, shard_id: int, raw_name: str, zip_name: str | None = None
-) -> ShardLocator:
-    raw = ShardFile(basename=raw_name, bytes=0, hashes={})
-    zip_file = ShardFile(basename=zip_name, bytes=0, hashes={}) if zip_name else None
-    return ShardLocator(
-        dataset=dataset,
-        shard_id=shard_id,
-        format="dummy",
-        root="/unused",
-        raw=raw,
-        zip=zip_file,
-        compression="gzip" if zip_name else None,
-        extra=None,
+def test_capacity_validation(tmp_path: Path) -> None:
+    del tmp_path
+    with pytest.raises(ValueError):
+        CacheSharedState(capacity=0)
+    with pytest.raises(ValueError):
+        CacheSharedState(capacity=-1)
+
+
+def test_create_allocates_arrays_and_returns_names() -> None:
+    ss = CacheSharedState(capacity=8)
+    try:
+        assert ss.capacity == 8
+        assert ss.created_regions
+        names = ss.shm_names
+        assert set(names.keys()) == {"states", "access", "sizes", "usage"}
+        # All four names must be distinct
+        assert len(set(names.values())) == 4
+
+        assert ss.shard_states.shape == (8,)
+        assert ss.shard_access_ns.shape == (8,)
+        assert ss.shard_sizes.shape == (8,)
+        assert ss.get_cache_usage() == 0
+        # Freshly created arrays are zeroed / INVALID
+        assert int(ss.shard_states[0]) == int(_ShardState.INVALID)
+    finally:
+        ss.close()
+
+
+def test_attach_second_process_in_same_process_sees_writes() -> None:
+    """Attaching twice in the same process reflects writes through both views."""
+    creator = CacheSharedState(capacity=4)
+    attacher = None
+    try:
+        names = creator.shm_names
+        attacher = CacheSharedState(capacity=4, shm_names=names)
+        assert not attacher.created_regions
+        assert attacher.capacity == 4
+
+        # Write through one view, read through the other.
+        creator.shard_states[2] = _ShardState.LOCAL
+        creator.shard_sizes[2] = 123
+        creator.set_access_time(2, 42)
+        creator.add_cache_usage(123)
+
+        assert int(attacher.shard_states[2]) == int(_ShardState.LOCAL)
+        assert int(attacher.shard_sizes[2]) == 123
+        assert int(attacher.shard_access_ns[2]) == 42
+        assert attacher.get_cache_usage() == 123
+    finally:
+        if attacher is not None:
+            attacher.close()
+        creator.close()
+
+
+def test_attach_missing_raises() -> None:
+    """Attaching with names that were never created is an error."""
+    fake_names = {
+        "states": "nonexistent_states_xxx",
+        "access": "nonexistent_access_xxx",
+        "sizes": "nonexistent_sizes_xxx",
+        "usage": "nonexistent_usage_xxx",
+    }
+    with pytest.raises(FileNotFoundError):
+        CacheSharedState(capacity=4, shm_names=fake_names)
+
+
+def test_unlink_by_names_is_idempotent_on_missing() -> None:
+    """Calling unlink_by_names on absent segments is safe."""
+    # Fully missing — should not raise.
+    CacheSharedState.unlink_by_names(
+        {
+            "states": "definitely_missing_states_zzz",
+            "access": "definitely_missing_access_zzz",
+            "sizes": "definitely_missing_sizes_zzz",
+            "usage": "definitely_missing_usage_zzz",
+        }
     )
+    # Empty/None inputs should not raise.
+    CacheSharedState.unlink_by_names({})
+    CacheSharedState.unlink_by_names(
+        {"states": None, "access": "", "sizes": 123, "usage": "x"}
+    )  # type: ignore[dict-item]
 
 
-def test_shared_state_initializes_and_persists_meta(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss1 = CacheSharedState(root, capacity=64)
+def test_close_does_not_unlink_segments() -> None:
+    """close() releases local handles only; names stay alive.
+
+    This is load-bearing for the session model: if a creator manager
+    exits while joiners are still attached, their SHM attachment must
+    keep working, AND later managers must still be able to attach via
+    the names recorded in ``session.json``.
+    """
+    ss1 = CacheSharedState(capacity=4)
+    names = ss1.shm_names
+    ss1.close()
+    # Names must still be attachable after close — proves close does not unlink.
+    ss2 = CacheSharedState(capacity=4, shm_names=names)
     try:
-        # Meta directory/files created
-        state_dir = root / ".zephon_cache_state"
-        meta_path = state_dir / "meta.json"
-        assert state_dir.is_dir()
-        assert meta_path.is_file()
-
-        # Vectors have expected shapes
-        assert ss1.capacity == 64
-        assert ss1.shard_states.shape == (ss1.capacity,)
-        assert ss1.shard_access_ns.shape == (ss1.capacity,)
-        assert ss1.shard_sizes.shape == (ss1.capacity,)
-        assert ss1.get_cache_usage() == 0
-
-        # Register one entry
-        loc = _locator("ds", 0, "raw0.bin")
-        e1 = ss1.ensure_entry(loc)
-        assert isinstance(e1, CacheEntry)
-        assert e1.dataset == "ds"
-        assert e1.shard_id == 0
-        assert e1.raw == "raw0.bin"
-
-        # New instance should reload meta mapping
-        ss2 = CacheSharedState(root, capacity=64)
-        try:
-            e2 = ss2.lookup("ds", 0)
-            assert e2 is not None
-            assert e2.index == e1.index
-            assert ss2.entry_by_index(e1.index) is not None
-        finally:
-            ss2.close()
+        assert ss2.capacity == 4
+        assert not ss2.created_regions
     finally:
-        ss1.close()
+        ss2.close()
+    # Explicit unlink releases the OS-level name.
+    CacheSharedState.unlink_by_names(names)
+    with pytest.raises(FileNotFoundError):
+        CacheSharedState(capacity=4, shm_names=names)
 
 
-def test_shared_state_updates_entry_metadata(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss = CacheSharedState(root, capacity=64)
+def test_numeric_accessors_roundtrip() -> None:
+    ss = CacheSharedState(capacity=3)
     try:
-        loc1 = _locator("demo", 7, "a.bin", None)
-        e = ss.ensure_entry(loc1)
-        # Update both raw and zip names via ensure_entry
-        loc2 = _locator("demo", 7, "b.bin", "b.bin.gz")
-        _ = ss.ensure_entry(loc2)
+        ss.set_cache_usage(1000)
+        assert ss.get_cache_usage() == 1000
+        ss.add_cache_usage(-250)
+        assert ss.get_cache_usage() == 750
 
-        # The in-memory object returned earlier may not reflect updated names;
-        # retrieve a fresh view via lookup and verify changes.
-        e2 = ss.lookup("demo", 7)
-        assert e2 is not None
-        assert e2.index == e.index
-        assert e2.raw == "b.bin"
-        assert e2.zip == "b.bin.gz"
+        ss.set_access_time(0, 111)
+        ss.set_access_time(1, 222)
+        ss.set_access_time(2, 333)
+        assert int(ss.shard_access_ns[0]) == 111
+        assert int(ss.shard_access_ns[2]) == 333
 
-        # Meta file reflects update
-        meta_path = root / ".zephon_cache_state" / "meta.json"
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        mapping = meta["mapping"]["demo"][str(7)]
-        assert mapping["raw"] == "b.bin"
-        assert mapping["zip"] == "b.bin.gz"
+        ss.shard_states[0] = _ShardState.LOCAL
+        ss.shard_states[1] = _ShardState.REMOTE
+        ss.shard_states[2] = _ShardState.LOCAL
+        assert ss.count_local() == 2
     finally:
         ss.close()
 
 
-def test_shared_state_usage_and_count_local(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss = CacheSharedState(root, capacity=64)
+def _child_attach_and_write(names: dict, q: Queue) -> None:  # type: ignore[no-redef]
     try:
-        loc = _locator("foo", 1, "x.bin")
-        entry = ss.ensure_entry(loc)
-        # Initially nothing local
-        assert ss.count_local() == 0
-
-        # Mark LOCAL and set size
-        ss.shard_states[entry.index] = _ShardState.LOCAL
-        ss.shard_sizes[entry.index] = 1234
-        ss.add_cache_usage(1234)
-        ts = time.time_ns()
-        ss.set_access_time(entry.index, ts)
-        assert ss.count_local() == 1
-        assert int(ss.shard_access_ns[entry.index]) == ts
-        assert ss.get_cache_usage() == 1234
-
-        # Reset usage explicitly
-        ss.set_cache_usage(42)
-        assert ss.get_cache_usage() == 42
-    finally:
-        # idempotent close
+        ss = CacheSharedState(capacity=4, shm_names=names)
+        ss.shard_states[0] = _ShardState.LOCAL
+        ss.set_access_time(0, 99)
         ss.close()
-        ss.close()
+        q.put({"ok": True})
+    except Exception as exc:  # pragma: no cover
+        q.put({"ok": False, "err": repr(exc)})
 
 
-# ---------------------------
-# Multiprocess helpers/tests
-# ---------------------------
-
-
-def _child_set_local_and_usage(
-    root: str, dataset: str, shard_id: int, size: int, q: Queue
-) -> None:  # type: ignore[no-redef]
-    ss = CacheSharedState(Path(root), capacity=64)
+def test_attach_across_processes() -> None:
+    """A child process can attach to segments created by the parent."""
+    ss = CacheSharedState(capacity=4)
     try:
-        entry = ss.lookup(dataset, shard_id)
-        if entry is None:
-            q.put({"ok": False, "err": "entry-missing"})
-            return
-        ss.shard_states[entry.index] = _ShardState.LOCAL
-        ss.shard_sizes[entry.index] = size
-        ss.set_cache_usage(size)
-        ts = 123456789
-        ss.set_access_time(entry.index, ts)
-        q.put({"ok": True, "index": entry.index, "ts": ts})
-    finally:
-        ss.close()
-
-
-def _child_ensure_entry(root: str, loc: ShardLocator, q: Queue) -> None:  # type: ignore[no-redef]
-    ss = CacheSharedState(Path(root), capacity=64)
-    try:
-        entry = ss.ensure_entry(loc)
-        q.put({"ok": True, "index": entry.index})
-    finally:
-        ss.close()
-
-
-def test_shared_state_is_visible_across_processes(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss = CacheSharedState(root, capacity=64)
-    try:
-        # Create entry in parent
-        loc = _locator("multi", 1, "raw.bin")
-        e = ss.ensure_entry(loc)
-
-        # Child marks it LOCAL and sets usage/ts
         q: Queue = Queue()
-        p = Process(
-            target=_child_set_local_and_usage, args=(str(root), "multi", 1, 2048, q)
-        )
+        p = Process(target=_child_attach_and_write, args=(ss.shm_names, q))
         p.start()
-        p.join(timeout=10)
+        p.join(timeout=5)
         assert p.exitcode == 0
-        msg = q.get_nowait()
-        assert msg["ok"] is True
-        assert msg["index"] == e.index
+        result = q.get_nowait()
+        assert result["ok"] is True
 
-        # Parent observes changes through shared memory
-        assert ss.count_local() == 1
-        assert ss.get_cache_usage() == 2048
-        assert int(ss.shard_sizes[e.index]) == 2048
-
-        # Child can also create new entries and parent sees them
-        q2: Queue = Queue()
-        loc2 = _locator("multi", 2, "raw2.bin")
-        p2 = Process(target=_child_ensure_entry, args=(str(root), loc2, q2))
-        p2.start()
-        p2.join(timeout=10)
-        assert p2.exitcode == 0
-        _ = q2.get_nowait()
-        # Lookup after child update
-        e2 = ss.lookup("multi", 2)
-        assert e2 is not None
-        assert e2.raw == "raw2.bin"
+        assert int(ss.shard_states[0]) == int(_ShardState.LOCAL)
+        assert int(ss.shard_access_ns[0]) == 99
     finally:
         ss.close()
 
 
-def test_cache_shared_state_cleanup_runs_on_gc(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    root = tmp_path / "cache"
-    closed_names: list[str] = []
-    orig = shared_state_mod._cleanup_shared_memory_regions
-
-    def wrapped(owns_regions: bool, shms: list) -> None:
-        for shm in shms:
-            if shm is not None:
-                closed_names.append(shm.name)
-        orig(owns_regions, shms)
-
-    monkeypatch.setattr(shared_state_mod, "_cleanup_shared_memory_regions", wrapped)
-    ss = CacheSharedState(root, capacity=64)
+def test_finalizer_releases_segments_on_gc() -> None:
+    ss = CacheSharedState(capacity=2)
     fin = ss._close_finalizer
-    # Expect 4 shared memory regions to be cleaned up
-    assert ss._states_mem is not None
-    ss = None
+    ss_ref = weakref.ref(ss)
+    ss = None  # drop strong ref
 
     for _ in range(200):
-        if not fin.alive:
+        if fin is None or not fin.alive:
             break
         gc.collect()
         time.sleep(0.01)
 
-    assert fin.alive is False
-    assert len(closed_names) == 4
+    assert ss_ref() is None
 
 
-def test_ensure_entry_raises_when_capacity_exceeded(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss = CacheSharedState(root, capacity=2)
+def test_accessor_raises_after_close() -> None:
+    ss = CacheSharedState(capacity=2)
+    ss.close()
+    with pytest.raises(RuntimeError):
+        _ = ss.shard_states
+    with pytest.raises(RuntimeError):
+        _ = ss.get_cache_usage()
+
+
+def test_views_reflect_numpy_semantics() -> None:
+    """Views are numpy arrays backed by shared memory — basic sanity."""
+    ss = CacheSharedState(capacity=5)
     try:
-        loc0 = _locator("ds", 0, "a.bin")
-        loc1 = _locator("ds", 1, "b.bin")
-        loc2 = _locator("ds", 2, "c.bin")
-
-        ss.ensure_entry(loc0)
-        ss.ensure_entry(loc1)
-
-        with pytest.raises(IndexError, match="exceeds capacity"):
-            ss.ensure_entry(loc2)
+        assert ss.shard_states.dtype == np.uint8
+        assert ss.shard_access_ns.dtype == np.uint64
+        assert ss.shard_sizes.dtype == np.int64
+        ss.shard_sizes[:] = np.arange(5, dtype=np.int64)
+        assert list(ss.shard_sizes.tolist()) == [0, 1, 2, 3, 4]
     finally:
         ss.close()
-
-
-def test_capacity_resize_recreates_shared_memory(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss1 = CacheSharedState(root, capacity=4)
-    try:
-        loc = _locator("ds", 0, "raw.bin")
-        ss1.ensure_entry(loc)
-    finally:
-        ss1.close()
-
-    # Re-open with larger capacity — should resize
-    ss2 = CacheSharedState(root, capacity=16)
-    try:
-        assert ss2.capacity == 16
-        assert ss2.shard_states.shape == (16,)
-        # Old mapping was cleared during resize
-        assert ss2.lookup("ds", 0) is None
-        # Can register shards up to new capacity
-        for i in range(16):
-            ss2.ensure_entry(_locator("ds", i, f"s{i}.bin"))
-    finally:
-        ss2.close()
-
-
-def test_capacity_smaller_or_equal_adopts_stored(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    ss1 = CacheSharedState(root, capacity=32)
-    try:
-        loc = _locator("ds", 0, "raw.bin")
-        ss1.ensure_entry(loc)
-    finally:
-        ss1.close()
-
-    # Re-open with smaller capacity — should keep stored (32)
-    ss2 = CacheSharedState(root, capacity=16)
-    try:
-        assert ss2.capacity == 32
-        e = ss2.lookup("ds", 0)
-        assert e is not None
-        assert e.raw == "raw.bin"
-    finally:
-        ss2.close()

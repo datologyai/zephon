@@ -1,10 +1,13 @@
 """Shard view for file-backed datasets."""
 
+from typing import Mapping
+
 from zephon.io.dataset import Dataset
 from zephon.io.formats.base import FormatHandler
 from zephon.io.protocols import DatasetShardView, RandomAccessShard
 from zephon.io.resolvers import ShardResolver
 from zephon.io.stores.resilient import ResilientShard
+from zephon.io.types import ShardLocator
 
 
 class FileBackedDatasetShardView(DatasetShardView):
@@ -19,11 +22,14 @@ class FileBackedDatasetShardView(DatasetShardView):
         retry_attempts: int,
         retry_initial_backoff: float,
         retry_max_backoff: float,
+        locators: Mapping[int, ShardLocator] | None = None,
     ) -> None:
         self._dataset = dataset
         self._handler = handler
         self._resolver = resolver
-        self._locators = dict(handler.build_locators(dataset))
+        if locators is None:
+            locators = handler.build_locators(dataset)
+        self._locators = dict(locators)
         self._lengths = {
             int(sid): int(count) for sid, count in dataset.shard_index.items()
         }

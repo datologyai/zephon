@@ -1,41 +1,35 @@
-"""Shared-memory bookkeeping for the cache-enabled resolver."""
+"""SHM-only shared bookkeeping for the cache resolver.
+
+This module owns exclusively the shared-memory lifecycle and numeric array
+accessors that multiple processes consult to track shard residency. All
+higher-level concerns — dense indexing, fingerprinting, session-state
+decisions — live in :class:`zephon.io.resolvers.cache.manager.CacheManager`.
+"""
 
 import contextlib
-import json
 import weakref
-from dataclasses import dataclass
 from enum import IntEnum
 from multiprocessing import shared_memory
-from pathlib import Path
-from typing import Optional
+from typing import Mapping
 
 import numpy as np
-from filelock import FileLock
 
-from zephon.io.types import ShardLocator
-
-_CACHE_STATE_DIR = ".zephon_cache_state"
-_CACHE_META_FILENAME = "meta.json"
-_CACHE_META_LOCK_FILENAME = "meta.lock"
 _SHM_KEYS = ("states", "access", "sizes", "usage")
 
 
-def _cleanup_shared_memory_regions(
-    owns_regions: bool,
-    shms: list,
-) -> None:
-    """Release shared memory regions.
+def _cleanup_shared_memory_regions(shms: list) -> None:
+    """Release this process's mappings of the shared-memory regions.
 
-    Designed for use as a ``weakref.finalize`` callback: receives the
-    resources directly so cleanup succeeds even when the parent object
-    is already being garbage-collected.
+    Designed for ``weakref.finalize``: takes the resources by value so it
+    can run even when the parent object is already being collected.
+
+    Deliberately does **not** call ``unlink()``. Unlinking removes the
+    segment name OS-wide and would invalidate peer processes that are
+    still attached via ``session.json``. Names are released only when the
+    last owner drops the session (see
+    :func:`zephon.io.resolvers.cache.manager._release_session_owner`) or
+    on the next manager init via :meth:`CacheSharedState.unlink_by_names`.
     """
-    if owns_regions:
-        for shm in shms:
-            if shm is None:
-                continue
-            with contextlib.suppress(Exception):
-                shm.unlink()
     for shm in shms:
         if shm is None:
             continue
@@ -52,35 +46,31 @@ class _ShardState(IntEnum):
     LOCAL = 3
 
 
-@dataclass(frozen=True)
-class CacheEntry:
-    """Metadata describing a shard tracked in shared cache state."""
-
-    dataset: str
-    shard_id: int
-    raw: str
-    zip: str | None
-    index: int
-
-
 class CacheSharedState:
-    """Process-shared bookkeeping for shard residency and usage metrics."""
+    """Owner of the four SHM arrays backing the cache.
 
-    def __init__(self, root: Path, *, capacity: int) -> None:
+    - ``states``   : uint8  per-shard residency state (see :class:`_ShardState`).
+    - ``access``   : uint64 per-shard last-access time in ns (LRU).
+    - ``sizes``    : int64  per-shard bytes currently on disk.
+    - ``usage``    : int64  scalar, total bytes used across all LOCAL shards.
+
+    Creation vs. attachment is chosen by the caller via ``shm_names``:
+
+    - ``shm_names=None`` allocates fresh SHM and records the generated
+      names; the caller can read them via :pyattr:`shm_names` and persist
+      them (e.g. into ``session.json``).
+    - Passing a dict attaches to existing SHM created by a peer process.
+    """
+
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        shm_names: Mapping[str, str] | None = None,
+    ) -> None:
         if capacity <= 0:
             raise ValueError("Shared cache capacity must be positive")
-
-        self._root = root
         self._capacity = int(capacity)
-        self._state_dir = self._root / _CACHE_STATE_DIR
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._meta_path = self._state_dir / _CACHE_META_FILENAME
-        self._meta_lock_path = self._state_dir / _CACHE_META_LOCK_FILENAME
-        self._meta_lock = FileLock(str(self._meta_lock_path))
-        self._names: dict[str, str] = {}
-        self._entries: dict[tuple[str, int], CacheEntry] = {}
-        self._entries_by_index: dict[int, CacheEntry] = {}
-        self._next_index = 0
         self._states_mem: shared_memory.SharedMemory | None = None
         self._access_mem: shared_memory.SharedMemory | None = None
         self._sizes_mem: shared_memory.SharedMemory | None = None
@@ -89,84 +79,33 @@ class CacheSharedState:
         self._access_view: np.ndarray | None = None
         self._sizes_view: np.ndarray | None = None
         self._usage_view: np.ndarray | None = None
-        self._owns_regions = False
+        # Creator vs joiner is tracked purely informationally; it does NOT
+        # control unlinking. Unlinking happens in the manager layer when
+        # the last session owner departs.
+        self._created_regions = False
         self._closed = False
         self._close_finalizer: weakref.finalize | None = None
 
-        with self._meta_lock:
-            if self._meta_path.exists():
-                meta = self._load_meta()
-                stored_capacity = int(meta.get("capacity", self._capacity))
-                if self._capacity > stored_capacity:
-                    # Capacity grew beyond what was stored (e.g., dataset changed
-                    # between runs with persist_state=True). Recreate shared
-                    # memory from scratch at the new size. All workers
-                    # synchronize through this FileLock so subsequent processes
-                    # will see the updated meta.json and attach to the new
-                    # correctly-sized regions.
-                    self._unlink_old_regions_locked(meta)
-                    self._names = self._generate_shm_names()
-                    self._attach_shared(create=True)
-                    meta = {
-                        "capacity": self._capacity,
-                        "next_index": 0,
-                        "mapping": {},
-                        "names": dict(self._names),
-                    }
-                    self._write_meta(meta)
-                else:
-                    self._capacity = stored_capacity
-                    self._sync_next_index_locked(meta)
-                    self._entries = {}
-                    self._entries_by_index = {}
-                    meta = self._ensure_names_locked(meta)
-                    self._reload_meta_locked(meta)
-                    try:
-                        self._attach_shared(create=False)
-                    except FileNotFoundError:
-                        self._attach_shared(create=True)
-            else:
-                self._next_index = 0
-                self._entries = {}
-                self._entries_by_index = {}
-                self._names = self._generate_shm_names()
-                self._attach_shared(create=True)
-                meta = {
-                    "capacity": self._capacity,
-                    "next_index": self._next_index,
-                    "mapping": {},
-                    "names": dict(self._names),
-                }
-                self._write_meta(meta)
+        if shm_names is None:
+            self._names = self._generate_shm_names()
+            self._open(create=True)
+        else:
+            self._names = {key: str(shm_names[key]) for key in _SHM_KEYS}
+            self._open(create=False)
 
     # ------------------------------------------------------------------
-    # Shared memory accessors
+    # SHM name generation / lifecycle
     # ------------------------------------------------------------------
 
-    def _unlink_old_regions_locked(self, meta: dict) -> None:
-        """Unlink shared memory regions referenced by *meta*."""
-        old_names = meta.get("names", {})
-        if not isinstance(old_names, dict):
-            return
-        for key in _SHM_KEYS:
-            name = old_names.get(key)
-            if not isinstance(name, str):
-                continue
-            try:
-                shm = shared_memory.SharedMemory(name=name, create=False)
-                shm.unlink()
-                shm.close()
-            except FileNotFoundError:
-                pass
-
-    def _generate_shm_names(self) -> dict[str, str]:
+    @staticmethod
+    def _generate_shm_names() -> dict[str, str]:
         make_filename = getattr(shared_memory, "_make_filename", None)
         if make_filename is None:
             raise RuntimeError(
                 "multiprocessing.shared_memory lacks _make_filename helper"
             )
-        names: dict[str, str] = {}
         used: set[str] = set()
+        names: dict[str, str] = {}
         for key in _SHM_KEYS:
             while True:
                 candidate = str(make_filename())
@@ -176,97 +115,46 @@ class CacheSharedState:
                     break
         return names
 
-    def _ensure_names_locked(self, meta: dict) -> dict:
-        raw_names = meta.get("names")
-        if isinstance(raw_names, dict):
-            names: dict[str, str] = {
-                str(key): str(value)
-                for key, value in raw_names.items()
-                if isinstance(key, str) and isinstance(value, str)
-            }
-        else:
-            names = {}
-        make_filename = getattr(shared_memory, "_make_filename", None)
-        if make_filename is None:
-            raise RuntimeError(
-                "multiprocessing.shared_memory lacks _make_filename helper"
-            )
-        changed = False
-        used: set[str] = set(names.values())
-        for key in _SHM_KEYS:
-            name = names.get(key)
-            if isinstance(name, str):
-                max_len = getattr(shared_memory, "_SHM_SAFE_NAME_LENGTH", None)
-                if max_len is not None and len(name) > max_len:
-                    name = None
-            else:
-                name = None
-            valid = name is not None
-            if not valid:
-                while True:
-                    candidate = str(make_filename())
-                    if candidate not in used:
-                        names[key] = candidate
-                        used.add(candidate)
-                        changed = True
-                        break
-        if len(set(names.values())) != len(names.values()):
-            names = self._generate_shm_names()
-            changed = True
-        meta["names"] = names
-        self._names = dict(names)
-        if changed:
-            self._write_meta(meta)
-        return meta
-
-    def _attach_shared(self, *, create: bool) -> None:
+    def _open(self, *, create: bool) -> None:
         state_size = self._capacity * np.uint8().nbytes
         access_size = self._capacity * np.uint64().nbytes
         sizes_size = self._capacity * np.int64().nbytes
         usage_size = np.int64().nbytes
 
-        states_name = self._names["states"]
-        access_name = self._names["access"]
-        sizes_name = self._names["sizes"]
-        usage_name = self._names["usage"]
-
-        owns_regions = False
-        try:
-            if create:
-                try:
-                    self._states_mem = shared_memory.SharedMemory(
-                        name=states_name, create=True, size=state_size
-                    )
-                    self._access_mem = shared_memory.SharedMemory(
-                        name=access_name, create=True, size=access_size
-                    )
-                    self._sizes_mem = shared_memory.SharedMemory(
-                        name=sizes_name, create=True, size=sizes_size
-                    )
-                    self._usage_mem = shared_memory.SharedMemory(
-                        name=usage_name, create=True, size=usage_size
-                    )
-                    owns_regions = True
-                except FileExistsError:
-                    create = False
-            if not create:
+        created_regions = False
+        if create:
+            try:
                 self._states_mem = shared_memory.SharedMemory(
-                    name=states_name, create=False
+                    name=self._names["states"], create=True, size=state_size
                 )
                 self._access_mem = shared_memory.SharedMemory(
-                    name=access_name, create=False
+                    name=self._names["access"], create=True, size=access_size
                 )
                 self._sizes_mem = shared_memory.SharedMemory(
-                    name=sizes_name, create=False
+                    name=self._names["sizes"], create=True, size=sizes_size
                 )
                 self._usage_mem = shared_memory.SharedMemory(
-                    name=usage_name, create=False
+                    name=self._names["usage"], create=True, size=usage_size
                 )
-        except FileNotFoundError:
-            if create:
-                raise
-            self._attach_shared(create=True)
-            return
+                created_regions = True
+            except FileExistsError:
+                # Name collision: close whatever we opened and attach instead.
+                self._close_partial()
+                create = False
+
+        if not create:
+            self._states_mem = shared_memory.SharedMemory(
+                name=self._names["states"], create=False
+            )
+            self._access_mem = shared_memory.SharedMemory(
+                name=self._names["access"], create=False
+            )
+            self._sizes_mem = shared_memory.SharedMemory(
+                name=self._names["sizes"], create=False
+            )
+            self._usage_mem = shared_memory.SharedMemory(
+                name=self._names["usage"], create=False
+            )
 
         assert self._states_mem is not None
         assert self._access_mem is not None
@@ -289,184 +177,89 @@ class CacheSharedState:
             self._sizes_view[:] = 0
             self._usage_view[:] = 0
 
-        self._owns_regions = owns_regions
+        self._created_regions = created_regions
         self._closed = False
-        # Ensure shared memory regions are released even if close() is never
-        # called.  Pass the resources directly so the callback works after the
-        # parent object has been collected (weakref.ref(self) would be dead).
+        # Finalizer closes local handles only. Unlinking is the manager's
+        # job when the session loses its last owner — see module docstring.
         self._close_finalizer = weakref.finalize(
             self,
             _cleanup_shared_memory_regions,
-            owns_regions,
             [self._states_mem, self._access_mem, self._sizes_mem, self._usage_mem],
         )
 
-    # ------------------------------------------------------------------
-    # Metadata helpers
-    # ------------------------------------------------------------------
-
-    def _load_meta(self) -> dict:
-        with self._meta_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-
-    def _write_meta(self, meta: dict) -> None:
-        tmp_path = self._meta_path.with_suffix(".tmp")
-        payload = json.dumps(meta, sort_keys=True)
-        tmp_path.write_text(payload, encoding="utf-8")
-        tmp_path.replace(self._meta_path)
-
-    def _reload_meta_locked(self, meta: dict) -> None:
-        names = meta.get("names")
-        if isinstance(names, dict) and all(key in names for key in _SHM_KEYS):
-            self._names = dict(names)
-        mapping = meta.get("mapping")
-        if not isinstance(mapping, dict):
-            return
-        datasets: dict[tuple[str, int], CacheEntry] = {}
-        by_index: dict[int, CacheEntry] = {}
-        for dataset, shards in mapping.items():
-            if not isinstance(shards, dict):
+    def _close_partial(self) -> None:
+        """Close any handles already opened during a failed ``_open``."""
+        for attr in ("_states_mem", "_access_mem", "_sizes_mem", "_usage_mem"):
+            mem = getattr(self, attr, None)
+            if mem is None:
                 continue
-            for shard_id, payload in shards.items():
-                if not isinstance(payload, dict):
-                    continue
-                try:
-                    index = int(payload["index"])
-                except Exception:
-                    continue
-                entry = CacheEntry(
-                    dataset=str(dataset),
-                    shard_id=int(shard_id),
-                    raw=str(payload.get("raw", "")),
-                    zip=payload.get("zip"),
-                    index=index,
-                )
-                datasets[(entry.dataset, entry.shard_id)] = entry
-                by_index[index] = entry
-        self._entries = datasets
-        self._entries_by_index = by_index
-        self._sync_next_index_locked(meta)
+            with contextlib.suppress(Exception):
+                mem.close()
+            setattr(self, attr, None)
 
-    def _sync_next_index_locked(self, meta: dict) -> None:
-        # ``next_index`` is persisted so independent processes can allocate
-        # unique indices without coordinating through additional shared-memory
-        # primitives. When we see a newer on-disk value we simply adopt it. This
-        # piggybacks on metadata I/O that is already required during cache
-        # warm-up and therefore does not add extra filesystem cost in the steady
-        # state where lookups hit the in-memory maps.
-        raw_next = meta.get("next_index")
-        if raw_next is None:
+    def close(self) -> None:
+        if self._closed:
             return
+        self._closed = True
+        if self._close_finalizer is not None:
+            self._close_finalizer()
+        self._states_mem = None
+        self._access_mem = None
+        self._sizes_mem = None
+        self._usage_mem = None
+        self._states_view = None
+        self._access_view = None
+        self._sizes_view = None
+        self._usage_view = None
+        self._created_regions = False
 
-        try:
-            next_index = int(raw_next)
-        except Exception:
+    @staticmethod
+    def unlink_by_names(shm_names: Mapping[str, str]) -> None:
+        """Best-effort unlink of SHM segments recorded in *shm_names*.
+
+        Called on stale-session / fingerprint-mismatch reset paths to
+        guarantee the previous session's SHM segments are released before
+        the new session creates fresh ones. Missing segments are silently
+        ignored — this is safe to call on any session-dict payload.
+        """
+        if not isinstance(shm_names, Mapping):
             return
-
-        if next_index < 0:
-            next_index = 0
-        if next_index > self._next_index:
-            self._next_index = next_index
+        for key in _SHM_KEYS:
+            name = shm_names.get(key)
+            if not isinstance(name, str) or not name:
+                continue
+            try:
+                shm = shared_memory.SharedMemory(name=name, create=False)
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+            with contextlib.suppress(Exception):
+                shm.unlink()
+            with contextlib.suppress(Exception):
+                shm.close()
 
     # ------------------------------------------------------------------
-    # Public API used by CacheManager
-    # ------------------------------------------------------------------
-
-    def ensure_entry(self, locator: ShardLocator) -> CacheEntry:
-        key = (locator.dataset, int(locator.shard_id))
-        entry = self._entries.get(key)
-        if entry is not None:
-            self._maybe_update_entry_metadata(entry, locator)
-            return entry
-
-        with self._meta_lock:
-            # NOTE: Disk I/O via ``_load_meta`` only occurs while registering a
-            # shard that is not already known locally. Once an entry has been
-            # created, repeated lookups are served from ``_entries`` without
-            # touching the filesystem, so steady-state cache hits remain fast.
-            meta = self._load_meta()
-            self._sync_next_index_locked(meta)
-            mapping = meta.setdefault("mapping", {})
-            dataset_map = mapping.setdefault(locator.dataset, {})
-            shard_key = str(int(locator.shard_id))
-            payload = dataset_map.get(shard_key)
-            if payload is None:
-                index = self._next_index
-                if index >= self._capacity:
-                    raise IndexError(
-                        f"Cache shard index {index} exceeds capacity "
-                        f"{self._capacity}. The dataset has more unique "
-                        f"shards than the cache can track."
-                    )
-                self._next_index += 1
-                payload = {
-                    "index": index,
-                    "raw": locator.raw.basename,
-                    "zip": locator.zip.basename if locator.zip else None,
-                }
-                dataset_map[shard_key] = payload
-                meta["next_index"] = self._next_index
-                self._write_meta(meta)
-                self._reload_meta_locked(meta)
-            else:
-                self._reload_meta_locked(meta)
-            entry = self._entries.get(key)
-        if entry is None:
-            raise RuntimeError("Failed to register shard in shared cache state")
-        self._maybe_update_entry_metadata(entry, locator)
-        return entry
-
-    def _maybe_update_entry_metadata(
-        self, entry: CacheEntry, locator: ShardLocator
-    ) -> None:
-        raw_name = locator.raw.basename
-        zip_name = locator.zip.basename if locator.zip is not None else None
-        if entry.raw == raw_name and entry.zip == zip_name:
-            return
-        with self._meta_lock:
-            meta = self._load_meta()
-            mapping = meta.setdefault("mapping", {})
-            dataset_map = mapping.setdefault(locator.dataset, {})
-            payload = dataset_map.setdefault(
-                str(int(locator.shard_id)), {"index": entry.index}
-            )
-            changed = False
-            if payload.get("raw") != raw_name:
-                payload["raw"] = raw_name
-                changed = True
-            if payload.get("zip") != zip_name:
-                payload["zip"] = zip_name
-                changed = True
-            if changed:
-                self._write_meta(meta)
-                self._reload_meta_locked(meta)
-
-    def lookup(self, dataset: str, shard_id: int) -> Optional[CacheEntry]:
-        key = (dataset, int(shard_id))
-        entry = self._entries.get(key)
-        if entry is not None:
-            return entry
-        with self._meta_lock:
-            meta = self._load_meta()
-            self._reload_meta_locked(meta)
-        return self._entries.get(key)
-
-    def entry_by_index(self, index: int) -> Optional[CacheEntry]:
-        entry = self._entries_by_index.get(index)
-        if entry is not None:
-            return entry
-        with self._meta_lock:
-            meta = self._load_meta()
-            self._reload_meta_locked(meta)
-        return self._entries_by_index.get(index)
-
-    # ------------------------------------------------------------------
-    # Numeric state helpers (callers must coordinate external locking)
+    # Public accessors
     # ------------------------------------------------------------------
 
     @property
     def capacity(self) -> int:
         return self._capacity
+
+    @property
+    def shm_names(self) -> dict[str, str]:
+        return dict(self._names)
+
+    @property
+    def created_regions(self) -> bool:
+        """Whether this instance originally created the SHM segments.
+
+        Informational only. Unlinking is gated on session ownership, not
+        on creator identity — see the module docstring and the manager's
+        last-owner unlink path in ``_release_session_owner``.
+        """
+        return self._created_regions
 
     @property
     def shard_states(self) -> np.ndarray:
@@ -510,29 +303,8 @@ class CacheSharedState:
     def set_access_time(self, index: int, timestamp_ns: int) -> None:
         self.shard_access_ns[index] = np.uint64(timestamp_ns)
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-
-        # Delegate to the finalizer callback which handles unlink + close.
-        # Calling a weakref.finalize object is idempotent — a second call
-        # (or GC triggering it later) is a harmless no-op.
-        if self._close_finalizer is not None:
-            self._close_finalizer()
-        self._states_mem = None
-        self._access_mem = None
-        self._sizes_mem = None
-        self._usage_mem = None
-        self._states_view = None
-        self._access_view = None
-        self._sizes_view = None
-        self._usage_view = None
-        self._owns_regions = False
-
 
 __all__ = [
-    "CacheEntry",
     "CacheSharedState",
     "_ShardState",
 ]

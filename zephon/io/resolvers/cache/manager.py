@@ -4,6 +4,7 @@ import bz2
 import contextlib
 import errno
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -15,13 +16,18 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Optional, cast
+from typing import BinaryIO, Callable, Mapping, Optional, cast
 
 import numpy as np
 from filelock import BaseFileLock, FileLock
 
+from zephon.io.dataset import Dataset
 from zephon.io.resolvers.base import ShardResolver
-from zephon.io.resolvers.cache.errors import PermanentSourceMissing, ShardNotReady
+from zephon.io.resolvers.cache.errors import (
+    CacheInUseError,
+    PermanentSourceMissing,
+    ShardNotReady,
+)
 from zephon.io.resolvers.cache.shared_state import CacheSharedState, _ShardState
 from zephon.io.resolvers.utils import compute_file_hash
 from zephon.io.storage import StorageBackend
@@ -40,13 +46,15 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 _CACHE_LOCK_FILENAME = ".cache.lock"
+_STATE_DIR_NAME = ".zephon_cache_state"
+_SESSION_FILENAME = "session.json"
+_RESET_LOCK_FILENAME = ".reset.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 Opener = Callable[[Path], BinaryIO]
 
 
 def _close_cache_manager_resources(
-    persist_state: bool,
-    shared: "CacheSharedState",
+    shared: "CacheSharedState | None",
     reset_lock: "BaseFileLock",
     session_path: Path,
     pid: int,
@@ -57,10 +65,10 @@ def _close_cache_manager_resources(
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
     """
-    if not persist_state:
-        with contextlib.suppress(Exception):
-            _release_session_owner(reset_lock, session_path, pid)
-    shared.close()
+    with contextlib.suppress(Exception):
+        _release_session_owner(reset_lock, session_path, pid)
+    if shared is not None:
+        shared.close()
 
 
 def _release_session_owner(
@@ -68,10 +76,18 @@ def _release_session_owner(
     session_path: Path,
     pid: int,
 ) -> None:
-    """Remove *pid* from the session owner file.
+    """Remove *pid* from the session owner list.
 
     Module-level helper so it can be called from a ``weakref.finalize``
     callback (where ``self`` is already dead).
+
+    When removal drops the last live owner, the session's SHM segments are
+    unlinked here but ``session.json`` itself is preserved (with an empty
+    ``owners`` list) so the next manager init can see the fingerprint and
+    route to RESUME via the ``persist_state=True`` path. This is the ONLY
+    place the cache normally unlinks SHM — ``CacheSharedState.close``
+    deliberately leaves segment names alive so peer managers can keep
+    attaching while any owner remains.
     """
     with reset_lock:
         if not session_path.exists():
@@ -89,18 +105,94 @@ def _release_session_owner(
                 entry["instances"] = instances - 1
                 owners[owner_key] = entry
                 session["owners"] = owners
-                tmp = session_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
-                tmp.replace(session_path)
+                _atomic_write_json(session_path, session)
                 return
         owners.pop(owner_key, None)
+        session["owners"] = owners
         if owners:
-            session["owners"] = owners
-            tmp = session_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
-            tmp.replace(session_path)
-        else:
-            session_path.unlink(missing_ok=True)
+            _atomic_write_json(session_path, session)
+            return
+        # Last owner: free the OS-level SHM names promptly so /dev/shm
+        # doesn't carry them between runs. Deliberately KEEP session.json
+        # (with empty owners) so the next manager init can see the
+        # fingerprint and route to RESUME instead of FIRST_INIT, which is
+        # what makes persist_state=True survive process exits. The stored
+        # shm_names become stale here but unlink_by_names is idempotent
+        # on missing segments, so the next init's reset paths remain safe.
+        shm_names = session.get("shm_names")
+        if isinstance(shm_names, dict):
+            CacheSharedState.unlink_by_names(shm_names)
+        _atomic_write_json(session_path, session)
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _diff_session_summary(
+    stored: object, current: list[dict[str, object]]
+) -> list[str]:
+    """Diff two per-dataset summaries for inclusion in ``CacheInUseError``.
+
+    Each entry is ``{name, path, shard_count, total_raw_bytes}``. The
+    diff bullets cover the operationally interesting cases — datasets
+    added or removed, shard count deltas, byte deltas, and path moves —
+    which are the cases the operator can act on without re-running the
+    prior job.
+
+    When ``stored`` isn't a list (legacy ``session.json`` written before
+    this schema landed), a single ``"summary missing"`` line is returned
+    so the caller can report that the structured data wasn't recorded.
+    When the summary is unchanged but the fingerprint still differs, the
+    mismatch is at the per-shard level (raw bytes, hashes, or zip
+    metadata) — those aren't preserved in the summary, so we say so
+    rather than emit an empty diff.
+    """
+    if not isinstance(stored, list):
+        return ["summary missing — reporting hashes only."]
+
+    stored_by_name: dict[str, dict] = {}
+    for entry in stored:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            stored_by_name[entry["name"]] = entry
+    current_by_name: dict[str, dict[str, object]] = {str(d["name"]): d for d in current}
+
+    lines: list[str] = []
+    added = sorted(set(current_by_name) - set(stored_by_name))
+    removed = sorted(set(stored_by_name) - set(current_by_name))
+    common = sorted(set(stored_by_name) & set(current_by_name))
+
+    for name in added:
+        d = current_by_name[name]
+        lines.append(
+            f"  + dataset added: {name!r} "
+            f"(shards={d.get('shard_count')}, "
+            f"raw_bytes={d.get('total_raw_bytes')})"
+        )
+    for name in removed:
+        d = stored_by_name[name]
+        lines.append(
+            f"  - dataset removed: {name!r} "
+            f"(shards={d.get('shard_count')}, "
+            f"raw_bytes={d.get('total_raw_bytes')})"
+        )
+    for name in common:
+        s, c = stored_by_name[name], current_by_name[name]
+        for field in ("path", "shard_count", "total_raw_bytes"):
+            if s.get(field) != c.get(field):
+                lines.append(
+                    f"  ~ dataset {name!r}: "
+                    f"{field} {s.get(field)!r} -> {c.get(field)!r}"
+                )
+    if not lines:
+        lines.append(
+            "per-dataset summary unchanged — fingerprint differs at "
+            "shard level (per-shard bytes, hashes, or zip metadata)."
+        )
+    return lines
 
 
 @dataclass(frozen=True)
@@ -112,14 +204,31 @@ class CacheStats:
 
 
 class CacheManager(ShardResolver):
-    """Resolve shards locally with eviction-aware coordination."""
+    """Resolve shards locally with eviction-aware coordination.
+
+    State layout on disk under ``root``:
+
+    - ``<dataset.name>/<raw_basename>`` — shard data files (one per shard).
+    - ``.locks/<shard_id>.lock`` — per-shard download locks.
+    - ``.cache.lock`` — global state-transition lock.
+    - ``.reset.lock`` — session-init lock (held across wipe + SHM create +
+      reconciliation + session.json write).
+    - ``.zephon_cache_state/session.json`` — handshake file recording
+      fingerprint, SHM segment names, and live owners.
+
+    Dense index mapping ``(dataset.name, shard_id) → slot`` is built
+    in-memory at ``__init__`` from the caller-provided ``locators`` dict.
+    No persistent index mapping lives on disk; recovery uses the
+    fingerprint to decide whether existing files are trustworthy.
+    """
 
     def __init__(
         self,
         root: Path,
         storage: StorageBackend,
         *,
-        num_shards: int,
+        locators: Mapping[tuple[int, int], ShardLocator],
+        datasets: Mapping[int, Dataset],
         limit_bytes: int | None = None,
         keep_zip: bool = False,
         validate_hash: str | None = None,
@@ -141,19 +250,40 @@ class CacheManager(ShardResolver):
         self._max_slack_bytes = int(max_slack_bytes)
 
         self._root.mkdir(parents=True, exist_ok=True)
-        reset_lock_path = self._root / ".reset.lock"
-        self._reset_lock_path = reset_lock_path
-        self._reset_lock = reset_lock = FileLock(str(reset_lock_path))
-        self._session_path = self._root / ".cache.session.json"
+        self._reset_lock_path = self._root / _RESET_LOCK_FILENAME
+        self._reset_lock = FileLock(str(self._reset_lock_path))
+        self._state_dir = self._root / _STATE_DIR_NAME
+        self._session_path = self._state_dir / _SESSION_FILENAME
         self._pid = os.getpid()
-        if not self._persist_state:
-            with reset_lock:
-                self._reset_if_first_owner(reset_lock_path)
-        self._shared = CacheSharedState(self._root, capacity=num_shards)
+
+        # In-memory dense index and per-index locator map (used by resolve/
+        # touch and eviction). Identity map keys by (dataset_name, basename)
+        # for disk-scan reconciliation; covers both raw and zip basenames.
+        (
+            self._index_map,
+            self._locators_by_index,
+            self._identity_to_index,
+        ) = self._build_index_maps(locators, datasets)
+        self._num_shards = len(self._locators_by_index)
+        self._fingerprint, self._summary = self._compute_fingerprint(datasets, locators)
+        self._cacheable_dataset_names: tuple[str, ...] = tuple(
+            sorted({loc.dataset for loc in self._locators_by_index.values()})
+        )
+
+        # Full init (wipe? create SHM? reconcile? register owner?) runs
+        # under _reset_lock so joiner processes cannot observe a partial
+        # session.json. The lock is released only after session.json names
+        # the newly-created SHM and our pid appears in the owners list.
+        self._shared: CacheSharedState | None = None
+        with self._reset_lock:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+            self._run_session_state_machine()
+
+        assert self._shared is not None
         logger.debug(
-            "Initialized cache at %s (capacity=%d shards, limit=%s)",
+            "Initialized cache at %s (num_shards=%d, limit=%s)",
             self._root,
-            self._shared.capacity,
+            self._num_shards,
             f"{self._limit_bytes:,} bytes"
             if self._limit_bytes is not None
             else "unlimited",
@@ -165,14 +295,507 @@ class CacheManager(ShardResolver):
         self._close_finalizer = weakref.finalize(
             self,
             _close_cache_manager_resources,
-            self._persist_state,
             self._shared,
             self._reset_lock,
             self._session_path,
             self._pid,
         )
 
+    # ------------------------------------------------------------------
+    # Dense index map + fingerprint
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_index_maps(
+        locators: Mapping[tuple[int, int], ShardLocator],
+        datasets: Mapping[int, Dataset],
+    ) -> tuple[
+        dict[tuple[str, int], int],
+        dict[int, ShardLocator],
+        dict[tuple[str, str], tuple[int, str]],
+    ]:
+        """Build the three in-memory maps used at runtime.
+
+        Canonical ordering: dataset names sorted, then shard ids within
+        each dataset. Every worker process feeds the same ``datasets`` and
+        ``locators`` in, so every process produces identical indices.
+
+        Dataset names must be unique among cacheable (non-inmem) datasets
+        because the dense map, disk layout (``{root}/{dataset.name}/``),
+        and fingerprint all key by name. Collisions are refused loudly
+        rather than silently overwriting — StaticMixtureWorkSource happens
+        to overwrite duplicates by name on its own, but we do not rely on
+        that and catch the problem at the cache boundary.
+        """
+        by_name: dict[str, list[tuple[int, ShardLocator]]] = {}
+        for (_did, sid), loc in locators.items():
+            by_name.setdefault(loc.dataset, []).append((int(sid), loc))
+
+        # Reject duplicate dataset names. Scope is ALL datasets, not just
+        # cacheable ones: even though in-memory datasets never touch the
+        # cache, an inmem dataset sharing a name with a file-backed one
+        # would make it ambiguous which dataset the cache's `(name, …)`
+        # keys and on-disk `{cache_root}/{name}/` layout refer to from
+        # the caller's perspective. Upstream (StaticMixtureWorkSource)
+        # already overwrites duplicates silently, so we catch it here.
+        names_seen: dict[str, int] = {}
+        for did, ds in datasets.items():
+            prev = names_seen.get(ds.name)
+            if prev is not None and prev != did:
+                raise ValueError(
+                    f"Duplicate dataset name {ds.name!r} in dataset set "
+                    f"(dataset_ids {prev} and {did}). Each dataset — "
+                    f"in-memory or file-backed — must have a unique .name "
+                    f"because the cache layout, dense index, and "
+                    f"fingerprint all key on it."
+                )
+            names_seen[ds.name] = did
+
+        # Only include datasets whose name is in the locators set (this
+        # implicitly excludes in-memory datasets which don't produce
+        # locators, matching collect_cacheable_locators' behavior).
+        cacheable_names = sorted(by_name.keys())
+
+        index_map: dict[tuple[str, int], int] = {}
+        locators_by_index: dict[int, ShardLocator] = {}
+        identity_to_index: dict[tuple[str, str], tuple[int, str]] = {}
+
+        next_idx = 0
+        for name in cacheable_names:
+            shards_for_name = sorted(by_name[name], key=lambda pair: pair[0])
+            for shard_id, loc in shards_for_name:
+                index_map[(name, shard_id)] = next_idx
+                locators_by_index[next_idx] = loc
+                identity_to_index[(name, loc.raw.basename)] = (next_idx, "raw")
+                if loc.zip is not None:
+                    identity_to_index[(name, loc.zip.basename)] = (next_idx, "zip")
+                next_idx += 1
+
+        # Reference datasets to make pyright happy (they're used indirectly
+        # via fingerprint computation elsewhere — here we just validate
+        # that every locator belongs to a known dataset name).
+        known_names = {ds.name for ds in datasets.values()}
+        for name in cacheable_names:
+            if name not in known_names:
+                raise ValueError(f"Locator references unknown dataset name {name!r}")
+
+        return index_map, locators_by_index, identity_to_index
+
+    @staticmethod
+    def _compute_fingerprint(
+        datasets: Mapping[int, Dataset],
+        locators: Mapping[tuple[int, int], ShardLocator],
+    ) -> tuple[str, list[dict[str, object]]]:
+        """SHA-256 fingerprint plus a per-dataset summary.
+
+        The fingerprint is the canonical hash of the
+        ``(dataset, locator)`` set — bytes, hashes, paths included — and
+        remains the authoritative match key. The summary is a small
+        ``{name, path, shard_count, total_raw_bytes}`` list per dataset
+        persisted alongside the hash in ``session.json`` so the
+        HARD_ERROR path can describe *what* changed rather than emit an
+        opaque hex digest. Returns the pair ``(fingerprint, summary)``;
+        the summary is ordered by dataset name.
+        """
+        by_name: dict[str, list[dict]] = {}
+        raw_byte_totals: dict[str, int] = {}
+        for (_did, sid), loc in locators.items():
+            entry = {
+                "shard_id": int(sid),
+                "raw_basename": loc.raw.basename,
+                "raw_bytes": int(loc.raw.bytes),
+                "raw_hashes": (
+                    {k: str(v) for k, v in dict(loc.raw.hashes).items()}
+                    if loc.raw.hashes
+                    else None
+                ),
+                "zip_basename": loc.zip.basename if loc.zip is not None else None,
+                "zip_bytes": int(loc.zip.bytes) if loc.zip is not None else None,
+                "zip_hashes": (
+                    {k: str(v) for k, v in dict(loc.zip.hashes).items()}
+                    if loc.zip is not None and loc.zip.hashes
+                    else None
+                ),
+                "compression": loc.compression,
+            }
+            by_name.setdefault(loc.dataset, []).append(entry)
+            raw_byte_totals[loc.dataset] = raw_byte_totals.get(loc.dataset, 0) + int(
+                loc.raw.bytes
+            )
+
+        ds_by_name = {ds.name: ds for ds in datasets.values()}
+        payload = [
+            {
+                "name": name,
+                "path": ds_by_name[name].path if name in ds_by_name else None,
+                "shards": sorted(by_name[name], key=lambda e: e["shard_id"]),
+            }
+            for name in sorted(by_name.keys())
+        ]
+        text = json.dumps(payload, sort_keys=True, default=str)
+        fingerprint = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        summary: list[dict[str, object]] = [
+            {
+                "name": name,
+                "path": ds_by_name[name].path if name in ds_by_name else None,
+                "shard_count": len(by_name[name]),
+                "total_raw_bytes": int(raw_byte_totals.get(name, 0)),
+            }
+            for name in sorted(by_name.keys())
+        ]
+        return fingerprint, summary
+
+    # ------------------------------------------------------------------
+    # Session state machine
+    # ------------------------------------------------------------------
+
+    def _run_session_state_machine(self) -> None:
+        """Dispatch one of six startup branches under ``_reset_lock``.
+
+        Branches:
+
+        - FIRST_INIT: no ``session.json`` — wipe, create SHM, write session.
+        - JOIN: matching fingerprint + live owners — attach to existing SHM.
+        - HARD_ERROR: fingerprint mismatch + live owners — raise
+          ``CacheInUseError``.
+        - FRESH_RESET: ``persist_state=False`` + stale session — wipe and
+          create fresh SHM.
+        - RESUME: ``persist_state=True`` + matching fingerprint + stale
+          session — preserve files, reconcile LOCAL state from disk.
+        - COLD_RESET: ``persist_state=True`` + fingerprint mismatch + stale
+          session — wipe and create fresh SHM.
+        """
+        session = self._load_session()
+
+        if session is None:
+            # FIRST_INIT: no session file means no prior state we can
+            # verify. Wipe regardless of persist_state because unverified
+            # files on disk could be from a crashed run with different
+            # content — reconciliation without a fingerprint is unsafe.
+            self._wipe_cache_root_locked()
+            self._create_fresh_session_locked()
+            return
+
+        live_owners = self._prune_dead_owners(session.get("owners", {}))
+        existing_fp = str(session.get("fingerprint", ""))
+        fp_match = existing_fp == self._fingerprint
+
+        if live_owners:
+            if fp_match:
+                try:
+                    self._join_session_locked(session, live_owners)
+                    return
+                except FileNotFoundError:
+                    # session.json claims live owners but the SHM names are
+                    # gone from /dev/shm. The old meta.json implementation
+                    # silently recovered via an attach→create fallback; we
+                    # reproduce that resilience here by downgrading the
+                    # session to "stale" and continuing through the
+                    # no-live-owners branches below. Plausible causes:
+                    # - a pid-reuse collision where the recorded owner pid
+                    #   refers to an unrelated process;
+                    # - OS-level /dev/shm cleanup (containers, reboots);
+                    # - a crashed creator that unlinked before peers detached.
+                    logger.warning(
+                        "session.json at %s names live owners but SHM is "
+                        "missing; treating session as stale and rebuilding.",
+                        self._session_path,
+                    )
+                    live_owners = {}
+            else:
+                stored_summary = session.get("summary")
+                diff_lines = _diff_session_summary(stored_summary, self._summary)
+                raise CacheInUseError(
+                    str(self._root),
+                    existing_fp,
+                    current_fingerprint=self._fingerprint,
+                    diff_lines=diff_lines,
+                )
+
+        # No live owners — session is stale, safe to reset or resume.
+        old_shm_names = session.get("shm_names")
+        if isinstance(old_shm_names, dict):
+            CacheSharedState.unlink_by_names(old_shm_names)
+
+        if self._persist_state and fp_match:
+            # RESUME: preserve existing files, reconcile LOCAL state from disk.
+            self._shared = CacheSharedState(capacity=self._num_shards, shm_names=None)
+            self._reconcile_local_files_locked()
+            self._write_new_session_record_locked()
+            return
+
+        # FRESH_RESET (persist_state=False) or COLD_RESET (fingerprint mismatch).
+        self._wipe_cache_root_locked()
+        self._create_fresh_session_locked()
+
+    def _create_fresh_session_locked(self) -> None:
+        self._shared = CacheSharedState(capacity=self._num_shards, shm_names=None)
+        self._write_new_session_record_locked()
+
+    def _write_new_session_record_locked(self) -> None:
+        assert self._shared is not None
+        owner_entry: dict[str, object] = {
+            "instances": 1,
+            "started_ns": time.time_ns(),
+        }
+        proc_start = self._proc_start_time(self._pid)
+        if proc_start is not None:
+            owner_entry["proc_start_time"] = int(proc_start)
+        session = {
+            "session_id": str(uuid.uuid4()),
+            "session_started_ns": time.time_ns(),
+            "fingerprint": self._fingerprint,
+            "summary": self._summary,
+            "capacity": int(self._num_shards),
+            "shm_names": self._shared.shm_names,
+            "owners": {str(self._pid): owner_entry},
+        }
+        _atomic_write_json(self._session_path, session)
+
+    def _join_session_locked(self, session: dict, live_owners: dict) -> None:
+        shm_names_raw = session.get("shm_names")
+        if not isinstance(shm_names_raw, dict):
+            raise RuntimeError(
+                f"session.json at {self._session_path} missing shm_names"
+            )
+        shm_names = {str(k): str(v) for k, v in shm_names_raw.items()}
+        capacity = int(session.get("capacity", self._num_shards))
+        self._shared = CacheSharedState(capacity=capacity, shm_names=shm_names)
+        owners = dict(live_owners)
+        key = str(self._pid)
+        entry = owners.get(key)
+        if not isinstance(entry, dict):
+            entry = {"started_ns": time.time_ns()}
+        entry.setdefault("started_ns", time.time_ns())
+        proc_start = self._proc_start_time(self._pid)
+        if proc_start is not None:
+            entry["proc_start_time"] = int(proc_start)
+        entry["instances"] = int(entry.get("instances", 0)) + 1
+        owners[key] = entry
+        session["owners"] = owners
+        # Backfill summary for sessions written before the schema landed.
+        # Safe because JOIN implies fingerprint match, so our local summary
+        # is identical to what the original creator would have written.
+        session.setdefault("summary", self._summary)
+        _atomic_write_json(self._session_path, session)
+
+    def _load_session(self) -> Optional[dict]:
+        if not self._session_path.exists():
+            return None
+        try:
+            return json.loads(self._session_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _prune_dead_owners(self, owners: object) -> dict:
+        alive: dict[str, dict] = {}
+        if not isinstance(owners, dict):
+            return alive
+        for pid_str, meta in owners.items():
+            try:
+                pid = int(pid_str)
+            except Exception:
+                continue
+            entry = meta if isinstance(meta, dict) else {}
+            # Compare procfs start-time when the entry recorded one. If the
+            # OS recycled the pid since registration, the new process has a
+            # different start-time and we treat the owner as dead — see
+            # ``_pid_alive``. Legacy entries without ``proc_start_time`` fall
+            # back to the bare ``os.kill(pid, 0)`` check.
+            recorded_start = entry.get("proc_start_time")
+            expected_start = (
+                int(recorded_start) if isinstance(recorded_start, int) else None
+            )
+            if self._pid_alive(pid, expected_start_time=expected_start):
+                if int(entry.get("instances", 0)) <= 0:
+                    entry["instances"] = 1
+                entry.setdefault("started_ns", time.time_ns())
+                alive[str(pid_str)] = entry
+        return alive
+
+    @staticmethod
+    def _parse_proc_stat_starttime(data: bytes) -> int | None:
+        """Extract field 22 (``starttime``) from ``/proc/<pid>/stat`` bytes.
+
+        ``comm`` (field 2) is rendered in parentheses and may itself
+        contain spaces or parens, so we split *after* the rightmost
+        ``)`` to land in the whitespace-delimited tail starting at
+        field 3 (``state``). Field 22 is then index 19 in that tail.
+        Returns ``None`` if the buffer doesn't conform to the expected
+        layout, which is treated as "unknown" by the caller.
+        """
+        rparen = data.rfind(b")")
+        if rparen == -1:
+            return None
+        fields = data[rparen + 2 :].split()
+        if len(fields) < 20:
+            return None
+        try:
+            return int(fields[19])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _proc_start_time(pid: int) -> int | None:
+        """Return the process start-time (field 22 of ``/proc/<pid>/stat``).
+
+        Stable for the life of a pid; changes when the OS reuses a pid
+        for an unrelated process, which makes it the right signal for
+        detecting pid recycling. Returns ``None`` on platforms without
+        ``/proc`` (macOS, Windows), on permission errors, or if the pid
+        no longer exists — in those cases callers fall back to the bare
+        liveness check.
+        """
+        if pid <= 0:
+            return None
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                data = f.read()
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            return None
+        return CacheManager._parse_proc_stat_starttime(data)
+
+    @staticmethod
+    def _pid_alive(pid: int, *, expected_start_time: int | None = None) -> bool:
+        """Return True if *pid* still refers to the same process we recorded.
+
+        The base check is ``os.kill(pid, 0)`` (portable). When
+        ``expected_start_time`` is supplied AND we can read procfs for
+        the live process, we additionally require the recorded and
+        current start-times match. This catches pid recycling: process X
+        died, the kernel reused its pid for unrelated process Y, our
+        recorded ``proc_start_time`` mismatches Y's, so Y is correctly
+        treated as a ghost owner instead of pinning the cache forever.
+
+        On platforms without procfs the start-time check degrades to a
+        no-op and only the kill check applies. We also defer to "alive"
+        rather than "dead" when procfs is unreadable for a pid that
+        ``os.kill`` says exists (e.g. EPERM on a foreign-uid process),
+        because falsely declaring an active session dead is worse than
+        the rare missed detection.
+        """
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError as exc:
+            # ESRCH: process does not exist; EPERM: process exists but not ours
+            if exc.errno == errno.ESRCH:
+                return False
+            if exc.errno == errno.EPERM:
+                return True
+            return False
+        if expected_start_time is None:
+            return True
+        current_start = CacheManager._proc_start_time(pid)
+        if current_start is None:
+            return True
+        return int(current_start) == int(expected_start_time)
+
+    def _wipe_cache_root_locked(self) -> None:
+        """Remove everything under ``root`` except the lock files.
+
+        Must be called under ``_reset_lock``. Preserves ``.reset.lock`` so
+        the lock itself stays valid through the wipe.
+        """
+        preserve = {self._reset_lock_path, self._root / _CACHE_LOCK_FILENAME}
+        for child in list(self._root.iterdir()):
+            if child in preserve:
+                continue
+            try:
+                if child.is_file() or child.is_symlink():
+                    child.unlink(missing_ok=True)
+                else:
+                    shutil.rmtree(child, ignore_errors=True)
+            except Exception:
+                logger.warning("Failed to remove %s during cache reset", child)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Disk-scan reconciliation
+    # ------------------------------------------------------------------
+
+    def _reconcile_local_files_locked(self) -> None:
+        """Scan the cache root and mark existing files as LOCAL.
+
+        Invoked only on the RESUME branch (fingerprint matched, no live
+        owners). Aggregates raw/zip presence per shard index and marks
+        LOCAL only when the raw file exists — zip-only shards remain
+        REMOTE to avoid materialising a new state.
+        """
+        assert self._shared is not None
+        raw_present: dict[int, bool] = {}
+        zip_present: dict[int, bool] = {}
+        raw_bytes: dict[int, int] = {}
+        zip_bytes: dict[int, int] = {}
+
+        skip_dirs = {".locks", _STATE_DIR_NAME}
+        skip_suffixes = (".tmp", ".part")
+
+        for dataset_name in self._cacheable_dataset_names:
+            ds_dir = self._root / dataset_name
+            if not ds_dir.is_dir():
+                continue
+            for entry in ds_dir.iterdir():
+                if entry.is_dir():
+                    if entry.name in skip_dirs:
+                        continue
+                    continue  # unexpected nested dir — ignore
+                if not entry.is_file():
+                    continue
+                name = entry.name
+                if name.endswith(skip_suffixes):
+                    continue
+                key = (dataset_name, name)
+                idx_role = self._identity_to_index.get(key)
+                if idx_role is None:
+                    # Orphan file from a prior run or unknown content.
+                    continue
+                idx, role = idx_role
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    continue
+                if role == "raw":
+                    raw_present[idx] = True
+                    raw_bytes[idx] = raw_bytes.get(idx, 0) + int(size)
+                elif role == "zip":
+                    zip_present[idx] = True
+                    zip_bytes[idx] = zip_bytes.get(idx, 0) + int(size)
+
+        states = self._shared.shard_states
+        sizes = self._shared.shard_sizes
+        access = self._shared.shard_access_ns
+        now_ns = time.time_ns()
+        total_usage = 0
+        for idx, has_raw in raw_present.items():
+            if not has_raw:
+                continue
+            size = raw_bytes.get(idx, 0)
+            if zip_present.get(idx, False):
+                if self._keep_zip:
+                    size += zip_bytes.get(idx, 0)
+                else:
+                    # Delete orphan zip — we only keep what the current run would keep.
+                    locator = self._locators_by_index.get(idx)
+                    if locator is not None and locator.zip is not None:
+                        zip_file = self._root / locator.dataset / locator.zip.basename
+                        with contextlib.suppress(Exception):
+                            zip_file.unlink(missing_ok=True)
+            states[idx] = _ShardState.LOCAL
+            sizes[idx] = size
+            access[idx] = np.uint64(now_ns)
+            total_usage += size
+        self._shared.set_cache_usage(total_usage)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def stats(self) -> CacheStats:
+        assert self._shared is not None
         with self._cache_lock:
             return CacheStats(
                 bytes_used=self._shared.get_cache_usage(),
@@ -181,26 +804,35 @@ class CacheManager(ShardResolver):
 
     def close(self) -> None:
         # Delegate to the finalizer which handles session owner release +
-        # shared state cleanup.  Calling it is idempotent — a second call
+        # shared state cleanup. Calling it is idempotent — a second call
         # (or GC triggering it later) is a harmless no-op.
         self._close_finalizer()
 
     def touch(self, locator: ShardLocator) -> None:
         """Record a shard access without taking the global lock."""
-        entry = self._shared.lookup(locator.dataset, int(locator.shard_id))
-        if entry is None:
+        index = self._index_for(locator)
+        if index is None:
             return
-        if _ShardState(self._shared.shard_states[entry.index]) == _ShardState.LOCAL:
-            self._shared.set_access_time(entry.index, time.time_ns())
+        assert self._shared is not None
+        if _ShardState(self._shared.shard_states[index]) == _ShardState.LOCAL:
+            self._shared.set_access_time(index, time.time_ns())
 
     def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
         """Return a local reference, downloading and evicting as required."""
-        entry = self._shared.ensure_entry(locator)
-        dataset_root = self._root / entry.dataset
+        assert self._shared is not None
+        index = self._index_for(locator)
+        if index is None:
+            raise KeyError(
+                f"Shard not registered with cache: dataset={locator.dataset} "
+                f"shard={locator.shard_id}. The cache manager must be built with "
+                f"locators covering every shard that resolve() is called for."
+            )
+
+        dataset_root = self._root / locator.dataset
         dataset_root.mkdir(parents=True, exist_ok=True)
 
-        raw_path = dataset_root / entry.raw
-        zip_path = dataset_root / entry.zip if entry.zip else None
+        raw_path = dataset_root / locator.raw.basename
+        zip_path = dataset_root / locator.zip.basename if locator.zip else None
         required = self._required_bytes(locator)
 
         shard_lock = self._shard_lock(dataset_root, locator.shard_id)
@@ -208,23 +840,23 @@ class CacheManager(ShardResolver):
         while True:
             wait_only = False
             with self._cache_lock:
-                state_value = _ShardState(self._shared.shard_states[entry.index])
+                state_value = _ShardState(self._shared.shard_states[index])
                 if state_value == _ShardState.LOCAL:
                     if raw_path.is_file():
-                        self._shared.set_access_time(entry.index, time.time_ns())
+                        self._shared.set_access_time(index, time.time_ns())
                         return self._build_ref(
                             raw_path, zip_path, locator, cache_hit=True
                         )
-                    self._mark_remote_locked(entry.index)
+                    self._mark_remote_locked(index)
                     continue
 
                 if state_value in (_ShardState.INVALID, _ShardState.REMOTE):
-                    current_size = int(self._shared.shard_sizes[entry.index])
+                    current_size = int(self._shared.shard_sizes[index])
                     additional = max(0, required - current_size)
                     if self._limit_bytes is not None:
-                        self._ensure_capacity_locked(additional, skip_index=entry.index)
-                    self._shared.shard_states[entry.index] = _ShardState.PREPARING
-                    self._shared.set_access_time(entry.index, time.time_ns())
+                        self._ensure_capacity_locked(additional, skip_index=index)
+                    self._shared.shard_states[index] = _ShardState.PREPARING
+                    self._shared.set_access_time(index, time.time_ns())
                     break
 
                 if state_value == _ShardState.PREPARING:
@@ -250,7 +882,7 @@ class CacheManager(ShardResolver):
                     part_path.unlink()
                 if not success:
                     with self._cache_lock:
-                        self._mark_remote_locked(entry.index)
+                        self._mark_remote_locked(index)
 
         entry_size = raw_path.stat().st_size
         actual_zip: Optional[Path] = None
@@ -261,13 +893,13 @@ class CacheManager(ShardResolver):
             else:
                 zip_path.unlink(missing_ok=True)
         with self._cache_lock:
-            old_size = int(self._shared.shard_sizes[entry.index])
+            old_size = int(self._shared.shard_sizes[index])
             delta = entry_size - old_size
             if delta:
                 self._shared.add_cache_usage(delta)
-            self._shared.shard_sizes[entry.index] = entry_size
-            self._shared.shard_states[entry.index] = _ShardState.LOCAL
-            self._shared.set_access_time(entry.index, time.time_ns())
+            self._shared.shard_sizes[index] = entry_size
+            self._shared.shard_states[index] = _ShardState.LOCAL
+            self._shared.set_access_time(index, time.time_ns())
 
         return self._build_ref(raw_path, actual_zip, locator, cache_hit=False)
 
@@ -275,7 +907,11 @@ class CacheManager(ShardResolver):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _index_for(self, locator: ShardLocator) -> Optional[int]:
+        return self._index_map.get((locator.dataset, int(locator.shard_id)))
+
     def _mark_remote_locked(self, index: int) -> None:
+        assert self._shared is not None
         size = int(self._shared.shard_sizes[index])
         if size:
             self._shared.add_cache_usage(-size)
@@ -284,6 +920,7 @@ class CacheManager(ShardResolver):
         self._shared.shard_access_ns[index] = 0
 
     def _ensure_capacity_locked(self, additional: int, *, skip_index: int) -> None:
+        assert self._shared is not None
         if self._limit_bytes is None or additional <= 0:
             return
         if self._limit_bytes < additional:
@@ -297,6 +934,7 @@ class CacheManager(ShardResolver):
             self._evict_index_locked(victim)
 
     def _select_coldest_index_locked(self, skip_index: int) -> Optional[int]:
+        assert self._shared is not None
         states = self._shared.shard_states
         access_times = self._shared.shard_access_ns
         mask = states == _ShardState.LOCAL
@@ -309,11 +947,11 @@ class CacheManager(ShardResolver):
         return int(np.argmin(candidates))
 
     def _evict_index_locked(self, index: int) -> None:
-        entry = self._shared.entry_by_index(index)
-        if entry is not None:
-            dataset_root = self._root / entry.dataset
-            raw_path = dataset_root / entry.raw
-            zip_path = dataset_root / entry.zip if entry.zip else None
+        locator = self._locators_by_index.get(index)
+        if locator is not None:
+            dataset_root = self._root / locator.dataset
+            raw_path = dataset_root / locator.raw.basename
+            zip_path = dataset_root / locator.zip.basename if locator.zip else None
             raw_path.unlink(missing_ok=True)
             if zip_path is not None:
                 zip_path.unlink(missing_ok=True)
@@ -473,116 +1111,6 @@ class CacheManager(ShardResolver):
         if self._storage.exists(src):
             return
         raise PermanentSourceMissing(f"Source missing: {src}")
-
-    def _reset_cache_root(self, lock_path: Path) -> None:
-        for child in list(self._root.iterdir()):
-            if child == lock_path:
-                continue
-            if child.is_file() or child.is_symlink():
-                child.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(child, ignore_errors=True)
-        self._root.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Session coordination helpers
-    # ------------------------------------------------------------------
-
-    def _reset_if_first_owner(self, lock_path: Path) -> None:
-        """Ensure only the first live owner resets the cache.
-
-        Because ``persist_state`` is ``False``, managers are expected to wipe the
-        cache directory when starting fresh. In a multi-process setup that shares
-        the same cache root, blindly resetting would cause one process to delete
-        data that another is actively preparing. To avoid data loss while still
-        guaranteeing a clean slate when *nobody* is using the cache, we maintain
-        a small session descriptor file recording which process IDs currently own
-        the cache. Initialization proceeds as follows:
-
-        1. Read the descriptor (if present) and drop owners whose processes are no
-           longer alive. Crashes and unclean exits are therefore handled when the
-           *next* manager starts rather than requiring explicit shutdown hooks.
-        2. If no live owners remain, reset the cache directory and start a brand
-           new session. Otherwise we simply join the existing session.
-        3. Register the current PID as an owner (tracking how many managers this
-           PID currently has open) and persist the descriptor.
-
-        This logic ensures that the cache is wiped exactly once at the beginning
-        of a session and that concurrent managers never stomp on each other's
-        data. Shutdown is best-effort: :meth:`close` removes the PID from the
-        descriptor, decrementing the per-PID reference count. Even if shutdown
-        fails, the next initializer will notice the stale PID and clean things
-        up before deciding whether to reset.
-        """
-        session = self._load_session()
-        owners = self._prune_dead_owners(session.get("owners", {}))
-        if not owners:
-            self._reset_cache_root(lock_path)
-            session = {
-                "session_id": str(uuid.uuid4()),
-                "session_started_ns": time.time_ns(),
-                "owners": {},
-            }
-        else:
-            session.setdefault("session_id", str(uuid.uuid4()))
-            session.setdefault("session_started_ns", time.time_ns())
-            session["owners"] = owners
-
-        owners = session["owners"]
-        owner_key = str(self._pid)
-        owner_entry = owners.get(owner_key)
-        if not isinstance(owner_entry, dict):
-            owner_entry = {}
-        owner_entry.setdefault("started_ns", time.time_ns())
-        instances = int(owner_entry.get("instances", 0)) + 1
-        owner_entry["instances"] = instances
-        owners[owner_key] = owner_entry
-        session["owners"] = owners
-        self._write_session(session)
-
-    def _load_session(self) -> dict:
-        if not self._session_path.exists():
-            return {}
-        try:
-            return json.loads(self._session_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _write_session(self, payload: dict) -> None:
-        tmp = self._session_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        tmp.replace(self._session_path)
-
-    def _prune_dead_owners(self, owners: dict) -> dict:
-        alive: dict[str, dict] = {}
-        for pid_str, meta in owners.items():
-            try:
-                pid = int(pid_str)
-            except Exception:
-                continue
-            if self._pid_alive(pid):
-                entry = meta if isinstance(meta, dict) else {}
-                if int(entry.get("instances", 0)) <= 0:
-                    entry["instances"] = 1
-                entry.setdefault("started_ns", time.time_ns())
-                alive[pid_str] = entry
-        return alive
-
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-        except OSError as exc:
-            # ESRCH: process does not exist; EPERM: process exists but not ours
-            if exc.errno == errno.ESRCH:
-                return False
-            if exc.errno == errno.EPERM:
-                return True
-            return False
-        else:
-            return True
 
 
 __all__ = [

@@ -2,7 +2,7 @@
 
 from .base import ShardResolver
 from .cache import (
-    CacheEntry,
+    CacheInUseError,
     CacheManager,
     CacheSharedState,
     CacheStats,
@@ -13,7 +13,7 @@ from .cache import (
 from .direct import DirectResolver
 
 __all__ = [
-    "CacheEntry",
+    "CacheInUseError",
     "CacheManager",
     "CacheSharedState",
     "CacheStats",
