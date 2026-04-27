@@ -3,6 +3,8 @@
 
 """Shard prefetching operator that warms the local cache ahead of consumption."""
 
+import sys
+import traceback
 from typing import Any, Callable
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
@@ -14,6 +16,7 @@ from zephon.io.resolvers.base import ShardResolver
 from zephon.io.stores.multi import build_resolver_with_locators
 from zephon.io.types import ShardLocator
 from zephon.observability.stats import PrefetchTimingDelta
+from zephon.utils.rank import rank_ctx
 
 
 class PrefetchOp(DefaultSetup):
@@ -176,8 +179,20 @@ class PrefetchOp(DefaultSetup):
             # CacheManager handles concurrent calls and deduplication
             self._resolver.resolve(locator, blocking=True)
             return True
-        except Exception:
-            # Prefetch failures will be retried by FetchOp when needed
+        except Exception as exc:
+            # Prefetch failures are non-fatal — FetchOp will retry the shard
+            # on its own path.  Surface them anyway so underlying issues
+            # (access/credentials, rate limits, missing keys) aren't masked
+            # by silent retries.
+            tb = traceback.format_exc().rstrip()
+            print(
+                f"[zephon] PrefetchOp: non-fatal shard prefetch failed "
+                f"(FetchOp will retry) dataset_id={dataset_id} "
+                f"shard_id={shard_id} err_type={type(exc).__name__} "
+                f"err={exc!s} {rank_ctx()}\n{tb}",
+                file=sys.stderr,
+                flush=True,
+            )
             return False
 
 
