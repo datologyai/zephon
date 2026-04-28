@@ -50,6 +50,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import queue as _queue_mod
 import signal
+import sys
+import threading
 import time
 import traceback
 import warnings
@@ -65,6 +67,8 @@ from zephon.core.notify import (
     _extract_notify_args,
     is_sentinel,
 )
+from zephon.utils.fault_handling import setup_faulthandler
+from zephon.utils.rank import rank_ctx
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -120,6 +124,8 @@ def _mtp_worker(
     """
     # Ignore SIGINT in the subprocess — let the main process handle Ctrl-C
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    setup_faulthandler()
 
     # Handle SIGTERM gracefully: raise SystemExit so the finally block
     # runs engine.close() (clean runner shutdown).  Without this the
@@ -378,6 +384,42 @@ class MTPPipeline:
             exitpriority=10,
         )
 
+        # Reports unexpected subprocess death even when the consumer
+        # isn't iterating (e.g. training is busy on the GPU); the
+        # ``is_alive()`` check in ``__iter__`` only runs while the
+        # consumer is blocked on ``data_q``.
+        self._watchdog_stop = threading.Event()
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop,
+            name="zephon-mtp-watchdog",
+            daemon=True,
+        )
+        self._watchdog.start()
+
+    def _watchdog_loop(self) -> None:
+        """Poll the subprocess and shout to stderr on unexpected death."""
+        while not self._watchdog_stop.wait(timeout=5.0):
+            if self._closed or self._exhausted or sys.is_finalizing():
+                return
+            if not self._process.is_alive():
+                exitcode = self._process.exitcode
+                print(
+                    "\n"
+                    + "!" * 78
+                    + "\n"
+                    + f"[zephon] MTP subprocess (sub_pid={self._process.pid}) "
+                    + f"DIED UNEXPECTEDLY with exit code {exitcode}. "
+                    + f"({rank_ctx()})\n"
+                    + "         The main process is still running; subsequent "
+                    + "iteration will raise RuntimeError.\n"
+                    + "         Common causes: OOM (exit=-9/-6), segfault "
+                    + "(exit=-11), unhandled exception inside the pipeline.\n"
+                    + "!" * 78,
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+
     @staticmethod
     def _static_close(
         process: mp.Process,
@@ -533,5 +575,6 @@ class MTPPipeline:
         if self._closed:
             return
         self._closed = True
+        self._watchdog_stop.set()
         self._finalizer.cancel()
         _shutdown_process(self._process, self._main_conn, self._data_q, self._exhausted)

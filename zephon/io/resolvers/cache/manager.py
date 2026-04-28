@@ -20,6 +20,7 @@ from typing import BinaryIO, Callable, Mapping, Optional, cast
 
 import numpy as np
 from filelock import BaseFileLock, FileLock
+from filelock import Timeout as FileLockTimeout
 
 from zephon.io.dataset import Dataset
 from zephon.io.resolvers.base import ShardResolver
@@ -53,11 +54,93 @@ _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
 Opener = Callable[[Path], BinaryIO]
 
 
+def _parse_proc_stat_starttime(data: bytes) -> int | None:
+    """Extract field 22 (``starttime``) from ``/proc/<pid>/stat`` bytes.
+
+    ``comm`` (field 2) is rendered in parentheses and may itself contain
+    spaces or parens, so we split *after* the rightmost ``)`` to land
+    in the whitespace-delimited tail starting at field 3 (``state``).
+    Field 22 is then index 19 in that tail. Returns ``None`` if the
+    buffer doesn't conform to the expected layout, which is treated as
+    "unknown" by the caller.
+    """
+    rparen = data.rfind(b")")
+    if rparen == -1:
+        return None
+    fields = data[rparen + 2 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _process_start_time_ns(pid: int) -> int | None:
+    """Return *pid*'s OS-level start time in ns, or ``None`` if unknown.
+
+    Used with ``os.kill(pid, 0)`` to distinguish a still-live owner from
+    a recycled PID.  Linux reads ``/proc/<pid>/stat``; macOS/BSD falls
+    back to ``psutil`` when available.
+    """
+    if pid <= 0:
+        return None
+    # Linux fast path: /proc/<pid>/stat
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+        ticks = _parse_proc_stat_starttime(data)
+        if ticks is not None:
+            tck = os.sysconf("SC_CLK_TCK")
+            return int(ticks * 1_000_000_000 / tck)
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    # Non-Linux fallback.
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        return int(psutil.Process(pid).create_time() * 1_000_000_000)
+    except Exception:
+        return None
+
+
+def _make_owner_key(pid: int, start_time_ns: int | None) -> str:
+    """Build the compound owner key used in ``session.json``.
+
+    Format is ``f"{pid}-{start_time_ns}"`` so PID recycling produces a
+    different key; falls back to ``str(pid)`` when start-time is
+    unavailable (non-Linux without psutil).
+    """
+    if start_time_ns is None:
+        return str(pid)
+    return f"{pid}-{start_time_ns}"
+
+
+def _parse_owner_key(key: str) -> tuple[int, int | None]:
+    """Parse ``f"{pid}-{start_time_ns}"`` back into its components.
+
+    Accepts the legacy ``str(pid)`` form for backwards-compatible reads
+    of pre-upgrade session files; returns ``(pid, None)`` in that case
+    so the caller treats missing start-time as "can't verify" rather
+    than "PID recycled".
+    """
+    if "-" in key:
+        pid_str, _, start_str = key.partition("-")
+        try:
+            return int(pid_str), int(start_str)
+        except ValueError:
+            pass
+    try:
+        return int(key), None
+    except ValueError:
+        return -1, None
+
+
 def _close_cache_manager_resources(
     shared: "CacheSharedState | None",
     reset_lock: "BaseFileLock",
     session_path: Path,
-    pid: int,
+    owner_key: str,
 ) -> None:
     """Release all resources owned by a ``CacheManager``.
 
@@ -66,7 +149,7 @@ def _close_cache_manager_resources(
     ``CacheManager`` is already being garbage-collected.
     """
     with contextlib.suppress(Exception):
-        _release_session_owner(reset_lock, session_path, pid)
+        _release_session_owner(reset_lock, session_path, owner_key)
     if shared is not None:
         shared.close()
 
@@ -74,20 +157,22 @@ def _close_cache_manager_resources(
 def _release_session_owner(
     reset_lock: "BaseFileLock",
     session_path: Path,
-    pid: int,
+    owner_key: str,
 ) -> None:
-    """Remove *pid* from the session owner list.
+    """Remove *owner_key* from the session owner list.
 
     Module-level helper so it can be called from a ``weakref.finalize``
-    callback (where ``self`` is already dead).
+    callback (where ``self`` is already dead). Owner key format is
+    ``f"{pid}-{start_time_ns}"`` (or legacy ``str(pid)`` for sessions
+    written by older versions).
 
-    When removal drops the last live owner, the session's SHM segments are
-    unlinked here but ``session.json`` itself is preserved (with an empty
-    ``owners`` list) so the next manager init can see the fingerprint and
-    route to RESUME via the ``persist_state=True`` path. This is the ONLY
-    place the cache normally unlinks SHM — ``CacheSharedState.close``
-    deliberately leaves segment names alive so peer managers can keep
-    attaching while any owner remains.
+    When removal drops the last live owner, the session's SHM segments
+    are unlinked here but ``session.json`` itself is preserved (with an
+    empty ``owners`` list) so the next manager init can see the
+    fingerprint and route to RESUME via the ``persist_state=True``
+    path. This is the ONLY place the cache normally unlinks SHM —
+    ``CacheSharedState.close`` deliberately leaves segment names alive
+    so peer managers can keep attaching while any owner remains.
     """
     with reset_lock:
         if not session_path.exists():
@@ -97,7 +182,6 @@ def _release_session_owner(
         except Exception:
             return
         owners = session.get("owners", {})
-        owner_key = str(pid)
         entry = owners.get(owner_key)
         if isinstance(entry, dict):
             instances = int(entry.get("instances", 1))
@@ -255,6 +339,11 @@ class CacheManager(ShardResolver):
         self._state_dir = self._root / _STATE_DIR_NAME
         self._session_path = self._state_dir / _SESSION_FILENAME
         self._pid = os.getpid()
+        # Capture our OS-level start time now so the session entry encodes
+        # ``(pid, start_time_ns)``. Prevents stale entries from masquerading
+        # as live when a PID is recycled between a crash and the next init.
+        self._start_time_ns = _process_start_time_ns(self._pid)
+        self._owner_key = _make_owner_key(self._pid, self._start_time_ns)
 
         # In-memory dense index and per-index locator map (used by resolve/
         # touch and eviction). Identity map keys by (dataset_name, basename)
@@ -298,7 +387,7 @@ class CacheManager(ShardResolver):
             self._shared,
             self._reset_lock,
             self._session_path,
-            self._pid,
+            self._owner_key,
         )
 
     # ------------------------------------------------------------------
@@ -539,9 +628,8 @@ class CacheManager(ShardResolver):
             "instances": 1,
             "started_ns": time.time_ns(),
         }
-        proc_start = self._proc_start_time(self._pid)
-        if proc_start is not None:
-            owner_entry["proc_start_time"] = int(proc_start)
+        if self._start_time_ns is not None:
+            owner_entry["process_start_ns"] = int(self._start_time_ns)
         session = {
             "session_id": str(uuid.uuid4()),
             "session_started_ns": time.time_ns(),
@@ -549,7 +637,7 @@ class CacheManager(ShardResolver):
             "summary": self._summary,
             "capacity": int(self._num_shards),
             "shm_names": self._shared.shm_names,
-            "owners": {str(self._pid): owner_entry},
+            "owners": {self._owner_key: owner_entry},
         }
         _atomic_write_json(self._session_path, session)
 
@@ -563,16 +651,14 @@ class CacheManager(ShardResolver):
         capacity = int(session.get("capacity", self._num_shards))
         self._shared = CacheSharedState(capacity=capacity, shm_names=shm_names)
         owners = dict(live_owners)
-        key = str(self._pid)
-        entry = owners.get(key)
+        entry = owners.get(self._owner_key)
         if not isinstance(entry, dict):
             entry = {"started_ns": time.time_ns()}
         entry.setdefault("started_ns", time.time_ns())
-        proc_start = self._proc_start_time(self._pid)
-        if proc_start is not None:
-            entry["proc_start_time"] = int(proc_start)
+        if self._start_time_ns is not None:
+            entry["process_start_ns"] = int(self._start_time_ns)
         entry["instances"] = int(entry.get("instances", 0)) + 1
-        owners[key] = entry
+        owners[self._owner_key] = entry
         session["owners"] = owners
         # Backfill summary for sessions written before the schema landed.
         # Safe because JOIN implies fingerprint match, so our local summary
@@ -589,91 +675,72 @@ class CacheManager(ShardResolver):
             return None
 
     def _prune_dead_owners(self, owners: object) -> dict:
+        """Drop owners whose process is gone or whose pid has been recycled.
+
+        Defense-in-depth: each owner key is ``f"{pid}-{start_time_ns}"``
+        (compound), AND the entry value carries ``process_start_ns``.
+        Both encode the same identity; we cross-check them against the
+        live process's procfs start-time so a stale entry that survived
+        a pid recycle is identified as dead from either signal alone.
+        Legacy single-pid keys (and entries without
+        ``process_start_ns``) keep working — they degrade to the
+        kill-only check via :func:`_pid_alive`.
+        """
         alive: dict[str, dict] = {}
         if not isinstance(owners, dict):
             return alive
-        for pid_str, meta in owners.items():
-            try:
-                pid = int(pid_str)
-            except Exception:
+        for key, meta in owners.items():
+            pid, key_start = _parse_owner_key(key)
+            if pid <= 0:
+                logger.info("Dropping malformed cache-session owner %r", key)
                 continue
+            if not self._pid_alive(pid):
+                logger.info("Dropping dead cache-session owner pid=%d key=%r", pid, key)
+                continue
+            actual_start = _process_start_time_ns(pid)
             entry = meta if isinstance(meta, dict) else {}
-            # Compare procfs start-time when the entry recorded one. If the
-            # OS recycled the pid since registration, the new process has a
-            # different start-time and we treat the owner as dead — see
-            # ``_pid_alive``. Legacy entries without ``proc_start_time`` fall
-            # back to the bare ``os.kill(pid, 0)`` check.
-            recorded_start = entry.get("proc_start_time")
-            expected_start = (
-                int(recorded_start) if isinstance(recorded_start, int) else None
-            )
-            if self._pid_alive(pid, expected_start_time=expected_start):
-                if int(entry.get("instances", 0)) <= 0:
-                    entry["instances"] = 1
-                entry.setdefault("started_ns", time.time_ns())
-                alive[str(pid_str)] = entry
+            recorded_start = entry.get("process_start_ns")
+            if (
+                actual_start is not None
+                and isinstance(recorded_start, (int, float))
+                and int(recorded_start) != int(actual_start)
+            ):
+                logger.info(
+                    "Dropping recycled-PID cache-session owner pid=%d "
+                    "recorded_start=%s actual_start=%s key=%r",
+                    pid,
+                    recorded_start,
+                    actual_start,
+                    key,
+                )
+                continue
+            if (
+                key_start is not None
+                and actual_start is not None
+                and key_start != actual_start
+            ):
+                logger.info(
+                    "Dropping stale-compound-key cache-session owner "
+                    "pid=%d key_start=%d actual_start=%d key=%r",
+                    pid,
+                    key_start,
+                    actual_start,
+                    key,
+                )
+                continue
+            if int(entry.get("instances", 0)) <= 0:
+                entry["instances"] = 1
+            entry.setdefault("started_ns", time.time_ns())
+            alive[key] = entry
         return alive
 
     @staticmethod
-    def _parse_proc_stat_starttime(data: bytes) -> int | None:
-        """Extract field 22 (``starttime``) from ``/proc/<pid>/stat`` bytes.
+    def _pid_alive(pid: int) -> bool:
+        """Return True if *pid* names a live process (kill-only check).
 
-        ``comm`` (field 2) is rendered in parentheses and may itself
-        contain spaces or parens, so we split *after* the rightmost
-        ``)`` to land in the whitespace-delimited tail starting at
-        field 3 (``state``). Field 22 is then index 19 in that tail.
-        Returns ``None`` if the buffer doesn't conform to the expected
-        layout, which is treated as "unknown" by the caller.
-        """
-        rparen = data.rfind(b")")
-        if rparen == -1:
-            return None
-        fields = data[rparen + 2 :].split()
-        if len(fields) < 20:
-            return None
-        try:
-            return int(fields[19])
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _proc_start_time(pid: int) -> int | None:
-        """Return the process start-time (field 22 of ``/proc/<pid>/stat``).
-
-        Stable for the life of a pid; changes when the OS reuses a pid
-        for an unrelated process, which makes it the right signal for
-        detecting pid recycling. Returns ``None`` on platforms without
-        ``/proc`` (macOS, Windows), on permission errors, or if the pid
-        no longer exists — in those cases callers fall back to the bare
-        liveness check.
-        """
-        if pid <= 0:
-            return None
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                data = f.read()
-        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-            return None
-        return CacheManager._parse_proc_stat_starttime(data)
-
-    @staticmethod
-    def _pid_alive(pid: int, *, expected_start_time: int | None = None) -> bool:
-        """Return True if *pid* still refers to the same process we recorded.
-
-        The base check is ``os.kill(pid, 0)`` (portable). When
-        ``expected_start_time`` is supplied AND we can read procfs for
-        the live process, we additionally require the recorded and
-        current start-times match. This catches pid recycling: process X
-        died, the kernel reused its pid for unrelated process Y, our
-        recorded ``proc_start_time`` mismatches Y's, so Y is correctly
-        treated as a ghost owner instead of pinning the cache forever.
-
-        On platforms without procfs the start-time check degrades to a
-        no-op and only the kill check applies. We also defer to "alive"
-        rather than "dead" when procfs is unreadable for a pid that
-        ``os.kill`` says exists (e.g. EPERM on a foreign-uid process),
-        because falsely declaring an active session dead is worse than
-        the rare missed detection.
+        Recycle-detection lives in :meth:`_prune_dead_owners`, which
+        compares the recorded ``process_start_ns`` against the live
+        process's procfs start-time before trusting this answer.
         """
         if pid <= 0:
             return False
@@ -686,12 +753,7 @@ class CacheManager(ShardResolver):
             if exc.errno == errno.EPERM:
                 return True
             return False
-        if expected_start_time is None:
-            return True
-        current_start = CacheManager._proc_start_time(pid)
-        if current_start is None:
-            return True
-        return int(current_start) == int(expected_start_time)
+        return True
 
     def _wipe_cache_root_locked(self) -> None:
         """Remove everything under ``root`` except the lock files.
@@ -818,7 +880,12 @@ class CacheManager(ShardResolver):
             self._shared.set_access_time(index, time.time_ns())
 
     def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
-        """Return a local reference, downloading and evicting as required."""
+        """Return a local reference, downloading and evicting as required.
+
+        With ``blocking=False``, raises :class:`ShardNotReady` instead of
+        waiting on a peer actively preparing the same shard. Orphaned
+        downloads from dead peers are taken over rather than waited on.
+        """
         assert self._shared is not None
         index = self._index_for(locator)
         if index is None:
@@ -838,7 +905,6 @@ class CacheManager(ShardResolver):
         shard_lock = self._shard_lock(dataset_root, locator.shard_id)
 
         while True:
-            wait_only = False
             with self._cache_lock:
                 state_value = _ShardState(self._shared.shard_states[index])
                 if state_value == _ShardState.LOCAL:
@@ -850,58 +916,95 @@ class CacheManager(ShardResolver):
                     self._mark_remote_locked(index)
                     continue
 
-                if state_value in (_ShardState.INVALID, _ShardState.REMOTE):
+            # Not LOCAL. Try to become the active preparer via non-
+            # blocking flock. ``timeout=0`` → ``fcntl.flock(LOCK_NB)``:
+            #   - Acquired → previous preparer is dead (or nobody had
+            #     started yet); we may proceed.
+            #   - Timeout  → a live peer holds the lock and is actively
+            #     downloading; wait and retry.
+            try:
+                shard_lock.acquire(timeout=0)
+            except FileLockTimeout:
+                if not blocking:
+                    raise ShardNotReady(locator.dataset, int(locator.shard_id))
+                time.sleep(_TICK_SECONDS)
+                continue
+
+            # We hold shard_lock. Re-check state under cache_lock to
+            # handle races where the prior preparer finished between
+            # our state observation and the flock acquisition.
+            try:
+                with self._cache_lock:
+                    state_value = _ShardState(self._shared.shard_states[index])
+                    if state_value == _ShardState.LOCAL:
+                        if raw_path.is_file():
+                            self._shared.set_access_time(index, time.time_ns())
+                            return self._build_ref(
+                                raw_path, zip_path, locator, cache_hit=True
+                            )
+                        # LOCAL but file missing — treat as REMOTE and prepare.
+                        self._mark_remote_locked(index)
+                        state_value = _ShardState.REMOTE
+
+                    if state_value == _ShardState.PREPARING:
+                        # We hold the flock but state is PREPARING → the
+                        # previous owner died mid-download. Normalize
+                        # stale on-disk state and proceed to prepare.
+                        logger.warning(
+                            "Cache: taking over orphaned PREPARING shard "
+                            "dataset=%s shard_id=%s (previous preparer died "
+                            "mid-download)",
+                            locator.dataset,
+                            int(locator.shard_id),
+                        )
+                        self._mark_remote_locked(index)
+
                     current_size = int(self._shared.shard_sizes[index])
                     additional = max(0, required - current_size)
                     if self._limit_bytes is not None:
                         self._ensure_capacity_locked(additional, skip_index=index)
                     self._shared.shard_states[index] = _ShardState.PREPARING
                     self._shared.set_access_time(index, time.time_ns())
-                    break
 
-                if state_value == _ShardState.PREPARING:
-                    wait_only = True
+                # Download while holding shard_lock. If this worker dies,
+                # the kernel releases shard_lock, unblocking a peer to
+                # take over via the LOCK_NB path above.
+                part_path = self._part_path(raw_path)
+                part_path.parent.mkdir(parents=True, exist_ok=True)
+                part_path.write_text(f"PREPARING {time.time()}\n", encoding="utf-8")
+                success = False
+                try:
+                    self._prepare(locator, raw_path, zip_path)
+                    self._validate(raw_path, locator.raw)
+                    success = True
+                finally:
+                    with contextlib.suppress(Exception):
+                        part_path.unlink()
+                    if not success:
+                        with self._cache_lock:
+                            self._mark_remote_locked(index)
 
-            if not wait_only:
-                continue
-            if not blocking:
-                raise ShardNotReady(locator.dataset, int(locator.shard_id))
-            time.sleep(_TICK_SECONDS)
+                entry_size = raw_path.stat().st_size
+                actual_zip: Optional[Path] = None
+                if zip_path and zip_path.exists():
+                    if self._keep_zip:
+                        entry_size += zip_path.stat().st_size
+                        actual_zip = zip_path
+                    else:
+                        zip_path.unlink(missing_ok=True)
+                with self._cache_lock:
+                    old_size = int(self._shared.shard_sizes[index])
+                    delta = entry_size - old_size
+                    if delta:
+                        self._shared.add_cache_usage(delta)
+                    self._shared.shard_sizes[index] = entry_size
+                    self._shared.shard_states[index] = _ShardState.LOCAL
+                    self._shared.set_access_time(index, time.time_ns())
 
-        with shard_lock:
-            part_path = self._part_path(raw_path)
-            part_path.parent.mkdir(parents=True, exist_ok=True)
-            part_path.write_text(f"PREPARING {time.time()}\n", encoding="utf-8")
-            success = False
-            try:
-                self._prepare(locator, raw_path, zip_path)
-                self._validate(raw_path, locator.raw)
-                success = True
+                return self._build_ref(raw_path, actual_zip, locator, cache_hit=False)
             finally:
                 with contextlib.suppress(Exception):
-                    part_path.unlink()
-                if not success:
-                    with self._cache_lock:
-                        self._mark_remote_locked(index)
-
-        entry_size = raw_path.stat().st_size
-        actual_zip: Optional[Path] = None
-        if zip_path and zip_path.exists():
-            if self._keep_zip:
-                entry_size += zip_path.stat().st_size
-                actual_zip = zip_path
-            else:
-                zip_path.unlink(missing_ok=True)
-        with self._cache_lock:
-            old_size = int(self._shared.shard_sizes[index])
-            delta = entry_size - old_size
-            if delta:
-                self._shared.add_cache_usage(delta)
-            self._shared.shard_sizes[index] = entry_size
-            self._shared.shard_states[index] = _ShardState.LOCAL
-            self._shared.set_access_time(index, time.time_ns())
-
-        return self._build_ref(raw_path, actual_zip, locator, cache_hit=False)
+                    shard_lock.release()
 
     # ------------------------------------------------------------------
     # Internal helpers

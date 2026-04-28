@@ -342,6 +342,64 @@ def test_engine_batch_with_post_ops_not_inline() -> None:
 
 
 # ---------------------------------------------------------------------------
+# max_worker_retries plumbing (RuntimeOptions -> Engine -> ProcessStageRunner)
+# ---------------------------------------------------------------------------
+
+
+def test_max_worker_retries_reaches_process_stage_runner() -> None:
+    """RuntimeOptions.max_worker_retries flows into ProcessStageRunner.
+
+    Regression guard for the full plumbing path:
+    ``RuntimeOptions -> StageRuntimeSpec -> Engine._build_runners ->
+    ProcessStageRunner.__init__``.  A single missing ``kwargs=`` on any
+    hop would cause ``runner._max_worker_retries`` to silently default
+    back to 0.
+    """
+    g = Graph()
+    g.add("op", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    opts = RuntimeOptions(
+        runner="process",
+        worker_allocation="per_stage_fixed",
+        max_workers=1,
+        max_worker_retries=7,
+    )
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
+    try:
+        assert len(eng._runners) == 1
+        runner = eng._runners[0]
+        assert isinstance(runner, ProcessStageRunner)
+        assert runner._max_worker_retries == 7
+    finally:
+        eng.close()
+
+
+def test_max_worker_retries_zero_disables_resilience_at_engine_level() -> None:
+    """``max_worker_retries=0`` produces a runner with the watchdog-resilient
+    actor path disabled (diagnostic-only)."""
+    g = Graph()
+    g.add("op", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    opts = RuntimeOptions(
+        runner="process",
+        worker_allocation="per_stage_fixed",
+        max_workers=1,
+        max_worker_retries=0,
+    )
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, work, spec)
+    try:
+        runner = eng._runners[0]
+        assert isinstance(runner, ProcessStageRunner)
+        assert runner._max_worker_retries == 0
+    finally:
+        eng.close()
+
+
+# ---------------------------------------------------------------------------
 # flush_every_k_chunks validation
 # ---------------------------------------------------------------------------
 

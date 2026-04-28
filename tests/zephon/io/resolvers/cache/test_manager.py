@@ -1276,7 +1276,12 @@ def test_parse_proc_stat_starttime_extracts_field_22() -> None:
     """Field 22 of /proc/<pid>/stat is starttime; parser must handle the
     awkward ``comm`` field (spaces, parens) by anchoring to the rightmost
     ``)`` rather than tokenising the whole line.
+
+    Factored out as a standalone helper specifically so this parsing logic
+    is unit-testable on platforms without ``/proc`` (Mac CI, etc.).
     """
+    from zephon.io.resolvers.cache.manager import _parse_proc_stat_starttime
+
     # Build a tail of exactly 20 fields (state through starttime). Index
     # 19 in this tail is starttime — set it to 4242 with a sentinel; the
     # other slots are filler. Trailing fields (vsize, rss, ...) are
@@ -1287,53 +1292,33 @@ def test_parse_proc_stat_starttime_extracts_field_22() -> None:
 
     # Plain comm with no special chars.
     stat = b"123 (python) " + tail
-    assert CacheManager._parse_proc_stat_starttime(stat) == 4242
+    assert _parse_proc_stat_starttime(stat) == 4242
 
     # Comm with spaces and parens — common for renamed processes — must
     # not confuse the parser since we anchor on the rightmost ``)``.
     stat_tricky = b"123 (weird (proc) name) " + tail
-    assert CacheManager._parse_proc_stat_starttime(stat_tricky) == 4242
+    assert _parse_proc_stat_starttime(stat_tricky) == 4242
 
     # Malformed inputs return None rather than raising.
-    assert CacheManager._parse_proc_stat_starttime(b"") is None
-    assert CacheManager._parse_proc_stat_starttime(b"123 nocommparen") is None
-    assert CacheManager._parse_proc_stat_starttime(b"123 (foo) S 1 2 3") is None
+    assert _parse_proc_stat_starttime(b"") is None
+    assert _parse_proc_stat_starttime(b"123 nocommparen") is None
+    assert _parse_proc_stat_starttime(b"123 (foo) S 1 2 3") is None
 
 
-def test_pid_alive_returns_true_for_matching_start_time() -> None:
-    """When the recorded start-time matches the live process, alive=True."""
-    pid = os.getpid()
-    start = CacheManager._proc_start_time(pid)
-    if start is None:
-        pytest.skip("procfs not available on this platform")
-    assert CacheManager._pid_alive(pid, expected_start_time=start) is True
+def test_owner_entry_records_compound_key_and_process_start_ns(
+    tmp_path: Path,
+) -> None:
+    """FIRST_INIT writes a compound owner key and the process start-time.
 
-
-def test_pid_alive_returns_false_for_mismatched_start_time() -> None:
-    """A live pid with a non-matching recorded start-time is treated as dead.
-
-    This is the pid-recycling scenario: the original process died, the
-    kernel reused its pid for an unrelated process, and the recorded
-    start-time no longer matches what procfs reports.
+    Belt-and-suspenders identity: the key itself encodes
+    ``f"{pid}-{start_time_ns}"`` and the entry value carries
+    ``process_start_ns``, so either signal alone is sufficient to detect
+    a recycled pid on the next prune.
     """
-    pid = os.getpid()
-    start = CacheManager._proc_start_time(pid)
-    if start is None:
-        pytest.skip("procfs not available on this platform")
-    assert CacheManager._pid_alive(pid, expected_start_time=start + 999_999) is False
+    from zephon.io.resolvers.cache.manager import _process_start_time_ns
 
-
-def test_pid_alive_without_start_time_check_falls_back_to_kill() -> None:
-    """Legacy entries without proc_start_time keep the old kill-only check."""
-    pid = os.getpid()
-    assert CacheManager._pid_alive(pid) is True
-    assert CacheManager._pid_alive(pid, expected_start_time=None) is True
-
-
-def test_owner_entry_records_proc_start_time_on_first_init(tmp_path: Path) -> None:
-    """FIRST_INIT writes proc_start_time alongside the pid in session.json."""
-    if CacheManager._proc_start_time(os.getpid()) is None:
-        pytest.skip("procfs not available on this platform")
+    if _process_start_time_ns(os.getpid()) is None:
+        pytest.skip("procfs/psutil unavailable on this platform")
 
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"
@@ -1349,9 +1334,11 @@ def test_owner_entry_records_proc_start_time_on_first_init(tmp_path: Path) -> No
                 encoding="utf-8"
             )
         )
-        owner = session["owners"][str(os.getpid())]
-        assert isinstance(owner.get("proc_start_time"), int)
-        assert owner["proc_start_time"] == CacheManager._proc_start_time(os.getpid())
+        start_ns = _process_start_time_ns(os.getpid())
+        expected_key = f"{os.getpid()}-{start_ns}"
+        assert expected_key in session["owners"]
+        owner = session["owners"][expected_key]
+        assert owner.get("process_start_ns") == start_ns
     finally:
         mgr.close()
 
@@ -1365,10 +1352,13 @@ def test_recycled_pid_does_not_block_init_when_start_time_mismatches(
     its owner pid was later reused by an unrelated process. Without the
     start-time check, the new manager would see a "live" owner with a
     different fingerprint and refuse to reset. With it, the bogus
-    start-time exposes the ghost and we proceed to COLD_RESET.
+    start-time exposes the ghost via *both* signals (the compound key's
+    suffix and the entry's ``process_start_ns``) and we COLD_RESET.
     """
-    if CacheManager._proc_start_time(os.getpid()) is None:
-        pytest.skip("procfs not available on this platform")
+    from zephon.io.resolvers.cache.manager import _process_start_time_ns
+
+    if _process_start_time_ns(os.getpid()) is None:
+        pytest.skip("procfs/psutil unavailable on this platform")
 
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"
@@ -1386,17 +1376,17 @@ def test_recycled_pid_does_not_block_init_when_start_time_mismatches(
     mgr1.close()
 
     # Hand-craft a ghost owner: our current pid (so os.kill says "alive")
-    # but with a deliberately wrong proc_start_time so the new prune
-    # logic correctly identifies it as recycled. Without the start-time
-    # check, mgr2 below would HARD_ERROR because (live owner, fingerprint
-    # mismatch).
+    # but with a bogus start-time in BOTH the compound key and the entry
+    # value. Either alone would trip the recycle check; together they
+    # form belt-and-suspenders identity.
     session_path = cache_root / ".zephon_cache_state" / "session.json"
     session = json.loads(session_path.read_text(encoding="utf-8"))
+    bogus_key = f"{os.getpid()}-1"  # start-time "1ns" — far from current
     session["owners"] = {
-        str(os.getpid()): {
+        bogus_key: {
             "instances": 1,
             "started_ns": int(time.time_ns()),
-            "proc_start_time": -1,  # bogus — won't match anything procfs reports
+            "process_start_ns": 1,
         }
     }
     session_path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
@@ -1416,8 +1406,10 @@ def test_legacy_owner_entry_without_start_time_is_treated_as_alive(
 ) -> None:
     """Sessions written before this schema landed still work.
 
-    The owner entry has no ``proc_start_time``; prune falls back to the
-    bare kill check, sees the pid is alive, and JOIN proceeds normally.
+    The owner key is a bare ``str(pid)`` and the entry has no
+    ``process_start_ns``; ``_parse_owner_key`` returns ``(pid, None)``,
+    prune falls back to the bare kill check, sees the pid is alive, and
+    JOIN proceeds normally.
     """
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"
@@ -1430,12 +1422,16 @@ def test_legacy_owner_entry_without_start_time_is_treated_as_alive(
     try:
         mgr1.resolve(loc)  # populate so a JOIN would observe a cache hit
 
-        # Strip proc_start_time from the owner entry to simulate a session
-        # written by a pre-schema build.
+        # Rewrite session.json into the legacy shape: pid-only key, no
+        # process_start_ns field. Mirrors a session.json written by a
+        # pre-schema build of the manager.
         session_path = cache_root / ".zephon_cache_state" / "session.json"
         session = json.loads(session_path.read_text(encoding="utf-8"))
+        legacy_owners: dict = {}
         for entry in session["owners"].values():
-            entry.pop("proc_start_time", None)
+            entry.pop("process_start_ns", None)
+            legacy_owners[str(os.getpid())] = entry
+        session["owners"] = legacy_owners
         session_path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
 
         # Same fingerprint + live owner ⇒ JOIN. No HARD_ERROR, no reset.
@@ -1447,3 +1443,45 @@ def test_legacy_owner_entry_without_start_time_is_treated_as_alive(
             mgr2.close()
     finally:
         mgr1.close()
+
+
+def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
+    """Orphaned PREPARING state is taken over via shard_lock flock.
+
+    Regression test for the resilient-workers crash-recovery path: a
+    worker that dies mid-download leaves the shard's state as PREPARING
+    in shared memory. Without the flock-based recovery, peers would
+    poll forever waiting for a peer that will never finish. We simulate
+    a dead peer by setting PREPARING in shared state without holding
+    the per-shard flock; the next ``resolve()`` must take over and
+    complete instead of polling forever.
+    """
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"orphan recovery"
+    raw_name = "orphan.bin"
+    _make_file(remote / raw_name, data)
+    storage = LocalFSBackend(root=remote)
+    loc = _locator("demo", 200, str(remote), raw_name=raw_name, raw_bytes=len(data))
+
+    mgr = _make_manager(cache_root, storage, [loc])
+    try:
+        # Force the shard into PREPARING without holding shard_lock —
+        # mimics a worker that started a download then died mid-flight
+        # (kernel released its shard_lock automatically on death).
+        index = mgr._index_for(loc)
+        assert index is not None
+        with mgr._cache_lock:
+            mgr._shared.shard_states[index] = _ShardState.PREPARING
+
+        # resolve() must complete (not loop). Bound the call with a
+        # generous deadline — anything more than a couple of seconds
+        # would indicate the recovery path failed.
+        start = time.time()
+        ref = mgr.resolve(loc)
+        elapsed = time.time() - start
+        assert elapsed < 10.0, f"resolve took {elapsed:.2f}s — recovery failed"
+        assert ref.raw.path.exists()
+        assert ref.raw.path.read_bytes() == data
+    finally:
+        mgr.close()

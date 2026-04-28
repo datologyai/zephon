@@ -9,6 +9,7 @@ from zephon.core.engine import RuntimeOptions
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
 from zephon.core.runtime_spec import (
+    StageRuntimeSpec,
     apportion,
     resolve_runtime_spec,
     stage_parallelism,
@@ -266,3 +267,45 @@ def test_stage_parallelism_sums_node_parallelism():
     assert len(plan.stages) == 1
     par = stage_parallelism(plan.stages[0])
     assert par == 8  # 3 + 5
+
+
+# ---------------------------------------------------------------------------
+# max_worker_retries plumbing (RuntimeOptions -> StageRuntimeSpec)
+# ---------------------------------------------------------------------------
+
+
+def test_max_worker_retries_default_and_override() -> None:
+    """``RuntimeOptions.max_worker_retries`` defaults to 3 and accepts overrides."""
+    assert RuntimeOptions().max_worker_retries == 3
+
+    opts = RuntimeOptions()
+    opts.max_worker_retries = 11
+    assert opts.max_worker_retries == 11
+
+
+def test_max_worker_retries_flows_through_runtime_spec() -> None:
+    """``.options(max_worker_retries=N)`` lands in each ``StageRuntimeSpec``."""
+    plan = _mk_plan((2, 5, 1))
+    spec = resolve_runtime_spec(plan, RuntimeOptions(max_worker_retries=11))
+    for stage_spec in spec.stages:
+        assert stage_spec.max_worker_retries == 11
+
+
+def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
+    """Direct ``StageRuntimeSpec`` construction (no ``RuntimeOptions``) defaults to 0.
+
+    This default keeps backwards compatibility for callers that build specs
+    by hand — they opt into resilience by passing the field explicitly.
+    """
+    stage_spec = StageRuntimeSpec(
+        stage_index=0,
+        runner_type="threads",
+        worker_cap=1,
+        queue_capacity=1,
+        prefetch_capacity=0,
+        output_mode="microbatches",
+        allow_latency_flush=True,
+        coalesce_tensors=False,
+        shm_min_size=1,
+    )
+    assert stage_spec.max_worker_retries == 0

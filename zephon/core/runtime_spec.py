@@ -44,6 +44,8 @@ class StageRuntimeSpec:
     allow_latency_flush: bool
     coalesce_tensors: bool
     shm_min_size: int
+    # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
+    max_worker_retries: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +309,7 @@ def resolve_runtime_spec(
                 allow_latency_flush=allow_latency,
                 coalesce_tensors=opts.coalesce_tensors,
                 shm_min_size=opts.shm_min_size,
+                max_worker_retries=opts.max_worker_retries,
             )
         )
 

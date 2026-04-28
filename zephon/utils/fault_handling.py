@@ -16,31 +16,36 @@ Environment variables:
 from __future__ import annotations
 
 import faulthandler
-import multiprocessing as mp
 import os
 import signal
 import sys
 import threading
 from typing import Any
 
+from zephon.utils.rank import rank_ctx
+
 
 def setup_faulthandler() -> None:
     """Set up faulthandler for crash diagnosis.
 
-    When ZEPHON_FAULTHANDLER=1 is set:
+    When ``ZEPHON_FAULTHANDLER=1`` is set:
+
     - Enables automatic traceback dump on SIGSEGV, SIGFPE, SIGABRT, SIGBUS, SIGILL
     - Registers SIGUSR1/SIGUSR2 to manually trigger a full traceback dump
-      (kill -USR1 <pid>)
+      (``kill -USR1 <pid>``)
 
-    This has zero runtime overhead - signal handlers only fire on actual signals.
-    Only runs in the main process (not in spawned workers).
+    This has zero runtime overhead — signal handlers only fire on actual
+    signals.  Runs in every process that imports (or explicitly invokes)
+    this setup: the main process, ProcessStageRunner workers (via
+    module-level import of ``zephon.runners.process``), and the MTP
+    subprocess (explicit call from ``_mtp_worker``).  Idempotent thanks
+    to ``faulthandler.is_enabled()``.
     """
     if not os.environ.get("ZEPHON_FAULTHANDLER"):
         return
 
-    # Skip if we're in a worker process (spawned workers re-import the module)
-    # MainProcess is the default name for the main process
-    if mp.current_process().name != "MainProcess":
+    # Idempotent: repeated calls (e.g. during spawn-worker re-import) are no-ops.
+    if faulthandler.is_enabled():
         return
 
     # Enable default crash signal handlers (SIGSEGV, SIGFPE, SIGABRT, SIGBUS, SIGILL)
@@ -65,7 +70,7 @@ def setup_faulthandler() -> None:
             pass
 
     print(
-        f"[Zephon] faulthandler enabled (pid={os.getpid()}). "
+        f"[Zephon] faulthandler enabled ({rank_ctx()}). "
         + "Send SIGUSR1/SIGUSR2 to dump all thread stacks.",
         file=sys.stderr,
         flush=True,

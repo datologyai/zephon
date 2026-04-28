@@ -1,3 +1,6 @@
+# Copyright 2025 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
 """Rank-aware context prefix for debug / stall / watchdog logs.
 
 Reads ``RANK`` and ``LOCAL_RANK`` from the environment (set by torchrun,

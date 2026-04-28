@@ -255,6 +255,11 @@ class RuntimeOptions:
     coalesce_tensors: bool = True
     shm_min_size: int = DEFAULT_SHM_MIN_SIZE
 
+    # ProcessStageRunner only.  Re-dispatches per crashed seq before
+    # giving up; 0 disables.  In non-deterministic mode an exhausted
+    # seq is dropped instead of failing the pipeline.
+    max_worker_retries: int = 3
+
     # Autotune placeholders (intentionally not implemented yet)
     autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
     # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
@@ -867,6 +872,7 @@ class Engine:
                         mp_context=self._mp_context,
                         coalesce_tensors=spec.coalesce_tensors,
                         shm_min_size=spec.shm_min_size,
+                        max_worker_retries=spec.max_worker_retries,
                         **common,
                     )
                 )

@@ -1,9 +1,19 @@
 import multiprocessing
+import multiprocessing.context
+import os
+import signal
+import sys
+import tempfile
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+# ``ZEPHON_WATCHDOG_POLL_S`` is tightened in
+# ``tests/zephon/runners/conftest.py`` so it's applied before any
+# test module triggers ``import zephon.runners.process``.
 from tests.zephon.runners._helpers import (
     _ctx_services,
     _extract_values,
@@ -15,13 +25,14 @@ from zephon.core.accumulators import (
     CountingAccumulator,
     PassthroughAccumulator,
 )
-from zephon.core.constants import SampleRecord, lane_of
+from zephon.core.constants import SampleRecord, StreamItem, lane_of
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import DefaultSetup, Op, OpContext
 from zephon.core.traits import OpTraits
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.delay import DelayById
+from zephon.runners.concurrent import WorkerCrashed
 from zephon.runners.process import ProcessStageRunner
 
 
@@ -1452,3 +1463,589 @@ class TestShmBackpressureE2E:
             assert {r1.value, r2.value} == {1, 2}
         finally:
             q.close()
+
+
+# ---------------------------------------------------------------------------
+# Resilient workers (watchdog-driven respawn on SIGSEGV)
+# ---------------------------------------------------------------------------
+
+
+class _CrashOnValue(DefaultSetup, Op[Any, Any]):
+    """Worker-side op that segfaults when it sees any of *crash_values*.
+
+    Uses a filesystem marker to communicate "I have already crashed" between
+    a dying worker and its replacement, so ``mode="first_only"`` really
+    means "crash exactly once per marker directory".
+    """
+
+    def __init__(
+        self,
+        crash_values: list[int],
+        *,
+        marker_dir: str,
+        mode: str = "first_only",
+    ) -> None:
+        DefaultSetup.__init__(self)
+        self._crash_values = list(crash_values)
+        self._marker_dir = marker_dir
+        self._mode = mode
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[StreamItem]:
+        return CountingAccumulator[StreamItem](
+            max_batch=1, max_latency_ms=None, key_fn=lane_of
+        )
+
+    def process_one(self, elem: StreamItem) -> list[StreamItem]:
+        return self.process_many([elem])
+
+    def process_many(self, elems: list[StreamItem]) -> list[StreamItem]:
+        out: list[StreamItem] = []
+        for item in elems:
+            val: int | None = None
+            if isinstance(item, SampleRecord):
+                v = (
+                    item.payload.get("value")
+                    if isinstance(item.payload, dict)
+                    else None
+                )
+                val = int(v) if isinstance(v, int) else None
+            if val is not None and val in self._crash_values:
+                if self._mode == "always":
+                    _segfault_self()
+                marker = Path(self._marker_dir) / f"crashed_{val}"
+                if not marker.exists():
+                    marker.touch()
+                    _segfault_self()
+            out.append(item)
+        return out
+
+
+class _CrashNTimes(DefaultSetup, Op[Any, Any]):
+    """Crash the first N times the op sees *crash_value*; succeed thereafter.
+
+    Uses filesystem markers (one per attempt) to count crashes across
+    respawned workers — the worker dies so an in-process counter cannot
+    survive.  Each crash writes ``attempt_<k>`` and the next worker
+    reads how many markers exist to decide whether to crash again.
+    """
+
+    def __init__(self, crash_value: int, *, fail_count: int, marker_dir: str) -> None:
+        DefaultSetup.__init__(self)
+        self._crash_value = crash_value
+        self._fail_count = fail_count
+        self._marker_dir = marker_dir
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[StreamItem]:
+        return CountingAccumulator[StreamItem](
+            max_batch=1, max_latency_ms=None, key_fn=lane_of
+        )
+
+    def process_one(self, elem: StreamItem) -> list[StreamItem]:
+        return self.process_many([elem])
+
+    def process_many(self, elems: list[StreamItem]) -> list[StreamItem]:
+        out: list[StreamItem] = []
+        for item in elems:
+            val: int | None = None
+            if isinstance(item, SampleRecord):
+                v = (
+                    item.payload.get("value")
+                    if isinstance(item.payload, dict)
+                    else None
+                )
+                val = int(v) if isinstance(v, int) else None
+            if val is not None and val == self._crash_value:
+                existing = len(list(Path(self._marker_dir).glob("crash_*")))
+                if existing < self._fail_count:
+                    (Path(self._marker_dir) / f"crash_{existing}").touch()
+                    _segfault_self()
+            out.append(item)
+        return out
+
+
+def _segfault_self() -> None:  # pragma: no cover - terminates the worker
+    # We're about to terminate this process via SIGSEGV.  Disable
+    # corefile writing for *just this process* before signaling — the
+    # kernel can spend hundreds of milliseconds writing a corefile,
+    # which compounds across multiple intentional crashes per test.
+    # Scope is the worker process about to die; the parent test
+    # process and any other workers still get their default
+    # ``RLIMIT_CORE``.  Real (unintentional) zephon crashes are
+    # unaffected.
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ImportError, OSError, ValueError):
+        pass  # Windows or restricted env — fall through to crash anyway.
+    os.kill(os.getpid(), signal.SIGSEGV)
+
+
+def _fast_spawn_ctx() -> "multiprocessing.context.BaseContext | None":
+    """Prefer a ``forkserver`` context so respawn cycles skip cold-import cost.
+
+    ``forkserver`` starts a helper process once that pre-imports everything;
+    each subsequent spawn is a near-instant fork from that helper (~100ms)
+    instead of a cold Python startup (~20-30s on slow CI).  The zephon
+    watchdog accepts both ``spawn`` and ``forkserver``; only ``fork`` gets
+    downgraded (fork + watchdog thread deadlocks on ``Process.start()``).
+
+    Returns ``None`` on platforms where ``forkserver`` is unavailable
+    (Windows), which lets the caller fall through to the ``spawn`` default.
+    """
+    if "forkserver" in multiprocessing.get_all_start_methods():
+        return multiprocessing.get_context("forkserver")
+    return None
+
+
+def _mk_resilience_stage(op: Any, *, parallelism: int = 1) -> Stage:
+    node = Node(name="crash", op=op, parallelism=parallelism)
+    return Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+
+
+def _run_flat(runner: ProcessStageRunner, values: list[int]) -> list[int]:
+    """Run values through runner and flatten any microbatch output."""
+    records = _mk_records(values)
+    out = list(runner.run(iter(records)))
+    flat: list[SampleRecord] = []
+    for item in out:
+        if isinstance(item, list):
+            flat.extend(rec for rec in item if isinstance(rec, SampleRecord))
+        elif isinstance(item, SampleRecord):
+            flat.append(item)
+    return _extract_values(flat)
+
+
+class TestResilientWorkers:
+    """Watchdog-driven resubmit + respawn actor enabled by ``max_worker_retries > 0``.
+
+    These tests intentionally trigger real SIGSEGV-style crashes inside
+    worker processes — the whole point is that the main process does NOT
+    die and the pipeline either recovers (transient) or fails with a
+    structured error (exhaustion) or silently drops (non-det).  Tests
+    self-skip when the platform can't exercise the crash path cleanly
+    (e.g. missing ``torch``).
+    """
+
+    @pytest.mark.timeout(90)
+    def test_transient_crash_recovers_under_max_worker_retries(
+        self, tmp_path: Path
+    ) -> None:
+        op = _CrashOnValue([5], marker_dir=str(tmp_path), mode="first_only")
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=1),
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=3,
+            mp_context=_fast_spawn_ctx(),
+        )
+        t0 = time.monotonic()
+        out = _run_flat(runner, [5])
+        elapsed = time.monotonic() - t0
+        assert out == [5]
+        # Loose bound — the real hang guard is pytest-timeout.  Local runs
+        # finish in ~2s; CI under Python 3.14t free-threaded can take
+        # ~10-15s per respawn due to slower imports + spawn.
+        assert elapsed < 30.0, f"resilient run took too long: {elapsed:.1f}s"
+
+    @pytest.mark.timeout(90)
+    def test_persistent_crash_deterministic_escalates(self, tmp_path: Path) -> None:
+        op = _CrashOnValue([7], marker_dir=str(tmp_path), mode="always")
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=1),
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=2,
+            mp_context=_fast_spawn_ctx(),
+        )
+        t0 = time.monotonic()
+        with pytest.raises(WorkerCrashed) as excinfo:
+            _run_flat(runner, [7])
+        elapsed = time.monotonic() - t0
+        assert excinfo.value.info.exc_type == "MaxWorkerRetriesExceeded"
+        assert "seq=" in excinfo.value.info.message
+        # 2 retries → 3 sequential cold spawns + 3 watchdog poll waits
+        # (5s each by default).  Local runs finish in ~5s; 3.12 cold CI
+        # has been observed at ~55s.  Real hang guard is the outer
+        # pytest-timeout(90); this elapsed bound just catches gross
+        # regressions.
+        assert elapsed < 80.0, f"exhaustion path took too long: {elapsed:.1f}s"
+
+    @pytest.mark.timeout(90)
+    def test_persistent_crash_nondet_drops_and_continues(self, tmp_path: Path) -> None:
+        op = _CrashOnValue([42], marker_dir=str(tmp_path), mode="always")
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=1),
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=False,
+            stage_output_mode="stream_items",
+            max_worker_retries=1,
+            mp_context=_fast_spawn_ctx(),
+        )
+        t0 = time.monotonic()
+        out = _run_flat(runner, [1, 42, 2, 3])
+        elapsed = time.monotonic() - t0
+        # Poisoned sample 42 dropped silently; good samples pass through.
+        # With blind-resubmit, good seqs still in task_queue when the
+        # worker died get re-dispatched too — the pump dedups via the
+        # ``pending_commands.pop(seq) is None`` branch in _handle_result,
+        # so extras are harmlessly ack-and-dropped.
+        assert set(out) == {1, 2, 3}
+        assert 42 not in out
+        assert elapsed < 30.0, f"non-det drop path took too long: {elapsed:.1f}s"
+
+    def test_fork_mp_context_downgrades_when_retries_enabled(self) -> None:
+        """Fork + retries warns and silently disables resilience.
+
+        We don't raise because ``max_worker_retries`` defaults to 3 and we
+        don't want a default-on feature to break existing fork-based
+        pipelines.  The caller gets a RuntimeWarning so the downgrade is
+        visible.
+        """
+        if "fork" not in multiprocessing.get_all_start_methods():
+            pytest.skip("fork start method unavailable on this platform")
+        op = _CrashOnValue([], marker_dir=tempfile.gettempdir())
+        stage = _mk_resilience_stage(op, parallelism=1)
+        with pytest.warns(RuntimeWarning, match="disabling worker-resilience watchdog"):
+            runner = ProcessStageRunner(
+                stage,
+                ctx_services=_ctx_services(),
+                max_workers=1,
+                max_worker_retries=1,
+                mp_context=multiprocessing.get_context("fork"),
+            )
+        # Resilience silently became a no-op.
+        assert runner._max_worker_retries == 0
+        runner.close()
+
+    def test_fork_mp_context_accepted_when_retries_disabled(self) -> None:
+        if "fork" not in multiprocessing.get_all_start_methods():
+            pytest.skip("fork start method unavailable on this platform")
+        op = _CrashOnValue([], marker_dir=tempfile.gettempdir())
+        stage = _mk_resilience_stage(op, parallelism=1)
+        runner = ProcessStageRunner(
+            stage,
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            max_worker_retries=0,
+            mp_context=multiprocessing.get_context("fork"),
+        )
+        runner.close()
+
+    def test_is_unexpected_death_classifies_signal_termination(self) -> None:
+        """Negative exitcodes trigger recovery; clean exits and pre-reap None do not.
+
+        Clean exits (0 or positive) and transient ``None`` exitcodes must
+        be ignored by the watchdog, or a routine clean shutdown or a
+        caught Python exception can trigger a spurious
+        ``_handle_dead_worker`` that deadlocks on ``task_queue.put()``
+        while holding ``_shutdown_lock``.
+
+        The predicate is currently signal-agnostic (just ``code < 0``),
+        so the specific signal values below are documentation / regression
+        guard against a future narrowing that would skip some of them,
+        not branch coverage.
+        """
+
+        class _FakeProc:
+            def __init__(self, exitcode: int | None):
+                self.exitcode = exitcode
+
+        canonical_crash_signals = (
+            -signal.SIGSEGV,
+            -signal.SIGKILL,
+            -signal.SIGABRT,
+            -signal.SIGBUS,
+            -signal.SIGTERM,
+            -signal.SIGINT,
+        )
+        for code in canonical_crash_signals:
+            assert ProcessStageRunner._is_unexpected_death(_FakeProc(code))  # type: ignore[arg-type]
+
+        # Non-negative exit codes and the pre-reap transient must NOT trigger.
+        for code in (0, 1, None):
+            assert not ProcessStageRunner._is_unexpected_death(_FakeProc(code))  # type: ignore[arg-type]
+
+    @pytest.mark.timeout(90)
+    def test_det_mode_multiworker_backpressure_deadlock_recovers(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for a production deadlock: in det mode with
+        ``parallelism>1``, when a worker crashes on an early seq, bystander
+        workers keep producing results into ``pending_results`` (held by
+        backpressure permits) until they exhaust their permit budget and
+        block at ``backpressure.acquire()``.  ``task_queue`` fills with
+        post-culprit seqs, pump's ``_send_command`` starts the drain-retry
+        loop but sees an empty ``result_queue`` (blocked workers can't put),
+        and the pipeline hangs.
+
+        The ``_RelaxSignal`` path breaks this: the watchdog posts the
+        signal onto ``result_queue``, the pump's drain-retry loop picks
+        it up, post-hoc releases the permits held by ``pending_results``
+        entries, switches to arrival-release until the resubmits come
+        back, and the emit cascade unblocks everyone once the respawned
+        worker processes the culprit.
+
+        The value ``0`` crashes the first worker to see it
+        (``first_only``); with ``max_worker_retries=3`` the respawn retries
+        and succeeds.  Without the fix this test hangs until pytest-timeout
+        fires.
+        """
+        op = _CrashOnValue([0], marker_dir=str(tmp_path), mode="first_only")
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=2),
+            ctx_services=_ctx_services(),
+            max_workers=2,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=3,
+            mp_context=_fast_spawn_ctx(),
+        )
+        t0 = time.monotonic()
+        # 24 items = 3x the total permit budget (queue_capacity=4 per
+        # worker x 2 workers = 8 permits, task_queue cap = 8), well past
+        # any threshold where the deadlock could be masked.
+        out = _run_flat(runner, list(range(24)))
+        elapsed = time.monotonic() - t0
+        assert sorted(out) == list(range(24)), f"unexpected output: {out}"
+        assert out == list(range(24))  # det mode preserves input order
+        assert elapsed < 45.0, f"recovery took too long: {elapsed:.1f}s"
+
+    # ------- gap 7: multi-worker crash exercises /proc-syscall path -------
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason=(
+            "Validates the /proc/PID/syscall live-writer-discrimination "
+            "code path in zephon.runners.watchdog. /proc only exists on "
+            "Linux; macOS multi-worker recovery is a known limitation "
+            "that this test can't exercise."
+        ),
+    )
+    @pytest.mark.timeout(90)
+    def test_multiworker_crash_with_proc_syscall_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Smoke test: parallelism>1 + crash + ``/proc/syscall``-only
+        recovery doesn't hang and produces correct output.
+
+        Disables ``rotation`` (parallelism=1-only anyway) and
+        ``timed_acquire`` so every worker death routes through the
+        ``/proc/syscall`` step.  Note: this does *not* prove
+        live-writer discrimination per se — for that, see the focused
+        unit tests in
+        ``tests/zephon/runners/test_watchdog.py``, which
+        spawn real processes with known states and check the helpers
+        directly.  This integration test confirms the chain is wired
+        up correctly and that the parallelism>1 flow doesn't regress.
+
+        ``ZEPHON_RECLAIM_DISABLE`` is read dynamically at every
+        recovery call by ``_disabled_strategies()`` so this monkeypatch
+        applies to every crash within the test, including those in
+        respawned worker pools.
+        """
+        monkeypatch.setenv("ZEPHON_RECLAIM_DISABLE", "rotation,timed_acquire")
+        for trial in range(3):
+            trial_dir = tmp_path / f"trial_{trial}"
+            trial_dir.mkdir()
+            op = _CrashOnValue([0], marker_dir=str(trial_dir), mode="first_only")
+            runner = ProcessStageRunner(
+                _mk_resilience_stage(op, parallelism=2),
+                ctx_services=_ctx_services(),
+                max_workers=2,
+                deterministic=True,
+                stage_output_mode="stream_items",
+                max_worker_retries=3,
+                mp_context=_fast_spawn_ctx(),
+            )
+            # 24 items lets both workers do meaningful concurrent work
+            # around the time of the crash.  Det mode means we'll catch
+            # any duplicate / lost / corrupted output by the strict
+            # equality check.
+            out = _run_flat(runner, list(range(24)))
+            assert out == list(range(24)), (
+                f"trial {trial}: unexpected output (corruption?): {out}"
+            )
+
+    # ------- gap 3: empty pending_commands on idle worker death -------
+
+    @pytest.mark.timeout(90)
+    def test_idle_worker_death_respawns_without_pending_work(
+        self, tmp_path: Path
+    ) -> None:
+        """Watchdog respawns a worker whose ``pending_commands`` is empty
+        at the moment of death — regression guard for the empty-pending
+        branch in ``_handle_dead_worker``.
+
+        Construction: consume exactly as many ``next(iterator)`` calls as
+        records (3/3), which drains ``pending_commands`` without letting
+        the outer ``run()`` generator advance to ``StopIteration`` (and
+        therefore without triggering ``_after_run`` → ``_shutdown_workers``).
+        Workers stay alive, pending is empty, and the pre-kill
+        ``is_alive()`` guard catches the narrow window where the worker
+        has already begun a clean shutdown (the feeder pushes
+        ``_Stop`` after the input iterator raises StopIteration; with 3
+        records fully consumed, the worker is racing between that path
+        and our SIGKILL).  When ``is_alive()`` is True, the SIGKILL wins
+        and we genuinely exercise the empty-pending respawn path.
+        """
+        op = _CrashOnValue([], marker_dir=str(tmp_path))  # never crashes on its own
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=1),
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=3,
+            mp_context=_fast_spawn_ctx(),
+        )
+        iterator = runner.run(iter(_mk_records([0, 1, 2])))
+        try:
+            for _ in range(3):
+                next(iterator)
+
+            state = runner.ops[0]
+            # Pump pops pending_commands before emitting; allow a brief
+            # settle window for any trailing bookkeeping after the yield.
+            drain_deadline = time.monotonic() + 2.0
+            while state.pending_commands and time.monotonic() < drain_deadline:
+                time.sleep(0.05)
+            assert not state.pending_commands, (
+                f"pending_commands not empty post-drain: {list(state.pending_commands)}"
+            )
+
+            assert state.workers, "worker list should be populated mid-iteration"
+            worker_proc = state.workers[0]
+            old_pid = worker_proc.pid
+            assert old_pid is not None
+            assert worker_proc.is_alive(), "worker should be alive pre-kill"
+            os.kill(old_pid, signal.SIGKILL)
+
+            # Wait for the watchdog to respawn the worker.  Bound matches
+            # the other resilience tests' elapsed-time tolerance — local
+            # runs finish in ~1-2s; CI under Python 3.14t free-threaded
+            # can take 10-15s per spawn due to slower imports.  The
+            # watchdog thread mutates ``state.workers``; catch
+            # ``IndexError`` defensively during the narrow swap window.
+            respawn_deadline = time.monotonic() + 30.0
+            respawned = False
+            while time.monotonic() < respawn_deadline:
+                try:
+                    current = state.workers[0]
+                except IndexError:
+                    time.sleep(0.05)
+                    continue
+                if current.pid != old_pid and current.is_alive():
+                    respawned = True
+                    break
+                time.sleep(0.1)
+            assert respawned, "watchdog did not respawn the idle worker within 30s"
+        finally:
+            try:
+                iterator.close()
+            except Exception:
+                pass
+            runner.close()
+
+    # ------- gap 4: retry counter boundary -------
+
+    @pytest.mark.timeout(120)
+    @pytest.mark.parametrize(
+        "fail_count,max_retries,should_succeed",
+        [
+            (1, 1, True),  # 1 crash + 1 retry -> 2nd attempt passes (at budget)
+            (2, 1, False),  # 2 crashes + 1 retry -> exhausts just over budget
+            (2, 2, True),  # 2 crashes + 2 retries -> 3rd attempt passes (at budget)
+            (3, 2, False),  # 3 crashes + 2 retries -> exhausts just over budget
+        ],
+    )
+    def test_retry_counter_boundary(
+        self,
+        tmp_path: Path,
+        fail_count: int,
+        max_retries: int,
+        should_succeed: bool,
+    ) -> None:
+        """At-budget crashes recover; just-over-budget crashes escalate.
+
+        Contract: ``max_worker_retries=N`` allows up to N retries after
+        the initial dispatch.  A seq that crashes K times succeeds iff
+        K <= N, otherwise escalates to
+        ``WorkerCrashed(MaxWorkerRetriesExceeded)``.
+        """
+        op = _CrashNTimes(
+            crash_value=0, fail_count=fail_count, marker_dir=str(tmp_path)
+        )
+        runner = ProcessStageRunner(
+            _mk_resilience_stage(op, parallelism=1),
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=max_retries,
+            mp_context=_fast_spawn_ctx(),
+        )
+        if should_succeed:
+            out = _run_flat(runner, [0])
+            assert out == [0]
+        else:
+            with pytest.raises(WorkerCrashed) as excinfo:
+                _run_flat(runner, [0])
+            assert excinfo.value.info.exc_type == "MaxWorkerRetriesExceeded"
+
+    # ------- gap 6: resilience with multi-op stage -------
+
+    @pytest.mark.timeout(30)
+    def test_multi_op_stage_recovers_from_worker_crash(self, tmp_path: Path) -> None:
+        """Multi-op stages exercise a different dispatch path than single-op
+        direct-IPC; verify transient crash recovery still works when
+        ``_single_op_direct_ipc`` is False.
+
+        Stage has two ops: a harmless ``_AddValueOp`` followed by a
+        ``_CrashOnValue`` that segfaults once on ``value=15``.  The add-op
+        maps inputs value -> value+10, the crash-op crashes on the first
+        post-shift value of 15, and the respawned worker succeeds.
+        """
+        add = Node(name="add", op=_AddValueOp(delta=10))
+        crash = Node(
+            name="crash",
+            op=_CrashOnValue([15], marker_dir=str(tmp_path), mode="first_only"),
+            inputs=[add],
+        )
+        stage = Stage(
+            name="multi_op_crash",
+            nodes=[add, crash],
+            placement="auto",
+            break_reason="test",
+        )
+
+        runner = ProcessStageRunner(
+            stage,
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=3,
+            mp_context=_fast_spawn_ctx(),
+        )
+        # Chains of ops force the non-fast path.
+        assert getattr(runner, "_single_op_direct_ipc") is False
+
+        data = [1, 2, 3, 4, 5]
+        out = _run_flat(runner, data)
+        assert out == [v + 10 for v in data]
