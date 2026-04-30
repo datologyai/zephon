@@ -547,13 +547,24 @@ class Pipeline:
     @_mutates_graph
     def shuffle(
         self,
-        buffer_size: int,
+        buffer_size: int | None = None,
         *,
         seed: int = 0,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
-        """Insert a deterministic shuffle buffer."""
+        """Insert a deterministic shuffle buffer.
+
+        Args:
+            buffer_size: Number of samples to buffer for shuffling. If None,
+                a default of 8192 is used.
+            seed: RNG seed for the shuffle.
+            placement: Placement hint for this operator.
+            parallelism: Override default parallelism for this operator.
+
+        Returns:
+            Self for method chaining.
+        """
         op = ShuffleBuffer(buffer_size=buffer_size, seed=seed)
         node = self._graph.add(
             "shuffle_buffer",

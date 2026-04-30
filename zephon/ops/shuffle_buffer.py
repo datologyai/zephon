@@ -12,6 +12,8 @@ from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.utils.seeding import batch_seed
 
+DEFAULT_BUFFER_SIZE = 8192
+
 T = TypeVar("T", bound=SampleRecord)
 
 
@@ -93,11 +95,13 @@ class ShuffleBuffer(DefaultSetup):
     avoids sharding RNG state across workers.
     """
 
-    def __init__(self, buffer_size: int, seed: int = 0) -> None:
+    def __init__(self, buffer_size: int | None = None, seed: int = 0) -> None:
+        if buffer_size is None:
+            buffer_size = DEFAULT_BUFFER_SIZE
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive")
         DefaultSetup.__init__(self)
-        self.buffer_size = int(buffer_size)
+        self.buffer_size: int = int(buffer_size)
         self.seed = int(seed)
 
     def setup(

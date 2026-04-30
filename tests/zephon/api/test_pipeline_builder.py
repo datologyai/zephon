@@ -5,6 +5,7 @@ import re
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
 from zephon.ops import TokenizeText
+from zephon.ops.shuffle_buffer import ShuffleBuffer
 
 
 def test_pipeline_explain_includes_plan_and_runtime() -> None:
@@ -105,3 +106,41 @@ def test_pipeline_tokenize_preserve_flag_forwarded() -> None:
     tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, TokenizeText)
     assert tail_op.preserve_upstream_payload is True
+
+
+# ---------------------------------------------------------------------------
+# Pipeline.shuffle() default buffer size
+# ---------------------------------------------------------------------------
+
+
+def _shuffle_node_op(pipe: PublicPipeline) -> ShuffleBuffer:
+    """Find the inserted shuffle_buffer node and return its op."""
+    for node in pipe._graph.nodes:  # type: ignore[attr-defined]
+        if node.name == "shuffle_buffer":
+            assert isinstance(node.op, ShuffleBuffer)
+            return node.op
+    raise AssertionError("Pipeline does not contain a shuffle_buffer node")
+
+
+def test_pipeline_shuffle_default_buffer_size() -> None:
+    """``pipeline.shuffle()`` with no buffer_size uses the default of 8192."""
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).shuffle().batch(microbatch_size=8)
+    pipe.compile()
+
+    op = _shuffle_node_op(pipe)
+    assert op.buffer_size == 8192
+
+
+def test_pipeline_shuffle_explicit_buffer_size() -> None:
+    """An explicit ``buffer_size=`` is preserved on the op."""
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).shuffle(buffer_size=42).batch(microbatch_size=8)
+    pipe.compile()
+
+    op = _shuffle_node_op(pipe)
+    assert op.buffer_size == 42
