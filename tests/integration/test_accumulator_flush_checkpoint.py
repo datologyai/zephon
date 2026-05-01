@@ -289,9 +289,12 @@ def test_batch_stall_checkpoint_restore(
             prefix.extend(_collect_output(item))
 
             # Check for eviction: chunk 0 no longer in inflight.
+            # Use ``in`` (atomic dict lookup) rather than ``min`` (which
+            # iterates) so we don't race with the engine pump mutating
+            # ``inflight_chunks_per_lane`` under free-threaded Python.
             if not eviction_observed and pipe1._engine is not None:
                 inflight = pipe1._engine.inflight_chunks_per_lane.get(0, {})
-                if inflight and min(inflight) > 0:
+                if inflight and 0 not in inflight:
                     eviction_observed = True
 
             # Checkpoint after eviction and consuming enough records.
