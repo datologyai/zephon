@@ -520,7 +520,7 @@ class Pipeline:
         truncation: bool = False,
         return_tensors: str | None = None,
         split_long_samples: bool = False,
-        use_fast: bool | None = None,
+        use_fast: bool | None = True,
         preserve_upstream_payload: bool = False,
         placement: str = "auto",
         parallelism: Optional[int] = None,
