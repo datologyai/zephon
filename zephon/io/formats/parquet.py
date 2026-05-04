@@ -14,6 +14,7 @@ Key features:
 """
 
 import bisect
+import copy
 import os
 import struct
 import threading
@@ -21,7 +22,7 @@ from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 import numpy as np
 
@@ -62,9 +63,15 @@ def _ensure_pyarrow():
 _CachedRG = dict[str, np.ndarray]
 
 
-def _arrow_table_to_numpy(table: Any) -> _CachedRG:
-    """Convert an Arrow table to a dict of numpy arrays, zero-copy when possible."""
+def _arrow_table_to_numpy(table: Any) -> tuple[_CachedRG, int]:
+    """Convert an Arrow table to a dict of numpy arrays, zero-copy when possible.
+
+    Returns ``(columns, decoded_bytes)``. ``decoded_bytes`` uses Arrow's
+    ``table.nbytes`` because numpy object-dtype ``nbytes`` only counts the
+    pointer table, not the underlying payload.
+    """
     pa, _ = _ensure_pyarrow()
+    decoded_bytes = int(table.nbytes)
     result: _CachedRG = {}
     for name in table.column_names:
         col = table.column(name)
@@ -86,29 +93,43 @@ def _arrow_table_to_numpy(table: Any) -> _CachedRG:
                 result[name] = arr.to_numpy(zero_copy_only=False)
             except Exception:
                 result[name] = np.array(arr.to_pylist(), dtype=object)
-    return result
+    return result, decoded_bytes
 
 
 def _extract_row(columns: _CachedRG, idx: int) -> dict[str, object]:
-    return {name: arr[idx] for name, arr in columns.items()}
+    """Materialize one record from the column dict.
+
+    Object-dtype cells are deep-copied so downstream references don't pin the
+    cache's decoded row groups; immutable atoms are effectively zero-copy
+    under ``deepcopy``.
+    """
+    out: dict[str, object] = {}
+    for name, arr in columns.items():
+        val = arr[idx]
+        if arr.dtype == object:
+            val = copy.deepcopy(val)
+        out[name] = val
+    return out
 
 
 _DEFAULT_RG_CACHE_BYTES = 2 * 1024**3  # 2 GiB
 
 
-def _rg_size_bytes(columns: _CachedRG) -> int:
-    return sum(a.nbytes for a in columns.values())
+class _CacheEntry(NamedTuple):
+    columns: _CachedRG
+    byte_size: int
 
 
 class _RowGroupCache:
-    """Thread-safe LRU cache keyed by (file_path, row_group_id) → _CachedRG.
+    """Thread-safe LRU keyed by ``(file_path, row_group_id)``.
 
-    Evicts LRU entries when total numpy buffer usage exceeds ``max_bytes``.
-    Set ``max_bytes=0`` to disable caching (low-memory mode).
+    Evicts LRU entries when ``used_bytes`` exceeds ``max_bytes``. Set
+    ``max_bytes=0`` to disable: ``put`` becomes a no-op and ``get`` always
+    returns ``None``.
     """
 
     def __init__(self, max_bytes: int = _DEFAULT_RG_CACHE_BYTES) -> None:
-        self._cache: OrderedDict[tuple[str, int], _CachedRG] = OrderedDict()
+        self._cache: OrderedDict[tuple[str, int], _CacheEntry] = OrderedDict()
         self._lock = threading.Lock()
         self._max_bytes = max_bytes
         self._used_bytes = 0
@@ -116,38 +137,25 @@ class _RowGroupCache:
     def get(self, path: str, rg_id: int) -> _CachedRG | None:
         key = (path, rg_id)
         with self._lock:
-            val = self._cache.get(key)
-            if val is not None:
-                self._cache.move_to_end(key)
-            return val
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            self._cache.move_to_end(key)
+            return entry.columns
 
-    def get_many(self, path: str, rg_ids: list[int]) -> dict[int, _CachedRG] | None:
-        """Return all requested row groups if all cached, else None."""
-        with self._lock:
-            result: dict[int, _CachedRG] = {}
-            for rg_id in rg_ids:
-                key = (path, rg_id)
-                val = self._cache.get(key)
-                if val is None:
-                    return None
-                self._cache.move_to_end(key)
-                result[rg_id] = val
-            return result
-
-    def put(self, path: str, rg_id: int, columns: _CachedRG) -> None:
+    def put(self, path: str, rg_id: int, columns: _CachedRG, byte_size: int) -> None:
         if self._max_bytes == 0:
             return
         key = (path, rg_id)
-        entry_bytes = _rg_size_bytes(columns)
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return
-            self._cache[key] = columns
-            self._used_bytes += entry_bytes
+            self._cache[key] = _CacheEntry(columns, byte_size)
+            self._used_bytes += byte_size
             while self._used_bytes > self._max_bytes and len(self._cache) > 1:
                 _, evicted = self._cache.popitem(last=False)
-                self._used_bytes -= _rg_size_bytes(evicted)
+                self._used_bytes -= evicted.byte_size
 
     def clear(self) -> None:
         with self._lock:
@@ -229,8 +237,8 @@ class ParquetShard(RandomAccessShard):
         table = pq_file.read_row_group(rg_id)
         del pq_file
 
-        columns = _arrow_table_to_numpy(table)
-        self._rg_cache.put(path_key, rg_id, columns)
+        columns, byte_size = _arrow_table_to_numpy(table)
+        self._rg_cache.put(path_key, rg_id, columns, byte_size)
         return columns
 
     def __getitem__(self, index: int) -> dict[str, object]:
@@ -253,7 +261,14 @@ class ParquetShard(RandomAccessShard):
         return _extract_row(columns, local_idx)
 
     def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
-        """Bulk read: groups by row group, single file open for cache misses."""
+        """Bulk read: groups by row group, single file open for cache misses.
+
+        Holds decoded row groups in a call-local dict so correctness is
+        independent of cache retention (e.g. ``ZEPHON_PARQUET_RG_CACHE_BYTES=0``
+        or concurrent eviction by other shards). Note that call-local peak
+        memory is roughly the sum of the requested row groups' decoded sizes,
+        regardless of the cache cap.
+        """
         if not indices:
             return []
 
@@ -267,22 +282,27 @@ class ParquetShard(RandomAccessShard):
             rg_groups[rg_id].append((orig_pos, local_idx))
 
         path_key = str(self._path)
-        missing_rg_ids = [
-            rg_id for rg_id in rg_groups if self._rg_cache.get(path_key, rg_id) is None
-        ]
+        decoded: dict[int, _CachedRG] = {}
+        missing_rg_ids: list[int] = []
+        for rg_id in rg_groups:
+            cached = self._rg_cache.get(path_key, rg_id)
+            if cached is not None:
+                decoded[rg_id] = cached
+            else:
+                missing_rg_ids.append(rg_id)
+
         if missing_rg_ids:
             pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
             for rg_id in missing_rg_ids:
                 table = pq_file.read_row_group(rg_id)
-                self._rg_cache.put(path_key, rg_id, _arrow_table_to_numpy(table))
+                columns, byte_size = _arrow_table_to_numpy(table)
+                decoded[rg_id] = columns
+                self._rg_cache.put(path_key, rg_id, columns, byte_size)
             del pq_file
 
         results: list[dict[str, object] | None] = [None] * len(indices)
         for rg_id, items in rg_groups.items():
-            columns = self._rg_cache.get(path_key, rg_id)
-            assert columns is not None, (
-                f"row group {rg_id} unexpectedly missing from cache"
-            )
+            columns = decoded[rg_id]
             for orig_pos, local_idx in items:
                 results[orig_pos] = _extract_row(columns, local_idx)
 
@@ -310,6 +330,10 @@ class ParquetFormat(FormatHandler):
     def __init__(self) -> None:
         self._metadata_cache: OrderedDict[str, Any] = OrderedDict()
         self._metadata_lock = threading.Lock()
+        # ``ZEPHON_PARQUET_RG_CACHE_BYTES`` caps in-RAM decoded row groups
+        # (default 2 GiB; ``0`` disables). This is independent of the on-disk
+        # shard cache (``CacheOptions.limit_bytes``); a process's resident set
+        # can include both plus downstream operator state.
         max_bytes = int(
             os.environ.get("ZEPHON_PARQUET_RG_CACHE_BYTES", _DEFAULT_RG_CACHE_BYTES)
         )

@@ -14,6 +14,7 @@ class CacheOptions:
 
     enabled: bool = False
     root: str | Path = Path("~/.cache/zephon").expanduser()
+    # Bound on the on-disk shard cache only, not in-memory cache.
     limit_bytes: int | None = None
     keep_zip: bool = False
     validate_hash: str | None = None

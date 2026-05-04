@@ -447,7 +447,7 @@ class TestArrowToNumpy:
     def test_scalar_columns(self):
         """Scalar int/float columns produce 1-D numpy arrays."""
         table = pa.table({"x": pa.array([1, 2, 3]), "y": pa.array([1.5, 2.5, 3.5])})
-        result = _arrow_table_to_numpy(table)
+        result, decoded_bytes = _arrow_table_to_numpy(table)
 
         assert set(result.keys()) == {"x", "y"}
         import numpy as np
@@ -455,6 +455,7 @@ class TestArrowToNumpy:
         np.testing.assert_array_equal(result["x"], [1, 2, 3])
         np.testing.assert_array_equal(result["y"], [1.5, 2.5, 3.5])
         assert result["x"].shape == (3,)
+        assert decoded_bytes == int(table.nbytes)
 
     def test_fixed_size_list_column(self):
         """fixed_size_list<uint32>[N] is reshaped to (n_rows, N)."""
@@ -463,7 +464,7 @@ class TestArrowToNumpy:
         inner = pa.array([10, 20, 30, 40, 50, 60], type=pa.uint32())
         fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=3)
         table = pa.table({"tokens": fsl})
-        result = _arrow_table_to_numpy(table)
+        result, _ = _arrow_table_to_numpy(table)
 
         assert result["tokens"].shape == (2, 3)
         np.testing.assert_array_equal(result["tokens"][0], [10, 20, 30])
@@ -475,7 +476,7 @@ class TestArrowToNumpy:
 
         list_arr = pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int64()))
         table = pa.table({"ragged": list_arr})
-        result = _arrow_table_to_numpy(table)
+        result, _ = _arrow_table_to_numpy(table)
 
         assert result["ragged"].dtype == object
         assert len(result["ragged"]) == 3
@@ -487,7 +488,7 @@ class TestArrowToNumpy:
         """String columns fall back to object dtype numpy array."""
 
         table = pa.table({"s": pa.array(["hello", "world"])})
-        result = _arrow_table_to_numpy(table)
+        result, _ = _arrow_table_to_numpy(table)
 
         assert len(result["s"]) == 2
         assert result["s"][0] == "hello"
@@ -499,7 +500,7 @@ class TestArrowToNumpy:
         inner = pa.array(list(range(12)), type=pa.uint32())
         fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=4)
         table = pa.table({"id": pa.array([10, 20, 30]), "tokens": fsl})
-        columns = _arrow_table_to_numpy(table)
+        columns, _ = _arrow_table_to_numpy(table)
 
         row = _extract_row(columns, 1)
         assert row["id"] == 20
@@ -766,6 +767,178 @@ class TestRowGroupCache:
         before = cache.used_bytes
         _ = shard[2000]  # second row group
         assert cache.used_bytes > before
+
+
+def _create_struct_parquet_file(
+    path: Path, num_rows: int, row_group_size: int, content_bytes: int
+) -> int:
+    """Create a Parquet file whose ``text`` column is a struct with a heavy
+    ``content`` field, mimicking the IngestedDocument shape that triggered
+    the byte-accounting bug. Returns the table's Arrow ``nbytes`` so callers
+    can size cache caps relative to the actual decoded payload.
+    """
+    payload = "x" * content_bytes
+    table = pa.table(
+        {
+            "id": pa.array(range(num_rows), type=pa.int64()),
+            "text": pa.array(
+                [{"content": payload, "hash": f"h{i}"} for i in range(num_rows)],
+                type=pa.struct([("content", pa.string()), ("hash", pa.string())]),
+            ),
+        }
+    )
+    pq.write_table(table, str(path), row_group_size=row_group_size)
+    return int(table.nbytes)
+
+
+class TestRowGroupCacheAccounting:
+    """Regression tests for parquet row-group LRU cache fixes."""
+
+    def _struct_shard(self, tmp_path, *, num_rows, row_group_size, content_bytes):
+        path = tmp_path / "struct.parquet"
+        decoded = _create_struct_parquet_file(
+            path,
+            num_rows=num_rows,
+            row_group_size=row_group_size,
+            content_bytes=content_bytes,
+        )
+        metadata = pq.read_metadata(str(path))
+        shard_meta = [
+            {
+                "num_rows": metadata.row_group(i).num_rows,
+                "total_byte_size": metadata.row_group(i).total_byte_size,
+            }
+            for i in range(metadata.num_row_groups)
+        ]
+        return path, shard_meta, decoded
+
+    def test_used_bytes_counts_struct_payload(self, tmp_path):
+        """Cache ``used_bytes`` must reflect struct-column payload
+        bytes, not just the numpy object-pointer table.
+
+        Before the fix, an object-dtype numpy array reported
+        ``nbytes == len(arr) * 8``, so a 100-row row group with 100 KiB of
+        text per row (~10 MiB decoded) was booked as ~800 bytes. After the
+        fix we use Arrow ``table.nbytes`` which counts the underlying
+        buffer bytes.
+        """
+        path, shard_meta, decoded_bytes = self._struct_shard(
+            tmp_path, num_rows=100, row_group_size=100, content_bytes=100 * 1024
+        )
+        # Sanity check: the single row group really is ~10 MiB on the wire.
+        assert decoded_bytes >= 9_500_000, decoded_bytes
+
+        cache = _RowGroupCache()
+        shard = ParquetShard(path, shard_meta, rg_cache=cache)
+        _ = shard[0]
+
+        # Pre-fix this would be ~1 KiB. Post-fix it must be within an order
+        # of magnitude of the Arrow decoded size.
+        assert cache.used_bytes >= 5_000_000, (
+            f"used_bytes={cache.used_bytes} too small for a "
+            f"~10 MiB struct row group; accounting still broken"
+        )
+
+    def test_lru_eviction_with_struct_columns(self, tmp_path):
+        """eviction cap actually fires for struct-dtype
+        row groups. Pre-fix the cap was meaningless for these workloads
+        because ``used_bytes`` under-counted by ~1000x.
+        """
+        # 5 row groups of ~5 MiB each; cap ≈ 7 MiB so a second insert
+        # always evicts the previous one.
+        path, shard_meta, _ = self._struct_shard(
+            tmp_path, num_rows=250, row_group_size=50, content_bytes=100 * 1024
+        )
+        cache = _RowGroupCache(max_bytes=7 * 1024 * 1024)
+        shard = ParquetShard(path, shard_meta, rg_cache=cache)
+
+        _ = shard[0]
+        assert len(cache) == 1
+        first_used = cache.used_bytes
+
+        _ = shard[50]  # next row group
+        _ = shard[100]
+        _ = shard[150]
+        # Cap is below 2x one row group, so eviction must keep us at 1 entry.
+        assert len(cache) == 1, (
+            f"expected cap to evict down to 1 entry, got len={len(cache)}, "
+            f"used_bytes={cache.used_bytes}, first_used={first_used}"
+        )
+        # And the most recently inserted row group is still there.
+        assert cache.get(str(path), 3) is not None
+
+    def test_getsamples_without_row_group_cache(self, tmp_path):
+        """When max_bytes=0, put is a no-op. getsamples must still work without it."""
+        path, shard_meta, _ = self._struct_shard(
+            tmp_path, num_rows=200, row_group_size=50, content_bytes=4 * 1024
+        )
+        cache = _RowGroupCache(max_bytes=0)
+        shard = ParquetShard(path, shard_meta, rg_cache=cache)
+
+        # Indices spanning multiple row groups, in non-monotonic order.
+        results = shard.getsamples([0, 51, 199, 100, 1, 150])
+        assert len(results) == 6
+        assert results[0]["id"] == 0
+        assert results[1]["id"] == 51
+        assert results[2]["id"] == 199
+        assert results[3]["id"] == 100
+        assert results[4]["id"] == 1
+        assert results[5]["id"] == 150
+        # Cache must still be empty (max_bytes=0 ⇒ put is a no-op).
+        assert len(cache) == 0
+        assert cache.used_bytes == 0
+
+    def test_put_same_key_does_not_double_count(self, tmp_path):
+        """Re-``put``ing the same ``(path, rg_id)`` must not double-count
+        ``used_bytes``. Guards the dedup branch in ``_RowGroupCache.put``.
+        """
+        path, shard_meta, _ = self._struct_shard(
+            tmp_path, num_rows=50, row_group_size=50, content_bytes=1024
+        )
+        cache = _RowGroupCache()
+        shard = ParquetShard(path, shard_meta, rg_cache=cache)
+
+        _ = shard[0]
+        used_after_first = cache.used_bytes
+        len_after_first = len(cache)
+        assert used_after_first > 0
+
+        # Re-insert the same row group directly. Without the dedup branch
+        # this would double the booked usage and add a second entry.
+        path_key = str(path)
+        cached = cache.get(path_key, 0)
+        assert cached is not None
+        cache.put(path_key, 0, cached, used_after_first)
+
+        assert cache.used_bytes == used_after_first
+        assert len(cache) == len_after_first
+
+    def test_extract_row_returns_independent_dict(self, tmp_path):
+        """Mutating a returned struct value must not corrupt the
+        cached row group. Pre-fix the returned dict was the same Python
+        object that lived in the cache's numpy object array, so any
+        downstream mutation (or downstream-held reference outliving cache
+        eviction) created a "shadow set" of pinned dicts.
+        """
+        path, shard_meta, _ = self._struct_shard(
+            tmp_path, num_rows=50, row_group_size=50, content_bytes=512
+        )
+        cache = _RowGroupCache()
+        shard = ParquetShard(path, shard_meta, rg_cache=cache)
+
+        first = shard[0]
+        original_content = first["text"]["content"]
+
+        # Mutating the returned dict's nested struct field must NOT affect
+        # the cache's view of the row.
+        first["text"]["content"] = "MUTATED"
+        first["text"]["hash"] = "MUTATED"
+
+        second = shard[0]  # served from cache
+        assert second["text"]["content"] == original_content
+        assert second["text"]["hash"] != "MUTATED"
+        # And the two reads are not the same Python object identity.
+        assert first["text"] is not second["text"]
 
 
 class TestParquetAutoDetection:
