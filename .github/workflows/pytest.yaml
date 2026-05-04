@@ -88,6 +88,10 @@ jobs:
         ray stop --force 2>/dev/null || true
         rm -rf /tmp/ray
     - name: Run Ray Tests
+      # --reruns=2 is a backstop for known Ray-side worker-startup
+      # SIGSEGVs in glog (logging.cc) — narrowly scoped via --only-rerun
+      # so genuine bugs are not retried.  See PR #282.
       run: |
         set -ex
-        uv run --python 3.12 pytest -m "requires_ray" --maxfail=10
+        uv run --python 3.12 pytest -m "requires_ray" --maxfail=10 \
+          --reruns=2 --only-rerun "WorkerCrashed|ActorDiedError|Segmentation"

@@ -79,6 +79,10 @@ jobs:
           ray stop --force 2>/dev/null || true
           rm -rf /tmp/ray
       - name: Run Ray Integration Tests
+        # --reruns=2 is a backstop for known Ray-side worker-startup
+        # SIGSEGVs in glog (logging.cc) — narrowly scoped via --only-rerun
+        # so genuine bugs are not retried.  See PR #282.
         run: |
           set -ex
-          uv run --python 3.12 pytest -m "integration and requires_ray" --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
+          uv run --python 3.12 pytest -m "integration and requires_ray" --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10 \
+            --reruns=2 --only-rerun "WorkerCrashed|ActorDiedError|Segmentation"

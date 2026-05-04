@@ -3608,6 +3608,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-rerunfailures"
+version = "16.1"
+source = { registry = "https://api.pyx.dev/simple/pypi" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.astralhosted.com/public/de/04/71e9520551fc8fe2cf5c1a1842e4e600265b0815f2016b7c27ec85688682/pytest_rerunfailures-16.1.tar.gz", hash = "sha256:c38b266db8a808953ebd71ac25c381cb1981a78ff9340a14bcb9f1b9bff1899e", size = 30889, upload-time = "2025-10-10T07:06:01Z" }
+wheels = [
+    { url = "https://files.astralhosted.com/public/77/54/60eabb34445e3db3d3d874dc1dfa72751bfec3265bd611cb13c8b290adea/pytest_rerunfailures-16.1-py3-none-any.whl", hash = "sha256:5d11b12c0ca9a1665b5054052fcc1084f8deadd9328962745ef6b04e26382e86", size = 14093, upload-time = "2025-10-10T07:06:00Z", zstd = { hash = "sha256:1a4890bbe8bfeaf8d0d87e8be73200b70dee2e3d84b0d48cd5ceec871321e46e", size = 12102 } },
+]
+
+[[package]]
 name = "pytest-timeout"
 version = "2.4.0"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
@@ -3718,7 +3731,7 @@ wheels = [
 
 [[package]]
 name = "ray"
-version = "2.54.0"
+version = "2.55.1"
 source = { registry = "https://api.pyx.dev/simple/pypi" }
 dependencies = [
     { name = "click" },
@@ -3731,21 +3744,24 @@ dependencies = [
     { name = "requests" },
 ]
 wheels = [
-    { url = "https://files.astralhosted.com/public/64/13/b86d791b41f33220335eba18fc4841f1ebddae41e562c6a216846404c88d/ray-2.54.0-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:a22937f09ee74a43171df338d84b45ef882c1c05748947ca9d5343a44d4b9379", size = 70097079, upload-time = "2026-02-18T04:04:35Z", zstd = { hash = "sha256:dedc99275e5f81916070f5c332033ab1cd2cef485cdfde88520544f59cad9c3e", size = 58834398 } },
-    { url = "https://files.astralhosted.com/public/e0/bb/f54980d45ecfd0ceb39b6a966bd64fc0597746af1917d7fe3cbdb9f72752/ray-2.54.0-cp310-cp310-manylinux2014_aarch64.whl", hash = "sha256:1e63e491155695d527513ffe9d33a6aeb3f3cdccb6309adadfd6f8dd7c0300f7", size = 71951024, upload-time = "2026-02-18T04:04:42Z", zstd = { hash = "sha256:a54a9431451802179ce0fea90dbf0b2a3c8c78011f3571d4df8ab36e6afd89be", size = 61145237 } },
-    { url = "https://files.astralhosted.com/public/b0/b1/8cc4e45a3ce87aabcb70696b448b20840bcbaa5c98bdb4807a2749541fda/ray-2.54.0-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:2d140409e4ca06d8d6a06f71d441b53f6edcd930ebe67a6988f652915db81070", size = 72783364, upload-time = "2026-02-18T04:04:48Z", zstd = { hash = "sha256:22b2ff21240bb74f208002889424944e6babb38868792d421bf18a41fce132e3", size = 61775251 } },
-    { url = "https://files.astralhosted.com/public/12/79/7fb2f5698319cd28f0599fc9848a77dd7a64e0d82486c78dd94c6dce5095/ray-2.54.0-cp310-cp310-win_amd64.whl", hash = "sha256:86da6ff60b57394aa47158b2f3fc2616a87492e828983451f04e676b192b49ce", size = 27452281, upload-time = "2026-02-18T04:04:53Z", zstd = { hash = "sha256:26d6e119d803133e440a85f47fea2f19a7465369751c384054147ebb839bb32a", size = 19887579 } },
-    { url = "https://files.astralhosted.com/public/08/58/6209b2231947f3c8df09ce1436f1c76c4a11fcafd57c8def852dcbb6d8ef/ray-2.54.0-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:8e39dd56b47a0a1820d5a5a54385bbe54d1d67e1093736d12d8ed4e99d0fa455", size = 70098998, upload-time = "2026-02-18T04:04:58Z", zstd = { hash = "sha256:02b7bbb98960a757a470c1a8d73c10cbe95e802c622178eb07955f030440c867", size = 58832047 } },
-    { url = "https://files.astralhosted.com/public/ac/29/7871f4206e6b00a9bb784c16dad32ccd01e9df5a93545db92de220eb2871/ray-2.54.0-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:491ae56ab80d8822c4eaf4d5bb96dcf32a6231d8d7b76eb8034400eb9be1bb18", size = 72066630, upload-time = "2026-02-18T04:05:04Z", zstd = { hash = "sha256:fd18659b4a761140421e3351bf4983271db7f04c762b91836dfe61eca734fcd2", size = 61245613 } },
-    { url = "https://files.astralhosted.com/public/1d/e8/d2c8ebd9cd945abc817b01ad02a29df78cdb86cd07d764587e16977389d0/ray-2.54.0-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:928bb09245a3c6f7c3c113ba8eafc69f948da9602d7f33e8251ecdf97c157615", size = 72895723, upload-time = "2026-02-18T04:05:10Z", zstd = { hash = "sha256:31066efb7c59bd9209ac0a3acaf464782186d32e05434dcce345e66bc7bab37c", size = 61870726 } },
-    { url = "https://files.astralhosted.com/public/7e/96/a5ea3a149a943475cda1d68fdcdb14c86251826c652c232ae853600ad7e7/ray-2.54.0-cp311-cp311-win_amd64.whl", hash = "sha256:1e786330de55b3ba2228e36ec305381a9b86f0b01a8b6072c5811c3bc4dd9a3d", size = 27448371, upload-time = "2026-02-18T04:05:16Z", zstd = { hash = "sha256:8b275e9b7223b1e7a40d0ba4c7c66109bfb2660e90503acbe892107129479918", size = 19886913 } },
-    { url = "https://files.astralhosted.com/public/0e/16/45eefb51eb1767342a6dbf41af0b432279e422e56160705fcd1098a7ec53/ray-2.54.0-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:cf5c33b4b13850ec24a5bd5f9d9e0a8161f8e586bfd297e52913d170dec447fe", size = 70084880, upload-time = "2026-02-18T04:05:22Z", zstd = { hash = "sha256:4ecf67d127a51695d7774f1f45d8218645a3dd368279957a5679796db934b92d", size = 58828605 } },
-    { url = "https://files.astralhosted.com/public/60/ad/e07aca3637e9c3ec4857ec4366208099cf8488ece8061a9925ba29b66382/ray-2.54.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:795ae21d6b764245d3f521bc5833446d58569e7dfde9c5777417eb285d87450f", size = 72107346, upload-time = "2026-02-18T04:05:27Z", zstd = { hash = "sha256:cb890d33fc788273bc289ec2ec01eebdff6e5b264ac529ce023683c4436a9771", size = 61278475 } },
-    { url = "https://files.astralhosted.com/public/9e/b9/cc5ea8460c3dc602e6b7198277a7c59ba2b8929374ab22efa8df9f3deac8/ray-2.54.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:a972afd5aa3dda99d0b2f369b5f62e5dd95865ab7d37bf2e0a0e0d2cfbd9b325", size = 72967230, upload-time = "2026-02-18T04:05:33Z", zstd = { hash = "sha256:b0c2de6b0eb91f95e5096bb0cc897332d83dacc1a8496a02983b42e22dc1e76d", size = 61937856 } },
-    { url = "https://files.astralhosted.com/public/de/d7/744de3b1bb881701330ddcbb2f6efaccd65915d564ece899a3838f9fb105/ray-2.54.0-cp312-cp312-win_amd64.whl", hash = "sha256:2ee074ede491d0aacfa339c003f5d7a15826e1e2a72ce873234ccbc0446e19b3", size = 27427353, upload-time = "2026-02-18T04:05:38Z", zstd = { hash = "sha256:32f6acf783bd959f5a0b4bc6cccda489ffe4aa95f563d52a6d94eb7e3644709d", size = 19873511 } },
-    { url = "https://files.astralhosted.com/public/7f/f2/5c0161d10445e703b7d01413ab54ec1cc5e27032555279d296df89b9c4ee/ray-2.54.0-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:5ad77961fea16c697a0fb0e51216dd39c0bec28868cde54ac668edd58d12b8ae", size = 70030991, upload-time = "2026-02-18T04:05:43Z", zstd = { hash = "sha256:1ceeda49331cef7bea302f13dadc2cfec90a482d125bac9d10c7a8c40cf45d62", size = 58795754 } },
-    { url = "https://files.astralhosted.com/public/fd/8c/4a4a38eaec6e9614076a96967f58540f4f8d4aa0c793f43150c5df23cb9a/ray-2.54.0-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:8952c23a8aa94f10728c2d16e0dc3732d09aa0e6254801757ff494984a214f45", size = 72013826, upload-time = "2026-02-18T04:05:49Z", zstd = { hash = "sha256:a4e8c06e94eb95eb5f3aeaa4e4d251aacb0d060a5e55f26c6c97c64b929b6dda", size = 61201721 } },
-    { url = "https://files.astralhosted.com/public/42/ac/e7ec2a406bd755f61c7090460fa5ab3f09b00c3c2d8db6d0b559f78a30eb/ray-2.54.0-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:ab89e6089abb6e46fb98fdd96d399b31a852d79127cd8ac00746c61d93defa2c", size = 72880209, upload-time = "2026-02-18T04:05:55Z", zstd = { hash = "sha256:0dec8afd119352cef3deabed26b38b4cf1da915d74e295ccd1427bab44a4684b", size = 61882250 } },
+    { url = "https://files.astralhosted.com/public/7e/d0/a85097dd53aaca1a44acc4dd0b3d2c0e9233179433e2ee326e4018ab3cf7/ray-2.55.1-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:2d5786661e192148719accc959def6cdcabd7a24cd9008005bf3d0e3c8cfd529", size = 65829601, upload-time = "2026-04-22T20:09:10Z", zstd = { hash = "sha256:58886401dd866760aae43dd8bfdcd65864cd2f58fb319d521d48229b5968b474", size = 55458330 } },
+    { url = "https://files.astralhosted.com/public/6a/d0/413baab5f0bdd1f913bd46538d96df3547a495b1a0de42f776b5c80d821c/ray-2.55.1-cp310-cp310-manylinux2014_aarch64.whl", hash = "sha256:baf2ec89df7838cabdef493ff9bdbec1e6a6452f8bc696ad0c1b8a6198721745", size = 72776751, upload-time = "2026-04-22T20:09:17Z", zstd = { hash = "sha256:233774f92e605a1c9d364f6654296ed65811593128298050537fc01ca6fa4440", size = 61759260 } },
+    { url = "https://files.astralhosted.com/public/b4/64/640f5525bac171282c6f76f3ecc9c4cfef60149ac0d00231afb22018ebe5/ray-2.55.1-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:bb49fbbe53a1d931e1f92d17f9271338f0b738885f8f70b7f531aa33f019d8af", size = 73606971, upload-time = "2026-04-22T20:09:23Z", zstd = { hash = "sha256:ffe01986922bdff479bd89d22789dbc9fdbfe81f70b62f9b73585d2439e3e976", size = 62387145 } },
+    { url = "https://files.astralhosted.com/public/31/9a/917f25438d802e23cee2bd1426f1e36ae19e0d0e41908d50937e0a4b7fd4/ray-2.55.1-cp310-cp310-win_amd64.whl", hash = "sha256:86e618e9ad8c6a24331c788eb599cee9838a62d2e10dfca0227743be06cf551c", size = 27886803, upload-time = "2026-04-22T20:09:28Z", zstd = { hash = "sha256:e7b4d32be93dcf5f7496398165ffd9cdb98d92a58f5a05baf8ffbcbecc41cb3e", size = 20160506 } },
+    { url = "https://files.astralhosted.com/public/88/7d/48ba2f49b40a34b0071ee27c0144a2573d8836094eaca213d59cef12c271/ray-2.55.1-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:0053fd5b400f7ac56263aa1bbd3d68fb79341b08b8dc697c88782d5aca7b3ed4", size = 65835271, upload-time = "2026-04-22T20:09:34Z", zstd = { hash = "sha256:61aad8eec967efc26c65035b0e747ab5f23b2f68ae028f8c9113197fd2a83b28", size = 55441533 } },
+    { url = "https://files.astralhosted.com/public/8f/a3/d6db3a428e4ea17cc72e79f747cfe11e90e63e36e1705bb8324e45f334b7/ray-2.55.1-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:0ea2f670a7725833ad2333a8c46ab69865ad06c8e5de9f65695e0f8f35331cec", size = 72879783, upload-time = "2026-04-22T20:09:40Z", zstd = { hash = "sha256:a52b27f4f04b48b356eb638f2eb5007856a41cd1eeda99f1455a38492930d727", size = 61836577 } },
+    { url = "https://files.astralhosted.com/public/46/59/41da0e72a59cd3e8978480ccfeb86ef4235ae5ceb9b8928168a764fa930a/ray-2.55.1-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:d5382da181c03ee2f502ef46cf0ae4bbc30157b5bd9a67d7651f6a272528a85a", size = 73706515, upload-time = "2026-04-22T20:09:47Z", zstd = { hash = "sha256:52caa4e2d6502206abffe8cf7df4bc2dfa92d4b53b6f4b9ec4c16d95b02fef63", size = 62468972 } },
+    { url = "https://files.astralhosted.com/public/65/52/c16bbdc3e31a5178f97be88966ab56db6f7e04882640c5cf2fee5b87757b/ray-2.55.1-cp311-cp311-win_amd64.whl", hash = "sha256:5e56d2e8f304cafe990c198a2b894f5b813de018998cd7212869201f6dc17cff", size = 27882093, upload-time = "2026-04-22T20:09:52Z", zstd = { hash = "sha256:c948063c77a1bc479a6d35c464bb4f57b08a67b96566d8eff3b2cf0320376e57", size = 20156433 } },
+    { url = "https://files.astralhosted.com/public/ac/3a/4d34f471a68b958b7f94c974c19ad6836a61a2dc16393df4294169a2e4b0/ray-2.55.1-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:137f9006eee28caab8260803cca314f37bbda3fc94fdfa31c770b5d019626ad8", size = 65822379, upload-time = "2026-04-22T20:09:58Z", zstd = { hash = "sha256:f11d4c9d7b110cd39a15c5d36161a524f713228c0ec40adecfed37aa9f7a622a", size = 55440233 } },
+    { url = "https://files.astralhosted.com/public/f1/13/0db535102d0256b350ca116d8987588aca1a1f9ebb4638e1e1ff88bbcef8/ray-2.55.1-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:26541f69bb55607ef8335baac75b2ed12ff2ce02d56313219b29eda003039221", size = 72910802, upload-time = "2026-04-22T20:10:04Z", zstd = { hash = "sha256:3b78819fb7fcf93fe2d67e462961640207247c68c3372dc2388affc9766be890", size = 61867920 } },
+    { url = "https://files.astralhosted.com/public/4c/f8/fffadf3f4285eebd460e4d7f2ed1c0cd641ed89613c3f49eb881ee9fa7e2/ray-2.55.1-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:263705f6bab29e7622a94f82da25fd7f9cead76cdf89a07aab28f79cdf8f9d95", size = 73765203, upload-time = "2026-04-22T20:10:10Z", zstd = { hash = "sha256:01e79ffd9263b8439646b2dfa5ebb368103af33dabd0ab56399f12258df2ed95", size = 62516609 } },
+    { url = "https://files.astralhosted.com/public/10/f7/5acb86fc9625a0e6bbc40e1c7d42c60770e78585439a921c32738b6d675a/ray-2.55.1-cp312-cp312-win_amd64.whl", hash = "sha256:9ad56704c8bd7e92130162f9c58e4ef473609515637673d5a36e761f95335206", size = 27865547, upload-time = "2026-04-22T20:10:15Z", zstd = { hash = "sha256:2a42500d41638ca940e8c042e45741ef8fc4c00dd72301d754fedd29fd9fc326", size = 20144735 } },
+    { url = "https://files.astralhosted.com/public/d5/95/898699cc1a6a5f304ea95376d079843b5c05f4c8c1ec7e55a5cc7ffcea50/ray-2.55.1-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:f9844a9272ef2e6eb5771025866072cf4234cf4c7cc1a31e235b7de7111864be", size = 65766823, upload-time = "2026-04-22T20:10:20Z", zstd = { hash = "sha256:13fc4a936399f3e0fc95a64539313e1b3d6aad90d949c63c2e4dd3b1adcf9e93", size = 55402518 } },
+    { url = "https://files.astralhosted.com/public/c9/13/87deecc090c672e45a0cf6f5eef511de448b93f37ef18fd10eb8e8557a0d/ray-2.55.1-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:b415d590e062f248907e0fe42994943f11726b7178fcf4b1cf5546721fb1a5f8", size = 72818676, upload-time = "2026-04-22T20:10:26Z", zstd = { hash = "sha256:7623d9d0299b199b0c1f9654549a27ad849eeaca01e27edfa9bb7af47665e753", size = 61798257 } },
+    { url = "https://files.astralhosted.com/public/71/d7/fc95d3b8824c62105c64aa1b59c59600b581f608d78a2af753e010936dc9/ray-2.55.1-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:1380e043eb57cde69b7e9199c6f2558ceeb8f0fc41c97d1d5e50ea042115f302", size = 73678908, upload-time = "2026-04-22T20:10:32Z", zstd = { hash = "sha256:0d428b90ae535008626af88ee9b5275c0ae90d55308c68fe92efb05b8e532a1e", size = 62448590 } },
+    { url = "https://files.astralhosted.com/public/a9/03/7e552325572e067b23a4584bda8dc6a67af8bd7e03c424d2610bfa93112d/ray-2.55.1-cp314-cp314-macosx_12_0_arm64.whl", hash = "sha256:b062045c64c2bce39a51661624f7292c7bbf30f2a9d878627aae31d46da5712d", size = 65774106, upload-time = "2026-04-22T20:10:39Z", zstd = { hash = "sha256:907d6e7f3bf875ada808bd7c3b9d0420f08662485a66d3fc27b4480011d08598", size = 55404572 } },
+    { url = "https://files.astralhosted.com/public/94/62/607a8859520ce350861425f11f8e15d66c15ee33e6aac812f9e2889b5df4/ray-2.55.1-cp314-cp314-manylinux2014_aarch64.whl", hash = "sha256:4e618d61e1b14b6fde9a586151f3fd9d435b0b85048b997bcaa7f4a533747b2b", size = 72814044, upload-time = "2026-04-22T20:10:46Z", zstd = { hash = "sha256:d8f687aaabc0f15649599ec468df068dff88f9feb065d5726637092414015a80", size = 61788838 } },
+    { url = "https://files.astralhosted.com/public/04/5a/0699bef04a72d7dc54462960d07ef7a19cd8b1e09979880aba2b6d13cca2/ray-2.55.1-cp314-cp314-manylinux2014_x86_64.whl", hash = "sha256:156ed3e72ad95b645d2006cd71a8dddbcc89b56bfc00027f6225adf78bd9cb74", size = 73644244, upload-time = "2026-04-22T20:10:52Z", zstd = { hash = "sha256:79ce6ef816c9c97fbefcf988fdd68f8a9df9375e34dddfb90a3ba626161b0261", size = 62429967 } },
 ]
 
 [package.optional-dependencies]
@@ -5144,6 +5160,7 @@ test = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pytest" },
+    { name = "pytest-rerunfailures" },
     { name = "pytest-timeout" },
     { name = "torchdata" },
     { name = "zephon", extra = ["ray"] },
@@ -5192,6 +5209,7 @@ test = [
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-rerunfailures", specifier = ">=14.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "torchdata", specifier = ">=0.11.0" },
     { name = "zephon", extras = ["ray"] },

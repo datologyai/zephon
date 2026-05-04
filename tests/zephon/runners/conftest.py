@@ -51,19 +51,27 @@ def _warm_forkserver():
     proc.join(timeout=60)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def ray_init():
-    """Initialize Ray for testing."""
+    """Initialize Ray once for the whole test session.
+
+    Ray's testing-tips doc recommends reusing a single cluster across
+    tests: each init/teardown is ~4–5 s and is another chance to hit
+    known worker-startup SIGSEGVs in Ray's glog wrapper.
+    """
     ray = pytest.importorskip("ray")
-    session_scope = os.environ.get("ZEPHON_RAY_SESSION_SCOPE") == "session"
+
+    # Disable ray's runtime env hook for uv run
+    from ray._private import ray_constants
+
+    ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
     if not ray.is_initialized():
         ray.init(
             ignore_reinit_error=True,
             num_cpus=2,
-            object_store_memory=100_000_000,
+            object_store_memory=512_000_000,
             include_dashboard=False,
-            runtime_env={"working_dir": None},
         )
     yield
-    if not session_scope and ray.is_initialized():
+    if ray.is_initialized():
         ray.shutdown()

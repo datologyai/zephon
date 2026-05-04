@@ -87,6 +87,7 @@ test = [
     "pillow>=10.0.0",
     "torchdata>=0.11.0",
     "pytest-timeout>=2.4.0",
+    "pytest-rerunfailures>=14.0",
     "obstore>=0.3.0",
     "zephon[ray]",
     "pydantic>=2.0.0",
