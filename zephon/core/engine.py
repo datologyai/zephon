@@ -82,6 +82,11 @@ from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
 from zephon.work import MixtureReadConfig, WorkSource
 from zephon.work.base import WorkChunk
 
+# Set ZEPHON_DEBUG_EVICT=1 to log per-eviction diagnostics from the Engine
+# hot path. Useful for debugging chunk-eviction / lane-progress issues; off
+# by default because it fires on every eviction.
+_DEBUG_EVICT = bool(os.environ.get("ZEPHON_DEBUG_EVICT"))
+
 
 def inside_torch_worker() -> bool:
     """Return True if the current process is a PyTorch DataLoader worker."""
@@ -1427,17 +1432,18 @@ class Engine:
                 with self._mixture_lock:
                     for cid in to_evict:
                         self._chunk_mixtures.pop((lane_id, cid), None)
-                # Compute remaining from local snapshots — reading
-                # ``inflight_lane`` here would race with concurrent feeder
-                # mutations under free-threaded Python.
-                remaining = len(snapshot) - len(to_evict)
-                print(
-                    f"[zephon.evict.monotone] lane={lane_id} cids={to_evict} "
-                    f"remaining_inflight~={remaining} "
-                    f"max_chunk_id={max_chunk_id} {rank_ctx()}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                if _DEBUG_EVICT:
+                    # Compute remaining from local snapshots — reading
+                    # ``inflight_lane`` here would race with concurrent feeder
+                    # mutations under free-threaded Python.
+                    remaining = len(snapshot) - len(to_evict)
+                    print(
+                        f"[zephon.evict.monotone] lane={lane_id} cids={to_evict} "
+                        f"remaining_inflight~={remaining} "
+                        f"max_chunk_id={max_chunk_id} {rank_ctx()}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
         # 2) Lane progress — mutate LanePtr in-place (mutable dataclass).
         cur = self._lane_progress[lane_id]  # defaultdict auto-creates
@@ -1608,18 +1614,19 @@ class Engine:
                     self._epoch_boundaries[lane_id] = [
                         b for b in self._epoch_boundaries[lane_id] if b > max_evicted
                     ]
-            _rc_cid = record_cursor.chunk_id if record_cursor is not None else None
-            # Compute remaining from local snapshots — reading
-            # ``inflight_lane`` here would race with concurrent feeder
-            # mutations under free-threaded Python.
-            remaining = len(cid_snapshot) - len(cids_to_evict)
-            print(
-                f"[zephon.evict.non-monotone] lane={lane_id} cids={cids_to_evict} "
-                f"remaining_inflight~={remaining} "
-                f"accum_floor={accum_floor} record_cursor_cid={_rc_cid} {rank_ctx()}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if _DEBUG_EVICT:
+                _rc_cid = record_cursor.chunk_id if record_cursor is not None else None
+                # Compute remaining from local snapshots — reading
+                # ``inflight_lane`` here would race with concurrent feeder
+                # mutations under free-threaded Python.
+                remaining = len(cid_snapshot) - len(cids_to_evict)
+                print(
+                    f"[zephon.evict.non-monotone] lane={lane_id} cids={cids_to_evict} "
+                    f"remaining_inflight~={remaining} "
+                    f"accum_floor={accum_floor} record_cursor_cid={_rc_cid} {rank_ctx()}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         # 3) Maintain lane progress for fairness diagnostics — mutate in-place.
         cur = self._lane_progress[lane_id]  # defaultdict auto-creates
@@ -1677,7 +1684,6 @@ class Engine:
         """Serializable snapshot of engine runtime state (no plan/op state)."""
         with self._checkpoint_lock:
             owned = self._owned_lanes
-            # print(f"node {self._world.global_rank}/{self._world.world_size} w{worker_id}/{workers_per_rank} owns {len(owned)} lanes.")
 
             self._refresh_rr_from_progress()
 
@@ -1691,7 +1697,6 @@ class Engine:
                 "_offset_done_count",
                 "_epoch_boundaries",
             ]:
-                # print(f"length of {purge_candidate_str} is {len(getattr(self, purge_candidate_str))}")
                 for lane in list(getattr(self, purge_candidate_str)):
                     if lane not in owned:
                         del getattr(self, purge_candidate_str)[lane]
