@@ -349,7 +349,7 @@ for more on this guarantee.
 
 Sequence packing illustrates the accumulator pattern well.  The
 {py:class}`~zephon.ops.PackSequences` operator packs variable-length
-tokenized sequences into fixed-length bins to maximize GPU utilization.
+tokenized sequences into bins.
 
 The packer must decide which incoming sequence goes into which bin.  This
 decision depends on what is already in the bins, making it inherently

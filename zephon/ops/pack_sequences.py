@@ -1,7 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sequence packing operator for grouping variable-length sequences into fixed-length bins."""
+"""Sequence packing operator for grouping variable-length sequences into bins."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class Bin:
 
 
 class PackingAccumulator(Accumulator[SampleRecord]):
-    """Accumulator that packs variable-length sequences into fixed-length bins.
+    """Accumulator that packs variable-length sequences into bins.
 
     This accumulator runs on the pump thread and maintains per-lane bins.
     It handles all the bin management and packing algorithm logic, emitting
@@ -277,7 +277,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
 
 class PackSequences(DefaultSetup):
-    """Pack variable-length sequences into fixed-length bins using first-fit or best-fit algorithms.
+    """Pack variable-length sequences into bins using first-fit or best-fit algorithms.
 
     This operator uses a PackingAccumulator to maintain per-lane bins on the pump
     thread. The packing decisions are deterministic regardless of parallelism level.
