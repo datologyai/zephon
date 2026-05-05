@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from zephon.core.constants import SampleMeta, SampleRecord
+from zephon.core.constants import ContributorRef, SampleCursor, SampleMeta, SampleRecord
 from zephon.ops.pack_sequences import PackingAccumulator, PackSequences
 
 
@@ -24,10 +24,16 @@ def _rec_tokens(
     field: str = "input_ids",
     lane: int = 0,
     chunk: int = 0,
+    as_numpy: bool = False,
 ) -> SampleRecord:
     """Create a sample record with a token field for auto-detection tests."""
     meta = SampleMeta(sample_id=(0, 0, i), lane_id=lane, chunk_id=chunk)
-    return SampleRecord(meta=meta, payload={"value": i, field: tokens})
+    tok: list[int] | int = tokens
+    if as_numpy:
+        np = pytest.importorskip("numpy")
+        if not isinstance(tokens, int):
+            tok = np.array(tokens, dtype=np.uint32)
+    return SampleRecord(meta=meta, payload={"value": i, field: tok})
 
 
 def _simple_length_fn(rec: SampleRecord) -> int:
@@ -620,3 +626,364 @@ def test_pack_sequences_default_is_auto() -> None:
     assert len(ready) == 1
     packed = ready[0][0][0]
     assert packed.meta.tags["_packing_metadata"]["total_length"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Tests for the "wrap" algorithm
+# ---------------------------------------------------------------------------
+
+
+def _wrap_op(
+    max_length: int,
+    *,
+    length_fn: Any = "input_ids",
+    drop_oversized: bool = False,
+) -> PackSequences:
+    """Construct a wrap-mode PackSequences operator with sensible defaults."""
+    return PackSequences(
+        max_length=max_length,
+        num_bins=1,
+        length_fn=length_fn,
+        algorithm="wrap",
+        drop_oversized=drop_oversized,
+    )
+
+
+def test_wrap_concatenates_into_full_bins() -> None:
+    """Three len-3 records with max_length=4 should yield two full bins, drop 1.
+
+    Uses a non-default field name (``tokens``) to also confirm the output
+    payload preserves the configured length-field name as the key.
+    """
+    op = _wrap_op(max_length=4, length_fn="tokens")
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    records = [
+        _rec_tokens(0, [1, 2, 3], field="tokens"),
+        _rec_tokens(1, [4, 5, 6], field="tokens"),
+        _rec_tokens(2, [7, 8, 9], field="tokens"),
+    ]
+    ready = acc.push_many(records)
+
+    assert len(ready) == 2
+    bin0 = ready[0][0][0]
+    bin1 = ready[1][0][0]
+    assert bin0.payload["packed_samples"] == [{"tokens": [1, 2, 3, 4]}]
+    assert bin1.payload["packed_samples"] == [{"tokens": [5, 6, 7, 8]}]
+    assert bin0.meta.tags["_packing_metadata"]["total_length"] == 4
+    assert bin0.meta.tags["_packing_metadata"]["packing_efficiency"] == 1.0
+
+    assert bin0.meta.component_token_counts == {0: 4}
+    assert bin1.meta.component_token_counts == {0: 4}
+
+    # The trailing token 9 stays in the buffer until flush, where it is dropped
+    # and a tombstone closes the truncated record's contributor offsets.
+    assert acc.has_pending_data()
+    tail = acc.flush()
+    assert len(tail) == 1
+    assert tail[0][0][0].meta.tombstone
+    assert not acc.has_pending_data()
+
+
+def test_wrap_oversized_input_splits_into_multiple_bins() -> None:
+    """A single len-10 record with max_length=4 yields 2 bins; flush drops 2."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    long_record = _rec_tokens(
+        0, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19], field="input_ids"
+    )
+    ready = acc.push_many([long_record])
+
+    assert len(ready) == 2
+    bin0 = ready[0][0][0]
+    bin1 = ready[1][0][0]
+    assert bin0.payload["packed_samples"][0]["input_ids"] == [10, 11, 12, 13]
+    assert bin1.payload["packed_samples"][0]["input_ids"] == [14, 15, 16, 17]
+
+    assert bin0.meta.component_token_counts == {0: 4}
+    assert bin1.meta.component_token_counts == {0: 4}
+
+    # Two leftover tokens are dropped on flush (with tombstone).
+    assert acc.has_pending_data()
+    tail = acc.flush()
+    assert len(tail) == 1
+    assert tail[0][0][0].meta.tombstone
+    assert not acc.has_pending_data()
+
+
+def test_wrap_lane_isolation() -> None:
+    """Wrap maintains independent buffers per lane."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    records = [
+        _rec_tokens(0, [1, 2, 3], field="input_ids", lane=0),
+        _rec_tokens(1, [10, 20, 30], field="input_ids", lane=1),
+        _rec_tokens(2, [4, 5, 6], field="input_ids", lane=0),
+        _rec_tokens(3, [40, 50, 60], field="input_ids", lane=1),
+    ]
+    ready = acc.push_many(records)
+
+    # Each lane should emit one full bin from 6 of its tokens (the 7th stays).
+    assert len(ready) == 2
+    lane_to_payload: dict[int, list[int]] = {}
+    for batch, _wait in ready:
+        rec = batch[0]
+        lane_to_payload[rec.meta.lane_id] = rec.payload["packed_samples"][0][
+            "input_ids"
+        ]
+    assert lane_to_payload[0] == [1, 2, 3, 4]
+    assert lane_to_payload[1] == [10, 20, 30, 40]
+
+    tail = acc.flush()
+    assert len(tail) == 2
+    assert all(rb[0][0].meta.tombstone for rb in tail)
+
+
+def test_wrap_contributors_marks_last_child_only_on_final_bin() -> None:
+    """A record spanning two bins closes only on the bin holding its last token."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # Record 0: len 6 → spans bins 0 (4 tokens) and 1 (2 tokens, then leftover).
+    # Record 1: len 4 → finishes bin 1 (2 tokens) and starts bin 2 (2 tokens
+    # remaining unflushed).
+    rec0 = _rec_tokens(0, [1, 2, 3, 4, 5, 6], field="input_ids")
+    rec1 = _rec_tokens(1, [7, 8, 9, 10], field="input_ids")
+    ready = acc.push_many([rec0, rec1])
+
+    assert len(ready) == 2
+
+    bin0 = ready[0][0][0]
+    bin1 = ready[1][0][0]
+    assert bin0.payload["packed_samples"][0]["input_ids"] == [1, 2, 3, 4]
+    assert bin1.payload["packed_samples"][0]["input_ids"] == [5, 6, 7, 8]
+
+    # rec0 only fully closes in bin1 (where its last token, 6, is consumed).
+    rec0_cursor = rec0.meta.cursor
+    rec1_cursor = rec1.meta.cursor
+
+    bin0_close_cursors = {
+        ref.cursor for ref in bin0.meta.contributors if ref.is_last_child
+    }
+    bin1_close_cursors = {
+        ref.cursor for ref in bin1.meta.contributors if ref.is_last_child
+    }
+    assert rec0_cursor not in bin0_close_cursors
+    assert rec0_cursor in bin1_close_cursors
+
+    # rec1 contributes 2 tokens to bin1 (not its last); is_last_child=False there.
+    assert rec1_cursor not in bin1_close_cursors
+
+    # Drop the rec1 tail (tombstone emitted).
+    tail = acc.flush()
+    assert len(tail) == 1
+    assert tail[0][0][0].meta.tombstone
+
+
+def test_wrap_primary_cursors_are_unique_across_bins() -> None:
+    """Consecutive bins built from the same first record have distinct cursors."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    # A single oversized record produces three bins; each bin's primary cursor
+    # would otherwise collide on rec.meta.cursor.child(0).
+    long_record = _rec_tokens(0, list(range(12)), field="input_ids")
+    ready = acc.push_many([long_record])
+
+    assert len(ready) == 3
+    cursors = [batch[0].meta.cursor for batch, _ in ready]
+    assert len(set(cursors)) == 3, f"cursors collided: {cursors}"
+
+
+def test_wrap_flush_reset_clears_state_for_replay() -> None:
+    """flush(reset=True) must leave the accumulator like a fresh instance."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    acc.push_many([_rec_tokens(0, [1, 2, 3], field="input_ids")])
+    assert acc.has_pending_data()
+    acc.flush(reset=True)
+    assert not acc.has_pending_data()
+
+    # After reset, packing should start fresh — bin counter, segments and
+    # totals are cleared, so a new full bin emits as if from a fresh accumulator.
+    ready = acc.push_many([_rec_tokens(1, [10, 20, 30, 40], field="input_ids")])
+    assert len(ready) == 1
+    assert ready[0][0][0].payload["packed_samples"][0]["input_ids"] == [10, 20, 30, 40]
+
+
+def test_wrap_works_with_numpy_arrays() -> None:
+    """Wrap concatenates numpy arrays preserving dtype."""
+    np = pytest.importorskip("numpy")
+
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    rec0 = _rec_tokens(0, [1, 2, 3], field="input_ids", as_numpy=True)
+    rec1 = SampleRecord(
+        meta=rec0.meta.with_lineage((1,)),
+        payload={"input_ids": np.array([4, 5, 6], dtype=np.uint32)},
+    )
+
+    ready = acc.push_many([rec0, rec1])
+    assert len(ready) == 1
+    packed_seq = ready[0][0][0].payload["packed_samples"][0]["input_ids"]
+    assert isinstance(packed_seq, np.ndarray)
+    assert packed_seq.dtype == np.uint32
+    assert packed_seq.tolist() == [1, 2, 3, 4]
+    tail = acc.flush()
+    assert len(tail) == 1
+    assert tail[0][0][0].meta.tombstone
+
+
+def test_wrap_auto_detects_length_field() -> None:
+    """Wrap with length_fn='auto' picks input_ids by default and slices it."""
+    op = PackSequences(
+        max_length=4,
+        num_bins=1,
+        algorithm="wrap",
+        drop_oversized=False,
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    ready = acc.push_many(
+        [
+            _rec_tokens(0, [1, 2], field="input_ids"),
+            _rec_tokens(1, [3, 4, 5, 6], field="input_ids"),
+        ]
+    )
+
+    assert len(ready) == 1
+    samples = ready[0][0][0].payload["packed_samples"]
+    assert samples[0]["input_ids"] == [1, 2, 3, 4]
+    tail = acc.flush()
+    assert len(tail) == 1
+    assert tail[0][0][0].meta.tombstone
+
+
+def test_wrap_slices_aligned_secondary_fields() -> None:
+    """Same-length fields (e.g. mask) are concatenated in lockstep with input_ids."""
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    rec0 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+        payload={
+            "input_ids": [1, 2, 3],
+            "attention_mask": [1, 1, 1],
+        },
+    )
+    rec1 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0),
+        payload={
+            "input_ids": [4, 5, 6, 7],
+            "attention_mask": [1, 1, 1, 1],
+        },
+    )
+    ready = acc.push_many([rec0, rec1])
+    assert len(ready) == 1
+    packed = ready[0][0][0].payload["packed_samples"][0]
+    assert packed["input_ids"] == [1, 2, 3, 4]
+    assert packed["attention_mask"] == [1, 1, 1, 1]
+    acc.flush()
+
+
+def test_wrap_raises_on_misaligned_secondary_field() -> None:
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    rec = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+        payload={
+            "input_ids": [1, 2, 3, 4],
+            "labels": [0, 0],
+        },
+    )
+    with pytest.raises(ValueError, match="length 2"):
+        acc.push_many([rec])
+
+
+def test_wrap_auto_detect_inconsistent_field_per_lane_raises() -> None:
+    """Auto length field is fixed per lane; mixing detected fields must fail."""
+    op = PackSequences(
+        max_length=4,
+        num_bins=1,
+        algorithm="wrap",
+        drop_oversized=False,
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    first = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+        payload={"tokens": [1, 2, 3, 4]},
+    )
+    second = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0),
+        payload={"input_ids": [5, 6, 7, 8]},
+    )
+    acc.push_many([first])
+    with pytest.raises(ValueError, match="inconsistent auto-detected length field"):
+        acc.push_many([second])
+
+
+def test_wrap_flush_tombstones_only_close_real_closing_contributors() -> None:
+    """Tail-drop tombstones must mirror ``tombstones_for_record``: only refs
+    whose original ``is_last_child=True`` produce a tombstone, so that
+    non-closing contributors (whose closing sibling lives elsewhere in the
+    stream) are not falsely advanced to closed.
+    """
+    closing_cursor = SampleCursor(
+        chunk_id=0, chunk_offset=0, sample_id=(0, 0, 0), lineage=(0,)
+    )
+    nonclosing_cursor = SampleCursor(
+        chunk_id=0, chunk_offset=0, sample_id=(0, 0, 0), lineage=(1,)
+    )
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0).with_contributors(
+        (
+            ContributorRef(cursor=closing_cursor, is_last_child=True),
+            ContributorRef(cursor=nonclosing_cursor, is_last_child=False),
+        )
+    )
+    rec = SampleRecord(meta=meta, payload={"input_ids": [1, 2]})
+
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+    acc.push_many([rec])
+
+    tail = acc.flush()
+    assert len(tail) == 1, "expected exactly one tombstone (only closing ref)"
+    tomb = tail[0][0][0]
+    assert tomb.meta.tombstone
+    refs = tomb.meta.contributors
+    assert len(refs) == 1
+    assert refs[0].cursor == closing_cursor
+    assert refs[0].is_last_child is True
+
+
+def test_wrap_component_token_counts_remainder_matches_targets() -> None:
+    """Floor splits plus last-slice remainder preserve per-record token totals."""
+    meta = SampleMeta(
+        sample_id=(0, 0, 0),
+        lane_id=0,
+        chunk_id=0,
+        component_sample_counts={0: 1, 1: 1},
+        component_token_counts={0: 3, 1: 5},
+    )
+    rec = SampleRecord(
+        meta=meta,
+        payload={"input_ids": [1] * 8},
+    )
+    op = _wrap_op(max_length=4)
+    acc = op.accumulator(deterministic=False, ctx={})
+
+    ready = acc.push_many([rec])
+    assert len(ready) == 2
+    totals: dict[int, int] = {0: 0, 1: 0}
+    cts = ready[0][0][0].meta.component_token_counts
+    cts1 = ready[1][0][0].meta.component_token_counts
+    assert cts is not None and cts1 is not None
+    for k in (0, 1):
+        totals[k] += cts[k] + cts1[k]
+    assert totals == {0: 3, 1: 5}

@@ -112,7 +112,8 @@ def _get_length(value: Any, field: str) -> int:
     if hasattr(value, "item") and callable(value.item):
         try:
             return int(value.item())
-        except (TypeError, AttributeError):
+        # numpy raises ValueError for non-scalar arrays; fall through to shape.
+        except (TypeError, AttributeError, ValueError):
             pass
 
     # Tensor shape
