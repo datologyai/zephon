@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_MISSING: object = object()
+
 TokenSeq: TypeAlias = Union[
     "np.ndarray", "torch.Tensor", "tf.Tensor", Sequence[int], list[int]
 ]
@@ -118,6 +120,9 @@ class TokenizeText(DefaultSetup):
         self.tok = tokenizer
         self.tokenizer_id = tokenizer_id
         self.field = field
+        # Dot-separated paths reach into nested mappings (e.g. parquet structs):
+        # ``field="text.content"`` reads ``payload["text"]["content"]``.
+        self._field_path: tuple[str, ...] = tuple(field.split(".")) if field else ()
         self.add_attention_mask = add_attention_mask
         self.max_length = max_length
         self.padding = padding
@@ -232,10 +237,21 @@ class TokenizeText(DefaultSetup):
             key_fn=lane_of,
         )
 
+    def _lookup_field(self, payload: Mapping[str, Any]) -> Any:
+        """Resolve ``self._field_path`` against a (possibly nested) mapping payload."""
+        value: Any = payload
+        for key in self._field_path:
+            if not isinstance(value, Mapping):
+                return ""
+            value = value.get(key, _MISSING)
+            if value is _MISSING:
+                return ""
+        return value
+
     def _extract_text(self, payload: SamplePayload) -> tuple[str, SamplePayloadDict]:
         if isinstance(payload, dict):
             # Safe cast: we expect the user to provide string fields as configured
-            text_value = cast(str, payload.get(self.field, ""))
+            text_value = cast(str, self._lookup_field(payload))
             if self.preserve_upstream_payload:
                 return text_value, payload
             # Fresh dict: drop upstream keys entirely

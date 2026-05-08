@@ -76,6 +76,44 @@ def test_tokenize_custom_field_and_missing_field() -> None:
     assert payload.get("attention_mask", []) == []
 
 
+def test_tokenize_nested_field_dot_path() -> None:
+    """Dot-notation field reaches into nested mappings (e.g. parquet structs)."""
+    op = _setup(
+        TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text.content")
+    )
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    rec = SampleRecord(
+        meta=meta, payload={"text": {"content": "hello world", "lang": "en"}}
+    )
+    out = op.process_one(rec)[0]
+    payload = _payload_dict(out)
+    # Fallback tokenizer maps each whitespace-split token to a positive id, so
+    # two-token text yields a length-2 input_ids list.
+    assert len(payload.get("input_ids", [])) == 2
+
+
+def test_tokenize_nested_field_missing_intermediate() -> None:
+    """Missing intermediate key resolves to empty string, not an error."""
+    op = _setup(
+        TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text.content")
+    )
+    # ``text`` is absent entirely
+    out = op.process_one(_rec("ignored", field="other"))[0]
+    payload = _payload_dict(out)
+    assert payload.get("input_ids", []) == []
+
+
+def test_tokenize_nested_field_intermediate_not_mapping() -> None:
+    """Intermediate non-mapping value resolves to empty string."""
+    op = _setup(
+        TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text.content")
+    )
+    # ``text`` exists but is a scalar, not a mapping
+    out = op.process_one(_rec("scalar text"))[0]
+    payload = _payload_dict(out)
+    assert payload.get("input_ids", []) == []
+
+
 def test_tokenize_disable_attention_mask() -> None:
     op = TokenizeText(
         tokenizer=None, tokenizer_id="__fallback__", add_attention_mask=False
