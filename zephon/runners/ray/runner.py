@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
@@ -33,6 +34,31 @@ logger = logging.getLogger(__name__)
 
 def _noop(*_args: Any, **_kwargs: Any) -> None:
     """No-op placeholder for non-serializable callables sent to Ray actors."""
+
+
+def _available_ray_node_ids() -> list[str]:
+    """Return alive Ray node ids with CPU resources in stable order."""
+    nodes = [
+        node
+        for node in ray.nodes()
+        if bool(node.get("Alive"))
+        and node.get("NodeID") is not None
+        and float(node.get("Resources", {}).get("CPU", 0)) > 0
+    ]
+    nodes.sort(
+        key=lambda node: (
+            str(node.get("NodeManagerAddress", "")),
+            str(node.get("NodeID", "")),
+        )
+    )
+    return [str(node["NodeID"]) for node in nodes]
+
+
+def _plan_actor_node_ids(num_actors: int, node_ids: list[str]) -> list[str]:
+    """Assign actor placements round-robin across Ray node ids."""
+    if num_actors <= 0 or not node_ids:
+        return []
+    return [node_ids[idx % len(node_ids)] for idx in range(num_actors)]
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +170,15 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         runtime_env: dict[str, Any] | None = None,
         actor_env_vars: dict[str, str] | None = None,
+        ray_hard_node_affinity: bool | None = None,
     ) -> None:
         self._num_cpus_per_actor = num_cpus_per_actor
         self._queue_capacity = max(1, queue_capacity)
+        if ray_hard_node_affinity is None:
+            ray_hard_node_affinity = bool(
+                int(os.environ.get("ZEPHON_RAY_HARD_NODE_AFFINITY", "0"))
+            )
+        self._hard_node_affinity = ray_hard_node_affinity
 
         if runtime_env is None:
             # UV vars ensure the actor process doesn't try to sync a
@@ -325,10 +357,12 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
     def _before_run(self, context: ConcurrentRunContext) -> None:
         """Initialize actor groups and per-operator input queues."""
         actor_ctx = self._build_actor_ctx()
+        cluster_node_ids = _available_ray_node_ids()
 
         for state in self.ops:
             traits = state.node.op.traits()
             num_actors = max(1, state.node.parallelism or traits.parallelism)
+            preferred_node_ids = _plan_actor_node_ids(num_actors, cluster_node_ids)
 
             group = _RayActorGroup(
                 node=state.node,
@@ -339,7 +373,12 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
                 collect_stats=self._tracking_mode.collects_nodes,
                 ctx_services=actor_ctx,
             )
-            group.init(self._num_cpus_per_actor, self._runtime_env)
+            group.init(
+                self._num_cpus_per_actor,
+                self._runtime_env,
+                preferred_node_ids=preferred_node_ids or None,
+                hard_node_affinity=self._hard_node_affinity,
+            )
             state.actor_group = group
             state.pending_refs.init(num_actors)
             state.dead_actors.clear()

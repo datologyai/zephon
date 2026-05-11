@@ -36,6 +36,9 @@ from zephon.ops.batch import Batch
 
 pytest.importorskip("ray")
 
+from zephon.runners.ray import RemoteStageRunner
+from zephon.runners.ray.runner import _plan_actor_node_ids
+
 
 def _make_runner(
     stage: Stage,
@@ -287,6 +290,37 @@ class TestRemoteStageRunner:
         runner = _make_runner(stage, max_workers=1)
         results = list(runner.run(iter([])))
         assert results == []
+        runner.close()
+
+
+def test_plan_actor_node_ids_round_robins_across_nodes() -> None:
+    """Actor node planning distributes actors round-robin across nodes."""
+    assert _plan_actor_node_ids(0, ["n1", "n2"]) == []
+    assert _plan_actor_node_ids(5, []) == []
+    assert _plan_actor_node_ids(5, ["n1", "n2"]) == [
+        "n1",
+        "n2",
+        "n1",
+        "n2",
+        "n1",
+    ]
+
+
+def test_hard_affinity_smoke() -> None:
+    """End-to-end smoke: hard-affinity placement still processes data."""
+    stage = _make_stage(max_delay_ms=0.0, parallelism=2, placement="remote")
+    runner = RemoteStageRunner(
+        stage,
+        _ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        ray_hard_node_affinity=True,
+    )
+    try:
+        data = list(range(10))
+        assert sorted(_collect(runner, data)) == data
+    finally:
         runner.close()
 
 

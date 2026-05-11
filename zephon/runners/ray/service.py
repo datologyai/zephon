@@ -11,10 +11,12 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import cloudpickle
 import ray
+from ray.exceptions import RayError
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from zephon.core.graph import Node
 from zephon.core.op_base import Op, OpContext
@@ -68,6 +70,15 @@ class RaySingleOpActor:
             op_index,
             collect_stats,
         )
+
+    def get_node_id(self) -> str:
+        """Return the Ray node id this actor is running on.
+
+        Used by ``_RayActorGroup.init`` as a placement-readiness probe under
+        hard node affinity: an actor that responds confirms it has been
+        scheduled.
+        """
+        return ray.get_runtime_context().get_node_id()
 
     def process(self, batch: list[Any], seq: int) -> RunnerResult:
         """Process one input batch and return a RunnerResult."""
@@ -128,6 +139,8 @@ class _RayActorGroup:
     tracks idle actors or tokens.
     """
 
+    _PLACEMENT_TIMEOUT_S: ClassVar[float] = 60.0
+
     node: Node
     op_index: int
     num_actors: int
@@ -142,13 +155,36 @@ class _RayActorGroup:
         self,
         num_cpus_per_actor: float,
         runtime_env: dict[str, Any] | None = None,
+        preferred_node_ids: list[str] | None = None,
+        hard_node_affinity: bool = False,
     ) -> None:
         """Create actors.
 
         Args:
             num_cpus_per_actor: CPU fraction each actor reserves.
             runtime_env: Optional Ray runtime environment dict.
+            preferred_node_ids: Optional per-actor Ray node id plan; each
+                entry pins the matching actor via NodeAffinity. If provided,
+                the list length must equal ``num_actors``.
+            hard_node_affinity: If True the plan is strict; otherwise a soft
+                hint Ray may override.
+
+        Raises:
+            RuntimeError: When ``hard_node_affinity`` is True and the
+                resulting actors fail to land on their requested nodes
+                (either timing out in PENDING past ``_PLACEMENT_TIMEOUT_S``
+                or being rejected synchronously by Ray). Half-spawned
+                actors are shut down before re-raising.
         """
+        if (
+            preferred_node_ids is not None
+            and len(preferred_node_ids) != self.num_actors
+        ):
+            raise ValueError(
+                f"preferred_node_ids has {len(preferred_node_ids)} entries but "
+                f"num_actors is {self.num_actors}; caller must supply a full plan or None."
+            )
+
         op_bytes = cloudpickle.dumps(self.node.op)
 
         options: dict[str, Any] = {
@@ -157,8 +193,14 @@ class _RayActorGroup:
         if runtime_env is not None:
             options["runtime_env"] = runtime_env
 
-        for _ in range(self.num_actors):
-            actor = RaySingleOpActor.options(**options).remote(
+        for idx in range(self.num_actors):
+            actor_options = dict(options)
+            if preferred_node_ids is not None:
+                actor_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+                    node_id=preferred_node_ids[idx],
+                    soft=not hard_node_affinity,
+                )
+            actor = RaySingleOpActor.options(**actor_options).remote(
                 op_bytes,
                 self.ctx_services,
                 self.stage_index,
@@ -168,6 +210,46 @@ class _RayActorGroup:
                 self.collect_stats,
             )
             self.actors.append(actor)
+
+        if hard_node_affinity and preferred_node_ids is not None and self.actors:
+            self._probe_hard_placement(preferred_node_ids)
+
+    def _probe_hard_placement(self, planned: list[str]) -> None:
+        """Verify hard-pinned actors have actually been scheduled.
+
+        Under ``soft=False`` Ray will leave an actor PENDING indefinitely if
+        the requested node is unavailable, and the pump thread later blocks
+        on ``ray.wait`` for results that never come. Two failure modes are
+        converted to a descriptive RuntimeError here:
+
+        * **Pending past the deadline** — the requested node existed at
+          snapshot time but was unavailable when Ray tried to schedule.
+        * **Immediate Ray rejection** — Ray detected the affinity target
+          is unknown / infeasible and surfaced a :class:`RayError` on
+          ``ray.get`` (e.g. ``ActorUnschedulableError``).
+
+        Half-spawned actors are shut down before raising so the group
+        doesn't leak handles.
+        """
+        refs = [actor.get_node_id.remote() for actor in self.actors]
+        _, pending = ray.wait(
+            refs, num_returns=len(refs), timeout=self._PLACEMENT_TIMEOUT_S
+        )
+        if pending:
+            self.shutdown()
+            raise RuntimeError(
+                f"Actor placement timed out for op '{self.node.name}': "
+                f"{len(pending)}/{len(refs)} actors still pending after "
+                f"{self._PLACEMENT_TIMEOUT_S}s. Requested node ids: {planned}."
+            )
+        try:
+            ray.get(refs)
+        except RayError as exc:
+            self.shutdown()
+            raise RuntimeError(
+                f"Actor placement failed for op '{self.node.name}': Ray rejected "
+                f"the requested placement: {exc}. Requested node ids: {planned}."
+            ) from exc
 
     def shutdown(self) -> None:
         """Kill all actors."""

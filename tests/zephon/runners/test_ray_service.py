@@ -16,13 +16,13 @@ from tests.zephon.runners._helpers import (
 
 ray = pytest.importorskip("ray")
 
+from zephon.core.graph import Node
+from zephon.ops.delay import DelayById
+from zephon.runners.ray.service import _RayActorGroup
+
 
 def _make_group(*, num_actors: int = 2, max_delay_ms: float = 0.0):
     """Create an actor group with DelayById actors for testing."""
-    from zephon.core.graph import Node
-    from zephon.ops.delay import DelayById
-    from zephon.runners.ray.service import _RayActorGroup
-
     op = DelayById(max_delay_ms=max_delay_ms)
     node = Node(name="test_op", op=op, parallelism=num_actors)
     group = _RayActorGroup(
@@ -189,3 +189,60 @@ class TestRayActorGroup:
         assert len(g.actors) == 1
         g.shutdown()
         assert len(g.actors) == 0
+
+    def test_init_rejects_mismatched_planned_length(self) -> None:
+        """preferred_node_ids must have length num_actors when provided."""
+        op = DelayById(max_delay_ms=0.0)
+        node = Node(name="mismatch", op=op, parallelism=2)
+        group = _RayActorGroup(
+            node=node,
+            op_index=0,
+            num_actors=2,
+            stage_index=0,
+            stage_name="test",
+            collect_stats=False,
+            ctx_services={},
+        )
+        with pytest.raises(ValueError, match=r"preferred_node_ids has 1 entries"):
+            group.init(num_cpus_per_actor=0.1, preferred_node_ids=["only-one"])
+        # No actors were spawned, so nothing to shut down.
+        assert group.actors == []
+
+    def test_hard_affinity_bogus_node_id_raises(self, monkeypatch) -> None:
+        """Hard affinity with an unschedulable node id fails fast, not silently hang.
+
+        Ray surfaces this two ways depending on timing — either a
+        synchronous ActorUnschedulableError (caught via ``ray.get``) or
+        indefinite PENDING (caught via the ``ray.wait`` deadline). We
+        accept either error message since both indicate the probe did
+        its job.
+        """
+        # Shrink the timeout so the test fails fast if Ray takes the pending path.
+        monkeypatch.setattr(_RayActorGroup, "_PLACEMENT_TIMEOUT_S", 1.0)
+
+        op = DelayById(max_delay_ms=0.0)
+        node = Node(name="bogus_pin", op=op, parallelism=1)
+        group = _RayActorGroup(
+            node=node,
+            op_index=0,
+            num_actors=1,
+            stage_index=0,
+            stage_name="test",
+            collect_stats=False,
+            ctx_services={},
+        )
+        try:
+            # Ray node IDs are 56-char hex strings — use one that's the right
+            # shape but doesn't correspond to any node in the cluster.
+            bogus_node_id = "0" * 56
+            with pytest.raises(
+                RuntimeError, match=r"Actor placement (timed out|failed)"
+            ):
+                group.init(
+                    num_cpus_per_actor=0.1,
+                    preferred_node_ids=[bogus_node_id],
+                    hard_node_affinity=True,
+                )
+            assert group.actors == []
+        finally:
+            group.shutdown()
