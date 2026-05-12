@@ -25,7 +25,7 @@ def test_decode_and_tokenize_single_records() -> None:
     pipe = (
         PublicPipeline(ws)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
     )
 
@@ -51,7 +51,7 @@ def test_tokenize_with_batch_outputs_masks() -> None:
     pipe = (
         PublicPipeline(ws)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .batch(microbatch_size=2, drop_last=False)
         .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
     )

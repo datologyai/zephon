@@ -147,6 +147,7 @@ ws = StaticMixtureWorkSource(
 pipeline = (
     Pipeline(ws)
     .tokenize(tokenizer_id="gpt2",
+              field="text",
               max_length=2048,
               split_long_samples=True)    # text --> token IDs
     .ensure_mixture()                     # fix token-level mixture drift
@@ -214,7 +215,7 @@ optimization.
 pipeline = (
     Pipeline(ws)
     .prefetch(buffer_size=2048)    # look ahead and warm the cache
-    .tokenize(tokenizer_id="gpt2")
+    .tokenize(tokenizer_id="gpt2", field="text")
     .batch(microbatch_size=8)
 )
 ```
@@ -265,7 +266,7 @@ Weighted Round Robin (SWRR) <zephon.utils.swrr.SmoothWeightedRoundRobin>` to bri
 ```python
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="gpt2", max_length=2048)
+    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048)
     .ensure_mixture(weight_by="auto")   # auto-detects token field
     .batch(microbatch_size=8)
 )

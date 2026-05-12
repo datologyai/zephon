@@ -31,6 +31,7 @@ def _pipe(
         .shuffle(buffer_size=buffer_size, seed=seed)
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=2,
             preserve_upstream_payload=True,
         )

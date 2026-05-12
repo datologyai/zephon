@@ -117,6 +117,7 @@ def _build_pipe_params(
         ._delay(max_delay_ms=1.0, parallelism=4)
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=4,
             preserve_upstream_payload=True,
         )

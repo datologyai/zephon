@@ -250,7 +250,7 @@ class Pipeline:
             ...     Pipeline(work_source)
             ...     .prefetch(buffer_size=2048, parallelism=8)
             ...     .decode_text()
-            ...     .tokenize()
+            ...     .tokenize(field="text")
             ...     .batch(32)
             ... )
 
@@ -513,7 +513,7 @@ class Pipeline:
         tokenizer: Any | None = None,
         tokenizer_id: str | None = None,
         *,
-        field: str = "text",
+        field: str,
         add_attention_mask: bool = True,
         max_length: int | None = None,
         padding: bool | str = False,
@@ -631,19 +631,23 @@ class Pipeline:
 
         Examples:
             # Token-level (default) - place after tokenize
-            pipeline.fetch().tokenize(...).ensure_mixture()  # Uses defaults
+            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture()
 
             # Sample-level enforcement (after filter)
             pipeline.fetch().filter(...).ensure_mixture(weight_by="samples")
 
             # With explicit token field
-            pipeline.fetch().tokenize(...).ensure_mixture(weight_by="input_ids")
+            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
+                weight_by="input_ids"
+            )
 
             # With warnings for drift (warn if >5% deviation)
-            pipeline.fetch().tokenize(...).ensure_mixture(warn_tolerance=0.05)
+            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
+                warn_tolerance=0.05
+            )
 
             # Explicit mixture target (override chunk mixture)
-            pipeline.fetch().tokenize(...).ensure_mixture(
+            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
                 mixture={"English": 0.7, "German": 0.3}
             )
         """

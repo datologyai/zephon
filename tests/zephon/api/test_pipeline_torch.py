@@ -63,7 +63,7 @@ def test_to_indexable_torch_dataset_with_indexable_pipeline(
     pipe = (
         PublicPipeline(ws)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
     )
 

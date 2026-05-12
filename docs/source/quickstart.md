@@ -82,6 +82,7 @@ pipeline = (
     .decode_text()  # Extract text from samples
     .tokenize(
         tokenizer_id="__fallback__",
+        field="text",
         parallelism=1,
         preserve_upstream_payload=True,  # Keep "text" field for display
     )
@@ -156,7 +157,7 @@ ws = StaticMixtureWorkSource(
 pipeline = (
     Pipeline(ws)
     .decode_text()
-    .tokenize(tokenizer_id="gpt2")
+    .tokenize(tokenizer_id="gpt2", field="text")
     .batch(microbatch_size=8)
 )
 
@@ -175,6 +176,7 @@ pipeline = (
     .decode_text()
     .tokenize(
         tokenizer_id="gpt2",  # Any HuggingFace tokenizer
+        field="text",
         max_length=512,
         parallelism=4,        # Parallel tokenization workers
     )

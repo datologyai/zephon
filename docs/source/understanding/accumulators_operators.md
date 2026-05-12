@@ -19,7 +19,7 @@ processed:
 ```python
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="gpt2", max_length=2048)
+    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048)
     .shuffle(buffer_size=4096, seed=42)
     .batch(microbatch_size=8)
 )
@@ -521,7 +521,7 @@ def add_length_field(payload: dict) -> dict:
 
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="gpt2", max_length=2048)
+    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048)
     .map_transform(add_length_field, parallelism=4)
     .batch(microbatch_size=8)
 )
@@ -552,7 +552,7 @@ serially in the accumulator, with an optional parallel
 ```python
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="gpt2", max_length=2048)
+    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048)
     .stateful_transform(
         "collect_pairs",
         init_state=lambda: [],

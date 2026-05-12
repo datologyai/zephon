@@ -123,6 +123,7 @@ def _run_pipeline(
     pipe = pipe._delay(max_delay_ms=2.0, parallelism=8)
     pipe = pipe.tokenize(
         tokenizer_id="__fallback__",
+        field="text",
         parallelism=8,
         preserve_upstream_payload=True,
     )
@@ -228,6 +229,7 @@ def test_parquet_integration_filter_js_and_html(
         ._delay(max_delay_ms=2.0, parallelism=8)
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=8,
             preserve_upstream_payload=True,
         )
@@ -253,6 +255,7 @@ def test_parquet_integration_filter_js_and_html(
         ._delay(max_delay_ms=2.0, parallelism=8)
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=8,
             preserve_upstream_payload=True,
         )

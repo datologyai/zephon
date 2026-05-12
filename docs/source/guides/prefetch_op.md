@@ -15,7 +15,7 @@ pipeline = (
     Pipeline(work_source)
     .prefetch(buffer_size=1024)  # Uses default parallelism=4
     .decode_text()
-    .tokenize()
+    .tokenize(tokenizer_id="gpt2", field="text")
     .batch(32)
 )
 ```

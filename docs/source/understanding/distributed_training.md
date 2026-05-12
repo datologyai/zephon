@@ -268,7 +268,7 @@ ws = StaticMixtureWorkSource(
 
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", max_length=4096)
+    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", field="text", max_length=4096)
     .batch(microbatch_size=4)
     .options(
         world_size=dist.get_world_size(),     # 4

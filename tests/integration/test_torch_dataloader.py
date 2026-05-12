@@ -77,6 +77,7 @@ def _build_pipe(
         .decode_text()
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=2,
             preserve_upstream_payload=True,
         )

@@ -62,6 +62,7 @@ def main() -> None:
         .decode_text()  # Extract text from samples
         .tokenize(
             tokenizer_id="__fallback__",
+            field="text",
             parallelism=1,
             preserve_upstream_payload=True,  # Keep "text" field for display
         )

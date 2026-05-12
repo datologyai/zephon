@@ -283,7 +283,7 @@ and micro-batch sizes.
 # Initial run: 8 GPUs, microbatch 4
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", max_length=4096)
+    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", field="text", max_length=4096)
     .batch(microbatch_size=4)
     .options(
         dp_degree=8,
@@ -295,7 +295,7 @@ pipeline = (
 # Resume on 4 GPUs, microbatch 2 --- same global batches if you use gradient_accumulation_steps = 4
 pipeline = (
     Pipeline(ws)
-    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", max_length=4096)
+    .tokenize(tokenizer_id="meta-llama/Llama-3-8B", field="text", max_length=4096)
     .batch(microbatch_size=2)
     .options(
         dp_degree=4,

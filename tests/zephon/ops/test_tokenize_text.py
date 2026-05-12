@@ -49,7 +49,7 @@ def _payload_dict(record: SampleRecord) -> dict[str, Any]:
 
 
 def test_tokenize_fallback_process_one_and_many() -> None:
-    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__"))
+    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text"))
     r1 = _rec("hello world")
     out1 = op.process_one(r1)[0]
     payload = _payload_dict(out1)
@@ -116,7 +116,10 @@ def test_tokenize_nested_field_intermediate_not_mapping() -> None:
 
 def test_tokenize_disable_attention_mask() -> None:
     op = TokenizeText(
-        tokenizer=None, tokenizer_id="__fallback__", add_attention_mask=False
+        tokenizer=None,
+        tokenizer_id="__fallback__",
+        field="text",
+        add_attention_mask=False,
     )
     op = _setup(op)
     out = op.process_one(_rec("hi there"))[0]
@@ -126,7 +129,7 @@ def test_tokenize_disable_attention_mask() -> None:
 
 
 def test_tokenize_replaces_payload_by_default() -> None:
-    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__"))
+    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text"))
     rec = _rec("keep me")
     payload = _payload_dict(rec)
     payload["extra"] = 99
@@ -140,7 +143,10 @@ def test_tokenize_replaces_payload_by_default() -> None:
 def test_tokenize_preserves_payload_when_requested() -> None:
     op = _setup(
         TokenizeText(
-            tokenizer=None, tokenizer_id="__fallback__", preserve_upstream_payload=True
+            tokenizer=None,
+            tokenizer_id="__fallback__",
+            field="text",
+            preserve_upstream_payload=True,
         )
     )
     rec = _rec("keep me")
@@ -171,7 +177,7 @@ def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
             }
 
     tok = ToyTok()
-    op = _setup(TokenizeText(tokenizer=tok))
+    op = _setup(TokenizeText(tokenizer=tok, field="text"))
     out = op.process_many([_rec("x"), _rec("y")])
     assert _payload_dict(out[0])["input_ids"] == [1, 2, 3]
     assert op.resolved_tokenizer_id() == "toy-tokenizer"
@@ -197,6 +203,7 @@ def test_tokenize_passes_extra_hf_options() -> None:
     op = _setup(
         TokenizeText(
             tokenizer=tok,
+            field="text",
             padding=True,
             truncation=True,
             max_length=4,
@@ -224,6 +231,7 @@ def test_fallback_respects_padding_and_truncation_options() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             padding=True,
             truncation=True,
             max_length=2,
@@ -242,6 +250,7 @@ def test_split_long_samples_requires_max_length_and_no_truncation() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             truncation=True,
             max_length=8,
@@ -250,6 +259,7 @@ def test_split_long_samples_requires_max_length_and_no_truncation() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=None,
         )
@@ -260,6 +270,7 @@ def test_split_long_samples_fanout_lineage_and_contributors() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=False,
@@ -281,6 +292,7 @@ def test_split_long_samples_padding_applied() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=3,
             padding=True,
@@ -298,6 +310,7 @@ def test_split_long_samples_respects_return_tensors() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=False,
@@ -318,6 +331,7 @@ def test_split_long_samples_numpy_tensors() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=False,
@@ -349,6 +363,7 @@ def test_convert_tensor_does_not_copy_torch_segments() -> None:
     op = _setup(
         TokenizeText(
             tokenizer=tok,
+            field="text",
             split_long_samples=True,
             max_length=3,
             padding=False,
@@ -372,6 +387,7 @@ def test_split_segments_torch_backend() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=3,
             padding=True,
@@ -392,6 +408,7 @@ def test_split_segments_numpy_backend() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=True,
@@ -412,6 +429,7 @@ def test_split_segments_tf_backend() -> None:
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=True,
@@ -450,6 +468,7 @@ def test_preserve_payload_warns_when_non_mapping(
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
+            field="text",
             preserve_upstream_payload=True,
         )
     )
@@ -478,7 +497,7 @@ def test_tokenizer_id_load_failure_falls_back(
     fake.AutoTokenizer = _AutoTokenizer
     monkeypatch.setitem(sys.modules, "transformers", fake)
 
-    op = TokenizeText(tokenizer=None, tokenizer_id="some-model")
+    op = TokenizeText(tokenizer=None, tokenizer_id="some-model", field="text")
     _setup(op)
     with pytest.raises(RuntimeError):
         _ = op.process_one(_rec("hi"))
@@ -509,14 +528,18 @@ def test_tokenizer_use_fast_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> Non
     fake.AutoTokenizer = _AutoTokenizer
     monkeypatch.setitem(sys.modules, "transformers", fake)
 
-    op = _setup(TokenizeText(tokenizer=None, tokenizer_id="hf-model", use_fast=False))
+    op = _setup(
+        TokenizeText(
+            tokenizer=None, tokenizer_id="hf-model", field="text", use_fast=False
+        )
+    )
     _ = op.process_one(_rec("hi"))
     assert calls["name"] == "hf-model"
     assert calls["kwargs"]["use_fast"] is False
 
 
 def test_tokenizer_initializes_on_first_process() -> None:
-    op = TokenizeText(tokenizer=None, tokenizer_id=None)
+    op = TokenizeText(tokenizer=None, tokenizer_id=None, field="text")
     out = op.process_one(_rec("text"))
     payload = _payload_dict(out[0])
     assert "input_ids" in payload
@@ -524,7 +547,12 @@ def test_tokenizer_initializes_on_first_process() -> None:
 
 def test_tokenizer_traits_and_default_accumulator() -> None:
     op = _setup(
-        TokenizeText(tokenizer_id="__fallback__", max_batch=48, max_latency_ms=15)
+        TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            max_batch=48,
+            max_latency_ms=15,
+        )
     )
     t = op.traits()
 
@@ -550,7 +578,13 @@ def test_fast_path_modifies_in_place() -> None:
     the existing SampleRecord objects rather than creating new ones.
     This confirms the zero-allocation optimization.
     """
-    op = _setup(TokenizeText(tokenizer_id="__fallback__", split_long_samples=False))
+    op = _setup(
+        TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            split_long_samples=False,
+        )
+    )
 
     r1 = _rec("test one")
     r2 = _rec("test two")
@@ -581,6 +615,7 @@ def test_slow_path_creates_new_objects() -> None:
     op = _setup(
         TokenizeText(
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=10,  # Large enough to not actually split, but trigger path
         )
@@ -603,7 +638,7 @@ def test_kwargs_caching_behavior() -> None:
     Verifies that tokenizer kwargs are computed once during setup.
     Modifying properties after setup should NOT change behavior.
     """
-    op = TokenizeText(tokenizer_id="__fallback__", padding=False)
+    op = TokenizeText(tokenizer_id="__fallback__", field="text", padding=False)
     op = _setup(op)
 
     # Hack: Inspect cached kwargs directly
@@ -652,7 +687,7 @@ def test_setup_retries_without_use_fast_on_type_error(
     monkeypatch.setitem(sys.modules, "transformers", fake_mod)
 
     # Init with use_fast=True (default)
-    op = TokenizeText(tokenizer_id="flaky-model", use_fast=True)
+    op = TokenizeText(tokenizer_id="flaky-model", field="text", use_fast=True)
     _setup(op)
     _ = op.process_one(_rec("hi"))
 
@@ -678,7 +713,7 @@ def test_setup_raises_other_type_errors(monkeypatch: pytest.MonkeyPatch) -> None
     fake_mod.AutoTokenizer = MockAutoTokenizer
     monkeypatch.setitem(sys.modules, "transformers", fake_mod)
 
-    op = TokenizeText(tokenizer_id="broken-model")
+    op = TokenizeText(tokenizer_id="broken-model", field="text")
     with pytest.raises(TypeError, match="Something else completely broken"):
         _ = _setup(op).process_one(_rec("hello"))
 
@@ -690,7 +725,7 @@ def test_normalize_batch_logic() -> None:
     """
     Directly tests _normalize_batch logic used for backend compatibility.
     """
-    op = TokenizeText(tokenizer_id="__fallback__")
+    op = TokenizeText(tokenizer_id="__fallback__", field="text")
 
     # Case 1: Standard List - Matches Batch Size
     batch_list = [[1, 2], [3, 4]]
@@ -738,13 +773,13 @@ def test_normalize_batch_logic() -> None:
 
 def test_empty_batch_processing() -> None:
     """Ensure processing an empty list returns empty list immediately."""
-    op = _setup(TokenizeText(tokenizer_id="__fallback__"))
+    op = _setup(TokenizeText(tokenizer_id="__fallback__", field="text"))
     assert op.process_many([]) == []
 
 
 def test_empty_string_input() -> None:
     """Ensure empty strings are handled gracefully by fallback."""
-    op = _setup(TokenizeText(tokenizer_id="__fallback__"))
+    op = _setup(TokenizeText(tokenizer_id="__fallback__", field="text"))
     out = op.process_one(_rec(""))
     payload = _payload_dict(out[0])
     assert payload["input_ids"] == []
@@ -764,6 +799,7 @@ def test_splitting_exact_boundaries() -> None:
     op = _setup(
         TokenizeText(
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=2,
             padding=False,
@@ -807,6 +843,7 @@ def test_splitting_with_padding_fill() -> None:
     op = _setup(
         TokenizeText(
             tokenizer_id="__fallback__",
+            field="text",
             split_long_samples=True,
             max_length=3,
             padding=True,
@@ -850,7 +887,11 @@ def test_normalize_batch_converts_torch_tensor_to_tuple_when_lock_set() -> None:
         # Simulate free-threaded Python by setting the lock
         tokenize_text._TENSOR_ITER_LOCK = threading.Lock()
 
-        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="pt")
+        op = TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            return_tensors="pt",
+        )
 
         # Create a 2D tensor (batch_size=3, seq_len=4)
         tensor = torch.randn(3, 4)
@@ -884,7 +925,11 @@ def test_normalize_batch_returns_tensor_when_lock_not_set() -> None:
         # Simulate regular Python by clearing the lock
         tokenize_text._TENSOR_ITER_LOCK = None
 
-        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="pt")
+        op = TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            return_tensors="pt",
+        )
 
         tensor = torch.randn(3, 4)
 
@@ -911,7 +956,11 @@ def test_normalize_batch_leaves_numpy_unchanged_even_with_lock() -> None:
         # Simulate free-threaded Python by setting the lock
         tokenize_text._TENSOR_ITER_LOCK = threading.Lock()
 
-        op = TokenizeText(tokenizer_id="__fallback__", return_tensors="np")
+        op = TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            return_tensors="np",
+        )
 
         arr = np.random.randn(3, 4)
 

@@ -15,7 +15,7 @@ def test_pipeline_explain_includes_plan_and_runtime() -> None:
     pipe = (
         PublicPipeline(ws)
         .decode_text(parallelism=3)  # override to check parallelism propagation
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .materialize()
         .batch(microbatch_size=2, drop_last=False)
         .options(
@@ -99,7 +99,11 @@ def test_pipeline_tokenize_preserve_flag_forwarded() -> None:
 
     pipe = (
         PublicPipeline(ws)
-        .tokenize(tokenizer_id="__fallback__", preserve_upstream_payload=True)
+        .tokenize(
+            tokenizer_id="__fallback__",
+            field="text",
+            preserve_upstream_payload=True,
+        )
         .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
     )
 

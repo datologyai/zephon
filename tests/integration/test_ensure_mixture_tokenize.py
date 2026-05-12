@@ -258,6 +258,7 @@ class TestEnsureMixtureTokenizationExpansion:
             .decode_text()
             .tokenize(
                 tokenizer_id="__fallback__",
+                field="text",
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
@@ -315,6 +316,7 @@ class TestEnsureMixtureTokenizationExpansion:
             .decode_text()
             .tokenize(
                 tokenizer_id="__fallback__",
+                field="text",
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
@@ -403,6 +405,7 @@ class TestEnsureMixtureTokenizationExpansion:
             .decode_text()
             .tokenize(
                 tokenizer_id="__fallback__",
+                field="text",
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
@@ -417,6 +420,7 @@ class TestEnsureMixtureTokenizationExpansion:
             .decode_text()
             .tokenize(
                 tokenizer_id="__fallback__",
+                field="text",
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,

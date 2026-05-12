@@ -33,7 +33,7 @@ def test_pipeline_checkpoint_restore_resumes_from_saved_position() -> None:
     pipe1 = (
         PublicPipeline(ws1)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
     )
 
@@ -57,7 +57,7 @@ def test_pipeline_checkpoint_restore_resumes_from_saved_position() -> None:
     pipe2 = (
         PublicPipeline(ws2)
         .decode_text()
-        .tokenize(tokenizer_id="__fallback__")
+        .tokenize(tokenizer_id="__fallback__", field="text")
         .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
     )
 

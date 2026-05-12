@@ -71,7 +71,7 @@ ws = StaticMixtureWorkSource(
 pipeline = (
     Pipeline(ws)
     .decode_text()
-    .tokenize(tokenizer_id="gpt2", parallelism=4)
+    .tokenize(tokenizer_id="gpt2", field="text", parallelism=4)
     .batch(microbatch_size=8)
 )
 
@@ -101,7 +101,7 @@ ws = StaticMixtureWorkSource(
 pipeline = (
     Pipeline(ws)
     .prefetch(buffer_size=2048)                         # warm cache from S3/GCS
-    .tokenize(tokenizer_id="gpt2", max_length=2048,
+    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048,
               split_long_samples=True, parallelism=8)
     .ensure_mixture()                                    # correct token-level ratios
     .batch(microbatch_size=8)

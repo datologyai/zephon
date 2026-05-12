@@ -146,7 +146,7 @@ things across the two systems:
 | Streaming concept | Zephon equivalent | Notes |
 |---|---|---|
 | DataLoader worker | *(no direct equivalent)* | Zephon has per-operator parallelism, not monolithic "workers" |
-| `num_workers` | `parallelism` per operator | Each operator may be tuned independently, e.g. `.tokenize(parallelism=8)` |
+| `num_workers` | `parallelism` per operator | Each operator may be tuned independently, e.g. `.tokenize(field="text", parallelism=8)` |
 | Canonical node | Lane | Both are logical data-parallel partitions for elastic determinism |
 | `StreamingDataset` | WorkSource + Pipeline | Zephon separates data declaration from processing |
 | `__getitem__` / transforms | Operators in the Pipeline | Transforms are explicit, composable steps in the operator graph |

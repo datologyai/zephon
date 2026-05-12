@@ -25,7 +25,7 @@ def build_pipeline() -> PublicPipeline:
     )
 
     pipe = PublicPipeline(work_source).decode_text()
-    pipe = pipe.tokenize(tokenizer_id="__fallback__", parallelism=1)
+    pipe = pipe.tokenize(tokenizer_id="__fallback__", field="text", parallelism=1)
     pipe = pipe.batch(microbatch_size=2, drop_last=False)
     return pipe
 

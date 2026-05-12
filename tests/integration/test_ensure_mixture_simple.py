@@ -178,7 +178,11 @@ class TestEnsureMixtureIntegration:
         pipe = (
             Pipeline(work)
             .decode_text()
-            .tokenize(tokenizer_id="__fallback__", preserve_upstream_payload=True)
+            .tokenize(
+                tokenizer_id="__fallback__",
+                field="text",
+                preserve_upstream_payload=True,
+            )
             .ensure_mixture(
                 max_buffer_size=100,  # 100 tokens
                 weight_by="auto",

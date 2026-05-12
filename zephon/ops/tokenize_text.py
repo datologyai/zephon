@@ -98,7 +98,7 @@ class TokenizeText(DefaultSetup):
         tokenizer: TokenizerLike | None = None,
         tokenizer_id: str | None = None,
         *,
-        field: str = "text",
+        field: str,
         add_attention_mask: bool = True,
         max_length: int | None = None,
         padding: bool | str = False,
