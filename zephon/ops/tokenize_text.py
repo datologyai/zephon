@@ -10,10 +10,12 @@ import logging
 import sys
 import threading
 import traceback
+import typing
 from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Any,
+    Literal,
     Mapping,
     Optional,
     Protocol,
@@ -56,6 +58,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+SpecialTokensMode: TypeAlias = Literal[
+    "bos_eos", "bos", "eos", "none", "tokenizer_default"
+]
+_VALID_SPECIAL_TOKENS_MODES: tuple[str, ...] = typing.get_args(SpecialTokensMode)
+
 _MISSING: object = object()
 
 TokenSeq: TypeAlias = Union[
@@ -76,6 +83,9 @@ TokenizerOutput: TypeAlias = Mapping[str, TokenBatch]
 
 # Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
 _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
+# Free-threaded Python only: serializes _setup_tokenizer's check-then-set so
+# concurrent _process threads can't race into double-loading the tokenizer.
+_SETUP_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 
 
 class TokenizerLike(Protocol):
@@ -109,19 +119,154 @@ class TokenizeText(DefaultSetup):
         max_batch: int = 64,
         max_latency_ms: Optional[int] = 3,
         preserve_upstream_payload: bool = False,
+        special_tokens: SpecialTokensMode = "bos_eos",
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
     ) -> None:
+        """Tokenize text fields using a provided or auto-resolved tokenizer.
+
+        Args:
+            tokenizer: Pre-instantiated HF-compatible tokenizer; takes precedence over
+                ``tokenizer_id``.
+            tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
+                ``"__fallback__"`` selects a small in-process stub for tests.
+            field: Dot-separated payload path of the text to tokenize.
+            add_attention_mask: Emit ``attention_mask`` alongside ``input_ids``.
+            max_length: Per-record cap on output length, in tokens *including* any
+                BOS/EOS added by ``special_tokens``. Only enforced as a hard
+                cap when ``truncation=True`` or ``split_long_samples=True``;
+                on its own ``max_length`` is just a target for
+                ``padding="max_length"`` and a no-op otherwise — rows already
+                longer than ``max_length`` pass through unchanged (matches
+                HF). When ``truncation=True`` and the operator is adding
+                BOS/EOS, the HF call receives ``max_length - num_specials``
+                so the bracketed output lands at exactly ``max_length``.
+                Required when ``truncation=True`` in any bracket mode (the
+                implicit HF fallback to ``tokenizer.model_max_length`` cannot
+                account for BOS/EOS).
+            padding: When ``special_tokens="tokenizer_default"`` this is passed
+                straight to the HF tokenizer. In every other mode HF is called
+                with ``padding=False`` (so BOS/EOS can be placed adjacent to
+                real content) and the operator pads the resulting sequences
+                itself: ``True`` / ``"longest"`` pads to the longest sequence
+                in the batch, ``"max_length"`` pads to ``max_length`` (which
+                must then be set). ``special_tokens="none"`` uses the same
+                operator-owned padding path even though no specials are added.
+                Note: ``padding="max_length"`` does not imply truncation. Rows
+                whose bracketed length exceeds ``max_length`` pass through
+                unchanged; only shorter rows are padded up. Matches HF.
+            truncation: Truncate to ``max_length`` (which must be set explicitly
+                in bracket modes). When the operator is adding BOS/EOS itself,
+                the HF call receives ``max_length - num_specials`` so the final
+                bracketed output comes out at exactly ``max_length`` tokens.
+            return_tensors: ``"pt"`` / ``"np"`` / ``"tf"`` backend for emitted fields.
+            split_long_samples: Slice each tokenized sequence into ``max_length``
+                chunks. BOS/EOS, if added, land only on the first/last chunk.
+            use_fast: Forwarded to ``AutoTokenizer.from_pretrained``.
+            preserve_upstream_payload: Keep all upstream payload keys; otherwise the
+                output dict contains only ``input_ids`` and ``attention_mask``.
+            special_tokens: How BOS/EOS are added.
+
+                * ``"bos_eos"`` (default): the operator brackets each input
+                  document as ``[BOS, ...tokens, EOS]`` explicitly. The HF
+                  tokenizer is called with ``add_special_tokens=False`` so the
+                  template never contributes; BOS/EOS come from the tokenizer's
+                  ``bos_token_id`` / ``eos_token_id`` attributes (or the
+                  overrides below). Suitable for autoregressive pretraining
+                  where every document should be explicitly delimited and the
+                  output should not depend on the tokenizer family's template.
+                * ``"bos"`` / ``"eos"``: as above but with only one side added.
+                * ``"none"``: emits raw content tokens. Useful when an upstream
+                  step already added the desired specials.
+                * ``"tokenizer_default"``: the HF tokenizer is called with
+                  ``add_special_tokens=True`` and its ``build_inputs_with_
+                  special_tokens`` template decides what to add. The result is
+                  tokenizer-family-dependent (Llama: BOS only; T5: EOS only;
+                  GPT-2: nothing; chat templates: varies). Choose this when
+                  you specifically want the template's behavior — e.g. when
+                  feeding chat-formatted prompts into an instruct tokenizer.
+            bos_token_id: BOS id to splice in under the bracket modes that
+                add a BOS (``bos_eos`` / ``bos``), replacing whatever the
+                tokenizer exposes via its own ``bos_token_id`` attribute.
+                Required when the chosen mode needs a BOS and the tokenizer
+                has none. The tokenizer itself is never mutated — this only
+                affects what the operator splices into bracketed sequences.
+                Passing this under ``tokenizer_default`` (where the
+                tokenizer's template owns special-token placement) or
+                ``none`` (where no specials are spliced) is a hard error at
+                ``__init__`` — silently dropping the override would risk
+                training under the wrong BOS assumption. To change which BOS
+                HF's template emits under ``tokenizer_default``, mutate the
+                tokenizer's ``bos_token`` before passing it in.
+            eos_token_id: EOS id to splice in under the bracket modes that
+                add an EOS (``bos_eos`` / ``eos``), replacing whatever the
+                tokenizer exposes via its own ``eos_token_id`` attribute.
+                Required when the chosen mode needs an EOS and the tokenizer
+                has none. Tokenizer not mutated; raises at ``__init__``
+                under ``tokenizer_default`` / ``none`` — see ``bos_token_id``.
+        """
         DefaultSetup.__init__(self)
+
+        if special_tokens not in _VALID_SPECIAL_TOKENS_MODES:
+            raise ValueError(
+                f"special_tokens must be one of {_VALID_SPECIAL_TOKENS_MODES}, "
+                + f"got {special_tokens!r}"
+            )
+
+        # HF accepts ``"do_not_pad"`` as a no-pad string; collapse to ``False``
+        # so downstream ``if self.padding`` checks don't have to handle both.
+        if padding == "do_not_pad":
+            padding = False
+
+        self.special_tokens: SpecialTokensMode = special_tokens
+        self._zephon_owns_brackets: bool = special_tokens != "tokenizer_default"
 
         if split_long_samples and truncation:
             raise ValueError("split_long_samples is mutually exclusive with truncation")
         if split_long_samples and not max_length:
             raise ValueError("split_long_samples requires max_length")
 
+        if padding == "max_length" and max_length is None:
+            raise ValueError("padding='max_length' requires max_length")
+
+        if self._zephon_owns_brackets and truncation and max_length is None:
+            raise ValueError(
+                "truncation=True requires an explicit max_length when "
+                + f"special_tokens={special_tokens!r}; the operator needs it "
+                + "to reserve room for BOS/EOS. Set max_length, or use "
+                + "special_tokens='tokenizer_default' to let HF's template "
+                + "manage specials within its own truncation."
+            )
+
+        num_specials = self._num_specials_total()
+        if (
+            self._zephon_owns_brackets
+            and truncation
+            and max_length is not None
+            and num_specials > 0
+            and max_length - num_specials <= 0
+        ):
+            raise ValueError(
+                f"max_length={max_length} cannot fit {num_specials} special "
+                + f"token(s) under special_tokens={special_tokens!r}"
+            )
+
+        if special_tokens in ("tokenizer_default", "none") and (
+            bos_token_id is not None or eos_token_id is not None
+        ):
+            raise ValueError(
+                "bos_token_id/eos_token_id has no effect under "
+                + f"special_tokens={special_tokens!r}; overrides apply only "
+                + "to bracket modes ('bos_eos' / 'bos' / 'eos'). To splice a "
+                + "specific BOS/EOS into the output, switch to a bracket "
+                + "mode; to change which BOS/EOS HF's template emits under "
+                + "'tokenizer_default', mutate the tokenizer's "
+                + "``bos_token`` / ``eos_token`` before passing it in."
+            )
+
         self.tok = tokenizer
         self.tokenizer_id = tokenizer_id
         self.field = field
-        # Dot-separated paths reach into nested mappings (e.g. parquet structs):
-        # ``field="text.content"`` reads ``payload["text"]["content"]``.
         self._field_path: tuple[str, ...] = tuple(field.split(".")) if field else ()
         self.add_attention_mask = add_attention_mask
         self.max_length = max_length
@@ -131,6 +276,13 @@ class TokenizeText(DefaultSetup):
         self.split_long_samples = split_long_samples
         self.use_fast = use_fast
         self.preserve_upstream_payload = preserve_upstream_payload
+        self._bos_id_override = bos_token_id
+        self._eos_id_override = eos_token_id
+        self._bos_id_resolved: int | None = None
+        self._eos_id_resolved: int | None = None
+        # Cached after _setup_tokenizer so the padding hot path doesn't
+        # getattr() the tokenizer per batch.
+        self._pad_token_id_cached: int = 0
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
         self._warned_non_mapping = False
@@ -138,6 +290,10 @@ class TokenizeText(DefaultSetup):
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
         self._tokenizer_instantiated = False
+        # Captures any failure from the lazy ``_setup_tokenizer`` call (see
+        # the fork-hazard comment in ``setup()``) so subsequent batches
+        # re-raise the same error instead of retrying half-initialised state.
+        self._setup_error: Exception | None = None
         # On free-threaded Python + old PyTorch, we intercept return_tensors='pt'
         # to avoid HF tokenizer creating tensors (which races with our code).
         self._convert_np_to_pt = False
@@ -154,76 +310,168 @@ class TokenizeText(DefaultSetup):
         # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
         # hf tokenizers don't like if we fork after creating the object
 
-        # Pre-compute tokenizer kwargs (Performance Optimization)
-        self._cached_kwargs = {"add_special_tokens": True}
-        if self.split_long_samples:
-            self._cached_kwargs["padding"] = False
-            self._cached_kwargs["truncation"] = False
-        else:
-            self._cached_kwargs["padding"] = self.padding
-            self._cached_kwargs["truncation"] = self.truncation
-            if self.max_length is not None:
-                self._cached_kwargs["max_length"] = self.max_length
-            # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
-            # races with our code. Request numpy from HF and convert ourselves under lock.
-            # See: https://github.com/pytorch/pytorch/issues/171992
+        # In bracket mode we ask HF for ragged lists (no specials, no padding,
+        # no return_tensors) and own bracketing/padding ourselves. Forwarding
+        # ``return_tensors`` here would force HF to stack a ragged batch and
+        # raise.
+        add_specials = not self._zephon_owns_brackets
+
+        # ``split_long_samples`` also owns padding (per-chunk, see
+        # ``_split_long_samples``). Padding the full sequence on the HF side
+        # before we slice it would inflate every chunk to the original
+        # padded length — force HF padding off whenever splitting, regardless
+        # of bracket-vs-default mode.
+        hf_padding: bool | str = (
+            self.padding if (add_specials and not self.split_long_samples) else False
+        )
+        hf_truncation = False if self.split_long_samples else self.truncation
+        hf_max_length: int | None = None if self.split_long_samples else self.max_length
+
+        if (
+            not add_specials
+            and self.truncation
+            and self.max_length is not None
+            and not self.split_long_samples
+        ):
+            # Reserve room for the BOS/EOS we splice in after HF returns.
+            hf_max_length = self.max_length - self._num_specials_total()
+
+        self._cached_kwargs = {
+            "add_special_tokens": add_specials,
+            "padding": hf_padding,
+            "truncation": hf_truncation,
+        }
+        if hf_max_length is not None:
+            self._cached_kwargs["max_length"] = hf_max_length
+
+        # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
+        # races with our code. Request numpy from HF and convert ourselves
+        # under lock.
+        # See: https://github.com/pytorch/pytorch/issues/171992
+        forward_return_tensors = add_specials and not self.split_long_samples
+        if forward_return_tensors and self.return_tensors is not None:
             if self.return_tensors == "pt" and _should_use_tensor_lock():
                 self._convert_np_to_pt = True
                 self._cached_kwargs["return_tensors"] = "np"
-            elif self.return_tensors is not None:
+            else:
                 self._cached_kwargs["return_tensors"] = self.return_tensors
 
     def _setup_tokenizer(self) -> None:
-        if self.tok is None:
-            lock_ctx = (
-                _IMPORT_LOCK if _IMPORT_LOCK is not None else contextlib.nullcontext()
-            )
+        lock_ctx = _SETUP_LOCK if _SETUP_LOCK is not None else contextlib.nullcontext()
+        with lock_ctx:
+            if self._setup_error is not None:
+                raise self._setup_error
+            if self._tokenizer_instantiated:
+                return
 
-            # Before importing hf tokenizers we tell it we handle the parallelism
-            # and not hf tokenizers. This avoids unforeseen effects when running
-            # multiple op instances.
-            suppress_library_threads()
-
-            if self.tokenizer_id in (None, "__fallback__"):
-                self.tok = _fallback_tokenizer()
-            else:
-                with lock_ctx:
-                    from transformers import AutoTokenizer
-
-                @retry(
-                    wait=wait_random_exponential(multiplier=2, max=15),
-                    stop=stop_after_attempt(5),
-                    reraise=True,
+            if self.tok is None:
+                import_lock_ctx = (
+                    _IMPORT_LOCK
+                    if _IMPORT_LOCK is not None
+                    else contextlib.nullcontext()
                 )
-                def _load_with_retry(model_id: str, **k: Any) -> Any:
+
+                # Before importing hf tokenizers we tell it we handle the
+                # parallelism and not hf tokenizers. This avoids unforeseen
+                # effects when running multiple op instances.
+                suppress_library_threads()
+
+                if self.tokenizer_id in (None, "__fallback__"):
+                    self.tok = _fallback_tokenizer()
+                else:
+                    with import_lock_ctx:
+                        from transformers import AutoTokenizer
+
+                    @retry(
+                        wait=wait_random_exponential(multiplier=2, max=15),
+                        stop=stop_after_attempt(5),
+                        reraise=True,
+                    )
+                    def _load_with_retry(model_id: str, **k: Any) -> Any:
+                        try:
+                            tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
+                        except Exception as e:
+                            print(
+                                f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
+                                file=sys.stderr,
+                            )
+                            raise e
+                        return tokenizer
+
+                    kwargs: dict[str, Any] = {}
+                    if self.use_fast is not None:
+                        kwargs["use_fast"] = self.use_fast
                     try:
-                        tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
-                    except Exception as e:
-                        print(
-                            f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
-                            file=sys.stderr,
-                        )
-                        raise e
-                    return tokenizer
-
-                kwargs: dict[str, Any] = {}
-                if self.use_fast is not None:
-                    kwargs["use_fast"] = self.use_fast
-                try:
-                    self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
-                except TypeError as exc:
-                    # Some tokenizers may not accept the `use_fast` kwarg;
-                    # retry without it so we surface the original failure instead of
-                    # a signature mismatch.
-                    if "use_fast" in kwargs and "use_fast" in str(exc):
-                        kwargs = dict(kwargs)
-                        kwargs.pop("use_fast", None)
                         self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
+                    except TypeError as exc:
+                        # Some tokenizers may not accept the `use_fast` kwarg;
+                        # retry without it so we surface the original failure
+                        # instead of a signature mismatch.
+                        if "use_fast" in kwargs and "use_fast" in str(exc):
+                            kwargs = dict(kwargs)
+                            kwargs.pop("use_fast", None)
+                            self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
 
-                    else:
-                        raise
+                        else:
+                            raise
 
-        self._tokenizer_instantiated = True
+            # _ensure_padding_token may set pad_token=eos_token (the HF pattern
+            # for Llama/GPT-2 et al.), so it must run before we snapshot pad id.
+            try:
+                self._resolve_special_token_ids()
+                self._ensure_padding_token()
+                self._pad_token_id_cached = self._compute_pad_token_id()
+            except Exception as exc:
+                self._setup_error = exc
+                raise
+            self._tokenizer_instantiated = True
+
+    def _resolve_special_token_ids(self) -> None:
+        """Bind the BOS/EOS ids we will splice in. No-op in tokenizer_default mode.
+
+        Raises on first batch (when _setup_tokenizer runs) if the configured
+        mode needs a token the tokenizer cannot provide and no override was
+        passed — better to fail loudly than silently emit unbracketed streams.
+        """
+        if not self._zephon_owns_brackets:
+            return
+        if self.tok is None:
+            return
+
+        if self._num_specials_to_prepend() > 0:
+            bid = self._bos_id_override
+            if bid is None:
+                bid = getattr(self.tok, "bos_token_id", None)
+            if bid is None:
+                raise ValueError(
+                    f"special_tokens={self.special_tokens!r} requires a BOS token, "
+                    + "but the tokenizer has no bos_token_id and no bos_token_id "
+                    + "override was provided. Pass bos_token_id=... or switch "
+                    + "special_tokens to 'eos'/'none'/'tokenizer_default'."
+                )
+            self._bos_id_resolved = int(bid)
+
+        if self._num_specials_to_append() > 0:
+            eid = self._eos_id_override
+            if eid is None:
+                eid = getattr(self.tok, "eos_token_id", None)
+            if eid is None:
+                raise ValueError(
+                    f"special_tokens={self.special_tokens!r} requires an EOS token, "
+                    + "but the tokenizer has no eos_token_id and no eos_token_id "
+                    + "override was provided. Pass eos_token_id=... or switch "
+                    + "special_tokens to 'bos'/'none'/'tokenizer_default'."
+                )
+            self._eos_id_resolved = int(eid)
+
+    def _num_specials_to_prepend(self) -> int:
+        return 1 if self.special_tokens in ("bos_eos", "bos") else 0
+
+    def _num_specials_to_append(self) -> int:
+        return 1 if self.special_tokens in ("bos_eos", "eos") else 0
+
+    def _num_specials_total(self) -> int:
+        return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
@@ -284,6 +532,257 @@ class TokenizeText(DefaultSetup):
         if self.add_attention_mask and mask is not None:
             payload["attention_mask"] = cast(SamplePayload, mask)
 
+    def _bracket_one(
+        self, ids: TokenSeq, mask: TokenSeq | None
+    ) -> tuple[TokenSeq, TokenSeq | None]:
+        """Prepend BOS / append EOS to one (ids, mask) pair per the configured mode.
+
+        No-op when neither side adds a token (``tokenizer_default``, ``none``, or
+        a mode that resolved no id). Backend-dispatched so list / numpy / torch /
+        tensorflow values stay in their original container type.
+        """
+        bos = self._bos_id_resolved
+        eos = self._eos_id_resolved
+        if bos is None and eos is None:
+            return ids, mask
+
+        module = type(ids).__module__
+        if "torch" in module:
+            ids_t = cast("torch.Tensor", ids)
+            mask_t = cast("torch.Tensor | None", mask)
+            new_ids_t, new_mask_t = self._bracket_torch(ids_t, mask_t, bos, eos)
+            return (
+                cast(TokenSeq, new_ids_t),
+                cast(TokenSeq | None, new_mask_t),
+            )
+        if "numpy" in module:
+            ids_np = cast("np.ndarray", ids)
+            mask_np = cast("np.ndarray | None", mask)
+            new_ids_np, new_mask_np = self._bracket_numpy(ids_np, mask_np, bos, eos)
+            return (
+                cast(TokenSeq, new_ids_np),
+                cast(TokenSeq | None, new_mask_np),
+            )
+        if "tensorflow" in module:
+            ids_tf = cast("tf.Tensor", ids)
+            mask_tf = cast("tf.Tensor | None", mask)
+            new_ids_tf, new_mask_tf = self._bracket_tf(ids_tf, mask_tf, bos, eos)
+            return (
+                cast(TokenSeq, new_ids_tf),
+                cast(TokenSeq | None, new_mask_tf),
+            )
+        ids_std = cast(Sequence[int], ids)
+        mask_std = cast(Sequence[int] | None, mask)
+        new_ids_std, new_mask_std = self._bracket_std(ids_std, mask_std, bos, eos)
+        return (
+            cast(TokenSeq, new_ids_std),
+            cast(TokenSeq | None, new_mask_std),
+        )
+
+    def _bracket_std(
+        self,
+        ids: Sequence[int],
+        mask: Sequence[int] | None,
+        bos: int | None,
+        eos: int | None,
+    ) -> tuple[list[int], list[int] | None]:
+        # Always emit a fresh list so the upstream batch container is not mutated.
+        new_ids: list[int] = []
+        if bos is not None:
+            new_ids.append(bos)
+        new_ids.extend(ids)
+        if eos is not None:
+            new_ids.append(eos)
+
+        new_mask: list[int] | None = None
+        if mask is not None:
+            new_mask = []
+            if bos is not None:
+                new_mask.append(1)
+            new_mask.extend(mask)
+            if eos is not None:
+                new_mask.append(1)
+        elif self.add_attention_mask:
+            new_mask = [1] * len(new_ids)
+        return new_ids, new_mask
+
+    def _bracket_numpy(
+        self,
+        ids: "np.ndarray",
+        mask: "np.ndarray | None",
+        bos: int | None,
+        eos: int | None,
+    ) -> tuple["np.ndarray", "np.ndarray | None"]:
+        import numpy as np
+
+        id_parts: list[np.ndarray] = []
+        if bos is not None:
+            id_parts.append(np.array([bos], dtype=ids.dtype))
+        id_parts.append(ids)
+        if eos is not None:
+            id_parts.append(np.array([eos], dtype=ids.dtype))
+        new_ids = np.concatenate(id_parts) if len(id_parts) > 1 else id_parts[0]
+
+        new_mask: np.ndarray | None = None
+        if mask is not None:
+            m_parts: list[np.ndarray] = []
+            if bos is not None:
+                m_parts.append(np.array([1], dtype=mask.dtype))
+            m_parts.append(mask)
+            if eos is not None:
+                m_parts.append(np.array([1], dtype=mask.dtype))
+            new_mask = np.concatenate(m_parts) if len(m_parts) > 1 else m_parts[0]
+        elif self.add_attention_mask:
+            new_mask = np.ones_like(new_ids)
+        return new_ids, new_mask
+
+    def _bracket_torch(
+        self,
+        ids: "torch.Tensor",
+        mask: "torch.Tensor | None",
+        bos: int | None,
+        eos: int | None,
+    ) -> tuple["torch.Tensor", "torch.Tensor | None"]:
+        import torch
+
+        with _tensor_lock_ctx():
+            id_parts: list[torch.Tensor] = []
+            if bos is not None:
+                id_parts.append(torch.tensor([bos], dtype=ids.dtype, device=ids.device))
+            id_parts.append(ids)
+            if eos is not None:
+                id_parts.append(torch.tensor([eos], dtype=ids.dtype, device=ids.device))
+            new_ids = torch.cat(id_parts, dim=-1) if len(id_parts) > 1 else id_parts[0]
+
+            new_mask: torch.Tensor | None = None
+            if mask is not None:
+                m_parts: list[torch.Tensor] = []
+                if bos is not None:
+                    m_parts.append(
+                        torch.tensor([1], dtype=mask.dtype, device=mask.device)
+                    )
+                m_parts.append(mask)
+                if eos is not None:
+                    m_parts.append(
+                        torch.tensor([1], dtype=mask.dtype, device=mask.device)
+                    )
+                new_mask = (
+                    torch.cat(m_parts, dim=-1) if len(m_parts) > 1 else m_parts[0]
+                )
+            elif self.add_attention_mask:
+                new_mask = torch.ones_like(new_ids)
+            return new_ids, new_mask
+
+    def _bracket_tf(
+        self,
+        ids: "tf.Tensor",
+        mask: "tf.Tensor | None",
+        bos: int | None,
+        eos: int | None,
+    ) -> tuple["tf.Tensor", "tf.Tensor | None"]:
+        import tensorflow as tf
+
+        id_parts: list[tf.Tensor] = []
+        if bos is not None:
+            id_parts.append(tf.constant([bos], dtype=ids.dtype))
+        id_parts.append(ids)
+        if eos is not None:
+            id_parts.append(tf.constant([eos], dtype=ids.dtype))
+        new_ids = tf.concat(id_parts, axis=-1) if len(id_parts) > 1 else id_parts[0]
+
+        new_mask: tf.Tensor | None = None
+        if mask is not None:
+            m_parts: list[tf.Tensor] = []
+            if bos is not None:
+                m_parts.append(tf.constant([1], dtype=mask.dtype))
+            m_parts.append(mask)
+            if eos is not None:
+                m_parts.append(tf.constant([1], dtype=mask.dtype))
+            new_mask = tf.concat(m_parts, axis=-1) if len(m_parts) > 1 else m_parts[0]
+        elif self.add_attention_mask:
+            new_mask = tf.ones_like(new_ids)
+        return new_ids, new_mask
+
+    def _pad_after_bracket(
+        self,
+        input_ids: Sequence[TokenSeq],
+        attention_mask: Sequence[TokenSeq] | None,
+    ) -> tuple[list[TokenSeq], list[TokenSeq] | None]:
+        """Pad bracketed sequences to a uniform length.
+
+        Matches HF: ``"max_length"`` pads every row to ``self.max_length``;
+        ``True``/``"longest"`` pads to the batch longest regardless of any
+        max_length cap (HF only honors the cap when truncation is also
+        enabled).
+        """
+        pad_id = self._pad_token_id()
+        n = len(input_ids)
+
+        if self.padding == "max_length":
+            assert self.max_length is not None
+            target = self.max_length
+        else:
+            target = max((self._len_of(ids) for ids in input_ids), default=0)
+
+        new_ids: list[TokenSeq] = []
+        new_masks: list[TokenSeq] | None = [] if attention_mask is not None else None
+        for i in range(n):
+            ids = input_ids[i]
+            mask = attention_mask[i] if attention_mask is not None else None
+            cur_len = self._len_of(ids)
+            if cur_len >= target:
+                new_ids.append(ids)
+                if new_masks is not None and mask is not None:
+                    new_masks.append(mask)
+                continue
+            pad_len = target - cur_len
+            new_ids.append(self._pad_one(ids, pad_len, pad_id))
+            if new_masks is not None and mask is not None:
+                new_masks.append(self._pad_one(mask, pad_len, 0))
+        return new_ids, new_masks
+
+    @staticmethod
+    def _len_of(seq: TokenSeq) -> int:
+        shape = getattr(seq, "shape", None)
+        if shape is not None:
+            try:
+                return int(shape[0])
+            except (TypeError, IndexError):
+                pass
+        return len(cast(Sequence[int], seq))
+
+    def _pad_one(self, seq: TokenSeq, pad_len: int, pad_val: int) -> TokenSeq:
+        module = type(seq).__module__
+        if "torch" in module:
+            import torch
+
+            t = cast("torch.Tensor", seq)
+            with _tensor_lock_ctx():
+                pad = torch.full((pad_len,), pad_val, dtype=t.dtype, device=t.device)
+                return cast(TokenSeq, torch.cat((t, pad), dim=-1))
+        if "numpy" in module:
+            import numpy as np
+
+            arr = cast("np.ndarray", seq)
+            return cast(
+                TokenSeq,
+                np.concatenate((arr, np.full((pad_len,), pad_val, dtype=arr.dtype))),
+            )
+        if "tensorflow" in module:
+            import tensorflow as tf
+
+            t2 = cast("tf.Tensor", seq)
+            pad = tf.fill((pad_len,), tf.cast(pad_val, t2.dtype))
+            return cast(TokenSeq, tf.concat((t2, pad), axis=-1))
+        # Lists here are unaliased (fresh from _bracket_std or owned by the
+        # current HF encode result), so extend in place.
+        if isinstance(seq, list):
+            seq.extend([pad_val] * pad_len)
+            return cast(TokenSeq, seq)
+        seq_list = list(cast(Sequence[int], seq))
+        seq_list.extend([pad_val] * pad_len)
+        return cast(TokenSeq, seq_list)
+
     def _process(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         if not self._tokenizer_instantiated:
             self._setup_tokenizer()
@@ -322,6 +821,35 @@ class TokenizeText(DefaultSetup):
         attention_mask: Sequence[TokenSeq] | None = None
         if raw_attention_mask is not None:
             attention_mask = self._normalize_batch(raw_attention_mask, len(metas))
+
+        # Bracket before any split: BOS lands on the first chunk, EOS on the
+        # last; neither appears at slice boundaries.
+        if self._zephon_owns_brackets and self._num_specials_total() > 0:
+            bracketed_ids: list[TokenSeq] = []
+            bracketed_mask: list[TokenSeq] | None = (
+                [] if (attention_mask is not None or self.add_attention_mask) else None
+            )
+            for i in range(len(metas)):
+                ids_i = input_ids[i]
+                mask_i = attention_mask[i] if attention_mask is not None else None
+                new_ids, new_mask = self._bracket_one(ids_i, mask_i)
+                bracketed_ids.append(new_ids)
+                if bracketed_mask is not None and new_mask is not None:
+                    bracketed_mask.append(new_mask)
+            input_ids = bracketed_ids
+            attention_mask = bracketed_mask if bracketed_mask else None
+
+        # Skip in split mode — the split path pads its own last chunk.
+        if self._zephon_owns_brackets and self.padding and not self.split_long_samples:
+            input_ids, attention_mask = self._pad_after_bracket(
+                input_ids, attention_mask
+            )
+
+        # Bracket mode pulled lists from HF; lift to the user's backend now.
+        if self._zephon_owns_brackets and self.return_tensors is not None and input_ids:
+            input_ids = [self._convert_tensor(seq) for seq in input_ids]
+            if attention_mask is not None:
+                attention_mask = [self._convert_tensor(seq) for seq in attention_mask]
 
         # 3. FAST PATH: In-Place Reuse (Zero Allocation)
         if not self.split_long_samples:
@@ -402,24 +930,37 @@ class TokenizeText(DefaultSetup):
         backend = self.return_tensors
         if backend is None:
             return value
+        src_mod = type(value).__module__
         if backend == "pt":
             torch = self._lazy_import("torch")
-            if hasattr(value, "shape") and "torch" in type(value).__module__:
+            if hasattr(value, "shape") and "torch" in src_mod:
                 return value
+            # On free-threaded Python + PyTorch < 2.10, detour list inputs
+            # through numpy so ``from_numpy`` (under lock) is the only torch
+            # allocation we do — numpy is unaffected by the allocator race.
+            # See: https://github.com/pytorch/pytorch/issues/171992
+            if hasattr(value, "shape") and "numpy" in src_mod:
+                with _tensor_lock_ctx():
+                    return torch.from_numpy(value)
+            if _should_use_tensor_lock():
+                np = self._lazy_import("numpy")
+                arr = np.asarray(value)
+                with _tensor_lock_ctx():
+                    return torch.from_numpy(arr)
             with _tensor_lock_ctx():
                 return torch.tensor(value)
         if backend in ("np", "numpy"):
             np = self._lazy_import("numpy")
             return (
                 value
-                if hasattr(value, "shape") and "numpy" in type(value).__module__
+                if hasattr(value, "shape") and "numpy" in src_mod
                 else np.asarray(value)
             )
         if backend == "tf":
             tf = self._lazy_import("tensorflow")
             return (
                 value
-                if hasattr(value, "shape") and "tensorflow" in type(value).__module__
+                if hasattr(value, "shape") and "tensorflow" in src_mod
                 else tf.convert_to_tensor(value)
             )
         raise ValueError(f"Unsupported return_tensors backend: {backend}")
@@ -478,6 +1019,9 @@ class TokenizeText(DefaultSetup):
         return [cast(TokenSeq, batch)]
 
     def _pad_token_id(self) -> int:
+        return self._pad_token_id_cached
+
+    def _compute_pad_token_id(self) -> int:
         tok = self.tok
         if tok is None:
             return 0
@@ -738,8 +1282,14 @@ class TokenizeText(DefaultSetup):
 def _fallback_tokenizer() -> TokenizerLike:
     class _Tokenizer:
         name_or_path: str | None = "__fallback__"
-        pad_token: int | str | None = None
-        eos_token: int | str | None = 0
+        # Distinct ids so a bracketed sample reads naturally as
+        # [bos=1, ..., eos=2] padded with pad=0.
+        pad_token: int | str | None = 0
+        pad_token_id: int | None = 0
+        bos_token: int | str | None = 1
+        bos_token_id: int | None = 1
+        eos_token: int | str | None = 2
+        eos_token_id: int | None = 2
 
         def __call__(
             self,
@@ -754,7 +1304,12 @@ def _fallback_tokenizer() -> TokenizerLike:
             max_len_int = int(max_length) if max_length is not None else None
 
             def encode_single(value: str) -> dict[str, list[int]]:
-                tokens = [abs(hash(word)) % 10000 + 1 for word in value.split()]
+                # Offset content ids past the reserved range (pad=0, bos=1,
+                # eos=2) so a hash collision can't masquerade as a special
+                # token. PYTHONHASHSEED randomization across runs means
+                # without the offset, content ids of 1 or 2 are possible and
+                # tests like ``ids[0] != _BOS`` become flaky.
+                tokens = [abs(hash(word)) % 10000 + 10 for word in value.split()]
                 if truncation and max_len_int is not None:
                     tokens = tokens[:max_len_int]
                 return {"input_ids": tokens, "attention_mask": [1] * len(tokens)}

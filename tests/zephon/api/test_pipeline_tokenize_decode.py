@@ -75,3 +75,50 @@ def test_tokenize_with_batch_outputs_masks() -> None:
             mask = payload.get("attention_mask")
             if mask is not None:
                 assert isinstance(mask, list)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline.tokenize forwards the special_tokens API to TokenizeText, and
+# carries the ``SpecialTokensMode`` Literal so SDK users get type narrowing
+# and autocomplete instead of a plain ``str``.
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_tokenize_forwards_special_tokens_params() -> None:
+    """``Pipeline.tokenize`` must accept and forward
+    ``special_tokens`` / ``bos_token_id`` / ``eos_token_id`` so the API is
+    reachable from the high-level wrapper, not just by constructing
+    ``TokenizeText`` directly."""
+    import inspect
+
+    from zephon.api.pipeline import Pipeline
+    from zephon.ops.tokenize_text import TokenizeText
+
+    sig = inspect.signature(Pipeline.tokenize)
+    assert "special_tokens" in sig.parameters
+    assert "bos_token_id" in sig.parameters
+    assert "eos_token_id" in sig.parameters
+
+    # And the kwargs round-trip into the op constructor.
+    op = TokenizeText(
+        tokenizer_id="__fallback__",
+        field="text",
+        special_tokens="bos",
+        bos_token_id=42,
+    )
+    assert op.special_tokens == "bos"
+    assert op._bos_id_override == 42
+
+
+def test_pipeline_tokenize_signature_uses_special_tokens_mode_literal() -> None:
+    """The Literal alias on ``Pipeline.tokenize`` lets SDK users see the
+    five valid mode strings in autocomplete and have static checkers narrow
+    the parameter type. A plain ``str`` annotation would lose both."""
+    import inspect
+
+    from zephon.api.pipeline import Pipeline
+    from zephon.ops.tokenize_text import SpecialTokensMode
+
+    sig = inspect.signature(Pipeline.tokenize)
+    annotation = sig.parameters["special_tokens"].annotation
+    assert annotation is SpecialTokensMode

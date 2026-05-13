@@ -45,6 +45,7 @@ from zephon.ops import (
     PackSequences,
     PrefetchOp,
     ShuffleBuffer,
+    SpecialTokensMode,
     TokenizeText,
 )
 from zephon.utils import buffered_iterable
@@ -522,6 +523,9 @@ class Pipeline:
         split_long_samples: bool = False,
         use_fast: bool | None = True,
         preserve_upstream_payload: bool = False,
+        special_tokens: SpecialTokensMode = "bos_eos",
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -537,6 +541,9 @@ class Pipeline:
             split_long_samples=split_long_samples,
             use_fast=use_fast,
             preserve_upstream_payload=preserve_upstream_payload,
+            special_tokens=special_tokens,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
         )
         node = self._graph.add(
             "tokenize", op, self._tail, placement=placement, parallelism=parallelism

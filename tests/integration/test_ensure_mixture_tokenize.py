@@ -262,6 +262,10 @@ class TestEnsureMixtureTokenizationExpansion:
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
+                # Pin to the no-bracketing mode so the expansion arithmetic
+                # in the comments (10 words → 5 segs, 2 words → 1 seg) holds
+                # under the new ``bos_eos`` default that adds two specials.
+                special_tokens="tokenizer_default",
             )
             .options(deterministic=True, max_workers=2)
         )
@@ -320,6 +324,10 @@ class TestEnsureMixtureTokenizationExpansion:
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
+                # Pin to no-bracketing so the exact-count assertions
+                # (total == 120, short_count == 20) match the documented
+                # 5:1 expansion without BOS/EOS overhead.
+                special_tokens="tokenizer_default",
             )
             .ensure_mixture(
                 max_buffer_size=50,  # Allow buffering to enable reordering
@@ -409,6 +417,10 @@ class TestEnsureMixtureTokenizationExpansion:
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
+                # Pin to no-bracketing so the expansion ratios match the
+                # documented "5x" arithmetic (the new ``bos_eos`` default
+                # would inflate both components by +2 tokens).
+                special_tokens="tokenizer_default",
             )
             .options(deterministic=True, max_workers=1)
         )
@@ -424,6 +436,7 @@ class TestEnsureMixtureTokenizationExpansion:
                 split_long_samples=True,
                 max_length=2,
                 preserve_upstream_payload=True,
+                special_tokens="tokenizer_default",
             )
             .ensure_mixture(
                 max_buffer_size=50,

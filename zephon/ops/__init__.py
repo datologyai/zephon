@@ -14,7 +14,7 @@ from zephon.ops.pack_sequences import PackSequences
 from zephon.ops.prefetch import PrefetchOp
 from zephon.ops.shuffle_buffer import ShuffleBuffer
 from zephon.ops.stateful_transform import StatefulTransformOp
-from zephon.ops.tokenize_text import TokenizeText
+from zephon.ops.tokenize_text import SpecialTokensMode, TokenizeText
 
 __all__ = [
     "AssertLineageOrder",
@@ -28,6 +28,7 @@ __all__ = [
     "PackSequences",
     "PrefetchOp",
     "ShuffleBuffer",
+    "SpecialTokensMode",
     "StatefulTransformOp",
     "TokenizeText",
 ]
