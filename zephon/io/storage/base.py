@@ -1,5 +1,6 @@
 """Protocols for IO storage backends."""
 
+from collections.abc import Iterator
 from typing import IO, Any, Mapping, Protocol
 
 
@@ -104,6 +105,14 @@ class StorageBackend(Protocol):
         For cloud backends, creates a folder marker (empty object with trailing /).
         """
         ...
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        """Recursively yield ``(rel_path, size)`` for every file under ``path``.
+
+        ``rel_path`` is relative to ``path``, POSIX-style.  Non-existent
+        roots yield nothing rather than raise.
+        """
+        raise NotImplementedError
 
 
 __all__ = ["StorageBackend"]

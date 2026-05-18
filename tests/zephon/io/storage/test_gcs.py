@@ -1,5 +1,6 @@
 """Tests for GCSBackend using obstore."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -289,3 +290,80 @@ def test_gcs_stat_includes_mtime(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "size" in info
     assert "mtime" in info
     assert isinstance(info["mtime"], float)
+
+
+# ---------- walk() — exercises the base ObstoreBackend implementation ---------- #
+
+
+def test_gcs_walk_yields_recursive_rel_paths_with_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercises the base ``ObstoreBackend.walk`` (GCS does not override it)."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "tok/tokenizer.json")] = b"\x00" * 8
+    state["objects"][("bucket", "tok/subdir/config.json")] = b"\x00" * 4
+    state["objects"][("bucket", "outside/leak.json")] = b"\x00" * 99
+
+    backend = GCSBackend()
+    out = sorted(backend.walk("gs://bucket/tok/"))
+
+    assert out == [
+        ("subdir/config.json", 4),
+        ("tokenizer.json", 8),
+    ]
+
+
+def test_gcs_walk_skips_folder_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero-byte keys ending in ``/`` (folder markers) are skipped."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "tok/real.json")] = b"\x00" * 5
+    state["objects"][("bucket", "tok/subdir/")] = b""
+
+    backend = GCSBackend()
+    assert list(backend.walk("gs://bucket/tok/")) == [("real.json", 5)]
+
+
+def test_gcs_walk_accepts_prefix_without_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    state["objects"][("bucket", "tok/file.json")] = b"x"
+
+    backend = GCSBackend()
+    assert sorted(backend.walk("gs://bucket/tok")) == [("file.json", 1)]
+
+
+def test_gcs_walk_invalid_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+    with pytest.raises(ValueError, match="Invalid URL"):
+        list(backend.walk("not-gs://bucket/prefix/"))
+
+
+def test_gcs_walk_propagates_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No unsigned-fallback on GCS — errors must propagate."""
+    _install_obstore_stubs(monkeypatch)
+    obstore_mod = sys.modules["obstore"]
+
+    def always_fail(store, prefix=""):  # noqa: ARG001
+        raise RuntimeError("GCS access denied")
+
+    obstore_mod.list = always_fail
+
+    from zephon.io.storage.gcs import GCSBackend
+
+    backend = GCSBackend()
+    with pytest.raises(RuntimeError, match="GCS access denied"):
+        list(backend.walk("gs://bucket/prefix/"))

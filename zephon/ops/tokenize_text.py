@@ -28,6 +28,7 @@ from typing import (
 
 from tenacity import (
     retry,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_random_exponential,
 )
@@ -44,6 +45,10 @@ from zephon.core.constants import (
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.utils.thread_utils import suppress_library_threads
+from zephon.utils.tokenizer_cloud import (
+    PermanentCloudTokenizerError,
+    resolve_tokenizer_id,
+)
 from zephon.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
     _gil_disabled,
@@ -86,6 +91,16 @@ _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else N
 # Free-threaded Python only: serializes _setup_tokenizer's check-then-set so
 # concurrent _process threads can't race into double-loading the tokenizer.
 _SETUP_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
+
+
+@retry(
+    wait=wait_random_exponential(multiplier=2, max=15),
+    stop=stop_after_attempt(5),
+    retry=retry_if_not_exception_type((ValueError, PermanentCloudTokenizerError)),
+    reraise=True,
+)
+def _resolve_with_retry(tokenizer_id: str | None) -> str | None:
+    return resolve_tokenizer_id(tokenizer_id)
 
 
 class TokenizerLike(Protocol):
@@ -382,9 +397,14 @@ class TokenizeText(DefaultSetup):
                     with import_lock_ctx:
                         from transformers import AutoTokenizer
 
+                    # Resolve before the HF retry — nesting would re-list the
+                    # bucket on every HF retry attempt.
+                    load_id = _resolve_with_retry(self.tokenizer_id)
+
                     @retry(
                         wait=wait_random_exponential(multiplier=2, max=15),
                         stop=stop_after_attempt(5),
+                        retry=retry_if_not_exception_type((TypeError, ValueError)),
                         reraise=True,
                     )
                     def _load_with_retry(model_id: str, **k: Any) -> Any:
@@ -402,7 +422,7 @@ class TokenizeText(DefaultSetup):
                     if self.use_fast is not None:
                         kwargs["use_fast"] = self.use_fast
                     try:
-                        self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
+                        self.tok = _load_with_retry(load_id, **kwargs)
                     except TypeError as exc:
                         # Some tokenizers may not accept the `use_fast` kwarg;
                         # retry without it so we surface the original failure
@@ -410,7 +430,7 @@ class TokenizeText(DefaultSetup):
                         if "use_fast" in kwargs and "use_fast" in str(exc):
                             kwargs = dict(kwargs)
                             kwargs.pop("use_fast", None)
-                            self.tok = _load_with_retry(self.tokenizer_id, **kwargs)
+                            self.tok = _load_with_retry(load_id, **kwargs)
 
                         else:
                             raise
@@ -883,7 +903,14 @@ class TokenizeText(DefaultSetup):
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         return self._process(elems)
 
-    def resolved_tokenizer_id(self) -> str | None:
+    def configured_tokenizer_id(self) -> str | None:
+        """Return the *configured* tokenizer id for observability.
+
+        For ``tokenizer_id``-driven ops, this is the original string passed at
+        construction time (HF Hub id, local path, or cloud URI) — not the
+        local cache path that cloud URIs are resolved to. For pre-built
+        tokenizers, this is ``tok.name_or_path``.
+        """
         if self.tokenizer_id is not None:
             return self.tokenizer_id
         name = getattr(self.tok, "name_or_path", None)

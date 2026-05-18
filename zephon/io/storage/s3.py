@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,31 @@ class S3Backend(ObstoreBackend):
                     self._logged_unsigned_fallback = True
                 unsigned_store = self._get_unsigned_store(bucket)
                 self._download_with_store(unsigned_store, key, src, dst)
+                return
+            raise
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        """Recursively walk an S3 prefix with the same unsigned-bucket fallback as download."""
+        scheme, bucket, prefix = split_url(path)
+        if scheme != "s3" or not bucket:
+            raise ValueError(f"Invalid S3 URL: {path}")
+
+        store = self._get_store(bucket)
+        base = prefix if (not prefix or prefix.endswith("/")) else prefix + "/"
+        try:
+            yield from self._walk_with_store(store, base)
+        except Exception as e:
+            err = str(e)
+            if self._should_retry_unsigned(err):
+                if not self._logged_unsigned_fallback:
+                    logger.info(
+                        "Retrying S3 listing with unsigned access for %s "
+                        "(assuming public bucket).",
+                        path,
+                    )
+                    self._logged_unsigned_fallback = True
+                unsigned_store = self._get_unsigned_store(bucket)
+                yield from self._walk_with_store(unsigned_store, base)
                 return
             raise
 

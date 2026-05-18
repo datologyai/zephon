@@ -4,6 +4,7 @@ import contextlib
 import os
 import shutil
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Mapping
@@ -103,6 +104,12 @@ class LocalFSBackend(StorageBackend):
             if length is not None:
                 return handle.read(length)
             return handle.read()
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        base = self._abspath(path)
+        for p in base.rglob("*"):
+            if p.is_file():
+                yield p.relative_to(base).as_posix(), p.stat().st_size
 
     def listdir(self, path: str) -> list[str]:
         abspath = self._abspath(path)

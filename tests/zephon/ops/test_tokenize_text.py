@@ -10,7 +10,15 @@ import pytest
 
 from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.op_base import OpContext
-from zephon.ops.tokenize_text import SpecialTokensMode, TokenizeText
+from zephon.ops.tokenize_text import (
+    SpecialTokensMode,
+    TokenizeText,
+    _resolve_with_retry,
+)
+from zephon.utils.tokenizer_cloud import (
+    PermanentCloudTokenizerError,
+    TransientCloudTokenizerError,
+)
 from zephon.utils.torch_compat import _should_use_tensor_lock
 
 
@@ -202,7 +210,7 @@ def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
     )
     out = op.process_many([_rec("x"), _rec("y")])
     assert _payload_dict(out[0])["input_ids"] == [1, 2, 3]
-    assert op.resolved_tokenizer_id() == "toy-tokenizer"
+    assert op.configured_tokenizer_id() == "toy-tokenizer"
 
 
 def test_tokenize_passes_extra_hf_options() -> None:
@@ -1042,6 +1050,215 @@ def test_torch_has_allocator_fix_detects_old_versions() -> None:
     with patch.dict("sys.modules", {"torch": mock_torch}):
         result = torch_compat._torch_has_allocator_fix()
         assert result is False, "2.5.1 should not have the fix"
+
+
+# --- Cloud tokenizer URI resolution ---
+
+
+def test_setup_resolves_cloud_uri_before_loading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """``AutoTokenizer.from_pretrained`` receives the resolved local path, not the URI."""
+    received_ids: list[str] = []
+    fake = types.ModuleType("transformers")
+
+    class _Tok:
+        name_or_path = "model"
+        pad_token = None
+        eos_token = 0
+
+        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
+            return {
+                "input_ids": [[1, 2] for _ in texts],
+                "attention_mask": [[1, 1] for _ in texts],
+            }
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str, **k: Any):
+            received_ids.append(name)
+            return _Tok()
+
+    fake.AutoTokenizer = _AutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+
+    resolved_path = str(tmp_path / "fake-resolved-tokenizer")
+
+    def fake_resolve(tokenizer_id):
+        assert tokenizer_id == "s3://fake-bucket/fake/prefix/"
+        return resolved_path
+
+    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", fake_resolve)
+
+    op = TokenizeText(
+        tokenizer=None,
+        tokenizer_id="s3://fake-bucket/fake/prefix/",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+    # tokenizer_id stays as the URI; resolution is lazy.
+    assert op.tokenizer_id == "s3://fake-bucket/fake/prefix/"
+    assert op.tok is None
+
+    _setup(op)
+    _ = op.process_one(_rec("hello"))
+
+    assert received_ids == [resolved_path]
+
+
+def test_setup_passes_hub_id_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF Hub ids are not cloud URIs; the resolver must pass them through."""
+    received_ids: list[str] = []
+    fake = types.ModuleType("transformers")
+
+    class _Tok:
+        name_or_path = "meta-llama/Llama-3.2-1B"
+        pad_token = None
+        eos_token = 0
+
+        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
+            return {
+                "input_ids": [[1, 2] for _ in texts],
+                "attention_mask": [[1, 1] for _ in texts],
+            }
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str, **k: Any):
+            received_ids.append(name)
+            return _Tok()
+
+    fake.AutoTokenizer = _AutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+
+    op = TokenizeText(
+        tokenizer=None,
+        tokenizer_id="meta-llama/Llama-3.2-1B",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+    _setup(op)
+    _ = op.process_one(_rec("hello"))
+
+    assert received_ids == ["meta-llama/Llama-3.2-1B"]
+
+
+def test_setup_does_not_resolve_when_tokenizer_passed_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing a pre-built tokenizer object short-circuits the resolver."""
+    calls: list[str | None] = []
+
+    def fake_resolve(tokenizer_id):
+        calls.append(tokenizer_id)
+        return tokenizer_id
+
+    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", fake_resolve)
+
+    class _Tok:
+        name_or_path = "user-supplied"
+        pad_token = None
+        eos_token = 0
+
+        def __call__(self, texts, **kwargs):
+            return {
+                "input_ids": [[1, 2] for _ in texts],
+                "attention_mask": [[1, 1] for _ in texts],
+            }
+
+    tok = _Tok()
+    op = TokenizeText(
+        tokenizer=tok,
+        tokenizer_id=None,
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+    _setup(op)
+    _ = op.process_one(_rec("hello"))
+
+    assert calls == [], "resolve_tokenizer_id must not run when tok is provided"
+
+
+def test_setup_retries_transient_cloud_sync_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Transient cloud-sync failures are retried by the same tenacity envelope as HF load."""
+    resolved_path = str(tmp_path / "fake-resolved-tokenizer")
+    resolve_attempts = 0
+
+    def flaky_resolve(tokenizer_id):
+        nonlocal resolve_attempts
+        resolve_attempts += 1
+        if resolve_attempts == 1:
+            raise TransientCloudTokenizerError("simulated transient S3 5xx")
+        return resolved_path
+
+    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", flaky_resolve)
+
+    # Zero out the tenacity backoff so the test runs fast.
+    monkeypatch.setattr(
+        "zephon.ops.tokenize_text.wait_random_exponential",
+        lambda **kw: __import__("tenacity").wait.wait_none(),
+    )
+
+    fake = types.ModuleType("transformers")
+
+    class _Tok:
+        name_or_path = "model"
+        pad_token = None
+        eos_token = 0
+
+        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
+            return {
+                "input_ids": [[1, 2] for _ in texts],
+                "attention_mask": [[1, 1] for _ in texts],
+            }
+
+    received_ids: list[str] = []
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str, **k: Any):
+            received_ids.append(name)
+            return _Tok()
+
+    fake.AutoTokenizer = _AutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+
+    op = TokenizeText(
+        tokenizer=None,
+        tokenizer_id="s3://fake-bucket/fake/prefix/",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+    _setup(op)
+    _ = op.process_one(_rec("hello"))
+
+    assert resolve_attempts == 2, "Transient sync error must be retried once"
+    assert received_ids == [resolved_path]
+
+
+def test_setup_does_not_retry_permanent_cloud_sync_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic resolver failures must surface without backoff retries."""
+    attempts = 0
+
+    def permanent_resolve(tokenizer_id):
+        nonlocal attempts
+        attempts += 1
+        raise PermanentCloudTokenizerError(f"empty prefix: {tokenizer_id}")
+
+    monkeypatch.setattr(
+        "zephon.ops.tokenize_text.resolve_tokenizer_id", permanent_resolve
+    )
+
+    with pytest.raises(PermanentCloudTokenizerError, match="empty prefix"):
+        _resolve_with_retry("s3://fake-bucket/empty/")
+
+    assert attempts == 1
 
 
 def test_torch_has_allocator_fix_detects_new_versions() -> None:

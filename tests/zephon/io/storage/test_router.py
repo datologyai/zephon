@@ -9,6 +9,7 @@ from zephon.io.storage.router import RouterStorageBackend
 class _DummyBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.walk_yields: list[tuple[str, int]] = []
 
     def open(self, path: str, mode: str = "rb", **kwargs):
         self.calls.append(("open", path))
@@ -29,6 +30,10 @@ class _DummyBackend:
     def stat(self, path: str):
         self.calls.append(("stat", path))
         return {"size": 1}
+
+    def walk(self, path: str):
+        self.calls.append(("walk", path))
+        yield from self.walk_yields
 
 
 class _RangeCapableBackend:
@@ -163,3 +168,72 @@ def test_router_read_range_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValueError, match="Specify at most one of end or length"):
         router.read_range("s3://bucket/file.bin", 0, end=2, length=1)
+
+
+# ---------- walk() ---------- #
+
+
+def test_router_walk_delegates_to_s3(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _DummyBackend()
+    dummy.walk_yields = [("tokenizer.json", 8), ("config.json", 4)]
+    monkeypatch.setattr("zephon.io.storage.router._make_s3_backend", lambda: dummy)
+
+    router = RouterStorageBackend()
+    out = list(router.walk("s3://bucket/tok/"))
+
+    assert out == [("tokenizer.json", 8), ("config.json", 4)]
+    assert dummy.calls == [("walk", "s3://bucket/tok/")]
+
+
+def test_router_walk_delegates_to_gcs(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _DummyBackend()
+    dummy.walk_yields = [("file.json", 12)]
+    monkeypatch.setattr("zephon.io.storage.router._make_gcs_backend", lambda: dummy)
+
+    router = RouterStorageBackend()
+    assert list(router.walk("gs://bucket/dir/")) == [("file.json", 12)]
+    assert dummy.calls == [("walk", "gs://bucket/dir/")]
+
+    dummy.calls.clear()
+    assert list(router.walk("gcs://bucket/dir/")) == [("file.json", 12)]
+    assert dummy.calls == [("walk", "gcs://bucket/dir/")]
+
+
+def test_router_walk_routes_local_paths_to_local_backend(tmp_path: Path) -> None:
+    """Local paths walk the filesystem via ``Path.rglob``."""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.json").write_text("12", encoding="utf-8")
+
+    router = RouterStorageBackend(local_root=tmp_path)
+    out = sorted(router.walk(str(tmp_path)))
+    assert out == [("a.txt", 2), ("sub/b.json", 2)]
+
+
+def test_router_walk_unknown_scheme_falls_through_to_local(tmp_path: Path) -> None:
+    """Unknown URL schemes route to the local backend, which simply walks
+    them as a literal path; non-existent → empty iterator."""
+    router = RouterStorageBackend(local_root=tmp_path)
+    assert list(router.walk("ftp://host/path")) == []
+
+
+def test_router_walk_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The returned iterator must not drain the backend eagerly."""
+    yielded_so_far: list[tuple[str, int]] = []
+
+    def slow_walk(self, path: str):  # noqa: ARG001
+        for item in [("a", 1), ("b", 2), ("c", 3)]:
+            yielded_so_far.append(item)
+            yield item
+
+    dummy = _DummyBackend()
+    dummy.walk = slow_walk.__get__(dummy, _DummyBackend)  # type: ignore[method-assign]
+    monkeypatch.setattr("zephon.io.storage.router._make_s3_backend", lambda: dummy)
+
+    router = RouterStorageBackend()
+    it = router.walk("s3://bucket/p/")
+
+    assert next(it) == ("a", 1)
+    assert yielded_so_far == [("a", 1)]
+    # And the rest only arrive when asked.
+    assert list(it) == [("b", 2), ("c", 3)]

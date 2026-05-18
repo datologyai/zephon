@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any, Mapping, cast
 
@@ -106,6 +107,14 @@ class RouterStorageBackend(StorageBackend):
     def is_cloud_path(self, path: str) -> bool:
         """Return True if path uses a cloud storage scheme."""
         return self._backend_for(path) is not self._local
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        """Recursively yield ``(rel_path, size)`` under ``path``.
+
+        Delegates to whichever backend matches ``path``'s scheme; local
+        filesystems use :class:`pathlib.Path.rglob` under the hood.
+        """
+        yield from self._backend_for(path).walk(path)
 
 
 __all__ = ["RouterStorageBackend"]

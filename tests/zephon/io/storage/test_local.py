@@ -123,3 +123,40 @@ def test_local_glob(tmp_path: Path) -> None:
     # Test glob with relative pattern
     matches = backend.glob("state_r0_*.json")
     assert len(matches) == 2
+
+
+def test_local_walk_yields_files_recursively(tmp_path: Path) -> None:
+    backend = LocalFSBackend(root=tmp_path)
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.json").write_text("12", encoding="utf-8")
+    (tmp_path / "sub" / "deep").mkdir()
+    (tmp_path / "sub" / "deep" / "c.bin").write_bytes(b"\x00\x01\x02")
+
+    out = sorted(backend.walk(str(tmp_path)))
+    assert out == [
+        ("a.txt", 2),
+        ("sub/b.json", 2),
+        ("sub/deep/c.bin", 3),
+    ]
+
+
+def test_local_walk_empty_dir_yields_nothing(tmp_path: Path) -> None:
+    backend = LocalFSBackend(root=tmp_path)
+    (tmp_path / "empty").mkdir()
+    assert list(backend.walk(str(tmp_path / "empty"))) == []
+
+
+def test_local_walk_nonexistent_path_yields_nothing(tmp_path: Path) -> None:
+    backend = LocalFSBackend(root=tmp_path)
+    assert list(backend.walk(str(tmp_path / "missing"))) == []
+
+
+def test_local_walk_skips_directories(tmp_path: Path) -> None:
+    """rglob returns directories too; walk must only yield regular files."""
+    backend = LocalFSBackend(root=tmp_path)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "leaf.txt").write_text("x", encoding="utf-8")
+    out = list(backend.walk(str(tmp_path)))
+    # Only "sub/leaf.txt" — not "sub" itself.
+    assert out == [("sub/leaf.txt", 1)]

@@ -1,5 +1,6 @@
 """Tests for S3Backend using obstore."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -249,8 +250,6 @@ def test_s3_stat_access_denied_raises_permission_error(
     """Test that stat raises PermissionError on 403 Access Denied."""
     _install_obstore_stubs(monkeypatch)
 
-    import sys
-
     # Patch the mock head to raise 403 for a specific key
     obstore_mod = sys.modules["obstore"]
     original_head = obstore_mod.head
@@ -268,3 +267,128 @@ def test_s3_stat_access_denied_raises_permission_error(
 
     with pytest.raises(PermissionError, match="Access denied"):
         backend.stat("s3://bucket/forbidden.bin")
+
+
+# ---------- walk() ---------- #
+
+
+def test_s3_walk_yields_recursive_rel_paths_with_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``walk`` must return all objects under a prefix recursively with sizes."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "tok/tokenizer.json")] = b"\x00" * 8
+    state["objects"][("bucket", "tok/config.json")] = b"\x00" * 4
+    state["objects"][("bucket", "tok/subdir/special.txt")] = b"\x00" * 16
+    state["objects"][("bucket", "other/leak.json")] = b"\x00" * 99
+
+    backend = S3Backend()
+    out = sorted(backend.walk("s3://bucket/tok/"))
+
+    assert out == [
+        ("config.json", 4),
+        ("subdir/special.txt", 16),
+        ("tokenizer.json", 8),
+    ]
+
+
+def test_s3_walk_accepts_prefix_without_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``walk("s3://b/tok")`` must behave the same as ``walk("s3://b/tok/")``."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "tok/file.json")] = b"\x00" * 3
+
+    backend = S3Backend()
+    assert sorted(backend.walk("s3://bucket/tok")) == [("file.json", 3)]
+
+
+def test_s3_walk_skips_folder_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero-byte keys ending in ``/`` (S3 folder markers) must be skipped."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "tok/real.json")] = b"\x00" * 5
+    state["objects"][("bucket", "tok/subdir/")] = b""
+
+    backend = S3Backend()
+    assert list(backend.walk("s3://bucket/tok/")) == [("real.json", 5)]
+
+
+def test_s3_walk_empty_prefix_yields_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prefix with no matching objects yields no entries (does not raise)."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+    assert list(backend.walk("s3://bucket/nonexistent/prefix/")) == []
+
+
+def test_s3_walk_invalid_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bad scheme or missing bucket raises ``ValueError``."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    backend = S3Backend()
+    with pytest.raises(ValueError, match="Invalid S3 URL"):
+        list(backend.walk("not-s3://bucket/prefix/"))
+    with pytest.raises(ValueError, match="Invalid S3 URL"):
+        list(backend.walk("s3://"))
+
+
+def test_s3_walk_unsigned_fallback_on_credential_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential failure on the signed store retries with the unsigned store."""
+    state = _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    state["objects"][("bucket", "public/tokenizer.json")] = b"\x00" * 7
+
+    backend = S3Backend()
+
+    obstore_mod = sys.modules["obstore"]
+    original_list = obstore_mod.list
+    call_state = {"signed_seen": False}
+
+    def list_with_403_then_success(store, prefix=""):
+        if not call_state["signed_seen"]:
+            call_state["signed_seen"] = True
+            raise Exception("403 InvalidAccessKeyId: signed access rejected")
+        return original_list(store, prefix=prefix)
+
+    obstore_mod.list = list_with_403_then_success
+
+    out = list(backend.walk("s3://bucket/public/"))
+    assert out == [("tokenizer.json", 7)]
+    assert any(cfg.get("skip_signature") is True for cfg in state["configs"])
+
+
+def test_s3_walk_non_credential_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Errors that don't look like auth failures must propagate unchanged."""
+    _install_obstore_stubs(monkeypatch)
+
+    from zephon.io.storage.s3 import S3Backend
+
+    obstore_mod = sys.modules["obstore"]
+
+    def always_fail(store, prefix=""):  # noqa: ARG001
+        raise RuntimeError("network timeout — totally unrelated to auth")
+
+    obstore_mod.list = always_fail
+
+    backend = S3Backend()
+    with pytest.raises(RuntimeError, match="network timeout"):
+        list(backend.walk("s3://bucket/prefix/"))

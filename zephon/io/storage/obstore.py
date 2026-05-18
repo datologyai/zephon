@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from typing import Any, Mapping
 
 from ._utils import OpenViaDownloadMixin, split_url
@@ -105,6 +106,38 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
             if "404" in err or "NoSuchKey" in err or "NotFound" in err:
                 raise FileNotFoundError(f"Object not found: {path}") from e
             raise
+
+    def _walk_with_store(self, store: Any, base: str) -> Iterator[tuple[str, int]]:
+        """Yield ``(rel_path, size)`` for every object under ``base``.
+
+        Zero-byte folder markers (keys equal to ``base`` or ending in ``/``)
+        are skipped — they aren't downloadable as files.
+        """
+        import obstore as obs
+
+        for chunk in obs.list(store, prefix=base):
+            for obj in chunk:
+                obj_path = obj["path"]
+                if not obj_path.startswith(base):
+                    continue
+                rel = obj_path[len(base) :]
+                if not rel or rel.endswith("/"):
+                    continue
+                yield rel, int(obj["size"])
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        """Recursively yield ``(rel_path, size)`` for every object under ``path``.
+
+        Unlike :meth:`listdir`, this descends into subdirectories and
+        returns sizes from the listing (no extra ``stat`` round-trip).
+        """
+        scheme, bucket, prefix = split_url(path)
+        if scheme not in self.valid_schemes or not bucket:
+            raise ValueError(f"Invalid URL: {path}")
+
+        store = self._get_store(bucket)
+        base = prefix if (not prefix or prefix.endswith("/")) else prefix + "/"
+        yield from self._walk_with_store(store, base)
 
     def listdir(self, path: str) -> list[str]:
         """List files in a cloud directory (prefix)."""
