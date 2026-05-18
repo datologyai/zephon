@@ -1077,6 +1077,19 @@ class Pipeline:
             pass
         return self._engine.eval_one(value)
 
+    def inflight_summary(self) -> dict[int, int]:
+        """Return per-lane inflight chunk counts: ``{lane_id: count}``.
+
+        In MTP mode this reads from shared memory (non-blocking, zero IPC).
+        In inline mode it reads the engine dict directly.
+        Returns ``{}`` if the engine is not running.
+        """
+        if self._sp is not None:
+            return self._sp.inflight_summary()
+        if self._engine is not None:
+            return self._engine.inflight_summary()
+        return {}
+
     def metrics_snapshot(self) -> Any:
         """Return a clone of the current pipeline metrics summary, or None."""
         if self._engine is not None:

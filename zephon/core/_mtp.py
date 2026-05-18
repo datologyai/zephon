@@ -47,6 +47,7 @@ join non-daemon children — preventing the process from blocking exit.
 
 from __future__ import annotations
 
+import ctypes
 import multiprocessing as mp
 import queue as _queue_mod
 import signal
@@ -116,6 +117,7 @@ def _mtp_worker(
     data_q: mp.Queue,  # type: ignore[type-arg]
     ctrl_conn: Connection,
     buffer_size: int,
+    inflight_shm: ctypes.Array[ctypes.c_int] | None = None,
 ) -> None:
     """Entry point for the MTP worker subprocess.
 
@@ -150,6 +152,9 @@ def _mtp_worker(
         engine, iterator, use_monotone = pipeline._build_raw_iter(
             restore_ckpt=restore_ckpt,
         )
+
+        if inflight_shm is not None:
+            engine.attach_inflight_counter(inflight_shm)
 
         # Pending notify args indexed by sequence number.  Only lightweight
         # NamedTuples of scalars/cursors — never retains the full item payload.
@@ -343,6 +348,10 @@ class MTPPipeline:
         sp.close()
     """
 
+    # Shared-memory array size for per-lane inflight counts.
+    # Lane IDs are small integers (typically 0..dp_degree*replicas).
+    _INFLIGHT_SHM_LANES: int = 256
+
     def __init__(
         self,
         pipeline: Any,
@@ -358,11 +367,25 @@ class MTPPipeline:
         # Control pipe: main_conn (main process) ↔ sub_conn (subprocess)
         self._main_conn, sub_conn = mp.Pipe()
 
+        # Shared-memory inflight counter: subprocess writes, main reads.
+        # RawArray (no lock) — single-int writes are atomic on x86/ARM and
+        # we tolerate reading a slightly stale value.
+        self._inflight_shm: ctypes.Array[ctypes.c_int] = mp.RawArray(
+            ctypes.c_int, self._INFLIGHT_SHM_LANES
+        )
+
         pipeline_bytes = cloudpickle.dumps(pipeline)
 
         self._process = mp.Process(
             target=_mtp_worker,
-            args=(pipeline_bytes, restore_ckpt, self._data_q, sub_conn, buffer_size),
+            args=(
+                pipeline_bytes,
+                restore_ckpt,
+                self._data_q,
+                sub_conn,
+                buffer_size,
+                self._inflight_shm,
+            ),
             daemon=False,
             name="zephon-mtp-worker",
         )
@@ -462,6 +485,18 @@ class MTPPipeline:
             self._main_conn.send((_ACK, seq))
             if not is_sentinel(item):
                 yield item
+
+    def inflight_summary(self) -> dict[int, int]:
+        """Read per-lane inflight chunk counts from shared memory.
+
+        Non-blocking — reads whatever the subprocess last wrote.
+        Returns ``{lane_id: count}`` for lanes with count > 0.
+        """
+        return {
+            lane: count
+            for lane in range(self._INFLIGHT_SHM_LANES)
+            if (count := self._inflight_shm[lane]) > 0
+        }
 
     def checkpoint(self, *, timeout: float = _CHECKPOINT_TIMEOUT_S) -> dict[str, Any]:
         """Request a checkpoint from the subprocess Engine.

@@ -30,6 +30,7 @@ The engine also inserts a lane-merging distributor at the tail only when a rank 
 and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane dataflow.
 """
 
+import ctypes
 import json
 import multiprocessing as mp
 import os
@@ -475,6 +476,7 @@ class Engine:
         self._warned_once_about_runid = False
         self._checkpoint_reload_count = 0
         self._checkpoint_lock = threading.Lock()
+        self._inflight_shm: ctypes.Array[ctypes.c_int] | None = None
         self._rr_next_idx: dict[str, int] = {}
 
         # Component ID mapping for mixture tracking (string -> int)
@@ -896,6 +898,58 @@ class Engine:
             else:
                 raise ValueError(f"Unknown runner '{spec.runner_type}'")
 
+    # ------------------------------------------------------------------
+    # Shared-memory inflight counter (used by MTP mode for zero-copy reads)
+    # ------------------------------------------------------------------
+
+    def attach_inflight_counter(self, shm: ctypes.Array[ctypes.c_int]) -> None:
+        """Wire up a shared ``multiprocessing.RawArray`` for inflight counts.
+
+        Called by the MTP worker after engine construction.  The array is
+        indexed by lane_id; the engine writes ``len(inflight_chunks_per_lane[lane])``
+        after every chunk admission or eviction.  The main process reads
+        at any time with no IPC round-trip.
+        """
+        self._inflight_shm = shm
+
+    def _sync_inflight_shm(self, lane_id: int) -> None:
+        """Update the shared-memory counter for *lane_id*."""
+        shm = self._inflight_shm
+        if shm is None:
+            return
+        if 0 <= lane_id < len(shm):
+            shm[lane_id] = len(self.inflight_chunks_per_lane.get(lane_id, {}))
+            return
+        warnings.warn(
+            f"inflight shm counter skipped: lane_id={lane_id} out of range "
+            f"[0, {len(shm)}); inflight_summary() will not include this lane.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def inflight_summary(self) -> dict[int, int]:
+        """Return the number of inflight chunks per lane.
+
+        Lightweight alternative to ``state_dict()`` for monitoring — returns
+        only ``{lane_id: chunk_count}`` without serialising chunk contents.
+        Safe to call from the main thread while workers are running; if a
+        lane mutates concurrently we skip just that lane rather than dropping
+        the whole summary.
+        """
+        try:
+            lanes = list(self.inflight_chunks_per_lane)
+        except RuntimeError:
+            return {}
+        result: dict[int, int] = {}
+        for lane in lanes:
+            try:
+                chunks = self.inflight_chunks_per_lane.get(lane)
+                if chunks is not None:
+                    result[int(lane)] = len(chunks)
+            except RuntimeError:
+                continue
+        return result
+
     def metrics_snapshot(self):
         """Return a clone of the current pipeline metrics summary when enabled."""
         if self._collector is None:
@@ -1077,6 +1131,7 @@ class Engine:
                 cid = int(self._lane_next_cid[lane_id])
                 self._lane_next_cid[lane_id] = cid + 1
                 inflight_lane[cid] = chunk
+                self._sync_inflight_shm(lane_id)
                 # Store mixture weights for this chunk
                 self._store_chunk_mixture(lane_id, cid, chunk)
 
@@ -1429,6 +1484,7 @@ class Engine:
                 to_evict = [cid for cid in snapshot if cid < max_chunk_id]
                 for cid in to_evict:
                     inflight_lane.pop(cid, None)
+                self._sync_inflight_shm(lane_id)
                 with self._mixture_lock:
                     for cid in to_evict:
                         self._chunk_mixtures.pop((lane_id, cid), None)
@@ -1602,6 +1658,7 @@ class Engine:
             done.pop(cid, None)
             done_count.pop(cid, None)
         if cids_to_evict:
+            self._sync_inflight_shm(lane_id)
             with self._mixture_lock:
                 for cid in cids_to_evict:
                     self._chunk_mixtures.pop((lane_id, cid), None)
@@ -2131,6 +2188,7 @@ class Engine:
             for cid_s, payload in by_chunk.items():
                 cid = int(cid_s)
                 self.inflight_chunks_per_lane[lane][cid] = WorkChunk.from_state(payload)
+            self._sync_inflight_shm(lane)
 
         self._lane_progress.clear()
         progress_all = state.get("progress", {})
