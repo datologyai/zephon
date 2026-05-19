@@ -84,23 +84,9 @@ def test_per_stage_fixed_allocation():
     assert caps == [7, 7, 7]
 
 
-def test_global_equal_weighting():
+def test_global_allocation():
     plan = _mk_plan((2, 5, 1))
-    opts = RuntimeOptions(
-        worker_allocation="global", stage_weighting="equal", max_workers=9
-    )
-    spec = resolve_runtime_spec(plan, opts)
-    caps = [s.worker_cap for s in spec.stages]
-    assert caps == [3, 3, 3]
-
-
-def test_global_by_declared_parallelism():
-    plan = _mk_plan((2, 5, 1))
-    opts = RuntimeOptions(
-        worker_allocation="global",
-        stage_weighting="by_declared_parallelism",
-        max_workers=16,
-    )
+    opts = RuntimeOptions(worker_allocation="global", max_workers=16)
     spec = resolve_runtime_spec(plan, opts)
     caps = [s.worker_cap for s in spec.stages]
     assert caps == [4, 10, 2]
@@ -111,11 +97,7 @@ def test_global_bumps_when_less_than_stages():
     with pytest.warns(RuntimeWarning):
         spec = resolve_runtime_spec(
             plan,
-            RuntimeOptions(
-                worker_allocation="global",
-                stage_weighting="equal",
-                max_workers=2,
-            ),
+            RuntimeOptions(worker_allocation="global", max_workers=2),
         )
     caps = [s.worker_cap for s in spec.stages]
     assert caps == [1, 1, 1]

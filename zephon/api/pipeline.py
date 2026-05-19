@@ -32,7 +32,12 @@ from zephon.core.constants import (
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph, Node, Plan
 from zephon.core.planner import Planner
-from zephon.core.runtime_spec import RuntimeSpec, resolve_runtime_spec
+from zephon.core.runtime_spec import (
+    RuntimeSpec,
+    resolve_mtp_buffer,
+    resolve_prefetch_batches,
+    resolve_runtime_spec,
+)
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
@@ -943,7 +948,7 @@ class Pipeline:
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         iterator: Iterator[StreamItem] = engine.build_iter()
-        final_prefetch = self._options.prefetch_batches or 0
+        final_prefetch = resolve_prefetch_batches(self._options)
         if final_prefetch > 0:
             iterator = buffered_iterable(iterator, final_prefetch, on_stop=engine.close)
         return engine, iterator, use_monotone
@@ -965,7 +970,7 @@ class Pipeline:
         self._last_state = None
         sp = MTPPipeline(
             self,
-            buffer_size=self._options.mtp_buffer,
+            buffer_size=resolve_mtp_buffer(self._options),
             restore_ckpt=self._pending_restore,
         )
         self._sp = sp

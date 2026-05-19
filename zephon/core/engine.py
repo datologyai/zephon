@@ -176,29 +176,55 @@ _RELOAD_SUFFIX = re.compile(r"-(\d+)$")
 
 @dataclass
 class RuntimeOptions:
-    """User-tunable knobs that influence how the engine constructs runners."""
+    """User-tunable knobs that influence how the engine constructs runners.
+
+    Numeric tuning knobs default to ``None``, resulting in sensible
+    defaults via  ``resolve_*`` helpers that form a dependency cascade.
+    Each resolver calls the ones above it when its own field is unset::
+
+        max_workers              ← os.cpu_count(), clamped [4, 16]
+            └── prefetch_batches             = max(8, 2 × max_workers)
+                    ├── op_queue_capacity        = max(8, prefetch_batches)
+                    ├── mtp_buffer               = max(4, prefetch_batches // 2)
+                    └── default_stage_prefetch   = max(4, prefetch_batches // 4)  [process]
+                                                   max(8, prefetch_batches // 2)  [threads/inline]
+
+    For example, ``max_workers=24`` naturally bumps the
+    prefetch / queue / MTP buffers without the user having to set them too,
+    while ``prefetch_batches=64`` overrides the tail buffer alone and lets
+    the rest auto-derive from it.
+
+    By default, ``max_workers`` is derived from the host's CPU count,
+    but is clamped to a range of ``[4, 16]``. For any large deployment
+    this will hit the upper limit, but the clamp allows Zephon to run
+    reasonably on small machines as well.
+    """
 
     runner: str | None = None  # Default runner. Typically auto-inferred.
     run_id: str = DEFAULT_RUN_ID
     per_stage_runner: dict[int, str] = field(
         default_factory=dict
     )  # Manual override for runner per-stage. Mostly useful for debugging and advanced usage.
-    allow_mtp_in_worker: bool = False  # TODO(MaxiBoether): Implement this.
     mp_context: Any = mp.get_context("spawn")
+    # "autotune" is reserved for a future probe-based tuner; passing it today
+    # raises NotImplementedError in resolve_runtime_spec.
     worker_allocation: Literal[
         "fit_to_ops", "per_stage_fixed", "global", "autotune"
     ] = "fit_to_ops"
-    stage_weighting: Literal["equal", "by_declared_parallelism"] = (
-        "by_declared_parallelism"
-    )
-    max_workers: int = (
-        8  # max_workers per stage OR global, depending on worker_allocation.
-    )
+    # max_workers per stage OR global, depending on worker_allocation.
+    # None = auto-derived from os.cpu_count(), clamped to [4, 16].
+    max_workers: int | None = None
     deterministic: bool = True
+    # Consumer-side prefetch depth at the pipeline tail.
+    # None = auto-derived from resolved max_workers (max(8, 2 * max_workers)).
     prefetch_batches: int | None = None
-    default_stage_prefetch: int = 0
+    # Inter-stage prefetch buffer depth.
+    # None = auto-derived (4 for thread/inline runners, 2 for process runners).
+    default_stage_prefetch: int | None = None
     per_stage_prefetch: dict[int, int] = field(default_factory=dict)
-    op_queue_capacity: int = 16  # maximum size of inflight items between ops.
+    # Maximum in-flight items in the queue between ops within a stage.
+    # None = auto-derived from resolved prefetch_batches (max(8, prefetch_batches)).
+    op_queue_capacity: int | None = None
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
     # Expert knob:
@@ -225,7 +251,8 @@ class RuntimeOptions:
     # The main process only dequeues finished batches via IPC.
     mtp_mode: bool = False
     # Bounded IPC queue depth for MTP mode.
-    mtp_buffer: int = 16
+    # None = auto-derived from resolved prefetch_batches (max(4, prefetch_batches // 2)).
+    mtp_buffer: int | None = None
     # Automatically capture a checkpoint from the MTP subprocess after normal
     # iteration completion.  Set to False when multi-rank aggregation is not
     # available (e.g. no aggregate_dir, or ranks run sequentially rather than
@@ -266,8 +293,6 @@ class RuntimeOptions:
     # seq is dropped instead of failing the pipeline.
     max_worker_retries: int = 3
 
-    # Autotune placeholders (intentionally not implemented yet)
-    autotune_config: dict[str, Any] | None = None  # e.g., {"target_util": 0.3, ...}
     # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
     # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None

@@ -17,6 +17,7 @@ This separation enables:
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -59,7 +60,6 @@ class RuntimeSpec:
     # Allocation description
     worker_allocation: str
     max_workers: int
-    stage_weighting: str
     # Pipeline-level flags
     preserves_cursor_order: bool
     final_prefetch: int
@@ -76,9 +76,7 @@ class RuntimeSpec:
         # Allocation header
         mode = self.worker_allocation
         if mode == "global":
-            lines.append(
-                f"Allocation=global total={self.max_workers} weighting={self.stage_weighting}"
-            )
+            lines.append(f"Allocation=global total={self.max_workers}")
         elif mode == "per_stage_fixed":
             lines.append(f"Allocation=per_stage_fixed per_stage={self.max_workers}")
         else:
@@ -145,6 +143,90 @@ class RuntimeSpec:
                     lines.append("  ==> pipeline_end")
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Auto-derivation of numeric tuning knobs
+# ---------------------------------------------------------------------------
+#
+# Each `resolve_*` helper materializes a `RuntimeOptions` field that may be
+# left as ``None`` (signalling "pick a sensible default"). Keeping the
+# derivation logic in one place lets the rest of the engine and the consumer
+# Pipeline API read uniform integer values without re-implementing fallbacks.
+
+
+_MAX_WORKERS_FLOOR = 4
+_MAX_WORKERS_CEIL = 16
+
+
+def _resolve_max_workers(opts: RuntimeOptions) -> int:
+    """Materialize ``opts.max_workers`` to a concrete int.
+
+    When unset, derives from ``os.cpu_count()`` clamped to ``[4, 16]``.
+
+    The resolved value is used in two distinct ways depending on
+    ``worker_allocation``:
+
+    * ``per_stage_fixed`` / ``global``: directly caps per-stage / total worker
+      counts.
+    * ``fit_to_ops`` (default): NOT used for worker counts — those come from
+      each op's declared parallelism. The resolved number only feeds the
+      buffer-sizing cascade (``prefetch_batches``, ``op_queue_capacity``,
+      ``mtp_buffer``, ``default_stage_prefetch``), so the clamp keeps those
+      buffers reasonable.
+
+    """
+    if opts.max_workers is not None:
+        return opts.max_workers
+    cpus = os.cpu_count() or _MAX_WORKERS_FLOOR
+    return min(_MAX_WORKERS_CEIL, max(_MAX_WORKERS_FLOOR, cpus))
+
+
+def resolve_prefetch_batches(opts: RuntimeOptions) -> int:
+    """Materialize ``opts.prefetch_batches`` to a concrete int.
+
+    When unset, derives from the resolved ``max_workers`` so the consumer-side
+    tail buffer scales with the number of producers in flight.
+    """
+    if opts.prefetch_batches is not None:
+        return opts.prefetch_batches
+    return max(8, 2 * _resolve_max_workers(opts))
+
+
+def _resolve_default_stage_prefetch(opts: RuntimeOptions, *, runner_type: str) -> int:
+    """Materialize ``opts.default_stage_prefetch`` to a concrete int.
+
+    When unset, scales with the resolved ``prefetch_batches``.
+    Floors of 4 (process) and 8 (threads/inline) guarantee meaningful
+    pipelining even on small machines.
+    """
+    if opts.default_stage_prefetch is not None:
+        return opts.default_stage_prefetch
+    prefetch = resolve_prefetch_batches(opts)
+    if runner_type == "process":
+        return max(4, prefetch // 4)
+    return max(8, prefetch // 2)
+
+
+def _resolve_op_queue_capacity(opts: RuntimeOptions) -> int:
+    """Materialize ``opts.op_queue_capacity`` to a concrete int.
+
+    Scales with the resolved prefetch depth so backpressure stays consistent.
+    """
+    if opts.op_queue_capacity is not None:
+        return opts.op_queue_capacity
+    return max(8, resolve_prefetch_batches(opts))
+
+
+def resolve_mtp_buffer(opts: RuntimeOptions) -> int:
+    """Materialize ``opts.mtp_buffer`` to a concrete int.
+
+    MTP only matters when ``opts.mtp_mode`` is True. Default keeps the IPC
+    queue at roughly half the tail prefetch depth.
+    """
+    if opts.mtp_buffer is not None:
+        return opts.mtp_buffer
+    return max(4, resolve_prefetch_batches(opts) // 2)
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +319,15 @@ def resolve_runtime_spec(
             "Use 'per_stage_fixed' or 'global' for now."
         )
 
+    # Materialize all numeric tuning knobs up front so the rest of the
+    # resolver and downstream RuntimeSpec carry concrete ints, never None.
+    max_workers = _resolve_max_workers(opts)
+    op_queue_capacity = _resolve_op_queue_capacity(opts)
+    final_prefetch = resolve_prefetch_batches(opts)
+
     # --- Worker count computation ---
     if mode == "global":
-        total = opts.max_workers
+        total = max_workers
         if total < num_stages:
             warnings.warn(
                 f"[zephon] max_workers_total={total} < number of stages={num_stages}; "
@@ -247,14 +335,16 @@ def resolve_runtime_spec(
                 RuntimeWarning,
                 stacklevel=2,
             )
-            total = num_stages
-        if opts.stage_weighting == "equal":
-            weights = [1 for _ in range(num_stages)]
+            # Bumped path: give every stage exactly 1 worker. Weight-proportional
+            # apportion would still produce zero-worker stages for small-parallelism
+            # ops (e.g. [2,5,1] under total=3 ⇒ [1,2,0]), which deadlocks the
+            # pipeline. The warning above promises "1 thread per stage", so honor it.
+            per_stage_caps = [1] * num_stages
         else:
             weights = [stage_parallelism(s) for s in plan.stages]
-        per_stage_caps = apportion(total, weights)
+            per_stage_caps = apportion(total, weights)
     elif mode == "per_stage_fixed":
-        per_stage_caps = [opts.max_workers for _ in range(num_stages)]
+        per_stage_caps = [max_workers for _ in range(num_stages)]
     else:  # fit_to_ops (default)
         per_stage_caps = [stage_parallelism(s) for s in plan.stages]
 
@@ -265,18 +355,18 @@ def resolve_runtime_spec(
     for idx, stg in enumerate(plan.stages):
         is_last = idx == num_stages - 1
         cap = per_stage_caps[idx]
-        prefetch = opts.per_stage_prefetch.get(idx, opts.default_stage_prefetch)
 
-        # Runner type selection
+        # Runner type selection. Inside a PyTorch DataLoader worker, process
+        # runners are demoted to threads (subprocesses cannot fork further).
         chosen = opts.per_stage_runner.get(idx, default_runner)
         if chosen == "auto":
-            if inside_worker and not opts.allow_mtp_in_worker:
+            if inside_worker:
                 chosen = "threads"
             elif stg.placement == "remote":
                 chosen = "remote"
             else:
                 chosen = "threads"
-        if inside_worker and chosen == "process" and not opts.allow_mtp_in_worker:
+        if inside_worker and chosen == "process":
             chosen = "threads"
 
         # Runner hint overrides from Planner
@@ -285,6 +375,13 @@ def resolve_runtime_spec(
             chosen = "inline"
         elif hint == "threads":
             chosen = "threads"
+
+        # Default stage prefetch depends on the resolved runner type, so
+        # compute it after the runner is selected.
+        prefetch = opts.per_stage_prefetch.get(
+            idx,
+            _resolve_default_stage_prefetch(opts, runner_type=chosen),
+        )
 
         # Latency flush in deterministic mode
         allow_latency = opts.allow_latency_flush_in_deterministic
@@ -303,7 +400,7 @@ def resolve_runtime_spec(
                 stage_index=idx,
                 runner_type=chosen,
                 worker_cap=cap,
-                queue_capacity=opts.op_queue_capacity,
+                queue_capacity=op_queue_capacity,
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
                 allow_latency_flush=allow_latency,
@@ -316,9 +413,8 @@ def resolve_runtime_spec(
     return RuntimeSpec(
         stages=tuple(stage_specs),
         worker_allocation=mode,
-        max_workers=opts.max_workers,
-        stage_weighting=opts.stage_weighting,
+        max_workers=max_workers,
         preserves_cursor_order=plan.preserves_cursor_order,
-        final_prefetch=opts.prefetch_batches or 0,
+        final_prefetch=final_prefetch,
         deterministic=opts.deterministic,
     )

@@ -240,35 +240,19 @@ def test_per_stage_fixed_caps_and_explain() -> None:
     assert _extract_caps_from_explain(exp) == [7, 7, 7]
 
 
-def test_global_equal_weighting_caps() -> None:
-    eng, _ = _mk_three_stage_plan((2, 5, 1))
-    eng = _rebuild_with_opts(
-        eng,
-        worker_allocation="global",
-        stage_weighting="equal",
-        max_workers=9,
-    )
-    caps = [getattr(r, "_max_workers") for r in eng._runners]  # type: ignore[attr-defined]
-    assert caps == [3, 3, 3]
-    exp = eng.explain()
-    assert "Allocation=global total=9 weighting=equal" in exp
-    assert _extract_caps_from_explain(exp) == [3, 3, 3]
-
-
-def test_global_by_declared_parallelism_caps() -> None:
+def test_global_allocation_caps() -> None:
     eng, expected_fit = _mk_three_stage_plan((2, 5, 1))
     assert expected_fit == [2, 5, 1]
     eng = _rebuild_with_opts(
         eng,
         worker_allocation="global",
-        stage_weighting="by_declared_parallelism",
         max_workers=16,
     )
     # weights proportional to [2,5,1] with total=16 → [4,10,2]
     caps = [getattr(r, "_max_workers") for r in eng._runners]  # type: ignore[attr-defined]
     assert caps == [4, 10, 2]
     exp = eng.explain()
-    assert "Allocation=global total=16 weighting=by_declared_parallelism" in exp
+    assert "Allocation=global total=16" in exp
     assert _extract_caps_from_explain(exp) == [4, 10, 2]
 
 
@@ -278,7 +262,6 @@ def test_global_total_less_than_stages_warns_and_bumps() -> None:
         eng = _rebuild_with_opts(
             eng,
             worker_allocation="global",
-            stage_weighting="equal",
             max_workers=2,  # less than number of stages (=3)
         )
     # Warning message should mention bumping to number of stages
