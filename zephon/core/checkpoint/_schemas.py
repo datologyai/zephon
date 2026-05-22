@@ -250,7 +250,7 @@ class WorkChunkStateV1(CheckpointMixin):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 1
+STATIC_MIXTURE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -274,6 +274,9 @@ class StaticMixtureStateV1(CheckpointMixin):
     Includes the base ``WorkSource`` fields (``lane_id``,
     ``canonical_replicas``, ``chunk_size_hint``) which are inherited from
     ``WorkSource.state_dict()``.
+
+    ``knobs["shuffle_block_size"]`` is always a concrete ``int | None`` in v1
+    and applies uniformly to every cursor.
     """
 
     _COMPONENT: ClassVar[str] = "static_mixture"
@@ -304,6 +307,128 @@ class StaticMixtureStateV1(CheckpointMixin):
     # Absent in pre-AllocationStrategy v1 checkpoints; loaders fall back to
     # inferring from "accumulators" key presence (see load_state_dict).
     allocation_mode: str | None = None
+
+
+_VALID_ALLOCATION_MODES = frozenset({"accumulator", "legacy_fixed"})
+_REQUIRED_V2_KNOB_KEYS = frozenset({"shuffle_shards", "shuffle_within_shard"})
+
+
+@dataclass(frozen=True)
+class StaticMixtureStateV2(CheckpointMixin):
+    """Checkpoint schema for ``StaticMixtureWorkSource`` (version 2).
+
+    The resolved per-dataset block size lives in ``cursor_block_sizes``
+    (always ``int | None``, never a sentinel) and is the source of truth on
+    restore. ``shuffle_block_size_spec`` records the user-given spec verbatim
+    (``int | None`` or the sentinels ``"auto"`` / ``"global"``).
+
+    ``knobs`` no longer carries ``shuffle_block_size`` — it has been promoted
+    to its own field. ``__post_init__`` rejects checkpoints that still carry
+    the stale key so a downstream loader cannot silently ignore it.
+    """
+
+    _COMPONENT: ClassVar[str] = "static_mixture"
+    # Always written by every historical v2 producer.
+    lane_id: int
+    canonical_replicas: int
+    chunk_size_hint: int | None
+    seed: int
+    chunk_size: int
+    knobs: dict[str, Any]
+    global_chunk_index: int
+    weights: dict[str, float]
+    component_order: list[str]
+    dataset_ids: dict[str, int]
+    cursor_positions: dict[str, int]
+    cursor_epochs: dict[str, int]
+    cursor_states: dict[str, dict[str, Any]]
+    cursor_block_sizes: dict[str, int | None]
+    shuffle_block_size_spec: int | str | None
+    exhausted_policy: str
+    reshuffle_on_repeat: bool
+    max_repeats: int | None
+    allocation_mode: str
+    accumulators: dict[str, float] | None
+    version: int = 2
+
+    def __post_init__(self) -> None:
+        errors: list[str] = []
+
+        # shuffle_block_size_spec — int (not bool), one of two sentinel strings,
+        # or None. The annotation alone is too loose; reject other types here.
+        spec = self.shuffle_block_size_spec
+        if isinstance(spec, bool):
+            errors.append(
+                f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
+                f"got bool ({spec!r})"
+            )
+        elif isinstance(spec, str):
+            if spec not in ("auto", "global"):
+                errors.append(
+                    f"shuffle_block_size_spec={spec!r} is not a valid sentinel "
+                    f"(expected 'auto', 'global', int, or None)"
+                )
+        elif spec is not None and not isinstance(spec, int):
+            errors.append(
+                f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
+                f"got {type(spec).__name__} ({spec!r})"
+            )
+
+        # knobs must carry the orthogonal shuffle toggles and must NOT carry
+        # the stale shuffle_block_size key — that field moved out in v2.
+        if not isinstance(self.knobs, dict):
+            errors.append(f"knobs must be a dict, got {type(self.knobs).__name__}")
+        else:
+            missing_knobs = _REQUIRED_V2_KNOB_KEYS - set(self.knobs)
+            if missing_knobs:
+                errors.append(f"knobs missing required keys {sorted(missing_knobs)}")
+            if "shuffle_block_size" in self.knobs:
+                errors.append(
+                    "knobs must not carry 'shuffle_block_size' in v2 — it lives "
+                    "in cursor_block_sizes/shuffle_block_size_spec now"
+                )
+
+        if self.allocation_mode not in _VALID_ALLOCATION_MODES:
+            errors.append(
+                f"allocation_mode={self.allocation_mode!r} is not one of "
+                f"{sorted(_VALID_ALLOCATION_MODES)}"
+            )
+
+        if not isinstance(self.cursor_block_sizes, dict):
+            errors.append(
+                "cursor_block_sizes must be a dict, "
+                f"got {type(self.cursor_block_sizes).__name__}"
+            )
+        else:
+            for name, value in self.cursor_block_sizes.items():
+                # bool first — it is an int subclass.
+                if isinstance(value, bool):
+                    errors.append(
+                        f"cursor_block_sizes[{name!r}] must be int or None, got bool"
+                    )
+                elif value is not None and not isinstance(value, int):
+                    errors.append(
+                        f"cursor_block_sizes[{name!r}] must be int or None, "
+                        f"got {type(value).__name__}"
+                    )
+            if isinstance(self.dataset_ids, dict):
+                missing = set(self.dataset_ids) - set(self.cursor_block_sizes)
+                extra = set(self.cursor_block_sizes) - set(self.dataset_ids)
+                if missing:
+                    errors.append(
+                        f"cursor_block_sizes missing entries for {sorted(missing)} "
+                        f"(must match dataset_ids keys)"
+                    )
+                if extra:
+                    errors.append(
+                        f"cursor_block_sizes has unknown entries {sorted(extra)} "
+                        f"(must match dataset_ids keys)"
+                    )
+        if errors:
+            raise ValueError(
+                "StaticMixtureStateV2 invariants violated:\n  - "
+                + "\n  - ".join(errors)
+            )
 
 
 # ---------------------------------------------------------------------------

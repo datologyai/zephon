@@ -17,6 +17,7 @@ from zephon.core.checkpoint._schemas import (
     CursorStateV1,
     EngineStateV1,
     StaticMixtureStateV1,
+    StaticMixtureStateV2,
     WorkChunkStateV1,
 )
 
@@ -26,6 +27,7 @@ __all__ = [
     "CursorStateV1",
     "WorkChunkStateV1",
     "StaticMixtureStateV1",
+    "StaticMixtureStateV2",
     "EngineStateV1",
     # Version constants
     "CURSOR_VERSION",

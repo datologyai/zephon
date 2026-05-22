@@ -91,6 +91,16 @@ orthogonal knobs, applied in order when the sample sequence is constructed:
    a local window. Smaller blocks preserve I/O locality; larger blocks
    make for a better shuffle.
 
+   In addition to a positive integer, `shuffle_block_size` accepts two
+   sentinels: `"auto"` resolves to `8 × max(shard_size)` across all datasets
+   in the mix, giving a sensible default that grows with the largest shard.
+   `"global"` resolves to *that dataset's* total sample count, i.e. one block
+   per dataset --- the strongest in-dataset shuffle, at the cost of buffering
+   on the order of the dataset's total samples in memory while the block
+   is materialized. The resolved per-dataset value is locked into the
+   checkpoint, so resuming after adding shards keeps the original block
+   size rather than silently re-resolving the sentinel.
+
 If you are coming from Mosaic Streaming and wondering how Zephon's shuffling
 knobs relate to algorithms like `py1s` or `py1br`, see
 [Transitioning from Streaming](transitioning.md) after understanding the basic concepts.

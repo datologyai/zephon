@@ -182,7 +182,13 @@ sample sequence is constructed:
    the per-dataset sample sequence is assembled, partitions it into
    non-overlapping windows of `shuffle_block_size` samples and shuffles
    each window independently.  This creates controlled cross-shard mixing
-   within a bounded window.
+   within a bounded window. Accepts a positive integer, or the sentinels
+   `"auto"` (= `8 × max(shard_size)` across the mix) and `"global"` (= that
+   dataset's total sample count, i.e. one block per dataset; note that
+   `"global"` buffers on the order of the dataset's total samples in memory
+   while the block is materialized). Resolved per-dataset values are locked
+   into the checkpoint, so resuming after adding shards keeps the original
+   block size.
 
 These are purely WorkSource-level controls that determine the pointer
 ordering.  The Engine's lane system, which handles distribution across

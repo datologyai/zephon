@@ -8,14 +8,14 @@ import random
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import numpy as np
 
 from zephon.core.checkpoint import (
     STATIC_MIXTURE_VERSION,
     CursorStateV1,
-    StaticMixtureStateV1,
+    StaticMixtureStateV2,
 )
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -23,6 +23,45 @@ from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 
 _GOLDEN_RATIO_64 = 0x9E3779B97F4A7C15  # Used to decorrelate derived seeds.
+
+#: Multiplier applied to the largest shard when ``shuffle_block_size="auto"``.
+_AUTO_BLOCK_SIZE_FACTOR = 8
+
+#: Accepted shapes for ``shuffle_block_size``. See :func:`_resolve_block_size`.
+ShuffleBlockSpec = int | Literal["auto", "global"] | None
+
+
+def _resolve_block_size(
+    spec: ShuffleBlockSpec, total_samples: int, max_shard: int
+) -> int | None:
+    """Resolve ``shuffle_block_size`` to a concrete value, clamped to total.
+
+    * ``None`` → ``None`` (cross-shard shuffle disabled)
+    * ``"auto"`` → ``_AUTO_BLOCK_SIZE_FACTOR * max_shard``
+    * ``"global"`` → ``total_samples``
+    * positive ``int`` → the value itself; ``bool`` is rejected
+
+    The clamp to ``total_samples`` lets callers rely on
+    ``block_size <= total_samples``.
+    """
+    if spec is None:
+        return None
+    if spec == "auto":
+        resolved = _AUTO_BLOCK_SIZE_FACTOR * max_shard
+    elif spec == "global":
+        resolved = total_samples
+    elif type(spec) is int:  # exact int — bool is an int subclass
+        if spec <= 0:
+            raise ValueError(
+                f"shuffle_block_size must be positive when given as int, got {spec}"
+            )
+        resolved = spec
+    else:
+        raise ValueError(
+            "shuffle_block_size must be None, a positive int, 'auto', or 'global'; "
+            f"got {spec!r}"
+        )
+    return min(resolved, total_samples)
 
 
 @dataclass(frozen=True)
@@ -43,7 +82,6 @@ class _AllocationConfig:
     exhausted_policy: str
     reshuffle_on_repeat: bool
     max_repeats: int | None
-    knobs: _DatasetKnobs
 
 
 class _DatasetCursor:
@@ -175,6 +213,9 @@ class _DatasetCursor:
         self._dataset_id = dataset_id
         self._shard_index = shard_index
         self._epoch = 0
+        # ``_base_knobs`` is the immutable epoch-0 config; ``_knobs`` is the
+        # per-epoch view (seed shifts when reshuffle_on_repeat is true).
+        self._base_knobs: _DatasetKnobs = knobs
         # Declare all instance variables for Pyright; _init_cursor_state sets values.
         self._knobs: _DatasetKnobs = knobs
         self._shard_order: tuple[int, ...] = ()
@@ -238,29 +279,28 @@ class _DatasetCursor:
         self._position = 0
         self.remaining = self._total_samples
 
-    def _seek_epoch(
-        self, epoch: int, *, reshuffle: bool, base_knobs: _DatasetKnobs
-    ) -> None:
+    def _seek_epoch(self, epoch: int, *, reshuffle: bool) -> None:
         """Jump directly to the given epoch, rebuilding cursor state."""
         self._epoch = epoch
+        base = self._base_knobs
         if epoch > 0 and reshuffle:
             knobs = _DatasetKnobs(
-                seed=base_knobs.seed + epoch * _GOLDEN_RATIO_64,
-                shuffle_shards=base_knobs.shuffle_shards,
-                shuffle_within_shard=base_knobs.shuffle_within_shard,
-                shuffle_block_size=base_knobs.shuffle_block_size,
+                seed=base.seed + epoch * _GOLDEN_RATIO_64,
+                shuffle_shards=base.shuffle_shards,
+                shuffle_within_shard=base.shuffle_within_shard,
+                shuffle_block_size=base.shuffle_block_size,
             )
         else:
-            knobs = base_knobs
+            knobs = base
         self._init_cursor_state(knobs)
 
-    def reset(self, *, reshuffle: bool, base_knobs: _DatasetKnobs) -> None:
+    def reset(self, *, reshuffle: bool) -> None:
         """Reset the cursor to position 0, starting a new epoch.
 
         If *reshuffle* is True, rebuilds the traversal order with an
         epoch-derived seed so each epoch sees a different ordering.
         """
-        self._seek_epoch(self._epoch + 1, reshuffle=reshuffle, base_knobs=base_knobs)
+        self._seek_epoch(self._epoch + 1, reshuffle=reshuffle)
 
     # ------------------------------------------------------------------
     # Lazy shard-level iteration helpers
@@ -549,6 +589,7 @@ class _DatasetCursor:
         # Immutable / epoch-level (shared references).
         c._dataset_id = self._dataset_id
         c._shard_index = self._shard_index
+        c._base_knobs = self._base_knobs
         c._knobs = self._knobs
         c._shard_order = self._shard_order
         c._shard_sizes = self._shard_sizes
@@ -605,11 +646,10 @@ class _DatasetCursor:
         state: Mapping[str, Any],
         *,
         reshuffle: bool,
-        base_knobs: _DatasetKnobs,
     ) -> None:
         """Restore cursor state from a serialized checkpoint payload."""
         cur = CursorStateV1.load(state)
-        self._seek_epoch(cur.epoch, reshuffle=reshuffle, base_knobs=base_knobs)
+        self._seek_epoch(cur.epoch, reshuffle=reshuffle)
         self._seek_to_position(cur.position, block_rng_snapshot=cur.block_rng_snapshot)
 
 
@@ -769,10 +809,7 @@ class AccumulatorStrategy(AllocationStrategy):
                             and cursor._epoch >= cfg.max_repeats
                         ):
                             return None
-                        cursor.reset(
-                            reshuffle=cfg.reshuffle_on_repeat,
-                            base_knobs=cfg.knobs,
-                        )
+                        cursor.reset(reshuffle=cfg.reshuffle_on_repeat)
                         self._accumulators = saved
                         needs_retry = True
                         break
@@ -920,10 +957,7 @@ class LegacyFixedStrategy(AllocationStrategy):
                 if cfg.exhausted_policy == "repeat":
                     if cfg.max_repeats is not None and cursor._epoch >= cfg.max_repeats:
                         return None  # hit repeat cap
-                    cursor.reset(
-                        reshuffle=cfg.reshuffle_on_repeat,
-                        base_knobs=cfg.knobs,
-                    )
+                    cursor.reset(reshuffle=cfg.reshuffle_on_repeat)
                 else:
                     return None  # "stop" policy
 
@@ -985,6 +1019,15 @@ class StaticMixtureWorkSource(WorkSource):
     - sample order within each shard (``shuffle_within_shard``)
     - optional block-based cross-shard shuffle (``shuffle_block_size``)
 
+    ``shuffle_block_size`` accepts:
+    - ``None`` (default) — cross-shard block shuffle disabled
+    - a positive ``int`` — explicit block size
+    - ``"auto"`` — ``8 * max_shard`` across all datasets in the mix
+    - ``"global"`` — that dataset's total sample count; the block buffer is
+      O(total_samples)
+
+    Resolved per-cursor values are clamped to the dataset's total.
+
     No IO is performed here; fetching is handled by FetchOp which constructs an
     internal shard store using the dataset descriptors exposed via
     ``datasets_by_id``.
@@ -1001,7 +1044,7 @@ class StaticMixtureWorkSource(WorkSource):
         seed: int = 0,
         shuffle_shards: bool = True,
         shuffle_within_shard: bool = False,
-        shuffle_block_size: int | None = None,
+        shuffle_block_size: ShuffleBlockSpec = None,
         exhausted_policy: str = "stop",
         reshuffle_on_repeat: bool = True,
         max_repeats: int | None = None,
@@ -1026,22 +1069,45 @@ class StaticMixtureWorkSource(WorkSource):
         )  # create an internal copy
         self._global_chunk_index = 0
 
-        self._knobs = _DatasetKnobs(
-            seed=seed,
-            shuffle_shards=shuffle_shards,
-            shuffle_within_shard=shuffle_within_shard,
-            shuffle_block_size=shuffle_block_size,
-        )
+        self._shuffle_block_size_spec: ShuffleBlockSpec = shuffle_block_size
 
+        # max_shard is only needed for "auto"; computing it unconditionally
+        # would raise on datasets with empty shard_index. Default to 0 so the
+        # value is well-defined but unused in the non-"auto" paths.
+        max_shard = 0
+        if shuffle_block_size == "auto":
+            shard_sizes = [
+                int(sz) for ds in self._datasets for sz in ds.shard_index.values()
+            ]
+            if not shard_sizes:
+                raise ValueError(
+                    "shuffle_block_size='auto' requires at least one non-empty "
+                    "shard across the provided datasets"
+                )
+            max_shard = max(shard_sizes)
+
+        self._knobs_by_name: dict[str, _DatasetKnobs] = {}
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
-            cursor = _DatasetCursor(dataset_id, ds.shard_index, self._knobs)
+
+            total = sum(int(sz) for sz in ds.shard_index.values())
+            knobs = _DatasetKnobs(
+                seed=seed,
+                shuffle_shards=shuffle_shards,
+                shuffle_within_shard=shuffle_within_shard,
+                shuffle_block_size=_resolve_block_size(
+                    shuffle_block_size, total, max_shard
+                ),
+            )
+            self._knobs_by_name[ds.name] = knobs
+            cursor = _DatasetCursor(dataset_id, ds.shard_index, knobs)
 
             if cursor.remaining <= 0:
                 # Should not happen due to validate_for call
                 print(f"Unexpected: cursor for ds {dataset_id} has 0 remaining items.")
                 self._weights.pop(ds.name)
+                self._knobs_by_name.pop(ds.name)
                 continue
             self._cursors[ds.name] = cursor
 
@@ -1076,7 +1142,6 @@ class StaticMixtureWorkSource(WorkSource):
             exhausted_policy=exhausted_policy,
             reshuffle_on_repeat=reshuffle_on_repeat,
             max_repeats=max_repeats,
-            knobs=self._knobs,
         )
 
         # Guard: with repeat policy, each dataset must have enough samples to
@@ -1128,7 +1193,8 @@ class StaticMixtureWorkSource(WorkSource):
         clone._alloc_config = self._alloc_config  # frozen, safe to share
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
-        clone._knobs = self._knobs
+        clone._shuffle_block_size_spec = self._shuffle_block_size_spec
+        clone._knobs_by_name = dict(self._knobs_by_name)
 
         clone._strategy = self._strategy.clone()
 
@@ -1261,7 +1327,13 @@ class StaticMixtureWorkSource(WorkSource):
         cfg = self._alloc_config
         strategy_state = self._strategy.checkpoint_state()
         accumulators = strategy_state.get("accumulators")
-        state = StaticMixtureStateV1(
+        # seed / shuffle_shards / shuffle_within_shard are identical across
+        # the per-dataset knobs by construction; pick any one as a representative.
+        sample_knobs = next(iter(self._knobs_by_name.values()))
+        cursor_block_sizes = {
+            name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
+        }
+        state = StaticMixtureStateV2(
             version=STATIC_MIXTURE_VERSION,
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
@@ -1269,10 +1341,11 @@ class StaticMixtureWorkSource(WorkSource):
             seed=int(self._seed),
             chunk_size=int(cfg.chunk_size),
             knobs={
-                "shuffle_shards": cfg.knobs.shuffle_shards,
-                "shuffle_within_shard": cfg.knobs.shuffle_within_shard,
-                "shuffle_block_size": cfg.knobs.shuffle_block_size,
+                "shuffle_shards": sample_knobs.shuffle_shards,
+                "shuffle_within_shard": sample_knobs.shuffle_within_shard,
             },
+            shuffle_block_size_spec=self._shuffle_block_size_spec,
+            cursor_block_sizes=cursor_block_sizes,
             global_chunk_index=int(self._global_chunk_index),
             weights=dict(cfg.weights),
             component_order=list(cfg.component_order),
@@ -1292,41 +1365,17 @@ class StaticMixtureWorkSource(WorkSource):
             accumulators=accumulators,
             allocation_mode=strategy_state["allocation_mode"],
         )
-        result = state.to_dict()
-        # Legacy-fixed mode is signalled on the wire by *absence* of
-        # accumulators (the original pre-AllocationStrategy shape), not by an
-        # explicit None — drop the key when the strategy isn't running an
-        # accumulator.
-        if accumulators is None:
-            del result["accumulators"]
-        return result
+        return state.to_dict()
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = StaticMixtureStateV1.load(state)
+        ckpt = StaticMixtureStateV2.load(state)
 
-        # Route base validation through the typed schema so a future v2 rename
-        # of lane_id / canonical_replicas does not desync from WorkSource.
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
-        # Pre-strategy v1 checkpoints have no allocation_mode tag; in that
-        # case the write-path pop makes "accumulators absent" mean legacy
-        # mode (schema default of None) and "accumulators present" mean
-        # accumulator mode.
-        if ckpt.allocation_mode == "accumulator":
-            is_accumulator_ckpt = True
-        elif ckpt.allocation_mode == "legacy_fixed":
-            is_accumulator_ckpt = False
-        else:
-            is_accumulator_ckpt = ckpt.accumulators is not None
+        is_accumulator_ckpt = ckpt.allocation_mode == "accumulator"
 
         self._seed = ckpt.seed
-        knobs = _DatasetKnobs(
-            seed=self._seed,
-            shuffle_shards=bool(ckpt.knobs["shuffle_shards"]),
-            shuffle_within_shard=bool(ckpt.knobs["shuffle_within_shard"]),
-            shuffle_block_size=ckpt.knobs["shuffle_block_size"],
-        )
-        self._knobs = knobs
+        self._shuffle_block_size_spec = ckpt.shuffle_block_size_spec
 
         cur_cfg = self._alloc_config
         if ckpt.reshuffle_on_repeat != cur_cfg.reshuffle_on_repeat:
@@ -1370,29 +1419,40 @@ class StaticMixtureWorkSource(WorkSource):
         self._cursors.clear()
         self._dataset_ids.clear()
         self._datasets_by_id.clear()
+        self._knobs_by_name = {}
 
         if not ckpt.cursor_states and is_accumulator_ckpt:
             raise RuntimeError("Accumulator-mode checkpoints require cursor_states")
 
+        shared_seed = self._seed
+        shared_shuffle_shards = bool(ckpt.knobs["shuffle_shards"])
+        shared_shuffle_within_shard = bool(ckpt.knobs["shuffle_within_shard"])
+
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
-            cur = _DatasetCursor(dataset_id, ds.shard_index, knobs)
+
+            ds_knobs = _DatasetKnobs(
+                seed=shared_seed,
+                shuffle_shards=shared_shuffle_shards,
+                shuffle_within_shard=shared_shuffle_within_shard,
+                shuffle_block_size=ckpt.cursor_block_sizes[ds.name],
+            )
+            self._knobs_by_name[ds.name] = ds_knobs
+            cur = _DatasetCursor(dataset_id, ds.shard_index, ds_knobs)
             if ds.name in ckpt.cursor_states:
                 cur.restore_checkpoint_state(
                     ckpt.cursor_states[ds.name],
                     reshuffle=ckpt.reshuffle_on_repeat,
-                    base_knobs=knobs,
                 )
             else:
-                # Older v1 checkpoint: reconstruct from cursor_positions + cursor_epochs
+                # Pre-strategy v1 checkpoint had only cursor_positions/_epochs.
                 cur.restore_checkpoint_state(
                     {
                         "epoch": int(ckpt.cursor_epochs.get(ds.name, 0)),
                         "position": int(ckpt.cursor_positions.get(ds.name, 0)),
                     },
                     reshuffle=ckpt.reshuffle_on_repeat,
-                    base_knobs=knobs,
                 )
             self._cursors[ds.name] = cur
 
@@ -1405,7 +1465,6 @@ class StaticMixtureWorkSource(WorkSource):
             exhausted_policy=ckpt.exhausted_policy,
             reshuffle_on_repeat=ckpt.reshuffle_on_repeat,
             max_repeats=ckpt.max_repeats,
-            knobs=knobs,
         )
         self._weights = dict(ckpt.weights)
 

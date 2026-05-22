@@ -82,8 +82,29 @@ from zephon.core.checkpoint._schemas import (
     CursorStateV1,
     EngineStateV1,
     StaticMixtureStateV1,
+    StaticMixtureStateV2,
     WorkChunkStateV1,
 )
+
+
+def _static_mixture_v1_to_v2(v1: StaticMixtureStateV1) -> dict[str, Any]:
+    """Fan v1's single ``knobs["shuffle_block_size"]`` out into per-cursor values.
+
+    Pre-strategy v1 checkpoints lack ``allocation_mode``; here it is inferred
+    from the presence of ``accumulators`` so v2 can require an explicit value.
+    """
+    v1_block_size = v1.knobs.get("shuffle_block_size")
+
+    d = v1.to_dict()
+    d["knobs"] = {k: v for k, v in v1.knobs.items() if k != "shuffle_block_size"}
+    d["cursor_block_sizes"] = dict.fromkeys(v1.dataset_ids, v1_block_size)
+    d["shuffle_block_size_spec"] = v1_block_size
+    if v1.allocation_mode is None:
+        d["allocation_mode"] = (
+            "accumulator" if v1.accumulators is not None else "legacy_fixed"
+        )
+    return d
+
 
 #: Migration functions take a validated v_N instance and return a v_{N+1} dict.
 MigrationFn = Callable[[Any], dict[str, Any]]
@@ -93,7 +114,7 @@ MigrationFn = Callable[[Any], dict[str, Any]]
 _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
     "engine": {},
     "work_chunk": {},
-    "static_mixture": {},
+    "static_mixture": {1: _static_mixture_v1_to_v2},
     "cursor": {},
 }
 
@@ -103,7 +124,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
 _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
     "engine": {1: EngineStateV1},
     "work_chunk": {1: WorkChunkStateV1},
-    "static_mixture": {1: StaticMixtureStateV1},
+    "static_mixture": {1: StaticMixtureStateV1, 2: StaticMixtureStateV2},
     "cursor": {1: CursorStateV1},
 }
 

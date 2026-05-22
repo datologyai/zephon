@@ -8,10 +8,12 @@ from zephon.work import (
     StaticMixtureWorkSource,
 )
 from zephon.work.static_mixture import (
+    _AUTO_BLOCK_SIZE_FACTOR,
     AccumulatorStrategy,
     LegacyFixedStrategy,
     _DatasetCursor,
     _DatasetKnobs,
+    _resolve_block_size,
 )
 
 
@@ -87,10 +89,11 @@ def test_state_dict_knobs_serialization(
     assert st["chunk_size"] == 7
     assert "knobs" in st
     knobs = st["knobs"]
-    # These asserts will surface any mismatch in how knobs are serialized.
     assert knobs["shuffle_shards"] == shuffle_shards
     assert knobs["shuffle_within_shard"] == shuffle_within
-    assert knobs["shuffle_block_size"] == block_size
+    assert "shuffle_block_size" not in knobs
+    assert st["shuffle_block_size_spec"] == block_size
+    assert st["cursor_block_sizes"] == {ds.name: block_size}
 
 
 @pytest.mark.parametrize(
@@ -172,6 +175,347 @@ def test_load_state_dict_preserves_sequence_and_positions(
             assert ca is None and cb is None
             break
         assert _flatten_components(ca) == _flatten_components(cb)
+
+
+# ── shuffle_block_size sentinel resolution ───────────────────────────
+
+
+def test_resolve_block_size_none_passes_through() -> None:
+    assert _resolve_block_size(None, total_samples=100, max_shard=10) is None
+
+
+def test_resolve_block_size_int_passes_through_when_within_total() -> None:
+    assert _resolve_block_size(7, total_samples=100, max_shard=10) == 7
+
+
+def test_resolve_block_size_int_clamped_to_total() -> None:
+    # Oversized explicit ints quietly behave as "global" for this dataset.
+    assert _resolve_block_size(500, total_samples=100, max_shard=10) == 100
+
+
+def test_resolve_block_size_auto_uses_factor_times_max_shard() -> None:
+    total = _AUTO_BLOCK_SIZE_FACTOR * 50 * 10  # well above the unclamped target
+    assert (
+        _resolve_block_size("auto", total_samples=total, max_shard=50)
+        == _AUTO_BLOCK_SIZE_FACTOR * 50
+    )
+
+
+def test_resolve_block_size_auto_clamped_to_total_when_factor_overshoots() -> None:
+    # max_shard * factor > total → clamp to total (effectively global).
+    assert _resolve_block_size("auto", total_samples=30, max_shard=50) == 30
+
+
+def test_resolve_block_size_global_returns_total() -> None:
+    assert _resolve_block_size("global", total_samples=100, max_shard=10) == 100
+
+
+def test_resolve_block_size_invalid_string_raises() -> None:
+    with pytest.raises(ValueError):
+        _resolve_block_size("nope", total_samples=100, max_shard=10)  # type: ignore[arg-type]
+
+
+def test_resolve_block_size_zero_int_raises() -> None:
+    with pytest.raises(ValueError):
+        _resolve_block_size(0, total_samples=100, max_shard=10)
+
+
+def test_resolve_block_size_negative_int_raises() -> None:
+    with pytest.raises(ValueError):
+        _resolve_block_size(-1, total_samples=100, max_shard=10)
+
+
+def test_resolve_block_size_bool_rejected() -> None:
+    # bool is an int subclass — explicitly rejected.
+    with pytest.raises(ValueError):
+        _resolve_block_size(True, total_samples=100, max_shard=10)  # type: ignore[arg-type]
+
+
+# ── WorkSource with "auto" / "global" sentinels ──────────────────────
+
+
+def test_shuffle_block_size_auto_resolves_per_cursor() -> None:
+    """auto: 8 * max(shard) across all datasets, clamped to per-dataset total."""
+    ds_a = make_sharded_dataset("alpha", [10, 20, 10])  # max shard 20, total 40
+    ds_b = make_sharded_dataset("beta", [50, 50, 50])  # max shard 50, total 150
+    work = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        {ds_a.name: 0.5, ds_b.name: 0.5},
+        chunk_size=8,
+        shuffle_block_size="auto",
+    )
+    expected_unclamped = _AUTO_BLOCK_SIZE_FACTOR * 50
+    assert work._knobs_by_name["alpha"].shuffle_block_size == min(
+        expected_unclamped, 40
+    )
+    assert work._knobs_by_name["beta"].shuffle_block_size == min(
+        expected_unclamped, 150
+    )
+
+
+def test_shuffle_block_size_global_resolves_per_dataset_total() -> None:
+    ds_a = make_sharded_dataset("alpha", [10, 20, 10])  # total 40
+    ds_b = make_sharded_dataset("beta", [5, 5, 5, 5])  # total 20
+    work = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        {ds_a.name: 0.5, ds_b.name: 0.5},
+        chunk_size=8,
+        shuffle_block_size="global",
+    )
+    assert work._knobs_by_name["alpha"].shuffle_block_size == 40
+    assert work._knobs_by_name["beta"].shuffle_block_size == 20
+
+
+def test_shuffle_block_size_none_disables_block_shuffle() -> None:
+    ds = make_sharded_dataset("alpha", [5, 5])
+    work = StaticMixtureWorkSource(
+        [ds], {ds.name: 1.0}, chunk_size=4, shuffle_block_size=None
+    )
+    assert work._knobs_by_name["alpha"].shuffle_block_size is None
+    assert work._cursors["alpha"]._has_block_shuffle is False
+
+
+def test_shuffle_block_size_global_drains_full_dataset() -> None:
+    """End-to-end smoke: "global" emits every sample exactly once."""
+    ds = make_sharded_dataset("alpha", [3, 4, 5])
+    work = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=4,
+        seed=42,
+        shuffle_block_size="global",
+        shuffle_within_shard=True,
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    chunks = _drain_chunks(ws)
+    seen: list[tuple[int, int, int]] = []
+    for ch in chunks:
+        seen.extend(ch["alpha"])
+    assert len(seen) == 12
+    assert set(seen) == {(0, sid, off) for sid in range(3) for off in range(3 + sid)}
+
+
+def test_shuffle_block_size_global_uses_block_shuffle_path() -> None:
+    ds = make_sharded_dataset("alpha", [5, 5])
+    work = StaticMixtureWorkSource(
+        [ds], {ds.name: 1.0}, chunk_size=4, shuffle_block_size="global"
+    )
+    assert work._cursors["alpha"]._has_block_shuffle is True
+
+
+def test_shuffle_block_size_invalid_string_raises_in_constructor() -> None:
+    ds = make_sharded_dataset("alpha", [5, 5])
+    with pytest.raises(ValueError):
+        StaticMixtureWorkSource(
+            [ds],
+            {ds.name: 1.0},
+            chunk_size=4,
+            shuffle_block_size="nope",  # type: ignore[arg-type]
+        )
+
+
+def test_shuffle_block_size_auto_with_all_empty_datasets_raises_clearly() -> None:
+    """``auto`` requires at least one shard to derive a block size from."""
+    empty = Dataset.from_dict("empty", {})
+    with pytest.raises(ValueError, match="shuffle_block_size='auto' requires"):
+        StaticMixtureWorkSource(
+            [empty],
+            {empty.name: 1.0},
+            chunk_size=4,
+            shuffle_block_size="auto",
+        )
+
+
+def test_shuffle_block_size_none_with_all_empty_datasets_raises_clear_error() -> None:
+    """No sentinel involved: the empty-shard-list case must still fail loudly,
+    via the standard 'No datasets with positive weight' guard rather than a
+    confusing 'max() iterable argument is empty'."""
+    empty = Dataset.from_dict("empty", {})
+    with pytest.raises(ValueError, match="No datasets with positive weight"):
+        StaticMixtureWorkSource(
+            [empty],
+            {empty.name: 1.0},
+            chunk_size=4,
+            shuffle_block_size=None,
+        )
+
+
+# ── state_dict round-trip + v1→v2 migration ──────────────────────────
+
+
+@pytest.mark.parametrize("spec", ["auto", "global"])
+def test_state_dict_preserves_sentinel_spec_at_top_level(spec: str) -> None:
+    ds_a = make_sharded_dataset("alpha", [10, 20])
+    ds_b = make_sharded_dataset("beta", [3, 7])
+    work = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        {ds_a.name: 0.5, ds_b.name: 0.5},
+        chunk_size=4,
+        shuffle_block_size=spec,  # type: ignore[arg-type]
+    )
+    st = work.state_dict()
+    assert st["shuffle_block_size_spec"] == spec
+    # Per-cursor resolved values live in cursor_block_sizes.
+    assert set(st["cursor_block_sizes"]) == {ds_a.name, ds_b.name}
+    for name, value in st["cursor_block_sizes"].items():
+        assert isinstance(value, int), f"{name} block size should be resolved int"
+
+
+@pytest.mark.parametrize("spec", ["auto", "global"])
+def test_round_trip_sentinel_preserves_per_cursor_block_size(spec: str) -> None:
+    """auto/global: resolved block_size is restored verbatim per cursor.
+
+    Critically, restore does NOT re-resolve the sentinel — adding shards
+    between save and load cannot shift block sizes.
+    """
+    ds_a = make_sharded_dataset("alpha", [10, 20])
+    ds_b = make_sharded_dataset("beta", [3, 7])
+    mix = {ds_a.name: 0.5, ds_b.name: 0.5}
+
+    work_a = StaticMixtureWorkSource(
+        [ds_a, ds_b],
+        mix,
+        chunk_size=4,
+        shuffle_block_size=spec,  # type: ignore[arg-type]
+    )
+    ws_a = work_a.clone_for_lane(0, canonical_replicas=1)
+    ws_a.next_chunk()  # advance so cursor positions diverge
+    st = ws_a.state_dict()
+
+    # Fresh instance with a *different* spec; load_state_dict must override.
+    work_b = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=4, shuffle_block_size=None
+    )
+    ws_b = work_b.clone_for_lane(0, canonical_replicas=1)
+    ws_b.load_state_dict(st)
+
+    for name in (ds_a.name, ds_b.name):
+        assert (
+            ws_b._knobs_by_name[name].shuffle_block_size
+            == work_a._knobs_by_name[name].shuffle_block_size
+        )
+
+
+def test_load_v1_checkpoint_migrates_block_size_per_cursor() -> None:
+    """v1 checkpoints had a single knobs.shuffle_block_size shared by all cursors.
+
+    The v1→v2 migration fans it out across every dataset; ``cursor_block_sizes``
+    is fully populated on restore and matches the v1 value for each entry.
+    """
+    ds_a = make_sharded_dataset("alpha", [5, 5])
+    ds_b = make_sharded_dataset("beta", [4, 4])
+    mix = {ds_a.name: 0.5, ds_b.name: 0.5}
+
+    # Build a current-version (v2) checkpoint, then construct an equivalent v1
+    # payload by reverse-applying the migration's deltas.
+    work = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=4, shuffle_block_size=3
+    )
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+    ws.next_chunk()
+    v2_state = ws.state_dict()
+
+    v1_state = dict(v2_state)
+    v1_state["version"] = 1
+    v1_state["knobs"] = {
+        **v2_state["knobs"],
+        "shuffle_block_size": 3,
+    }
+    # v2-only fields don't exist in the v1 contract.
+    v1_state.pop("shuffle_block_size_spec")
+    v1_state.pop("cursor_block_sizes")
+
+    work_b = StaticMixtureWorkSource(
+        [ds_a, ds_b], mix, chunk_size=4, shuffle_block_size=None
+    )
+    ws_b = work_b.clone_for_lane(0, canonical_replicas=1)
+    ws_b.load_state_dict(v1_state)
+    for name in (ds_a.name, ds_b.name):
+        assert ws_b._knobs_by_name[name].shuffle_block_size == 3
+    # The spec is also restored from v1 (concrete int there, never a sentinel).
+    assert ws_b._shuffle_block_size_spec == 3
+
+
+@pytest.mark.parametrize("spec", ["auto", "global"])
+@pytest.mark.parametrize("cut_after_chunks", [1, 2, 4])
+def test_sentinel_checkpoint_continues_deterministically(
+    spec: str, cut_after_chunks: int
+) -> None:
+    """Sentinel feature's core promise: resolved once, then continue exactly.
+
+    A checkpoint taken mid-stream must emit the same suffix chunks after
+    restore as the baseline would have produced. Parameterised over both
+    sentinels and several cut points so cuts land mid-block (block size = 32
+    for ``auto``, ≥ 48 for ``global``; chunk_size=3 so cuts at 3/6/12 samples).
+
+    The shard layout is deliberately chosen so ``8 × max_shard < total`` for
+    every dataset — i.e. ``"auto"`` and ``"global"`` resolve to *different*
+    per-cursor values (auto = 32 for both; global = 60 for alpha, 48 for
+    beta). This makes the cross-spec restore assertion below load-bearing:
+    if ``load_state_dict`` started re-resolving the constructor spec instead
+    of trusting the checkpoint's ``cursor_block_sizes``, the assertion would
+    fail.
+    """
+    ds_a = make_sharded_dataset("alpha", [4] * 15)  # total 60, max_shard 4
+    ds_b = make_sharded_dataset("beta", [4] * 12)  # total 48, max_shard 4
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={ds_a.name: 0.6, ds_b.name: 0.4},
+        chunk_size=3,
+        seed=4242,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        shuffle_block_size=spec,
+    )
+
+    # Guard against future shard-size edits silently neutering the cross-spec
+    # assertion: if "auto" and "global" ever resolve to the same per-cursor
+    # value here, the test below becomes tautological.
+    other_spec = "global" if spec == "auto" else "auto"
+    auto_knobs = StaticMixtureWorkSource(
+        **{**kwargs, "shuffle_block_size": "auto"}
+    )._knobs_by_name
+    global_knobs = StaticMixtureWorkSource(
+        **{**kwargs, "shuffle_block_size": "global"}
+    )._knobs_by_name
+    assert any(
+        auto_knobs[n].shuffle_block_size != global_knobs[n].shuffle_block_size
+        for n in (ds_a.name, ds_b.name)
+    ), "fixture must distinguish auto vs global for the lockdown assertion"
+
+    ws_baseline = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    baseline = _drain_chunks(ws_baseline)
+    assert len(baseline) > cut_after_chunks
+
+    ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(0, canonical_replicas=1)
+    prefix = _drain_chunks(ws_save, limit=cut_after_chunks)
+    state = ws_save.state_dict()
+
+    # Restore into an instance configured with a DIFFERENT spec: the resolved
+    # cursor_block_sizes from the checkpoint must override, proving the
+    # restore is driven by the locked-in values and not a re-resolution.
+    restore_kwargs = dict(kwargs)
+    restore_kwargs["shuffle_block_size"] = other_spec
+    ws_load = StaticMixtureWorkSource(**restore_kwargs).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    ws_load.load_state_dict(state)
+
+    # The restored per-cursor block sizes must come from the checkpoint, not
+    # from re-resolving the (different) constructor spec.
+    for name in (ds_a.name, ds_b.name):
+        original_resolved = (
+            StaticMixtureWorkSource(**kwargs)._knobs_by_name[name].shuffle_block_size
+        )
+        assert ws_load._knobs_by_name[name].shuffle_block_size == original_resolved
+    # And the spec is preserved verbatim — it survives the round-trip even
+    # though the loading instance was constructed with the opposite sentinel.
+    assert ws_load._shuffle_block_size_spec == spec
+
+    suffix = _drain_chunks(ws_load)
+    assert prefix + suffix == baseline
 
 
 def test_load_state_dict_version_mismatch_raises() -> None:
@@ -2178,10 +2522,17 @@ def test_legacy_checkpoint_detection_and_sticky_mode() -> None:
     # Verify it's an accumulator checkpoint
     assert "accumulators" in state
 
-    # Manually strip accumulator fields to simulate a legacy checkpoint
+    # Manually strip accumulator fields to simulate a pre-strategy v1
+    # checkpoint and downgrade the version so the v1→v2 migration infers
+    # allocation_mode from the (now-absent) accumulators field.
     legacy_state = {
         k: v for k, v in state.items() if k not in ("accumulators", "allocation_mode")
     }
+    legacy_state["version"] = 1
+    # v2-only fields aren't part of the v1 shape; drop them so the v1 schema
+    # validates cleanly before the migration runs.
+    for k in ("shuffle_block_size_spec", "cursor_block_sizes"):
+        legacy_state.pop(k, None)
 
     # Load it — should detect legacy mode
     ws_load = StaticMixtureWorkSource(
@@ -2190,10 +2541,12 @@ def test_legacy_checkpoint_detection_and_sticky_mode() -> None:
     ws_load.load_state_dict(legacy_state)
     assert isinstance(ws_load._strategy, LegacyFixedStrategy)
 
-    # Produce a chunk and re-checkpoint — should remain legacy format
+    # Produce a chunk and re-checkpoint — should remain legacy format.
+    # v2 always writes ``accumulators`` (None signals legacy); ``allocation_mode``
+    # is the canonical signal.
     ws_load.next_chunk()
     re_saved = ws_load.state_dict()
-    assert "accumulators" not in re_saved
+    assert re_saved.get("accumulators") is None
     assert re_saved.get("allocation_mode") == "legacy_fixed"
 
     # Close the loop: load the re-saved checkpoint into a fresh instance
@@ -2258,10 +2611,14 @@ def test_legacy_checkpoint_determinism() -> None:
         ws2.next_chunk()
 
     state = ws1.state_dict()
-    # Convert to legacy format
+    # Convert to legacy v1 format: strip strategy-era fields and downgrade
+    # version so the v1→v2 migration runs.
     legacy_state = {
         k: v for k, v in state.items() if k not in ("accumulators", "allocation_mode")
     }
+    legacy_state["version"] = 1
+    for k in ("shuffle_block_size_spec", "cursor_block_sizes"):
+        legacy_state.pop(k, None)
 
     # Load both from the same legacy checkpoint
     ws_load1 = StaticMixtureWorkSource(

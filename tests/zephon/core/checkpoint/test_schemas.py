@@ -9,6 +9,7 @@ from zephon.core.checkpoint import (
     CursorStateV1,
     EngineStateV1,
     StaticMixtureStateV1,
+    StaticMixtureStateV2,
     WorkChunkStateV1,
 )
 from zephon.core.checkpoint._migrations import (
@@ -196,6 +197,279 @@ def test_static_mixture_exhausted_policy_missing_defaults_to_stop():
     del raw["exhausted_policy"]
     sm = StaticMixtureStateV1.from_dict(raw)
     assert sm.exhausted_policy == "stop"
+
+
+# -- StaticMixtureStateV2 ----------------------------------------------------
+
+
+def _minimal_static_mixture_v2_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV2's required fields.
+
+    v2 has no field-level defaults (besides ``version``), so the fixture must
+    spell out every field. Tests override one slot at a time to exercise the
+    invariants in ``__post_init__`` in isolation.
+    """
+    base = {
+        "version": 2,
+        "lane_id": 0,
+        "canonical_replicas": 1,
+        "chunk_size_hint": None,
+        "seed": 0,
+        "chunk_size": 1,
+        "knobs": {"shuffle_shards": False, "shuffle_within_shard": False},
+        "global_chunk_index": 0,
+        "weights": {},
+        "component_order": [],
+        "dataset_ids": {},
+        "cursor_positions": {},
+        "cursor_epochs": {},
+        "cursor_states": {},
+        "cursor_block_sizes": {},
+        "shuffle_block_size_spec": None,
+        "exhausted_policy": "stop",
+        "reshuffle_on_repeat": False,
+        "max_repeats": None,
+        "allocation_mode": "legacy_fixed",
+        "accumulators": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_static_mixture_v2_requires_every_field_except_version():
+    """v2 has no field-level defaults — promotion-to-required is the contract."""
+    import pytest
+
+    with pytest.raises(ValueError) as exc_info:
+        StaticMixtureStateV2.from_dict({"version": 2})
+    msg = str(exc_info.value)
+    for name in (
+        "lane_id",
+        "canonical_replicas",
+        "chunk_size_hint",
+        "seed",
+        "chunk_size",
+        "knobs",
+        "global_chunk_index",
+        "weights",
+        "component_order",
+        "dataset_ids",
+        "cursor_positions",
+        "cursor_epochs",
+        "cursor_states",
+        "cursor_block_sizes",
+        "shuffle_block_size_spec",
+        "exhausted_policy",
+        "reshuffle_on_repeat",
+        "max_repeats",
+        "allocation_mode",
+        "accumulators",
+    ):
+        assert f"{name}: missing" in msg, f"expected '{name}: missing' in error"
+
+
+def test_static_mixture_v2_minimal_roundtrip():
+    sm = StaticMixtureStateV2.from_dict(_minimal_static_mixture_v2_raw())
+    assert sm.version == 2
+    assert sm.allocation_mode == "legacy_fixed"
+    assert sm.accumulators is None
+    assert sm.cursor_block_sizes == {}
+    assert sm.shuffle_block_size_spec is None
+
+
+def test_static_mixture_v2_rejects_invalid_allocation_mode():
+    import pytest
+
+    with pytest.raises(ValueError, match="allocation_mode='banana'"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(allocation_mode="banana")
+        )
+
+
+def test_static_mixture_v2_rejects_empty_allocation_mode():
+    """Empty-string allocation_mode used to silently load as legacy_fixed."""
+    import pytest
+
+    with pytest.raises(ValueError, match="allocation_mode=''"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(allocation_mode="")
+        )
+
+
+def test_static_mixture_v2_accepts_both_valid_allocation_modes():
+    for mode in ("accumulator", "legacy_fixed"):
+        sm = StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                allocation_mode=mode,
+                accumulators=({"a": 0.5} if mode == "accumulator" else None),
+                weights={"a": 1.0} if mode == "accumulator" else {},
+                cursor_block_sizes={"a": None} if mode == "accumulator" else {},
+                dataset_ids={"a": 0} if mode == "accumulator" else {},
+                cursor_positions={"a": 0} if mode == "accumulator" else {},
+                cursor_epochs={"a": 0} if mode == "accumulator" else {},
+                cursor_states=(
+                    {"a": {"position": 0, "epoch": 0}} if mode == "accumulator" else {}
+                ),
+                component_order=["a"] if mode == "accumulator" else [],
+            )
+        )
+        assert sm.allocation_mode == mode
+
+
+def test_static_mixture_v2_rejects_stale_shuffle_block_size_in_knobs():
+    """The shuffle_block_size key moved out of knobs in v2."""
+    import pytest
+
+    with pytest.raises(ValueError, match="knobs must not carry 'shuffle_block_size'"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                knobs={
+                    "shuffle_shards": False,
+                    "shuffle_within_shard": False,
+                    "shuffle_block_size": 64,
+                }
+            )
+        )
+
+
+def test_static_mixture_v2_rejects_missing_knob_keys():
+    import pytest
+
+    with pytest.raises(ValueError, match="knobs missing required keys"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(knobs={"shuffle_shards": True})
+        )
+
+
+def test_static_mixture_v2_rejects_non_dict_knobs():
+    import pytest
+
+    with pytest.raises(ValueError, match="knobs must be a dict"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(knobs=["shuffle_shards"])  # type: ignore[arg-type]
+        )
+
+
+def test_static_mixture_v2_rejects_invalid_spec_string():
+    import pytest
+
+    with pytest.raises(ValueError, match="not a valid sentinel"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec="banana")
+        )
+
+
+def test_static_mixture_v2_accepts_valid_spec_sentinels():
+    for spec in ("auto", "global"):
+        sm = StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec=spec)
+        )
+        assert sm.shuffle_block_size_spec == spec
+
+
+def test_static_mixture_v2_accepts_int_and_none_spec():
+    for spec in (None, 128):
+        sm = StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec=spec)
+        )
+        assert sm.shuffle_block_size_spec == spec
+
+
+def test_static_mixture_v2_rejects_bool_spec():
+    """bool is an int subclass — explicitly rejected so True doesn't smuggle in as 1."""
+    import pytest
+
+    with pytest.raises(ValueError, match="shuffle_block_size_spec must be int"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec=True)
+        )
+
+
+def test_static_mixture_v2_rejects_float_spec():
+    import pytest
+
+    with pytest.raises(ValueError, match="shuffle_block_size_spec must be int"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec=1.5)
+        )
+
+
+def test_static_mixture_v2_rejects_list_spec():
+    import pytest
+
+    with pytest.raises(ValueError, match="shuffle_block_size_spec must be int"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(shuffle_block_size_spec=[1, 2])  # type: ignore[arg-type]
+        )
+
+
+def test_static_mixture_v2_rejects_cursor_block_sizes_missing_entry():
+    import pytest
+
+    with pytest.raises(ValueError, match="cursor_block_sizes missing entries"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                dataset_ids={"a": 0, "b": 1},
+                cursor_block_sizes={"a": 64},  # "b" missing
+            )
+        )
+
+
+def test_static_mixture_v2_rejects_cursor_block_sizes_extra_entry():
+    import pytest
+
+    with pytest.raises(ValueError, match="cursor_block_sizes has unknown entries"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                dataset_ids={"a": 0},
+                cursor_block_sizes={"a": 64, "ghost": 32},
+            )
+        )
+
+
+def test_static_mixture_v2_rejects_bool_cursor_block_size():
+    """bool slipping in as block size masks an int — reject it."""
+    import pytest
+
+    with pytest.raises(ValueError, match="must be int or None, got bool"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                dataset_ids={"a": 0},
+                cursor_block_sizes={"a": True},
+            )
+        )
+
+
+def test_static_mixture_v2_rejects_string_cursor_block_size():
+    """cursor_block_sizes values are resolved ints; sentinels never land here."""
+    import pytest
+
+    with pytest.raises(ValueError, match="must be int or None, got str"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                dataset_ids={"a": 0},
+                cursor_block_sizes={"a": "auto"},
+            )
+        )
+
+
+def test_static_mixture_v2_accumulates_multiple_invariant_errors():
+    """Multiple invariant violations surface in a single ValueError."""
+    import pytest
+
+    with pytest.raises(ValueError) as exc_info:
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(
+                allocation_mode="bogus",
+                knobs={"shuffle_shards": True, "shuffle_block_size": 1},
+                shuffle_block_size_spec=2.5,
+            )
+        )
+    msg = str(exc_info.value)
+    assert "allocation_mode='bogus'" in msg
+    assert "shuffle_block_size_spec must be int" in msg
+    assert "knobs missing required keys" in msg
+    assert "knobs must not carry 'shuffle_block_size'" in msg
 
 
 # -- EngineStateV1 ------------------------------------------------------------
