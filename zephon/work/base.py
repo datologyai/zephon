@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
+from zephon.core.checkpoint import WORK_CHUNK_VERSION, WorkChunkStateV1
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
 from zephon.utils.swrr import swrr_iterate
@@ -244,54 +245,53 @@ class WorkChunk:
 
     def state_dict(self) -> dict[str, Any]:
         """Portable, JSON-friendly snapshot of this chunk."""
-        # Serialize components as an ordered list of (name, items-as-lists)
         comps_serial: list[tuple[str, list[list[int]]]] = []
         for name in self._component_order:
             items = self.components.get(name, [])
-            # Each SampleId is a tuple[int,int,int] → store as [int,int,int]
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        return {
-            "version": 1,
-            "seed": None if self.seed is None else int(self.seed),
-            "components": comps_serial,  # preserves insertion order
-            "component_order": list(self._component_order),  # redundant but explicit
-            # Optional sanity field — consumers may ignore
-            "total_samples": int(self._total_samples),
-        }
+        state = WorkChunkStateV1(
+            version=WORK_CHUNK_VERSION,
+            seed=None if self.seed is None else int(self.seed),
+            components=comps_serial,
+            component_order=list(self._component_order),
+            total_samples=int(self._total_samples),
+        )
+        return state.to_dict()
 
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        version = int(payload.get("version", 0))
-        if version != 1:
-            raise ValueError(f"Unsupported WorkChunk state version: {version}")
+        ckpt = WorkChunkStateV1.load(payload)
 
-        comps_in: Sequence[tuple[str, Sequence[Sequence[int]]]] = payload["components"]
-
-        # Use a plain dict; insertion order matches iteration order in Python 3.7+
         comps: dict[str, list[SampleId]] = {}
-
-        for name, items in comps_in:
+        for name, items in ckpt.components:
             restored: list[SampleId] = []
             for raw in items:
                 if len(raw) != 3:
                     raise ValueError(f"Bad SampleId for component {name}: {raw!r}")
-                # IMPORTANT: build a fixed-length tuple to avoid tuple[int, ...]
                 a, b, c = int(raw[0]), int(raw[1]), int(raw[2])
-                restored.append((a, b, c))  # this is SampleId
+                restored.append((a, b, c))
             comps[name] = restored
 
-        seed = payload.get("seed", None)
-        chunk = cls(components=comps, seed=None if seed is None else int(seed))
+        chunk = cls(components=comps, seed=ckpt.seed)
 
-        # Optional: honor serialized order explicitly (should already match)
-        co = payload.get("component_order")
-        if co is not None and tuple(co) != chunk._component_order:
-            # rebuild in the serialized order using a new dict literal to set insertion order
-            ordered = {name: comps[name] for name in co}
+        if (
+            ckpt.component_order
+            and tuple(ckpt.component_order) != chunk._component_order
+        ):
+            ordered = {name: comps[name] for name in ckpt.component_order}
             chunk.components = ordered
-            chunk.__post_init__()  # recompute internal caches
+            chunk.__post_init__()
+
+        if (
+            ckpt.total_samples is not None
+            and ckpt.total_samples != chunk._total_samples
+        ):
+            raise ValueError(
+                f"WorkChunk total_samples mismatch: payload={ckpt.total_samples}, "
+                f"computed={chunk._total_samples}"
+            )
 
         return chunk
 
@@ -315,9 +315,18 @@ class WorkSource(ABC):
         }
 
     def load_state_dict(self, state: dict) -> None:
-        if int(state["lane_id"]) != self._lane:
+        self._verify_base_state(int(state["lane_id"]), int(state["canonical_replicas"]))
+
+    def _verify_base_state(self, lane_id: int, canonical_replicas: int) -> None:
+        """Verify lane/canonical-replicas identity against this instance.
+
+        Subclasses that route state through a typed schema should call this
+        directly (passing schema fields) instead of ``super().load_state_dict(state)``
+        so a future rename in the schema does not desync from the base.
+        """
+        if lane_id != self._lane:
             raise RuntimeError("Lane mismatch loading LaneWorkSource state.")
-        if int(state["canonical_replicas"]) != self._canon:
+        if canonical_replicas != self._canon:
             raise RuntimeError("canonical_replicas changed; migration required.")
 
     def _bind_lane(self, lane_id: int, canonical_replicas: int) -> None:

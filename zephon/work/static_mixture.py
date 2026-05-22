@@ -12,6 +12,11 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from zephon.core.checkpoint import (
+    STATIC_MIXTURE_VERSION,
+    CursorStateV1,
+    StaticMixtureStateV1,
+)
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
 from zephon.work.base import WorkChunk, WorkSource
@@ -582,16 +587,18 @@ class _DatasetCursor:
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Return cursor state needed for deterministic continuation."""
-        state: dict[str, Any] = {
-            "position": int(self._position),
-            "epoch": int(self._epoch),
-        }
+        snapshot = None
         if self._pre_fill_rng_state is not None:
-            state["block_rng_snapshot"] = {
+            snapshot = {
                 "rng_state": self._pre_fill_rng_state,
                 "block_count": self._pre_fill_block_count,
             }
-        return state
+        state = CursorStateV1(
+            position=int(self._position),
+            epoch=int(self._epoch),
+            block_rng_snapshot=snapshot,
+        )
+        return state.to_dict(strip_none=True)
 
     def restore_checkpoint_state(
         self,
@@ -601,11 +608,9 @@ class _DatasetCursor:
         base_knobs: _DatasetKnobs,
     ) -> None:
         """Restore cursor state from a serialized checkpoint payload."""
-        epoch = int(state.get("epoch", 0))
-        self._seek_epoch(epoch, reshuffle=reshuffle, base_knobs=base_knobs)
-        position = int(state.get("position", 0))
-        snapshot = state.get("block_rng_snapshot")
-        self._seek_to_position(position, block_rng_snapshot=snapshot)
+        cur = CursorStateV1.load(state)
+        self._seek_epoch(cur.epoch, reshuffle=reshuffle, base_knobs=base_knobs)
+        self._seek_to_position(cur.position, block_rng_snapshot=cur.block_rng_snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -1254,89 +1259,103 @@ class StaticMixtureWorkSource(WorkSource):
             name: cur.checkpoint_state() for name, cur in self._cursors.items()
         }
         cfg = self._alloc_config
-        common = base | {
-            "version": 1,
-            "seed": int(self._seed),
-            "chunk_size": int(cfg.chunk_size),
-            "knobs": {
+        strategy_state = self._strategy.checkpoint_state()
+        accumulators = strategy_state.get("accumulators")
+        state = StaticMixtureStateV1(
+            version=STATIC_MIXTURE_VERSION,
+            lane_id=base["lane_id"],
+            canonical_replicas=base["canonical_replicas"],
+            chunk_size_hint=base["chunk_size_hint"],
+            seed=int(self._seed),
+            chunk_size=int(cfg.chunk_size),
+            knobs={
                 "shuffle_shards": cfg.knobs.shuffle_shards,
                 "shuffle_within_shard": cfg.knobs.shuffle_within_shard,
                 "shuffle_block_size": cfg.knobs.shuffle_block_size,
             },
-            "global_chunk_index": int(self._global_chunk_index),
-            "weights": dict(cfg.weights),
-            "component_order": list(cfg.component_order),
-            "dataset_ids": dict(self._dataset_ids),
-            "cursor_states": cursor_states,
-            "cursor_positions": {
+            global_chunk_index=int(self._global_chunk_index),
+            weights=dict(cfg.weights),
+            component_order=list(cfg.component_order),
+            dataset_ids=dict(self._dataset_ids),
+            cursor_states=cursor_states,
+            cursor_positions={
                 name: int(cur_state["position"])
                 for name, cur_state in cursor_states.items()
             },
-            "cursor_epochs": {
+            cursor_epochs={
                 name: int(cur_state["epoch"])
                 for name, cur_state in cursor_states.items()
             },
-            "exhausted_policy": cfg.exhausted_policy,
-            "reshuffle_on_repeat": cfg.reshuffle_on_repeat,
-            "max_repeats": cfg.max_repeats,
-        }
-        return common | self._strategy.checkpoint_state()
+            exhausted_policy=cfg.exhausted_policy,
+            reshuffle_on_repeat=cfg.reshuffle_on_repeat,
+            max_repeats=cfg.max_repeats,
+            accumulators=accumulators,
+            allocation_mode=strategy_state["allocation_mode"],
+        )
+        result = state.to_dict()
+        # Legacy-fixed mode is signalled on the wire by *absence* of
+        # accumulators (the original pre-AllocationStrategy shape), not by an
+        # explicit None — drop the key when the strategy isn't running an
+        # accumulator.
+        if accumulators is None:
+            del result["accumulators"]
+        return result
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        super().load_state_dict(state)
+        ckpt = StaticMixtureStateV1.load(state)
 
-        if int(state.get("version", 0)) != 1:
-            raise RuntimeError("Unsupported StaticMixtureWorkSource checkpoint version")
+        # Route base validation through the typed schema so a future v2 rename
+        # of lane_id / canonical_replicas does not desync from WorkSource.
+        self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
-        # Explicit mode tag (new checkpoints); fall back to heuristic for old ones
-        mode_tag = state.get("allocation_mode")
-        if mode_tag == "accumulator":
+        # Pre-strategy v1 checkpoints have no allocation_mode tag; in that
+        # case the write-path pop makes "accumulators absent" mean legacy
+        # mode (schema default of None) and "accumulators present" mean
+        # accumulator mode.
+        if ckpt.allocation_mode == "accumulator":
             is_accumulator_ckpt = True
-        elif mode_tag == "legacy_fixed":
+        elif ckpt.allocation_mode == "legacy_fixed":
             is_accumulator_ckpt = False
         else:
-            # Pre-tag checkpoint: infer from presence of accumulators dict
-            is_accumulator_ckpt = "accumulators" in state
+            is_accumulator_ckpt = ckpt.accumulators is not None
 
-        self._seed = int(state["seed"])
+        self._seed = ckpt.seed
         knobs = _DatasetKnobs(
             seed=self._seed,
-            shuffle_shards=bool(state["knobs"]["shuffle_shards"]),
-            shuffle_within_shard=bool(state["knobs"]["shuffle_within_shard"]),
-            shuffle_block_size=state["knobs"]["shuffle_block_size"],
+            shuffle_shards=bool(ckpt.knobs["shuffle_shards"]),
+            shuffle_within_shard=bool(ckpt.knobs["shuffle_within_shard"]),
+            shuffle_block_size=ckpt.knobs["shuffle_block_size"],
         )
         self._knobs = knobs
 
-        # Restore repeat-related settings (defaults match "stop" policy for v1 compat)
         cur_cfg = self._alloc_config
-        ckpt_reshuffle = state.get("reshuffle_on_repeat", cur_cfg.reshuffle_on_repeat)
-        ckpt_max_repeats = state.get("max_repeats", cur_cfg.max_repeats)
-
-        if ckpt_reshuffle != cur_cfg.reshuffle_on_repeat:
+        if ckpt.reshuffle_on_repeat != cur_cfg.reshuffle_on_repeat:
             raise RuntimeError(
-                f"Checkpoint has reshuffle_on_repeat={ckpt_reshuffle} but "
+                f"Checkpoint has reshuffle_on_repeat={ckpt.reshuffle_on_repeat} but "
                 f"the current instance was constructed with "
                 f"reshuffle_on_repeat={cur_cfg.reshuffle_on_repeat}. "
                 f"These must match for deterministic continuation."
             )
-        if ckpt_max_repeats != cur_cfg.max_repeats:
+        if ckpt.max_repeats != cur_cfg.max_repeats:
             raise RuntimeError(
-                f"Checkpoint has max_repeats={ckpt_max_repeats} but "
+                f"Checkpoint has max_repeats={ckpt.max_repeats} but "
                 f"the current instance was constructed with "
                 f"max_repeats={cur_cfg.max_repeats}. "
                 f"These must match for deterministic continuation."
             )
-
-        cursor_states: dict[str, Any] = state.get("cursor_states", {})
-        cursor_epochs: dict[str, int] = state.get("cursor_epochs", {})
+        if ckpt.exhausted_policy != cur_cfg.exhausted_policy:
+            raise RuntimeError(
+                f"Checkpoint has exhausted_policy={ckpt.exhausted_policy!r} but "
+                f"the current instance was constructed with "
+                f"exhausted_policy={cur_cfg.exhausted_policy!r}. "
+                f"These must match for deterministic continuation."
+            )
 
         # Verify dataset_ids matching
-        ckpt_dataset_ids_raw = state.get("dataset_ids")
-        if not isinstance(ckpt_dataset_ids_raw, dict):
+        if not ckpt.dataset_ids:
             raise RuntimeError("Checkpoint missing or invalid dataset_ids mapping.")
         ckpt_dataset_ids = {
-            str(name): int(dataset_id)
-            for name, dataset_id in ckpt_dataset_ids_raw.items()
+            str(name): int(dataset_id) for name, dataset_id in ckpt.dataset_ids.items()
         }
         current_dataset_ids = {
             ds.name: dataset_id for dataset_id, ds in enumerate(self._datasets)
@@ -1352,49 +1371,52 @@ class StaticMixtureWorkSource(WorkSource):
         self._dataset_ids.clear()
         self._datasets_by_id.clear()
 
-        if not cursor_states and is_accumulator_ckpt:
+        if not ckpt.cursor_states and is_accumulator_ckpt:
             raise RuntimeError("Accumulator-mode checkpoints require cursor_states")
 
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
             cur = _DatasetCursor(dataset_id, ds.shard_index, knobs)
-            if ds.name in cursor_states:
+            if ds.name in ckpt.cursor_states:
                 cur.restore_checkpoint_state(
-                    cursor_states[ds.name],
-                    reshuffle=ckpt_reshuffle,
+                    ckpt.cursor_states[ds.name],
+                    reshuffle=ckpt.reshuffle_on_repeat,
                     base_knobs=knobs,
                 )
             else:
-                # Legacy cursor state checkpoint
+                # Older v1 checkpoint: reconstruct from cursor_positions + cursor_epochs
                 cur.restore_checkpoint_state(
                     {
-                        "epoch": int(cursor_epochs.get(ds.name, 0)),
-                        "position": int(state["cursor_positions"].get(ds.name, 0)),
+                        "epoch": int(ckpt.cursor_epochs.get(ds.name, 0)),
+                        "position": int(ckpt.cursor_positions.get(ds.name, 0)),
                     },
-                    reshuffle=ckpt_reshuffle,
+                    reshuffle=ckpt.reshuffle_on_repeat,
                     base_knobs=knobs,
                 )
             self._cursors[ds.name] = cur
 
-        self._global_chunk_index = int(state["global_chunk_index"])
+        self._global_chunk_index = int(ckpt.global_chunk_index)
 
         self._alloc_config = _AllocationConfig(
-            component_order=tuple(state["component_order"]),
-            weights=dict(state["weights"]),
-            chunk_size=int(state["chunk_size"]),
-            exhausted_policy=cur_cfg.exhausted_policy,
-            reshuffle_on_repeat=ckpt_reshuffle,
-            max_repeats=ckpt_max_repeats,
+            component_order=tuple(ckpt.component_order),
+            weights=dict(ckpt.weights),
+            chunk_size=int(ckpt.chunk_size),
+            exhausted_policy=ckpt.exhausted_policy,
+            reshuffle_on_repeat=ckpt.reshuffle_on_repeat,
+            max_repeats=ckpt.max_repeats,
             knobs=knobs,
         )
+        self._weights = dict(ckpt.weights)
 
         if is_accumulator_ckpt:
+            if ckpt.accumulators is None:
+                raise RuntimeError(
+                    "Accumulator-mode checkpoint missing accumulators field"
+                )
             self._strategy = AccumulatorStrategy(
                 config=self._alloc_config,
-                accumulators={
-                    str(k): float(v) for k, v in state["accumulators"].items()
-                },
+                accumulators={str(k): float(v) for k, v in ckpt.accumulators.items()},
             )
         else:
             self._strategy = LegacyFixedStrategy(config=self._alloc_config)

@@ -352,3 +352,103 @@ def test_empty_components_are_ignored_in_iteration():
     # Only A and C appear in component sequence
     comp_names = extract_components(out)
     assert set(comp_names) <= {"A", "C"}
+
+
+# ----------------------------
+# WorkChunk.state_dict / from_state
+# ----------------------------
+
+
+def test_workchunk_state_dict_roundtrip_preserves_components_and_seed():
+    comps = {"A": make_ids(0, 0, 3), "B": make_ids(1, 5, 2)}
+    chunk = WorkChunk(components=comps, seed=42)
+
+    state = chunk.state_dict()
+    restored = WorkChunk.from_state(state)
+
+    assert restored.seed == 42
+    assert restored.components["A"] == comps["A"]
+    assert restored.components["B"] == comps["B"]
+    assert restored._component_order == chunk._component_order
+
+
+def test_workchunk_state_dict_preserves_none_seed():
+    chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=None)
+    state = chunk.state_dict()
+    assert state["seed"] is None
+    restored = WorkChunk.from_state(state)
+    assert restored.seed is None
+
+
+def test_workchunk_state_dict_uses_typed_schema_version():
+    """state_dict() should write the schema's current version."""
+    from zephon.core.checkpoint import WORK_CHUNK_VERSION
+
+    chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=1)
+    state = chunk.state_dict()
+    assert state["version"] == WORK_CHUNK_VERSION
+
+
+def test_workchunk_from_state_rejects_bad_sample_id_length():
+    bad_state = {
+        "version": 1,
+        "seed": 1,
+        "components": [("A", [[0, 0]])],  # 2-tuple, not 3
+        "component_order": ["A"],
+        "total_samples": 1,
+    }
+    with pytest.raises(ValueError, match="Bad SampleId"):
+        WorkChunk.from_state(bad_state)
+
+
+def test_workchunk_from_state_honors_serialized_component_order():
+    """Component order in the state dict drives iteration order on rebuild."""
+    comps_in_order = {"A": make_ids(0, 0, 1), "B": make_ids(1, 0, 1)}
+    chunk = WorkChunk(components=comps_in_order, seed=1)
+    state = chunk.state_dict()
+
+    # Flip the order in the serialized payload.
+    state = dict(state)
+    state["components"] = list(reversed(state["components"]))
+    state["component_order"] = list(reversed(state["component_order"]))
+
+    restored = WorkChunk.from_state(state)
+    assert tuple(restored.components.keys()) == ("B", "A")
+
+
+def test_workchunk_from_state_rejects_total_samples_mismatch():
+    bad_state = {
+        "version": 1,
+        "components": [("A", [[0, 0, 1], [0, 0, 2]])],
+        "component_order": ["A"],
+        "total_samples": 99,  # disk says 99, components say 2
+    }
+    with pytest.raises(ValueError, match="total_samples mismatch"):
+        WorkChunk.from_state(bad_state)
+
+
+def test_workchunk_from_state_accepts_missing_total_samples():
+    """Older checkpoints predating total_samples load without raising."""
+    state = {
+        "version": 1,
+        "components": [("A", [[0, 0, 1]])],
+        "component_order": ["A"],
+    }
+    restored = WorkChunk.from_state(state)
+    assert len(restored) == 1
+
+
+def test_workchunk_from_state_rejects_empty_payload():
+    """An empty dict is corruption, not 'old format' — from_state must raise."""
+    with pytest.raises(ValueError, match="components: missing"):
+        WorkChunk.from_state({})
+
+
+def test_workchunk_from_state_rejects_missing_components_key():
+    """``components`` and ``component_order`` are always-written; absence is corruption."""
+    state = {"version": 1, "seed": 7}
+    with pytest.raises(ValueError) as exc_info:
+        WorkChunk.from_state(state)
+    msg = str(exc_info.value)
+    assert "components: missing" in msg
+    assert "component_order: missing" in msg

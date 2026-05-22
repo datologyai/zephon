@@ -31,7 +31,6 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 """
 
 import ctypes
-import json
 import multiprocessing as mp
 import os
 import re
@@ -48,10 +47,11 @@ from multiprocessing.context import BaseContext
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
-from zephon.io.storage import RouterStorageBackend
-
-T = TypeVar("T")
-
+from zephon.core.checkpoint import (
+    ENGINE_VERSION,
+    AggregationCodec,
+    EngineStateV1,
+)
 from zephon.core.constants import (
     ChunkId,
     ContributorRef,
@@ -72,6 +72,7 @@ from zephon.core.replay import ReplayConfigService
 from zephon.core.runtime_spec import RuntimeSpec
 from zephon.core.world import World
 from zephon.io.options import StoreOptions
+from zephon.io.storage import RouterStorageBackend
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.emitter import MetricsReporter
@@ -82,6 +83,8 @@ from zephon.utils.rank import rank_ctx
 from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
 from zephon.work import MixtureReadConfig, WorkSource
 from zephon.work.base import WorkChunk
+
+T = TypeVar("T")
 
 # Set ZEPHON_DEBUG_EVICT=1 to log per-eviction diagnostics from the Engine
 # hot path. Useful for debugging chunk-eviction / lane-progress issues; off
@@ -298,6 +301,10 @@ class RuntimeOptions:
     aggregate_dir: str | None = None
     # How long to wait for all contributors and for the merged file.
     aggregate_timeout_s: float = 180.0
+    # Serialization format for intermediate aggregation files ("json" or "msgpack").
+    aggregate_serializer: str = "msgpack"
+    # Compression for intermediate aggregation files ("none" or "zstd").
+    aggregate_compressor: str = "zstd"
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
@@ -358,76 +365,6 @@ class RuntimeOptions:
 #    Complexity: requires coordination with training framework for broadcast.
 #    Only implement if I/O proven to be bottleneck.
 # =============================================================================
-
-
-def validate_checkpoint(state: Any) -> None:
-    """Validate checkpoint structure.
-
-    Raises TypeError / ValueError for malformed checkpoints.  Does not
-    require an Engine — only inspects the dict shape so callers can
-    fail-fast at ``restore()`` time.
-    """
-    if not isinstance(state, dict):
-        raise TypeError(f"Expected dict checkpoint, got {type(state).__name__}")
-
-    required = {
-        "world",
-        "progress",
-        "lane_next_cid",
-        "lane_ws_state",
-        "last_round_id",
-        "checkpoint_reload_count",
-    }
-    missing = required - state.keys()
-    if missing:
-        raise ValueError(f"Checkpoint missing required keys: {sorted(missing)}")
-
-    # -- dict-typed fields ---------------------------------------------
-    for field in ("world", "progress", "lane_next_cid", "lane_ws_state"):
-        if not isinstance(state[field], dict):
-            raise TypeError(
-                f"Checkpoint '{field}' must be a dict, "
-                f"got {type(state[field]).__name__}"
-            )
-
-    # -- world (extra checks) ------------------------------------------
-    world = state["world"]
-    if "canonical_replicas" not in world:
-        raise ValueError("Checkpoint 'world' missing 'canonical_replicas'")
-    try:
-        int(world["canonical_replicas"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"'canonical_replicas' must be int-like, got {world['canonical_replicas']!r}"
-        ) from exc
-
-    # -- progress (extra checks) ---------------------------------------
-    for lane_key, entry in state["progress"].items():
-        if not isinstance(entry, dict):
-            raise TypeError(
-                f"progress[{lane_key!r}] must be a dict, got {type(entry).__name__}"
-            )
-        for field in ("chunk_id", "offset"):
-            if field not in entry:
-                raise ValueError(
-                    f"progress[{lane_key!r}] missing required field '{field}'"
-                )
-
-    # -- last_round_id -------------------------------------------------
-    last_round_id = state["last_round_id"]
-    if last_round_id is not None and not isinstance(last_round_id, str):
-        raise TypeError(
-            f"'last_round_id' must be str or None, got {type(last_round_id).__name__}"
-        )
-
-    # -- checkpoint_reload_count ---------------------------------------
-    try:
-        int(state["checkpoint_reload_count"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"'checkpoint_reload_count' must be int-like, "
-            f"got {state['checkpoint_reload_count']!r}"
-        ) from exc
 
 
 class Engine:
@@ -581,8 +518,12 @@ class Engine:
                 )
             base = self._opts.aggregate_dir
 
-        # Initialize storage backend for checkpoint I/O
+        # Initialize storage backend and aggregation codec for checkpoint I/O
         self._agg_backend = RouterStorageBackend()
+        self._agg_codec = AggregationCodec(
+            serializer=self._opts.aggregate_serializer,
+            compressor=self._opts.aggregate_compressor,
+        )
 
         # Detect cloud storage and adjust timeouts for higher latency
         base = str(base)  # Handle Path objects
@@ -1843,20 +1784,21 @@ class Engine:
                 if boundaries:
                     epoch_boundaries[int(lane)] = [int(cid) for cid in boundaries]
 
-            return {
-                "version": 1,
-                "world": world,
-                "inflight": inflight,
-                "progress": progress,
-                "lane_next_cid": lane_next,
-                "work_source": self._work.state_dict(),
-                "lane_ws_state": lane_ws_state,
-                "last_round_id": self._last_round_id,
-                "checkpoint_reload_count": self._checkpoint_reload_count,
-                "rr_next_idx": rr_next_idx,
-                "replay_cursors": replay_cursors,
-                "epoch_boundaries": epoch_boundaries,
-            }
+            state = EngineStateV1(
+                version=ENGINE_VERSION,
+                world=world,
+                inflight=inflight,
+                progress=progress,
+                lane_next_cid=lane_next,
+                work_source=self._work.state_dict(),
+                lane_ws_state=lane_ws_state,
+                last_round_id=self._last_round_id,
+                checkpoint_reload_count=self._checkpoint_reload_count,
+                rr_next_idx=rr_next_idx,
+                replay_cursors=replay_cursors,
+                epoch_boundaries=epoch_boundaries,
+            )
+            return state.to_dict()
 
     # ---------- FS utilities ----------
     def _read_text(self, path: str) -> str | None:
@@ -1866,11 +1808,16 @@ class Engine:
         except Exception:
             return None
 
-    def _read_json(self, path: str) -> dict | None:
+    def _read_aggregation_state(self, path: str) -> dict | None:
         try:
-            with self._agg_backend.open(path, "r") as f:
-                return json.load(f)
+            with self._agg_backend.open(path, "rb") as f:
+                raw = f.read()
         except Exception:
+            return None
+        try:
+            return self._agg_codec.decode(raw)
+        except Exception as exc:
+            self._log(f"Failed to decode aggregation state at {path}: {exc!r}")
             return None
 
     def _wait_until(self, pred: Callable[[], bool], timeout: float) -> bool:
@@ -1951,13 +1898,13 @@ class Engine:
     def _state_file_path(self, round_id: str) -> str:
         wid, _ = get_torch_worker_info()
         pid = os.getpid()
-        return f"{self._agg_dir}/state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.json"
+        return f"{self._agg_dir}/state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.ckpt"
 
     def _merged_file_path(self, round_id: str) -> str:
-        return f"{self._agg_dir}/merged_{round_id}.json"
+        return f"{self._agg_dir}/merged_{round_id}.ckpt"
 
     def _list_state_files(self, round_id: str) -> list[str]:
-        pattern = f"{self._agg_dir}/state_r*_w*_p*_{round_id}.json"
+        pattern = f"{self._agg_dir}/state_r*_w*_p*_{round_id}.ckpt"
         return self._agg_backend.glob(pattern)
 
     def _read_states_for_round(
@@ -1980,7 +1927,7 @@ class Engine:
         for fp in self._list_state_files(round_id):
             if fp in seen:
                 continue
-            st = self._read_json(fp)
+            st = self._read_aggregation_state(fp)
             if st is None:
                 continue
             seen[fp] = st
@@ -2025,7 +1972,7 @@ class Engine:
         round_id = self._open_round_id(is_leader)
         self._last_round_id = round_id
         my_path = self._state_file_path(round_id)
-        self._agg_backend.put(my_path, json.dumps(local).encode("utf-8"))
+        self._agg_backend.put(my_path, self._agg_codec.encode(local))
 
         merged_path = self._merged_file_path(round_id)
         if is_leader:
@@ -2047,7 +1994,7 @@ class Engine:
             # States already cached from polling above.
             merged = self._merge_state_dicts(list(seen.values()))
             assert not self._agg_backend.exists(merged_path)
-            self._agg_backend.put(merged_path, json.dumps(merged).encode("utf-8"))
+            self._agg_backend.put(merged_path, self._agg_codec.encode(merged))
             self._agg_backend.delete(my_path)
             if self._previous_merged_file is not None:
                 self._agg_backend.delete(self._previous_merged_file)
@@ -2065,7 +2012,7 @@ class Engine:
             raise RuntimeError(
                 f"[PID {os.getpid()}] Timed out after {self._agg_timeout_s}s waiting for merged checkpoint at {merged_path}"
             )
-        merged = self._read_json(merged_path)
+        merged = self._read_aggregation_state(merged_path)
         self._agg_backend.delete(my_path)
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
@@ -2073,105 +2020,143 @@ class Engine:
 
     def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
         assert states
-        C = int(states[0]["world"]["canonical_replicas"])
-        for s in states[1:]:
-            if int(s["world"]["canonical_replicas"]) != C:
-                raise RuntimeError("canonical_replicas mismatch")
+        typed = [EngineStateV1.load(s) for s in states]
+        errors: list[str] = []
+
+        C = int(typed[0].world["canonical_replicas"])
+        for idx, st in enumerate(typed[1:], start=1):
+            if int(st.world["canonical_replicas"]) != C:
+                errors.append(
+                    f"states[{idx}].world.canonical_replicas="
+                    f"{st.world['canonical_replicas']!r} != states[0]={C}"
+                )
 
         merged_world_size: int | None = None
-        for s in states:
-            w = s.get("world", {})
+        for idx, st in enumerate(typed):
+            w = st.world
             if "world_size" in w and w["world_size"] is not None:
                 n = int(w["world_size"])
                 if merged_world_size is None:
                     merged_world_size = n
                 elif merged_world_size != n:
-                    raise RuntimeError("world_size mismatch across state shards")
+                    errors.append(
+                        f"states[{idx}].world.world_size={n} mismatches "
+                        f"previously-seen={merged_world_size}"
+                    )
 
         inflight, progress, lane_next, lane_ws_state = {}, {}, {}, {}
-        for st in states:
-            for lane_s, by_chunk in st.get("inflight", {}).items():
+        for idx, st in enumerate(typed):
+            for lane_s, by_chunk in st.inflight.items():
                 lane = int(lane_s)
                 if lane in inflight:
-                    raise RuntimeError(f"duplicate inflight for lane {lane}")
+                    errors.append(f"states[{idx}]: duplicate inflight for lane {lane}")
+                    continue
                 inflight[lane] = {
                     int(cid): payload for cid, payload in by_chunk.items()
                 }
 
-            for lane_s, p in st.get("progress", {}).items():
+            for lane_s, p in st.progress.items():
                 lane = int(lane_s)
                 if lane in progress:
-                    raise RuntimeError(f"duplicate progress for lane {lane}")
+                    errors.append(f"states[{idx}]: duplicate progress for lane {lane}")
+                    continue
                 progress[lane] = {
                     "chunk_id": int(p["chunk_id"]),
                     "offset": int(p["offset"]),
                 }
 
-            for lane_s, nxt in st.get("lane_next_cid", {}).items():
+            for lane_s, nxt in st.lane_next_cid.items():
                 lane = int(lane_s)
                 if lane in lane_next:
-                    raise RuntimeError(f"duplicate lane_next_cid for lane {lane}")
+                    errors.append(
+                        f"states[{idx}]: duplicate lane_next_cid for lane {lane}"
+                    )
+                    continue
                 lane_next[lane] = int(nxt)
 
-            for lane_s, ws in st.get("lane_ws_state", {}).items():
+            for lane_s, ws in st.lane_ws_state.items():
                 lane = int(lane_s)
                 if lane in lane_ws_state:
-                    raise RuntimeError(f"duplicate lane_ws_state for lane {lane}")
+                    errors.append(
+                        f"states[{idx}]: duplicate lane_ws_state for lane {lane}"
+                    )
+                    continue
                 lane_ws_state[lane] = ws
 
-        work_config = next(
-            (s.get("work_config") for s in states if s.get("work_config")), None
-        )
-        last_round_ids = {s.get("last_round_id") for s in states}
-        assert len(last_round_ids) == 1
+        work_config = next((st.work_config for st in typed if st.work_config), None)
+        last_round_ids = {st.last_round_id for st in typed}
+        if len(last_round_ids) != 1:
+            errors.append(f"last_round_id mismatch across shards: {last_round_ids!r}")
 
-        checkpoint_reload_counts = {s.get("checkpoint_reload_count") for s in states}
-        assert len(checkpoint_reload_counts) == 1
+        checkpoint_reload_counts = {st.checkpoint_reload_count for st in typed}
+        if len(checkpoint_reload_counts) != 1:
+            errors.append(
+                f"checkpoint_reload_count mismatch across shards: "
+                f"{checkpoint_reload_counts!r}"
+            )
 
         rr_next_idx: dict[str, int] = {}
-        for st in states:
-            for key, idx in st.get("rr_next_idx", {}).items():
-                if key in rr_next_idx and rr_next_idx[key] != int(idx):
-                    raise RuntimeError(f"duplicate rr_next_idx for key {key}")
-                rr_next_idx[key] = int(idx)
+        for idx, st in enumerate(typed):
+            for key, val in st.rr_next_idx.items():
+                if key in rr_next_idx and rr_next_idx[key] != int(val):
+                    errors.append(
+                        f"states[{idx}]: rr_next_idx[{key!r}]={int(val)} conflicts "
+                        f"with previously-merged value {rr_next_idx[key]}"
+                    )
+                    continue
+                rr_next_idx[key] = int(val)
 
         replay_cursors: dict[int, Any] = {}
-        for st in states:
-            for lane_s, key in st.get("replay_cursors", {}).items():
+        for idx, st in enumerate(typed):
+            for lane_s, key in st.replay_cursors.items():
                 lane = int(lane_s)
                 if lane in replay_cursors:
-                    raise RuntimeError(
-                        f"duplicate replay_cursors entry for lane {lane}"
+                    errors.append(
+                        f"states[{idx}]: duplicate replay_cursors for lane {lane}"
                     )
+                    continue
                 replay_cursors[lane] = key
 
         epoch_boundaries: dict[int, list[int]] = {}
-        for st in states:
-            for lane_s, boundaries in st.get("epoch_boundaries", {}).items():
+        for idx, st in enumerate(typed):
+            for lane_s, boundaries in st.epoch_boundaries.items():
                 lane = int(lane_s)
                 if lane in epoch_boundaries:
-                    raise RuntimeError(f"duplicate epoch_boundaries for lane {lane}")
+                    errors.append(
+                        f"states[{idx}]: duplicate epoch_boundaries for lane {lane}"
+                    )
+                    continue
                 epoch_boundaries[lane] = [int(cid) for cid in boundaries]
 
-        return {
-            "version": 1,
-            "world": {"canonical_replicas": C, "world_size": merged_world_size},
-            "inflight": inflight,
-            "progress": progress,
-            "lane_next_cid": lane_next,
-            "work_config": work_config,
-            "lane_ws_state": lane_ws_state,
-            "last_round_id": list(last_round_ids)[0],
-            "checkpoint_reload_count": list(checkpoint_reload_counts)[0],
-            "rr_next_idx": rr_next_idx,
-            "replay_cursors": replay_cursors,
-            "epoch_boundaries": epoch_boundaries,
-        }
+        if errors:
+            raise RuntimeError(
+                f"cannot merge {len(states)} aggregation state shards:\n  - "
+                + "\n  - ".join(errors)
+            )
+
+        merged = EngineStateV1(
+            version=ENGINE_VERSION,
+            world={"canonical_replicas": C, "world_size": merged_world_size},
+            inflight=inflight,
+            progress=progress,
+            lane_next_cid=lane_next,
+            work_config=work_config,
+            lane_ws_state=lane_ws_state,
+            last_round_id=list(last_round_ids)[0],
+            checkpoint_reload_count=list(checkpoint_reload_counts)[0],
+            rr_next_idx=rr_next_idx,
+            replay_cursors=replay_cursors,
+            epoch_boundaries=epoch_boundaries,
+        )
+        return merged.to_dict()
 
     def load_state_dict(self, state: dict[str, Any], *, replay: bool = True) -> None:
         """Restore engine & WorkSource; enter replay mode if 'replay' is True."""
-        validate_checkpoint(state)
-        if int(state["world"]["canonical_replicas"]) != self._world.canonical_replicas:
+        ckpt = EngineStateV1.load(state)
+        # ckpt.work_source is intentionally unread: it is captured on write for
+        # debugging only. The authoritative WorkSource is the one constructed
+        # in-process; per-lane state is restored from ckpt.lane_ws_state below.
+        if int(ckpt.world["canonical_replicas"]) != self._world.canonical_replicas:
             raise RuntimeError("canonical_replicas changed; migration required")
 
         bs = self._plan.batch_size_hint
@@ -2204,8 +2189,7 @@ class Engine:
         self.inflight_chunks_per_lane.clear()
         self._offset_done.clear()
         self._offset_done_count.clear()
-        inflight_all = state.get("inflight", {})
-        for lane_s, by_chunk in inflight_all.items():
+        for lane_s, by_chunk in ckpt.inflight.items():
             lane = int(lane_s)
             if lane not in owned:
                 continue
@@ -2216,9 +2200,8 @@ class Engine:
             self._sync_inflight_shm(lane)
 
         self._lane_progress.clear()
-        progress_all = state.get("progress", {})
         for lane in owned:
-            p = progress_all.get(str(lane)) or progress_all.get(int(lane))
+            p = ckpt.progress.get(str(lane)) or ckpt.progress.get(int(lane))
             if p is not None:
                 self._lane_progress[lane] = LanePtr(
                     int(p["chunk_id"]), int(p["offset"])
@@ -2229,9 +2212,10 @@ class Engine:
                 )
 
         self._lane_next_cid.clear()
-        lane_next_all = state.get("lane_next_cid", {})
         for lane in owned:
-            saved_next = lane_next_all.get(str(lane)) or lane_next_all.get(int(lane))
+            saved_next = ckpt.lane_next_cid.get(str(lane)) or ckpt.lane_next_cid.get(
+                int(lane)
+            )
             if saved_next is None:
                 raise RuntimeError(
                     f"Lane {lane} does not have next cid in the checkpoint"
@@ -2239,9 +2223,8 @@ class Engine:
             self._lane_next_cid[lane] = int(saved_next)
 
         # Restore lane WS state for owned lanes
-        lane_ws_state_all = state.get("lane_ws_state", {})
         for lane, ws in self._lane_ws.items():
-            st = lane_ws_state_all.get(str(lane)) or lane_ws_state_all.get(int(lane))
+            st = ckpt.lane_ws_state.get(str(lane)) or ckpt.lane_ws_state.get(int(lane))
             if st is not None:
                 ws.load_state_dict(dict(st))
             else:
@@ -2249,14 +2232,14 @@ class Engine:
                     f"Lane {lane} does not have WorkSource state in the checkpoint"
                 )
 
-        self._last_round_id = state["last_round_id"]
-        self._checkpoint_reload_count = state["checkpoint_reload_count"] + 1
+        self._last_round_id = ckpt.last_round_id
+        self._checkpoint_reload_count = ckpt.checkpoint_reload_count + 1
         self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
 
-        rr_next_idx_raw = state.get("rr_next_idx", {}) or {}
-        self._rr_next_idx = {str(k): int(v) for k, v in rr_next_idx_raw.items()}
+        rr_raw = ckpt.rr_next_idx or {}
+        self._rr_next_idx = {str(k): int(v) for k, v in rr_raw.items()}
 
-        replay_raw = state.get("replay_cursors", {}) or {}
+        replay_raw = ckpt.replay_cursors or {}
         self._lane_last_cursor = dict.fromkeys(owned)
         if replay:
             for lane in owned:
@@ -2273,7 +2256,7 @@ class Engine:
 
         # Restore epoch boundaries for flush sentinel re-injection on replay.
         self._epoch_boundaries.clear()
-        for lane_s, boundaries in state.get("epoch_boundaries", {}).items():
+        for lane_s, boundaries in (ckpt.epoch_boundaries or {}).items():
             lane = int(lane_s)
             if lane in owned:
                 self._epoch_boundaries[lane] = [int(cid) for cid in boundaries]

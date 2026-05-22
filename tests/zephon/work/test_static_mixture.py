@@ -410,18 +410,20 @@ def test_repeat_total_samples_inf() -> None:
 
 
 def test_repeat_v1_checkpoint_loads() -> None:
-    """A v1 checkpoint (no cursor_epochs) loads correctly as epoch 0."""
+    """A never-repeated repeat-policy checkpoint loads at epoch 0 and continues."""
     ds = make_dataset("alpha", 10)
-    # Build a "stop" source, consume 1 chunk, get state_dict
-    stop_ws = StaticMixtureWorkSource(
-        [ds], {ds.name: 1.0}, chunk_size=5, seed=0, shuffle_shards=False
+    save_ws = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
     ).clone_for_lane(0, canonical_replicas=1)
-    stop_ws.next_chunk()
-    saved_state = stop_ws.state_dict()
-    # All epochs should be 0 (never repeated)
+    save_ws.next_chunk()
+    saved_state = save_ws.state_dict()
     assert all(e == 0 for e in saved_state.get("cursor_epochs", {}).values())
 
-    # Load into a repeat source with matching reshuffle/max_repeats defaults
     ws_load = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
@@ -432,7 +434,6 @@ def test_repeat_v1_checkpoint_loads() -> None:
     ).clone_for_lane(0, canonical_replicas=1)
     ws_load.load_state_dict(saved_state)
 
-    # Should continue producing chunks (repeat policy)
     ch = ws_load.next_chunk()
     assert ch is not None
 
@@ -483,6 +484,17 @@ def test_repeat_load_mismatch_raises() -> None:
     ).clone_for_lane(0, canonical_replicas=1)
     with pytest.raises(RuntimeError, match="max_repeats"):
         ws_load2.load_state_dict(state)
+
+    # Mismatched exhausted_policy
+    ws_load3 = StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=5,
+        exhausted_policy="stop",
+        reshuffle_on_repeat=True,
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="exhausted_policy"):
+        ws_load3.load_state_dict(state)
 
 
 def test_max_repeats_warns_with_stop_policy() -> None:

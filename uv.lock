@@ -5097,10 +5097,12 @@ name = "zephon"
 source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
+    { name = "msgpack" },
     { name = "numpy" },
     { name = "optree" },
     { name = "tenacity" },
     { name = "wrapt" },
+    { name = "zstd" },
 ]
 
 [package.optional-dependencies]
@@ -5173,6 +5175,7 @@ requires-dist = [
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2023.0.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
     { name = "mosaicml-streaming", marker = "extra == 'streaming'" },
+    { name = "msgpack", specifier = ">=1.0.0" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "obstore", marker = "extra == 'cloud'", specifier = ">=0.3.0" },
@@ -5187,6 +5190,7 @@ requires-dist = [
     { name = "wrapt", specifier = ">=1.11.0" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mds'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mosaic'" },
+    { name = "zstd", specifier = ">=1.5.0" },
     { name = "zstd", marker = "extra == 'litdata'" },
     { name = "zstd", marker = "extra == 'streaming'" },
 ]

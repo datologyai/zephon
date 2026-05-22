@@ -477,14 +477,14 @@ class TestRestoreValidation:
 
     def test_restore_rejects_missing_keys(self) -> None:
         pipe = _mk_pipe(n_rows=5, chunk_size=5)
-        with pytest.raises(ValueError, match="missing required keys"):
+        with pytest.raises(ValueError, match="missing"):
             pipe.restore({"world": {"canonical_replicas": 1}})
 
     def test_restore_rejects_bad_world(self) -> None:
         pipe = _mk_pipe(n_rows=5, chunk_size=5)
         ckpt = _fake_ckpt()
         ckpt["world"] = "bad"
-        with pytest.raises(TypeError, match="'world' must be a dict"):
+        with pytest.raises(ValueError, match="world must be a dict"):
             pipe.restore(ckpt)
 
     def test_restore_rejects_missing_canonical_replicas(self) -> None:
@@ -506,3 +506,27 @@ class TestRestoreValidation:
         ckpt = _fake_ckpt()
         pipe.restore(ckpt)
         assert pipe._pending_restore == ckpt
+
+    def test_restore_invokes_engine_migration_chain(self, monkeypatch) -> None:
+        from zephon.core.checkpoint import EngineStateV1
+        from zephon.core.checkpoint._migrations import (
+            _MIGRATIONS,
+            CURRENT_VERSIONS,
+            register_migration,
+        )
+
+        monkeypatch.setitem(CURRENT_VERSIONS, "engine", 2)
+        monkeypatch.setitem(_MIGRATIONS, "engine", {})
+
+        called: list[int] = []
+
+        def _engine_v1_to_v2(v1: EngineStateV1) -> dict:
+            called.append(v1.version)
+            return v1.to_dict()
+
+        register_migration("engine", from_version=1, fn=_engine_v1_to_v2)
+
+        pipe = _mk_pipe(n_rows=5, chunk_size=5)
+        pipe.restore(_fake_ckpt())
+
+        assert called == [1]
