@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from zephon.core.checkpoint._schemas import EngineStateV1
 from zephon.core.constants import (
     ContributorRef,
     LanePtr,
@@ -529,3 +530,321 @@ class TestParallelismValidation:
         mapping = eng._world.lanes_for_dp_group
         assert mapping[0] == [0, 1, 2]  # 3 lanes
         assert mapping[1] == [3, 4]  # 2 lanes
+
+
+# =============================================================================
+# _merge_state_dicts: shared DP group / model-parallel aggregation
+# =============================================================================
+
+
+def _seed_inflight_state(eng: Engine, *, chunk_id: int = 0) -> None:
+    """Populate inflight chunks, progress, and lane_next_cid for owned lanes."""
+    for lane in eng._world.lanes_for_dp_group[eng._world.dp_group_id]:
+        eng.inflight_chunks_per_lane[lane][chunk_id] = WorkChunk(
+            components={"X": [(1, 2, 3)]}, seed=lane * 10 + chunk_id
+        )
+        eng._lane_progress[lane] = LanePtr(chunk_id=chunk_id, offset=0)  # type: ignore[index]
+        eng._lane_next_cid[lane] = chunk_id + 1  # type: ignore[attr-defined]
+
+
+class TestMergeStateDictsSharedDPGroup:
+    """``_merge_state_dicts`` handles same-DP-group peer state files.
+
+    Under 3D parallelism (``dp_degree >= 2 AND world_size > dp_degree``) at
+    ``workers_per_rank=1``, every rank in a DP group owns the same canonical
+    lanes and writes a state file. The merge must collapse those peer files
+    to a single representative per ``(dp_group_id, owned-lane-set)``;
+    otherwise the lane-uniqueness invariant on ``inflight`` / ``progress`` /
+    ``lane_next_cid`` / ``lane_ws_state`` is violated.
+
+    The ``dp_degree == 1`` peer-duplicate case is intentionally not covered
+    here: it's only reachable with ``workers_per_rank > 1`` (DataLoader),
+    which these unit tests don't exercise.
+    """
+
+    def test_dp2_tp2_each_lane_appears_twice(self) -> None:
+        """world_size=4, dp_degree=2: ranks 0-1 share lane 0; ranks 2-3 share lane 1."""
+        engs: list[Engine] = []
+        # Rank-to-dp_group: contiguous so ranks [0,1] -> dp 0; [2,3] -> dp 1.
+        for rank in range(4):
+            dp_id = rank // 2
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=4,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=dp_id,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+
+        states = [e._state_dict_local() for e in engs]
+        # Each lane should appear twice across the four states.
+        lane_counts: dict[int, int] = {}
+        for s in states:
+            for lane in s["inflight"]:
+                lane_counts[int(lane)] = lane_counts.get(int(lane), 0) + 1
+        assert lane_counts == {0: 2, 1: 2}
+
+        merged = engs[0]._merge_state_dicts(states)
+        assert {int(k) for k in merged["inflight"]} == {0, 1}
+
+    def test_dp2_tp3_each_lane_appears_three_times(self) -> None:
+        """world_size=6, dp_degree=2: 3 same-DP-group peers per lane.
+
+        Exercises the >2-peer case to make sure any fix doesn't accidentally
+        only handle exact pairs.
+        """
+        engs: list[Engine] = []
+        for rank in range(6):
+            dp_id = rank // 3
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=6,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=dp_id,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+
+        states = [e._state_dict_local() for e in engs]
+        lane_counts: dict[int, int] = {}
+        for s in states:
+            for lane in s["inflight"]:
+                lane_counts[int(lane)] = lane_counts.get(int(lane), 0) + 1
+        assert lane_counts == {0: 3, 1: 3}
+
+        merged = engs[0]._merge_state_dicts(states)
+        assert {int(k) for k in merged["inflight"]} == {0, 1}
+
+    def test_dp_equals_world_size_unique_lanes_merge_ok(self) -> None:
+        """Sanity / regression guard: when each rank has its own dp_group_id
+        (pure DP), the merge already works today and must keep working."""
+        engs: list[Engine] = []
+        for rank in range(4):
+            e = _mk_engine_with_opts(
+                canonical_replicas=4,
+                world_size=4,
+                global_rank=rank,
+                dp_degree=4,
+                dp_group_id=rank,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+
+        states = [e._state_dict_local() for e in engs]
+        merged = engs[0]._merge_state_dicts(states)
+        assert {int(k) for k in merged["inflight"]} == {0, 1, 2, 3}
+        assert {int(k) for k in merged["progress"]} == {0, 1, 2, 3}
+
+    def test_pure_dp_merge_preserves_per_rank_progress(self) -> None:
+        """Sanity guard: pure-DP merge result preserves per-rank progress."""
+        engs: list[Engine] = []
+        for rank in range(2):
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=2,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=rank,
+            )
+            engs.append(e)
+            # Advance rank `rank` to chunk_id=rank, offset=rank*2.
+            for lane in e._world.lanes_for_dp_group[rank]:
+                e.inflight_chunks_per_lane[lane][rank] = WorkChunk(
+                    components={"X": [(1, 2, 3)]}, seed=lane
+                )
+                e._lane_progress[lane] = LanePtr(chunk_id=rank, offset=rank * 2)  # type: ignore[index]
+                e._lane_next_cid[lane] = rank + 1  # type: ignore[attr-defined]
+
+        states = [e._state_dict_local() for e in engs]
+        merged = engs[0]._merge_state_dicts(states)
+        assert merged["progress"][0]["chunk_id"] == 0
+        assert merged["progress"][1]["chunk_id"] == 1
+        assert merged["progress"][1]["offset"] == 2
+
+
+# =============================================================================
+# _dedupe_dp_group_peers: direct unit tests on hand-built typed states
+# =============================================================================
+
+
+def _mk_typed_state(
+    *,
+    global_rank: int,
+    dp_group_id: int,
+    lanes: list[int],
+    world_size: int = 4,
+    canonical_replicas: int = 2,
+    dp_degree: int = 2,
+    progress: dict[Any, Any] | None = None,
+    inflight: dict[Any, Any] | None = None,
+    lane_next_cid: dict[Any, Any] | None = None,
+    lane_ws_state: dict[Any, Any] | None = None,
+    replay_cursors: dict[Any, Any] | None = None,
+    epoch_boundaries: dict[Any, Any] | None = None,
+    last_round_id: str | None = "rid-1",
+    checkpoint_reload_count: int = 0,
+) -> EngineStateV1:
+    """Minimal valid EngineStateV1 for testing _dedupe_dp_group_peers in isolation."""
+    if progress is None:
+        progress = {l: {"chunk_id": 0, "offset": 0} for l in lanes}
+    if inflight is None:
+        inflight = {}
+    if lane_next_cid is None:
+        lane_next_cid = dict.fromkeys(lanes, 0)
+    if lane_ws_state is None:
+        lane_ws_state = {l: {"ws": l} for l in lanes}
+    if replay_cursors is None:
+        replay_cursors = dict.fromkeys(lanes)
+    if epoch_boundaries is None:
+        epoch_boundaries = {}
+    return EngineStateV1(
+        world={
+            "canonical_replicas": canonical_replicas,
+            "world_size": world_size,
+            "global_rank": global_rank,
+            "dp_degree": dp_degree,
+            "dp_group_id": dp_group_id,
+        },
+        progress=progress,
+        lane_next_cid=lane_next_cid,
+        lane_ws_state=lane_ws_state,
+        last_round_id=last_round_id,
+        checkpoint_reload_count=checkpoint_reload_count,
+        inflight=inflight,
+        replay_cursors=replay_cursors,
+        epoch_boundaries=epoch_boundaries,
+    )
+
+
+@pytest.fixture
+def dedupe_engine() -> Engine:
+    """Engine instance solely for calling ``_dedupe_dp_group_peers`` — the
+    method uses no instance state, so any engine works as the receiver."""
+    return _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
+
+
+class TestDedupeDpGroupPeers:
+    """Direct unit tests for ``Engine._dedupe_dp_group_peers``."""
+
+    def test_progress_divergence_raises_with_actionable_message(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """Same-DP-group peers with different progress trigger the barrier hint."""
+        rep = _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[0, 1])
+        diverged = _mk_typed_state(
+            global_rank=1,
+            dp_group_id=0,
+            lanes=[0, 1],
+            progress={
+                0: {"chunk_id": 5, "offset": 0},  # rep has chunk_id=0
+                1: {"chunk_id": 0, "offset": 0},
+            },
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            dedupe_engine._dedupe_dp_group_peers([rep, diverged])
+        msg = str(excinfo.value)
+        assert "DP group 0" in msg
+        assert "'progress'" in msg
+        assert "rank 0" in msg and "rank 1" in msg
+        assert "barrier" in msg
+
+    def test_replay_cursors_divergence_raises(self, dedupe_engine: Engine) -> None:
+        """Replay-cursor divergence across same-DP-group peers is also flagged."""
+        rep = _mk_typed_state(
+            global_rank=0,
+            dp_group_id=0,
+            lanes=[0, 1],
+            replay_cursors={0: "cursor-a", 1: "cursor-b"},
+        )
+        diverged = _mk_typed_state(
+            global_rank=1,
+            dp_group_id=0,
+            lanes=[0, 1],
+            replay_cursors={0: "cursor-a", 1: "DIFFERENT"},
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            dedupe_engine._dedupe_dp_group_peers([rep, diverged])
+        assert "'replay_cursors'" in str(excinfo.value)
+
+    def test_production_side_divergence_accepted_rep_wins(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """Same delivery, different prefetch state → dedupe succeeds and the
+        lowest-rank rep's production fields are kept wholesale."""
+        rep = _mk_typed_state(
+            global_rank=0,
+            dp_group_id=0,
+            lanes=[0, 1],
+            inflight={0: {3: {"k": "rep"}}, 1: {}},
+            lane_next_cid={0: 4, 1: 1},
+            epoch_boundaries={0: [2]},
+        )
+        faster_peer = _mk_typed_state(
+            global_rank=1,
+            dp_group_id=0,
+            lanes=[0, 1],
+            inflight={0: {3: {"k": "peer"}, 4: {"k": "peer-extra"}}, 1: {}},
+            lane_next_cid={0: 5, 1: 1},
+            epoch_boundaries={0: [2, 4]},
+        )
+        chosen = dedupe_engine._dedupe_dp_group_peers([rep, faster_peer])
+        assert len(chosen) == 1
+        kept = chosen[0]
+        assert int(kept.world["global_rank"]) == 0
+        # rep's production-side snapshot is preserved verbatim
+        assert kept.inflight == {0: {3: {"k": "rep"}}, 1: {}}
+        assert kept.lane_next_cid == {0: 4, 1: 1}
+        assert kept.epoch_boundaries == {0: [2]}
+
+    def test_disjoint_lane_partitions_not_collapsed(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """``workers_per_rank > 1`` partitions a DP group's lanes across workers;
+        those state files have the same ``dp_group_id`` but disjoint lane sets
+        and must survive dedupe as separate reps."""
+        worker_a = _mk_typed_state(
+            global_rank=0, dp_group_id=0, lanes=[0], canonical_replicas=2
+        )
+        worker_b = _mk_typed_state(
+            global_rank=0, dp_group_id=0, lanes=[1], canonical_replicas=2
+        )
+        chosen = dedupe_engine._dedupe_dp_group_peers([worker_a, worker_b])
+        assert len(chosen) == 2
+        kept_lane_sets = {frozenset(int(k) for k in st.progress) for st in chosen}
+        assert kept_lane_sets == {frozenset({0}), frozenset({1})}
+
+    def test_three_peers_collapse_to_single_rep(self, dedupe_engine: Engine) -> None:
+        """All three TP/PP peers (matching delivery) collapse to the lowest-rank rep."""
+        peers = [
+            _mk_typed_state(global_rank=r, dp_group_id=0, lanes=[0, 1])
+            for r in (0, 1, 2)
+        ]
+        chosen = dedupe_engine._dedupe_dp_group_peers(peers)
+        assert len(chosen) == 1
+        assert int(chosen[0].world["global_rank"]) == 0
+
+    def test_cross_dp_group_peers_preserved(self, dedupe_engine: Engine) -> None:
+        """Peers in different DP groups own disjoint lane sets and survive intact."""
+        dp0_peer = _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[0])
+        dp1_peer = _mk_typed_state(global_rank=1, dp_group_id=1, lanes=[1])
+        chosen = dedupe_engine._dedupe_dp_group_peers([dp0_peer, dp1_peer])
+        assert len(chosen) == 2
+        kept_dp_ids = {int(st.world["dp_group_id"]) for st in chosen}
+        assert kept_dp_ids == {0, 1}
+
+    def test_universal_field_divergence_caught_before_dedupe(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """Cross-shard global-invariant checks in ``_merge_state_dicts`` run
+        BEFORE dedupe, so divergence in a universal field between same-DP-group
+        peers is surfaced rather than masked by dropping the divergent peer."""
+        rep = _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[0, 1])
+        diverged = _mk_typed_state(
+            global_rank=1, dp_group_id=0, lanes=[0, 1], last_round_id="DIFFERENT"
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            dedupe_engine._merge_state_dicts([rep.to_dict(), diverged.to_dict()])
+        assert "last_round_id mismatch" in str(excinfo.value)

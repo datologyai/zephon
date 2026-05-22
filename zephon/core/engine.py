@@ -176,6 +176,14 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
 DEFAULT_RUN_ID = "default_run_id"
 _RELOAD_SUFFIX = re.compile(r"-(\d+)$")
 
+# Per-rank state-dict fields that must be dict-equal across same-DP-group,
+# same-owned-lane-set peers at checkpoint time — the caller is expected to
+# barrier all ranks (e.g. torch.distributed.barrier()) before
+# pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
+# lane_ws_state, epoch_boundaries) may legitimately differ across peers due
+# to async prefetch and are taken wholesale from one representative.
+_DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors")
+
 
 @dataclass
 class RuntimeOptions:
@@ -1977,31 +1985,41 @@ class Engine:
         merged_path = self._merged_file_path(round_id)
         if is_leader:
             expected_lanes = set(range(int(self._world.canonical_replicas)))
+            expected_ranks = set(range(int(self._world.world_size)))
             seen: dict[str, dict[str, Any]] = {}
             covered: set[int] = set()
 
             def _have_full_coverage() -> bool:
                 self._read_states_for_round(round_id, seen=seen, covered=covered)
-                return bool(seen) and expected_lanes.issubset(covered)
+                ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
+                return ranks_seen == expected_ranks and expected_lanes.issubset(covered)
 
             if not self._wait_until(_have_full_coverage, self._agg_timeout_s):
-                missing = sorted(expected_lanes - covered)
+                ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
+                missing_ranks = sorted(expected_ranks - ranks_seen)
+                missing_lanes = sorted(expected_lanes - covered)
                 raise RuntimeError(
-                    f"[PID {os.getpid()}] Aggregation timeout after {self._agg_timeout_s}s. "
-                    + f"Missing lanes={missing}; files={len(self._list_state_files(round_id))}"
+                    f"[PID {os.getpid()}] Aggregation timeout after "
+                    f"{self._agg_timeout_s}s. Missing ranks={missing_ranks}; "
+                    f"missing lanes={missing_lanes}; "
+                    f"files={len(self._list_state_files(round_id))}"
                 )
 
             # States already cached from polling above.
             merged = self._merge_state_dicts(list(seen.values()))
             assert not self._agg_backend.exists(merged_path)
-            self._agg_backend.put(merged_path, self._agg_codec.encode(merged))
+            merged_bytes = self._agg_codec.encode(merged)
+            self._agg_backend.put(merged_path, merged_bytes)
+            # Roundtrip so the leader's return value is byte-identical to
+            # what followers read back (json would otherwise stringify keys).
+            merged = self._agg_codec.decode(merged_bytes)
             self._agg_backend.delete(my_path)
             if self._previous_merged_file is not None:
                 self._agg_backend.delete(self._previous_merged_file)
             self._previous_merged_file = merged_path
-            self._agg_backend.delete(
-                self._round_file
-            )  # can also clean this up since we know everybody consumed it.
+            # Safe: by the coverage check above every rank has already read
+            # round.current and is now waiting on merged_path.
+            self._agg_backend.delete(self._round_file)
             return merged
 
         # Followers: wait for merged file
@@ -2018,8 +2036,62 @@ class Engine:
             raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
         return merged
 
+    def _dedupe_dp_group_peers(
+        self, states: list[EngineStateV1]
+    ) -> list[EngineStateV1]:
+        """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
+
+        Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
+        group owns the same canonical lanes and writes a state file; their
+        lane-keyed entries would collide in the downstream merge. One rep
+        per ``(dp_group_id, owned-lane-set)`` group survives, with
+        ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
+
+        Operates on typed ``EngineStateV1`` so callers can run schema
+        migration and cross-shard global-invariant checks BEFORE dedupe —
+        otherwise a divergence in a universal field (``world.world_size``,
+        ``last_round_id``, ``checkpoint_reload_count``) between same-DP-group
+        peers would be silently hidden when peers are dropped.
+
+        Why the lane-set component (not just ``dp_group_id``): with
+        ``workers_per_rank > 1`` multiple DataLoader workers on the same
+        rank split their DP group's lanes into disjoint subsets (see
+        ``_owned_lanes``); those state files are complementary partitions,
+        not duplicates, and must not be collapsed. At
+        ``workers_per_rank=1`` the lane-set is redundant and grouping
+        collapses to ``dp_group_id``.
+        """
+        groups: dict[tuple[int, frozenset[int]], list[EngineStateV1]] = {}
+        for st in states:
+            dp_id = int(st.world["dp_group_id"])
+            lane_set = frozenset(int(k) for k in st.progress)
+            groups.setdefault((dp_id, lane_set), []).append(st)
+
+        chosen: list[EngineStateV1] = []
+        for (dp_id, lane_set), group in groups.items():
+            # Deterministic representative: lowest global_rank wins.
+            rep = min(group, key=lambda st: int(st.world["global_rank"]))
+            for st in group:
+                if st is rep:
+                    continue
+                for fname in _DELIVERY_SYNCED_FIELDS:
+                    if getattr(st, fname) != getattr(rep, fname):
+                        raise RuntimeError(
+                            f"DP group {dp_id} delivery-state divergence on "
+                            f"{fname!r} (lanes={sorted(lane_set)}) between rank "
+                            f"{int(rep.world['global_rank'])} and rank "
+                            f"{int(st.world['global_rank'])}. Did all ranks "
+                            f"barrier before calling pipe.checkpoint()?"
+                        )
+            chosen.append(rep)
+        return chosen
+
     def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
         assert states
+        # Load + migrate every shard up front. Same-DP-group peer dedupe runs
+        # AFTER the cross-shard global-invariant checks below; otherwise a
+        # divergence in a universal field between same-DP-group peers would
+        # be silently dropped together with the peer.
         typed = [EngineStateV1.load(s) for s in states]
         errors: list[str] = []
 
@@ -2043,6 +2115,29 @@ class Engine:
                         f"states[{idx}].world.world_size={n} mismatches "
                         f"previously-seen={merged_world_size}"
                     )
+
+        last_round_ids = {st.last_round_id for st in typed}
+        if len(last_round_ids) != 1:
+            errors.append(f"last_round_id mismatch across shards: {last_round_ids!r}")
+
+        checkpoint_reload_counts = {st.checkpoint_reload_count for st in typed}
+        if len(checkpoint_reload_counts) != 1:
+            errors.append(
+                f"checkpoint_reload_count mismatch across shards: "
+                f"{checkpoint_reload_counts!r}"
+            )
+
+        # Fail fast on universal-field divergence so it isn't masked by dedupe
+        # dropping the divergent peer.
+        if errors:
+            raise RuntimeError(
+                f"cannot merge {len(states)} aggregation state shards:\n  - "
+                + "\n  - ".join(errors)
+            )
+        merged_last_round_id = next(iter(last_round_ids))
+        merged_reload_count = next(iter(checkpoint_reload_counts))
+
+        typed = self._dedupe_dp_group_peers(typed)
 
         inflight, progress, lane_next, lane_ws_state = {}, {}, {}, {}
         for idx, st in enumerate(typed):
@@ -2084,16 +2179,6 @@ class Engine:
                 lane_ws_state[lane] = ws
 
         work_config = next((st.work_config for st in typed if st.work_config), None)
-        last_round_ids = {st.last_round_id for st in typed}
-        if len(last_round_ids) != 1:
-            errors.append(f"last_round_id mismatch across shards: {last_round_ids!r}")
-
-        checkpoint_reload_counts = {st.checkpoint_reload_count for st in typed}
-        if len(checkpoint_reload_counts) != 1:
-            errors.append(
-                f"checkpoint_reload_count mismatch across shards: "
-                f"{checkpoint_reload_counts!r}"
-            )
 
         rr_next_idx: dict[str, int] = {}
         for idx, st in enumerate(typed):
@@ -2142,8 +2227,8 @@ class Engine:
             lane_next_cid=lane_next,
             work_config=work_config,
             lane_ws_state=lane_ws_state,
-            last_round_id=list(last_round_ids)[0],
-            checkpoint_reload_count=list(checkpoint_reload_counts)[0],
+            last_round_id=merged_last_round_id,
+            checkpoint_reload_count=merged_reload_count,
             rr_next_idx=rr_next_idx,
             replay_cursors=replay_cursors,
             epoch_boundaries=epoch_boundaries,

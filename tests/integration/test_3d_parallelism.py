@@ -13,9 +13,13 @@ Key invariants tested:
 4. Checkpoint/resume works correctly with 3D parallelism
 """
 
+import multiprocessing as mp
 import os
 import tempfile
+import time
+import traceback
 from pathlib import Path
+from queue import Empty
 from typing import Any
 
 import pytest
@@ -338,99 +342,101 @@ class TestLaneAssignment:
 
 
 class TestElastic3DParallelism:
-    """Test checkpoint/resume with 3D parallelism configurations.
+    """Checkpoint and resume across 3D-parallelism configurations.
 
-    Note: Single-process checkpoint tests use dp_degree=1 so the single process
-    owns all lanes (required for checkpoint aggregation to succeed). The 3D
-    aspect (world_size > dp_degree) is validated via configuration checks.
+    Each test spawns the declared ``world_size`` ranks as separate
+    processes so the multi-rank aggregation path is actually exercised.
+    The ``dp_degree=1`` cases verify that all peers in the single DP
+    group resume to identical state.
     """
 
     @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
     def test_resume_same_config(self, tmp_path: Path, mtp_mode: bool) -> None:
         """Checkpoint and resume with identical config reproduces baseline.
 
-        Uses dp_degree=1 so single process owns all lanes for aggregation.
-        world_size=4 means mp_degree=4 (simulates 3D with TP/PP=4).
+        ``dp_degree=1`` with ``world_size=4`` means every rank shares
+        ``dp_group_id=0`` and owns the same canonical lanes. Each of the
+        4 spawned ranks runs the full prefix → checkpoint → restore → suffix
+        cycle; every rank's ``prefix + suffix`` must equal the baseline.
         """
-        ds = make_dataset("a", 64)
+        ds_name = "a"
+        ds_sample_count = 64
         chunk_size = 8
         n_total = 24
         n_prefix = 12
+        world_size = 4
 
-        kw = dict(mtp_mode=mtp_mode)
-        # Baseline: full run (dp_degree=1 -> owns all lanes)
+        # Baseline materializes the deterministic per-rank sample order;
+        # ``mtp_mode`` is unconditionally False because the multi-rank
+        # aggregation path under test runs in the spawned ranks below.
+        ds = make_dataset(ds_name, ds_sample_count)
         baseline = consume_n(
             _build_pipeline(
                 ds,
                 chunk_size=chunk_size,
                 canonical_replicas=2,
-                world_size=4,
+                world_size=world_size,
                 global_rank=0,
                 dp_degree=1,
                 dp_group_id=0,
-                **kw,
             ),
             n=n_total,
         )
 
-        # Phase 1: consume prefix, checkpoint
-        pipe1 = _build_pipeline(
-            ds,
-            chunk_size=chunk_size,
-            canonical_replicas=2,
-            world_size=4,
-            global_rank=0,
+        # mtp_mode spawns a nested subprocess per rank, so bump the aggregation
+        # timeout to absorb the extra startup latency.
+        aggregate_timeout_s = 30.0 if mtp_mode else 15.0
+        results, errors = _run_consume_checkpoint_resume(
+            world_size=world_size,
             dp_degree=1,
-            dp_group_id=0,
-            aggregate_dir=str(tmp_path),
-            run_id="p1",
-            **kw,
-        )
-        prefix: list[str] = []
-        it1 = iter(pipe1)
-        try:
-            for item in it1:
-                prefix.extend(_extract_texts(item))
-                if len(prefix) >= n_prefix:
-                    break
-            ckpt = pipe1.checkpoint()
-        finally:
-            it1.close()
-        prefix = prefix[:n_prefix]
-
-        assert prefix == baseline[:n_prefix]
-
-        # Phase 2: resume, consume suffix
-        pipe2 = _build_pipeline(
-            ds,
-            chunk_size=chunk_size,
             canonical_replicas=2,
-            world_size=4,
-            global_rank=0,
-            dp_degree=1,
-            dp_group_id=0,
-            aggregate_dir=str(tmp_path),
-            run_id="p2",
-            **kw,
+            chunk_size=chunk_size,
+            n_prefix=n_prefix,
+            n_suffix=n_total - n_prefix,
+            run_id_p1=f"resume_same_config_p1_{int(mtp_mode)}",
+            run_id_p2=f"resume_same_config_p2_{int(mtp_mode)}",
+            agg_dir=str(tmp_path),
+            ds_name=ds_name,
+            ds_sample_count=ds_sample_count,
+            mtp_mode=mtp_mode,
+            aggregate_timeout_s=aggregate_timeout_s,
         )
-        pipe2.restore(ckpt)
 
-        suffix = consume_n(pipe2, n=n_total - n_prefix)
+        assert not errors, (
+            "Rank(s) raised during prefix/checkpoint/resume/suffix: "
+            + "\n".join(f"rank {r}: {msg}\n{tb}" for r, msg, tb in errors)
+        )
+        assert len(results) == world_size
 
-        assert prefix + suffix == baseline
+        for rank, (prefix, suffix) in results.items():
+            assert prefix == baseline[:n_prefix], (
+                f"rank {rank} prefix {prefix} != baseline prefix {baseline[:n_prefix]}"
+            )
+            assert prefix + suffix == baseline, (
+                f"rank {rank} prefix+suffix {prefix + suffix} != baseline {baseline}"
+            )
 
     @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
     def test_resume_different_mp_degree(self, tmp_path: Path, mtp_mode: bool) -> None:
         """Resume with changed world_size (mp_degree) but same dp config.
 
-        Phase 1: world_size=2, dp_degree=1, mp_degree=2
-        Phase 2: world_size=4, dp_degree=1, mp_degree=4
-        """
-        ds = make_dataset("a", 64)
-        chunk_size = 8
+        Phase 1: world_size=2, dp_degree=1 (mp_degree=2) — checkpoint
+        Phase 2: world_size=4, dp_degree=1 (mp_degree=4) — restore and consume
 
-        kw = dict(mtp_mode=mtp_mode)
-        # Baseline for comparison
+        Phase 1 and Phase 2 use different rank counts ⇒ two separate spawn
+        waves; rank 0's Phase-1 merged ckpt is broadcast to every rank in
+        Phase 2 via mp.Queue.
+        """
+        ds_name = "a"
+        ds_sample_count = 64
+        chunk_size = 8
+        n_prefix = 8
+        n_suffix = 8
+
+        # Baseline materializes the deterministic per-rank sample order;
+        # ``mtp_mode`` is unconditionally False because the multi-rank
+        # aggregation path under test runs in the spawned ranks below.
+        ds = make_dataset(ds_name, ds_sample_count)
         baseline = consume_n(
             _build_pipeline(
                 ds,
@@ -440,112 +446,111 @@ class TestElastic3DParallelism:
                 global_rank=0,
                 dp_degree=1,
                 dp_group_id=0,
-                **kw,
             ),
-            n=16,
+            n=n_prefix + n_suffix,
         )
 
-        # Phase 1: world_size=2, mp_degree=2
-        pipe1 = _build_pipeline(
-            ds,
-            chunk_size=chunk_size,
-            canonical_replicas=2,
+        aggregate_timeout_s = 30.0 if mtp_mode else 15.0
+
+        # ---- Wave 1: world_size=2, consume prefix, checkpoint. ----
+        wave1_ckpts, wave1_errors = _run_ranks_and_collect(
             world_size=2,
-            global_rank=0,
             dp_degree=1,
-            dp_group_id=0,
-            aggregate_dir=str(tmp_path),
-            run_id="mp1",
-            **kw,
-        )
-        prefix: list[str] = []
-        it1 = iter(pipe1)
-        try:
-            for item in it1:
-                prefix.extend(_extract_texts(item))
-                if len(prefix) >= 8:
-                    break
-            ckpt = pipe1.checkpoint()
-        finally:
-            it1.close()
-        prefix = prefix[:8]
-
-        # Phase 2: world_size=4, mp_degree=4
-        pipe2 = _build_pipeline(
-            ds,
-            chunk_size=chunk_size,
             canonical_replicas=2,
-            world_size=4,
-            global_rank=0,
-            dp_degree=1,
-            dp_group_id=0,
-            aggregate_dir=str(tmp_path),
-            run_id="mp2",
-            **kw,
-        )
-        pipe2.restore(ckpt)
-
-        suffix = consume_n(pipe2, n=8)
-
-        # Should match baseline exactly
-        assert prefix + suffix == baseline
-
-    @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
-    def test_mp_peers_resume_identically(self, tmp_path: Path, mtp_mode: bool) -> None:
-        """Multiple MP ranks resume to identical state.
-
-        Uses dp_degree=1 for checkpoint. After resume, different global_ranks
-        with same dp_group_id should produce identical output.
-        """
-        ds = make_dataset("a", 64)
-        chunk_size = 8
-
-        # Short aggregate timeout: ranks run sequentially (not in parallel),
-        # so non-leader ranks will always time out waiting for a round file
-        # from a leader that isn't running.  This is harmless — the test only
-        # checks sample identity, not aggregation — but the default 180s
-        # timeout would exceed the pytest timeout.
-        kw = dict(mtp_mode=mtp_mode, aggregate_timeout_s=15)
-        # Checkpoint from rank 0 (dp_degree=1 owns all lanes)
-        pipe1 = _build_pipeline(
-            ds,
             chunk_size=chunk_size,
-            canonical_replicas=2,
-            world_size=4,
-            global_rank=0,
-            dp_degree=1,
-            dp_group_id=0,
-            aggregate_dir=str(tmp_path),
-            run_id="mp_peers",
-            **kw,
+            n_consume=n_prefix,
+            run_id=f"mp_change_p1_{int(mtp_mode)}",
+            agg_dir=str(tmp_path),
+            ds_name=ds_name,
+            ds_sample_count=ds_sample_count,
+            mtp_mode=mtp_mode,
+            aggregate_timeout_s=aggregate_timeout_s,
         )
-        it1 = iter(pipe1)
-        try:
-            for item in it1:
-                break  # Consume 1 item
-            ckpt = pipe1.checkpoint()
-        finally:
-            it1.close()
+        assert not wave1_errors, "Wave 1 rank(s) raised: " + "\n".join(
+            f"rank {r}: {msg}\n{tb}" for r, msg, tb in wave1_errors
+        )
+        assert len(wave1_ckpts) == 2
+        ckpts_by_rank = dict(wave1_ckpts)
+        # All ranks see the same merged ckpt; pick rank 0.
+        ckpt = ckpts_by_rank[0]
 
-        # Resume from different global_ranks (all dp_group_id=0)
-        resumed: list[list[str]] = []
-        for rank in [0, 1, 2, 3]:
+        # ---- Wave 2: world_size=4 restore. No aggregation in Phase 2, so
+        # an in-process loop over the ranks suffices.
+        wave2_world_size = 4
+        suffixes: list[list[str]] = []
+        for rank in range(wave2_world_size):
             pipe = _build_pipeline(
                 ds,
                 chunk_size=chunk_size,
                 canonical_replicas=2,
-                world_size=4,
+                world_size=wave2_world_size,
                 global_rank=rank,
                 dp_degree=1,
                 dp_group_id=0,
-                aggregate_dir=str(tmp_path),
-                run_id=f"mp_peers_r{rank}",
-                **kw,
+            )
+            pipe.restore(ckpt)
+            suffixes.append(consume_n(pipe, n=n_suffix))
+
+        # All ranks share dp_group_id=0 ⇒ identical suffixes; each matches baseline.
+        expected_suffix = baseline[n_prefix:]
+        for rank, suffix in enumerate(suffixes):
+            assert suffix == expected_suffix, (
+                f"rank {rank} suffix {suffix} != expected {expected_suffix}"
+            )
+
+    @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+    def test_mp_peers_resume_identically(self, tmp_path: Path, mtp_mode: bool) -> None:
+        """Peers in the same DP group resume to identical state.
+
+        Phase 1 spawns every declared rank as a separate process to
+        exercise the multi-rank aggregation path (parametrized over
+        ``mtp_mode``). Phase 2 restores the merged checkpoint on each
+        rank in turn and verifies the consumed samples are identical
+        across ranks; it runs inline because no aggregation is involved.
+        """
+        ds_name = "a"
+        ds_sample_count = 64
+        chunk_size = 8
+        world_size = 4
+
+        # Phase 1: spawn all 4 ranks; collect one rank's merged ckpt.
+        aggregate_timeout_s = 30.0 if mtp_mode else 15.0
+        checkpoints, errors = _run_ranks_and_collect(
+            world_size=world_size,
+            dp_degree=1,
+            canonical_replicas=2,
+            chunk_size=chunk_size,
+            n_consume=1,
+            run_id=f"mp_peers_{int(mtp_mode)}",
+            agg_dir=str(tmp_path),
+            ds_name=ds_name,
+            ds_sample_count=ds_sample_count,
+            mtp_mode=mtp_mode,
+            aggregate_timeout_s=aggregate_timeout_s,
+        )
+        assert not errors, "Rank(s) raised during Phase 1: " + "\n".join(
+            f"rank {r}: {msg}\n{tb}" for r, msg, tb in errors
+        )
+        assert len(checkpoints) == world_size
+        ckpts_by_rank = dict(checkpoints)
+        ckpt = ckpts_by_rank[0]
+
+        # Phase 2: sequential in-process restore on each rank's view.
+        ds = make_dataset(ds_name, ds_sample_count)
+        resumed: list[list[str]] = []
+        for rank in range(world_size):
+            pipe = _build_pipeline(
+                ds,
+                chunk_size=chunk_size,
+                canonical_replicas=2,
+                world_size=world_size,
+                global_rank=rank,
+                dp_degree=1,
+                dp_group_id=0,
             )
             pipe.restore(ckpt)
             resumed.append(consume_n(pipe, n=8))
 
-        # All ranks should get identical samples
         for i in range(1, len(resumed)):
             assert resumed[0] == resumed[i], f"Rank {i} differs from rank 0"
 
@@ -670,3 +675,627 @@ class TestFullCoverage:
                     merged.append(per_dp[dp_id][i])
 
         assert merged == truth, "Merged 3D output differs from single-rank truth"
+
+
+# =============================================================================
+# Multi-process checkpoint aggregation under model parallelism
+# =============================================================================
+#
+# These tests pin the multi-rank aggregation contract under 3D parallelism
+# (DP × TP/PP): the leader must merge per-rank state files into a single
+# consistent checkpoint that every rank observes identically.
+#
+# The interesting regime is ``dp_degree >= 2 AND world_size > dp_degree``
+# (at ``workers_per_rank=1``, the default for raw zephon without a
+# DataLoader). Ranks sharing a ``dp_group_id`` own the *same* canonical
+# lanes, so each writes a state file with lane-keyed entries that overlap
+# its peers'. The merge must collapse those peer files into one
+# representative per group before the lane-uniqueness invariant fires; the
+# unit-level repro lives in
+# ``tests/zephon/core/test_engine_extras.py::TestMergeStateDictsSharedDPGroup``.
+#
+# At ``dp_degree == 1`` the regime is different — every rank in the single
+# DP group owns every canonical lane, so the leader's own state file
+# already satisfies the lane-coverage half of the wait. The leader still
+# has to wait for every follower to commit a state file before deleting
+# ``round.current``; that branch is exercised by
+# ``TestFollowerObservesMergedCheckpoint`` below.
+# =============================================================================
+
+
+def _aggregate_worker(
+    rank: int,
+    *,
+    world_size: int,
+    dp_degree: int,
+    dp_group_id: int,
+    canonical_replicas: int,
+    chunk_size: int,
+    n_consume: int,
+    run_id: str,
+    agg_dir: str,
+    ds_name: str,
+    ds_sample_count: int,
+    ckpt_q: "mp.Queue",
+    err_q: "mp.Queue",
+    start_barrier: "mp.Barrier",
+    ckpt_barrier: "mp.Barrier",
+    mtp_mode: bool = False,
+    aggregate_timeout_s: float = 15.0,
+) -> None:
+    """Subprocess body: build pipe, consume some samples, checkpoint at barrier."""
+    try:
+        ds = make_dataset(ds_name, ds_sample_count)
+        pipe = _build_pipeline(
+            ds,
+            chunk_size=chunk_size,
+            canonical_replicas=canonical_replicas,
+            world_size=world_size,
+            global_rank=rank,
+            dp_degree=dp_degree,
+            dp_group_id=dp_group_id,
+            aggregate_dir=agg_dir,
+            aggregate_timeout_s=aggregate_timeout_s,
+            run_id=run_id,
+            mtp_mode=mtp_mode,
+        )
+
+        # Synchronize start so all ranks build their engines concurrently.
+        start_barrier.wait(timeout=60.0)
+
+        it = iter(pipe)
+        try:
+            consumed = 0
+            for item in it:
+                consumed += len(_extract_texts(item))
+                if consumed >= n_consume:
+                    break
+            ckpt_barrier.wait(timeout=60.0)
+            ckpt = pipe.checkpoint()
+            ckpt_q.put((rank, ckpt))
+        finally:
+            # Re-wait on ckpt_barrier as a done-barrier: without it the
+            # leader can exit and trigger Engine.__del__ -> _clean_merged
+            # (deleting merged_<rid>.ckpt) before followers read it.
+            try:
+                ckpt_barrier.wait(timeout=60.0)
+            except Exception:
+                pass
+            try:
+                it.close()
+            except Exception:
+                pass
+    except BaseException as e:  # noqa: BLE001 — must surface any failure
+        err_q.put((rank, repr(e), traceback.format_exc()))
+
+
+def _run_ranks_and_collect(
+    *,
+    world_size: int,
+    dp_degree: int,
+    canonical_replicas: int,
+    chunk_size: int,
+    n_consume: int,
+    run_id: str,
+    agg_dir: str,
+    ds_name: str = "a",
+    ds_sample_count: int = 64,
+    timeout_s: float = 120.0,
+    mtp_mode: bool = False,
+    aggregate_timeout_s: float = 15.0,
+) -> tuple[list[tuple[int, Any]], list[tuple[int, str, str]]]:
+    """Spawn ``world_size`` rank workers, sync them, collect checkpoints/errors.
+
+    Returns ``(checkpoints, errors)`` where ``checkpoints`` is a list of
+    ``(rank, ckpt)`` and ``errors`` is a list of ``(rank, repr, traceback)``.
+    """
+    ctx = mp.get_context("spawn")
+    ckpt_q: mp.Queue = ctx.Queue()
+    err_q: mp.Queue = ctx.Queue()
+    start_barrier = ctx.Barrier(world_size)
+    ckpt_barrier = ctx.Barrier(world_size)
+
+    procs: list[mp.Process] = []
+    for rank in range(world_size):
+        # Contiguous rank → dp_group mapping (matches StaticMixture default).
+        ranks_per_dp = world_size // dp_degree
+        dp_group_id = rank // ranks_per_dp
+        p = ctx.Process(
+            target=_aggregate_worker,
+            args=(rank,),
+            kwargs=dict(
+                world_size=world_size,
+                dp_degree=dp_degree,
+                dp_group_id=dp_group_id,
+                canonical_replicas=canonical_replicas,
+                chunk_size=chunk_size,
+                n_consume=n_consume,
+                run_id=run_id,
+                agg_dir=agg_dir,
+                ds_name=ds_name,
+                ds_sample_count=ds_sample_count,
+                ckpt_q=ckpt_q,
+                err_q=err_q,
+                start_barrier=start_barrier,
+                ckpt_barrier=ckpt_barrier,
+                mtp_mode=mtp_mode,
+                aggregate_timeout_s=aggregate_timeout_s,
+            ),
+            daemon=False,
+        )
+        p.start()
+        procs.append(p)
+
+    checkpoints: list[tuple[int, Any]] = []
+    errors: list[tuple[int, str, str]] = []
+    deadline = time.monotonic() + timeout_s
+    try:
+        # Drain both queues until every rank has reported (either ckpt or error)
+        # or any process has crashed without sending anything.
+        while (
+            len(checkpoints) + len(errors) < world_size and time.monotonic() < deadline
+        ):
+            got = False
+            try:
+                checkpoints.append(ckpt_q.get(timeout=1.0))
+                got = True
+            except Empty:
+                pass
+            try:
+                errors.append(err_q.get_nowait())
+                got = True
+            except Empty:
+                pass
+            if not got:
+                dead = [
+                    (p.pid, p.exitcode)
+                    for p in procs
+                    if not p.is_alive() and p.exitcode not in (None, 0)
+                ]
+                if dead and (len(checkpoints) + len(errors)) < world_size:
+                    # Give a dying process a chance to drain its error queue.
+                    try:
+                        errors.append(err_q.get(timeout=5.0))
+                        continue
+                    except Empty:
+                        errors.append((-1, f"process(es) died: {dead}", ""))
+                        break
+            if not any(p.is_alive() for p in procs):
+                # All processes exited — drain queues and stop.
+                try:
+                    while True:
+                        checkpoints.append(ckpt_q.get_nowait())
+                except Empty:
+                    pass
+                try:
+                    while True:
+                        errors.append(err_q.get_nowait())
+                except Empty:
+                    pass
+                break
+        if len(checkpoints) + len(errors) < world_size:
+            still_alive = [
+                (rank, p.pid) for rank, p in enumerate(procs) if p.is_alive()
+            ]
+            reason = (
+                f"collector deadline of {timeout_s}s elapsed"
+                if still_alive
+                else "all ranks exited without reporting"
+            )
+            errors.append(
+                (
+                    -1,
+                    f"{reason}; got {len(checkpoints)} ckpts, "
+                    f"{len(errors)} errors; still alive (rank, pid): {still_alive}",
+                    "",
+                )
+            )
+    finally:
+        for p in procs:
+            p.join(timeout=timeout_s)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5.0)
+
+    return checkpoints, errors
+
+
+class TestCheckpointAggregation3D:
+    """End-to-end multi-process checkpoint aggregation under model parallelism.
+
+    These tests live in their own class so they can be filtered with
+    ``-k Aggregation3D`` when iterating on the fix.
+    """
+
+    @pytest.mark.parametrize(
+        ("world_size", "dp_degree", "canonical_replicas"),
+        [
+            # dp >= 2 with world_size > dp_degree: leader has to wait for
+            # other DP groups, so its same-DP-group peers' files get picked up
+            # before the merge → duplicate-inflight reliably fires.
+            pytest.param(4, 2, 2, id="dp2-tp2"),  # 2 peers per DP group
+            pytest.param(6, 2, 2, id="dp2-tp3"),  # 3 peers per DP group
+            pytest.param(8, 4, 4, id="dp4-tp2"),  # 2 peers, 4 DP groups
+        ],
+    )
+    def test_checkpoint_aggregates_with_model_parallelism(
+        self,
+        tmp_path: Path,
+        world_size: int,
+        dp_degree: int,
+        canonical_replicas: int,
+    ) -> None:
+        """All ranks call checkpoint() concurrently → merged state is consistent.
+
+        With ``world_size > dp_degree``, multiple ranks share a ``dp_group_id``
+        and own the same canonical lanes. The leader must produce a single
+        consistent merged checkpoint, and every rank (leader and follower)
+        must observe it.
+        """
+        checkpoints, errors = _run_ranks_and_collect(
+            world_size=world_size,
+            dp_degree=dp_degree,
+            canonical_replicas=canonical_replicas,
+            chunk_size=4,
+            n_consume=8,
+            run_id=f"agg3d_w{world_size}_dp{dp_degree}",
+            agg_dir=str(tmp_path),
+        )
+
+        # Every rank must have produced a checkpoint, none should have errored.
+        assert not errors, "Rank(s) raised during checkpoint aggregation: " + "\n".join(
+            f"rank {r}: {msg}\n{tb}" for r, msg, tb in errors
+        )
+        assert len(checkpoints) == world_size, (
+            f"Expected {world_size} checkpoints, got {len(checkpoints)}"
+        )
+
+        # Every rank should observe the *same* merged checkpoint.
+        ckpts_by_rank = dict(checkpoints)
+        ranks_sorted = sorted(ckpts_by_rank)
+        ref = ckpts_by_rank[ranks_sorted[0]]
+        for r in ranks_sorted[1:]:
+            assert ckpts_by_rank[r] == ref, (
+                f"Rank {r} merged checkpoint diverges from rank {ranks_sorted[0]}"
+            )
+
+        # Merged checkpoint must cover every canonical lane exactly once.
+        inflight_lanes = {int(k) for k in ref.get("inflight", {}).keys()}
+        progress_lanes = {int(k) for k in ref.get("progress", {}).keys()}
+        expected_lanes = set(range(canonical_replicas))
+        assert progress_lanes == expected_lanes, (
+            f"Merged progress covers lanes {progress_lanes}, expected {expected_lanes}"
+        )
+        # inflight may legitimately be a subset (e.g., all chunks already drained)
+        assert inflight_lanes.issubset(expected_lanes), (
+            f"Merged inflight has unexpected lanes: {inflight_lanes - expected_lanes}"
+        )
+
+        # Cross-rank value consistency: every rank's merged ckpt must agree
+        # on the per-lane progress chunk_id/offset and lane_next_cid. (The
+        # dict-equality assertion above already implies this, but a focused
+        # check pinpoints lane-keyed value drift if it ever resurfaces.)
+        ref_progress = {int(k): v for k, v in ref.get("progress", {}).items()}
+        ref_lane_next = {
+            int(k): int(v) for k, v in ref.get("lane_next_cid", {}).items()
+        }
+        for r in ranks_sorted[1:]:
+            other = ckpts_by_rank[r]
+            other_progress = {int(k): v for k, v in other.get("progress", {}).items()}
+            other_lane_next = {
+                int(k): int(v) for k, v in other.get("lane_next_cid", {}).items()
+            }
+            assert other_progress == ref_progress, (
+                f"Rank {r} progress values diverge from rank {ranks_sorted[0]}"
+            )
+            assert other_lane_next == ref_lane_next, (
+                f"Rank {r} lane_next_cid values diverge from rank {ranks_sorted[0]}"
+            )
+
+
+def _consume_then_checkpoint_worker(
+    rank: int,
+    *,
+    world_size: int,
+    dp_degree: int,
+    dp_group_id: int,
+    canonical_replicas: int,
+    chunk_size: int,
+    n_prefix: int,
+    n_suffix: int,
+    run_id_p1: str,
+    run_id_p2: str,
+    agg_dir: str,
+    ds_name: str,
+    ds_sample_count: int,
+    out_q: "mp.Queue",
+    err_q: "mp.Queue",
+    start_barrier: "mp.Barrier",
+    ckpt_barrier: "mp.Barrier",
+    resume_barrier: "mp.Barrier",
+    mtp_mode: bool = False,
+    aggregate_timeout_s: float = 15.0,
+) -> None:
+    """Subprocess body for the resume-after-aggregate test."""
+    try:
+        ds = make_dataset(ds_name, ds_sample_count)
+        pipe1 = _build_pipeline(
+            ds,
+            chunk_size=chunk_size,
+            canonical_replicas=canonical_replicas,
+            world_size=world_size,
+            global_rank=rank,
+            dp_degree=dp_degree,
+            dp_group_id=dp_group_id,
+            aggregate_dir=agg_dir,
+            aggregate_timeout_s=aggregate_timeout_s,
+            run_id=run_id_p1,
+            mtp_mode=mtp_mode,
+        )
+
+        start_barrier.wait(timeout=60.0)
+        prefix: list[str] = []
+        it1 = iter(pipe1)
+        try:
+            for item in it1:
+                prefix.extend(_extract_texts(item))
+                if len(prefix) >= n_prefix:
+                    break
+            ckpt_barrier.wait(timeout=60.0)
+            ckpt = pipe1.checkpoint()
+        finally:
+            try:
+                it1.close()
+            except Exception:
+                pass
+        prefix = prefix[:n_prefix]
+
+        # Phase 2: resume from merged checkpoint, consume suffix.
+        pipe2 = _build_pipeline(
+            ds,
+            chunk_size=chunk_size,
+            canonical_replicas=canonical_replicas,
+            world_size=world_size,
+            global_rank=rank,
+            dp_degree=dp_degree,
+            dp_group_id=dp_group_id,
+            aggregate_dir=agg_dir,
+            aggregate_timeout_s=aggregate_timeout_s,
+            run_id=run_id_p2,
+            mtp_mode=mtp_mode,
+        )
+        pipe2.restore(ckpt)
+        resume_barrier.wait(timeout=60.0)
+        suffix = consume_n(pipe2, n=n_suffix)
+
+        out_q.put((rank, prefix, suffix))
+    except BaseException as e:  # noqa: BLE001
+        err_q.put((rank, repr(e), traceback.format_exc()))
+
+
+def _run_consume_checkpoint_resume(
+    *,
+    world_size: int,
+    dp_degree: int,
+    canonical_replicas: int,
+    chunk_size: int,
+    n_prefix: int,
+    n_suffix: int,
+    run_id_p1: str,
+    run_id_p2: str,
+    agg_dir: str,
+    ds_name: str = "a",
+    ds_sample_count: int = 64,
+    mtp_mode: bool = False,
+    aggregate_timeout_s: float = 15.0,
+    collect_timeout_s: float = 180.0,
+) -> tuple[
+    dict[int, tuple[list[str], list[str]]],
+    list[tuple[int, str, str]],
+]:
+    """Spawn ``world_size`` ranks of ``_consume_then_checkpoint_worker``.
+
+    Returns ``(results, errors)`` where ``results`` maps rank →
+    ``(prefix, suffix)``. Workers are joined inside a ``finally`` block.
+    """
+    ctx = mp.get_context("spawn")
+    out_q: mp.Queue = ctx.Queue()
+    err_q: mp.Queue = ctx.Queue()
+    start_barrier = ctx.Barrier(world_size)
+    ckpt_barrier = ctx.Barrier(world_size)
+    resume_barrier = ctx.Barrier(world_size)
+    ranks_per_dp = world_size // dp_degree
+
+    procs: list[mp.Process] = []
+    for rank in range(world_size):
+        dp_group_id = rank // ranks_per_dp
+        p = ctx.Process(
+            target=_consume_then_checkpoint_worker,
+            args=(rank,),
+            kwargs=dict(
+                world_size=world_size,
+                dp_degree=dp_degree,
+                dp_group_id=dp_group_id,
+                canonical_replicas=canonical_replicas,
+                chunk_size=chunk_size,
+                n_prefix=n_prefix,
+                n_suffix=n_suffix,
+                run_id_p1=run_id_p1,
+                run_id_p2=run_id_p2,
+                agg_dir=agg_dir,
+                ds_name=ds_name,
+                ds_sample_count=ds_sample_count,
+                out_q=out_q,
+                err_q=err_q,
+                start_barrier=start_barrier,
+                ckpt_barrier=ckpt_barrier,
+                resume_barrier=resume_barrier,
+                mtp_mode=mtp_mode,
+                aggregate_timeout_s=aggregate_timeout_s,
+            ),
+            daemon=False,
+        )
+        p.start()
+        procs.append(p)
+
+    results: dict[int, tuple[list[str], list[str]]] = {}
+    errors: list[tuple[int, str, str]] = []
+    deadline = time.monotonic() + collect_timeout_s
+    try:
+        received = 0
+        while received < world_size and time.monotonic() < deadline:
+            try:
+                rank, prefix, suffix = out_q.get(timeout=1.0)
+                results[rank] = (prefix, suffix)
+                received += 1
+                continue
+            except Empty:
+                pass
+            try:
+                errors.append(err_q.get_nowait())
+                received += 1
+                continue
+            except Empty:
+                pass
+            if all(not p.is_alive() for p in procs):
+                break
+    finally:
+        for p in procs:
+            p.join(timeout=30.0)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5.0)
+
+    return results, errors
+
+
+class TestResumeAfterAggregation3D:
+    """Resume-after-merged-checkpoint under model parallelism.
+
+    Even if ``_merge_state_dicts`` were patched to ignore duplicates, the
+    *resume path* could still corrupt state if same-DP-group peers don't
+    observe identical aggregated state on reload. These tests pin the full
+    round-trip.
+    """
+
+    @pytest.mark.parametrize(
+        ("world_size", "dp_degree", "canonical_replicas"),
+        [
+            # Both configs require dp_degree >= 2 — see precondition note above
+            # TestCheckpointAggregation3D.
+            pytest.param(4, 2, 2, id="dp2-tp2"),
+            pytest.param(8, 4, 4, id="dp4-tp2"),
+        ],
+    )
+    def test_prefix_plus_suffix_equals_baseline_under_model_parallelism(
+        self,
+        tmp_path: Path,
+        world_size: int,
+        dp_degree: int,
+        canonical_replicas: int,
+    ) -> None:
+        """For each DP group, prefix+suffix from a checkpointed run equals the
+        baseline samples consumed in one shot."""
+        ds_name = "agg3d_resume"
+        ds_sample_count = 64
+        chunk_size = 4
+        n_prefix = 8
+        n_suffix = 8
+
+        # ---- Baseline: single-process per DP group, no checkpoint ----
+        ds = make_dataset(ds_name, ds_sample_count)
+        ranks_per_dp = world_size // dp_degree
+        baseline_per_dp: dict[int, list[str]] = {}
+        for dp_id in range(dp_degree):
+            # Pick the lowest-numbered rank in that DP group as the baseline runner.
+            rep_rank = dp_id * ranks_per_dp
+            baseline_per_dp[dp_id] = consume_n(
+                _build_pipeline(
+                    ds,
+                    chunk_size=chunk_size,
+                    canonical_replicas=canonical_replicas,
+                    world_size=world_size,
+                    global_rank=rep_rank,
+                    dp_degree=dp_degree,
+                    dp_group_id=dp_id,
+                ),
+                n=n_prefix + n_suffix,
+            )
+
+        # ---- Multi-process: prefix → checkpoint → resume → suffix ----
+        results, errors = _run_consume_checkpoint_resume(
+            world_size=world_size,
+            dp_degree=dp_degree,
+            canonical_replicas=canonical_replicas,
+            chunk_size=chunk_size,
+            n_prefix=n_prefix,
+            n_suffix=n_suffix,
+            run_id_p1=f"resume3d_p1_w{world_size}_dp{dp_degree}",
+            run_id_p2=f"resume3d_p2_w{world_size}_dp{dp_degree}",
+            agg_dir=str(tmp_path),
+            ds_name=ds_name,
+            ds_sample_count=ds_sample_count,
+        )
+
+        assert not errors, (
+            "Rank(s) raised during prefix/checkpoint/resume/suffix: "
+            + "\n".join(f"rank {r}: {msg}\n{tb}" for r, msg, tb in errors)
+        )
+        assert len(results) == world_size
+
+        # Every rank in a DP group must agree with the baseline for that group.
+        for rank, (prefix, suffix) in results.items():
+            dp_id = rank // ranks_per_dp
+            expected = baseline_per_dp[dp_id]
+            assert prefix + suffix == expected, (
+                f"rank {rank} (dp_group {dp_id}): prefix+suffix {prefix + suffix} "
+                f"!= baseline {expected}"
+            )
+
+
+# =============================================================================
+# dp=1, mp>1 follower must observe the leader's merged checkpoint
+# =============================================================================
+#
+# At ``dp_degree == 1`` the leader's own state file already covers every
+# canonical lane on the very first coverage poll. Without the
+# every-rank-reports-in coverage requirement, the leader could race
+# through merge + ``round.current`` cleanup before a slow follower had
+# even read ``round.current`` — leaving the follower unable to learn
+# ``round_id`` and timing out, even though the merged ckpt is on disk.
+#
+# The leader must wait until every declared rank has committed a state
+# file (so every follower has already learned ``round_id`` and is now
+# blocked on the merged ckpt) before cleaning up ``round.current``.
+# =============================================================================
+
+
+class TestFollowerObservesMergedCheckpoint:
+    """Followers in a ``dp_degree=1, mp_degree>1`` round still observe the
+    leader's merged checkpoint when their ``checkpoint()`` call lands after
+    the leader has finished merging and removed ``round.current``."""
+
+    def test_dp1_tp2_follower_returns_same_merged_ckpt(self, tmp_path: Path) -> None:
+        """``world_size=2, dp_degree=1``: both ranks return the same merged
+        checkpoint even when the follower's poll arrives after the leader's
+        cleanup."""
+        checkpoints, errors = _run_ranks_and_collect(
+            world_size=2,
+            dp_degree=1,
+            canonical_replicas=2,
+            chunk_size=4,
+            n_consume=4,
+            run_id="follower_recovery_dp1_tp2",
+            agg_dir=str(tmp_path),
+        )
+
+        assert not errors, "Rank(s) raised during checkpoint: " + "\n".join(
+            f"rank {r}: {msg}\n{tb}" for r, msg, tb in errors
+        )
+        assert len(checkpoints) == 2
+        ckpts_by_rank = dict(checkpoints)
+        assert ckpts_by_rank[0] == ckpts_by_rank[1], (
+            "Follower must observe the same merged checkpoint as the leader"
+        )
