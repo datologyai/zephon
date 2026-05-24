@@ -56,6 +56,12 @@ class Dataset:
         - ``"mds"`` directories containing ``index.json`` structured with ``shards``
         - ``"jsonl"`` directories where ``*.jsonl`` files act as shards
 
+        Special URI schemes:
+        - ``"hf://org/name[@rev]/[config/]split"`` is served through the
+          :class:`zephon.io.storage.hf.HFBackend`, which streams parquet
+          shards just-in-time via the HuggingFace Datasets Server. See
+          :func:`zephon.io.storage._hf_uri.parse_hf_uri` for the URI grammar.
+
         Returns:
             Dataset: a descriptor populated with shard counts and backend
             metadata for later IO.

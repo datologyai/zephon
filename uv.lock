@@ -5118,6 +5118,10 @@ docs = [
     { name = "sphinx", version = "9.1.0", source = { registry = "https://api.pyx.dev/simple/pypi" }, marker = "python_full_version >= '3.12'" },
     { name = "sphinx-copybutton" },
 ]
+hf = [
+    { name = "huggingface-hub" },
+    { name = "pyarrow" },
+]
 litdata = [
     { name = "litdata" },
     { name = "optree" },
@@ -5173,6 +5177,7 @@ test = [
 requires-dist = [
     { name = "cloudpickle", specifier = ">=1.6.0" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2023.0.0" },
+    { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=0.20.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
     { name = "mosaicml-streaming", marker = "extra == 'streaming'" },
     { name = "msgpack", specifier = ">=1.0.0" },
@@ -5188,13 +5193,14 @@ requires-dist = [
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.52.1" },
     { name = "wrapt", specifier = ">=1.11.0" },
+    { name = "zephon", extras = ["parquet"], marker = "extra == 'hf'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mds'" },
     { name = "zephon", extras = ["streaming"], marker = "extra == 'mosaic'" },
     { name = "zstd", specifier = ">=1.5.0" },
     { name = "zstd", marker = "extra == 'litdata'" },
     { name = "zstd", marker = "extra == 'streaming'" },
 ]
-provides-extras = ["parquet", "vortex", "cloud", "litdata", "streaming", "mosaic", "mds", "ray", "docs"]
+provides-extras = ["parquet", "vortex", "cloud", "litdata", "streaming", "mosaic", "mds", "hf", "ray", "docs"]
 
 [package.metadata.requires-dev]
 dev = [

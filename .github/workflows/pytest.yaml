@@ -46,8 +46,10 @@ jobs:
         set -ex
         if [[ "${{ matrix.python_version }}" == *"t" ]]; then
           # Free-threaded Python: skip test group (mosaicml-streaming->cryptography doesn't support 3.14t)
-          # Install only compatible extras and essential test deps
-          uv sync --python ${{ matrix.python_version }} --group dev --extra parquet --extra cloud --extra litdata
+          # Install only compatible extras and essential test deps. ``hf``
+          # is opt-in here so HFBackend's huggingface_hub-using tests
+          # (download/resume/error mapping) actually run on 3.14t.
+          uv sync --python ${{ matrix.python_version }} --group dev --extra parquet --extra cloud --extra litdata --extra hf
           uv pip install pytest pytest-timeout pydantic attrs
         else
           uv sync --python ${{ matrix.python_version }} --group dev --group test --all-extras

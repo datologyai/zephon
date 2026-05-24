@@ -22,11 +22,18 @@ def _make_gcs_backend() -> StorageBackend:
     return GCSBackend()
 
 
+def _make_hf_backend() -> StorageBackend:
+    from .hf import HFBackend
+
+    return HFBackend()
+
+
 class RouterStorageBackend(StorageBackend):
     """Delegate storage operations to a backend chosen by path scheme.
 
     - ``s3://`` -> S3 backend
     - ``gs://`` or ``gcs://`` -> GCS backend
+    - ``hf://`` -> HuggingFace backend (Datasets Server-backed parquet shards)
     - otherwise -> Local filesystem
     """
 
@@ -34,6 +41,7 @@ class RouterStorageBackend(StorageBackend):
         self._local = LocalFSBackend(root=local_root or Path("/"))
         self._s3 = None
         self._gcs = None
+        self._hf = None
 
     def _backend_for(self, path: str) -> StorageBackend:
         import urllib.parse as _url
@@ -49,6 +57,10 @@ class RouterStorageBackend(StorageBackend):
             if self._gcs is None:
                 self._gcs = _make_gcs_backend()
             return self._gcs
+        if scheme == "hf":
+            if self._hf is None:
+                self._hf = _make_hf_backend()
+            return self._hf
         return self._local
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:

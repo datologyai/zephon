@@ -62,6 +62,10 @@ mosaic = [
 mds = [
     "zephon[streaming]",
 ]
+hf = [
+    "huggingface_hub>=0.20.0",
+    "zephon[parquet]",
+]
 ray = [
     "ray[default]>=2.0.0; python_version < '3.14'",
 ]

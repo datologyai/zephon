@@ -74,6 +74,8 @@ class OpenViaDownloadMixin:
             self.download(path, str(tmp))  # type: ignore[attr-defined].
         except Exception:
             tmp.unlink(missing_ok=True)
+            # Some backends like HF stage partial bytes in a sibling ``.incomplete`` file.
+            Path(str(tmp) + ".incomplete").unlink(missing_ok=True)
             raise
         # Reads from local temp
         wrapper = TempLocalFile(tmp, mode)
