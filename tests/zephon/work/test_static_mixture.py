@@ -1,5 +1,6 @@
 import random
 
+import numpy as np
 import pytest
 
 from zephon.io import Dataset, InMemoryShard
@@ -971,6 +972,10 @@ def test_seeded_shuffle_is_deterministic() -> None:
 # ---------------------------------------------------------------------------
 
 _EQUIV_SHARD_INDEX: dict[int, int] = {0: 5, 1: 7, 2: 3}
+_EQUIV_IDS = np.array(sorted(_EQUIV_SHARD_INDEX), dtype=np.int64)
+_EQUIV_SIZES = np.array(
+    [_EQUIV_SHARD_INDEX[i] for i in sorted(_EQUIV_SHARD_INDEX)], dtype=np.int64
+)
 
 
 @pytest.mark.parametrize(
@@ -1012,10 +1017,12 @@ def test_streaming_cursor_matches_reference(
         shuffle_block_size=block_size,
     )
     dataset_id = 0
-    ref = _DatasetCursor._build_order_reference(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    ref = _DatasetCursor._build_order_reference(
+        dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs
+    )
     expected = [tuple(row) for row in ref.tolist()]
 
-    cursor = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    cursor = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     actual = cursor.next_many(cursor._total_samples)
 
     assert actual == expected, (
@@ -1034,9 +1041,11 @@ def test_streaming_cursor_reference_multiple_seeds(seed: int) -> None:
         shuffle_block_size=3,
     )
     dataset_id = 1
-    ref = _DatasetCursor._build_order_reference(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    ref = _DatasetCursor._build_order_reference(
+        dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs
+    )
     expected = [tuple(row) for row in ref.tolist()]
-    cursor = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    cursor = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     actual = cursor.next_many(cursor._total_samples)
     assert actual == expected
 
@@ -1143,12 +1152,12 @@ def test_seek_to_position_produces_correct_tail(
     total = sum(_EQUIV_SHARD_INDEX.values())  # 15
 
     # Baseline: advance naturally.
-    baseline = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    baseline = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     baseline.next_many(seek_to)
     expected_tail = baseline.next_many(total)
 
     # Seeker: jump directly.
-    seeker = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    seeker = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     seeker._seek_to_position(seek_to)
     actual_tail = seeker.next_many(total)
 
@@ -1189,7 +1198,7 @@ def test_clone_independence(
     total = sum(_EQUIV_SHARD_INDEX.values())  # 15
 
     # Advance the original partway, then snapshot its state via clone.
-    original = _DatasetCursor(dataset_id, _EQUIV_SHARD_INDEX, knobs)
+    original = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     original.next_many(5)
     orig_position = original._position
     orig_remaining = original.remaining

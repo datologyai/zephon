@@ -1,9 +1,13 @@
 """User-facing dataset descriptors and detectors."""
 
+from __future__ import annotations
+
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+import numpy as np
 
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
@@ -39,8 +43,29 @@ class Dataset:
     backend: Mapping[str, object]
     path: str | None = None
 
+    def ids(self) -> np.ndarray:
+        """Return the sorted shard ids as an ``int64`` array."""
+        return np.array(sorted(self.shard_index), dtype=np.int64)
+
+    def counts(self) -> np.ndarray:
+        """Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""
+        # ``int(k)``: ids() yields numpy int64; index shard_index with plain ints.
+        return np.array([self.shard_index[int(k)] for k in self.ids()], dtype=np.int64)
+
+    def total(self) -> int:
+        """Total sample count across all shards."""
+        return int(self.counts().sum())
+
+    def max_count(self) -> int:
+        """Largest single-shard sample count (0 when empty)."""
+        return int(self.counts().max(initial=0))
+
+    def shard_count(self) -> int:
+        """Number of shards."""
+        return self.ids().size
+
     def __len__(self) -> int:
-        return sum(int(v) for v in self.shard_index.values())
+        return self.total()
 
     @classmethod
     def from_path(cls, name: str, path: str, *, fmt: str | None = None) -> "Dataset":

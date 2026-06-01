@@ -146,9 +146,24 @@ class _DatasetCursor:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _order_permutation(n: int, knobs: _DatasetKnobs) -> list[int] | None:
+        """Shard-traversal permutation of ``range(n)``, or ``None`` when unshuffled.
+
+        The shuffle is content-independent, so permuting indices then gathering
+        matches permuting the shard ids directly — preserving checkpoint order
+        (given ascending shard ids, as every ``discover()`` emits).
+        """
+        if not (knobs.shuffle_shards and n > 1):
+            return None
+        order_idx = list(range(n))
+        random.Random(knobs.seed).shuffle(order_idx)
+        return order_idx
+
+    @staticmethod
     def _build_order_reference(
         dataset_id: int,
-        shard_index: Mapping[int, int],
+        shard_ids: np.ndarray,
+        shard_sizes: np.ndarray,
         knobs: _DatasetKnobs,
     ) -> np.ndarray:
         """Build the full order array for validation/testing.
@@ -156,16 +171,18 @@ class _DatasetCursor:
         This is the original materializing implementation kept as a reference
         oracle.  The runtime path uses lazy shard-at-a-time iteration instead.
         """
-        shard_ids = list(shard_index.keys())
-        if knobs.shuffle_shards and len(shard_ids) > 1:
-            random.Random(knobs.seed).shuffle(shard_ids)
+        shard_ids = np.asarray(shard_ids, dtype=np.int64)
+        shard_sizes = np.asarray(shard_sizes, dtype=np.int64)
+        perm = _DatasetCursor._order_permutation(shard_ids.size, knobs)
+        order_idx = range(shard_ids.size) if perm is None else perm
 
-        total_samples = sum(int(shard_index[sid]) for sid in shard_ids)
+        total_samples = int(shard_sizes.sum())
         order = np.empty((total_samples, 3), dtype=np.int32)
 
         pos = 0
-        for position, shard_id in enumerate(shard_ids):
-            count = int(shard_index[shard_id])
+        for position, sidx in enumerate(order_idx):
+            shard_id = int(shard_ids[sidx])  # plain int: feeds the seed math below
+            count = shard_sizes[sidx]
             order[pos : pos + count, 0] = dataset_id
             order[pos : pos + count, 1] = shard_id
             offsets = np.arange(count, dtype=np.int32)
@@ -186,16 +203,6 @@ class _DatasetCursor:
         return order
 
     @staticmethod
-    def _compute_shard_order(
-        shard_index: Mapping[int, int], knobs: _DatasetKnobs
-    ) -> tuple[int, ...]:
-        """Return shard IDs in traversal order (shuffled if requested)."""
-        shard_ids = list(shard_index.keys())
-        if knobs.shuffle_shards and len(shard_ids) > 1:
-            random.Random(knobs.seed).shuffle(shard_ids)
-        return tuple(shard_ids)
-
-    @staticmethod
     def _make_block_rng(knobs: _DatasetKnobs) -> np.random.Generator:
         """Create the block-shuffle RNG for the given knobs."""
         return np.random.default_rng(knobs.seed ^ _GOLDEN_RATIO_64)
@@ -207,19 +214,23 @@ class _DatasetCursor:
     def __init__(
         self,
         dataset_id: int,
-        shard_index: Mapping[int, int],
+        shard_ids: np.ndarray,
+        shard_sizes: np.ndarray,
         knobs: _DatasetKnobs,
     ) -> None:
         self._dataset_id = dataset_id
-        self._shard_index = shard_index
+        # numpy int64 (not Python ints) keeps the WorkSource pickle into the
+        # MTP/DataLoader child small; must stay immutable (shared by lane clones).
+        self._ids: np.ndarray = np.asarray(shard_ids, dtype=np.int64)
+        self._sizes: np.ndarray = np.asarray(shard_sizes, dtype=np.int64)
         self._epoch = 0
         # ``_base_knobs`` is the immutable epoch-0 config; ``_knobs`` is the
         # per-epoch view (seed shifts when reshuffle_on_repeat is true).
         self._base_knobs: _DatasetKnobs = knobs
         # Declare all instance variables for Pyright; _init_cursor_state sets values.
         self._knobs: _DatasetKnobs = knobs
-        self._shard_order: tuple[int, ...] = ()
-        self._shard_sizes: tuple[int, ...] = ()
+        self._shard_order: np.ndarray = np.array([], dtype=np.int64)
+        self._shard_sizes: np.ndarray = np.array([], dtype=np.int64)
         self._total_samples: int = 0
         self._shard_cumsum: np.ndarray = np.array([], dtype=np.int64)
         self._current_shard_idx: int = 0
@@ -241,17 +252,15 @@ class _DatasetCursor:
         """(Re-)initialise all mutable cursor state for the given knobs."""
         self._knobs = knobs
 
-        # Shard-level metadata (small — one entry per shard).
-        self._shard_order = self._compute_shard_order(self._shard_index, knobs)
-        self._shard_sizes = tuple(
-            int(self._shard_index[sid]) for sid in self._shard_order
+        # ``None`` => natural order; ``slice(None)`` gathers the whole array.
+        perm = self._order_permutation(self._ids.size, knobs)
+        idx: slice | np.ndarray = (
+            slice(None) if perm is None else np.asarray(perm, dtype=np.intp)
         )
-        self._total_samples = sum(self._shard_sizes)
-        self._shard_cumsum = (
-            np.cumsum(self._shard_sizes, dtype=np.int64)
-            if self._shard_sizes
-            else np.array([], dtype=np.int64)
-        )
+        self._shard_order = self._ids[idx]
+        self._shard_sizes = self._sizes[idx]
+        self._total_samples = int(self._shard_sizes.sum())
+        self._shard_cumsum = np.cumsum(self._shard_sizes, dtype=np.int64)
 
         # Shard-level cursor.
         self._current_shard_idx = 0
@@ -316,7 +325,8 @@ class _DatasetCursor:
             return
         if self._current_shard_idx >= len(self._shard_order):
             return
-        shard_id = self._shard_order[self._current_shard_idx]
+        # Plain int: a numpy int64 here overflows the (seed << 32) ^ ... seed math.
+        shard_id = int(self._shard_order[self._current_shard_idx])
         count = self._shard_sizes[self._current_shard_idx]
         offsets = np.arange(count, dtype=np.int32)
         if count > 1:
@@ -588,7 +598,8 @@ class _DatasetCursor:
         c = _DatasetCursor.__new__(_DatasetCursor)
         # Immutable / epoch-level (shared references).
         c._dataset_id = self._dataset_id
-        c._shard_index = self._shard_index
+        c._ids = self._ids
+        c._sizes = self._sizes
         c._base_knobs = self._base_knobs
         c._knobs = self._knobs
         c._shard_order = self._shard_order
@@ -1076,22 +1087,20 @@ class StaticMixtureWorkSource(WorkSource):
         # value is well-defined but unused in the non-"auto" paths.
         max_shard = 0
         if shuffle_block_size == "auto":
-            shard_sizes = [
-                int(sz) for ds in self._datasets for sz in ds.shard_index.values()
-            ]
-            if not shard_sizes:
+            per_dataset_max = [ds.max_count() for ds in self._datasets]
+            max_shard = max(per_dataset_max, default=0)
+            if max_shard <= 0:
                 raise ValueError(
                     "shuffle_block_size='auto' requires at least one non-empty "
                     "shard across the provided datasets"
                 )
-            max_shard = max(shard_sizes)
 
         self._knobs_by_name: dict[str, _DatasetKnobs] = {}
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
 
-            total = sum(int(sz) for sz in ds.shard_index.values())
+            total = ds.total()
             knobs = _DatasetKnobs(
                 seed=seed,
                 shuffle_shards=shuffle_shards,
@@ -1101,7 +1110,7 @@ class StaticMixtureWorkSource(WorkSource):
                 ),
             )
             self._knobs_by_name[ds.name] = knobs
-            cursor = _DatasetCursor(dataset_id, ds.shard_index, knobs)
+            cursor = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), knobs)
 
             if cursor.remaining <= 0:
                 # Should not happen due to validate_for call
@@ -1439,7 +1448,7 @@ class StaticMixtureWorkSource(WorkSource):
                 shuffle_block_size=ckpt.cursor_block_sizes[ds.name],
             )
             self._knobs_by_name[ds.name] = ds_knobs
-            cur = _DatasetCursor(dataset_id, ds.shard_index, ds_knobs)
+            cur = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), ds_knobs)
             if ds.name in ckpt.cursor_states:
                 cur.restore_checkpoint_state(
                     ckpt.cursor_states[ds.name],

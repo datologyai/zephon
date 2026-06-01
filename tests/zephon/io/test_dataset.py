@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tests.helpers.storage import _install_obstore_stubs
@@ -102,5 +103,44 @@ def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
     )
     ds = Dataset.from_path("demo", str(tmp_path))
     assert ds.backend["kind"] == "jsonl"
-    assert set(ds.shard_index.keys()) == {0, 1}
-    assert sum(ds.shard_index.values()) == 5
+    assert set(ds.ids().tolist()) == {0, 1}
+    assert ds.total() == 5
+
+
+def test_dataset_accessors_dict_backed() -> None:
+    """ids/counts/total/max_count/shard_count/__len__ on a dict-backed Dataset."""
+    from zephon.io import InMemoryShard
+
+    shards = {
+        2: InMemoryShard([{"v": i} for i in range(3)]),
+        0: InMemoryShard([{"v": i} for i in range(5)]),
+        1: InMemoryShard([{"v": i} for i in range(2)]),
+    }
+    ds = Dataset.from_dict("demo", shards)
+
+    # ids() is sorted and int64.
+    ids = ds.ids()
+    assert ids.dtype == np.int64
+    assert ids.tolist() == [0, 1, 2]
+
+    # counts() is aligned with ids() (sorted order), int64.
+    counts = ds.counts()
+    assert counts.dtype == np.int64
+    assert counts.tolist() == [5, 2, 3]
+
+    assert ds.total() == 10
+    assert ds.max_count() == 5
+    assert ds.shard_count() == 3
+    assert len(ds) == 10
+
+
+def test_dataset_accessors_empty() -> None:
+    """Accessors are well-defined for an empty dict-backed Dataset."""
+    ds = Dataset.from_dict("empty", {})
+    assert ds.ids().dtype == np.int64
+    assert ds.ids().tolist() == []
+    assert ds.counts().tolist() == []
+    assert ds.total() == 0
+    assert ds.max_count() == 0
+    assert ds.shard_count() == 0
+    assert len(ds) == 0
