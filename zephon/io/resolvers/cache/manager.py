@@ -33,6 +33,7 @@ from zephon.io.resolvers.cache.shared_state import CacheSharedState, _ShardState
 from zephon.io.resolvers.utils import compute_file_hash
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
+from zephon.utils.atomic import atomic_write_bytes
 
 try:  # LZ4 is optional
     import lz4.frame as lz4frame
@@ -210,10 +211,8 @@ def _release_session_owner(
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    data = json.dumps(payload, sort_keys=True).encode("utf-8")
+    atomic_write_bytes(path, data, unique_tmp=False)
 
 
 def _diff_session_summary(

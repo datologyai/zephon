@@ -1,8 +1,6 @@
 """Resolver that operates on shards present on the local filesystem."""
 
 import os
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +16,7 @@ from zephon.io.resolvers.base import ShardResolver
 from zephon.io.resolvers.utils import compute_file_hash
 from zephon.io.storage import LocalFSBackend
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardLocator
+from zephon.utils.atomic import atomic_write_bytes
 
 
 class DirectResolver(ShardResolver):
@@ -111,20 +110,9 @@ class DirectResolver(ShardResolver):
             )
 
             def _decompress_once() -> int:
-                temp_file = tempfile.NamedTemporaryFile(
-                    delete=False,
-                    dir=str(raw_path.parent),
-                    prefix=f".{raw_path.name}.tmp-",
-                )
-                try:
-                    compressed = zip_path.read_bytes()
-                    decompressed = zstd.decompress(compressed)
-                    with temp_file:
-                        temp_file.write(decompressed)
-                    os.replace(temp_file.name, raw_path)
-                finally:
-                    with suppress(FileNotFoundError):
-                        os.unlink(temp_file.name)
+                compressed = zip_path.read_bytes()
+                decompressed = zstd.decompress(compressed)
+                atomic_write_bytes(raw_path, decompressed)
 
                 # Validation here keeps the retry loop focused on integrity failures rather than
                 # letting broken output leak to callers.

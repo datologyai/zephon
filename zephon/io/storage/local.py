@@ -1,13 +1,14 @@
 """Local filesystem storage backend implementation."""
 
 import contextlib
-import os
 import shutil
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Mapping
+
+from zephon.utils.atomic import atomic_write_bytes
 
 from .base import StorageBackend
 
@@ -123,16 +124,7 @@ class LocalFSBackend(StorageBackend):
         return {"size": info.st_size, "mtime": info.st_mtime}
 
     def put(self, path: str, data: bytes) -> None:
-        abspath = self._abspath(path)
-        abspath.parent.mkdir(parents=True, exist_ok=True)
-        tmp = abspath.with_suffix(abspath.suffix + ".tmp")
-        try:
-            tmp.write_bytes(data)
-            os.replace(tmp, abspath)  # Atomic on POSIX
-        except Exception:
-            with contextlib.suppress(Exception):
-                tmp.unlink()
-            raise
+        atomic_write_bytes(self._abspath(path), data, unique_tmp=False)
 
     def delete(self, path: str) -> None:
         self._abspath(path).unlink(missing_ok=True)
