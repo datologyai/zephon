@@ -5,6 +5,7 @@
 
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from multiprocessing import queues as mp_queues
 from typing import Any, Generic, Iterable, Iterator, Protocol, Sequence, TypeVar
@@ -21,6 +22,7 @@ from zephon.core.constants import (
 from zephon.observability.size_estimator import estimate_bytes
 from zephon.observability.stats import BackpressureDelta, NodeMetricsDelta
 from zephon.runners.base import BaseOperatorState, StageRunnerBase
+from zephon.runners.pump_timer import PumpTimer
 from zephon.utils import buffered_iterable
 
 S = TypeVar("S", bound="ConcurrentOperatorState")
@@ -153,7 +155,9 @@ class ConcurrentOperatorState(BaseOperatorState):
 
     Tracks the per-operator machinery common to every concurrent runner:
     the inbound queue the pump reads from, the deterministic-reordering
-    buffer, the in-flight work counter, and the monotonic seq counters.
+    buffer, the in-flight work counter, the monotonic seq counters, and
+    the pump-thread timer used to attribute pump wall time to disjoint
+    phase buckets.
     """
 
     queue_capacity: int = 1
@@ -162,10 +166,18 @@ class ConcurrentOperatorState(BaseOperatorState):
     pending_results: dict[int, RunnerResult] = field(init=False, default_factory=dict)
     inflight: _InflightCounter = field(init=False)
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
+    pump_timer: PumpTimer = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.inflight = _InflightCounter()
+        self.pump_timer = PumpTimer(
+            enabled=self.collect_stats,
+            stage_index=self.stage_index,
+            op_index=self.op_index,
+            stage_name=self.stage_name,
+            op_name=self.node.name,
+        )
 
     @property
     def all_completions_observed(self) -> bool:
@@ -328,6 +340,9 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         self._emit_backpressure_metrics: Any = self._ctx_services.get(
             "emit_backpressure_metrics"
         )
+        self._emit_pump_metrics: Any = self._ctx_services.get("emit_pump_metrics")
+        flush_interval_s = float(self._ctx_services.get("pump_flush_interval_s") or 5.0)
+        self._pump_flush_interval_ns: int = int(flush_interval_s * 1_000_000_000)
 
     # -- Abstract hooks -------------------------------------------------
     def _create_context(self) -> ConcurrentRunContext:
@@ -553,12 +568,14 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         next_queue = self._next_queue_for(state)
 
         state.reset_buffers()
+        state.pump_timer.start_window()
         upstream_closed = False
         self._on_pump_started(state)
 
         try:
             while True:
                 self._drain_results(state, next_queue, context)
+                self._maybe_flush_pump_timer(state)
 
                 if upstream_closed:
                     if (
@@ -606,7 +623,8 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                 except queue.Empty:
                     self._drain_results(state, next_queue, context)
                     try:
-                        item = self._queue_get(state.input_queue, timeout=0.05)
+                        with state.pump_timer.measure("input_wait"):
+                            item = self._queue_get(state.input_queue, timeout=0.05)
                     except queue.Empty:
                         continue
 
@@ -631,6 +649,27 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
             # so the iterator can stop cleanly rather than killing the thread.
             self._record_error(context, exc)
             return
+        finally:
+            self._flush_pump_timer(state)
+
+    def _maybe_flush_pump_timer(self, state: S) -> None:
+        """Emit a pump-timing delta if the cadence has elapsed."""
+        if self._emit_pump_metrics is None or not state.pump_timer.enabled:
+            return
+        now_ns = time.perf_counter_ns()
+        if not state.pump_timer.should_flush(now_ns, self._pump_flush_interval_ns):
+            return
+        delta = state.pump_timer.flush(now_ns)
+        if delta is not None:
+            self._emit_pump_metrics(delta)
+
+    def _flush_pump_timer(self, state: S) -> None:
+        """Emit the final pump-timing delta on pump exit."""
+        if self._emit_pump_metrics is None or not state.pump_timer.enabled:
+            return
+        delta = state.pump_timer.flush()
+        if delta is not None and delta.has_samples():
+            self._emit_pump_metrics(delta)
 
     def _signal_downstream_stop(
         self,

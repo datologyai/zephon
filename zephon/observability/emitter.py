@@ -14,6 +14,7 @@ from .config import ExecutionTrackingMode, MetricsSinkConfig
 from .stats import (
     FetchTimingSummary,
     PipelineSummary,
+    PumpTimingSummary,
     pretty_format_bytes,
     pretty_format_ns,
     pretty_format_ratio,
@@ -129,6 +130,7 @@ class MetricsReporter:
             self._statsd = StatsdEmitter(sink_config)
         self._prev_totals: MutableMapping[tuple[int, int], dict[str, float]] = {}
         self._prev_fetch_totals: MutableMapping[int, dict[str, float]] = {}
+        self._prev_pump_totals: MutableMapping[tuple[int, int], dict[str, int]] = {}
 
     def start(self) -> None:
         if self._collector.tracking_mode is ExecutionTrackingMode.OFF:
@@ -162,6 +164,7 @@ class MetricsReporter:
     def publish_snapshot(self) -> None:
         summary = self._collector.snapshot()
         fetch_summary = self._collector.snapshot_fetch()
+        pump_summary = self._collector.snapshot_pump_timing()
         if summary.tracking_mode is ExecutionTrackingMode.OFF:
             return
         summary.compute_wait_ratios()
@@ -183,6 +186,10 @@ class MetricsReporter:
                 stage_names, include_shards=False
             )
 
+        pump_records: list[dict] = []
+        if pump_summary.has_samples():
+            pump_records = pump_summary.to_records()
+
         if self._sink_config and self._sink_config.should_log():
             self._emit_logs(summary, records)
             if fetch_records_logs:
@@ -194,10 +201,14 @@ class MetricsReporter:
                     fetch_records_logs,
                     interval=interval,
                 )
+            if pump_records:
+                self._emit_pump_logs(pump_summary, pump_records)
         if self._statsd is not None:
             self._emit_statsd(records, summary.plan_id)
             if fetch_records_statsd:
                 self._emit_fetch_statsd(fetch_records_statsd, summary.plan_id)
+            if pump_records:
+                self._emit_pump_statsd(pump_records, summary.plan_id)
         if self._statsd is not None:
             self._statsd.flush()
 
@@ -418,4 +429,116 @@ class MetricsReporter:
                 "cache_hits": record["cache_hits"],
                 "cache_misses": record["cache_misses"],
                 "shard_reopens": record["shard_reopens"],
+            }
+
+    def _emit_pump_logs(
+        self, summary: PumpTimingSummary, records: Iterable[dict]
+    ) -> None:
+        plan_id = summary.plan_id or "unknown"
+        for record in records:
+            payload = {
+                "event": "zephon.pump_metrics",
+                "plan_id": plan_id,
+                "stage": record["stage"],
+                "stage_name": record["stage_name"],
+                "op_index": record["op"],
+                "op_name": record["name"],
+                "input_wait_ns": record["input_wait_ns"],
+                "dispatch_wait_ns": record["dispatch_wait_ns"],
+                "dispatch_active_ns": record["dispatch_active_ns"],
+                "result_wait_ns": record["result_wait_ns"],
+                "result_collect_ns": record["result_collect_ns"],
+                "result_handle_ns": record["result_handle_ns"],
+                "idle_drain_ns": record["idle_drain_ns"],
+                "total_ns": record["total_ns"],
+                "batches_submitted": record["batches_submitted"],
+                "batches_completed": record["batches_completed"],
+                "capacity_stalls": record["capacity_stalls"],
+                "rank": self._rank_id,
+                "worker": self._worker_id,
+            }
+            if self._sink_config and self._sink_config.json_logs:
+                logger.info(json.dumps(payload))
+            else:
+                total_ns = record["total_ns"] or 1
+                logger.info(
+                    "[zephon][pump] plan=%s stage=%s/%s op=%s/%s "
+                    "submitted=%d completed=%d stalls=%d | "
+                    "input_wait=%s dispatch_wait=%s dispatch=%s "
+                    "result_wait=%s result_collect=%s result_handle=%s idle=%s",
+                    plan_id,
+                    record["stage"],
+                    record["stage_name"],
+                    record["op"],
+                    record["name"],
+                    record["batches_submitted"],
+                    record["batches_completed"],
+                    record["capacity_stalls"],
+                    pretty_format_ratio(record["input_wait_ns"] / total_ns),
+                    pretty_format_ratio(record["dispatch_wait_ns"] / total_ns),
+                    pretty_format_ratio(record["dispatch_active_ns"] / total_ns),
+                    pretty_format_ratio(record["result_wait_ns"] / total_ns),
+                    pretty_format_ratio(record["result_collect_ns"] / total_ns),
+                    pretty_format_ratio(record["result_handle_ns"] / total_ns),
+                    pretty_format_ratio(record["idle_drain_ns"] / total_ns),
+                )
+
+    def _emit_pump_statsd(self, records: Iterable[dict], plan_id: str | None) -> None:
+        assert self._statsd is not None
+        base_tags = {
+            "plan": plan_id or "unknown",
+            "rank": str(self._rank_id),
+            "worker": str(self._worker_id),
+        }
+        for record in records:
+            key = (record["stage"], record["op"])
+            prev = self._prev_pump_totals.get(key, {})
+            tags = dict(base_tags)
+            tags.update(
+                {
+                    "stage": str(record["stage"]),
+                    "stage_name": record.get("stage_name") or "unknown",
+                    "op": str(record["op"]),
+                    "op_name": record.get("name") or "unknown",
+                }
+            )
+            metric_base = f"{_sanitize_component(record['stage_name'])}.{_sanitize_component(record['name'])}.pump"
+            for bucket in (
+                "input_wait_ns",
+                "dispatch_wait_ns",
+                "dispatch_active_ns",
+                "result_wait_ns",
+                "result_collect_ns",
+                "result_handle_ns",
+                "idle_drain_ns",
+            ):
+                delta_ns = record[bucket] - prev.get(bucket, 0)
+                if delta_ns > 0:
+                    self._statsd.timer(
+                        f"{metric_base}.{bucket[:-3]}",
+                        delta_ns / 1_000_000,
+                        tags,
+                    )
+            for counter in (
+                "batches_submitted",
+                "batches_completed",
+                "capacity_stalls",
+            ):
+                delta = record[counter] - prev.get(counter, 0)
+                if delta > 0:
+                    self._statsd.counter(f"{metric_base}.{counter}", delta, tags)
+            self._prev_pump_totals[key] = {
+                field: record[field]
+                for field in (
+                    "input_wait_ns",
+                    "dispatch_wait_ns",
+                    "dispatch_active_ns",
+                    "result_wait_ns",
+                    "result_collect_ns",
+                    "result_handle_ns",
+                    "idle_drain_ns",
+                    "batches_submitted",
+                    "batches_completed",
+                    "capacity_stalls",
+                )
             }

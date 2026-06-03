@@ -85,6 +85,13 @@ class _ThreadOperatorState(QueueDrainOperatorState):
     def acquire_instance(self) -> Op[RunnerStreamIn, StreamItem]:
         return self._instance_queue.get()
 
+    def try_acquire_instance(self) -> Op[RunnerStreamIn, StreamItem] | None:
+        """Non-blocking acquire; returns None when the instance pool is empty."""
+        try:
+            return self._instance_queue.get_nowait()
+        except queue.Empty:
+            return None
+
     def release_instance(self, instance: Op[RunnerStreamIn, StreamItem]) -> None:
         self._instance_queue.put(instance)
 
@@ -283,7 +290,9 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         context: ConcurrentRunContext,
     ) -> None:
         for result in state._local_results:
-            self._handle_result(state, result, next_queue, context)
+            state.pump_timer.note("batches_completed")
+            with state.pump_timer.measure("result_handle"):
+                self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
 
     def _put_result(
@@ -346,38 +355,47 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             state._local_results.append(result)
             return
 
-        instance = state.acquire_instance()
+        # Instance-pool starvation is a capacity stall, not dispatch work: when
+        # the pool is empty charge the blocking acquire to dispatch_wait (as the
+        # Ray runner does), keeping only the submit in dispatch_active.
+        instance = state.try_acquire_instance()
+        if instance is None:
+            state.pump_timer.note("capacity_stalls")
+            with state.pump_timer.measure("dispatch_wait"):
+                instance = state.acquire_instance()
 
-        seq = state.next_seq
-        state.next_seq += 1
+        with state.pump_timer.measure("dispatch_active"):
+            seq = state.next_seq
+            state.next_seq += 1
 
-        collect_stats = self._tracking_mode.collects_nodes
-        consumed_elements = len(batch) if collect_stats else 0
-        consumed_bytes = estimate_bytes(batch) if collect_stats else 0
-        queue_depth_snapshot = -1
-        if collect_stats:
-            try:
-                queue_depth_snapshot = state.input_queue.qsize()
-            except NotImplementedError:
-                queue_depth_snapshot = -1
+            collect_stats = self._tracking_mode.collects_nodes
+            consumed_elements = len(batch) if collect_stats else 0
+            consumed_bytes = estimate_bytes(batch) if collect_stats else 0
+            queue_depth_snapshot = -1
+            if collect_stats:
+                try:
+                    queue_depth_snapshot = state.input_queue.qsize()
+                except NotImplementedError:
+                    queue_depth_snapshot = -1
 
-        def work(
-            items: list[RunnerStreamIn],
-        ) -> tuple[list[StreamItem], int]:
-            start_ns = self._node_sw.start()
-            try:
-                outputs = instance.process_many(items)
-            except (NotImplementedError, AttributeError):
-                outputs = None
-            if outputs is None:
-                out: list[StreamItem] = []
-                for element in items:
-                    out.extend(instance.process_one(element))
-                outputs = out
-            return outputs, self._node_sw.elapsed(start_ns)
+            def work(
+                items: list[RunnerStreamIn],
+            ) -> tuple[list[StreamItem], int]:
+                start_ns = self._node_sw.start()
+                try:
+                    outputs = instance.process_many(items)
+                except (NotImplementedError, AttributeError):
+                    outputs = None
+                if outputs is None:
+                    out: list[StreamItem] = []
+                    for element in items:
+                        out.extend(instance.process_one(element))
+                    outputs = out
+                return outputs, self._node_sw.elapsed(start_ns)
 
-        state.inflight.increment()
-        future = self._executor.submit(work, batch)
+            state.inflight.increment()
+            future = self._executor.submit(work, batch)
+            state.pump_timer.note("batches_submitted")
 
         def done_callback(
             fut: Future[tuple[list[StreamItem], int]],

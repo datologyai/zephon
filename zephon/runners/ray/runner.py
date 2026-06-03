@@ -193,6 +193,11 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
                 "UV_NO_SYNC": "1",
                 **THREAD_SUPPRESSION_ENV_VARS,
             }
+            # Pass through the zero-copy tensor flag — actors don't inherit the
+            # driver's os.environ, and it must be set on both ends to take effect.
+            zero_copy = os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS")
+            if zero_copy is not None:
+                default_env_vars["RAY_ENABLE_ZERO_COPY_TORCH_TENSORS"] = zero_copy
             if actor_env_vars:
                 default_env_vars.update(actor_env_vars)
             self._runtime_env: dict[str, Any] = {"env_vars": default_env_vars}
@@ -214,14 +219,15 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
     def _build_actor_ctx(self) -> dict[str, Any]:
         """Build context services for actors.
 
-        Callables (e.g. metrics callbacks) cannot be serialized across Ray
-        actor boundaries via cloudpickle, so we replace them with no-ops.
-        This means actors currently run without observability callbacks —
-        metrics are only recorded when results arrive back on the driver.
+        Callables cannot be serialized across Ray actor boundaries via
+        cloudpickle, so we replace them with no-ops before shipping the
+        context to actors.
 
         TODO: implement Ray-native observability (e.g. via Ray's built-in
         metrics, a dedicated reporting actor, or a similar mechanism to the
-        process runner's task_queue approach).
+        process runner's task_queue approach). Pump-level metrics now flow
+        back to the driver, but node-level metrics inside actors are still
+        no-ops.
         """
         ctx: dict[str, Any] = {}
         for key, val in self._ctx_services.items():
@@ -283,21 +289,27 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
         refs = state.pending_refs.active()
 
         # Non-blocking sweep first.
-        ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
+        with state.pump_timer.measure("result_wait"):
+            ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
         if not ready and block:
-            ready, _ = ray.wait(refs, num_returns=1, timeout=timeout)
+            with state.pump_timer.measure("result_wait"):
+                ready, _ = ray.wait(refs, num_returns=1, timeout=timeout)
 
         resolved = 0
         for ref in ready:
             actor_idx = state.pending_refs.pop(ref)
             try:
-                result: RunnerResult = ray.get(ref)
+                with state.pump_timer.measure("result_collect"):
+                    result: RunnerResult = ray.get(ref)
             except Exception as exc:
                 # Actor died — synthesize error result.
                 state.dead_actors.add(actor_idx)
                 num_actors = state.actor_group.num_actors if state.actor_group else 0
                 alive = num_actors - len(state.dead_actors)
-                logger.warning(
+                # Demote to DEBUG when stop_event is set — actor kills during
+                # intentional teardown are expected and shouldn't spam logs.
+                log = logger.debug if context.stop_event.is_set() else logger.warning
+                log(
                     "Actor %d for op '%s' died: %s (%d/%d actors remaining)",
                     actor_idx,
                     state.node.name,
@@ -328,7 +340,9 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
                     )
                     context.stop_event.set()
 
-            self._handle_result(state, result, next_queue, context)
+            state.pump_timer.note("batches_completed")
+            with state.pump_timer.measure("result_handle"):
+                self._handle_result(state, result, next_queue, context)
             resolved += 1
 
         return resolved
@@ -342,7 +356,10 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
         context: ConcurrentRunContext,
     ) -> None:
         """Non-blocking sweep of ready ObjectRefs."""
-        self._sweep_ready_refs(state, next_queue, context, block=False)
+        with state.pump_timer.measure_excluding(
+            "idle_drain", "result_wait", "result_collect", "result_handle"
+        ):
+            self._sweep_ready_refs(state, next_queue, context, block=False)
 
     def _await_one_result(
         self,
@@ -451,14 +468,22 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
             if not at_actor_cap and not at_total_cap:
                 break
 
-            self._sweep_ready_refs(state, next_queue, context, block=True, timeout=0.5)
+            state.pump_timer.note("capacity_stalls")
+            with state.pump_timer.measure_excluding(
+                "dispatch_wait", "result_wait", "result_collect", "result_handle"
+            ):
+                self._sweep_ready_refs(
+                    state, next_queue, context, block=True, timeout=0.5
+                )
 
-        seq = state.next_seq
-        state.next_seq += 1
+        with state.pump_timer.measure("dispatch_active"):
+            seq = state.next_seq
+            state.next_seq += 1
 
-        ref = state.actor_group.actors[actor_idx].process.remote(batch, seq)
-        state.pending_refs.add(ref, actor_idx)
-        state.inflight.increment()
+            ref = state.actor_group.actors[actor_idx].process.remote(batch, seq)
+            state.pending_refs.add(ref, actor_idx)
+            state.inflight.increment()
+        state.pump_timer.note("batches_submitted")
 
     def _post_schedule_batch(
         self,
@@ -468,7 +493,9 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
     ) -> None:
         """Drain locally-stashed sentinel results."""
         for result in state._local_results:
-            self._handle_result(state, result, next_queue, context)
+            state.pump_timer.note("batches_completed")
+            with state.pump_timer.measure("result_handle"):
+                self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
 
     def _ack_result(

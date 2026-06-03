@@ -79,15 +79,18 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        while True:
-            try:
-                item = self._queue_get_nowait(state.result_queue)
-            except queue.Empty:
-                break
-            except FileNotFoundError as exc:
-                self._record_error(context, exc)
-                return
-            self._handle_result(state, item, next_queue, context)
+        with state.pump_timer.measure_excluding("idle_drain", "result_handle"):
+            while True:
+                try:
+                    item = self._queue_get_nowait(state.result_queue)
+                except queue.Empty:
+                    break
+                except FileNotFoundError as exc:
+                    self._record_error(context, exc)
+                    return
+                state.pump_timer.note("batches_completed")
+                with state.pump_timer.measure("result_handle"):
+                    self._handle_result(state, item, next_queue, context)
 
     def _await_one_result(
         self,
@@ -97,10 +100,13 @@ class QueueDrainStageRunner(ConcurrentStageRunner[SQueueDrain], Generic[SQueueDr
         timeout: float,
     ) -> None:
         try:
-            item = self._queue_get(state.result_queue, timeout=timeout)
+            with state.pump_timer.measure("result_wait"):
+                item = self._queue_get(state.result_queue, timeout=timeout)
         except queue.Empty:
             return
         # FileNotFoundError propagates — outer _operator_loop BaseException
         # handler records the error and returns from the pump, matching the
         # pre-refactor direct-return behavior.
-        self._handle_result(state, item, next_queue, context)
+        state.pump_timer.note("batches_completed")
+        with state.pump_timer.measure("result_handle"):
+            self._handle_result(state, item, next_queue, context)

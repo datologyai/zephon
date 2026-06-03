@@ -474,7 +474,9 @@ class Engine:
         self._ctx["emit_fetch_metrics"] = _noop
         self._ctx["emit_prefetch_metrics"] = _noop
         self._ctx["emit_backpressure_metrics"] = _noop
+        self._ctx["emit_pump_metrics"] = _noop
         self._ctx["record_node_metrics"] = _noop
+        self._ctx["pump_flush_interval_s"] = 5.0
 
         if tracking_mode != ExecutionTrackingMode.OFF:
             metrics_sink_config = self._opts.metrics_sink_config
@@ -501,7 +503,9 @@ class Engine:
                 self._ctx["emit_fetch_metrics"] = self._emit_fetch_metrics
                 self._ctx["emit_prefetch_metrics"] = self._emit_prefetch_metrics
                 self._ctx["emit_backpressure_metrics"] = self._emit_backpressure_metrics
+                self._ctx["emit_pump_metrics"] = self._emit_pump_metrics
             self._ctx["record_node_metrics"] = self._collector.record
+            self._ctx["pump_flush_interval_s"] = report_interval
 
         # Stage runners are stored heterogeneously.
         self._runners: list[
@@ -930,6 +934,12 @@ class Engine:
             return None
         return self._collector.snapshot()
 
+    def pump_metrics_snapshot(self):
+        """Return a clone of the current pump-timing summary when enabled."""
+        if self._collector is None:
+            return None
+        return self._collector.snapshot_pump_timing()
+
     def _emit_fetch_metrics(self, delta: Any) -> None:
         """Forward fetch timings to the collector when tracking is enabled."""
         if self._collector is not None and self._collector.tracking_mode.collects_nodes:
@@ -944,6 +954,11 @@ class Engine:
         """Forward backpressure metrics to the collector when tracking is enabled."""
         if self._collector is not None and self._collector.tracking_mode.collects_nodes:
             self._collector.record_backpressure(delta)
+
+    def _emit_pump_metrics(self, delta: Any) -> None:
+        """Forward pump-thread timing metrics to the collector when tracking is enabled."""
+        if self._collector is not None and self._collector.tracking_mode.collects_nodes:
+            self._collector.record_pump_timing(delta)
 
     def _get_component_id(self, component_name: str) -> int:
         """Get or assign a stable integer ID for a component name.

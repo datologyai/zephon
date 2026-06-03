@@ -1910,7 +1910,11 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                         for _ in range(3):
                             try:
                                 item = self._queue_get_nowait(state.result_queue)
-                                self._handle_result(state, item, next_queue, context)
+                                state.pump_timer.note("batches_completed")
+                                with state.pump_timer.measure("result_handle"):
+                                    self._handle_result(
+                                        state, item, next_queue, context
+                                    )
                             except queue.Empty:
                                 break
                         if context.stop_event.is_set():
@@ -1996,7 +2000,11 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         # worker that picks up, crashes, and gets observed by the watchdog
         # can never find pending_commands missing an in-flight seq.
         state.pending_commands[seq] = command
-        self._send_command(task_queue, command, state=state, context=context)
+        # Exclude result_handle: a full task queue makes _send_command drain
+        # results, which would otherwise double-count into dispatch_active.
+        with state.pump_timer.measure_excluding("dispatch_active", "result_handle"):
+            self._send_command(task_queue, command, state=state, context=context)
+        state.pump_timer.note("batches_submitted")
         _debug(f"scheduled batch seq={seq}")
         state.inflight.increment()
 
@@ -2007,7 +2015,9 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         context: ConcurrentRunContext,
     ) -> None:
         for result in state._local_results:
-            self._handle_result(state, result, next_queue, context)
+            state.pump_timer.note("batches_completed")
+            with state.pump_timer.measure("result_handle"):
+                self._handle_result(state, result, next_queue, context)
         state._local_results.clear()
 
     def _ack_result(

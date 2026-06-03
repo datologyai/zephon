@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Iterator, Mapping, MutableMapping
 
 from .config import ExecutionTrackingMode
@@ -649,6 +649,203 @@ class BackpressureSummary:
         return sum(
             totals.put_into_queue_backpressure_events for totals in self.stages.values()
         )
+
+
+@dataclass(slots=True)
+class PumpCounts:
+    """Shape of a pump-thread measurement record.
+
+    The seven ``*_ns`` buckets are disjoint slices of pump wall time; their
+    sum approximates the elapsed wall clock modulo small unaccounted Python
+    overhead. The three counters track discrete events. Used as the shared
+    base for ``PumpTimingDelta`` (per-flush emit), ``PumpTimingNodeTotals``
+    (aggregated in the collector), and ``PumpTimer`` (the live accumulator
+    on the operator state). Field names live here once; everything else
+    derives from :func:`dataclasses.fields`.
+    """
+
+    input_wait_ns: int = 0
+    dispatch_wait_ns: int = 0
+    dispatch_active_ns: int = 0
+    result_wait_ns: int = 0
+    result_collect_ns: int = 0
+    result_handle_ns: int = 0
+    idle_drain_ns: int = 0
+    batches_submitted: int = 0
+    batches_completed: int = 0
+    capacity_stalls: int = 0
+
+    def add_from(self, other: "PumpCounts") -> None:
+        for name in _PUMP_ALL_FIELDS:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    def copy_to(self, other: "PumpCounts") -> None:
+        for name in _PUMP_ALL_FIELDS:
+            setattr(other, name, getattr(self, name))
+
+    def reset_counts(self) -> None:
+        for name in _PUMP_ALL_FIELDS:
+            setattr(self, name, 0)
+
+    @property
+    def total_ns(self) -> int:
+        return sum(getattr(self, name) for name in _PUMP_BUCKET_FIELDS)
+
+    def has_samples(self) -> bool:
+        """True if any bucket accrued time or any counter fired."""
+        return any(getattr(self, name) for name in _PUMP_ALL_FIELDS)
+
+
+# Derived from PumpCounts so the field list is named exactly once.
+_PUMP_BUCKET_FIELDS: tuple[str, ...] = tuple(
+    f.name for f in fields(PumpCounts) if f.name.endswith("_ns")
+)
+_PUMP_COUNTER_FIELDS: tuple[str, ...] = tuple(
+    f.name for f in fields(PumpCounts) if not f.name.endswith("_ns")
+)
+_PUMP_ALL_FIELDS: tuple[str, ...] = _PUMP_BUCKET_FIELDS + _PUMP_COUNTER_FIELDS
+
+
+@dataclass(slots=True)
+class PumpTimingDelta(PumpCounts):
+    """Incremental pump-thread timing emitted by a concurrent stage runner."""
+
+    stage_index: int = 0
+    op_index: int = 0
+    stage_name: str = ""
+    name: str = ""
+
+
+@dataclass(slots=True)
+class PumpTimingNodeTotals(PumpCounts):
+    """Aggregated pump timing for one operator."""
+
+    stage_index: int = 0
+    op_index: int = 0
+    name: str = ""
+
+    def apply(self, delta: PumpTimingDelta) -> None:
+        self.add_from(delta)
+
+    def to_dict(self) -> dict:
+        record: dict = {
+            "stage": self.stage_index,
+            "op": self.op_index,
+            "name": self.name,
+        }
+        for name in _PUMP_ALL_FIELDS:
+            record[name] = getattr(self, name)
+        record["total_ns"] = self.total_ns
+        return record
+
+
+@dataclass(slots=True)
+class PumpTimingStageSummary:
+    """Aggregated pump timing for one stage."""
+
+    index: int
+    name: str
+    nodes: MutableMapping[int, PumpTimingNodeTotals] = field(default_factory=dict)
+
+    def apply(self, delta: PumpTimingDelta) -> None:
+        if delta.stage_name and not self.name:
+            self.name = delta.stage_name
+        node = self.nodes.get(delta.op_index)
+        if node is None:
+            node = PumpTimingNodeTotals(
+                stage_index=delta.stage_index,
+                op_index=delta.op_index,
+                name=delta.name,
+            )
+            self.nodes[delta.op_index] = node
+        node.apply(delta)
+
+    def _delta_from_node(
+        self, node: PumpTimingNodeTotals, stage_name: str
+    ) -> PumpTimingDelta:
+        delta = PumpTimingDelta(
+            stage_index=self.index,
+            op_index=node.op_index,
+            stage_name=stage_name,
+            name=node.name,
+        )
+        node.copy_to(delta)
+        return delta
+
+    def merge(self, other: "PumpTimingStageSummary") -> None:
+        for node in other.nodes.values():
+            self.apply(self._delta_from_node(node, self.name))
+
+    def iter_nodes(self) -> Iterator[PumpTimingNodeTotals]:
+        for _, node in sorted(self.nodes.items()):
+            yield node
+
+    def copy(self) -> "PumpTimingStageSummary":
+        clone = PumpTimingStageSummary(index=self.index, name=self.name)
+        for node in self.iter_nodes():
+            clone.apply(self._delta_from_node(node, self.name))
+        return clone
+
+
+@dataclass
+class PumpTimingSummary:
+    """Aggregated pump-thread timing for an entire pipeline."""
+
+    plan_id: str | None = None
+    reporting_interval_s: float | None = None
+    tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF
+    stages: MutableMapping[int, PumpTimingStageSummary] = field(default_factory=dict)
+
+    def apply(self, delta: PumpTimingDelta) -> None:
+        stage = self.stages.get(delta.stage_index)
+        if stage is None:
+            stage = PumpTimingStageSummary(
+                index=delta.stage_index, name=delta.stage_name
+            )
+            self.stages[delta.stage_index] = stage
+        stage.apply(delta)
+
+    def merge(self, other: "PumpTimingSummary") -> None:
+        if self.plan_id is None:
+            self.plan_id = other.plan_id
+        if self.reporting_interval_s is None:
+            self.reporting_interval_s = other.reporting_interval_s
+        for stage_index, stage in other.stages.items():
+            existing = self.stages.get(stage_index)
+            if existing is None:
+                new_stage = PumpTimingStageSummary(index=stage.index, name=stage.name)
+                new_stage.merge(stage)
+                self.stages[stage_index] = new_stage
+            else:
+                existing.merge(stage)
+
+    def iter_stages(self) -> Iterator[PumpTimingStageSummary]:
+        for _, stage in sorted(self.stages.items()):
+            yield stage
+
+    def clone(self) -> "PumpTimingSummary":
+        clone = PumpTimingSummary(
+            plan_id=self.plan_id,
+            reporting_interval_s=self.reporting_interval_s,
+            tracking_mode=self.tracking_mode,
+        )
+        for stage in self.iter_stages():
+            clone.stages[stage.index] = stage.copy()
+        return clone
+
+    def to_records(self) -> list[dict]:
+        records: list[dict] = []
+        for stage in self.iter_stages():
+            for node in stage.iter_nodes():
+                record = node.to_dict()
+                record["stage_name"] = stage.name
+                record["plan_id"] = self.plan_id
+                record["tracking_mode"] = self.tracking_mode.value
+                records.append(record)
+        return records
+
+    def has_samples(self) -> bool:
+        return any(stage.nodes for stage in self.stages.values())
 
 
 @dataclass
