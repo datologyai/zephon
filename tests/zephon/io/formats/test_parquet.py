@@ -15,13 +15,16 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from tests._helpers import catalog_locators
 from tests.helpers.storage import _install_obstore_stubs
+from zephon.io.catalog import extra_codec
 from zephon.io.dataset import Dataset
 from zephon.io.formats.parquet import (
     ParquetFormat,
     ParquetShard,
     _arrow_table_to_numpy,
     _extract_row,
+    _ParquetExtraCodec,
     _RowGroupCache,
 )
 from zephon.io.index.parquet_index import ParquetIndexBuilder
@@ -154,6 +157,34 @@ class TestParquetFormatDiscovery:
         # Metadata should be the same as index-based discovery
         meta0 = shard_meta[0]
         assert "row_groups" in meta0["extra"]
+
+    def test_discover_counts_matches_discover_with_index(
+        self, parquet_dataset_with_index
+    ):
+        """Index path: counts agree with ``discover`` on ``(shard_id, num_rows)``."""
+        format_handler = ParquetFormat()
+        storage = LocalFSBackend(root=Path("/"))
+
+        shard_index, _ = format_handler.discover(
+            str(parquet_dataset_with_index), storage
+        )
+        ids, counts = format_handler.discover_counts(
+            str(parquet_dataset_with_index), storage
+        )
+
+        assert ids.tolist() == sorted(shard_index)
+        assert counts.tolist() == [shard_index[sid] for sid in sorted(shard_index)]
+
+    def test_discover_counts_matches_discover_without_index(self, parquet_dataset_dir):
+        """No index: the footer-scan fallback still agrees with ``discover``."""
+        format_handler = ParquetFormat()
+        storage = LocalFSBackend(root=Path("/"))
+
+        shard_index, _ = format_handler.discover(str(parquet_dataset_dir), storage)
+        ids, counts = format_handler.discover_counts(str(parquet_dataset_dir), storage)
+
+        assert ids.tolist() == sorted(shard_index)
+        assert counts.tolist() == [10000, 8000, 12000]
 
     def test_discover_from_files_s3_does_not_download_full_object(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -952,7 +983,7 @@ class TestParquetAutoDetection:
 
         assert dataset.backend["kind"] == "parquet"
         assert len(dataset.shard_index) == 3
-        assert sum(dataset.shard_index.values()) == 30000  # 10000 + 8000 + 12000
+        assert dataset.total() == 30000  # 10000 + 8000 + 12000
 
     def test_auto_detect_without_index(self, parquet_dataset_dir):
         """Test auto-detection without index.json (fallback)."""
@@ -960,7 +991,7 @@ class TestParquetAutoDetection:
 
         assert dataset.backend["kind"] == "parquet"
         assert len(dataset.shard_index) == 3
-        assert sum(dataset.shard_index.values()) == 30000
+        assert dataset.total() == 30000
 
     def test_explicit_format_specification(self, parquet_dataset_dir):
         """Test explicitly specifying format='parquet'."""
@@ -982,12 +1013,157 @@ class TestParquetIntegration:
 
         # Verify dataset structure
         assert len(dataset.shard_index) == 3
-        total_samples = sum(dataset.shard_index.values())
+        total_samples = dataset.total()
         assert total_samples == 30000
 
         # Note: Full integration with FetchOp/Pipeline would require
         # more complex setup with engine and workers. This test verifies
         # the dataset structure is correct for such integration.
+
+
+class TestParquetExtraCodec:
+    """Catalog round-trip of the parquet row-group metadata (``extra``)."""
+
+    def _expected_extras(self, dataset_dir: Path) -> dict[int, dict[str, object]]:
+        """Ground truth straight from the parquet footers, keyed by shard id.
+
+        Shard ids follow sorted-basename order (the discovery contract), so this
+        is independent of the discovery/locator code under test.
+        """
+        out: dict[int, dict[str, object]] = {}
+        names = sorted(p.name for p in dataset_dir.glob("*.parquet"))
+        for shard_id, name in enumerate(names):
+            md = pq.ParquetFile(str(dataset_dir / name)).metadata
+            out[shard_id] = {
+                "num_rows": md.num_rows,
+                "num_row_groups": md.num_row_groups,
+                "row_groups": [
+                    {
+                        "num_rows": md.row_group(i).num_rows,
+                        "total_byte_size": md.row_group(i).total_byte_size,
+                    }
+                    for i in range(md.num_row_groups)
+                ],
+            }
+        return out
+
+    def _synthesized_extras(
+        self, dataset_dir: Path, name: str
+    ) -> dict[int, dict[str, object]]:
+        dataset = Dataset.from_path(name=name, path=str(dataset_dir))
+        _, locators = catalog_locators(dataset)
+        return {
+            sid: dict(loc.extra) if loc.extra else {} for sid, loc in locators.items()
+        }
+
+    def test_catalog_extra_matches_parquet_footers(self, parquet_dataset_with_index):
+        """Codec decode reconstructs num_rows/num_row_groups/row_groups exactly."""
+        assert self._synthesized_extras(
+            parquet_dataset_with_index, "pq_codec"
+        ) == self._expected_extras(parquet_dataset_with_index)
+
+    def test_extra_roundtrips_through_default_codec(
+        self, parquet_dataset_with_index, monkeypatch
+    ):
+        """The generic rest path alone preserves ``extra`` field-for-field.
+
+        With no parquet codec registered, the catch-all per-shard blob must
+        reconstruct ``extra`` exactly.
+        """
+        monkeypatch.delitem(extra_codec._CODECS, "parquet", raising=False)
+        assert self._synthesized_extras(
+            parquet_dataset_with_index, "pq_default"
+        ) == self._expected_extras(parquet_dataset_with_index)
+
+    def test_catalog_locator_serves_reader(self, parquet_dataset_with_index):
+        """A catalog-synthesized locator's decoded ``extra`` feeds ``open_shard``.
+
+        The row-group offsets come back from the ragged int64 columns; a wrong
+        slice would break row-group pruning at read time.
+        """
+        dataset = Dataset.from_path(
+            name="pq_read", path=str(parquet_dataset_with_index)
+        )
+        _, locators = catalog_locators(dataset)
+
+        # data_000.parquet: 10000 rows in row groups of 2000.
+        locator = locators[0]
+        local_ref = LocalShardRef(
+            raw=LocalShardFile(
+                path=parquet_dataset_with_index / locator.raw.basename,
+                bytes=locator.raw.bytes,
+            ),
+            extra=locator.extra,
+        )
+        shard = ParquetFormat().open_shard(locator, local_ref)
+        assert len(shard) == 10000
+        # Rows on both sides of a row-group boundary exercise the rg offsets.
+        assert shard[0] == {"id": 0, "text": "item_0", "value": 0}
+        assert shard[1999] == {"id": 1999, "text": "item_1999", "value": 3998}
+        assert shard[2000] == {"id": 2000, "text": "item_2000", "value": 4000}
+        assert shard[9999] == {"id": 9999, "text": "item_9999", "value": 19998}
+
+    def test_codec_raises_on_num_rows_contradiction(self):
+        """``encode`` refuses an extra ``num_rows`` that disagrees with the counts.
+
+        Decode substitutes the catalog's ``num_rows`` column, so a contradictory
+        extra cannot round-trip; it must fail at build time rather than be
+        silently rewritten.
+        """
+        import numpy as np
+
+        codec = _ParquetExtraCodec()
+        metas = [
+            {
+                "num_rows": 5,
+                "num_row_groups": 1,
+                "row_groups": [{"num_rows": 5, "total_byte_size": 10}],
+            }
+        ]
+        with pytest.raises(ValueError, match="self-contradictory"):
+            codec.encode(metas, np.array([7], dtype=np.int64))
+
+    def test_codec_raises_on_row_group_count_contradiction(self):
+        """``encode`` refuses ``num_row_groups`` != ``len(row_groups)``."""
+        import numpy as np
+
+        codec = _ParquetExtraCodec()
+        metas = [
+            {
+                "num_rows": 5,
+                "num_row_groups": 2,
+                "row_groups": [{"num_rows": 5, "total_byte_size": 10}],
+            }
+        ]
+        with pytest.raises(ValueError, match="num_row_groups"):
+            codec.encode(metas, np.array([5], dtype=np.int64))
+
+    def test_codec_owns_nothing_for_foreign_extras(self, tmp_path):
+        """Non-discovery-shaped extras ride the generic rest path untouched.
+
+        Round-trips through a real packed catalog: decode must step aside (no
+        ``rg_off`` columns) so the rest path alone reconstructs the extra.
+        """
+        import numpy as np
+
+        from tests._helpers import catalog_set_from_locators
+
+        codec = _ParquetExtraCodec()
+        extra = {"custom": 1}
+        encoded = codec.encode([dict(extra)], np.array([5], dtype=np.int64))
+        assert encoded.owned_keys == frozenset()
+        assert encoded.int_columns == {}
+
+        locator = ShardLocator(
+            dataset="pq_foreign",
+            shard_id=0,
+            format="parquet",
+            root=str(tmp_path),
+            raw=ShardFile(basename="s0.parquet", bytes=10, hashes={}),
+            extra=dict(extra),
+        )
+        catalog_set = catalog_set_from_locators([locator], tmp_path / "_catalogs")
+        assert dict(catalog_set.locator_at(0).extra) == extra
 
 
 if __name__ == "__main__":

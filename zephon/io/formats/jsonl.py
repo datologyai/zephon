@@ -101,7 +101,11 @@ class JsonlFormat(FormatHandler):
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
         """Scan ``path`` and return shard statistics and metadata."""
-        entries = [name for name in storage.listdir(path) if name.endswith(".jsonl")]
+        # Sort so shard_id assignment is reproducible across processes/machines
+        # (cache JOIN, cross-node Ray). Re-numbers existing jsonl datasets once.
+        entries = sorted(
+            name for name in storage.listdir(path) if name.endswith(".jsonl")
+        )
         if not entries:
             raise ValueError(f"No .jsonl shards found under {path}")
 

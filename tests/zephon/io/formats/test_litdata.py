@@ -7,11 +7,12 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
+from tests._helpers import catalog_locators
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
-from zephon.io.formats.litdata import LitDataFormat
+from zephon.io.formats.litdata import LitDataFormat, _LitDataExtraCodec
 from zephon.io.resolvers import DirectResolver
 from zephon.io.storage import LocalFSBackend
 from zephon.io.storage.base import StorageBackend
@@ -52,7 +53,7 @@ def test_litdata_reader_handles_dataset(
     dataset = Dataset.from_path(name="lit", path=str(dataset_dir))
     ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
-    locators = handler.build_locators(dataset)
+    _, locators = catalog_locators(dataset)
     assert dataset.path is not None
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
@@ -112,7 +113,7 @@ def test_litdata_reader_handles_dict_with_numpy_ints(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="lit-numpy", path=str(dataset_dir))
     ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
-    locators = handler.build_locators(dataset)
+    _, locators = catalog_locators(dataset)
     assert dataset.path is not None
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
@@ -151,7 +152,7 @@ def test_litdata_reader_handles_no_header_numpy(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="lit-no-header", path=str(dataset_dir))
     ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
-    locators = handler.build_locators(dataset)
+    _, locators = catalog_locators(dataset)
     assert dataset.path is not None
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
@@ -355,7 +356,7 @@ def test_litdata_shard_getsamples_batch_loading(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="lit-getsamples", path=str(dataset_dir))
     ensure_builtin_formats(required={"litdata"})
     handler = get_format("litdata")
-    locators = handler.build_locators(dataset)
+    _, locators = catalog_locators(dataset)
     assert dataset.path is not None
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
@@ -396,6 +397,41 @@ def test_litdata_shard_getsamples_batch_loading(tmp_path: Path) -> None:
                 assert str(item[1]) == f"sample-{idx}"
         finally:
             shard.close()
+
+
+def test_litdata_codec_rejects_non_constant_config() -> None:
+    """``encode`` fails loud when shards carry msgpack-distinct configs."""
+    codec = _LitDataExtraCodec()
+    metas = [
+        {"config": {"data_spec": None, "chunk_bytes": 1}},
+        {"config": {"data_spec": None, "chunk_bytes": 2}},
+    ]
+    with pytest.raises(ValueError, match="not constant across shards"):
+        codec.encode(metas, np.array([1, 1], dtype=np.int64))
+
+
+def test_litdata_codec_rejects_partial_config() -> None:
+    """``config`` on some shards but not all would be fabricated at decode."""
+    codec = _LitDataExtraCodec()
+    metas = [
+        {"chunk": {"chunk_size": 1}},
+        {"config": {"data_spec": None}, "chunk": {"chunk_size": 1}},
+    ]
+    with pytest.raises(ValueError, match="some shards but not all"):
+        codec.encode(metas, np.array([1, 1], dtype=np.int64))
+
+
+def test_litdata_codec_rejects_partial_interval() -> None:
+    """``interval`` on some shards but not all would be fabricated at decode."""
+    from zephon.io.formats.litdata_support import Interval
+
+    codec = _LitDataExtraCodec()
+    metas = [
+        {"interval": Interval(0, 0, 4, 4)},
+        {"chunk": {"chunk_size": 1}},
+    ]
+    with pytest.raises(ValueError, match="some shards but not all"):
+        codec.encode(metas, np.array([4, 1], dtype=np.int64))
 
 
 def _ensure_single_thread_zstd(writer: BinaryWriter) -> None:

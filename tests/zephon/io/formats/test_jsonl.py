@@ -22,13 +22,30 @@ def test_jsonl_discover_local(tmp_path: Path) -> None:
     handler = JsonlFormat()
     shard_index, shard_meta = handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
 
-    # Enumerate in storage.listdir order; just assert counts sum and per-shard entries present
+    # Assert counts sum and per-shard entries present
     assert sum(int(v) for v in shard_index.values()) == 5
     assert len(shard_meta) == len(shard_index)
     # Ensure basic metadata captured
     for meta in shard_meta.values():
         assert isinstance(meta.get("raw"), dict)
         assert isinstance(meta.get("extra"), dict)
+
+
+def test_jsonl_discover_assigns_shard_ids_in_sorted_basename_order(
+    tmp_path: Path,
+) -> None:
+    """Shard ids follow sorted basenames regardless of directory order."""
+    # Created out of lexical order on purpose; distinct row counts identify files.
+    _write_jsonl(tmp_path / "c.jsonl", [{"i": i} for i in range(1)])
+    _write_jsonl(tmp_path / "a.jsonl", [{"i": i} for i in range(2)])
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": i} for i in range(3)])
+
+    handler = JsonlFormat()
+    shard_index, shard_meta = handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
+
+    basenames = [shard_meta[sid]["raw"]["basename"] for sid in sorted(shard_meta)]
+    assert basenames == ["a.jsonl", "b.jsonl", "c.jsonl"]
+    assert dict(shard_index) == {0: 2, 1: 3, 2: 1}
 
 
 def test_jsonl_build_locators_and_open(tmp_path: Path) -> None:

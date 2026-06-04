@@ -70,8 +70,10 @@ class EncodedExtra:
         int_columns: name -> ``int64`` array for owned numeric fields — length-``M``
             (one per shard, e.g. litdata ``Interval``) or ragged with an offset
             column (e.g. parquet ``row_groups``).
-        flags: small JSON-serializable dict recorded in the file header (e.g.
-            ``{"has_interval": True}``) and passed back to ``decode``.
+        flags: small JSON-serializable dict recorded in the file header and
+            passed back to ``decode``/``decode_header``. The built-in codecs
+            leave it empty (header/column presence already carries their
+            state); the builder folds ``rest_constant`` into the stored flags.
     """
 
     owned_keys: frozenset[str] = frozenset()

@@ -56,18 +56,30 @@ IndexData = Union[ShardIndex, LitDataIndex, MdsIndex]
 # ---------------------------------------------------------------------------
 
 
-def is_shard_index(data: IndexData) -> TypeGuard[ShardIndex]:
-    """True when *data* matches the zephon-written ShardIndex shape."""
+def is_shard_index(data: IndexData | None) -> TypeGuard[ShardIndex]:
+    """True when *data* matches the zephon-written ShardIndex shape.
+
+    Accepts ``None`` so callers can classify ``find_and_load_index``'s optional
+    result directly, without a separate ``is not None`` guard.
+    """
     return isinstance(data, dict) and "format_version" in data and "shards" in data
 
 
-def is_litdata_index(data: IndexData) -> TypeGuard[LitDataIndex]:
-    """True when *data* matches the LitData index shape."""
+def is_litdata_index(data: IndexData | None) -> TypeGuard[LitDataIndex]:
+    """True when *data* matches the LitData index shape.
+
+    Accepts ``None`` so callers can classify ``find_and_load_index``'s optional
+    result directly, without a separate ``is not None`` guard.
+    """
     return isinstance(data, dict) and "config" in data and "chunks" in data
 
 
-def is_mds_index(data: IndexData) -> TypeGuard[MdsIndex]:
-    """True when *data* matches the MDS index shape."""
+def is_mds_index(data: IndexData | None) -> TypeGuard[MdsIndex]:
+    """True when *data* matches the MDS index shape.
+
+    Accepts ``None`` so callers can classify ``find_and_load_index``'s optional
+    result directly, without a separate ``is not None`` guard.
+    """
     return isinstance(data, dict) and "shards" in data and "format_version" not in data
 
 

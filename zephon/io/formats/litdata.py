@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
+from zephon.io.catalog.extra_codec import (
+    EncodedExtra,
+    packb,
+    register_extra_codec,
+    unpackb,
+)
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import LitDataIndex, is_litdata_index
@@ -519,6 +525,127 @@ class _LitDataShard(RandomAccessShard):
             close(0)
 
 
+def _serialize_litdata_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Make a LitData ``config`` msgpack-safe by serializing the PyTreeSpec.
+
+    The ``data_spec`` is an ``optree.PyTreeSpec`` (not msgpack-native); it is
+    serialized with ``treespec_dumps`` to a byte-stable string. At decode the
+    string is left in place — ``_normalize_config`` (run in ``_LitDataShard``)
+    re-loads it via ``treespec_loads``. Everything else in the config is already
+    JSON-native.
+    """
+    support = _ensure_litdata_support()
+    out = dict(config)
+    spec = out.get("data_spec")
+    if spec is not None and not isinstance(spec, str):
+        out["data_spec"] = support.treespec_dumps(spec)
+    return out
+
+
+class _LitDataExtraCodec:
+    """LitData ``extra`` optimization: ``config`` -> header, ``interval`` -> columns.
+
+    ``config`` is per-dataset, serialized once with ``treespec_dumps``;
+    ``interval`` is the 4-field ``Interval`` NamedTuple stored as four int64
+    columns so ``open_shard`` gets the exact cached interval. Both are
+    all-or-nothing across shards: with partial presence ``decode`` would
+    fabricate values for the shards that had none, and the generic rest path
+    cannot carry a ``PyTreeSpec`` config anyway, so ``encode`` raises instead.
+    ``chunk`` (and ``chunk_index``) are arbitrary per-shard data and flow
+    through the builder's generic rest path.
+    """
+
+    _INTERVAL_FIELDS = (
+        "iv_chunk_start",
+        "iv_roi_start_idx",
+        "iv_roi_end_idx",
+        "iv_chunk_end",
+    )
+
+    def encode(self, metas, num_rows) -> EncodedExtra:
+        support = _ensure_litdata_support()
+        count = len(metas)
+
+        # config is per-dataset (one object per index.json). Serialize it once;
+        # only re-serialize a shard whose config is a *different* object, and
+        # fail loud if it disagrees rather than silently serving shard 0's.
+        configs = [
+            cfg
+            for meta in metas
+            if meta and isinstance(cfg := meta.get("config"), Mapping)
+        ]
+        config_blob: bytes | None = None
+        if configs:
+            if len(configs) != count:
+                raise ValueError(
+                    "LitData 'config' is present on some shards but not all; "
+                    "the per-dataset header hoist requires every shard to "
+                    "carry it."
+                )
+            config_blob = packb(_serialize_litdata_config(configs[0]))
+            for cfg in configs[1:]:
+                if cfg is not configs[0] and (
+                    packb(_serialize_litdata_config(cfg)) != config_blob
+                ):
+                    raise ValueError(
+                        "LitData config is not constant across shards; the "
+                        "per-dataset header hoist requires a single config."
+                    )
+
+        intervals = [
+            iv
+            for meta in metas
+            if meta and isinstance(iv := meta.get("interval"), support.Interval)
+        ]
+        int_columns: dict[str, np.ndarray] = {}
+        if intervals:
+            if len(intervals) != count:
+                raise ValueError(
+                    "LitData 'interval' is present on some shards but not all; "
+                    "the per-shard interval columns require every shard to "
+                    "carry it."
+                )
+            cols = {
+                name: np.empty(count, dtype=np.int64) for name in self._INTERVAL_FIELDS
+            }
+            for i, iv in enumerate(intervals):
+                cols["iv_chunk_start"][i] = iv.chunk_start
+                cols["iv_roi_start_idx"][i] = iv.roi_start_idx
+                cols["iv_roi_end_idx"][i] = iv.roi_end_idx
+                cols["iv_chunk_end"][i] = iv.chunk_end
+            int_columns = cols
+
+        owned = set()
+        if config_blob is not None:
+            owned.add("config")
+        if int_columns:
+            owned.add("interval")
+        return EncodedExtra(
+            owned_keys=frozenset(owned),
+            header_blob=config_blob,
+            int_columns=int_columns,
+        )
+
+    def decode_header(self, header_blob, flags):
+        return unpackb(header_blob) if header_blob else None
+
+    def decode(self, slot, header_obj, int_cols, num_rows, flags):
+        out: dict[str, Any] = {}
+        if header_obj is not None:
+            # data_spec stays a string; _normalize_config re-loads it at open.
+            out["config"] = dict(header_obj)
+        if self._INTERVAL_FIELDS[0] in int_cols:
+            support = _ensure_litdata_support()
+            out["interval"] = support.Interval(
+                int(int_cols["iv_chunk_start"][slot]),
+                int(int_cols["iv_roi_start_idx"][slot]),
+                int(int_cols["iv_roi_end_idx"][slot]),
+                int(int_cols["iv_chunk_end"][slot]),
+            )
+        return out
+
+
 register_format(LitDataFormat())
+register_extra_codec("litdata", _LitDataExtraCodec())
 
 __all__ = ["LitDataFormat"]

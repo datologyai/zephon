@@ -5,6 +5,8 @@
 
 from typing import TYPE_CHECKING, Mapping, Protocol
 
+import numpy as np
+
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardRef, ShardLocator
@@ -29,6 +31,23 @@ class FormatHandler(Protocol):
         opening shards eagerly beyond what is required to compute counts.
         """
         ...
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return per-shard counts as ``(shard_ids, num_rows)`` int64 arrays.
+
+        Default implementation runs the full ``discover`` and keeps only the
+        counts. Formats with an index override this with a metadata-only fast
+        path and defer to ``super()`` otherwise; either way the result must
+        agree with ``discover`` on ``(shard_id, num_rows)``.
+        """
+        shard_index, _ = self.discover(path, storage)
+        ids = sorted(shard_index)
+        return (
+            np.array(ids, dtype=np.int64),
+            np.array([shard_index[i] for i in ids], dtype=np.int64),
+        )
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]: ...
 

@@ -7,6 +7,14 @@ import os
 from copy import deepcopy
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol, TypedDict, cast
 
+import numpy as np
+
+from zephon.io.catalog.extra_codec import (
+    EncodedExtra,
+    packb,
+    register_extra_codec,
+    unpackb,
+)
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import is_mds_index
@@ -103,6 +111,31 @@ class MDSFormat(FormatHandler):
             shard_meta[shard_id] = _normalize_shard(entry, shard_id)
 
         return shard_index, shard_meta
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Count-only discovery: read just per-shard ``samples`` from the index.
+
+        Avoids building the per-shard ``shard_meta`` graph at ``from_path`` time
+        (the heavy ~GB transient for million-shard MDS datasets). A missing or
+        malformed index defers to the full ``discover``, which raises the
+        canonical error. Must agree with ``discover`` on ``(shard_id, num_rows)``.
+        """
+        result = find_and_load_index(path, storage)
+        if is_mds_index(result) and isinstance(result.get("shards"), list):
+            try:
+                counts = [int(entry["samples"]) for entry in result["shards"]]
+            except (TypeError, KeyError, ValueError):
+                # Malformed entry: fall through to discover(), which re-parses
+                # the index and raises its canonical, shard-contextual error.
+                pass
+            else:
+                return (
+                    np.arange(len(counts), dtype=np.int64),
+                    np.array(counts, dtype=np.int64),
+                )
+        return super().discover_counts(path, storage)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         backend = dataset.backend
@@ -504,6 +537,67 @@ def _finalize_streaming_entry(
     return entry
 
 
+class _MDSExtraCodec:
+    """Hoist the per-dataset ``_streaming_template`` to the header once.
+
+    ``samples`` (== ``num_rows``) is the one per-shard template field; it is
+    stripped here and re-attached at decode from the ``num_rows`` column —
+    ``encode`` raises if the two disagree rather than silently rewriting the
+    template. When the remaining template is byte-identical across shards the
+    codec owns the ``_streaming_template`` key and hoists it; otherwise it owns
+    nothing and the full template flows through the builder's generic rest
+    path. Any sibling ``extra`` keys are likewise preserved by the rest path —
+    nothing is dropped.
+    """
+
+    def encode(self, metas, num_rows) -> EncodedExtra:
+        # Streamed: constancy only ever compares against the first blob, so one
+        # stripped copy + one blob are alive at a time instead of two O(shards)
+        # transients on top of the discovery metas build_catalog already holds.
+        first: bytes | None = None
+        constant = bool(metas)
+        for i, meta in enumerate(metas):
+            template = meta.get("_streaming_template") if meta else None
+            if not isinstance(template, Mapping) or "samples" not in template:
+                # Not hoistable; the generic rest path preserves it exactly.
+                constant = False
+                continue
+            if template["samples"] != num_rows[i]:
+                raise ValueError(
+                    f"MDS shard slot {i}: template samples="
+                    f"{template['samples']!r} != shard count {int(num_rows[i])}; "
+                    "the dataset description is self-contradictory."
+                )
+            if not constant:
+                # The hoist is already off the table; keep looping only so the
+                # samples check above stays unconditional.
+                continue
+            rest = dict(template)
+            del rest["samples"]
+            blob = packb(rest)
+            if first is None:
+                first = blob
+            elif blob != first:
+                constant = False
+        if constant and first is not None:
+            return EncodedExtra(
+                owned_keys=frozenset({"_streaming_template"}),
+                header_blob=first,
+            )
+        return EncodedExtra()
+
+    def decode_header(self, header_blob, flags):
+        return unpackb(header_blob) if header_blob else None
+
+    def decode(self, slot, header_obj, int_cols, num_rows, flags):
+        if header_obj is None:
+            return None  # template rode the generic rest path
+        template = dict(header_obj)
+        template["samples"] = num_rows
+        return {"_streaming_template": template}
+
+
 register_format(MDSFormat())
+register_extra_codec("mds", _MDSExtraCodec())
 
 __all__ = ["MDSFormat"]

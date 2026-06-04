@@ -7,7 +7,12 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from zephon.io import InMemoryShard
-from zephon.io.catalog import CatalogSet, DatasetHeader, ShardCatalog
+from zephon.io.catalog import (
+    CatalogSet,
+    DatasetHeader,
+    ShardCatalog,
+    ShardCatalogHandle,
+)
 from zephon.io.catalog import io as _catalog_io
 from zephon.io.catalog.builder import pack_locators
 from zephon.io.dataset import Dataset
@@ -49,6 +54,45 @@ def catalog_set_from_locators(
         _catalog_io.write_atomic(path, built.file_bytes)
         entries[dataset_id] = (name, ShardCatalog(_catalog_io.load_mmap(path)))
     return CatalogSet(entries)
+
+
+def attach_catalog(dataset: Dataset) -> ShardCatalog:
+    """Finalize (if needed) and attach a file-backed dataset's shard catalog.
+
+    Test-side equivalent of what the Engine / store builder does, for tests that
+    want to inspect synthesized locators directly.
+
+    When the dataset carries no ``catalog_handle``, one is synthesized from the
+    backend descriptor (format kind + path).
+    """
+    handle = getattr(dataset, "catalog_handle", None)
+    if handle is None:
+        kind = dataset.backend.get("kind")
+        assert isinstance(kind, str) and dataset.path is not None, (
+            "attach_catalog requires a file-backed dataset"
+        )
+        header = DatasetHeader(
+            name=dataset.name, root=dataset.path, format=kind, path=dataset.path
+        )
+        handle = ShardCatalogHandle(dataset=header)
+    if handle.fingerprint is None:
+        handle.finalize()
+    return handle.attach()
+
+
+def catalog_locators(
+    dataset: Dataset,
+) -> tuple[ShardCatalog, dict[int, ShardLocator]]:
+    """Return ``(catalog, {shard_id -> synthesized ShardLocator})`` for a dataset.
+
+    Locators are synthesized on demand from the dataset's node-local catalog.
+    """
+    catalog = attach_catalog(dataset)
+    locators = {
+        sid: catalog.locator_at(slot, dataset_name=dataset.name)
+        for slot, sid in enumerate(catalog.ids().tolist())
+    }
+    return catalog, locators
 
 
 def mk_dataset(name: str, shards: dict[int, int]) -> Dataset:

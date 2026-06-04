@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+import numpy as np
+
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import ShardIndex, is_shard_index
@@ -175,6 +177,26 @@ class VortexFormat(FormatHandler):
             }
 
         return shard_index, shard_meta
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Count-only discovery: read per-shard ``num_rows`` from the index.
+
+        Avoids building the per-shard ``shard_meta`` graph at ``from_path`` time
+        and, on the index path, opening any ``.vortex`` files. Falls back to the
+        full ``discover`` when no index is present — or when it has no shards,
+        which ``discover`` rejects. Must agree with ``discover`` on
+        ``(shard_id, num_rows)``.
+        """
+        result = find_and_load_index(path, storage)
+        if is_shard_index(result) and result.get("shards"):
+            counts = [shard.get("num_rows", 0) for shard in result["shards"]]
+            return (
+                np.arange(len(counts), dtype=np.int64),
+                np.array(counts, dtype=np.int64),
+            )
+        return super().discover_counts(path, storage)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         """Build shard locators from dataset metadata."""

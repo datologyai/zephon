@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 import numpy as np
 
+from zephon.io.catalog.extra_codec import EncodedExtra, register_extra_codec
 from zephon.io.formats.base import FormatHandler, register_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import ShardIndex, is_shard_index
@@ -539,6 +540,25 @@ class ParquetFormat(FormatHandler):
 
         return shard_index, shard_meta
 
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Count-only discovery: read ``num_rows`` from the index when present.
+
+        Avoids building the per-shard ``row_groups`` graph at ``from_path`` time
+        (and, on the index path, importing pyarrow at all). With no usable index
+        it falls back to the full ``discover`` footer scan. Must agree with
+        ``discover`` on ``(shard_id, num_rows)``.
+        """
+        result = find_and_load_index(path, storage)
+        if is_shard_index(result) and self._is_valid_parquet_index(result):
+            counts = [shard.get("num_rows", 0) for shard in result["shards"]]
+            return (
+                np.arange(len(counts), dtype=np.int64),
+                np.array(counts, dtype=np.int64),
+            )
+        return super().discover_counts(path, storage)
+
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         """Convert discovered metadata into ShardLocators.
 
@@ -652,7 +672,94 @@ class ParquetFormat(FormatHandler):
             return metadata
 
 
-# Register format
+class _ParquetExtraCodec:
+    """Columnarize per-shard ``row_groups`` into ragged int64 columns.
+
+    ``row_groups`` is ``[{num_rows, total_byte_size}, ...]`` per shard. A per-shard
+    msgpack blob would re-encode the ``num_rows``/``total_byte_size`` key strings
+    for every row group of every shard; flat int64 columns + an offset column
+    drop that repetition and need no deserialize. ``num_rows`` (the shard total)
+    comes from the catalog's ``num_rows`` column, so it is not stored here.
+
+    ``encode`` expects discovery-shaped extras. Extras without that shape ride
+    the generic rest path untouched; values that contradict the catalog's
+    counts raise rather than being silently rewritten at decode.
+    """
+
+    _RG_KEYS = frozenset({"num_rows", "total_byte_size"})
+
+    def _is_discovery_shaped(self, meta) -> bool:
+        if not isinstance(meta, Mapping):
+            return False
+        if "num_rows" not in meta or "num_row_groups" not in meta:
+            return False
+        row_groups = meta.get("row_groups")
+        return isinstance(row_groups, list) and all(
+            isinstance(rg, Mapping)
+            and set(rg) == self._RG_KEYS
+            and isinstance(rg["num_rows"], int)
+            and isinstance(rg["total_byte_size"], int)
+            for rg in row_groups
+        )
+
+    def encode(self, metas, num_rows) -> EncodedExtra:
+        if not all(self._is_discovery_shaped(meta) for meta in metas):
+            return EncodedExtra()  # foreign extras: the rest path is exact
+        offsets = np.empty(len(metas) + 1, dtype=np.int64)
+        offsets[0] = 0
+        total = sum(len(meta["row_groups"]) for meta in metas)
+        rg_num_rows = np.empty(total, dtype=np.int64)
+        rg_byte_size = np.empty(total, dtype=np.int64)
+        pos = 0
+        for i, meta in enumerate(metas):
+            row_groups = meta["row_groups"]
+            if meta["num_rows"] != num_rows[i]:
+                raise ValueError(
+                    f"Parquet shard slot {i}: extra num_rows="
+                    f"{meta['num_rows']!r} != shard count {int(num_rows[i])}; "
+                    "the dataset description is self-contradictory."
+                )
+            if meta["num_row_groups"] != len(row_groups):
+                raise ValueError(
+                    f"Parquet shard slot {i}: num_row_groups="
+                    f"{meta['num_row_groups']!r} != len(row_groups)="
+                    f"{len(row_groups)}; the dataset description is "
+                    "self-contradictory."
+                )
+            for rg in row_groups:
+                rg_num_rows[pos] = rg["num_rows"]
+                rg_byte_size[pos] = rg["total_byte_size"]
+                pos += 1
+            offsets[i + 1] = pos
+        return EncodedExtra(
+            owned_keys=frozenset({"row_groups", "num_rows", "num_row_groups"}),
+            int_columns={
+                "rg_off": offsets,
+                "rg_num_rows": rg_num_rows,
+                "rg_byte_size": rg_byte_size,
+            },
+        )
+
+    def decode_header(self, header_blob, flags):
+        return None
+
+    def decode(self, slot, header_obj, int_cols, num_rows, flags):
+        if "rg_off" not in int_cols:
+            return None  # encode owned nothing; extras rode the generic rest path
+        offsets = int_cols["rg_off"]
+        start, end = int(offsets[slot]), int(offsets[slot + 1])
+        nrows = int_cols["rg_num_rows"][start:end].tolist()
+        bsize = int_cols["rg_byte_size"][start:end].tolist()
+        return {
+            "num_rows": num_rows,
+            "num_row_groups": end - start,
+            "row_groups": [
+                {"num_rows": n, "total_byte_size": b} for n, b in zip(nrows, bsize)
+            ],
+        }
+
+
 register_format(ParquetFormat())
+register_extra_codec("parquet", _ParquetExtraCodec())
 
 __all__ = ["ParquetFormat", "ParquetShard"]
