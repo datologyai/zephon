@@ -657,7 +657,7 @@ class PumpCounts:
 
     The seven ``*_ns`` buckets are disjoint slices of pump wall time; their
     sum approximates the elapsed wall clock modulo small unaccounted Python
-    overhead. The three counters track discrete events. Used as the shared
+    overhead. The counter fields track discrete events. Used as the shared
     base for ``PumpTimingDelta`` (per-flush emit), ``PumpTimingNodeTotals``
     (aggregated in the collector), and ``PumpTimer`` (the live accumulator
     on the operator state). Field names live here once; everything else
@@ -674,6 +674,9 @@ class PumpCounts:
     batches_submitted: int = 0
     batches_completed: int = 0
     capacity_stalls: int = 0
+    items_consumed: int = 0
+    sweeps: int = 0
+    sweep_refs: int = 0
 
     def add_from(self, other: "PumpCounts") -> None:
         for name in _PUMP_ALL_FIELDS:

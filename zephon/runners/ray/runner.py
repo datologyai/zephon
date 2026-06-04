@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
@@ -30,6 +31,9 @@ from zephon.runners.ray.service import _RayActorGroup
 from zephon.utils.thread_utils import THREAD_SUPPRESSION_ENV_VARS
 
 logger = logging.getLogger(__name__)
+
+# Minimum interval between opportunistic result sweeps; see _drain_results.
+_DRAIN_INTERVAL_NS: int = 2_000_000
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> None:
@@ -128,6 +132,9 @@ class _RayOperatorState(ConcurrentOperatorState):
     actor_group: _RayActorGroup | None = field(default=None, init=False)
     pending_refs: _PendingRefs = field(init=False, default_factory=_PendingRefs)
     dead_actors: set[int] = field(init=False, default_factory=set)
+
+    # Last opportunistic sweep; rate-limits ray.wait polls (pump-thread only).
+    last_drain_ns: int = field(default=0, init=False)
 
     # Sentinel results created inline on the pump thread (same pattern as
     # ThreadStageRunner._local_results). Sentinel batches bypass actors and
@@ -287,6 +294,8 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
             return 0
 
         refs = state.pending_refs.active()
+        state.pump_timer.note("sweeps")
+        state.pump_timer.note("sweep_refs", len(refs))
 
         # Non-blocking sweep first.
         with state.pump_timer.measure("result_wait"):
@@ -355,7 +364,17 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
         next_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] | None,
         context: ConcurrentRunContext,
     ) -> None:
-        """Non-blocking sweep of ready ObjectRefs."""
+        """Non-blocking sweep of ready ObjectRefs, rate-limited to a cadence.
+
+        Each sweep is a ``ray.wait`` RPC (~100-200us), so the pump loop's
+        per-item call frequency would otherwise dominate pump time on
+        fine-grained input. Blocking paths (:meth:`_await_one_result`,
+        capacity stalls) bypass this and are never skipped.
+        """
+        now_ns = time.perf_counter_ns()
+        if now_ns - state.last_drain_ns < _DRAIN_INTERVAL_NS:
+            return
+        state.last_drain_ns = now_ns
         with state.pump_timer.measure_excluding(
             "idle_drain", "result_wait", "result_collect", "result_handle"
         ):

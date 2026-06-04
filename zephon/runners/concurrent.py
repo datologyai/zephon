@@ -436,9 +436,10 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
     ) -> None:
         """Drain any ready results and forward each via :meth:`_handle_result`.
 
-        Non-blocking. Subclasses implement this per their result source —
-        queue-pop for queue-drain runners, ``ray.wait()`` for ray-based
-        runners, etc.
+        Non-blocking and opportunistic; subclasses may rate-limit the sweep
+        (the Ray runner does). Subclasses implement this per their result
+        source — queue-pop for queue-drain runners, ``ray.wait()`` for
+        ray-based runners, etc.
         """
         raise NotImplementedError
 
@@ -632,6 +633,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                     upstream_closed = True
                     ready = state.enqueue([], force=True)
                 else:
+                    state.pump_timer.note("items_consumed")
                     ready = state.enqueue(item, force=False)
 
                 # Drain results after every dispatch to keep workers unblocked.
