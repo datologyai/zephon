@@ -29,6 +29,7 @@ dynamic = ["version"]
 
 dependencies = [
     "cloudpickle>=1.6.0",
+    "filelock>=3.0.0",
     "msgpack>=1.0.0",
     "numpy>=1.20.0",
     "optree>=0.12.0",

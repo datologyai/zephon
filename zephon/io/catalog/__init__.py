@@ -16,17 +16,35 @@ from zephon.io.catalog.extra_codec import (
     get_extra_codec,
     register_extra_codec,
 )
+from zephon.io.catalog.handle import (
+    CATALOG_CACHE_SUBDIR,
+    CatalogFingerprintMismatch,
+    ShardCatalogHandle,
+    attach,
+    clear_registry,
+    finalize,
+    resolve_catalog_dir,
+    set_catalog_dir,
+)
 from zephon.io.catalog.io import SCHEMA_VERSION
 
 __all__ = [
+    "CATALOG_CACHE_SUBDIR",
     "SCHEMA_VERSION",
     "BuiltCatalog",
+    "CatalogFingerprintMismatch",
     "CatalogSet",
     "DatasetHeader",
     "EncodedExtra",
     "ExtraCodec",
     "ShardCatalog",
+    "ShardCatalogHandle",
+    "attach",
     "build_catalog",
+    "clear_registry",
+    "finalize",
     "get_extra_codec",
     "register_extra_codec",
+    "resolve_catalog_dir",
+    "set_catalog_dir",
 ]

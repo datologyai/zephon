@@ -1,23 +1,43 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the zero-copy catalog views (``ShardCatalog`` / ``CatalogSet``).
+"""Unit tests for the node-local shard catalog: zero-copy views and lifecycle.
 
-Catalogs are built here from synthetic locators via
-:func:`tests._helpers.catalog_set_from_locators` (``pack_locators`` -> on-disk
-artifact -> ``mmap``), which exercises the same columnarize/synthesize path the
-production node-local build uses.
+The view tests (``ShardCatalog`` / ``CatalogSet``) build catalogs from synthetic
+locators via :func:`tests._helpers.catalog_set_from_locators` (``pack_locators``
+-> on-disk artifact -> ``mmap``), exercising the same columnarize/synthesize path
+the production node-local build uses. The build/finalize/attach tests drive the
+full lifecycle (``build_catalog`` -> source-key-locked ``finalize`` ->
+registry/file/rebuild ``attach``) over real on-disk datasets.
 """
 
+import json
 import mmap as _mmap
 import pickle
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from tests._helpers import catalog_set_from_locators
-from zephon.io.catalog import CatalogSet
+from zephon.io.catalog import (
+    CATALOG_CACHE_SUBDIR,
+    SCHEMA_VERSION,
+    CatalogSet,
+    DatasetHeader,
+    ShardCatalog,
+    ShardCatalogHandle,
+    attach,
+    build_catalog,
+    clear_registry,
+    finalize,
+    resolve_catalog_dir,
+    set_catalog_dir,
+)
+from zephon.io.catalog import handle as handle_mod
+from zephon.io.options import CacheOptions, StoreOptions
 from zephon.io.types import ShardFile, ShardLocator
 
 
@@ -144,3 +164,290 @@ def test_catalog_set_not_picklable(tmp_path: Path) -> None:
     cset = catalog_set_from_locators([_loc("x", 0, "x0.jsonl")], tmp_path)
     with pytest.raises(TypeError, match="must not be pickled"):
         pickle.dumps(cset)
+
+
+# --------------------------------------------------------------------------
+# build / finalize / attach lifecycle (handle-backed, real on-disk datasets)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def catalog_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path))
+    set_catalog_dir(StoreOptions())
+    clear_registry()
+    yield tmp_path
+    clear_registry()
+
+
+def _make_jsonl(root: Path, shards: dict[str, int]) -> None:
+    for name, count in shards.items():
+        path = root / f"{name}.jsonl"
+        path.write_text(
+            "".join(json.dumps({"i": i}) + "\n" for i in range(count)),
+            encoding="utf-8",
+        )
+
+
+def _header(root: Path, name: str = "ds") -> DatasetHeader:
+    return DatasetHeader(name=name, root=str(root), format="jsonl", path=str(root))
+
+
+def test_finalize_then_attach_jsonl(catalog_dir: Path, tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    handle = ShardCatalogHandle(dataset=_header(root))
+
+    fp = finalize(handle)
+    assert fp.startswith("sha256:")
+    assert handle.fingerprint == fp
+
+    catalog = attach(handle)
+    assert isinstance(catalog, ShardCatalog)
+    assert catalog.shard_count == 2
+    assert catalog.total() == 8
+    assert catalog.max_count() == 5
+    np.testing.assert_array_equal(catalog.ids(), np.array([0, 1]))
+    np.testing.assert_array_equal(catalog.num_rows(), np.array([3, 5]))
+
+    loc = catalog.locator_at(catalog.slot_of(1), dataset_name="ds")
+    assert loc.shard_id == 1
+    assert loc.format == "jsonl"
+    assert loc.root == str(root)
+    assert dict(loc.extra) == {"length": 5}
+
+
+def test_attach_requires_finalized_handle(catalog_dir: Path, tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 1})
+    handle = ShardCatalogHandle(dataset=_header(root))
+    with pytest.raises(RuntimeError, match="finalize"):
+        attach(handle)
+
+
+def test_lazy_extra_is_mapping(catalog_dir: Path, tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 2})
+    handle = ShardCatalogHandle(dataset=_header(root))
+    finalize(handle)
+    loc = attach(handle).locator_at(0, dataset_name="ds")
+    assert isinstance(loc.extra, Mapping)
+    assert loc.extra["length"] == 2
+    assert list(loc.extra.keys()) == ["length"]
+    assert dict(loc.extra) == {"length": 2}
+
+
+# --------------------------------------------------------------------------
+# fingerprint boundary
+# --------------------------------------------------------------------------
+
+
+def test_fingerprint_stable_and_name_independent(tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    fp1 = build_catalog(_header(root, name="alpha")).fingerprint
+    fp2 = build_catalog(_header(root, name="alpha")).fingerprint
+    fp_alias = build_catalog(_header(root, name="BETA")).fingerprint
+    assert fp1 == fp2  # deterministic
+    assert fp1 == fp_alias  # name excluded from fingerprint
+
+
+def test_fingerprint_changes_with_root(tmp_path: Path) -> None:
+    root1 = tmp_path / "ds1"
+    root2 = tmp_path / "ds2"
+    for r in (root1, root2):
+        r.mkdir()
+        _make_jsonl(r, {"a": 3, "b": 5})
+    fp1 = build_catalog(_header(root1)).fingerprint
+    fp2 = build_catalog(_header(root2)).fingerprint
+    assert fp1 != fp2  # physical identity (root) is part of the hash
+
+
+# --------------------------------------------------------------------------
+# concurrency: exactly one builder, the rest hit the pointer
+# --------------------------------------------------------------------------
+
+
+def test_concurrent_finalize_builds_once(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5, "c": 7})
+
+    builds = {"n": 0}
+    lock = threading.Lock()
+    real_build = build_catalog
+
+    def counting_build(header):
+        with lock:
+            builds["n"] += 1
+        return real_build(header)
+
+    monkeypatch.setattr(handle_mod, "build_catalog", counting_build)
+
+    handles = [ShardCatalogHandle(dataset=_header(root)) for _ in range(8)]
+    results: list[str] = []
+    rlock = threading.Lock()
+
+    def worker(h):
+        fp = finalize(h)
+        with rlock:
+            results.append(fp)
+
+    threads = [threading.Thread(target=worker, args=(h,)) for h in handles]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(set(results)) == 1  # all converge on one fingerprint
+    assert builds["n"] == 1  # source-key lock + pointer => exactly one build
+
+
+def test_attach_rebuild_matches_fingerprint(catalog_dir: Path, tmp_path: Path) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    handle = ShardCatalogHandle(dataset=_header(root))
+    fp = finalize(handle)
+
+    # Simulate a fresh machine: clear the registry and delete the file, keep the
+    # baked fingerprint. attach() must rebuild and reproduce the same fp.
+    clear_registry()
+    (catalog_dir / f"v{SCHEMA_VERSION}" / fp).unlink()
+    catalog = attach(handle)
+    assert catalog.fingerprint == fp
+    assert catalog.total() == 8
+
+
+def test_attach_rebuild_mismatch_raises(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3})
+    handle = ShardCatalogHandle(dataset=_header(root))
+    finalize(handle)
+    handle.fingerprint = "sha256:deadbeef"  # pretend the driver baked a different fp
+    clear_registry()
+    with pytest.raises(handle_mod.CatalogFingerprintMismatch):
+        attach(handle)
+
+
+def test_stale_source_sig_forces_rebuild(catalog_dir: Path, tmp_path: Path) -> None:
+    # An index-bearing dataset whose index changes in place under the same root
+    # gets a new source key -> pointer miss -> rebuild (no stale catalog served).
+    root = tmp_path / "ds"
+    root.mkdir()
+    index = {"shards": [{"samples": 3, "raw": {"basename": "s0.mds", "bytes": 1}}]}
+    (root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    h1 = ShardCatalogHandle(
+        dataset=DatasetHeader(name="ds", root=str(root), format="mds", path=str(root))
+    )
+    fp1 = finalize(h1)
+
+    # Mutate the index in place (different samples) and bump mtime.
+    index2 = {
+        "shards": [
+            {"samples": 4, "raw": {"basename": "s0.mds", "bytes": 1}},
+            {"samples": 9, "raw": {"basename": "s1.mds", "bytes": 1}},
+        ]
+    }
+    (root / "index.json").write_text(json.dumps(index2), encoding="utf-8")
+    import os
+    import time
+
+    future = time.time() + 10
+    os.utime(root / "index.json", (future, future))
+
+    h2 = ShardCatalogHandle(
+        dataset=DatasetHeader(name="ds", root=str(root), format="mds", path=str(root))
+    )
+    fp2 = finalize(h2)
+    assert fp2 != fp1
+    assert attach(h2).total() == 13
+
+
+def test_catalog_is_mmap_backed_not_anonymous(
+    catalog_dir: Path, tmp_path: Path
+) -> None:
+    # finalize/attach must register the mmap of the file on disk, not the
+    # private in-memory build buffers: columns stay zero-copy, read-only views
+    # into the file mapping, so all ranks/workers on a node share its pages.
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    handle = ShardCatalogHandle(dataset=_header(root))
+    finalize(handle)
+    catalog = attach(handle)
+    num_rows = catalog.num_rows()
+    assert isinstance(catalog._loaded._mmap, _mmap.mmap)
+    assert not num_rows.flags.writeable
+    assert np.shares_memory(
+        num_rows, np.frombuffer(catalog._loaded._mmap, dtype=np.uint8)
+    )
+
+
+# --------------------------------------------------------------------------
+# catalog directory: filesystem classification + resolution precedence
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fstype", "expected"),
+    [
+        (None, False),  # no procfs (e.g. macOS): can't detect -> assume node-local
+        ("", True),  # procfs present but mount undetermined -> fail safe
+        ("ext4", False),
+        ("xfs", False),
+        ("nfs4", True),
+        ("lustre", True),
+        ("tmpfs", True),
+        ("fuse.sshfs", True),  # any fuse mount
+    ],
+)
+def test_is_network_or_ram_classifies_fstype(
+    fstype: str | None, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(handle_mod, "_fs_type", lambda _p: fstype)
+    assert handle_mod._is_network_or_ram(Path("/whatever")) is expected
+
+
+def test_resolve_catalog_dir_prefers_local_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(handle_mod, "_is_network_or_ram", lambda _p: False)
+    opts = StoreOptions(cache=CacheOptions(enabled=True, root=tmp_path))
+    assert resolve_catalog_dir(opts) == tmp_path / CATALOG_CACHE_SUBDIR
+
+
+def test_resolve_catalog_dir_skips_network_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A network/RAM-backed cache root is skipped (mmap page-sharing degrades
+    # there); resolution falls through to the env override.
+    monkeypatch.setattr(handle_mod, "_is_network_or_ram", lambda _p: True)
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "env"))
+    opts = StoreOptions(cache=CacheOptions(enabled=True, root=tmp_path))
+    assert resolve_catalog_dir(opts) == tmp_path / "env"
+
+
+def test_resolve_catalog_dir_env_over_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cache off -> skip the cache branch; the env override beats the tmp default.
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "env"))
+    assert resolve_catalog_dir(StoreOptions()) == tmp_path / "env"
+
+
+def test_resolve_catalog_dir_falls_back_to_tmp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No cache, no env override (``None`` mirrors the no-Engine direct/test path).
+    monkeypatch.delenv("ZEPHON_CATALOG_DIR", raising=False)
+    assert resolve_catalog_dir(None) == handle_mod._default_tmp_dir()

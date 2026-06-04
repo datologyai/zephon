@@ -5097,6 +5097,7 @@ name = "zephon"
 source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
+    { name = "filelock" },
     { name = "msgpack" },
     { name = "numpy" },
     { name = "optree" },
@@ -5176,6 +5177,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "cloudpickle", specifier = ">=1.6.0" },
+    { name = "filelock", specifier = ">=3.0.0" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2023.0.0" },
     { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=0.20.0" },
     { name = "litdata", marker = "extra == 'litdata'" },
