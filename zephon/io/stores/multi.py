@@ -33,8 +33,8 @@ def _cross_check_counts(dataset: Dataset, catalog: ShardCatalog) -> None:
     shard ordering would silently mis-map counts to files, so when both are
     present in the same process we assert they agree.
     """
-    ids = getattr(dataset, "_ids", None)
-    counts = getattr(dataset, "_counts", None)
+    ids = dataset._ids
+    counts = dataset._counts
     if ids is None or counts is None:
         return
     if not (

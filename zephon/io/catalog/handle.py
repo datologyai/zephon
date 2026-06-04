@@ -7,7 +7,8 @@ A ``ShardCatalogHandle`` pickles to a few KB (only the content ``fingerprint``,
 no buffers or path); the mmap-backed columns live in a module registry that
 pickle never touches. ``finalize()`` builds-or-loads under a source-key lock when
 the fingerprint is unknown (one build per node) and bakes it; ``attach()`` loads
-by the known fingerprint (registry -> node-local file -> cross-node rebuild).
+by the known fingerprint (registry -> node-local file -> cross-node rebuild,
+the rebuild serialized on the same source-key lock).
 """
 
 from __future__ import annotations
@@ -245,31 +246,68 @@ def _source_key(header: DatasetHeader) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def finalize(handle: ShardCatalogHandle) -> str:
-    """Build-or-load the catalog under a source-key lock; bake the fingerprint."""
-    if handle.fingerprint is not None:
-        attach(handle)
-        return handle.fingerprint
+def _ensure_catalog_file(
+    header: DatasetHeader, *, expected_fp: str | None = None
+) -> str:
+    """Ensure the content-addressed catalog file exists; return its fingerprint.
 
+    ``finalize()`` and ``attach()``'s cross-node rebuild serialize on the same
+    per-source lock, so concurrent calls for one source yield exactly one
+    build. The pointer is refreshed either way: a rebuild also warms the next
+    unfinalized ``finalize()`` on this node.
+    """
     sdir = _schema_dir(_catalog_dir())
-    skey = _source_key(handle.dataset)
+    skey = _source_key(header)
     pointer_path = sdir / ".bykey" / f"{skey}.fp"
     lock_path = sdir / ".bykey" / f"{skey}.lock"
-
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OSError(
+            f"Cannot create catalog dir {sdir}: {exc}. Zephon needs a writable "
+            "node-local directory for shard catalogs even with the cache "
+            "disabled (resolution: {cache.root}/.catalog -> $ZEPHON_CATALOG_DIR "
+            "-> {tempdir}/zephon-{uid}/catalog); set ZEPHON_CATALOG_DIR to "
+            "override."
+        ) from exc
     with FileLock(str(lock_path)):
-        fp = catalog_io.read_pointer(pointer_path)
+        fp = expected_fp or catalog_io.read_pointer(pointer_path)
         if fp is None or not catalog_io.is_valid(
             sdir / fp, schema_version=SCHEMA_VERSION
         ):
-            built = build_catalog(handle.dataset)
+            built = build_catalog(header)
+            if expected_fp is not None and built.fingerprint != expected_fp:
+                raise CatalogFingerprintMismatch(
+                    f"Rebuilt catalog fingerprint {built.fingerprint} != baked "
+                    f"{expected_fp} for dataset {header.name!r}; discovery is "
+                    "not deterministic across machines."
+                )
             fp = built.fingerprint
             catalog_io.write_atomic(sdir / fp, built.file_bytes)
+            del built  # drop the private build buffers; callers mmap the file
+        if catalog_io.read_pointer(pointer_path) != fp:
             catalog_io.write_pointer(pointer_path, fp)
-            del built  # drop the private build buffers; we mmap the file below
-        catalog = ShardCatalog(catalog_io.load_mmap(sdir / fp))
-        with _REGISTRY_LOCK:
-            _REGISTRY[(SCHEMA_VERSION, fp)] = catalog
+    return fp
+
+
+def _load_and_register(fp: str) -> ShardCatalog:
+    """Mmap the catalog file for ``fp`` and share it via the process registry.
+
+    The mmap happens outside the registry lock; on a race the loser's mapping
+    is dropped and the winner's is shared.
+    """
+    catalog = ShardCatalog(catalog_io.load_mmap(_schema_dir(_catalog_dir()) / fp))
+    with _REGISTRY_LOCK:
+        return _REGISTRY.setdefault((SCHEMA_VERSION, fp), catalog)
+
+
+def finalize(handle: ShardCatalogHandle) -> str:
+    """Build-or-load the catalog under the per-source lock; bake the fingerprint."""
+    if handle.fingerprint is not None:
+        attach(handle)
+        return handle.fingerprint
+    fp = _ensure_catalog_file(handle.dataset)
+    _load_and_register(fp)
     handle.fingerprint = fp
     return fp
 
@@ -279,43 +317,18 @@ def attach(handle: ShardCatalogHandle) -> ShardCatalog:
     if handle.fingerprint is None:
         raise RuntimeError(
             "attach() requires a finalized handle (fingerprint is the registry/"
-            "file key); call finalize() first."
+            "file key). A missing fingerprint after unpickling means the "
+            "Dataset was pickled before finalize() baked it — the Engine "
+            "finalizes at construction; call finalize() first."
         )
-    key = (SCHEMA_VERSION, handle.fingerprint)
-    catalog = _REGISTRY.get(key)
+    catalog = _REGISTRY.get((SCHEMA_VERSION, handle.fingerprint))
     if catalog is not None:
         return catalog
-
-    # Build (cross-node miss) outside the registry lock — the file lock
-    # serializes builds, the registry lock only guards the insert — so one
-    # actor's rebuild doesn't block attaches of other datasets.
     path = _schema_dir(_catalog_dir()) / handle.fingerprint
-    if catalog_io.is_valid(path, schema_version=SCHEMA_VERSION):
-        catalog = ShardCatalog(catalog_io.load_mmap(path))
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(path) + ".lock"):
-            if catalog_io.is_valid(path, schema_version=SCHEMA_VERSION):
-                catalog = ShardCatalog(catalog_io.load_mmap(path))
-            else:
-                built = build_catalog(handle.dataset)
-                if built.fingerprint != handle.fingerprint:
-                    raise CatalogFingerprintMismatch(
-                        "Rebuilt catalog fingerprint "
-                        f"{built.fingerprint} != baked {handle.fingerprint} "
-                        f"for dataset {handle.dataset.name!r}; discovery is "
-                        "not deterministic across machines."
-                    )
-                catalog_io.write_atomic(path, built.file_bytes)
-                del built
-                catalog = ShardCatalog(catalog_io.load_mmap(path))
-
-    with _REGISTRY_LOCK:
-        existing = _REGISTRY.get(key)
-        if existing is not None:
-            return existing  # another thread won the race; share its mapping
-        _REGISTRY[key] = catalog
-        return catalog
+    if not catalog_io.is_valid(path, schema_version=SCHEMA_VERSION):
+        # Cross-node miss: rebuild from source, serialized with finalize().
+        _ensure_catalog_file(handle.dataset, expected_fp=handle.fingerprint)
+    return _load_and_register(handle.fingerprint)
 
 
 def clear_registry() -> None:

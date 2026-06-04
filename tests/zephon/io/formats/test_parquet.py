@@ -982,7 +982,7 @@ class TestParquetAutoDetection:
         )
 
         assert dataset.backend["kind"] == "parquet"
-        assert len(dataset.shard_index) == 3
+        assert dataset.shard_count() == 3
         assert dataset.total() == 30000  # 10000 + 8000 + 12000
 
     def test_auto_detect_without_index(self, parquet_dataset_dir):
@@ -990,7 +990,7 @@ class TestParquetAutoDetection:
         dataset = Dataset.from_path(name="test_dataset", path=str(parquet_dataset_dir))
 
         assert dataset.backend["kind"] == "parquet"
-        assert len(dataset.shard_index) == 3
+        assert dataset.shard_count() == 3
         assert dataset.total() == 30000
 
     def test_explicit_format_specification(self, parquet_dataset_dir):
@@ -1012,7 +1012,7 @@ class TestParquetIntegration:
         )
 
         # Verify dataset structure
-        assert len(dataset.shard_index) == 3
+        assert dataset.shard_count() == 3
         total_samples = dataset.total()
         assert total_samples == 30000
 

@@ -24,6 +24,21 @@ from zephon.utils.semaphore import SafeSemLock
 _spawn_ctx = mp.get_context("spawn")
 
 
+def _registry_semaphore_names() -> set[str]:
+    """Semaphore names currently in the multiprocessing finalizer registry.
+
+    Only string first-args are kept: the registry is process-global and shared
+    with CPython internals — e.g. a live ``mp.Queue`` registers
+    ``Queue._finalize_close`` whose first arg is its ``collections.deque``
+    buffer, which is unhashable and would otherwise break the set build.
+    """
+    return {
+        args[0]
+        for f in util._finalizer_registry.values()
+        if (args := getattr(f, "_args", ())) and isinstance(args[0], str)
+    }
+
+
 class TestIsGilDisabled:
     """Tests for is_gil_disabled()."""
 
@@ -59,18 +74,14 @@ class TestCleanupSemaphores:
         name = sem._semlock.name
 
         # Verify it's in the registry
-        names_in_registry = {
-            getattr(f, "_args", (None,))[0] for f in util._finalizer_registry.values()
-        }
+        names_in_registry = _registry_semaphore_names()
         assert name in names_in_registry
 
         # Clean up
         cleanup_semaphores([sem])
 
         # Verify it's removed
-        names_in_registry = {
-            getattr(f, "_args", (None,))[0] for f in util._finalizer_registry.values()
-        }
+        names_in_registry = _registry_semaphore_names()
         assert name not in names_in_registry
 
     def test_cleans_up_multiple_semaphores(self):
@@ -79,18 +90,14 @@ class TestCleanupSemaphores:
         names = {s._semlock.name for s in sems}
 
         # Verify they're in the registry
-        names_in_registry = {
-            getattr(f, "_args", (None,))[0] for f in util._finalizer_registry.values()
-        }
+        names_in_registry = _registry_semaphore_names()
         assert names.issubset(names_in_registry)
 
         # Clean up
         cleanup_semaphores(sems)
 
         # Verify they're all removed
-        names_in_registry = {
-            getattr(f, "_args", (None,))[0] for f in util._finalizer_registry.values()
-        }
+        names_in_registry = _registry_semaphore_names()
         assert not names.intersection(names_in_registry)
 
     def test_handles_already_cleaned_semaphore(self):

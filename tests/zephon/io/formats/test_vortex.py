@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 
-from tests._helpers import catalog_locators
+from tests._helpers import catalog_locators, counts_dict
 from zephon.io.dataset import Dataset
 from zephon.io.formats.vortex import VortexFormat, VortexShard
 from zephon.io.storage.local import LocalFSBackend
@@ -52,7 +52,6 @@ def test_vortex_build_locators_and_open(tmp_path: Path) -> None:
 
     ds = Dataset(
         name="demo",
-        shard_index=shard_index,
         backend={"kind": "vortex", "path": str(tmp_path), "shards": shard_meta},
         path=str(tmp_path),
     )
@@ -94,7 +93,6 @@ def test_vortex_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) 
     """Test that build_locators rejects invalid metadata."""
     ds = Dataset(
         name="bad",
-        shard_index={0: 1},
         backend={"kind": "vortex", "path": str(tmp_path), "shards": bad_shards},
         path=str(tmp_path),
     )
@@ -196,7 +194,6 @@ def test_vortex_multiple_shards_data_integrity(tmp_path: Path) -> None:
     # Verify each shard's data
     ds = Dataset(
         name="multi",
-        shard_index=shard_index,
         backend={"kind": "vortex", "path": str(tmp_path), "shards": shard_meta},
         path=str(tmp_path),
     )
@@ -489,7 +486,7 @@ def test_vortex_auto_detect_format(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="test_vortex", path=str(tmp_path))
 
     assert dataset.backend["kind"] == "vortex"
-    assert len(dataset.shard_index) == 2
+    assert dataset.shard_count() == 2
     assert dataset.total() == 20
 
 
@@ -500,8 +497,8 @@ def test_vortex_explicit_format_specification(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="explicit", path=str(tmp_path), fmt="vortex")
 
     assert dataset.backend["kind"] == "vortex"
-    assert len(dataset.shard_index) == 1
-    assert dataset.shard_index[0] == 5
+    assert dataset.shard_count() == 1
+    assert counts_dict(dataset)[0] == 5
 
 
 def test_vortex_end_to_end_reading(tmp_path: Path) -> None:
@@ -514,7 +511,7 @@ def test_vortex_end_to_end_reading(tmp_path: Path) -> None:
     dataset = Dataset.from_path(name="e2e_test", path=str(tmp_path))
 
     # Verify dataset structure
-    assert len(dataset.shard_index) == 3
+    assert dataset.shard_count() == 3
     assert dataset.total() == 150  # 3 shards * 50 rows
 
     # from_path datasets carry no per-shard metadata in the backend; locators

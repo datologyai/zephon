@@ -38,7 +38,7 @@ def test_dataset_from_path_streams_squad() -> None:
     ds = Dataset.from_path("squad", _SQUAD_TRAIN_URI)
     assert ds.path == _SQUAD_TRAIN_URI
     assert ds.backend["kind"] == "parquet"
-    assert len(ds.shard_index) >= 1
+    assert ds.shard_count() >= 1
     assert ds.total() > 0
 
 

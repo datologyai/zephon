@@ -1107,7 +1107,6 @@ def test_build_resolver_with_all_inmem_datasets_does_not_crash(tmp_path: Path) -
     datasets = {
         0: Dataset(
             name="only-inmem",
-            shard_index={},
             backend={"kind": "inmem", "shards": inmem_shards},
             path=None,
         )
@@ -1133,13 +1132,11 @@ def test_duplicate_cacheable_dataset_names_raise(tmp_path: Path) -> None:
     datasets = {
         0: Dataset(
             name="same",
-            shard_index={0: 1},
             backend={"kind": "dummy", "path": str(remote)},
             path=str(remote),
         ),
         1: Dataset(
             name="same",
-            shard_index={1: 1},
             backend={"kind": "dummy", "path": str(remote)},
             path=str(remote),
         ),
@@ -1165,13 +1162,11 @@ def test_duplicate_name_rejected_across_inmem_and_file_backed(
     datasets = {
         0: Dataset(
             name="same",
-            shard_index={0: 1},
             backend={"kind": "dummy", "path": str(remote)},
             path=str(remote),
         ),
         1: Dataset(
             name="same",
-            shard_index={},
             backend={"kind": "inmem", "shards": inmem_shards},
             path=None,
         ),

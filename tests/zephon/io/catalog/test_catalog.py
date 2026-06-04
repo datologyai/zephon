@@ -13,7 +13,9 @@ registry/file/rebuild ``attach``) over real on-disk datasets.
 
 import json
 import mmap as _mmap
+import os
 import pickle
+import sys
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -22,6 +24,7 @@ import numpy as np
 import pytest
 
 from tests._helpers import catalog_set_from_locators
+from zephon.io import formats as formats_mod
 from zephon.io.catalog import (
     CATALOG_CACHE_SUBDIR,
     SCHEMA_VERSION,
@@ -36,6 +39,7 @@ from zephon.io.catalog import (
     resolve_catalog_dir,
     set_catalog_dir,
 )
+from zephon.io.catalog import extra_codec as extra_codec_mod
 from zephon.io.catalog import handle as handle_mod
 from zephon.io.options import CacheOptions, StoreOptions
 from zephon.io.types import ShardFile, ShardLocator
@@ -223,7 +227,8 @@ def test_attach_requires_finalized_handle(catalog_dir: Path, tmp_path: Path) -> 
     root.mkdir()
     _make_jsonl(root, {"a": 1})
     handle = ShardCatalogHandle(dataset=_header(root))
-    with pytest.raises(RuntimeError, match="finalize"):
+    # The message must explain the usual cause: pickled before finalize().
+    with pytest.raises(RuntimeError, match="pickled before finalize"):
         attach(handle)
 
 
@@ -337,6 +342,108 @@ def test_attach_rebuild_mismatch_raises(
     clear_registry()
     with pytest.raises(handle_mod.CatalogFingerprintMismatch):
         attach(handle)
+
+
+def test_attach_rebuild_concurrent_with_finalize_builds_once(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # attach()'s cross-node rebuild and finalize() share the per-source lock:
+    # overlapping calls for one source must produce exactly one build.
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3, "b": 5})
+    baked = ShardCatalogHandle(dataset=_header(root))
+    fp = finalize(baked)
+    clear_registry()
+    (catalog_dir / f"v{SCHEMA_VERSION}" / fp).unlink()  # simulate a fresh node
+
+    builds = {"n": 0}
+    lock = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+    real_build = build_catalog
+
+    def gated_build(header):
+        with lock:
+            builds["n"] += 1
+        entered.set()
+        assert release.wait(timeout=30)
+        return real_build(header)
+
+    monkeypatch.setattr(handle_mod, "build_catalog", gated_build)
+
+    attached: list[ShardCatalog] = []
+    finalized: list[str] = []
+    t_attach = threading.Thread(target=lambda: attached.append(attach(baked)))
+    t_attach.start()
+    assert entered.wait(timeout=30)  # the rebuild holds the source-key lock
+    fresh = ShardCatalogHandle(dataset=_header(root))
+    t_finalize = threading.Thread(target=lambda: finalized.append(finalize(fresh)))
+    t_finalize.start()
+    release.set()
+    t_attach.join(timeout=30)
+    t_finalize.join(timeout=30)
+
+    assert builds["n"] == 1  # finalize waited, then loaded the rebuilt file
+    assert finalized == [fp]
+    assert attached[0].fingerprint == fp
+
+
+def test_attach_cold_process_resolves_codec(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """attach() must import the owning format; the default codec would drop keys."""
+    root = tmp_path / "ds"
+    root.mkdir()
+    index = {
+        "shards": [
+            {
+                "samples": 3,
+                "raw": {"basename": "s0.mds", "bytes": 1},
+                "column_encodings": ["str"],
+                "column_names": ["text"],
+            }
+        ]
+    }
+    (root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    handle = ShardCatalogHandle(
+        dataset=DatasetHeader(name="ds", root=str(root), format="mds", path=str(root))
+    )
+    finalize(handle)
+    warm = dict(attach(handle).locator_at(0, dataset_name="ds").extra)
+    assert "_streaming_template" in warm  # the key the mds codec owns
+
+    # Simulate a fresh worker: no mmapped catalogs, empty codec registry, format
+    # module not imported.
+    clear_registry()
+    monkeypatch.setattr(extra_codec_mod, "_CODECS", {})
+    monkeypatch.setattr(formats_mod, "_INITIALIZED_FORMATS", set())
+    monkeypatch.delitem(sys.modules, "zephon.io.formats.mds")
+    cold = dict(attach(handle).locator_at(0, dataset_name="ds").extra)
+    assert cold == warm
+
+
+def test_unwritable_catalog_dir_error_names_override(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only catalog dir fails loud, naming $ZEPHON_CATALOG_DIR."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file modes")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(ro / "catalog"))
+    set_catalog_dir(StoreOptions())
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 1})
+    try:
+        with pytest.raises(OSError, match="ZEPHON_CATALOG_DIR"):
+            finalize(ShardCatalogHandle(dataset=_header(root)))
+    finally:
+        ro.chmod(0o755)
+        monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(catalog_dir))
+        set_catalog_dir(StoreOptions())
 
 
 def test_stale_source_sig_forces_rebuild(catalog_dir: Path, tmp_path: Path) -> None:

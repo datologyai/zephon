@@ -29,13 +29,15 @@ class FakeIndexableWorkSource(WorkSource):
     def __post_init__(self) -> None:
         # Initialize WorkSource base (dataclass doesn't call super()).
         super().__init__()
-        # Flatten SampleIds from the dataset's shard_index (single shard assumed)
+        # Flatten SampleIds from the dataset's shard counts (single shard assumed)
         # dataset_id is fixed to 0 for these tests.
         self._dataset_id = 0
         ids: list[SampleId] = []
-        for shard_id, count in self.dataset.shard_index.items():
-            for i in range(int(count)):
-                ids.append((self._dataset_id, int(shard_id), int(i)))
+        for shard_id, count in zip(
+            self.dataset.ids().tolist(), self.dataset.counts().tolist(), strict=True
+        ):
+            for i in range(count):
+                ids.append((self._dataset_id, shard_id, i))
         self._ids = ids
         self._pos: dict[int, int] = {}  # per-lane cursor
 

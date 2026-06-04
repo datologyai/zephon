@@ -58,9 +58,7 @@ def test_build_multi_dataset_store_file_backed_resolvers(tmp_path: Path) -> None
 
 
 def test_build_multi_dataset_store_unknown_backend_kind_raises(tmp_path: Path) -> None:
-    ds = Dataset(
-        name="x", shard_index={0: 1}, backend={"kind": "unknown"}, path=str(tmp_path)
-    )
+    ds = Dataset(name="x", backend={"kind": "unknown"}, path=str(tmp_path))
     with pytest.raises(ValueError):
         _ = build_multi_dataset_store({0: ds})
 

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
 
 import numpy as np
 
@@ -25,11 +25,13 @@ class Dataset:
     Instances are created via ``from_path`` (file-backed) or ``from_dict``
     (in-memory/testing). They always provide:
     - ``name``: a user-facing identifier used in mixtures
-    - ``shard_index``: mapping ``shard_id -> sample_count`` (computed eagerly)
     - ``backend``: opaque metadata that lets FetchOp build a reader later
     - ``path``: original filesystem path if file-backed, otherwise ``None``
     - ``catalog_handle``: the few-KB handle to the node-local shard catalog
       (file-backed datasets only); this is what travels in ctx, not ``shard_meta``.
+
+    Shard counts are not stored as a mapping; read them via :meth:`ids` /
+    :meth:`counts` / :meth:`total` / :meth:`max_count` / :meth:`shard_count`.
 
     Backend kinds used by the internal store builder:
     - "litdata"/"mds"/"jsonl"/"parquet"/"vortex": {"kind", "path"} (no per-shard
@@ -41,25 +43,37 @@ class Dataset:
     """
 
     name: str
-    shard_index: Mapping[int, int]
     backend: Mapping[str, object]
     path: str | None = None
     catalog_handle: ShardCatalogHandle | None = field(default=None, compare=False)
+    # _ids/_counts are constructor-seeded discovery output, not a cache: at
+    # planning time the catalog doesn't exist yet (preflight builds it once per
+    # node, later), so they are the only copy the driver can read. Pickling
+    # drops them: by spawn time the catalog exists, and attach() maps pages
+    # shared node-wide where pickled arrays would be a private copy per worker
+    # (in-memory datasets re-derive from the shipped shards). Reads stay uncached.
+    _ids: np.ndarray | None = field(default=None, compare=False, repr=False)
+    _counts: np.ndarray | None = field(default=None, compare=False, repr=False)
 
     def ids(self) -> np.ndarray:
         """Return the sorted shard ids as an ``int64`` array."""
-        ids = getattr(self, "_ids", None)
-        if ids is not None:
-            return ids
-        return np.array(sorted(self.shard_index), dtype=np.int64)
+        if self._ids is not None:
+            return self._ids
+        if self.catalog_handle is not None:
+            return self.catalog_handle.attach().ids()
+        shards = self.backend.get("shards")  # in-memory only (post-unpickle)
+        assert self.backend.get("kind") == "inmem" and isinstance(shards, Mapping)
+        return _inmem_ids_counts(shards)[0]
 
     def counts(self) -> np.ndarray:
         """Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""
-        counts = getattr(self, "_counts", None)
-        if counts is not None:
-            return counts
-        # ``int(k)``: ids() yields numpy int64; index shard_index with plain ints.
-        return np.array([self.shard_index[int(k)] for k in self.ids()], dtype=np.int64)
+        if self._counts is not None:
+            return self._counts
+        if self.catalog_handle is not None:
+            return self.catalog_handle.attach().num_rows()
+        shards = self.backend.get("shards")  # in-memory only (post-unpickle)
+        assert self.backend.get("kind") == "inmem" and isinstance(shards, Mapping)
+        return _inmem_ids_counts(shards)[1]
 
     def total(self) -> int:
         """Total sample count across all shards."""
@@ -75,6 +89,21 @@ class Dataset:
 
     def __len__(self) -> int:
         return self.total()
+
+    def __getstate__(self) -> dict[str, object]:
+        # Counts never travel — see the _ids/_counts field comment.
+        return {
+            "name": self.name,
+            "backend": self.backend,
+            "path": self.path,
+            "catalog_handle": self.catalog_handle,
+        }
+
+    def __deepcopy__(self, memo: dict) -> "Dataset":
+        # Share, don't copy: a base-WorkSource deepcopy-clone must not duplicate
+        # the (immutable) handle and count arrays.
+        memo[id(self)] = self
+        return self
 
     @classmethod
     def from_path(cls, name: str, path: str, *, fmt: str | None = None) -> "Dataset":
@@ -143,26 +172,34 @@ class Dataset:
         backend = {"kind": kind, "path": root_str}
         header = DatasetHeader(name=name, root=root_str, format=kind, path=root_str)
         handle = ShardCatalogHandle(dataset=header)
-        # shard_index serves per-shard dict lookups; the _ids/_counts arrays set
-        # below back the ids()/counts() fast path the work source consumes.
-        shard_index = dict(zip(ids.tolist(), counts.tolist(), strict=True))
-        dataset = cls(
+        return cls(
             name=name,
-            shard_index=shard_index,
             backend=backend,
             path=root_str,
             catalog_handle=handle,
+            _ids=ids,
+            _counts=counts,
         )
-        object.__setattr__(dataset, "_ids", ids)
-        object.__setattr__(dataset, "_counts", counts)
-        return dataset
 
     @classmethod
     def from_dict(cls, name: str, shards: Mapping[int, RandomAccessShard]) -> "Dataset":
         """Construct an in-memory dataset descriptor."""
-        shard_index = {int(sid): int(len(shard)) for sid, shard in shards.items()}
-        backend: Mapping[str, object] = {"kind": "inmem", "shards": dict(shards)}
-        return cls(name=name, shard_index=shard_index, backend=backend, path=None)
+        norm = {int(sid): shard for sid, shard in shards.items()}
+        backend: Mapping[str, object] = {"kind": "inmem", "shards": norm}
+        ids, counts = _inmem_ids_counts(norm)
+        return cls(name=name, backend=backend, path=None, _ids=ids, _counts=counts)
+
+
+def _inmem_ids_counts(
+    shards: Mapping[int, RandomAccessShard],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Derive aligned ``(ids, counts)`` from resident in-memory shards."""
+    ids = np.array(sorted(int(k) for k in shards), dtype=np.int64)
+    counts = np.array([len(shards[int(i)]) for i in ids], dtype=np.int64)
+    # Handed out shared (same contract as the from_path arrays): freeze them.
+    ids.setflags(write=False)
+    counts.setflags(write=False)
+    return ids, counts
 
 
 def _discover_counts(

@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("streaming")
 from streaming import MDSWriter
 
-from tests._helpers import catalog_locators
+from tests._helpers import catalog_locators, counts_dict
 from zephon.io.catalog import extra_codec
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
@@ -64,6 +64,7 @@ def test_mds_reader_handles_streaming_variants(
     assert len(locators) >= expected_min_shards
 
     observed: list[dict[str, object]] = []
+    counts = counts_dict(dataset)
     for shard_id, locator in locators.items():
         if expect_zip:
             assert locator.zip is not None
@@ -79,7 +80,7 @@ def test_mds_reader_handles_streaming_variants(
         shard, reused = view.open(shard_id)
         assert reused in (True, False)
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 got = shard[row_idx]
                 assert isinstance(got, tuple)
@@ -144,16 +145,17 @@ def _read_all_via_catalog_locators(dataset: Dataset) -> list[dict[str, object]]:
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
     observed: list[dict[str, object]] = []
+    counts = counts_dict(dataset)
     for shard_id, locator in locators.items():
         extra = dict(locator.extra) if locator.extra else {}
         template = extra["_streaming_template"]
         assert isinstance(template, dict)
         # The per-shard 'samples' must survive the codec's header hoist (it is
         # stripped at encode and re-attached from the num_rows column).
-        assert template["samples"] == dataset.shard_index[shard_id]
+        assert template["samples"] == counts[shard_id]
         shard = handler.open_shard(locator, resolver.resolve(locator))
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 row = shard[row_idx]
                 observed.append({"text": str(row["text"]), "value": int(row["value"])})
@@ -182,7 +184,7 @@ def test_catalog_extra_serves_reader(
     samples = _write_mds_dataset(dataset_dir, **writer_kwargs)
 
     dataset = Dataset.from_path(name=f"codec_{description}", path=str(dataset_dir))
-    assert len(dataset.shard_index) >= expected_min_shards
+    assert dataset.shard_count() >= expected_min_shards
     assert _read_all_via_catalog_locators(dataset) == samples
 
 
@@ -198,7 +200,7 @@ def test_mds_extra_roundtrips_through_default_codec(tmp_path, monkeypatch):
     samples = _write_mds_dataset(dataset_dir, size_limit=2048)
 
     dataset = Dataset.from_path(name="default_codec", path=str(dataset_dir))
-    assert len(dataset.shard_index) >= 2
+    assert dataset.shard_count() >= 2
     assert _read_all_via_catalog_locators(dataset) == samples
 
 
@@ -364,11 +366,12 @@ def test_mds_reader_handles_root_index_with_subdir_basenames(tmp_path):
     )
 
     observed: list[dict[str, object]] = []
+    counts = counts_dict(dataset)
     for shard_id in locators.keys():
         shard, reused = view.open(shard_id)
         assert reused in (True, False)
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 got = shard[row_idx]
                 assert isinstance(got, tuple)

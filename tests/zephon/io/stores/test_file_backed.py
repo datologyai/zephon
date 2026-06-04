@@ -84,7 +84,6 @@ class _FakeHandler(FormatHandler):
 def _mk_dataset() -> Dataset:
     return Dataset(
         name="d",
-        shard_index={0: 2},
         backend={"kind": "fakefmt", "shards": {0: {}}},
         path="/tmp",
     )
@@ -95,7 +94,7 @@ def _catalog_for(
 ) -> ShardCatalog:
     """Columnarize a fake handler's locators into a catalog for the view."""
     locators = list(handler.build_locators(ds).values())
-    counts = {int(sid): int(c) for sid, c in ds.shard_index.items()}
+    counts = {0: 2}  # matches _mk_dataset's single fake shard
     return catalog_set_from_locators(locators, catalog_dir, counts).catalog_for(ds.name)
 
 

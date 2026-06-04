@@ -76,6 +76,14 @@ class ShardCatalog:
         )
         self._shard_id = self._cols["shard_id"]
         self._num_rows = self._cols["num_rows"]
+        # Codecs register at format-module import, so a cold attach in a fresh
+        # worker must force that import — the default-codec fallback would
+        # silently drop codec-owned extra keys. missing_ok: non-builtin kinds
+        # register themselves. Imported lazily (formats -> storage -> catalog
+        # is a module cycle).
+        from zephon.io.formats import ensure_builtin_formats
+
+        ensure_builtin_formats(required={self._format}, missing_ok=True)
         self._codec = get_extra_codec(self._format)
         header_blob = None
         if self._present.get("extra_header"):

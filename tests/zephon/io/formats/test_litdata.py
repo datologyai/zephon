@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
-from tests._helpers import catalog_locators
+from tests._helpers import catalog_locators, counts_dict
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
@@ -58,6 +58,7 @@ def test_litdata_reader_handles_dataset(
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
     observed: list[tuple[int, str]] = []
+    counts = counts_dict(dataset)
     for shard_id, locator in locators.items():
         local_ref = resolver.resolve(locator)
         chunk_meta: dict[str, object] = {}
@@ -79,7 +80,7 @@ def test_litdata_reader_handles_dataset(
             assert not config_meta.get("compression")
         shard = handler.open_shard(locator, local_ref)
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 row = shard[row_idx]
                 if loader_kind == "tokens":
@@ -118,11 +119,12 @@ def test_litdata_reader_handles_dict_with_numpy_ints(tmp_path: Path) -> None:
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
     observed: list[Mapping[str, object]] = []
+    counts = counts_dict(dataset)
     for shard_id, locator in locators.items():
         local_ref = resolver.resolve(locator)
         shard = handler.open_shard(locator, local_ref)
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 row = shard[row_idx]
                 assert isinstance(row, Mapping)
@@ -157,11 +159,12 @@ def test_litdata_reader_handles_no_header_numpy(tmp_path: Path) -> None:
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
 
     observed: list[Mapping[str, object]] = []
+    counts = counts_dict(dataset)
     for shard_id, locator in locators.items():
         local_ref = resolver.resolve(locator)
         shard = handler.open_shard(locator, local_ref)
         try:
-            assert len(shard) == dataset.shard_index[shard_id]
+            assert len(shard) == counts[shard_id]
             for row_idx in range(len(shard)):
                 row = shard[row_idx]
                 assert isinstance(row, Mapping)

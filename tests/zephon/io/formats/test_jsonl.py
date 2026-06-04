@@ -57,7 +57,6 @@ def test_jsonl_build_locators_and_open(tmp_path: Path) -> None:
 
     ds = Dataset(
         name="demo",
-        shard_index=shard_index,
         backend={"kind": "jsonl", "path": str(tmp_path), "shards": shard_meta},
         path=str(tmp_path),
     )
@@ -105,7 +104,6 @@ def test_jsonl_build_locators_and_open(tmp_path: Path) -> None:
 def test_jsonl_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) -> None:
     ds = Dataset(
         name="bad",
-        shard_index={0: 1},
         backend={"kind": "jsonl", "path": str(tmp_path), "shards": bad_shards},
         path=str(tmp_path),
     )

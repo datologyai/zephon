@@ -16,13 +16,16 @@ _FORMAT_MODULES: dict[str, str] = {
 }
 
 
-def ensure_builtin_formats(required: set[str]) -> None:
+def ensure_builtin_formats(required: set[str], *, missing_ok: bool = False) -> None:
     """Register format handlers for the given format kinds.
 
     Only the requested formats are loaded.  Formats that have already been
     registered in a previous call are skipped (idempotent).  Each format
     module is expected to handle its own optional dependencies internally
     (e.g. parquet defers pyarrow, litdata defers optree/litdata).
+
+    With ``missing_ok``, kinds outside the builtin table are skipped instead of
+    raising — custom formats register themselves (and their codec) at import.
     """
     import importlib
 
@@ -30,6 +33,8 @@ def ensure_builtin_formats(required: set[str]) -> None:
     for kind in needed:
         mod = _FORMAT_MODULES.get(kind)
         if mod is None:
+            if missing_ok:
+                continue
             raise ValueError(f"Unknown format kind: {kind!r}")
         importlib.import_module(mod)
         _INITIALIZED_FORMATS.add(kind)

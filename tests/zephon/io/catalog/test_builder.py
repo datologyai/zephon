@@ -84,7 +84,6 @@ def test_build_catalog_locators_match_build_locators(tmp_path: Path) -> None:
     shard_index, shard_meta = handler.discover(str(root), RouterStorageBackend())
     tmp_ds = Dataset(
         name="ds",
-        shard_index=dict(shard_index),
         backend={"kind": "jsonl", "path": str(root), "shards": shard_meta},
         path=str(root),
     )

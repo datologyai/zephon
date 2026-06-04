@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests._helpers import catalog_locators
+from tests._helpers import catalog_locators, counts_dict
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 
@@ -44,7 +44,7 @@ def test_dataset_from_path_mds_parametrized(
 
     dataset = Dataset.from_path("demo", path)
     assert dataset.backend["kind"] == "mds"
-    assert dataset.shard_index == {0: 3}
+    assert counts_dict(dataset) == {0: 3}
     _, locators = catalog_locators(dataset)
     assert locators[0].raw.basename == "shard0.mds"
 
@@ -71,7 +71,7 @@ def test_dataset_from_path_jsonl_parametrized(
 
     dataset = Dataset.from_path("jsonl", path)
     assert dataset.backend["kind"] == "jsonl"
-    assert dataset.shard_index == {0: 2, 1: 2}
+    assert counts_dict(dataset) == {0: 2, 1: 2}
     _, locators = catalog_locators(dataset)
     assert locators[0].raw.basename.endswith("shard0.jsonl")
 
@@ -88,9 +88,29 @@ def test_dataset_from_path_remote_gcs_jsonl(monkeypatch: pytest.MonkeyPatch) -> 
     dataset = Dataset.from_path("remote-jsonl", "gs://bucket/json")
 
     assert dataset.backend["kind"] == "jsonl"
-    assert dataset.shard_index == {0: 2, 1: 2}
+    assert counts_dict(dataset) == {0: 2, 1: 2}
     _, locators = catalog_locators(dataset)
     assert locators[0].raw.basename == "shard0.jsonl"
+
+
+def test_from_path_dataset_pickle_is_small(tmp_path: Path) -> None:
+    """A file-backed Dataset must pickle to KB (handle only; no shard graph)."""
+    import pickle
+
+    root = tmp_path
+    for i in range(50):
+        (root / f"shard{i:03d}.jsonl").write_text(
+            '{"id":1}\n{"id":2}\n{"id":3}\n', encoding="utf-8"
+        )
+    ds = Dataset.from_path("many", str(root))
+    assert ds.total() == 150
+    blob = pickle.dumps(ds)
+    assert len(blob) < 4096, f"Dataset pickle too large: {len(blob)} bytes"
+
+    restored = pickle.loads(blob)
+    assert "shards" not in restored.backend  # no per-shard graph travels
+    assert restored._ids is None  # count arrays dropped
+    assert restored.catalog_handle is not None
 
 
 def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
@@ -110,10 +130,10 @@ def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
     assert "shards" not in ds.backend
     assert ds.catalog_handle is not None
     assert ds.catalog_handle.fingerprint is None  # baked later by the Engine
-    # The array fast path is ordered, aligned, and consistent with shard_index.
+    # The array fast path is ordered, aligned, and consistent with the counts.
     assert ds.ids().tolist() == [0, 1]
     assert ds.counts().tolist() == [3, 2]
-    assert ds.shard_index == {0: 3, 1: 2}
+    assert counts_dict(ds) == {0: 3, 1: 2}
     assert ds.total() == 5
     # The accessors hand out shared arrays; they must be frozen.
     assert not ds.ids().flags.writeable
@@ -140,6 +160,10 @@ def test_dataset_accessors_dict_backed() -> None:
     counts = ds.counts()
     assert counts.dtype == np.int64
     assert counts.tolist() == [5, 2, 3]
+
+    # Shared arrays are frozen — same contract as the from_path arrays.
+    assert not ids.flags.writeable
+    assert not counts.flags.writeable
 
     assert ds.total() == 10
     assert ds.max_count() == 5

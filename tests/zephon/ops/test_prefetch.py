@@ -95,13 +95,11 @@ def mock_datasets():
     return {
         0: Dataset(
             name="dataset_0",
-            shard_index={},
             backend={"kind": "inmem", "shards": {}},  # In-memory for testing
             path=None,
         ),
         1: Dataset(
             name="dataset_1",
-            shard_index={},
             backend={"kind": "inmem", "shards": {}},
             path=None,
         ),

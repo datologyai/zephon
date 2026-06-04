@@ -99,7 +99,6 @@ def build_catalog(header: DatasetHeader) -> BuiltCatalog:
     shard_index, shard_meta = handler.discover(header.root, storage)
     tmp_dataset = Dataset(
         name=header.name,
-        shard_index=dict(shard_index),
         backend={"kind": header.format, "path": header.root, "shards": shard_meta},
         path=header.path,
     )

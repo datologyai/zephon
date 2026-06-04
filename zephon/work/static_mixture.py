@@ -1082,9 +1082,8 @@ class StaticMixtureWorkSource(WorkSource):
 
         self._shuffle_block_size_spec: ShuffleBlockSpec = shuffle_block_size
 
-        # max_shard is only needed for "auto"; computing it unconditionally
-        # would raise on datasets with empty shard_index. Default to 0 so the
-        # value is well-defined but unused in the non-"auto" paths.
+        # max_shard is only consumed by the "auto" path; default to 0 so the
+        # value is well-defined but unused for the other specs.
         max_shard = 0
         if shuffle_block_size == "auto":
             per_dataset_max = [ds.max_count() for ds in self._datasets]

@@ -25,8 +25,9 @@ class FormatHandler(Protocol):
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
         """Inspect ``path`` and return shard counts plus locator metadata.
 
-        The returned tuple is consumed by :class:`zephon.io.dataset.Dataset`
-        to populate ``shard_index`` and backend metadata. Implementations may
+        The returned tuple feeds the catalog build
+        (:func:`zephon.io.catalog.builder.build_catalog`), which packs the
+        counts and locators into the catalog artifact. Implementations may
         perform filesystem or remote IO via ``storage`` but should avoid
         opening shards eagerly beyond what is required to compute counts.
         """

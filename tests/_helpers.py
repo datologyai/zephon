@@ -93,3 +93,8 @@ def mk_dataset(name: str, shards: dict[int, int]) -> Dataset:
         rows = [{"text": f"{name}:{sid}:{i}"} for i in range(count)]
         data[int(sid)] = InMemoryShard(rows)
     return Dataset.from_dict(name, data)
+
+
+def counts_dict(dataset: Dataset) -> dict[int, int]:
+    """``shard_id -> sample_count`` dict for test assertions."""
+    return dict(zip(dataset.ids().tolist(), dataset.counts().tolist(), strict=True))
