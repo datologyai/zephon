@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests._helpers import catalog_locators
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 
@@ -44,7 +45,8 @@ def test_dataset_from_path_mds_parametrized(
     dataset = Dataset.from_path("demo", path)
     assert dataset.backend["kind"] == "mds"
     assert dataset.shard_index == {0: 3}
-    assert dataset.backend["shards"][0]["raw"]["basename"] == "shard0.mds"
+    _, locators = catalog_locators(dataset)
+    assert locators[0].raw.basename == "shard0.mds"
 
 
 @pytest.mark.parametrize("backend_kind", ["local", "s3", "gcs"])  # JSONL discovery
@@ -70,8 +72,8 @@ def test_dataset_from_path_jsonl_parametrized(
     dataset = Dataset.from_path("jsonl", path)
     assert dataset.backend["kind"] == "jsonl"
     assert dataset.shard_index == {0: 2, 1: 2}
-    shards = dataset.backend["shards"]
-    assert shards[0]["raw"]["basename"].endswith("shard0.jsonl")
+    _, locators = catalog_locators(dataset)
+    assert locators[0].raw.basename.endswith("shard0.jsonl")
 
 
 def test_dataset_from_path_remote_gcs_jsonl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,7 +89,8 @@ def test_dataset_from_path_remote_gcs_jsonl(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert dataset.backend["kind"] == "jsonl"
     assert dataset.shard_index == {0: 2, 1: 2}
-    assert dataset.backend["shards"][0]["raw"]["basename"] == "shard0.jsonl"
+    _, locators = catalog_locators(dataset)
+    assert locators[0].raw.basename == "shard0.jsonl"
 
 
 def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
@@ -103,8 +106,18 @@ def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
     )
     ds = Dataset.from_path("demo", str(tmp_path))
     assert ds.backend["kind"] == "jsonl"
-    assert set(ds.ids().tolist()) == {0, 1}
+    # from_path is count-only: no per-shard metadata graph, just the handle.
+    assert "shards" not in ds.backend
+    assert ds.catalog_handle is not None
+    assert ds.catalog_handle.fingerprint is None  # baked later by the Engine
+    # The array fast path is ordered, aligned, and consistent with shard_index.
+    assert ds.ids().tolist() == [0, 1]
+    assert ds.counts().tolist() == [3, 2]
+    assert ds.shard_index == {0: 3, 1: 2}
     assert ds.total() == 5
+    # The accessors hand out shared arrays; they must be frozen.
+    assert not ds.ids().flags.writeable
+    assert not ds.counts().flags.writeable
 
 
 def test_dataset_accessors_dict_backed() -> None:

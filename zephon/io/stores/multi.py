@@ -1,14 +1,23 @@
 """Unified builder for multi-dataset shard stores."""
 
-from pathlib import Path
-from typing import Mapping, cast
+from __future__ import annotations
 
+from pathlib import Path
+from typing import Iterator, Mapping, cast
+
+import numpy as np
+
+from zephon.io.catalog import CatalogSet, ShardCatalog, set_catalog_dir
 from zephon.io.dataset import Dataset
 from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import get_format
 from zephon.io.memory import InMemoryDatasetStore
 from zephon.io.options import StoreOptions
-from zephon.io.protocols import MultiDatasetShardStore, RandomAccessShard
+from zephon.io.protocols import (
+    DatasetShardView,
+    MultiDatasetShardStore,
+    RandomAccessShard,
+)
 from zephon.io.resolvers import CacheManager, DirectResolver, ShardResolver
 from zephon.io.storage import LocalFSBackend, RouterStorageBackend, StorageBackend
 from zephon.io.stores.file_backed import FileBackedDatasetShardView
@@ -16,98 +25,150 @@ from zephon.io.stores.registry import DatasetStoreRegistry
 from zephon.io.types import ShardLocator
 
 
-def collect_cacheable_locators(
-    datasets: Mapping[int, Dataset],
-) -> tuple[
-    dict[tuple[int, int], ShardLocator],
-    dict[int, dict[int, ShardLocator]],
-]:
-    """Build locators once for every file-backed dataset.
+def _cross_check_counts(dataset: Dataset, catalog: ShardCatalog) -> None:
+    """Guard the ``discover_counts`` <-> ``discover`` seam.
 
-    Skips in-memory datasets and unknown format kinds. Returns both a flat
-    map keyed by ``(dataset_id, shard_id)`` (what PrefetchOp iterates) and a
-    per-dataset nested map keyed by ``shard_id`` (what each view needs).
-
-    This centralises the ``handler.build_locators(dataset)`` call so
-    downstream builders can thread pre-built locators into both the
-    ``ShardResolver`` and the per-dataset views without recomputing them.
+    The work source's cursor is sized from ``from_path``'s count arrays, while
+    the catalog's slots/locators come from the full ``discover``. A divergent
+    shard ordering would silently mis-map counts to files, so when both are
+    present in the same process we assert they agree.
     """
-    kinds: set[str] = {
+    ids = getattr(dataset, "_ids", None)
+    counts = getattr(dataset, "_counts", None)
+    if ids is None or counts is None:
+        return
+    if not (
+        np.array_equal(catalog.ids(), ids)
+        and np.array_equal(catalog.num_rows(), counts)
+    ):
+        raise RuntimeError(
+            f"Catalog for dataset {dataset.name!r} disagrees with count-only "
+            "discovery on (shard_id, num_rows); discover_counts() and discover() "
+            "must assign the same shard ordering."
+        )
+
+
+def _ensure_attached(dataset: Dataset) -> ShardCatalog:
+    """Attach the catalog for a file-backed dataset, finalizing if needed."""
+    handle = dataset.catalog_handle
+    assert handle is not None
+    catalog = handle.ensure_attached()
+    _cross_check_counts(dataset, catalog)
+    return catalog
+
+
+def finalize_dataset_catalogs(
+    datasets: Mapping[int, Dataset], options: StoreOptions | None = None
+) -> None:
+    """Set the process-global catalog dir and finalize each file-backed handle.
+
+    Called by the Engine before runners spawn: this is the one full build per
+    node (source-key-locked in ``finalize``), and it bakes each handle's
+    ``fingerprint`` onto the shared handle that ships in ctx.
+    """
+    set_catalog_dir(StoreOptions.from_any(options))
+    for dataset in datasets.values():
+        if dataset.catalog_handle is None:
+            continue  # in-memory dataset
+        _ensure_attached(dataset)
+
+
+def _attached_entries(
+    datasets: Mapping[int, Dataset],
+) -> dict[int, tuple[str, ShardCatalog]]:
+    """Attach every file-backed dataset's catalog, keyed by dataset id.
+
+    Rejects duplicate dataset names across the whole map (in-memory included):
+    names key the cache slot space, disk layout, and fingerprint, so a collision
+    is ambiguous for any by-name lookup.
+    """
+    seen: set[str] = set()
+    for dataset in datasets.values():
+        if dataset.name in seen:
+            raise ValueError(f"Duplicate dataset name {dataset.name!r} across datasets")
+        seen.add(dataset.name)
+
+    # Register the format modules for the file-backed kinds (their handler AND
+    # extra codec) before attaching catalogs / synthesizing locators. A freshly
+    # spawned worker never ran from_path, so its registry is otherwise empty.
+    kinds = {
         kind
         for d in datasets.values()
-        if isinstance((backend := d.backend), dict)
-        and isinstance((kind := backend.get("kind")), str)
+        if isinstance((b := d.backend), dict)
+        and isinstance((kind := b.get("kind")), str)
         and kind != "inmem"
     }
     ensure_builtin_formats(required=kinds)
 
-    flat: dict[tuple[int, int], ShardLocator] = {}
-    per_dataset: dict[int, dict[int, ShardLocator]] = {}
-
+    entries: dict[int, tuple[str, ShardCatalog]] = {}
     for dataset_id, dataset in datasets.items():
-        backend = dataset.backend
-        kind = backend.get("kind") if isinstance(backend, dict) else None
-        # Skip in-memory datasets (no file-backed shards) and entries whose
-        # backend kind is absent or malformed.
-        if kind == "inmem" or not isinstance(kind, str):
-            continue
+        if dataset.catalog_handle is None:
+            continue  # in-memory dataset
+        entries[int(dataset_id)] = (dataset.name, _ensure_attached(dataset))
+    return entries
+
+
+def build_catalog_set(datasets: Mapping[int, Dataset]) -> CatalogSet | None:
+    """Compose a :class:`CatalogSet` over the file-backed datasets, if any.
+
+    Attaches (finalizing first if the handle is not yet baked, e.g. on a Ray
+    actor or in direct/non-Engine use) each file-backed dataset's catalog. Skips
+    in-memory datasets; a file-backed dataset that reaches the view without a
+    catalog handle raises there (``from_path`` always builds one).
+    """
+    entries = _attached_entries(datasets)
+    return CatalogSet(entries) if entries else None
+
+
+class CatalogLocators(Mapping[tuple[int, int], ShardLocator]):
+    """Lazy ``(dataset_id, shard_id) -> ShardLocator`` view over catalogs.
+
+    PrefetchOp consults this by key per shard (never a full scan), so a locator
+    is synthesized only when actually requested — no resident per-shard dict.
+    """
+
+    def __init__(self, entries: Mapping[int, tuple[str, ShardCatalog]]) -> None:
+        self._entries = dict(entries)
+
+    def __getitem__(self, key: tuple[int, int]) -> ShardLocator:
+        dataset_id, shard_id = key
+        entry = self._entries.get(dataset_id)
+        if entry is None:
+            raise KeyError(key)
+        name, catalog = entry
         try:
-            handler = get_format(kind)
+            slot = catalog.slot_of(shard_id)
         except KeyError:
-            # Skip datasets with unknown formats.
-            continue
+            raise KeyError(key) from None
+        return catalog.locator_at(slot, dataset_name=name)
 
-        # Build locators for all shards in this dataset.
-        shard_locators = dict(handler.build_locators(dataset))
-        per_dataset[int(dataset_id)] = shard_locators
-        for shard_id, locator in shard_locators.items():
-            flat[(int(dataset_id), int(shard_id))] = locator
+    def __iter__(self) -> Iterator[tuple[int, int]]:
+        for dataset_id, (_name, catalog) in self._entries.items():
+            for shard_id in catalog.ids().tolist():
+                yield (dataset_id, shard_id)
 
-    return flat, per_dataset
+    def __len__(self) -> int:
+        return sum(catalog.shard_count for _name, catalog in self._entries.values())
 
 
 def build_resolver(
-    locators: Mapping[tuple[int, int], ShardLocator],
-    datasets: Mapping[int, Dataset],
+    catalog_set: CatalogSet | None,
     options: StoreOptions | None = None,
     storage: StorageBackend | None = None,
 ) -> ShardResolver:
-    """Build a shard resolver based on store options.
+    """Build a shard resolver (``CacheManager`` or ``DirectResolver``).
 
-    Creates either a ``CacheManager`` (for cache-enabled configs) or a
-    ``DirectResolver`` (for direct local file access). The resolver can be
-    shared across multiple operators (e.g., PrefetchOp and FetchOp) to
-    ensure consistent cache behavior.
-
-    Args:
-        locators: Flat ``(dataset_id, shard_id) → ShardLocator`` map for all
-            cacheable shards. Used by ``CacheManager`` to build its dense
-            runtime index and to compute the session fingerprint.
-        datasets: Mapping of dataset id to ``Dataset`` objects, used for
-            fingerprint inputs (name, path).
-        options: Store configuration options. If None, uses defaults.
-        storage: Optional storage backend override.
-
-    Returns:
-        A ``ShardResolver`` instance (``CacheManager`` or ``DirectResolver``).
+    A cache-backed ``CacheManager`` over the ``CatalogSet`` when the cache is
+    enabled and there are shards, else a stateless ``DirectResolver``.
     """
     store_opts = StoreOptions.from_any(options)
-
-    # When there are no cacheable shards (e.g. all datasets are in-memory),
-    # there is nothing for the cache layer to manage. Fall back to a
-    # DirectResolver regardless of ``cache.enabled`` — this avoids trying
-    # to allocate a zero-sized SHM cache (which would raise ValueError in
-    # CacheSharedState) and keeps the downstream contract intact because
-    # the resolver is unused for inmem datasets anyway.
-    if store_opts.cache.enabled and locators:
-        # Default to router for discovery and cache-backed downloads.
+    if store_opts.cache.enabled and catalog_set is not None and catalog_set.num_shards:
         storage = RouterStorageBackend() if storage is None else storage
         cache_root = Path(store_opts.cache.root).expanduser()
         return CacheManager(
             cache_root,
             storage,
-            locators=locators,
-            datasets=datasets,
+            catalog_set=catalog_set,
             limit_bytes=store_opts.cache.limit_bytes,
             keep_zip=store_opts.cache.keep_zip,
             validate_hash=store_opts.cache.validate_hash,
@@ -116,14 +177,10 @@ def build_resolver(
             min_slack_bytes=store_opts.cache.min_slack_bytes,
             max_slack_bytes=store_opts.cache.max_slack_bytes,
         )
-    else:
-        # No need for RouterStorageBackend in the no-cache case.
-        storage = LocalFSBackend(root=Path("/")) if storage is None else storage
-        assert isinstance(storage, LocalFSBackend)
-        return DirectResolver(
-            storage,
-            validate_hash=store_opts.cache.validate_hash,
-        )
+
+    storage = LocalFSBackend(root=Path("/")) if storage is None else storage
+    assert isinstance(storage, LocalFSBackend)
+    return DirectResolver(storage, validate_hash=store_opts.cache.validate_hash)
 
 
 def build_resolver_with_locators(
@@ -132,28 +189,17 @@ def build_resolver_with_locators(
     storage: StorageBackend | None = None,
     options: StoreOptions | None = None,
     skip_inmem: bool = True,
-) -> tuple[ShardResolver, dict[tuple[int, int], ShardLocator]]:
-    """Build a resolver and extract locators for all file-backed datasets.
+) -> tuple[ShardResolver, Mapping[tuple[int, int], ShardLocator]]:
+    """Build a resolver plus a lazy ``(dataset_id, shard_id) -> ShardLocator`` map.
 
-    Args:
-        datasets: Mapping of dataset ID to Dataset objects.
-        storage: Optional storage backend override.
-        options: Store configuration options.
-        skip_inmem: Retained for API compatibility; in-memory datasets are
-            always excluded from the locator map since they have no
-            file-backed shards.
-
-    Returns:
-        Tuple of (resolver, locators_dict) where locators_dict maps
-        ``(dataset_id, shard_id)`` to ``ShardLocator``.
+    Used by PrefetchOp; the map synthesizes locators on demand, never all at once.
     """
-    del skip_inmem  # inmem datasets are always excluded by collect_cacheable_locators
+    del skip_inmem  # in-memory datasets are always excluded
     store_opts = StoreOptions.from_any(options)
-    flat_locators, _ = collect_cacheable_locators(datasets)
-    resolver = build_resolver(
-        flat_locators, datasets, options=store_opts, storage=storage
-    )
-    return resolver, flat_locators
+    entries = _attached_entries(datasets)
+    catalog_set = CatalogSet(entries) if entries else None
+    resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
+    return resolver, CatalogLocators(entries)
 
 
 def build_multi_dataset_store(
@@ -165,21 +211,11 @@ def build_multi_dataset_store(
     """Construct a registry-backed multi-dataset store mixing inmem and file-backed.
 
     Creates a single resolver (cache-backed or direct) and a per-dataset view
-    using registered format handlers.
-
-    Args:
-        datasets: Mapping of dataset ID to Dataset objects.
-        storage: Optional storage backend override.
-        options: Store configuration options.
-
-    Returns:
-        A MultiDatasetShardStore registry.
+    backed by the node-local catalog.
     """
     store_opts = StoreOptions.from_any(options)
-    flat_locators, per_dataset_locators = collect_cacheable_locators(datasets)
-    resolver = build_resolver(
-        flat_locators, datasets, options=store_opts, storage=storage
-    )
+    catalog_set = build_catalog_set(datasets)
+    resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
 
     registry = DatasetStoreRegistry()
     for dataset_id, dataset in datasets.items():
@@ -187,20 +223,19 @@ def build_multi_dataset_store(
         kind = backend.get("kind") if isinstance(backend, dict) else None
         if kind == "inmem":
             shards_obj = backend.get("shards", {}) if isinstance(backend, dict) else {}
-            view = InMemoryDatasetStore(
+            view: DatasetShardView = InMemoryDatasetStore(
                 cast(Mapping[int, RandomAccessShard], shards_obj)
             )
         elif isinstance(kind, str):
-            # Defer to any registered file-backed format handler (e.g. jsonl,
-            # mds, litdata). collect_cacheable_locators already called
-            # ensure_builtin_formats above for every non-inmem kind seen,
-            # so get_format() resolves without an extra registration step.
             try:
                 handler = get_format(kind)
             except KeyError as exc:
                 raise ValueError(
                     f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
                 ) from exc
+            catalog: ShardCatalog | None = None
+            if catalog_set is not None and dataset.catalog_handle is not None:
+                catalog = catalog_set.catalog_for(dataset.name)
             view = FileBackedDatasetShardView(
                 dataset=dataset,
                 handler=handler,
@@ -208,7 +243,7 @@ def build_multi_dataset_store(
                 retry_attempts=store_opts.cache.open_retry_attempts,
                 retry_initial_backoff=store_opts.cache.open_retry_initial_backoff,
                 retry_max_backoff=store_opts.cache.open_retry_max_backoff,
-                locators=per_dataset_locators.get(int(dataset_id)),
+                catalog=catalog,
             )
         else:
             raise ValueError(
@@ -220,8 +255,10 @@ def build_multi_dataset_store(
 
 
 __all__ = [
+    "CatalogLocators",
+    "build_catalog_set",
     "build_multi_dataset_store",
     "build_resolver",
     "build_resolver_with_locators",
-    "collect_cacheable_locators",
+    "finalize_dataset_catalogs",
 ]

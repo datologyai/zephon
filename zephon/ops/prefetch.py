@@ -5,12 +5,13 @@
 
 import sys
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.constants import EngineSample, lane_of
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
+from zephon.io.catalog import set_catalog_dir
 from zephon.io.options import StoreOptions
 from zephon.io.resolvers.base import ShardResolver
 from zephon.io.stores.multi import build_resolver_with_locators
@@ -61,7 +62,7 @@ class PrefetchOp(DefaultSetup):
 
         # Runtime state (initialized in setup(), not here, to avoid pickling issues)
         self._resolver: ShardResolver | None = None
-        self._locators: dict[tuple[int, int], ShardLocator] = {}
+        self._locators: Mapping[tuple[int, int], ShardLocator] = {}
 
         # Callback for emitting metrics
         self._emit_prefetch_metrics: Callable[[PrefetchTimingDelta], None] | None = None
@@ -87,6 +88,9 @@ class PrefetchOp(DefaultSetup):
         # Multiple CacheManager instances pointing to the same cache directory work
         # correctly due to internal file locking.
         store_options = StoreOptions.from_any(ctx.get("io_options"))
+        # Resolve the process-global catalog dir before attaching/building the
+        # node-local catalog (see FetchOp.setup for the rationale).
+        set_catalog_dir(store_options)
         self._resolver, self._locators = build_resolver_with_locators(
             datasets_by_id, options=store_options, skip_inmem=True
         )

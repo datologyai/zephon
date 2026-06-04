@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 
+from tests._helpers import catalog_locators
 from zephon.io.dataset import Dataset
 from zephon.io.formats.vortex import VortexFormat, VortexShard
 from zephon.io.storage.local import LocalFSBackend
@@ -489,7 +490,7 @@ def test_vortex_auto_detect_format(tmp_path: Path) -> None:
 
     assert dataset.backend["kind"] == "vortex"
     assert len(dataset.shard_index) == 2
-    assert sum(dataset.shard_index.values()) == 20
+    assert dataset.total() == 20
 
 
 def test_vortex_explicit_format_specification(tmp_path: Path) -> None:
@@ -514,21 +515,20 @@ def test_vortex_end_to_end_reading(tmp_path: Path) -> None:
 
     # Verify dataset structure
     assert len(dataset.shard_index) == 3
-    total_samples = sum(dataset.shard_index.values())
-    assert total_samples == 150  # 3 shards * 50 rows
+    assert dataset.total() == 150  # 3 shards * 50 rows
 
-    # Verify we can build locators and open shards
+    # from_path datasets carry no per-shard metadata in the backend; locators
+    # are synthesized from the node-local catalog.
     handler = VortexFormat()
-    locators = handler.build_locators(dataset)
+    _, locators = catalog_locators(dataset)
     assert len(locators) == 3
 
     # Open each shard and verify data
-    shard_meta = dataset.backend["shards"]
-    for shard_id, loc in locators.items():
+    for loc in locators.values():
         shard_path = tmp_path / loc.raw.basename
         ref = LocalShardRef(
             raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
-            extra=shard_meta[shard_id].get("extra"),
+            extra=loc.extra,
         )
         shard = handler.open_shard(loc, ref)
         assert len(shard) == 50

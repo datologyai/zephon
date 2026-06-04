@@ -400,6 +400,15 @@ class Engine:
         self._replay_config = ReplayConfigService()
         self._ctx = base_ctx
         self._ctx["replay_state_service"] = self._replay_config
+        # Build each dataset's node-local catalog before runners spawn (the
+        # source-key lock in finalize() elects one builder per node; the rest
+        # mmap the file), baking the handle fingerprint that ships in ctx so
+        # workers attach the shared mapping instead of unpickling a per-shard
+        # metadata copy. Dataset-less pipelines skip the io import entirely.
+        if datasets_by_id := self._ctx["datasets_by_id"]:
+            from zephon.io.stores.multi import finalize_dataset_catalogs
+
+            finalize_dataset_catalogs(datasets_by_id, opts.io_options)
         self._opts = opts
         self._mp_context = self._resolve_mp_context(self._opts.mp_context)
         self._world = self._build_world()

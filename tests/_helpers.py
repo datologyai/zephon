@@ -7,12 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from zephon.io import InMemoryShard
-from zephon.io.catalog import (
-    CatalogSet,
-    DatasetHeader,
-    ShardCatalog,
-    ShardCatalogHandle,
-)
+from zephon.io.catalog import CatalogSet, DatasetHeader, ShardCatalog
 from zephon.io.catalog import io as _catalog_io
 from zephon.io.catalog.builder import pack_locators
 from zephon.io.dataset import Dataset
@@ -61,23 +56,10 @@ def attach_catalog(dataset: Dataset) -> ShardCatalog:
 
     Test-side equivalent of what the Engine / store builder does, for tests that
     want to inspect synthesized locators directly.
-
-    When the dataset carries no ``catalog_handle``, one is synthesized from the
-    backend descriptor (format kind + path).
     """
-    handle = getattr(dataset, "catalog_handle", None)
-    if handle is None:
-        kind = dataset.backend.get("kind")
-        assert isinstance(kind, str) and dataset.path is not None, (
-            "attach_catalog requires a file-backed dataset"
-        )
-        header = DatasetHeader(
-            name=dataset.name, root=dataset.path, format=kind, path=dataset.path
-        )
-        handle = ShardCatalogHandle(dataset=header)
-    if handle.fingerprint is None:
-        handle.finalize()
-    return handle.attach()
+    handle = dataset.catalog_handle
+    assert handle is not None, "attach_catalog requires a file-backed dataset"
+    return handle.ensure_attached()
 
 
 def catalog_locators(

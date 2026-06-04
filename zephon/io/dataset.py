@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
 import numpy as np
 
+from zephon.io.catalog import DatasetHeader, ShardCatalogHandle
 from zephon.io.formats import ensure_builtin_formats
-from zephon.io.formats.base import get_format
+from zephon.io.formats.base import FormatHandler, get_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import IndexData
 from zephon.io.protocols import RandomAccessShard
-from zephon.io.storage import RouterStorageBackend
+from zephon.io.storage import RouterStorageBackend, StorageBackend
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,12 @@ class Dataset:
     - ``shard_index``: mapping ``shard_id -> sample_count`` (computed eagerly)
     - ``backend``: opaque metadata that lets FetchOp build a reader later
     - ``path``: original filesystem path if file-backed, otherwise ``None``
+    - ``catalog_handle``: the few-KB handle to the node-local shard catalog
+      (file-backed datasets only); this is what travels in ctx, not ``shard_meta``.
 
     Backend kinds used by the internal store builder:
-    - "litdata": {"path": str, "shards": metadata}
-    - "mds": {"path": str, "shards": metadata}
-    - "jsonl": {"path": str, "shards": metadata}
+    - "litdata"/"mds"/"jsonl"/"parquet"/"vortex": {"kind", "path"} (no per-shard
+      ``shards`` graph — that lives in the catalog now)
     - "inmem": {"shards": dict[int, RandomAccessShard]}
 
     Note: this class does not expose any method to fetch rows; IO is delegated
@@ -42,13 +44,20 @@ class Dataset:
     shard_index: Mapping[int, int]
     backend: Mapping[str, object]
     path: str | None = None
+    catalog_handle: ShardCatalogHandle | None = field(default=None, compare=False)
 
     def ids(self) -> np.ndarray:
         """Return the sorted shard ids as an ``int64`` array."""
+        ids = getattr(self, "_ids", None)
+        if ids is not None:
+            return ids
         return np.array(sorted(self.shard_index), dtype=np.int64)
 
     def counts(self) -> np.ndarray:
         """Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""
+        counts = getattr(self, "_counts", None)
+        if counts is not None:
+            return counts
         # ``int(k)``: ids() yields numpy int64; index shard_index with plain ints.
         return np.array([self.shard_index[int(k)] for k in self.ids()], dtype=np.int64)
 
@@ -71,6 +80,12 @@ class Dataset:
     def from_path(cls, name: str, path: str, *, fmt: str | None = None) -> "Dataset":
         """Construct a file-backed dataset descriptor.
 
+        Performs a *count-only* discovery: it obtains ``shard_id`` + ``num_rows``
+        as small numpy arrays (the work source's input) without materializing the
+        per-shard ``shard_meta`` graph. The full columnar catalog is built once
+        per node later, by the Engine's ``finalize()`` (or lazily by the store
+        builder for Engine-less use).
+
         Args:
             name: Logical dataset name used in mixtures and debugging.
             path: Filesystem directory containing the dataset.
@@ -88,8 +103,8 @@ class Dataset:
           :func:`zephon.io.storage._hf_uri.parse_hf_uri` for the URI grammar.
 
         Returns:
-            Dataset: a descriptor populated with shard counts and backend
-            metadata for later IO.
+            Dataset: a descriptor populated with shard counts and a catalog
+            handle for later IO.
 
         Raises:
             FileNotFoundError: if ``path`` does not exist.
@@ -119,9 +134,28 @@ class Dataset:
 
         ensure_builtin_formats(required={kind})
         handler = get_format(kind)
-        shard_index, shard_meta = handler.discover(root_str, storage)
-        backend = {"kind": kind, "path": root_str, "shards": shard_meta}
-        return cls(name=name, shard_index=shard_index, backend=backend, path=root_str)
+        ids, counts = _discover_counts(handler, root_str, storage)
+        # ids()/counts() hand these arrays out shared (the work-source cursor
+        # gathers from them in place); freeze them so an in-place edit fails loud.
+        ids.setflags(write=False)
+        counts.setflags(write=False)
+
+        backend = {"kind": kind, "path": root_str}
+        header = DatasetHeader(name=name, root=root_str, format=kind, path=root_str)
+        handle = ShardCatalogHandle(dataset=header)
+        # shard_index serves per-shard dict lookups; the _ids/_counts arrays set
+        # below back the ids()/counts() fast path the work source consumes.
+        shard_index = dict(zip(ids.tolist(), counts.tolist(), strict=True))
+        dataset = cls(
+            name=name,
+            shard_index=shard_index,
+            backend=backend,
+            path=root_str,
+            catalog_handle=handle,
+        )
+        object.__setattr__(dataset, "_ids", ids)
+        object.__setattr__(dataset, "_counts", counts)
+        return dataset
 
     @classmethod
     def from_dict(cls, name: str, shards: Mapping[int, RandomAccessShard]) -> "Dataset":
@@ -129,6 +163,20 @@ class Dataset:
         shard_index = {int(sid): int(len(shard)) for sid, shard in shards.items()}
         backend: Mapping[str, object] = {"kind": "inmem", "shards": dict(shards)}
         return cls(name=name, shard_index=shard_index, backend=backend, path=None)
+
+
+def _discover_counts(
+    handler: FormatHandler, path: str, storage: StorageBackend
+) -> tuple[np.ndarray, np.ndarray]:
+    """Obtain ``(ids, counts)`` without materializing per-shard ``shard_meta``.
+
+    ``FormatHandler.discover_counts`` gives index formats a metadata-only fast
+    path; the protocol default runs the full ``discover()`` and keeps only the
+    counts, so the heavy graph is at most transiently built, never retained.
+    Results are normalized to ``int64`` arrays.
+    """
+    ids, counts = handler.discover_counts(path, storage)
+    return np.asarray(ids, dtype=np.int64), np.asarray(counts, dtype=np.int64)
 
 
 __all__ = ["Dataset"]

@@ -11,6 +11,7 @@ from typing import IO, Any, Mapping
 import pytest
 
 import zephon.io.resolvers.cache.manager as manager_mod
+from tests._helpers import catalog_set_from_locators
 from zephon.io.dataset import Dataset
 from zephon.io.resolvers.cache import (
     CacheInUseError,
@@ -63,35 +64,6 @@ def _locator(
     )
 
 
-def _pack_datasets_and_locators(
-    locators_list: list[ShardLocator],
-) -> tuple[dict[tuple[int, int], ShardLocator], dict[int, Dataset]]:
-    """Group a flat list of locators into the (flat_locators, datasets) pair
-    that the new ``CacheManager`` constructor expects.
-
-    Each unique ``locator.dataset`` name becomes its own ``Dataset`` with a
-    positional id and a ``shard_index`` derived from the supplied locators.
-    """
-    by_name: dict[str, list[ShardLocator]] = {}
-    for loc in locators_list:
-        by_name.setdefault(loc.dataset, []).append(loc)
-
-    flat: dict[tuple[int, int], ShardLocator] = {}
-    datasets: dict[int, Dataset] = {}
-    for dataset_id, name in enumerate(sorted(by_name.keys())):
-        locs = by_name[name]
-        shard_index = {int(loc.shard_id): 1 for loc in locs}
-        datasets[dataset_id] = Dataset(
-            name=name,
-            shard_index=shard_index,
-            backend={"kind": locs[0].format, "path": locs[0].root},
-            path=locs[0].root,
-        )
-        for loc in locs:
-            flat[(dataset_id, int(loc.shard_id))] = loc
-    return flat, datasets
-
-
 def _make_manager(
     cache_root: Path,
     storage,
@@ -100,15 +72,9 @@ def _make_manager(
     cls: type[CacheManager] = CacheManager,
     **kwargs: Any,
 ) -> CacheManager:
-    """Construct a CacheManager from a flat list of locators."""
-    flat, datasets = _pack_datasets_and_locators(locators)
-    return cls(
-        cache_root,
-        storage,
-        locators=flat,
-        datasets=datasets,
-        **kwargs,
-    )
+    """Construct a CacheManager over a CatalogSet built from synthetic locators."""
+    catalog_set = catalog_set_from_locators(locators, cache_root.parent / "_catalogs")
+    return cls(cache_root, storage, catalog_set=catalog_set, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +505,30 @@ def test_first_init_wipes_preexisting_files(tmp_path: Path) -> None:
     mgr = _make_manager(cache_root, storage, [loc], persist_state=True)
     try:
         assert not (orphan_dir / "leftover.bin").exists()
+    finally:
+        mgr.close()
+
+
+def test_first_init_wipe_preserves_catalog_subdir(tmp_path: Path) -> None:
+    """The node-local shard catalog under ``.catalog`` survives a cache wipe."""
+    from zephon.io.catalog import CATALOG_CACHE_SUBDIR
+
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    raw_name = "persist.bin"
+    data = b"persist test"
+    _make_file(remote / raw_name, data)
+    catalog_file = cache_root / CATALOG_CACHE_SUBDIR / "v1" / "sha256:feedface"
+    _make_file(catalog_file, b"catalog-bytes")
+    _make_file(cache_root / "demo" / "leftover.bin", b"old run")
+
+    storage = LocalFSBackend(root=remote)
+    loc = _locator("demo", 40, str(remote), raw_name=raw_name, raw_bytes=len(data))
+    mgr = _make_manager(cache_root, storage, [loc])
+    try:
+        # FIRST_INIT wiped the stale shard but not the co-located catalog.
+        assert not (cache_root / "demo" / "leftover.bin").exists()
+        assert catalog_file.read_bytes() == b"catalog-bytes"
     finally:
         mgr.close()
 
@@ -1044,9 +1034,9 @@ def test_multiprocess_eviction_coldest(tmp_path: Path) -> None:
     path_a = cache_root / "demo" / "a.bin"
     path_b = cache_root / "demo" / "b.bin"
     path_c = cache_root / "demo" / "c.bin"
-    idx_a = mgr_parent._index_map[("demo", 100)]
-    idx_b = mgr_parent._index_map[("demo", 101)]
-    idx_c = mgr_parent._index_map[("demo", 102)]
+    idx_a = mgr_parent._catalog_set.slot_of("demo", 100)
+    idx_b = mgr_parent._catalog_set.slot_of("demo", 101)
+    idx_c = mgr_parent._catalog_set.slot_of("demo", 102)
     shared = mgr_parent._shared
     assert shared is not None
     state_a = _ShardState(shared.shard_states[idx_a])
@@ -1110,10 +1100,9 @@ def test_build_resolver_with_all_inmem_datasets_does_not_crash(tmp_path: Path) -
     from zephon.io.options import StoreOptions
     from zephon.io.protocols import RandomAccessShard
     from zephon.io.resolvers import DirectResolver
-    from zephon.io.stores.multi import build_resolver
+    from zephon.io.stores.multi import build_catalog_set, build_resolver
 
-    # An all-inmem datasets map produces an empty flat locator dict.
-    flat_locators: dict[tuple[int, int], ShardLocator] = {}
+    # An all-inmem datasets map yields no catalog set.
     inmem_shards: Mapping[int, RandomAccessShard] = {}
     datasets = {
         0: Dataset(
@@ -1127,7 +1116,9 @@ def test_build_resolver_with_all_inmem_datasets_does_not_crash(tmp_path: Path) -
     store_opts = StoreOptions.from_any(
         {"cache": {"enabled": True, "root": str(cache_root)}}
     )
-    resolver = build_resolver(flat_locators, datasets, options=store_opts)
+    catalog_set = build_catalog_set(datasets)
+    assert catalog_set is None
+    resolver = build_resolver(catalog_set, options=store_opts)
     # No cacheable shards => fall back to DirectResolver rather than
     # building a zero-capacity CacheManager.
     assert isinstance(resolver, DirectResolver)
@@ -1135,19 +1126,10 @@ def test_build_resolver_with_all_inmem_datasets_does_not_crash(tmp_path: Path) -
 
 def test_duplicate_cacheable_dataset_names_raise(tmp_path: Path) -> None:
     """Two file-backed datasets with the same .name must not silently collide."""
+    from zephon.io.stores.multi import build_catalog_set
+
     remote = tmp_path / "remote"
-    cache_root = tmp_path / "cache"
     _make_file(remote / "x.bin", b"x")
-    storage = LocalFSBackend(root=remote)
-
-    # Two locators under the same dataset name but different dataset_ids.
-    loc0 = _locator("same", 0, str(remote), raw_name="x.bin", raw_bytes=1)
-    loc1 = _locator("same", 1, str(remote), raw_name="x.bin", raw_bytes=1)
-
-    flat: dict[tuple[int, int], ShardLocator] = {
-        (0, 0): loc0,
-        (1, 1): loc1,
-    }
     datasets = {
         0: Dataset(
             name="same",
@@ -1162,14 +1144,8 @@ def test_duplicate_cacheable_dataset_names_raise(tmp_path: Path) -> None:
             path=str(remote),
         ),
     }
-
     with pytest.raises(ValueError, match="Duplicate dataset name"):
-        CacheManager(
-            cache_root,
-            storage,
-            locators=flat,
-            datasets=datasets,
-        )
+        build_catalog_set(datasets)
 
 
 def test_duplicate_name_rejected_across_inmem_and_file_backed(
@@ -1177,18 +1153,14 @@ def test_duplicate_name_rejected_across_inmem_and_file_backed(
 ) -> None:
     """Inmem + file-backed sharing a .name is also ambiguous and must raise.
 
-    Even though the inmem dataset produces no locators and never touches
-    the cache, its .name would collide semantically with the file-backed
-    one in any caller-side lookup by name.
+    The inmem dataset never touches the cache, but its .name would still
+    collide semantically with the file-backed one in any by-name lookup.
     """
     from zephon.io.protocols import RandomAccessShard
+    from zephon.io.stores.multi import build_catalog_set
 
     remote = tmp_path / "remote"
-    cache_root = tmp_path / "cache"
     _make_file(remote / "x.bin", b"x")
-    storage = LocalFSBackend(root=remote)
-
-    loc = _locator("same", 0, str(remote), raw_name="x.bin", raw_bytes=1)
     inmem_shards: Mapping[int, RandomAccessShard] = {}
     datasets = {
         0: Dataset(
@@ -1204,14 +1176,8 @@ def test_duplicate_name_rejected_across_inmem_and_file_backed(
             path=None,
         ),
     }
-
     with pytest.raises(ValueError, match="Duplicate dataset name"):
-        CacheManager(
-            cache_root,
-            storage,
-            locators={(0, 0): loc},
-            datasets=datasets,
-        )
+        build_catalog_set(datasets)
 
 
 def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> None:

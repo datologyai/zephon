@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping
 
+import pytest
+
+from tests._helpers import catalog_set_from_locators
+from zephon.io.catalog import ShardCatalog
 from zephon.io.dataset import Dataset
-from zephon.io.formats.base import FormatHandler
+from zephon.io.formats.base import FormatHandler, get_format
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.resolvers.base import ShardResolver
 from zephon.io.stores.file_backed import FileBackedDatasetShardView
@@ -85,6 +90,15 @@ def _mk_dataset() -> Dataset:
     )
 
 
+def _catalog_for(
+    ds: Dataset, handler: FormatHandler, catalog_dir: Path
+) -> ShardCatalog:
+    """Columnarize a fake handler's locators into a catalog for the view."""
+    locators = list(handler.build_locators(ds).values())
+    counts = {int(sid): int(c) for sid, c in ds.shard_index.items()}
+    return catalog_set_from_locators(locators, catalog_dir, counts).catalog_for(ds.name)
+
+
 def test_file_backed_dataset_view_caches_shards(tmp_path) -> None:
     ds = _mk_dataset()
     handler = _FakeHandler(rows=[{"x": 1}, {"x": 2}])
@@ -98,6 +112,7 @@ def test_file_backed_dataset_view_caches_shards(tmp_path) -> None:
         retry_attempts=2,
         retry_initial_backoff=0.0,
         retry_max_backoff=0.0,
+        catalog=_catalog_for(ds, handler, tmp_path),
     )
 
     s1, reused1 = view.open(0)
@@ -127,6 +142,7 @@ def test_file_backed_dataset_view_retries_on_eviction(tmp_path) -> None:
         retry_attempts=3,
         retry_initial_backoff=0.0,
         retry_max_backoff=0.0,
+        catalog=_catalog_for(ds, handler, tmp_path),
     )
     shard, reused = view.open(0)
     assert reused is False
@@ -149,6 +165,7 @@ def test_file_backed_dataset_view_invalid_shard_raises(tmp_path) -> None:
         retry_attempts=1,
         retry_initial_backoff=0.0,
         retry_max_backoff=0.0,
+        catalog=_catalog_for(ds, handler, tmp_path),
     )
     try:
         _ = view.open(99)
@@ -157,12 +174,38 @@ def test_file_backed_dataset_view_invalid_shard_raises(tmp_path) -> None:
         pass
 
 
-def _mk_locator(tmp_path) -> ShardLocator:
-    raw = ShardFile(basename="raw.bin", bytes=1, hashes={})
-    return ShardLocator(
-        dataset="d",
-        shard_id=0,
-        format="fakefmt",
-        root=str(tmp_path),
-        raw=raw,
+def test_file_backed_dataset_view_attaches_from_handle(tmp_path) -> None:
+    """With no explicit catalog, the view finalizes+attaches via the handle."""
+    (tmp_path / "s0.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+    ds = Dataset.from_path("demo", str(tmp_path))
+    assert ds.catalog_handle is not None
+
+    local = LocalShardRef(raw=LocalShardFile(path=tmp_path / "s0.jsonl", bytes=1))
+    view = FileBackedDatasetShardView(
+        dataset=ds,
+        handler=get_format("jsonl"),
+        resolver=_FakeResolver(local=local),
+        retry_attempts=1,
+        retry_initial_backoff=0.0,
+        retry_max_backoff=0.0,
     )
+
+    assert ds.catalog_handle.fingerprint is not None  # finalized by the view
+    shard, reused = view.open(0)
+    assert reused is False
+    assert len(shard) == 1  # length served from the catalog's num_rows column
+
+
+def test_file_backed_dataset_view_requires_handle(tmp_path) -> None:
+    """A hand-built file-backed dataset without a catalog handle is refused."""
+    ds = _mk_dataset()
+    local = LocalShardRef(raw=LocalShardFile(path=tmp_path / "raw.bin", bytes=1))
+    with pytest.raises(ValueError, match="no shard catalog handle"):
+        FileBackedDatasetShardView(
+            dataset=ds,
+            handler=_FakeHandler(rows=[{"x": 1}]),
+            resolver=_FakeResolver(local=local),
+            retry_attempts=1,
+            retry_initial_backoff=0.0,
+            retry_max_backoff=0.0,
+        )

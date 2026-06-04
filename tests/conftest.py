@@ -77,3 +77,27 @@ def repro_iters(pytestconfig: pytest.Config) -> int:
         return int(val)
     except Exception:
         return 4
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shard_catalogs(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+):
+    """Isolate the shard-catalog dir and registry per test.
+
+    ``Dataset.from_path`` + finalize/attach otherwise write content-addressed
+    catalog artifacts into the *process-global* catalog dir (``$TMPDIR/zephon-
+    {uid}/catalog`` or the developer's ``ZEPHON_CATALOG_DIR``), accumulating
+    across runs, and the sticky ``_CATALOG_DIR``/``_REGISTRY`` globals leak
+    state between tests. Point both at a per-test temp dir instead; the env var
+    also propagates to spawned worker processes in integration tests. Tests
+    that manage the dir themselves (tests/zephon/io/catalog) simply override.
+    """
+    from zephon.io.catalog import clear_registry, set_catalog_dir
+
+    catalog_dir = tmp_path_factory.mktemp("shard-catalogs")
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(catalog_dir))
+    set_catalog_dir(None)  # re-resolve the process-global dir from the env var
+    clear_registry()
+    yield
+    clear_registry()

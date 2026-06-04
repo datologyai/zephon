@@ -16,6 +16,7 @@ from zephon.core.constants import (
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.io import build_multi_dataset_store
+from zephon.io.catalog import set_catalog_dir
 from zephon.io.options import StoreOptions
 from zephon.io.protocols import MultiDatasetShardStore
 from zephon.io.stores.resilient import SampleLoadStats
@@ -55,6 +56,9 @@ class FetchOp(DefaultSetup):
                 "FetchOp requires 'datasets_by_id' in context (provided by WorkSource)"
             )
         store_options = StoreOptions.from_any(ctx.get("io_options"))
+        # Set the process-global catalog dir (the Engine sets it on the driver;
+        # a spawned worker / Ray actor sets it here) before the store attaches it.
+        set_catalog_dir(store_options)
         self._store = build_multi_dataset_store(datasets_by_id, options=store_options)
         self._emit_fetch_metrics = ctx.get("emit_fetch_metrics")
         self._seen_shards.clear()

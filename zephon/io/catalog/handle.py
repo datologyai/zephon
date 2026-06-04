@@ -83,6 +83,11 @@ class ShardCatalogHandle:
     def attach(self) -> ShardCatalog:
         return attach(self)
 
+    def ensure_attached(self) -> ShardCatalog:
+        """Finalize (idempotent: build-or-load once) and attach in one step."""
+        finalize(self)
+        return attach(self)
+
 
 def _fs_type(path: Path) -> str | None:
     """Filesystem type of the mount containing ``path``.

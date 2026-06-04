@@ -4,7 +4,6 @@ import bz2
 import contextlib
 import errno
 import gzip
-import hashlib
 import io
 import json
 import logging
@@ -16,13 +15,13 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Mapping, Optional, cast
+from typing import BinaryIO, Callable, Optional, cast
 
 import numpy as np
 from filelock import BaseFileLock, FileLock
 from filelock import Timeout as FileLockTimeout
 
-from zephon.io.dataset import Dataset
+from zephon.io.catalog import CATALOG_CACHE_SUBDIR, CatalogSet
 from zephon.io.resolvers.base import ShardResolver
 from zephon.io.resolvers.cache.errors import (
     CacheInUseError,
@@ -299,10 +298,10 @@ class CacheManager(ShardResolver):
     - ``.zephon_cache_state/session.json`` — handshake file recording
       fingerprint, SHM segment names, and live owners.
 
-    Dense index mapping ``(dataset.name, shard_id) → slot`` is built
-    in-memory at ``__init__`` from the caller-provided ``locators`` dict.
-    No persistent index mapping lives on disk; recovery uses the
-    fingerprint to decide whether existing files are trustworthy.
+    Slot numbering ``(dataset.name, shard_id) → slot``, locators, fingerprint and
+    summary are served lazily by the ``CatalogSet`` (no resident locator dict).
+    No persistent index mapping lives on disk; recovery uses the fingerprint to
+    decide whether existing files are trustworthy.
     """
 
     def __init__(
@@ -310,8 +309,7 @@ class CacheManager(ShardResolver):
         root: Path,
         storage: StorageBackend,
         *,
-        locators: Mapping[tuple[int, int], ShardLocator],
-        datasets: Mapping[int, Dataset],
+        catalog_set: CatalogSet,
         limit_bytes: int | None = None,
         keep_zip: bool = False,
         validate_hash: str | None = None,
@@ -344,19 +342,13 @@ class CacheManager(ShardResolver):
         self._start_time_ns = _process_start_time_ns(self._pid)
         self._owner_key = _make_owner_key(self._pid, self._start_time_ns)
 
-        # In-memory dense index and per-index locator map (used by resolve/
-        # touch and eviction). Identity map keys by (dataset_name, basename)
-        # for disk-scan reconciliation; covers both raw and zip basenames.
-        (
-            self._index_map,
-            self._locators_by_index,
-            self._identity_to_index,
-        ) = self._build_index_maps(locators, datasets)
-        self._num_shards = len(self._locators_by_index)
-        self._fingerprint, self._summary = self._compute_fingerprint(datasets, locators)
-        self._cacheable_dataset_names: tuple[str, ...] = tuple(
-            sorted({loc.dataset for loc in self._locators_by_index.values()})
-        )
+        # Slot/locator/fingerprint state is served lazily by the CatalogSet —
+        # no resident per-shard locator dict.
+        self._catalog_set = catalog_set
+        self._num_shards = catalog_set.num_shards
+        self._fingerprint = catalog_set.global_fingerprint
+        self._summary = catalog_set.summary()
+        self._cacheable_dataset_names = catalog_set.cacheable_names
 
         # Full init (wipe? create SHM? reconcile? register owner?) runs
         # under _reset_lock so joiner processes cannot observe a partial
@@ -388,151 +380,6 @@ class CacheManager(ShardResolver):
             self._session_path,
             self._owner_key,
         )
-
-    # ------------------------------------------------------------------
-    # Dense index map + fingerprint
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_index_maps(
-        locators: Mapping[tuple[int, int], ShardLocator],
-        datasets: Mapping[int, Dataset],
-    ) -> tuple[
-        dict[tuple[str, int], int],
-        dict[int, ShardLocator],
-        dict[tuple[str, str], tuple[int, str]],
-    ]:
-        """Build the three in-memory maps used at runtime.
-
-        Canonical ordering: dataset names sorted, then shard ids within
-        each dataset. Every worker process feeds the same ``datasets`` and
-        ``locators`` in, so every process produces identical indices.
-
-        Dataset names must be unique among cacheable (non-inmem) datasets
-        because the dense map, disk layout (``{root}/{dataset.name}/``),
-        and fingerprint all key by name. Collisions are refused loudly
-        rather than silently overwriting — StaticMixtureWorkSource happens
-        to overwrite duplicates by name on its own, but we do not rely on
-        that and catch the problem at the cache boundary.
-        """
-        by_name: dict[str, list[tuple[int, ShardLocator]]] = {}
-        for (_did, sid), loc in locators.items():
-            by_name.setdefault(loc.dataset, []).append((int(sid), loc))
-
-        # Reject duplicate dataset names. Scope is ALL datasets, not just
-        # cacheable ones: even though in-memory datasets never touch the
-        # cache, an inmem dataset sharing a name with a file-backed one
-        # would make it ambiguous which dataset the cache's `(name, …)`
-        # keys and on-disk `{cache_root}/{name}/` layout refer to from
-        # the caller's perspective. Upstream (StaticMixtureWorkSource)
-        # already overwrites duplicates silently, so we catch it here.
-        names_seen: dict[str, int] = {}
-        for did, ds in datasets.items():
-            prev = names_seen.get(ds.name)
-            if prev is not None and prev != did:
-                raise ValueError(
-                    f"Duplicate dataset name {ds.name!r} in dataset set "
-                    f"(dataset_ids {prev} and {did}). Each dataset — "
-                    f"in-memory or file-backed — must have a unique .name "
-                    f"because the cache layout, dense index, and "
-                    f"fingerprint all key on it."
-                )
-            names_seen[ds.name] = did
-
-        # Only include datasets whose name is in the locators set (this
-        # implicitly excludes in-memory datasets which don't produce
-        # locators, matching collect_cacheable_locators' behavior).
-        cacheable_names = sorted(by_name.keys())
-
-        index_map: dict[tuple[str, int], int] = {}
-        locators_by_index: dict[int, ShardLocator] = {}
-        identity_to_index: dict[tuple[str, str], tuple[int, str]] = {}
-
-        next_idx = 0
-        for name in cacheable_names:
-            shards_for_name = sorted(by_name[name], key=lambda pair: pair[0])
-            for shard_id, loc in shards_for_name:
-                index_map[(name, shard_id)] = next_idx
-                locators_by_index[next_idx] = loc
-                identity_to_index[(name, loc.raw.basename)] = (next_idx, "raw")
-                if loc.zip is not None:
-                    identity_to_index[(name, loc.zip.basename)] = (next_idx, "zip")
-                next_idx += 1
-
-        # Reference datasets to make pyright happy (they're used indirectly
-        # via fingerprint computation elsewhere — here we just validate
-        # that every locator belongs to a known dataset name).
-        known_names = {ds.name for ds in datasets.values()}
-        for name in cacheable_names:
-            if name not in known_names:
-                raise ValueError(f"Locator references unknown dataset name {name!r}")
-
-        return index_map, locators_by_index, identity_to_index
-
-    @staticmethod
-    def _compute_fingerprint(
-        datasets: Mapping[int, Dataset],
-        locators: Mapping[tuple[int, int], ShardLocator],
-    ) -> tuple[str, list[dict[str, object]]]:
-        """SHA-256 fingerprint plus a per-dataset summary.
-
-        The fingerprint is the canonical hash of the
-        ``(dataset, locator)`` set — bytes, hashes, paths included — and
-        remains the authoritative match key. The summary is a small
-        ``{name, path, shard_count, total_raw_bytes}`` list per dataset
-        persisted alongside the hash in ``session.json`` so the
-        HARD_ERROR path can describe *what* changed rather than emit an
-        opaque hex digest. Returns the pair ``(fingerprint, summary)``;
-        the summary is ordered by dataset name.
-        """
-        by_name: dict[str, list[dict]] = {}
-        raw_byte_totals: dict[str, int] = {}
-        for (_did, sid), loc in locators.items():
-            entry = {
-                "shard_id": int(sid),
-                "raw_basename": loc.raw.basename,
-                "raw_bytes": int(loc.raw.bytes),
-                "raw_hashes": (
-                    {k: str(v) for k, v in dict(loc.raw.hashes).items()}
-                    if loc.raw.hashes
-                    else None
-                ),
-                "zip_basename": loc.zip.basename if loc.zip is not None else None,
-                "zip_bytes": int(loc.zip.bytes) if loc.zip is not None else None,
-                "zip_hashes": (
-                    {k: str(v) for k, v in dict(loc.zip.hashes).items()}
-                    if loc.zip is not None and loc.zip.hashes
-                    else None
-                ),
-                "compression": loc.compression,
-            }
-            by_name.setdefault(loc.dataset, []).append(entry)
-            raw_byte_totals[loc.dataset] = raw_byte_totals.get(loc.dataset, 0) + int(
-                loc.raw.bytes
-            )
-
-        ds_by_name = {ds.name: ds for ds in datasets.values()}
-        payload = [
-            {
-                "name": name,
-                "path": ds_by_name[name].path if name in ds_by_name else None,
-                "shards": sorted(by_name[name], key=lambda e: e["shard_id"]),
-            }
-            for name in sorted(by_name.keys())
-        ]
-        text = json.dumps(payload, sort_keys=True, default=str)
-        fingerprint = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-        summary: list[dict[str, object]] = [
-            {
-                "name": name,
-                "path": ds_by_name[name].path if name in ds_by_name else None,
-                "shard_count": len(by_name[name]),
-                "total_raw_bytes": int(raw_byte_totals.get(name, 0)),
-            }
-            for name in sorted(by_name.keys())
-        ]
-        return fingerprint, summary
 
     # ------------------------------------------------------------------
     # Session state machine
@@ -755,12 +602,18 @@ class CacheManager(ShardResolver):
         return True
 
     def _wipe_cache_root_locked(self) -> None:
-        """Remove everything under ``root`` except the lock files.
+        """Remove everything under ``root`` except the lock files and the catalog.
 
-        Must be called under ``_reset_lock``. Preserves ``.reset.lock`` so
-        the lock itself stays valid through the wipe.
+        Must be called under ``_reset_lock``. Preserves ``.reset.lock`` so the
+        lock stays valid through the wipe, and ``.catalog`` so the node-local
+        shard catalog (built once per node, content-addressed, unrelated to the
+        cache session) survives cache resets instead of forcing a rebuild.
         """
-        preserve = {self._reset_lock_path, self._root / _CACHE_LOCK_FILENAME}
+        preserve = {
+            self._reset_lock_path,
+            self._root / _CACHE_LOCK_FILENAME,
+            self._root / CATALOG_CACHE_SUBDIR,
+        }
         for child in list(self._root.iterdir()):
             if child in preserve:
                 continue
@@ -809,8 +662,7 @@ class CacheManager(ShardResolver):
                 name = entry.name
                 if name.endswith(skip_suffixes):
                     continue
-                key = (dataset_name, name)
-                idx_role = self._identity_to_index.get(key)
+                idx_role = self._reverse_lookup(dataset_name, name)
                 if idx_role is None:
                     # Orphan file from a prior run or unknown content.
                     continue
@@ -840,8 +692,8 @@ class CacheManager(ShardResolver):
                     size += zip_bytes.get(idx, 0)
                 else:
                     # Delete orphan zip — we only keep what the current run would keep.
-                    locator = self._locators_by_index.get(idx)
-                    if locator is not None and locator.zip is not None:
+                    locator = self._catalog_set.locator_at(idx)
+                    if locator.zip is not None:
                         zip_file = self._root / locator.dataset / locator.zip.basename
                         with contextlib.suppress(Exception):
                             zip_file.unlink(missing_ok=True)
@@ -1010,7 +862,13 @@ class CacheManager(ShardResolver):
     # ------------------------------------------------------------------
 
     def _index_for(self, locator: ShardLocator) -> Optional[int]:
-        return self._index_map.get((locator.dataset, int(locator.shard_id)))
+        return self._catalog_set.slot_of(locator.dataset, int(locator.shard_id))
+
+    def _reverse_lookup(
+        self, dataset_name: str, basename: str
+    ) -> Optional[tuple[int, str]]:
+        """Resolve ``(dataset_name, basename) -> (slot, role)`` (RESUME only)."""
+        return self._catalog_set.reverse_lookup(dataset_name, basename)
 
     def _mark_remote_locked(self, index: int) -> None:
         assert self._shared is not None
@@ -1049,14 +907,11 @@ class CacheManager(ShardResolver):
         return int(np.argmin(candidates))
 
     def _evict_index_locked(self, index: int) -> None:
-        locator = self._locators_by_index.get(index)
-        if locator is not None:
-            dataset_root = self._root / locator.dataset
-            raw_path = dataset_root / locator.raw.basename
-            zip_path = dataset_root / locator.zip.basename if locator.zip else None
-            raw_path.unlink(missing_ok=True)
-            if zip_path is not None:
-                zip_path.unlink(missing_ok=True)
+        locator = self._catalog_set.locator_at(index)
+        dataset_root = self._root / locator.dataset
+        (dataset_root / locator.raw.basename).unlink(missing_ok=True)
+        if locator.zip is not None:
+            (dataset_root / locator.zip.basename).unlink(missing_ok=True)
         self._mark_remote_locked(index)
 
     def _prepare(

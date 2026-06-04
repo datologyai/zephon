@@ -39,7 +39,7 @@ def test_dataset_from_path_streams_squad() -> None:
     assert ds.path == _SQUAD_TRAIN_URI
     assert ds.backend["kind"] == "parquet"
     assert len(ds.shard_index) >= 1
-    assert sum(ds.shard_index.values()) > 0
+    assert ds.total() > 0
 
 
 def test_download_squad_shard_via_http_get(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ def test_minimal_pipeline_consumes_squad(tmp_path: Path) -> None:
 
     ds = Dataset.from_path("squad", _SQUAD_TRAIN_URI)
     assert ds.backend["kind"] == "parquet"
-    assert sum(ds.shard_index.values()) > 0
+    assert ds.total() > 0
 
     work_source = StaticMixtureWorkSource(
         [ds],
