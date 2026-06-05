@@ -14,8 +14,12 @@ from zephon.io.stores.multi import (
     build_multi_dataset_store,
     build_resolver_with_locators,
     finalize_dataset_catalogs,
+    has_cacheable_dataset,
 )
 from zephon.io.stores.registry import DatasetStoreRegistry
+from zephon.utils.disk import InsufficientCacheSpaceError
+
+GiB = 1024**3
 
 
 def _mk_jsonl_dataset(tmp_path: Path) -> Dataset:
@@ -127,3 +131,48 @@ def test_catalog_locators_lazy_map(tmp_path: Path) -> None:
     assert locators.get((9, 0)) is None
     with pytest.raises(KeyError):
         _ = locators[(3, 99)]
+
+
+def test_cache_manager_blocks_on_insufficient_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fresh cache (existing=0): the limit must fit in free space alone, and
+    # 10GiB free < 50GiB limit, so CacheManager construction fails fast.
+    ds = _mk_jsonl_dataset(tmp_path)
+    monkeypatch.setattr(
+        "zephon.utils.disk.device_space", lambda path: (100 * GiB, 10 * GiB)
+    )
+    with pytest.raises(InsufficientCacheSpaceError):
+        build_multi_dataset_store(
+            {0: ds},
+            options=StoreOptions(
+                cache=CacheOptions(
+                    enabled=True, root=tmp_path / "cache", limit_bytes=50 * GiB
+                )
+            ),
+        )
+
+
+def test_inmem_only_skips_disk_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # In-memory only: no CacheManager is built, so the disk check never runs —
+    # even with the device reported nearly full.
+    monkeypatch.setattr(
+        "zephon.utils.disk.device_space", lambda path: (100 * GiB, 1 * GiB)
+    )
+    ds = Dataset.from_dict("mem", {0: InMemoryShard([{"x": 1}])})
+    store = build_multi_dataset_store(
+        {0: ds},
+        options=StoreOptions(cache=CacheOptions(enabled=True, limit_bytes=50 * GiB)),
+    )
+    _shard, reused = store.for_dataset(0).open(0)
+    assert reused is True
+
+
+def test_has_cacheable_dataset(tmp_path: Path) -> None:
+    inmem = Dataset.from_dict("mem", {0: InMemoryShard([{"x": 1}])})
+    file_backed = _mk_jsonl_dataset(tmp_path)
+    assert has_cacheable_dataset({}) is False
+    assert has_cacheable_dataset({0: inmem}) is False
+    assert has_cacheable_dataset({0: inmem, 1: file_backed}) is True

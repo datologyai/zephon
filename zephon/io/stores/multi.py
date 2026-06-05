@@ -151,6 +151,16 @@ class CatalogLocators(Mapping[tuple[int, int], ShardLocator]):
         return sum(catalog.shard_count for _name, catalog in self._entries.values())
 
 
+def has_cacheable_dataset(datasets: Mapping[int, Dataset]) -> bool:
+    """Return ``True`` if any dataset is file-backed (a non-inmem string kind)."""
+    return any(
+        isinstance((backend := d.backend), dict)
+        and isinstance((kind := backend.get("kind")), str)
+        and kind != "inmem"
+        for d in datasets.values()
+    )
+
+
 def build_resolver(
     catalog_set: CatalogSet | None,
     options: StoreOptions | None = None,
@@ -261,4 +271,5 @@ __all__ = [
     "build_resolver",
     "build_resolver_with_locators",
     "finalize_dataset_catalogs",
+    "has_cacheable_dataset",
 ]

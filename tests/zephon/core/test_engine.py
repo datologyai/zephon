@@ -1,4 +1,5 @@
 import gc
+import logging
 import re
 import threading
 import time
@@ -6,6 +7,7 @@ import types
 import weakref
 from collections import defaultdict
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,12 +17,15 @@ from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.graph import Graph
 from zephon.core.planner import Planner
 from zephon.core.runtime_spec import resolve_runtime_spec
+from zephon.io.dataset import Dataset
+from zephon.io.options import CacheOptions, StoreOptions
 from zephon.ops.batch import Batch
 from zephon.ops.delay import DelayById
 from zephon.ops.fetch import FetchOp
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
+from zephon.utils.disk import InsufficientCacheSpaceError
 from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -156,6 +161,69 @@ class _DummyWorkSource(WorkSource):
 
     def sample_id_at(self, index: int) -> Any:  # pragma: no cover - not used
         raise NotImplementedError
+
+
+# -- Cache disk-space preflight ---------------------------------------------
+
+_GiB = 1024**3
+
+
+class _FileBackedWorkSource(_DummyWorkSource):
+    """`datasets_by_id` with a file-backed entry so the cache preflight runs."""
+
+    @property
+    def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
+        return {0: Dataset(name="d", backend={"kind": "jsonl"}, path="/data")}
+
+
+def _cache_preflight_engine_args(tmp_path, limit_bytes: int):
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(
+        io_options=StoreOptions(
+            cache=CacheOptions(
+                enabled=True, root=tmp_path / "cache", limit_bytes=limit_bytes
+            )
+        )
+    )
+    return plan, opts, resolve_runtime_spec(plan, opts)
+
+
+def test_engine_cache_preflight_raises_on_insufficient_space(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    monkeypatch.setattr(
+        "zephon.utils.disk.device_space", lambda path: (100 * _GiB, 10 * _GiB)
+    )
+    plan, opts, spec = _cache_preflight_engine_args(tmp_path, 50 * _GiB)
+    with pytest.raises(InsufficientCacheSpaceError):
+        Engine(plan, opts, _FileBackedWorkSource(), spec)
+
+
+def test_engine_cache_preflight_warns_on_low_headroom(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    monkeypatch.setattr(
+        "zephon.utils.disk.device_space", lambda path: (1000 * _GiB, 1000 * _GiB)
+    )
+    plan, opts, spec = _cache_preflight_engine_args(tmp_path, 970 * _GiB)
+    with caplog.at_level(logging.WARNING, logger="zephon.utils.disk"):
+        Engine(plan, opts, _FileBackedWorkSource(), spec)
+    assert sum("headroom" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_engine_cache_preflight_skipped_without_file_backed_datasets(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    check = Mock()
+    monkeypatch.setattr("zephon.core.engine.check_cache_disk_space", check)
+    plan, opts, spec = _cache_preflight_engine_args(tmp_path, 50 * _GiB)
+    Engine(plan, opts, _DummyWorkSource(), spec)
+    check.assert_not_called()
 
 
 def _mk_three_stage_plan(

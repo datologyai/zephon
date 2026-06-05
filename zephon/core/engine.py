@@ -73,12 +73,14 @@ from zephon.core.runtime_spec import RuntimeSpec
 from zephon.core.world import World
 from zephon.io.options import StoreOptions
 from zephon.io.storage import RouterStorageBackend
+from zephon.io.stores.multi import finalize_dataset_catalogs, has_cacheable_dataset
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.emitter import MetricsReporter
 from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
+from zephon.utils.disk import check_cache_disk_space
 from zephon.utils.rank import rank_ctx
 from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
 from zephon.work import MixtureReadConfig, WorkSource
@@ -393,6 +395,11 @@ class Engine:
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
         }
+        cache_opts = opts.io_options.cache
+        if cache_opts.enabled and has_cacheable_dataset(work.datasets_by_id):
+            check_cache_disk_space(
+                Path(cache_opts.root).expanduser(), cache_opts.limit_bytes
+            )
         # Mixture query service for EnsureMixture operator
         base_ctx["get_chunk_mixture"] = self._get_chunk_mixture
         base_ctx["get_component_name"] = self._get_component_name
@@ -404,10 +411,8 @@ class Engine:
         # source-key lock in finalize() elects one builder per node; the rest
         # mmap the file), baking the handle fingerprint that ships in ctx so
         # workers attach the shared mapping instead of unpickling a per-shard
-        # metadata copy. Dataset-less pipelines skip the io import entirely.
+        # metadata copy.
         if datasets_by_id := self._ctx["datasets_by_id"]:
-            from zephon.io.stores.multi import finalize_dataset_catalogs
-
             finalize_dataset_catalogs(datasets_by_id, opts.io_options)
         self._opts = opts
         self._mp_context = self._resolve_mp_context(self._opts.mp_context)

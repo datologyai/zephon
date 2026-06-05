@@ -33,6 +33,7 @@ from zephon.io.resolvers.utils import compute_file_hash
 from zephon.io.storage import StorageBackend
 from zephon.io.types import LocalShardFile, LocalShardRef, ShardFile, ShardLocator
 from zephon.utils.atomic import atomic_write_bytes
+from zephon.utils.disk import check_cache_disk_space
 
 try:  # LZ4 is optional
     import lz4.frame as lz4frame
@@ -379,6 +380,14 @@ class CacheManager(ShardResolver):
             self._reset_lock,
             self._session_path,
             self._owner_key,
+        )
+
+        # Enforce the limit on this node's disk, reusing the reconcile tally.
+        check_cache_disk_space(
+            self._root,
+            self._limit_bytes,
+            existing_bytes=self._shared.get_cache_usage(),
+            warn_fraction=None,
         )
 
     # ------------------------------------------------------------------
