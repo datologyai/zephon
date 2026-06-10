@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from zephon.core.constants import SampleBatch, SampleMeta, SampleRecord
 from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.config import (
     ExecutionTrackingMode,
@@ -112,3 +113,22 @@ def test_estimate_bytes_handles_nested_containers() -> None:
     nested = {"a": [1, 2, 3], "b": {"inner": b"payload"}}
     size = estimate_bytes(nested)
     assert size >= len(b"payload")
+
+
+def test_estimate_bytes_counts_sample_record_payloads() -> None:
+    payload = b"x" * 4096
+    meta = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    record = SampleRecord(meta=meta, payload={"data": payload})
+    batch = SampleBatch(records=(record,))
+
+    assert estimate_bytes(record) >= len(payload)
+    assert estimate_bytes(batch) >= len(payload)
+    assert estimate_bytes([batch]) >= len(payload)
+
+
+def test_estimate_bytes_does_not_double_count_shared_records() -> None:
+    payload = b"x" * 4096
+    meta = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
+    record = SampleRecord(meta=meta, payload={"data": payload})
+
+    assert estimate_bytes([record, record]) < 2 * len(payload)

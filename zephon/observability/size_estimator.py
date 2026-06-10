@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -32,6 +33,35 @@ def _estimate_sequence_bytes(obj: Sequence[Any], visited: set[int]) -> int:
     size = sys.getsizeof(obj)
     for item in obj:
         size += estimate_bytes(item, visited)
+    return size
+
+
+_struct_field_names_cache: dict[type, tuple[str, ...] | None] = {}
+
+
+def _struct_field_names(cls: type) -> tuple[str, ...] | None:
+    """Return field names for dataclass/pydantic/attrs classes, else ``None``."""
+    try:
+        return _struct_field_names_cache[cls]
+    except KeyError:
+        pass
+    names: tuple[str, ...] | None = None
+    if dataclasses.is_dataclass(cls):
+        names = tuple(f.name for f in dataclasses.fields(cls))
+    elif hasattr(cls, "model_fields") and hasattr(cls, "model_construct"):
+        names = tuple(cls.model_fields.keys())  # pydantic
+    elif hasattr(cls, "__attrs_attrs__"):
+        names = tuple(a.name for a in cls.__attrs_attrs__)  # attrs
+    _struct_field_names_cache[cls] = names
+    return names
+
+
+def _estimate_struct_bytes(
+    obj: Any, field_names: tuple[str, ...], visited: set[int]
+) -> int:
+    size = sys.getsizeof(obj)
+    for name in field_names:
+        size += estimate_bytes(getattr(obj, name, None), visited)
     return size
 
 
@@ -71,6 +101,9 @@ def estimate_bytes(obj: Any, visited: set[int] | None = None) -> int:
         return _estimate_mapping_bytes(obj, visited)
     if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
         return _estimate_sequence_bytes(obj, visited)
+    field_names = _struct_field_names(type(obj))
+    if field_names is not None:
+        return _estimate_struct_bytes(obj, field_names, visited)
 
     try:
         return sys.getsizeof(obj)
