@@ -473,6 +473,7 @@ class EngineStateV1(CheckpointMixin):
     rr_next_idx: dict[str, int] = field(default_factory=dict)
     replay_cursors: dict[str, Any] = field(default_factory=dict)
     epoch_boundaries: dict[str, Any] = field(default_factory=dict)
+    lane_emitted: dict[str, Any] = field(default_factory=dict)  # empty = unknown
 
     def __post_init__(self) -> None:
         # Accumulate every invariant violation so a malformed checkpoint

@@ -175,3 +175,51 @@ class TestIsTombstone:
 
     def test_batch_is_not_tombstone(self):
         assert is_tombstone(_batch(_record())) is False
+
+
+# ---------------------------------------------------------------------------
+# delivered flag — per-lane delivery counting at the tail
+# ---------------------------------------------------------------------------
+
+
+class TestDeliveredFlag:
+    @pytest.mark.parametrize("use_monotone", [True, False])
+    def test_real_record_is_delivered(self, use_monotone: bool):
+        result = _extract_notify_args(_record(lane=1), use_monotone=use_monotone)
+        assert result.delivered is True
+
+    @pytest.mark.parametrize("use_monotone", [True, False])
+    def test_tombstone_record_is_not_delivered(self, use_monotone: bool):
+        result = _extract_notify_args(
+            _record(lane=1, tombstone=True), use_monotone=use_monotone
+        )
+        assert result.delivered is False
+
+    @pytest.mark.parametrize("use_monotone", [True, False])
+    def test_batch_is_delivered(self, use_monotone: bool):
+        result = _extract_notify_args(
+            _batch(_record(lane=0, offset=0), _record(lane=0, offset=1)),
+            use_monotone=use_monotone,
+        )
+        assert result.delivered is True
+
+    def test_apply_records_delivery_for_delivered_items(self):
+        engine = MagicMock()
+        r = _record(lane=3)
+        _notify_item(engine, r, use_monotone=True)
+        engine.record_delivery.assert_called_once_with(3)
+
+    def test_apply_skips_delivery_for_tombstones(self):
+        engine = MagicMock()
+        r = _record(lane=3, tombstone=True)
+        _notify_item(engine, r, use_monotone=True)
+        engine.record_delivery.assert_not_called()
+        # The tombstone is still notified for eviction bookkeeping.
+        engine.notify_monotone.assert_called_once()
+
+    def test_apply_records_delivery_for_batches(self):
+        engine = MagicMock()
+        b = _batch(_record(lane=2, offset=0), _record(lane=2, offset=1))
+        _notify_item(engine, b, use_monotone=False)
+        engine.record_delivery.assert_called_once_with(2)
+        engine.notify.assert_called_once()

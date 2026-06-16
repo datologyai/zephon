@@ -21,20 +21,32 @@ from zephon.core.constants import (
 
 
 class _MonotoneNotify(NamedTuple):
-    """Lightweight args for ``engine.notify_monotone()``."""
+    """Lightweight args for ``engine.notify_monotone()``.
+
+    ``delivered`` is True when the notified item is actually yielded to the
+    consumer at the pipeline tail (a real batch or record) and False for
+    control items (tombstones, sentinels) that are notified but never
+    delivered. It feeds the per-lane delivery counters used for mid-window
+    checkpoint detection.
+    """
 
     lane_id: int
     max_chunk_id: int
     add_k: int
     max_cursor: SampleCursor | None
+    delivered: bool = True
 
 
 class _ContributorNotify(NamedTuple):
-    """Lightweight args for ``engine.notify()``."""
+    """Lightweight args for ``engine.notify()``.
+
+    See :class:`_MonotoneNotify` for the meaning of ``delivered``.
+    """
 
     lane_id: int
     entries: list[ContributorRef]
     record_cursor: SampleCursor | None
+    delivered: bool = True
 
 
 NotifyArgs = _MonotoneNotify | _ContributorNotify
@@ -76,10 +88,15 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
 
     if isinstance(item, SampleRecord):
         lane_id = item.meta.lane_id
+        # Sentinels never reach the consumer; replayed-and-dropped records arrive
+        # as tombstones, so excluding them prevents double-counting on resume.
+        delivered = not item.meta.is_sentinel
         if use_monotone:
-            return _MonotoneNotify(lane_id, item.meta.chunk_id, 1, item.meta.cursor)
+            return _MonotoneNotify(
+                lane_id, item.meta.chunk_id, 1, item.meta.cursor, delivered
+            )
         return _ContributorNotify(
-            lane_id, item.meta.contribution_refs(), item.meta.cursor
+            lane_id, item.meta.contribution_refs(), item.meta.cursor, delivered
         )
 
     raise TypeError(
@@ -98,6 +115,10 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
         engine.notify(
             notify.lane_id, notify.entries, record_cursor=notify.record_cursor
         )
+    # Both delivery paths funnel through here (inline _notify_item and the MTP
+    # ACK handler), so tail counters cover every pipeline shape.
+    if notify.delivered:
+        engine.record_delivery(notify.lane_id)
 
 
 def _notify_item(engine: Any, item: StreamItem, use_monotone: bool) -> None:

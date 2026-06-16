@@ -848,3 +848,219 @@ class TestDedupeDpGroupPeers:
         with pytest.raises(RuntimeError) as excinfo:
             dedupe_engine._merge_state_dicts([rep.to_dict(), diverged.to_dict()])
         assert "last_round_id mismatch" in str(excinfo.value)
+
+
+# =============================================================================
+# Per-lane delivery counters + mid-window checkpoint warning (observability)
+# =============================================================================
+
+
+def _no_midwindow_warnings(recwarn: Any) -> bool:
+    return not [w for w in recwarn.list if "mid-window" in str(w.message)]
+
+
+class TestLaneEmittedCounters:
+    def test_record_delivery_increments_per_lane(self) -> None:
+        eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        eng.record_delivery(0)
+        eng.record_delivery(0)
+        eng.record_delivery(1)
+        assert eng._lane_emitted == {0: 2, 1: 1}
+
+    def test_state_dict_serializes_counters_for_owned_lanes(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        eng.record_delivery(0)
+        eng.record_delivery(1)
+        state = eng.state_dict()
+        assert state["lane_emitted"] == {0: 1, 1: 1}
+        # Equal counts across all canonical lanes → window-aligned, no warning.
+        assert _no_midwindow_warnings(recwarn)
+
+    def test_single_lane_fast_path_counts_and_never_warns(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        """canonical_replicas=1: the single-lane fast path (no RR multiplexer)
+        still counts deliveries, and one lane can never be mid-window."""
+        eng = _mk_engine_with_opts(canonical_replicas=1, dp_degree=1)
+        for _ in range(3):
+            eng.record_delivery(0)
+        state = eng.state_dict()
+        assert state["lane_emitted"] == {0: 3}
+        assert _no_midwindow_warnings(recwarn)
+
+    def test_round_trip_restores_counters_and_continues_counting(self) -> None:
+        eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        for _ in range(3):
+            eng.record_delivery(0)
+            eng.record_delivery(1)
+        state = eng.state_dict()
+
+        eng2 = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        eng2.load_state_dict(state, replay=False)
+        # Invariant: after load_state_dict, counters equal their
+        # checkpointed values...
+        assert dict(eng2._lane_emitted) == {0: 3, 1: 3}
+        assert eng2._lane_emitted_valid is True
+        # ...and increase only for newly delivered items.
+        eng2.record_delivery(0)
+        assert dict(eng2._lane_emitted) == {0: 4, 1: 3}
+
+    def test_legacy_state_without_counters_loads_cleanly(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        """Backward compat: a pre-counter checkpoint loads fine — counters are
+        treated as unknown (no warning, no crash) and stay unknown on re-save."""
+        eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        eng.record_delivery(0)
+        state = eng._state_dict_local()
+        state.pop("lane_emitted")  # simulate an old checkpoint
+
+        eng2 = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        eng2.load_state_dict(state, replay=False)
+        assert dict(eng2._lane_emitted) == {}
+        assert eng2._lane_emitted_valid is False
+        assert _no_midwindow_warnings(recwarn)
+
+        # Unknown propagates: the next save must not pretend to know counts.
+        restate = eng2.state_dict()
+        assert restate["lane_emitted"] == {}
+        assert _no_midwindow_warnings(recwarn)
+
+
+class TestMidWindowCheckpointWarning:
+    def test_unequal_counts_warn_on_single_rank_state_dict(self) -> None:
+        eng = _mk_engine_with_opts(canonical_replicas=4, dp_degree=1)
+        # 5 deliveries across 4 lanes → mid-window (counts 2,1,1,1).
+        for lane in (0, 1, 2, 3, 0):
+            eng.record_delivery(lane)
+        with pytest.warns(RuntimeWarning, match=r"mid-window.*\[1\.\.2\]"):
+            eng.state_dict()
+
+    def test_equal_counts_do_not_warn(self, recwarn: pytest.WarningsRecorder) -> None:
+        eng = _mk_engine_with_opts(canonical_replicas=4, dp_degree=1)
+        for _ in range(2):
+            for lane in range(4):
+                eng.record_delivery(lane)
+        eng.state_dict()
+        assert _no_midwindow_warnings(recwarn)
+
+    def test_merge_collects_counters_and_warns_on_mid_window(self) -> None:
+        engs: list[Engine] = []
+        for rank in range(2):
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=2,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=rank,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+        engs[0].record_delivery(0)
+        engs[0].record_delivery(0)
+        engs[1].record_delivery(1)
+
+        states = [e._state_dict_local() for e in engs]
+        with pytest.warns(RuntimeWarning, match=r"mid-window.*\[1\.\.2\]"):
+            merged = engs[0]._merge_state_dicts(states)
+        assert merged["lane_emitted"] == {0: 2, 1: 1}
+
+    def test_merge_with_equal_counts_does_not_warn(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        engs: list[Engine] = []
+        for rank in range(2):
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=2,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=rank,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+            e.record_delivery(rank)  # one delivery on each rank's lane
+        merged = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+        assert merged["lane_emitted"] == {0: 1, 1: 1}
+        assert _no_midwindow_warnings(recwarn)
+
+    def test_merge_with_partial_coverage_does_not_warn(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        """Shards whose counters are unknown leave coverage incomplete — the
+        merged checkpoint must stay silent rather than guess."""
+        engs: list[Engine] = []
+        for rank in range(2):
+            e = _mk_engine_with_opts(
+                canonical_replicas=2,
+                world_size=2,
+                global_rank=rank,
+                dp_degree=2,
+                dp_group_id=rank,
+            )
+            engs.append(e)
+            _seed_inflight_state(e)
+        engs[0].record_delivery(0)
+        engs[1]._lane_emitted_valid = False  # rank 1 resumed from a legacy ckpt
+
+        states = [e._state_dict_local() for e in engs]
+        merged = engs[0]._merge_state_dicts(states)
+        assert merged["lane_emitted"] == {0: 1}
+        assert _no_midwindow_warnings(recwarn)
+
+    def test_load_warns_on_mid_window_into_different_topology(self) -> None:
+        src = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        src.record_delivery(0)
+        src.record_delivery(0)
+        src.record_delivery(1)
+        state = src._state_dict_local()  # world_size=1, owns both lanes
+
+        dst = _mk_engine_with_opts(
+            canonical_replicas=2,
+            world_size=2,
+            global_rank=0,
+            dp_degree=2,
+            dp_group_id=0,
+        )
+        with pytest.warns(RuntimeWarning, match="Resuming a mid-window checkpoint"):
+            dst.load_state_dict(state, replay=False)
+        # Counters for the (now smaller) owned lane set are still restored.
+        assert dict(dst._lane_emitted) == {0: 2}
+        assert dst._lane_emitted_valid is True
+
+    def test_load_same_topology_does_not_warn(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        src = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        src.record_delivery(0)
+        src.record_delivery(0)
+        src.record_delivery(1)
+        state = src._state_dict_local()
+
+        dst = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        dst.load_state_dict(state, replay=False)
+        assert not [
+            w for w in recwarn.list if "Resuming a mid-window" in str(w.message)
+        ]
+
+    def test_load_equal_counts_into_different_topology_does_not_warn(
+        self, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        src = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+        src.record_delivery(0)
+        src.record_delivery(1)
+        state = src._state_dict_local()  # window-aligned
+
+        dst = _mk_engine_with_opts(
+            canonical_replicas=2,
+            world_size=2,
+            global_rank=0,
+            dp_degree=2,
+            dp_group_id=0,
+        )
+        dst.load_state_dict(state, replay=False)
+        assert not [
+            w for w in recwarn.list if "Resuming a mid-window" in str(w.message)
+        ]

@@ -1,6 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import multiprocessing as mp
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -452,7 +453,15 @@ def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
         stage_prefetch=0,
         **kw,
     )
-    prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
+    # The cut is also mid-window (odd count over 2 lanes), so the checkpoint
+    # emits the mid-window RuntimeWarning - observable in-process only inline.
+    warn_ctx = (
+        contextlib.nullcontext()
+        if mtp_mode
+        else pytest.warns(RuntimeWarning, match="mid-window")
+    )
+    with warn_ctx:
+        prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
     assert ckpt is not None
     assert prefix_flat == baseline_flat[:cut]
 

@@ -569,6 +569,28 @@ def test_engine_asdict_roundtrip():
     assert e == e2
 
 
+def test_engine_lane_emitted_defaults_to_empty():
+    """Old v1 checkpoints lack lane_emitted — it must default to {} (unknown)."""
+    e = EngineStateV1.from_dict(_minimal_engine_raw())
+    assert e.lane_emitted == {}
+
+
+def test_engine_lane_emitted_roundtrip():
+    raw = _minimal_engine_raw(lane_emitted={"0": 5, "1": 4})
+    e = EngineStateV1.from_dict(raw)
+    assert e.lane_emitted == {"0": 5, "1": 4}
+    d = e.to_dict()
+    assert d["lane_emitted"] == {"0": 5, "1": 4}
+    assert EngineStateV1.from_dict(d) == e
+
+
+def test_engine_lane_emitted_survives_load_migration_chain():
+    """EngineStateV1.load() (migrate + structure) preserves the counters."""
+    raw = _minimal_engine_raw(lane_emitted={"0": 7})
+    e = EngineStateV1.load(raw)
+    assert e.lane_emitted == {"0": 7}
+
+
 # -- to_dict() helper --------------------------------------------------------
 
 

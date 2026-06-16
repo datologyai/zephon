@@ -18,6 +18,7 @@ class _StubEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[int, list[ContributorRef], SampleCursor | None]] = []
         self.monotone_calls: list[tuple[int, int, list[SampleCursor] | None]] = []
+        self.delivery_calls: list[int] = []
         self.inflight_chunks_per_lane: dict[int, dict[int, object]] = {}
 
     def notify(
@@ -34,6 +35,9 @@ class _StubEngine:
     ) -> bool:
         self.monotone_calls.append((lane_id, max_chunk_id, list(cursors)))
         return True
+
+    def record_delivery(self, lane_id: int) -> None:
+        self.delivery_calls.append(lane_id)
 
 
 def test_yield_while_notifying_type_checks_and_forwards() -> None:

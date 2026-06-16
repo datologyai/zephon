@@ -427,6 +427,10 @@ class Engine:
 
         self._lane_next_cid: dict[LaneId, int] = defaultdict(int)
         self._epoch_boundaries: dict[LaneId, list[int]] = defaultdict(list)
+        # Per-lane consumer-delivered item counts at the tail; observability only.
+        self._lane_emitted: dict[LaneId, int] = defaultdict(int)
+        # False = unknown baseline (pre-counter restore): neither serialized nor warned on.
+        self._lane_emitted_valid: bool = True
         # Resolve flush_every_k_chunks: auto-detect for non-monotonic pipelines.
         _flush_k = opts.flush_every_k_chunks
         if _flush_k is None:
@@ -1707,6 +1711,91 @@ class Engine:
         if record_cursor is not None:
             self._lane_last_cursor[lane_id] = record_cursor
 
+    def record_delivery(self, lane_id: int) -> None:
+        """Count one consumer-delivered item at the pipeline tail for *lane_id*.
+
+        Called from the tail notify path (``_apply_notify_args``) once per
+        item actually yielded to the consumer — a batch when batching is
+        present, a record otherwise. Tombstones and flush sentinels are
+        excluded upstream (they are notified but never delivered), which is
+        what keeps replayed-and-dropped records after a checkpoint restore
+        from double-counting.
+
+        Purely observability: the counters feed the mid-window checkpoint
+        warning and never influence scheduling, replay, or RR emission.
+        """
+        self._lane_emitted[lane_id] += 1
+
+    @staticmethod
+    def _complete_lane_counts(
+        lane_emitted: dict[int, int], canonical_replicas: int
+    ) -> list[int] | None:
+        """Counts for every canonical lane, or None if any lane is unknown."""
+        counts: list[int] = []
+        for lane in range(canonical_replicas):
+            count = lane_emitted.get(lane)
+            if count is None:
+                return None
+            counts.append(count)
+        return counts
+
+    @staticmethod
+    def _check_mid_window_counts(
+        lane_emitted: dict[int, int], canonical_replicas: int
+    ) -> None:
+        """Warn loudly when per-lane delivery counts indicate a mid-window cut.
+
+        Only fires when counts are known for EVERY canonical lane (partial
+        coverage means another shard holds the rest, or the counters are
+        unknown because the run was resumed from a pre-counter checkpoint).
+        """
+        counts = Engine._complete_lane_counts(lane_emitted, canonical_replicas)
+        if counts is None:
+            return
+        lo, hi = min(counts), max(counts)
+        if lo == hi:
+            return
+        warnings.warn(
+            f"[zephon] Checkpoint taken mid-window: emitted-batch counts per "
+            f"canonical lane are unequal (range [{lo}..{hi}] across "
+            f"{canonical_replicas} lanes). Resuming this checkpoint into a "
+            f"DIFFERENT topology will permute the remainder of the current "
+            f"global window (no samples are lost or duplicated). To avoid "
+            f"this, checkpoint at window boundaries: the number of global "
+            f"batches per pooled step must be a multiple of "
+            f"canonical_replicas ({canonical_replicas}).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _topology_differs(self, ckpt_world: dict[str, Any]) -> bool:
+        """Best-effort check for a lane-ownership topology change vs *ckpt_world*.
+
+        Merged checkpoints carry only ``canonical_replicas`` and
+        ``world_size``; single-shard (fast-path) checkpoints additionally
+        carry ``dp_degree`` and the full lane ``mapping``. Compare whatever
+        is present; missing information conservatively counts as "same" so
+        the load-time mid-window warning never fires spuriously.
+        """
+        ws = ckpt_world.get("world_size")
+        if ws is not None and int(ws) != int(self._world.world_size):
+            return True
+        dp = ckpt_world.get("dp_degree")
+        if dp is not None and int(dp) != int(self._world.dp_degree):
+            return True
+        mapping = ckpt_world.get("mapping")
+        if mapping:
+            current = {
+                int(dp_id): [int(x) for x in lanes]
+                for dp_id, lanes in self._world.lanes_for_dp_group.items()
+            }
+            saved = {
+                int(dp_id): [int(x) for x in lanes] for dp_id, lanes in mapping.items()
+            }
+            if saved != current:
+                return True
+        return False
+
     def eval_one(self, sample: SampleId | EngineSample) -> Any:
         """Synchronously evaluate a single element through every stage runner."""
         value: Any = sample
@@ -1756,6 +1845,7 @@ class Engine:
                 "_offset_done",
                 "_offset_done_count",
                 "_epoch_boundaries",
+                "_lane_emitted",
             ]:
                 for lane in list(getattr(self, purge_candidate_str)):
                     if lane not in owned:
@@ -1821,6 +1911,10 @@ class Engine:
                 if boundaries:
                     epoch_boundaries[int(lane)] = [int(cid) for cid in boundaries]
 
+            lane_emitted: dict[int, int] = {}
+            if self._lane_emitted_valid:
+                lane_emitted = {lane: self._lane_emitted.get(lane, 0) for lane in owned}
+
             state = EngineStateV1(
                 version=ENGINE_VERSION,
                 world=world,
@@ -1834,6 +1928,7 @@ class Engine:
                 rr_next_idx=rr_next_idx,
                 replay_cursors=replay_cursors,
                 epoch_boundaries=epoch_boundaries,
+                lane_emitted=lane_emitted,
             )
             return state.to_dict()
 
@@ -2002,6 +2097,11 @@ class Engine:
         worker_id, workers_per_rank = get_torch_worker_info()
         active_here = self._active_workers(workers_per_rank, lanes_all)
         if self._world.world_size == 1 and active_here == 1:
+            # Fast path has no merge; this owner covers every lane, so check locally.
+            self._check_mid_window_counts(
+                local.get("lane_emitted") or {},
+                int(self._world.canonical_replicas),
+            )
             return local
 
         # Round setup
@@ -2242,11 +2342,26 @@ class Engine:
                     continue
                 epoch_boundaries[lane] = [int(cid) for cid in boundaries]
 
+        # Lanes are disjoint across shards (peers deduped above): merge by union.
+        # Unknown shards contribute nothing; the check stays silent without full coverage.
+        lane_emitted: dict[int, int] = {}
+        for idx, st in enumerate(typed):
+            for lane_s, count in st.lane_emitted.items():
+                lane = int(lane_s)
+                if lane in lane_emitted:
+                    errors.append(
+                        f"states[{idx}]: duplicate lane_emitted for lane {lane}"
+                    )
+                    continue
+                lane_emitted[lane] = int(count)
+
         if errors:
             raise RuntimeError(
                 f"cannot merge {len(states)} aggregation state shards:\n  - "
                 + "\n  - ".join(errors)
             )
+
+        self._check_mid_window_counts(lane_emitted, C)
 
         merged = EngineStateV1(
             version=ENGINE_VERSION,
@@ -2261,6 +2376,7 @@ class Engine:
             rr_next_idx=rr_next_idx,
             replay_cursors=replay_cursors,
             epoch_boundaries=epoch_boundaries,
+            lane_emitted=lane_emitted,
         )
         return merged.to_dict()
 
@@ -2374,6 +2490,36 @@ class Engine:
             lane = int(lane_s)
             if lane in owned:
                 self._epoch_boundaries[lane] = [int(cid) for cid in boundaries]
+
+        # Pre-counter checkpoints lack entries for owned lanes -> baseline unknown.
+        emitted_raw = ckpt.lane_emitted or {}
+        restored_emitted = {int(lane_s): int(c) for lane_s, c in emitted_raw.items()}
+        self._lane_emitted.clear()
+        self._lane_emitted_valid = all(lane in restored_emitted for lane in owned)
+        if self._lane_emitted_valid:
+            for lane in owned:
+                self._lane_emitted[lane] = restored_emitted[lane]
+
+        C = int(self._world.canonical_replicas)
+        counts = self._complete_lane_counts(restored_emitted, C)
+        if (
+            counts is not None
+            and min(counts) != max(counts)
+            and self._topology_differs(ckpt.world)
+        ):
+            warnings.warn(
+                f"[zephon] Resuming a mid-window checkpoint into a different "
+                f"topology: emitted-batch counts per canonical lane are "
+                f"unequal (range [{min(counts)}..{max(counts)}] across {C} "
+                f"lanes) and the lane-ownership topology changed. The "
+                f"remainder of the current global window will be permuted "
+                f"(no samples are lost or duplicated). To avoid this, "
+                f"checkpoint at window boundaries: the number of global "
+                f"batches per pooled step must be a multiple of "
+                f"canonical_replicas ({C}).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         self._refresh_rr_from_progress()
         self._publish_replay_snapshot()
