@@ -1064,3 +1064,122 @@ class TestMidWindowCheckpointWarning:
         assert not [
             w for w in recwarn.list if "Resuming a mid-window" in str(w.message)
         ]
+
+
+# =============================================================================
+# Reload must SCATTER the tail round-robin pointer to its owner, not BROADCAST
+# the full merged pointer-set into every rank.
+# =============================================================================
+#
+# The tail-RR pointer is physical/owner-scoped: its key encodes the owning rank
+# ("{global_rank}:{worker}/{active}:{lanes}"). A fresh run merges cleanly
+# because each rank contributes only its own key (one author per key). The
+# merged checkpoint, however, holds every rank's key. ``load_state_dict`` used
+# to copy that whole dict into *every* rank, so each rank then carried all
+# peers' pointers; only its own moved as it trained, while the peers' copies
+# went stale. The next aggregation merge saw the owner's advanced value
+# conflict with the stale copies and raised
+# ``cannot merge N aggregation state shards: ... rr_next_idx[...] conflicts``.
+#
+# This is invisible until ALL of: world_size > 1 (merge path runs), >= 2 lanes
+# per rank (else the pointer is pinned to 0), a same-topology reload (so the
+# owner's key matches one the peers also hold), and a checkpoint AFTER that
+# reload. No existing test hits that intersection, which is why the crash
+# shipped.
+
+
+# The bug needs >= 2 lanes per rank (a single-lane rank pins the pointer to 0);
+# these tests use exactly two, the minimal trigger.
+LANES_PER_RANK = 2
+
+
+def _owned_pair(eng: Engine) -> tuple[int, int]:
+    lanes = eng._world.lanes_for_dp_group[eng._world.dp_group_id]
+    assert len(lanes) == LANES_PER_RANK, (
+        f"test assumes {LANES_PER_RANK} lanes/rank, got {lanes}"
+    )
+    return lanes[0], lanes[1]
+
+
+def _set_least_advanced(eng: Engine, behind_lane: int) -> None:
+    """Make ``behind_lane`` the least-advanced of the rank's two lanes so
+    ``_refresh_rr_from_progress`` resolves the pointer to that lane's index."""
+    lo, hi = _owned_pair(eng)
+    for lane in (lo, hi):
+        eng._lane_progress[lane] = LanePtr(  # type: ignore[index]
+            chunk_id=0, offset=0 if lane == behind_lane else 1
+        )
+
+
+def _build_pure_dp_engines(world_size: int, agg_dir: str) -> list[Engine]:
+    """``world_size`` ranks, two canonical lanes per rank, pure data parallel."""
+    engs: list[Engine] = []
+    for r in range(world_size):
+        e = _mk_engine_with_opts(
+            canonical_replicas=LANES_PER_RANK * world_size,  # 2 lanes per rank
+            world_size=world_size,
+            global_rank=r,
+            dp_degree=world_size,
+            dp_group_id=r,
+            aggregate_dir=agg_dir,
+            run_id="rr-pointer-regression",
+        )
+        _seed_inflight_state(e)
+        engs.append(e)
+    return engs
+
+
+def test_reload_then_checkpoint_does_not_conflict_on_rr_pointer(tmp_path) -> None:
+    """Fresh merge -> reload into every rank -> advance -> merge again.
+
+    The second merge must succeed. Before the fix it raised
+    ``RuntimeError: cannot merge ... rr_next_idx[...] conflicts`` because every
+    rank had loaded (and re-emitted) all peers' pointers.
+    """
+    world_size = 4
+    engs = _build_pure_dp_engines(world_size, str(tmp_path))
+
+    # Fresh checkpoint: each rank's lower-id lane is least-advanced, so every
+    # pointer resolves to index 0. Fresh => exactly one author per key.
+    for e in engs:
+        _set_least_advanced(e, behind_lane=_owned_pair(e)[0])
+    merged0 = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+    assert len(merged0["rr_next_idx"]) == world_size  # one key per rank
+    assert set(merged0["rr_next_idx"].values()) == {0}
+
+    # Reload the merged checkpoint into every rank (identical topology).
+    # replay=False keeps the test focused on pointer scoping, not replay.
+    for e in engs:
+        e.load_state_dict(merged0, replay=False)
+
+    # Advance so the higher-id lane is now least-advanced for every rank: each
+    # owner's pointer flips 0 -> 1, while peers keep the frozen 0 they loaded.
+    for e in engs:
+        _set_least_advanced(e, behind_lane=_owned_pair(e)[1])
+
+    # Must NOT raise (pre-fix: rr_next_idx conflict across the shards).
+    merged1 = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+    assert len(merged1["rr_next_idx"]) == world_size
+    assert set(merged1["rr_next_idx"].values()) == {1}
+
+
+def test_load_state_dict_scopes_rr_pointer_to_owner(tmp_path) -> None:
+    """After a reload a rank keeps only its OWN rr pointer key (never peers'),
+    and that key's value is preserved (progress unchanged => no spurious flip)."""
+    world_size = 4
+    engs = _build_pure_dp_engines(world_size, str(tmp_path))
+    for e in engs:
+        _set_least_advanced(e, behind_lane=_owned_pair(e)[0])
+    merged0 = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+    # The merged checkpoint legitimately holds every rank's key...
+    assert len(merged0["rr_next_idx"]) == world_size
+
+    # ...but each rank must restore only the key it owns, value intact.
+    for r, e in enumerate(engs):
+        e.load_state_dict(merged0, replay=False)
+        rr = e._rr_next_idx
+        assert {int(k.split(":")[0]) for k in rr} == {r}, (
+            f"rank {r} restored peers' rr pointers: {sorted(rr)}"
+        )
+        (own_key,) = rr  # exactly one key for this single-worker rank
+        assert rr[own_key] == merged0["rr_next_idx"][own_key]

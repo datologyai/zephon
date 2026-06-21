@@ -1898,6 +1898,9 @@ class Engine:
             lane_ws_state = {
                 int(l): self._lane_ws[l].state_dict() for l in self._lane_ws
             }
+            # rr_next_idx is owner-keyed, not lane-keyed: don't add it to the
+            # purge loop above (its `lane not in owned` check would drop our own
+            # key). Peer keys are filtered out on load instead.
             rr_next_idx = dict(self._rr_next_idx)
 
             replay_cursors: dict[int, Any] = {}
@@ -2466,8 +2469,14 @@ class Engine:
         self._checkpoint_reload_count = ckpt.checkpoint_reload_count + 1
         self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
 
+        # rr_next_idx is owner-keyed ("{global_rank}:..."); keep only our own so
+        # peers' stale pointers can't collide in the next merge (_refresh below
+        # re-derives our key from progress).
+        own_prefix = f"{self._opts.global_rank}:"
         rr_raw = ckpt.rr_next_idx or {}
-        self._rr_next_idx = {str(k): int(v) for k, v in rr_raw.items()}
+        self._rr_next_idx = {
+            k: int(v) for k, v in rr_raw.items() if k.startswith(own_prefix)
+        }
 
         replay_raw = ckpt.replay_cursors or {}
         self._lane_last_cursor = dict.fromkeys(owned)
