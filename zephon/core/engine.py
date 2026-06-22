@@ -1089,8 +1089,16 @@ class Engine:
         # Phase 1: replay restored inflight chunks first (ascending chunk_id).
         # Re-inject flush sentinels at stored epoch boundary positions so that
         # accumulators see the same flush points as the original run.
+        # The consumer thread evicts (pops) concurrently, so an unguarded scan
+        # raises under free-threaded Python; retry rather than lock — this is a
+        # cold path (once per lane at stream start), not the hot eviction path.
         epoch_boundary_set = set(self._epoch_boundaries.get(lane_id, []))
-        sorted_inflight_cids = sorted(inflight_lane.keys())
+        while True:
+            try:
+                sorted_inflight_cids = sorted(inflight_lane.keys())
+                break
+            except RuntimeError:
+                pass
         for cid in sorted_inflight_cids:
             if cid in epoch_boundary_set:
                 yield self._make_flush_sentinel(lane_id, boundary_cid=cid)
@@ -1114,17 +1122,16 @@ class Engine:
         # Inject a flush sentinel every K chunks per lane.
         ws = self._lane_ws[lane_id]
         K = self._flush_every_k_chunks
-        # After Phase 1 replay, account for the partial epoch at the tail.
-        # Chunks >= the last boundary are in the current (incomplete) epoch.
-        # Both _epoch_boundaries and inflight_lane are captured atomically
-        # under _checkpoint_lock, so this derivation is consistent.
+        # Seed the open epoch's chunk count from the admission counter, not
+        # from live inflight. The open epoch starts at last_boundary (0 before
+        # the first boundary); _lane_next_cid is one past the last admitted
+        # chunk, so next_cid - last_boundary is how many chunks the epoch holds
+        # — including ones admitted before the checkpoint and already evicted,
+        # which a live inflight count would miss.
         phase1_boundaries = self._epoch_boundaries.get(lane_id, [])
-        if K > 0 and inflight_lane and phase1_boundaries:
-            last_boundary = max(phase1_boundaries)
-            chunks_in_epoch = sum(1 for cid in inflight_lane if cid >= last_boundary)
-        elif K > 0 and inflight_lane and not phase1_boundaries:
-            # No boundaries yet → all inflight chunks are in the first epoch.
-            chunks_in_epoch = len(inflight_lane)
+        if K > 0:
+            last_boundary = max(phase1_boundaries) if phase1_boundaries else 0
+            chunks_in_epoch = max(0, self._lane_next_cid[lane_id] - last_boundary)
         else:
             chunks_in_epoch = 0
         while True:
@@ -1482,7 +1489,12 @@ class Engine:
 
         # 1) Evict older inflight chunks — O(1) fast-path skip.
         if inflight_lane:
-            # Free-threaded Python: dict iteration can race; skipping is safe (retried next call).
+            # Deliberately no _checkpoint_lock on this per-sample hot path: we
+            # keep eviction lock-free and pay the cost on the cold reader
+            # instead — _lane_stream scans inflight once per lane at stream
+            # start and retries there on a racing pop.
+            # list() can still race a feeder dispatch insert under free-threaded
+            # Python; skipping is safe (retried on the next delivered sample).
             try:
                 snapshot = list(inflight_lane)
             except RuntimeError:
@@ -1660,6 +1672,10 @@ class Engine:
                     last_completed_cid = max(below)
                     last_completed_offset = len(inflight_lane[last_completed_cid])
 
+        # Deliberately no lock on this hot-path pop (see notify_monotone): we
+        # keep eviction lock-free and let the cold reader _lane_stream retry on
+        # a racing resize instead. The snapshot above takes _checkpoint_lock
+        # only for a consistent decision view vs dispatch, not to guard this pop.
         for cid in cids_to_evict:
             inflight_lane.pop(cid, None)
             done.pop(cid, None)

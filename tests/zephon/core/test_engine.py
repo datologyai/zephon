@@ -26,7 +26,7 @@ from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
 from zephon.utils.disk import InsufficientCacheSpaceError
-from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkSource
+from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkChunk, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 
@@ -639,4 +639,108 @@ def test_notify_epoch_boundary_prune_concurrent_append(monkeypatch: Any) -> None
     assert NEW_BOUNDARY in eng._epoch_boundaries[LANE], (
         f"Epoch boundary {NEW_BOUNDARY} was lost by notify() prune. "
         f"Final boundaries: {list(eng._epoch_boundaries[LANE])}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 chunks_in_epoch seeding after restore
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedLaneWS:
+    """Minimal per-lane WorkSource that yields a fixed list of chunks then None."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = list(chunks)
+        self._i = 0
+
+    def next_chunk(self) -> Any:
+        if self._i < len(self._chunks):
+            chunk = self._chunks[self._i]
+            self._i += 1
+            return chunk
+        return None
+
+
+def _build_minimal_engine(monkeypatch: Any) -> Engine:
+    """Build an Engine with runners stubbed out, for driving `_lane_stream`."""
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    work = _DummyWorkSource()
+    opts = RuntimeOptions()
+    spec = resolve_runtime_spec(plan, opts)
+    return Engine(plan, opts, work, spec)
+
+
+def _lane_chunk(cid: int) -> WorkChunk:
+    return WorkChunk(components={"default": [(0, 0, cid)]})
+
+
+def _phase2_boundary_cids(eng: Engine, lane: int) -> list[int]:
+    """Drive ``_lane_stream`` to exhaustion, returning the flush-boundary cids."""
+    return [
+        int(item.meta.tags["_boundary_cid"])
+        for item in eng._lane_stream(lane)
+        if isinstance(item, SampleRecord)
+    ]
+
+
+def test_lane_stream_seeds_first_epoch_count_from_admission_counter(
+    monkeypatch: Any,
+) -> None:
+    """First epoch (no boundary recorded yet): chunks consumed and evicted
+    before the checkpoint are gone from inflight but still belong to the open
+    epoch, so the count must come from the admission counter.
+
+    Restored with ``flush_every_k_chunks=4``: cids 0,1,2 were admitted (still
+    the first epoch, 3 < 4), the accumulator evicted cid 0 before the
+    checkpoint, so inflight is {1,2} while ``_lane_next_cid`` is 3. The open
+    epoch holds 3 chunks, so the first boundary fires after one more chunk (cid
+    4) — not after the two live inflight chunks (which would land it at cid 5).
+    """
+    eng = _build_minimal_engine(monkeypatch)
+    LANE, K = 0, 4
+    eng._flush_every_k_chunks = K
+
+    for cid in (1, 2):
+        eng.inflight_chunks_per_lane[LANE][cid] = _lane_chunk(cid)
+    eng._lane_next_cid[LANE] = 3  # cids 0,1,2 admitted; cid 0 already evicted
+
+    eng._lane_ws[LANE] = _ScriptedLaneWS([_lane_chunk(c) for c in range(3, 9)])  # type: ignore[assignment]
+
+    boundary_cids = _phase2_boundary_cids(eng, LANE)
+    assert boundary_cids and boundary_cids[0] == 4, (
+        f"first boundary must fire at cid 4 (open epoch holds 3 admitted "
+        f"chunks); got {boundary_cids}"
+    )
+
+
+def test_lane_stream_seeds_open_epoch_after_recorded_boundary(
+    monkeypatch: Any,
+) -> None:
+    """Open epoch after a recorded boundary: the seed counts only chunks above
+    the last boundary.
+
+    Restored with ``flush_every_k_chunks=4``: epoch 0 = {0,1,2,3} closed at cid
+    4, open epoch = {4,5}; inflight is {2,3,4,5} (epoch-0 chunks 0,1 evicted)
+    and ``_lane_next_cid`` is 6. The open epoch already holds 2 chunks, so
+    Phase 1 re-injects the recorded boundary at cid 4 and the next boundary
+    fires after two more chunks (cid 8).
+    """
+    eng = _build_minimal_engine(monkeypatch)
+    LANE, K = 0, 4
+    eng._flush_every_k_chunks = K
+
+    for cid in (2, 3, 4, 5):
+        eng.inflight_chunks_per_lane[LANE][cid] = _lane_chunk(cid)
+    eng._lane_next_cid[LANE] = 6
+    eng._epoch_boundaries[LANE] = [4]
+
+    eng._lane_ws[LANE] = _ScriptedLaneWS([_lane_chunk(c) for c in range(6, 12)])  # type: ignore[assignment]
+
+    boundary_cids = _phase2_boundary_cids(eng, LANE)
+    assert boundary_cids[:2] == [4, 8], (
+        f"expected boundaries [4, 8], got {boundary_cids}"
     )
