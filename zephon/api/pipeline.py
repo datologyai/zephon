@@ -716,56 +716,131 @@ class Pipeline:
         self,
         max_length: int,
         num_bins: int,
-        length_fn: Callable[[SampleRecord], int] | Literal["auto"] | str = "auto",
-        algorithm: Literal["first_fit", "best_fit"] = "first_fit",
         *,
+        algorithm: Literal["first_fit", "best_fit", "wrap"] = "first_fit",
+        tokens_field: str = "auto",
+        length_fn: Callable[[SampleRecord], int] | None = None,
         drop_oversized: bool = True,
+        min_sequence_length: int = 1,
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
         placement: str = "auto",
     ) -> "Pipeline":
-        """Add a sequence packing operator to the pipeline.
+        """Add a sequence-packing operator that emits the lossless envelope.
 
-        Supports lambda functions for length_fn and pack_payloads parameters,
-        which work seamlessly with multiprocessing-based runners.
+        Each bin is emitted as ``{"packed_samples": [seg0, seg1, ...]}`` — an
+        ordered list of the constituent records (first_fit/best_fit) or slices
+        (wrap), preserving document boundaries. ``pack_payloads`` merges that list
+        (default keeps it as-is). For flat, tensor-ready training records with
+        ``positions``, use :meth:`pack_flat` instead.
 
         Args:
             max_length: Maximum length for packed bins.
-            num_bins: Number of bins to maintain per lane.
-            length_fn: How to extract sequence length. Options:
-                - "auto" (default): Auto-detect from common token fields
-                  (input_ids, tokens, token_ids, ids).
-                - Explicit field name (e.g., "input_ids"): Use that field.
-                - Callable: Custom function taking SampleRecord, returning int.
-                  Can be a lambda (e.g., lambda r: len(r.payload["tokens"])).
-            algorithm: Packing algorithm to use ("first_fit" or "best_fit").
-            drop_oversized: If True, drop sequences longer than max_length.
-            shuffle_strategy: Strategy for ordering sequences before packing ("random", "length", or None).
+            num_bins: Number of bins to maintain per lane (first_fit/best_fit).
+            algorithm: ``"first_fit"`` (default), ``"best_fit"``, or ``"wrap"``.
+            tokens_field: Token field to slice (``"auto"`` or an explicit name);
+                consumed by wrap. first/best keep whole payloads.
+            length_fn: Optional callable measuring packing length, for
+                first_fit/best_fit only (e.g. a precomputed ``length`` field with
+                no token field to slice). ``None`` measures
+                ``len(payload[tokens_field])``. Not allowed with
+                ``algorithm="wrap"`` (length is the sliced field's length).
+            drop_oversized: If True, drop sequences longer than max_length. Must
+                be False with ``algorithm="wrap"``.
+            min_sequence_length: Remaining capacity below which a bin is emitted.
+            shuffle_strategy: Strategy for ordering sequences before packing
+                ("random", "length", or None).
             shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
-            flush_strategy: Strategy for flushing bins when num_bins limit is reached.
-                "fifo" flushes oldest bins first (default), "fullest" flushes bins with smallest
-                remaining capacity first (better packing efficiency).
-            pack_payloads: How to combine payloads from multiple samples in a bin.
-                "keep_list" keeps payloads as a list (default),
-                "torch_tensor" concatenates PyTorch tensors along the first dimension,
-                "numpy_array" concatenates NumPy arrays along the first axis,
-                or a custom callable (including lambdas) that takes list[Any] and returns Any.
+            flush_strategy: "fifo" (default) flushes oldest bins first; "fullest"
+                flushes bins with the smallest remaining capacity first.
+            pack_payloads: How to merge the segment list. "keep_list" (default),
+                "torch_tensor", "numpy_array", or a custom callable taking list[Any].
             placement: Placement strategy for this operator.
         """
         op = PackSequences(
             max_length=max_length,
+            num_bins=num_bins,
             length_fn=length_fn,
             algorithm=algorithm,
+            output="envelope",
+            tokens_field=tokens_field,
             drop_oversized=drop_oversized,
+            min_sequence_length=min_sequence_length,
             shuffle_strategy=shuffle_strategy,
             shuffle_seed=shuffle_seed,
-            num_bins=num_bins,
             flush_strategy=flush_strategy,
             pack_payloads=pack_payloads,
         )
         node = self._graph.add("pack_sequences", op, self._tail, placement=placement)
+        self._tail = node
+        return self
+
+    @_mutates_graph
+    def pack_flat(
+        self,
+        max_length: int,
+        num_bins: int,
+        *,
+        algorithm: Literal["first_fit", "best_fit", "wrap"] = "first_fit",
+        tokens_field: str = "auto",
+        pad_token_id: Optional[int] = None,
+        emit_positions: bool = True,
+        drop_oversized: bool = True,
+        min_sequence_length: int = 1,
+        shuffle_strategy: Literal["random", "length", None] = None,
+        shuffle_seed: Optional[int] = None,
+        flush_strategy: Literal["fifo", "fullest"] = "fifo",
+        placement: str = "auto",
+    ) -> "Pipeline":
+        """Add a sequence-packing operator that emits flat training records.
+
+        Each bin is emitted flat as ``{tokens_field: concat[+pad], "positions"?}``
+        — no ``packed_samples`` — so ``SampleBatch.to_training`` consumes it
+        directly (``positions`` is surfaced automatically). Every algorithm emits
+        this identical shape: wrap fills bins exactly;
+        first_fit/best_fit pad partial bins to ``max_length`` with
+        ``pad_token_id`` (the pad tail becomes its own ``positions`` document).
+        Only the token field and length-aligned sliceable fields survive; scalar
+        and non-aligned payload is dropped (use :meth:`pack_sequences` to keep it).
+
+        Args:
+            max_length: Fixed length of every emitted record.
+            num_bins: Number of bins to maintain per lane (first_fit/best_fit).
+            algorithm: ``"first_fit"`` (default), ``"best_fit"``, or ``"wrap"``.
+            tokens_field: Token field to concatenate (``"auto"`` or explicit name).
+            pad_token_id: Fill value for the token field when padding partial
+                first_fit/best_fit bins (aligned fields pad with 0). Required for
+                those algorithms; unused for wrap. Any embeddable id works —
+                ``to_training`` masks the pad tail from the loss by position
+                (``meta.padding_length``), not by id.
+            emit_positions: Include the ``positions`` array marking document
+                boundaries (``cumsum(positions == 0) - 1`` → doc ids). Defaults to
+                True; set False for classic concatenated blocks.
+            drop_oversized: If True, drop sequences longer than max_length. Must
+                be False with ``algorithm="wrap"``.
+            min_sequence_length: Remaining capacity below which a bin is emitted.
+            shuffle_strategy: Strategy for ordering sequences before packing.
+            shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
+            flush_strategy: "fifo" (default) or "fullest" when num_bins is reached.
+            placement: Placement strategy for this operator.
+        """
+        op = PackSequences(
+            max_length=max_length,
+            num_bins=num_bins,
+            algorithm=algorithm,
+            output="flat",
+            tokens_field=tokens_field,
+            drop_oversized=drop_oversized,
+            min_sequence_length=min_sequence_length,
+            shuffle_strategy=shuffle_strategy,
+            shuffle_seed=shuffle_seed,
+            flush_strategy=flush_strategy,
+            emit_positions=emit_positions,
+            pad_token_id=pad_token_id,
+        )
+        node = self._graph.add("pack_flat", op, self._tail, placement=placement)
         self._tail = node
         return self
 

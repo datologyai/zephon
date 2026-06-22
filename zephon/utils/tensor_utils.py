@@ -119,3 +119,48 @@ def slice_last_dim(tensor: Any, slc: slice, framework: str | None) -> Any:
     else:
         # List of lists: slice each inner list
         return [row[slc] for row in tensor]
+
+
+def mask_padding_labels(
+    labels: Any, pad_lengths: list[int], replacement: int, framework: str | None
+) -> Any:
+    """Set the last ``pad_lengths[i]`` entries of row ``i`` to ``replacement``.
+
+    Masks right-padding out of next-token labels by position rather than by id, so
+    a pad token that collides with a real (or eos) id is still handled correctly.
+    Returns a new container.
+    """
+    if framework in ("torch", "numpy"):
+        n_rows, width = labels.shape[0], labels.shape[-1]
+    else:
+        n_rows = len(labels)
+        width = len(labels[0]) if labels else 0
+    assert len(pad_lengths) == n_rows, (
+        f"pad_lengths has {len(pad_lengths)} entries for {n_rows} rows"
+    )
+    assert all(0 <= n <= width for n in pad_lengths), (
+        f"pad_lengths must lie in [0, {width}]: {pad_lengths}"
+    )
+
+    if framework == "torch":
+        import torch
+
+        cols = torch.arange(width, device=labels.device)
+        cutoff = width - torch.as_tensor(pad_lengths, device=labels.device)
+        return labels.masked_fill(cols.unsqueeze(0) >= cutoff.unsqueeze(1), replacement)
+    elif framework == "numpy":
+        import numpy as np
+
+        out = np.array(labels, copy=True)
+        for i, n in enumerate(pad_lengths):
+            if n:
+                out[i, width - n :] = replacement
+        return out
+    else:
+        masked = []
+        for row, n in zip(labels, pad_lengths):
+            row = list(row)
+            if n:
+                row[len(row) - n :] = [replacement] * n
+            masked.append(row)
+        return masked

@@ -50,7 +50,7 @@ def test_pack_sequences_chunk_eviction(runner_kind: str) -> None:
     # Build pipeline: Fetch -> PackSequences
     pipeline = Pipeline(work)
     pipeline.pack_sequences(
-        max_length=10, length_fn="length", algorithm="best_fit", num_bins=100
+        max_length=10, tokens_field="length", algorithm="best_fit", num_bins=100
     )
     pipeline.options(
         deterministic=True,
@@ -135,7 +135,7 @@ def test_pack_sequences_reproducibility(runner_kind: str) -> None:
         pipeline = Pipeline(work)
         pipeline.pack_sequences(
             max_length=10,
-            length_fn="length",
+            tokens_field="length",
             algorithm="best_fit",
             shuffle_strategy="random" if shuffle else "length",
             shuffle_seed=seed,
@@ -214,7 +214,7 @@ def _make_pack_pipeline(
     pipeline = Pipeline(work)
     pipeline.pack_sequences(
         max_length=10,
-        length_fn="length",
+        tokens_field="length",
         algorithm="best_fit",
         num_bins=100,
     )
@@ -435,7 +435,7 @@ def _make_varlen_pack_pipeline(
     pipeline = Pipeline(work)
     pipeline.pack_sequences(
         max_length=max_length,
-        length_fn="length",
+        tokens_field="length",
         algorithm="best_fit",
         num_bins=num_bins,
         flush_strategy=flush_strategy,
@@ -681,3 +681,129 @@ def test_pack_sequences_varlen_mid_stream_eviction_after_checkpoint(
         f"  baseline: {all_baseline}\n"
         f"  combined: {all_combined}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The output matrix, end to end through real runners:
+#   algorithm {first_fit, best_fit, wrap} x output {envelope, flat(+/-positions)}
+# ---------------------------------------------------------------------------
+
+_MATRIX_SEQS = [[10, 11, 12], [20, 21], [30, 31, 32, 33], [40]]
+_MATRIX_MAXLEN = 4
+
+
+def _mk_token_dataset(name: str, seqs: list[list[int]]) -> Dataset:
+    """Single-shard dataset of token sequences under ``input_ids``."""
+    rows: list[dict[str, Any]] = [{"input_ids": list(s)} for s in seqs]
+    return Dataset.from_dict(name, {0: InMemoryShard(rows)})
+
+
+def _matrix_work() -> StaticMixtureWorkSource:
+    ds = _mk_token_dataset("m", _MATRIX_SEQS)
+    return StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=2,
+        seed=42,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+def test_pack_envelope_matrix_end_to_end(runner_kind: str, algorithm: str) -> None:
+    """Envelope output across the algorithm axis: each record is a list of
+    per-segment dicts carrying the token field (boundaries preserved)."""
+    pipeline = Pipeline(_matrix_work())
+    pipeline.pack_sequences(
+        max_length=_MATRIX_MAXLEN, num_bins=8, algorithm=algorithm, drop_oversized=False
+    )
+    pipeline.options(
+        deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
+    )
+
+    records = list(pipeline)
+    assert records
+    for rec in records:
+        assert set(rec.payload) == {"packed_samples"}
+        segs = rec.payload["packed_samples"]
+        assert isinstance(segs, list) and segs
+        assert all("input_ids" in seg for seg in segs)
+
+
+@pytest.mark.parametrize(
+    "runner_kind",
+    ["inline", "threads", "process"],
+    ids=["inline", "threads", "process"],
+)
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize("emit_positions", [True, False], ids=["pos", "nopos"])
+def test_pack_flat_matrix_end_to_end(
+    runner_kind: str, algorithm: str, emit_positions: bool
+) -> None:
+    """Flat output across algorithm × positions: every record is a fixed-length
+    ``{input_ids[, positions]}`` the trainer can stack directly."""
+    pipeline = Pipeline(_matrix_work())
+    pipeline.pack_flat(
+        max_length=_MATRIX_MAXLEN,
+        num_bins=8,
+        algorithm=algorithm,
+        pad_token_id=-1,
+        emit_positions=emit_positions,
+        drop_oversized=False,
+    )
+    pipeline.options(
+        deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
+    )
+
+    records = list(pipeline)
+    assert records
+    expected_keys = {"input_ids", "positions"} if emit_positions else {"input_ids"}
+    for rec in records:
+        assert set(rec.payload) == expected_keys
+        assert len(rec.payload["input_ids"]) == _MATRIX_MAXLEN
+        if emit_positions:
+            assert len(rec.payload["positions"]) == _MATRIX_MAXLEN
+            assert rec.payload["positions"][0] == 0  # each bin starts a document
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
+    """flat tokens (minus pad) reconstruct the envelope's concatenated segment
+    tokens for the same input and algorithm — flat is a serialization of the
+    same packing, not a different one."""
+
+    def env_tokens() -> list[int]:
+        p = Pipeline(_matrix_work())
+        p.pack_sequences(
+            max_length=_MATRIX_MAXLEN,
+            num_bins=8,
+            algorithm=algorithm,
+            drop_oversized=False,
+        )
+        p.options(deterministic=True, max_workers=1, runner="inline")
+        return [
+            t
+            for rec in p
+            for seg in rec.payload["packed_samples"]
+            for t in seg["input_ids"]
+        ]
+
+    def flat_tokens() -> list[int]:
+        p = Pipeline(_matrix_work())
+        p.pack_flat(
+            max_length=_MATRIX_MAXLEN,
+            num_bins=8,
+            algorithm=algorithm,
+            pad_token_id=-1,
+            drop_oversized=False,
+        )
+        p.options(deterministic=True, max_workers=1, runner="inline")
+        return [t for rec in p for t in rec.payload["input_ids"] if t != -1]
+
+    assert flat_tokens() == env_tokens()

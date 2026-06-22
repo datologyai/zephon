@@ -4,7 +4,7 @@ import re
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
-from zephon.ops import TokenizeText
+from zephon.ops import PackSequences, TokenizeText
 from zephon.ops.shuffle_buffer import ShuffleBuffer
 
 
@@ -110,6 +110,60 @@ def test_pipeline_tokenize_preserve_flag_forwarded() -> None:
     tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, TokenizeText)
     assert tail_op.preserve_upstream_payload is True
+
+
+# ---------------------------------------------------------------------------
+# Pipeline.pack_sequences() / pack_flat() output selection
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_pack_sequences_is_envelope() -> None:
+    """pack_sequences builds the envelope (list) output."""
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).pack_sequences(max_length=8, num_bins=4)
+
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, PackSequences)
+    assert tail_op.output == "envelope"
+
+
+def test_pipeline_pack_flat_wrap() -> None:
+    """pack_flat builds the flat output; wrap needs no pad_token_id."""
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).pack_flat(
+        max_length=8, num_bins=4, algorithm="wrap", drop_oversized=False
+    )
+
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, PackSequences)
+    assert tail_op.output == "flat"
+    assert tail_op.emit_positions is True  # positions on by default
+
+
+def test_pipeline_pack_flat_first_fit_forwards_pad_token_id() -> None:
+    """first_fit/best_fit pad partial bins, so pad_token_id flows through."""
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).pack_flat(
+        max_length=8,
+        num_bins=4,
+        tokens_field="input_ids",
+        algorithm="first_fit",
+        pad_token_id=0,
+        emit_positions=False,
+    )
+
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, PackSequences)
+    assert tail_op.output == "flat"
+    assert tail_op.algorithm == "first_fit"
+    assert tail_op.pad_token_id == 0
+    assert tail_op.emit_positions is False
 
 
 # ---------------------------------------------------------------------------

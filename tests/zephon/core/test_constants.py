@@ -11,9 +11,20 @@ from zephon.core.constants import (
 )
 
 
-def _rec(sample_id: tuple[int, int, int], lane_id: int, chunk_id: int, payload: dict):
+def _rec(
+    sample_id: tuple[int, int, int],
+    lane_id: int,
+    chunk_id: int,
+    payload: dict,
+    padding_length: int | None = None,
+):
+    tags: dict = {}
+    if padding_length is not None:
+        tags["_packing_metadata"] = {"padding_length": padding_length}
     return SampleRecord(
-        meta=SampleMeta(sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id),
+        meta=SampleMeta(
+            sample_id=sample_id, lane_id=lane_id, chunk_id=chunk_id, tags=tags
+        ),
         payload=payload,
     )
 
@@ -294,6 +305,126 @@ class TestToTrainingExtraFields:
         batch = SampleBatch(records=(r0,))
         with pytest.raises(ValueError, match="Extra field 'attention_mask' not found"):
             batch.to_training(extra_fields=["attention_mask"], dtype=None)
+
+
+class TestToTrainingPositions:
+    """The packing 'positions' field is surfaced automatically."""
+
+    def test_positions_auto_surfaced(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 1, 0]})
+        r1 = _rec((0, 0, 1), 0, 0, {"input_ids": [4, 5, 6], "positions": [0, 0, 1]})
+        out = SampleBatch(records=(r0, r1)).to_training(dtype=None)
+        # No extra_fields passed, yet positions rides through.
+        assert out["positions"] == [[0, 1, 0], [0, 0, 1]]
+
+    def test_positions_shifted_with_labels(self) -> None:
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "positions": [0, 1, 0, 1]}
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["input_ids"] == [[1, 2, 3]]
+        assert out["labels"] == [[2, 3, 4]]
+        # positions is sliced like input_ids (drop last), staying aligned with it.
+        assert out["positions"] == [[0, 1, 0]]
+
+    def test_absent_positions_not_added(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3]})
+        out = SampleBatch(records=(r0,)).to_training(dtype=None)
+        assert "positions" not in out
+
+    def test_explicit_positions_not_duplicated(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 1, 2]})
+        out = SampleBatch(records=(r0,)).to_training(
+            extra_fields=["positions"], dtype=None
+        )
+        assert out["positions"] == [[0, 1, 2]]
+
+    def test_inconsistent_positions_raises(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 1, 2]})
+        r1 = _rec((0, 0, 1), 0, 0, {"input_ids": [4, 5, 6]})  # missing positions
+        with pytest.raises(ValueError, match="'positions' present in some payloads"):
+            SampleBatch(records=(r0, r1)).to_training(dtype=None)
+
+
+class TestToTrainingPadMasking:
+    """to_training masks each record's trailing padding_length labels (by position)."""
+
+    def test_pad_labels_become_ignore_index(self) -> None:
+        # tokens [10,11,12,999,999] -> labels [11,12,999,999]; 2 pad -> last 2 masked.
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [10, 11, 12, 999, 999]}, padding_length=2
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["input_ids"] == [[10, 11, 12, 999]]  # input keeps the real pad id
+        assert out["labels"] == [[11, 12, -100, -100]]  # trailing pad masked
+
+    def test_custom_ignore_index(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 11, 999]}, padding_length=1)
+        out = SampleBatch(records=(r0,)).to_training(
+            return_labels=True, dtype=None, ignore_index=-1
+        )
+        assert out["labels"] == [[11, -1]]
+
+    def test_no_padding_leaves_labels_untouched(self) -> None:
+        # padding_length absent (None) -> nothing masked.
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 11, 999]})
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[11, 999]]
+
+    def test_zero_padding_leaves_labels_untouched(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 11, 999]}, padding_length=0)
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[11, 999]]
+
+    def test_pad_id_colliding_with_content_only_masks_trailing(self) -> None:
+        # The pad id (0) also appears mid-sequence; only the trailing pad is masked,
+        # so the real in-content 0 stays in the loss — the point of position masking.
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 0, 12, 0, 0]}, padding_length=2)
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[0, 12, -100, -100]]  # leading 0 kept, trailing masked
+
+    def test_padding_without_labels_is_noop(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 11, 999]}, padding_length=1)
+        out = SampleBatch(records=(r0,)).to_training(dtype=None)
+        assert "labels" not in out
+        assert out["input_ids"] == [[10, 11, 999]]
+
+    def test_per_record_padding_lengths(self) -> None:
+        # Different pad counts per row are masked independently.
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [10, 11, 12, 13]}, padding_length=1)
+        r1 = _rec((0, 0, 1), 0, 0, {"input_ids": [20, 21, 22, 23]}, padding_length=3)
+        out = SampleBatch(records=(r0, r1)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[11, 12, -100], [-100, -100, -100]]
+
+    def test_mask_padding_labels_list(self) -> None:
+        from zephon.utils.tensor_utils import mask_padding_labels
+
+        out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [1, 2], -100, None)
+        assert out == [[1, 2, -100], [4, -100, -100]]
+
+    def test_mask_padding_labels_numpy_does_not_mutate(self) -> None:
+        import numpy as np
+
+        from zephon.utils.tensor_utils import mask_padding_labels
+
+        labels = np.array([[1, 2, 3], [4, 5, 6]])
+        out = mask_padding_labels(labels, [1, 2], -100, "numpy")
+        assert out.tolist() == [[1, 2, -100], [4, -100, -100]]
+        assert labels.tolist() == [[1, 2, 3], [4, 5, 6]]  # input untouched
+
+    def test_mask_padding_labels_torch(self) -> None:
+        torch = pytest.importorskip("torch")
+        from zephon.utils.tensor_utils import mask_padding_labels
+
+        labels = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        out = mask_padding_labels(labels, [1, 2], -100, "torch")
+        assert out.tolist() == [[1, 2, -100], [4, -100, -100]]
+
+    def test_mask_padding_labels_zero_is_noop(self) -> None:
+        from zephon.utils.tensor_utils import mask_padding_labels
+
+        out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [0, 0], -100, None)
+        assert out == [[1, 2, 3], [4, 5, 6]]
 
 
 class TestToTrainingDtype:

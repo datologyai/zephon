@@ -8,7 +8,12 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypeAlias, cast
 
 from zephon.utils.length_extraction import TOKEN_FIELD_CANDIDATES, detect_length_field
-from zephon.utils.tensor_utils import resolve_dtype, slice_last_dim, stack_sequences
+from zephon.utils.tensor_utils import (
+    mask_padding_labels,
+    resolve_dtype,
+    slice_last_dim,
+    stack_sequences,
+)
 
 if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type checker.
     from numpy.typing import NDArray
@@ -247,6 +252,14 @@ class SampleMeta:
         """True if this record is a flush sentinel (triggers accumulator flush)."""
         return bool(self.tags.get("_flush_sentinel", False))
 
+    @property
+    def padding_length(self) -> int | None:
+        """Trailing pad-token count of a flat ``pack_flat`` record, else ``None``."""
+        packing = self.tags.get("_packing_metadata")
+        if not packing:
+            return None
+        return packing.get("padding_length")
+
     def with_contributors(self, value: Iterable[ContributorRef] | None) -> "SampleMeta":
         """Return a new ``SampleMeta`` with contributors set/cleared in tags."""
         tags = dict(self.tags)
@@ -365,6 +378,16 @@ class SampleBatch:
                     )
             extra_data[field_name] = [payload[field_name] for payload in payloads]
 
+        # Auto-surface the packing 'positions' field (document boundaries from
+        # pack_flat) so callers don't have to thread it through extra_fields.
+        if "positions" in payloads[0] and "positions" not in extra_data:
+            for i, payload in enumerate(payloads):
+                if "positions" not in payload:
+                    raise ValueError(
+                        f"'positions' present in some payloads but missing at index {i}"
+                    )
+            extra_data["positions"] = [payload["positions"] for payload in payloads]
+
         return token_lists, texts, extra_data
 
     def _extract_from_arrays(
@@ -396,6 +419,7 @@ class SampleBatch:
         return_labels: bool = False,
         dtype: Any = "auto",
         extra_fields: Sequence[str] = (),
+        ignore_index: int = -100,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
@@ -404,19 +428,29 @@ class SampleBatch:
                 from common field names (input_ids, tokens, token_ids, ids).
             return_labels: If True, generates next-token prediction labels by
                 shifting tokens. input_ids becomes tokens[:, :-1] and labels
-                becomes tokens[:, 1:]. Extra fields are also shifted to match.
+                becomes tokens[:, 1:]. Extra fields are sliced like input_ids
+                (drop the last token), so they stay aligned with it.
             dtype: Tensor dtype for stacking. Use "auto" to detect (prefers
                 torch.long if available, else np.int64, else returns lists).
                 Use None to explicitly return lists instead of tensors.
             extra_fields: Additional fields to include and stack (e.g.,
-                ["attention_mask"]). These are shifted when return_labels=True.
+                ["attention_mask"]). When return_labels=True they are sliced like
+                input_ids (drop the last token) to stay aligned with it. A
+                ``"positions"`` field (emitted by ``pack_flat``) is surfaced
+                automatically and need not be listed here.
+            ignore_index: Loss-ignore sentinel (default ``-100``). With
+                ``return_labels``, each record's trailing pad labels
+                (``meta.padding_length``) are set to this value.
 
         Returns:
             Dictionary with:
             - "ids": List of sample IDs (always list, not stacked)
             - "texts": List of text strings (always list, not stacked)
             - "input_ids": Stacked token tensor (shifted if return_labels=True)
-            - "labels": Shifted labels tensor (only if return_labels=True)
+            - "labels": Shifted labels tensor (only if return_labels=True), with
+              each record's trailing pad labels set to ignore_index
+            - "positions": Stacked document-position tensor, present iff the
+              payloads carry one (sliced to match input_ids if return_labels=True)
             - Any extra_fields as stacked tensors (shifted if return_labels=True)
 
         Raises:
@@ -450,7 +484,15 @@ class SampleBatch:
         if return_labels:
             # Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]
             result["input_ids"] = slice_last_dim(tokens, slice(None, -1), framework)
-            result["labels"] = slice_last_dim(tokens, slice(1, None), framework)
+            labels = slice_last_dim(tokens, slice(1, None), framework)
+            # After the shift, a record's trailing padding_length labels are
+            # exactly its right-pad tokens; mask by position, not by id.
+            pad_lengths = [r.meta.padding_length or 0 for r in items]
+            if any(pad_lengths):
+                labels = mask_padding_labels(
+                    labels, pad_lengths, ignore_index, framework
+                )
+            result["labels"] = labels
         else:
             result["input_ids"] = tokens
 
