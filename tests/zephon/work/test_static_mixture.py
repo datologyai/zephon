@@ -425,6 +425,11 @@ def test_load_v1_checkpoint_migrates_block_size_per_cursor() -> None:
     # v2-only fields don't exist in the v1 contract.
     v1_state.pop("shuffle_block_size_spec")
     v1_state.pop("cursor_block_sizes")
+    # v1 stored the exhaustion policy as scalars (the per-dataset dicts arrived
+    # in v3); use the scalar form a real v1 producer would have written.
+    v1_state["exhausted_policy"] = "stop"
+    v1_state["reshuffle_on_repeat"] = True
+    v1_state["max_repeats"] = None
 
     work_b = StaticMixtureWorkSource(
         [ds_a, ds_b], mix, chunk_size=4, shuffle_block_size=None
@@ -795,8 +800,10 @@ def test_repeat_zero_sample_dataset_guard() -> None:
         )
 
 
-def test_repeat_load_mismatch_raises() -> None:
-    """Loading a checkpoint with different reshuffle/max_repeats raises."""
+def test_load_adopts_checkpoint_policy() -> None:
+    """A resume that leaves policy args at their defaults inherits the
+    checkpoint's frozen policy (like seed/chunk_size/weights) — this is what
+    lets a moved default resume an old checkpoint under its original behavior."""
     ds = make_dataset("alpha", 10)
     ws_save = StaticMixtureWorkSource(
         [ds],
@@ -804,42 +811,51 @@ def test_repeat_load_mismatch_raises() -> None:
         chunk_size=5,
         exhausted_policy="repeat",
         reshuffle_on_repeat=True,
+        max_repeats=4,
     ).clone_for_lane(0, canonical_replicas=1)
     ws_save.next_chunk()
     state = ws_save.state_dict()
 
-    # Mismatched reshuffle_on_repeat
+    # Loader leaves reshuffle_on_repeat / max_repeats unset, so the checkpoint's
+    # values win without a conflict.
     ws_load = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
         chunk_size=5,
         exhausted_policy="repeat",
-        reshuffle_on_repeat=False,
     ).clone_for_lane(0, canonical_replicas=1)
-    with pytest.raises(RuntimeError, match="reshuffle_on_repeat"):
-        ws_load.load_state_dict(state)
+    ws_load.load_state_dict(state)  # no raise
 
-    # Mismatched max_repeats
-    ws_load2 = StaticMixtureWorkSource(
+    cfg = ws_load._alloc_config
+    assert cfg.reshuffle_on_repeat == {ds.name: True}  # checkpoint wins
+    assert cfg.max_repeats == {ds.name: 4}  # checkpoint wins
+
+
+def test_load_rejects_conflicting_policy() -> None:
+    """An explicit constructor policy that contradicts the checkpoint fails the
+    resume instead of being silently dropped."""
+    ds = make_dataset("alpha", 10)
+    ws_save = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
         chunk_size=5,
         exhausted_policy="repeat",
-        max_repeats=5,
+        reshuffle_on_repeat=True,
+        max_repeats=4,
     ).clone_for_lane(0, canonical_replicas=1)
-    with pytest.raises(RuntimeError, match="max_repeats"):
-        ws_load2.load_state_dict(state)
+    ws_save.next_chunk()
+    state = ws_save.state_dict()
 
-    # Mismatched exhausted_policy
-    ws_load3 = StaticMixtureWorkSource(
+    ws_load = StaticMixtureWorkSource(
         [ds],
         {ds.name: 1.0},
         chunk_size=5,
-        exhausted_policy="stop",
-        reshuffle_on_repeat=True,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,  # contradicts the checkpoint
+        max_repeats=9,  # contradicts the checkpoint
     ).clone_for_lane(0, canonical_replicas=1)
-    with pytest.raises(RuntimeError, match="exhausted_policy"):
-        ws_load3.load_state_dict(state)
+    with pytest.raises(RuntimeError, match="contradict the checkpoint"):
+        ws_load.load_state_dict(state)
 
 
 def test_max_repeats_warns_with_stop_policy() -> None:
@@ -2226,7 +2242,12 @@ def test_checkpoint_restore_3_lanes() -> None:
 
 
 def test_multilane_no_duplicate_chunks() -> None:
-    """4 lanes must receive disjoint chunk sets."""
+    """4 lanes must receive disjoint sample sets.
+
+    Sample-level disjointness is a no-repeat property, so this pins
+    ``exhausted_policy="stop"`` (the pre-default-flip behavior); under the
+    ``stop_after_passes`` default datasets repeat and samples recur by design.
+    """
     ds_a = make_dataset("alpha", 200)
     ds_b = make_dataset("beta", 200)
     kwargs: dict = dict(
@@ -2234,6 +2255,7 @@ def test_multilane_no_duplicate_chunks() -> None:
         mixture={"alpha": 0.6, "beta": 0.4},
         chunk_size=5,
         seed=0,
+        exhausted_policy="stop",
     )
 
     canonical_replicas = 4
@@ -2542,6 +2564,11 @@ def test_legacy_checkpoint_detection_and_sticky_mode() -> None:
     # validates cleanly before the migration runs.
     for k in ("shuffle_block_size_spec", "cursor_block_sizes"):
         legacy_state.pop(k, None)
+    # v1 stored scalar exhaustion-policy fields (the per-dataset dicts arrived
+    # in v3); use the scalar form a real v1 producer would have written.
+    legacy_state["exhausted_policy"] = "stop"
+    legacy_state["reshuffle_on_repeat"] = True
+    legacy_state["max_repeats"] = None
 
     # Load it — should detect legacy mode
     ws_load = StaticMixtureWorkSource(
@@ -2628,6 +2655,11 @@ def test_legacy_checkpoint_determinism() -> None:
     legacy_state["version"] = 1
     for k in ("shuffle_block_size_spec", "cursor_block_sizes"):
         legacy_state.pop(k, None)
+    # v1 stored scalar exhaustion-policy fields (the per-dataset dicts arrived
+    # in v3); use the scalar form a real v1 producer would have written.
+    legacy_state["exhausted_policy"] = "stop"
+    legacy_state["reshuffle_on_repeat"] = True
+    legacy_state["max_repeats"] = None
 
     # Load both from the same legacy checkpoint
     ws_load1 = StaticMixtureWorkSource(
@@ -2648,3 +2680,698 @@ def test_legacy_checkpoint_determinism() -> None:
             assert c1 is None and c2 is None
             break
         assert _flatten_components(c1) == _flatten_components(c2)
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset exhausted_policy tests
+# ---------------------------------------------------------------------------
+
+
+def test_per_dataset_policy_stop_drives_termination() -> None:
+    """When one dataset repeats and another stops, the stop one ends the stream."""
+    large = make_dataset("large", 200)
+    small = make_dataset("small", 20)
+    ws = StaticMixtureWorkSource(
+        [large, small],
+        {"large": 0.5, "small": 0.5},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy={"large": "repeat", "small": "stop"},
+    ).clone_for_lane(0, canonical_replicas=1)
+
+    chunks = _drain_chunks(ws)
+    # ``small`` has 20 samples; with weight 0.5 over chunk_size=10 it averages
+    # 5 samples/chunk, so we should see ~4 chunks before stopping.
+    assert 3 <= len(chunks) <= 5
+    # The large dataset should NOT have been exhausted after this many chunks.
+    # Confirm the source returns None on the next call (stream terminated).
+    assert ws.next_chunk() is None
+
+
+def test_per_dataset_policy_dict_validation_rejects_unknown_name() -> None:
+    """A dict policy referencing an unknown dataset name raises."""
+    ds = make_dataset("alpha", 10)
+    with pytest.raises(ValueError, match="unknown dataset names"):
+        StaticMixtureWorkSource(
+            [ds],
+            {"alpha": 1.0},
+            chunk_size=5,
+            exhausted_policy={"bogus": "stop"},
+        )
+
+
+def test_per_dataset_policy_invalid_value_rejected() -> None:
+    """A dict policy with an invalid policy value raises."""
+    ds = make_dataset("alpha", 10)
+    with pytest.raises(ValueError, match="must be one of"):
+        StaticMixtureWorkSource(
+            [ds],
+            {"alpha": 1.0},
+            chunk_size=5,
+            exhausted_policy={"alpha": "nope"},
+        )
+
+
+def test_per_dataset_repeat_guard_only_repeating_datasets() -> None:
+    """Repeat-min-samples guard fires only for datasets configured to repeat."""
+    tiny = make_dataset("tiny", 1)  # not enough to repeat with chunk_size=5
+    large = make_dataset("large", 200)
+    # tiny is configured to STOP, so the guard should NOT fire even though
+    # tiny is too small to support a repeat cycle.
+    StaticMixtureWorkSource(
+        [tiny, large],
+        {"tiny": 0.5, "large": 0.5},
+        chunk_size=5,
+        exhausted_policy={"tiny": "stop", "large": "repeat"},
+    )
+    # Now configure tiny to repeat — guard should fire.
+    with pytest.raises(ValueError, match="repeat policy requires"):
+        StaticMixtureWorkSource(
+            [tiny, large],
+            {"tiny": 0.5, "large": 0.5},
+            chunk_size=5,
+            exhausted_policy={"tiny": "repeat", "large": "repeat"},
+        )
+
+
+def test_per_dataset_max_repeats_dict() -> None:
+    """max_repeats supports a per-dataset dict form."""
+    ds = make_dataset("alpha", 20)
+    ws = StaticMixtureWorkSource(
+        [ds],
+        {"alpha": 1.0},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        max_repeats={"alpha": 2},
+    ).clone_for_lane(0, canonical_replicas=1)
+    chunks = _drain_chunks(ws)
+    # 20 samples / chunk_size=10 = 2 chunks per epoch.  max_repeats=2 means
+    # 1 original + 2 repeats = 3 epochs -> 6 chunks total.
+    assert len(chunks) == 6
+
+
+def test_unbounded_iff_all_datasets_repeat_without_cap() -> None:
+    """Infinite only when EVERY dataset repeats uncapped; one ``"stop"`` dataset
+    bounds the whole stream (the ``all``, not ``any``, rule)."""
+    a = make_dataset("a", 200)
+    b = make_dataset("b", 20)
+    # b stops -> bounded by b: 20 samples / weight 0.5 = 40 samples.
+    bounded = StaticMixtureWorkSource(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy={"a": "repeat", "b": "stop"},
+    )
+    assert bounded.total_samples == 40
+    assert len(bounded) == 40
+
+    # Every dataset repeats with no cap -> genuinely infinite.
+    infinite = StaticMixtureWorkSource(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy="repeat",
+    )
+    assert infinite.total_samples == float("inf")
+    with pytest.raises(TypeError, match="infinite work source"):
+        len(infinite)
+
+
+def test_per_dataset_finite_len_when_repeat_capped() -> None:
+    """A capped repeat dataset contributes finite samples to len()."""
+    a = make_dataset("a", 20)
+    b = make_dataset("b", 20)
+    ws = StaticMixtureWorkSource(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy={"a": "repeat", "b": "stop"},
+        max_repeats={"a": 3},
+    )
+    # Length is governed by b (no cap, will exhaust): 20 samples / 0.5 = 40.
+    assert len(ws) == 40
+
+
+def test_finite_len_bound_by_capped_repeat_projects_all_epochs() -> None:
+    """When the capped-repeat dataset binds the minimum, its projection must
+    count every epoch under the cap (regression for an epoch off-by-one).
+
+    ``a`` repeats with max_repeats=2 -> epochs 0,1,2 = 3 full passes = 60 of
+    its own samples (weight 0.5 -> ~120 total). The pre-fix off-by-one
+    projected only 2 epochs (~80 total). ``estimate_remaining_samples`` is an
+    estimate, so assert the corrected ballpark rather than an exact count.
+    """
+    ws = StaticMixtureWorkSource(
+        [make_dataset("a", 20), make_dataset("big", 100_000)],
+        {"a": 0.5, "big": 0.5},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy={"a": "repeat", "big": "stop"},
+        max_repeats={"a": 2, "big": None},
+    )
+    # ``a`` binds: 60 samples / (0.5 * chunk_size=10) = 12 chunks -> 120
+    # samples. The buggy 2-epoch projection gave 40/5 = 8 chunks -> 80.
+    assert len(ws) == 120
+
+
+def test_single_capped_repeat_len_matches_drained() -> None:
+    """A lone capped-repeat dataset: len() == drained == (max_repeats+1) epochs."""
+    for max_repeats in (1, 2, 3):
+        ws = StaticMixtureWorkSource(
+            [make_dataset("a", 20)],
+            {"a": 1.0},
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            exhausted_policy="repeat",
+            max_repeats=max_repeats,
+        )
+        expected = (max_repeats + 1) * 20
+        assert len(ws) == expected
+        drained = sum(
+            len(v)
+            for chunk in _drain_chunks(ws.clone_for_lane(0, 1))
+            for v in chunk.values()
+        )
+        assert drained == expected
+
+
+def test_v1_checkpoint_with_scalar_policy_loads() -> None:
+    """A v1 checkpoint storing a scalar policy is upgraded to per-dataset dicts."""
+    ds = make_dataset("alpha", 10)
+    src = StaticMixtureWorkSource(
+        [ds],
+        {"alpha": 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    src.next_chunk()
+    state = src.state_dict()
+    # Simulate a v1 checkpoint: scalar policy fields, version=1.
+    state["version"] = 1
+    state["exhausted_policy"] = "repeat"
+    state["reshuffle_on_repeat"] = True
+    state["max_repeats"] = None
+
+    dst = StaticMixtureWorkSource(
+        [ds],
+        {"alpha": 1.0},
+        chunk_size=5,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    dst.load_state_dict(state)
+    assert dst.next_chunk() is not None
+
+
+# -- Scalar-broadcast byte-for-byte equivalence (the load-bearing invariant) --
+
+
+@pytest.mark.parametrize("policy", ["stop", "repeat"])
+@pytest.mark.parametrize("shuffle_within", [False, True])
+@pytest.mark.parametrize("block_size", [None, 4])
+def test_scalar_broadcast_matches_explicit_dict_chunk_stream(
+    policy: str, shuffle_within: bool, block_size: int | None
+) -> None:
+    """A scalar policy must produce the identical chunk stream to the dict that
+    broadcasting it would yield — the per-dataset feature is inert for scalars."""
+    names = ["a", "b", "c"]
+    max_repeats = 2 if policy == "repeat" else None
+
+    def _make(exhausted_policy, reshuffle_on_repeat, mr):
+        datasets = [make_dataset(n, 60) for n in names]
+        return StaticMixtureWorkSource(
+            datasets,
+            {"a": 0.5, "b": 0.3, "c": 0.2},
+            chunk_size=8,
+            seed=123,
+            shuffle_shards=True,
+            shuffle_within_shard=shuffle_within,
+            shuffle_block_size=block_size,
+            exhausted_policy=exhausted_policy,
+            reshuffle_on_repeat=reshuffle_on_repeat,
+            max_repeats=mr,
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    scalar_ws = _make(policy, True, max_repeats)
+    dict_ws = _make(
+        dict.fromkeys(names, policy),
+        dict.fromkeys(names, True),
+        dict.fromkeys(names, max_repeats),
+    )
+    assert _drain_chunks(scalar_ws, limit=50) == _drain_chunks(dict_ws, limit=50)
+
+
+@pytest.mark.parametrize("policy", ["stop", "repeat"])
+def test_scalar_policy_state_dict_matches_origin_main_shape(policy: str) -> None:
+    """A scalar-configured source serialises per-dataset policy dicts that are
+    exactly the broadcast of the scalar — and the state round-trips."""
+    names = ["a", "b"]
+    max_repeats = 3 if policy == "repeat" else None
+    ws = StaticMixtureWorkSource(
+        [make_dataset(n, 40) for n in names],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=8,
+        seed=7,
+        shuffle_shards=False,
+        exhausted_policy=policy,
+        reshuffle_on_repeat=True,
+        max_repeats=max_repeats,
+    ).clone_for_lane(0, canonical_replicas=1)
+    ws.next_chunk()
+    state = ws.state_dict()
+    assert state["exhausted_policy"] == dict.fromkeys(names, policy)
+    assert state["reshuffle_on_repeat"] == dict.fromkeys(names, True)
+    assert state["max_repeats"] == dict.fromkeys(names, max_repeats)
+
+    restored = StaticMixtureWorkSource(
+        [make_dataset(n, 40) for n in names],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=8,
+        seed=7,
+        shuffle_shards=False,
+        exhausted_policy=policy,
+        reshuffle_on_repeat=True,
+        max_repeats=max_repeats,
+    ).clone_for_lane(0, canonical_replicas=1)
+    restored.load_state_dict(state)
+    # Same continuation from the restored point.
+    a = _drain_chunks(ws, limit=10)
+    b = _drain_chunks(restored, limit=10)
+    assert a == b
+
+
+def test_per_dataset_reshuffle_on_repeat_restore() -> None:
+    """A per-dataset reshuffle_on_repeat round-trips and is honored on restore."""
+    a = make_dataset("a", 20)
+    b = make_dataset("b", 20)
+
+    def _make():
+        return StaticMixtureWorkSource(
+            [make_dataset("a", 20), make_dataset("b", 20)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=10,
+            seed=3,
+            shuffle_shards=True,
+            exhausted_policy="repeat",
+            reshuffle_on_repeat={"a": False, "b": True},
+            max_repeats={"a": 2, "b": 2},
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    src = _make()
+    # Advance a few chunks (crosses at least one epoch boundary for each).
+    _drain_chunks(src, limit=5)
+    state = src.state_dict()
+    assert state["reshuffle_on_repeat"] == {"a": False, "b": True}
+
+    dst = _make()
+    dst.load_state_dict(state)
+    assert _drain_chunks(src, limit=10) == _drain_chunks(dst, limit=10)
+
+
+def test_mismatched_per_dataset_policy_on_restore_rejected() -> None:
+    """A per-dataset policy that differs at construction fails the resume rather
+    than being silently dropped for the checkpoint's."""
+    src = StaticMixtureWorkSource(
+        [make_dataset("a", 40), make_dataset("b", 40)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=8,
+        exhausted_policy={"a": "repeat", "b": "repeat"},
+        reshuffle_on_repeat={"a": True, "b": True},
+        max_repeats={"a": 2, "b": 2},
+    ).clone_for_lane(0, canonical_replicas=1)
+    src.next_chunk()
+    state = src.state_dict()
+
+    dst = StaticMixtureWorkSource(
+        [make_dataset("a", 40), make_dataset("b", 40)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=8,
+        exhausted_policy={"a": "stop", "b": "repeat"},  # differs from checkpoint
+    ).clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="contradict the checkpoint"):
+        dst.load_state_dict(state)
+
+
+# -- Terminal stop-path rollback (no phantom chunks on restore) ---------------
+
+
+def test_stop_terminal_state_is_checkpoint_stable() -> None:
+    """The terminal None must be side-effect-free: a checkpoint taken after
+    the source already hit it must restore a source that is still terminal.
+
+    Regression for a pre-existing leak: compute_quotas advanced the
+    Bresenham accumulators on the failing attempt without rolling back, so
+    a restored source re-accumulated from the debited state and produced
+    phantom chunks past the stop point.
+    """
+
+    def _make():
+        return StaticMixtureWorkSource(
+            [make_dataset("large", 400), make_dataset("small", 2)],
+            {"large": 0.98, "small": 0.02},
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            exhausted_policy={"large": "repeat", "small": "stop"},
+        )
+
+    ws = _make().clone_for_lane(0, canonical_replicas=1)
+    produced = len(_drain_chunks(ws))
+    assert ws.next_chunk() is None  # idempotent in-process too
+
+    restored = _make().clone_for_lane(0, canonical_replicas=1)
+    restored.load_state_dict(ws.state_dict())
+    assert restored.next_chunk() is None, (
+        f"restored source must stay terminal (original produced {produced} chunks)"
+    )
+
+
+# -- stop_after_passes: global "repeat all, stop at the slowest's Nth pass" floor -----
+
+
+def _drain_counts(ws: StaticMixtureWorkSource) -> dict[str, int]:
+    """Total samples drained per dataset until the stream terminates."""
+    counts: dict[str, int] = {}
+    for chunk in _drain_chunks(ws):
+        for name, items in chunk.items():
+            counts[name] = counts.get(name, 0) + len(items)
+    return counts
+
+
+def test_stop_after_passes_one_drains_slowest_while_others_repeat() -> None:
+    """stop_after_passes=1 drains the slowest dataset once and repeats the rest.
+
+    Equal weights over chunk_size=10 give an exact 5 samples/dataset/chunk, so
+    large(200) bounds the run at 40 chunks while small(20) repeats to match.
+    """
+    parent = StaticMixtureWorkSource(
+        [make_dataset("large", 200), make_dataset("small", 20)],
+        {"large": 0.5, "small": 0.5},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        stop_after_passes=1,
+    )
+    # Bounded by the slowest dataset reaching the floor (large: 200 / 5 = 40
+    # chunks -> 400 samples), not infinite even though every dataset repeats.
+    assert parent.total_samples == 400
+    assert len(parent) == 400
+
+    ws = parent.clone_for_lane(0, canonical_replicas=1)
+    chunks = _drain_chunks(ws)
+    counts = _drain_counts(parent.clone_for_lane(0, canonical_replicas=1))
+
+    assert len(chunks) == 40
+    assert ws.next_chunk() is None  # terminated at large's first exhaustion
+    assert counts == {"large": 200, "small": 200}
+
+
+def test_stop_after_passes_unspecified_policy_resolves_to_repeat() -> None:
+    """stop_after_passes leaves exhausted_policy unset -> every dataset repeats.
+
+    A lone dataset is its own slowest: with stop_after_passes=2 it runs exactly two
+    passes (4 chunks of 10) and the length is finite.
+    """
+    parent = StaticMixtureWorkSource(
+        [make_dataset("a", 20)],
+        {"a": 1.0},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        stop_after_passes=2,
+    )
+    assert parent.total_samples == 40
+    assert len(parent) == 40
+    counts = _drain_counts(parent.clone_for_lane(0, canonical_replicas=1))
+    assert counts == {"a": 40}
+
+
+def test_stop_after_passes_n_passes_over_slowest() -> None:
+    """stop_after_passes=2 runs the slowest dataset twice; the rest repeat further."""
+    counts = _drain_counts(
+        StaticMixtureWorkSource(
+            [make_dataset("large", 100), make_dataset("small", 20)],
+            {"large": 0.5, "small": 0.5},
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            stop_after_passes=2,
+        ).clone_for_lane(0, canonical_replicas=1)
+    )
+    assert counts["large"] == 200  # two full passes over the slowest
+    assert counts["small"] == 200  # repeated to hold the ratio across both
+
+
+def test_stop_after_passes_conflicts_with_explicit_dict_stop() -> None:
+    """An explicit per-dataset 'stop' contradicts stop_after_passes -> raise, not override."""
+    with pytest.raises(ValueError, match="requires every dataset to repeat"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 40), make_dataset("b", 40)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=10,
+            exhausted_policy={"a": "stop", "b": "repeat"},
+            stop_after_passes=1,
+        )
+
+
+def test_stop_after_passes_conflicts_with_scalar_stop() -> None:
+    """A scalar 'stop' contradicts stop_after_passes for every dataset -> raise."""
+    with pytest.raises(ValueError, match="requires every dataset to repeat"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 40)],
+            {"a": 1.0},
+            chunk_size=10,
+            exhausted_policy="stop",
+            stop_after_passes=1,
+        )
+
+
+def test_stop_after_passes_conflicts_with_max_repeats() -> None:
+    """A per-dataset upper cap could end the stream before the floor -> raise."""
+    with pytest.raises(ValueError, match="cannot be combined with"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 40), make_dataset("b", 40)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=10,
+            max_repeats={"a": 2},
+            stop_after_passes=1,
+        )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_stop_after_passes_rejects_non_positive_int(bad: int) -> None:
+    """stop_after_passes must be a positive int (rejecting 0, negatives, and bool)."""
+    with pytest.raises(ValueError, match="stop_after_passes"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 40)],
+            {"a": 1.0},
+            chunk_size=10,
+            stop_after_passes=bad,
+        )
+
+
+def test_stop_after_passes_repeat_guard_applies_to_every_dataset() -> None:
+    """Under stop_after_passes all datasets repeat, so the min-samples guard covers all.
+
+    tiny(1) cannot fill its ceil(0.5 * chunk_size=5) = 3-sample quota after a
+    reset, so construction must raise rather than spin forever at runtime.
+    """
+    with pytest.raises(ValueError, match="repeat policy requires"):
+        StaticMixtureWorkSource(
+            [make_dataset("tiny", 1), make_dataset("large", 200)],
+            {"tiny": 0.5, "large": 0.5},
+            chunk_size=5,
+            stop_after_passes=1,
+        )
+
+
+def test_stop_after_passes_checkpoint_roundtrip() -> None:
+    """stop_after_passes round-trips through state_dict and continues deterministically."""
+
+    def _make():
+        return StaticMixtureWorkSource(
+            [make_dataset("large", 200), make_dataset("small", 20)],
+            {"large": 0.5, "small": 0.5},
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            stop_after_passes=2,
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    src = _make()
+    _drain_chunks(src, limit=6)  # crosses small's epoch boundaries
+    state = src.state_dict()
+    assert state["stop_after_passes"] == 2
+
+    dst = _make()
+    dst.load_state_dict(state)
+    assert _drain_chunks(src, limit=10) == _drain_chunks(dst, limit=10)
+
+
+def test_stop_after_passes_checkpoint_is_authoritative_on_resume() -> None:
+    """stop_after_passes is taken from the checkpoint on resume: a default at
+    construction yields to it (so an old checkpoint keeps its behavior after the
+    default flips), while an explicit, conflicting value is rejected."""
+
+    def _make(**policy):
+        return StaticMixtureWorkSource(
+            [make_dataset("large", 200), make_dataset("small", 20)],
+            {"large": 0.5, "small": 0.5},
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            **policy,
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    src = _make(stop_after_passes=2)
+    src.next_chunk()
+    state = src.state_dict()
+
+    # Default at construction → checkpoint's value wins, no raise.
+    dst = _make()
+    dst.load_state_dict(state)
+    assert dst._alloc_config.stop_after_passes == 2
+
+    # Explicit, conflicting value → rejected.
+    with pytest.raises(RuntimeError, match="contradict the checkpoint"):
+        _make(stop_after_passes=3).load_state_dict(state)
+
+
+def test_default_is_stop_after_one_pass() -> None:
+    """Bare construction defaults to stop_after_passes=1, which cascades
+    exhausted_policy to repeat — the see-each-dataset-once-then-stop flip."""
+    ws = StaticMixtureWorkSource(
+        [make_dataset("a", 40), make_dataset("b", 40)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=8,
+    )
+    assert ws._alloc_config.stop_after_passes == 1
+    assert ws._alloc_config.exhausted_policy == {"a": "repeat", "b": "repeat"}
+
+
+def test_explicit_policy_turns_off_stop_after_passes_default() -> None:
+    """Opting into the explicit per-dataset API disables the default floor."""
+    ws_stop = StaticMixtureWorkSource(
+        [make_dataset("a", 40)], {"a": 1.0}, chunk_size=8, exhausted_policy="stop"
+    )
+    assert ws_stop._alloc_config.stop_after_passes is None
+    assert ws_stop._alloc_config.exhausted_policy == {"a": "stop"}
+
+    ws_cap = StaticMixtureWorkSource(
+        [make_dataset("a", 40)],
+        {"a": 1.0},
+        chunk_size=8,
+        exhausted_policy="repeat",
+        max_repeats=2,
+    )
+    assert ws_cap._alloc_config.stop_after_passes is None
+
+
+def test_old_default_checkpoint_resumes_with_old_behavior() -> None:
+    """A checkpoint frozen with the old default (stop / no floor) keeps that
+    behavior when resumed by new-default (bare) construction."""
+
+    def _ds():
+        return [make_dataset("large", 200), make_dataset("small", 20)]
+
+    weights = {"large": 0.5, "small": 0.5}
+    old = StaticMixtureWorkSource(
+        _ds(),
+        weights,
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="stop",  # what bare construction produced pre-flip
+    ).clone_for_lane(0, canonical_replicas=1)
+    old.next_chunk()
+    state = old.state_dict()
+
+    resumed = StaticMixtureWorkSource(  # bare → new default (repeat / 1)
+        _ds(), weights, chunk_size=10, seed=0, shuffle_shards=False
+    ).clone_for_lane(0, canonical_replicas=1)
+    resumed.load_state_dict(state)
+
+    cfg = resumed._alloc_config
+    assert cfg.exhausted_policy == {"large": "stop", "small": "stop"}
+    assert cfg.stop_after_passes is None
+
+
+def test_stop_after_passes_no_overshoot_with_sparse_binding_dataset() -> None:
+    """Regression: a sparse binding dataset finishing cleanly must not overshoot.
+
+    "rare" (weight 0.1 over chunk_size 5 = 0.5 samples/chunk) draws quota 0 in
+    ~half the chunks and is the slowest dataset, so it gates the floor. Before
+    the unconditional floor check, once "rare" finished its pass cleanly the
+    stream kept emitting "common"-only chunks until "rare" next drew a positive
+    quota — overshooting by a chunk. Verified by stashing the fix: the old impl
+    yields common=90 over 20 chunks; the fix stops at common=85 over 19.
+    """
+    counts = _drain_counts(
+        StaticMixtureWorkSource(
+            [make_dataset("rare", 10), make_dataset("common", 9)],
+            {"rare": 0.1, "common": 0.9},
+            chunk_size=5,
+            seed=0,
+            shuffle_shards=False,
+            stop_after_passes=1,
+        ).clone_for_lane(0, canonical_replicas=1)
+    )
+    assert counts == {"rare": 10, "common": 85}  # not common=90 (the overshoot)
+
+
+def test_max_repeats_terminal_state_is_checkpoint_stable() -> None:
+    """The terminal None at the max_repeats cap must also roll back the failed
+    accumulator advance, so a restored source does not produce phantom chunks.
+
+    Skewed weights with a small max_repeats=2 dataset leave a non-zero
+    accumulator residue at the cap, which is exactly what the rollback must
+    discard — a uniform-weight config would zero out at the boundary and hide
+    the leak.
+    """
+
+    def _make():
+        return StaticMixtureWorkSource(
+            [make_dataset("large", 400), make_dataset("small", 30)],
+            {"large": 0.95, "small": 0.05},
+            chunk_size=7,
+            seed=0,
+            shuffle_shards=False,
+            exhausted_policy={"large": "repeat", "small": "repeat"},
+            max_repeats={"large": None, "small": 2},
+        )
+
+    ws = _make().clone_for_lane(0, canonical_replicas=1)
+    _drain_chunks(ws)
+    assert ws.next_chunk() is None
+    acc_at_terminal = ws.state_dict()["accumulators"]
+    # Idempotent in-process: the terminal None must not perturb accumulators.
+    assert ws.next_chunk() is None
+    assert ws.state_dict()["accumulators"] == acc_at_terminal
+
+    restored = _make().clone_for_lane(0, canonical_replicas=1)
+    restored.load_state_dict(ws.state_dict())
+    assert restored.next_chunk() is None
+
+
+def test_terminal_stop_does_not_advance_accumulators() -> None:
+    """Hitting the terminal None must leave the accumulator state identical to
+    just before the failed draw — the state_dict is stable across repeated
+    terminal calls."""
+    ws = StaticMixtureWorkSource(
+        [make_dataset("large", 400), make_dataset("small", 2)],
+        {"large": 0.98, "small": 0.02},
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy={"large": "repeat", "small": "stop"},
+    ).clone_for_lane(0, canonical_replicas=1)
+    _drain_chunks(ws)
+    assert ws.next_chunk() is None
+    state_after_first_none = ws.state_dict()["accumulators"]
+    # Calling again must not perturb the accumulators (idempotent terminal).
+    assert ws.next_chunk() is None
+    assert ws.state_dict()["accumulators"] == state_after_first_none

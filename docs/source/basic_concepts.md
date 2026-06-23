@@ -104,7 +104,7 @@ orthogonal knobs, applied in order when the sample sequence is constructed:
 If you are coming from Mosaic Streaming and wondering how Zephon's shuffling
 knobs relate to algorithms like `py1s` or `py1br`, see
 [Transitioning from Streaming](transitioning.md) after understanding the basic concepts.
-The control of shuffling in the  {py:class}`~zephon.work.StaticMixtureWorkSource`  is the only curriculum-level control that this WorkSource implementation currently has.
+Shuffling and the per-dataset repetition controls (exhaustion policy and `stop_after_passes`) are the curriculum-level controls that this {py:class}`~zephon.work.StaticMixtureWorkSource` implementation currently has.
 If you need control on the data curriculum beyond this, a new WorkSource is needed.
 
 It is important to note that shuffling and mixing are not *exclusively*

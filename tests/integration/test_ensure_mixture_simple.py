@@ -201,12 +201,15 @@ class TestEnsureMixtureIntegration:
         """Test that explicit weights override WorkSource mixture."""
         ds_code, ds_text = _prepare_datasets(tmp_path, code_count=100, text_count=100)
 
-        # WorkSource has 30/70 ratio
+        # WorkSource has 30/70 ratio. Pin exhausted_policy="stop" (pre-flip
+        # default): this test calibrates front-loading to a bounded one-pass
+        # input, not the repeating stop_after_passes default.
         work = StaticMixtureWorkSource(
             [ds_code, ds_text],
             {"code": 0.3, "text": 0.7},
             chunk_size=20,
             seed=42,
+            exhausted_policy="stop",
         )
 
         # But ensure_mixture overrides to 80/20

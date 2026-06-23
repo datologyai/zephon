@@ -35,30 +35,55 @@ migration that renames a key inside ``world`` must walk into the dict
 explicitly and reassign it. See the mutation contract below for ownership
 when doing so.
 
-When to use a migration vs. a dataclass default
+Schema evolution: adding or changing a field
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The schema is a contract. A migration is needed whenever existing on-disk
-dicts cannot pass ``CurrentSchema.from_dict()`` (including ``__post_init__``).
-Defaults are the concession the contract makes for one specific case:
-"field missing -> use this value". Anything stricter requires a migration.
+A version's class is the complete, self-contained validator for that version's
+on-disk shape. Two rules keep the contract sharp and adding a field cheap.
 
-**No migration needed** when:
+**No field defaults except ``version``.** A static default would let a new
+field skip its migration — ``from_dict`` fills the absent key — but we
+deliberately do not take that shortcut: it makes a version a *union* of shapes,
+where a missing key reads as the default instead of as corruption (the drift
+``StaticMixtureStateV1`` accumulated and v2 undid). Add new fields as
+**required** and fill them in the migration into that version; a nullable field
+is still required (present, value may be ``None``). Only the legacy v1 union
+keeps its historical defaults.
 
-- Adding a new field that can carry a sensible static default. Old
-  checkpoints get the default automatically via ``from_dict()``.
+**Bump and migrate, cheaply via inheritance.** Schemas are
+``@dataclass(frozen=True, kw_only=True)`` and each version inherits the
+previous, so an additive change is a few lines, not a field-list copy::
 
-**Migration required** when:
+    @dataclass(frozen=True, kw_only=True)
+    class StaticMixtureStateV4(StaticMixtureStateV3):
+        new_field: SomeType   # required; kw_only lets it follow the version default
+        version: int = 4
 
-- Adding a new *required* field (no default). Existing checkpoints would
-  raise ``TypeError`` at construction; the migration fills the value in.
-- Renaming a field. ``from_dict`` ignores unknown keys and defaults the
-  new name, so a rename without a migration silently drops data.
-- Removing a field that something downstream depended on.
-- Changing a field's type beyond what ``_auto_coerce`` handles.
-- Restructuring data (merging fields, nesting, computing from siblings).
-- Tightening a ``__post_init__`` invariant in a way old checkpoints
-  don't satisfy — the migration fixes the data first.
+Pair it with a ``_..._v3_to_v4`` migration that fills ``new_field``. ``kw_only``
+is load-bearing: without it a required field after the inherited ``version``
+default raises "non-default argument follows default argument".
+
+**Copy instead of inherit when you cannot extend additively.** A field cannot
+be re-typed in a subclass (an incompatible override under static type checking)
+and inheritance cannot drop one, so **re-typing** (v2 scalars -> v3 per-dataset
+dicts) or **removing** a field needs a standalone schema copy.
+
+**Migration required whenever** existing dicts cannot pass
+``CurrentSchema.from_dict()`` (including ``__post_init__``): adding a required
+field, renaming (``from_dict`` drops the unknown old key and defaults the new
+one — silently losing data), removing, re-typing beyond ``_auto_coerce``,
+restructuring (merging fields, nesting, computing from siblings), or tightening
+a ``__post_init__`` invariant old data fails.
+
+**``__post_init__`` holds the semantic invariants** — value ranges, nested
+shapes, key sets matching ``component_order``. It runs on every construction,
+including after a migration, so a structurally valid but semantically broken
+result is still caught; accumulate all violations and raise once. Because state
+can be loaded *without* the public constructor (e.g. ``load_state_dict``
+adopting checkpoint fields directly), ``__post_init__`` is the load-time trust
+boundary: keep its invariants in sync with the constructor's, including
+cross-field interaction rules, or a malformed checkpoint loads a config the
+constructor would have rejected.
 
 Mutation contract
 ~~~~~~~~~~~~~~~~~
@@ -83,6 +108,7 @@ from zephon.core.checkpoint._schemas import (
     EngineStateV1,
     StaticMixtureStateV1,
     StaticMixtureStateV2,
+    StaticMixtureStateV3,
     WorkChunkStateV1,
 )
 
@@ -106,6 +132,24 @@ def _static_mixture_v1_to_v2(v1: StaticMixtureStateV1) -> dict[str, Any]:
     return d
 
 
+def _static_mixture_v2_to_v3(v2: StaticMixtureStateV2) -> dict[str, Any]:
+    """Broadcast v2's scalar exhaustion-policy knobs to per-dataset dicts.
+
+    v2 stored ``exhausted_policy`` / ``reshuffle_on_repeat`` / ``max_repeats``
+    as single scalars applied uniformly to every dataset; v3 keys them by
+    dataset name. Each scalar is fanned out across ``component_order``. v3 also
+    introduces ``stop_after_passes`` (a required field); v2 had no global floor, so it
+    is filled with ``None``.
+    """
+    d = v2.to_dict()
+    names = v2.component_order
+    d["exhausted_policy"] = dict.fromkeys(names, v2.exhausted_policy)
+    d["reshuffle_on_repeat"] = dict.fromkeys(names, v2.reshuffle_on_repeat)
+    d["max_repeats"] = dict.fromkeys(names, v2.max_repeats)
+    d["stop_after_passes"] = None
+    return d
+
+
 #: Migration functions take a validated v_N instance and return a v_{N+1} dict.
 MigrationFn = Callable[[Any], dict[str, Any]]
 
@@ -114,7 +158,10 @@ MigrationFn = Callable[[Any], dict[str, Any]]
 _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
     "engine": {},
     "work_chunk": {},
-    "static_mixture": {1: _static_mixture_v1_to_v2},
+    "static_mixture": {
+        1: _static_mixture_v1_to_v2,
+        2: _static_mixture_v2_to_v3,
+    },
     "cursor": {},
 }
 
@@ -124,7 +171,11 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
 _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
     "engine": {1: EngineStateV1},
     "work_chunk": {1: WorkChunkStateV1},
-    "static_mixture": {1: StaticMixtureStateV1, 2: StaticMixtureStateV2},
+    "static_mixture": {
+        1: StaticMixtureStateV1,
+        2: StaticMixtureStateV2,
+        3: StaticMixtureStateV3,
+    },
     "cursor": {1: CursorStateV1},
 }
 

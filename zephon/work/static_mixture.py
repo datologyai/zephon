@@ -7,15 +7,17 @@ import math
 import random
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from enum import Enum, auto
+from typing import Any, Literal
 
 import numpy as np
 
 from zephon.core.checkpoint import (
     STATIC_MIXTURE_VERSION,
     CursorStateV1,
-    StaticMixtureStateV2,
+    StaticMixtureStateV3,
 )
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -29,6 +31,13 @@ _AUTO_BLOCK_SIZE_FACTOR = 8
 
 #: Accepted shapes for ``shuffle_block_size``. See :func:`_resolve_block_size`.
 ShuffleBlockSpec = int | Literal["auto", "global"] | None
+
+
+class _Sentinel(Enum):
+    UNSET = auto()
+
+
+_STOP_AFTER_PASSES_UNSET = _Sentinel.UNSET
 
 
 def _resolve_block_size(
@@ -64,6 +73,29 @@ def _resolve_block_size(
     return min(resolved, total_samples)
 
 
+def _normalize_per_dataset(
+    value: Any,
+    dataset_names: list[str],
+    *,
+    default: Any,
+    name: str,
+) -> dict[str, Any]:
+    """Normalize a scalar-or-mapping policy knob into a per-dataset dict.
+
+    A scalar value is broadcast to every dataset.  A mapping is validated to
+    contain only known dataset names; missing keys are filled with ``default``.
+    """
+    if isinstance(value, Mapping):
+        unknown = set(value) - set(dataset_names)
+        if unknown:
+            raise ValueError(
+                f"{name} contains unknown dataset names: {sorted(unknown)}. "
+                f"Known datasets: {dataset_names}"
+            )
+        return {ds: value.get(ds, default) for ds in dataset_names}
+    return dict.fromkeys(dataset_names, value)
+
+
 @dataclass(frozen=True)
 class _DatasetKnobs:
     seed: int
@@ -74,14 +106,108 @@ class _DatasetKnobs:
 
 @dataclass(frozen=True, slots=True)
 class _AllocationConfig:
-    """Immutable parameters shared by all allocation strategies."""
+    """Immutable parameters shared by all allocation strategies.
+
+    ``exhausted_policy``, ``reshuffle_on_repeat``, and ``max_repeats`` are
+    keyed by dataset name so that different datasets in the same mixture can
+    use different policies (e.g. one dataset repeats forever as padding while
+    another drives termination when exhausted).
+
+    ``stop_after_passes`` (when set) is a global termination floor: every dataset
+    repeats and the stream ends once the slowest has completed that many
+    passes. Mutually exclusive with per-dataset ``"stop"`` and ``max_repeats``.
+    """
 
     component_order: tuple[str, ...]
     weights: dict[str, float]
     chunk_size: int
-    exhausted_policy: str
-    reshuffle_on_repeat: bool
-    max_repeats: int | None
+    exhausted_policy: Mapping[str, str]
+    reshuffle_on_repeat: Mapping[str, bool]
+    max_repeats: Mapping[str, int | None]
+    stop_after_passes: int | None = None
+
+
+def _is_unbounded(cfg: _AllocationConfig) -> bool:
+    """True when nothing can ever force termination.
+
+    Only a stream where *every* dataset repeats uncapped runs forever; a single
+    ``"stop"`` or capped-``"repeat"`` dataset bounds it, as does ``stop_after_passes``.
+    """
+    if cfg.stop_after_passes is not None:
+        return False
+    return all(
+        cfg.exhausted_policy[name] == "repeat" and cfg.max_repeats[name] is None
+        for name in cfg.component_order
+    )
+
+
+def _effective_remaining_samples(
+    cfg: _AllocationConfig, name: str, cursor: "_DatasetCursor"
+) -> float | None:
+    """Samples ``name`` can still yield before termination, or None if endless.
+
+    A capped repeat dataset yields its current epoch's remainder plus one full
+    pass for every epoch left under the cap (``reset`` fires while
+    ``_epoch < max_repeats``, so epochs ``_epoch+1 .. max_repeats`` still run).
+    """
+    policy = cfg.exhausted_policy[name]
+    ds_max = cfg.max_repeats[name]
+    if policy == "repeat":
+        if ds_max is None:
+            return None
+        return cursor.remaining + max(0, ds_max - cursor._epoch) * cursor._total_samples
+    return cursor.remaining
+
+
+def _stop_after_passes_reached(
+    cfg: _AllocationConfig,
+    cursors: Mapping[str, "_DatasetCursor"],
+    exhausting: str | None = None,
+) -> bool:
+    """True when every dataset has completed at least ``stop_after_passes`` passes.
+
+    A dataset has finished its current pass when its cursor sits at
+    ``remaining == 0`` (consumed cleanly) or it is ``exhausting`` (about to be
+    reset because it can't fill this chunk's quota); either counts as
+    ``_epoch + 1``, others are mid-pass at ``_epoch``. Checking ``remaining == 0``
+    — not only ``exhausting`` — is what catches a sparse dataset that finishes on
+    a chunk boundary without tripping ``remaining < quota``.
+    """
+    assert cfg.stop_after_passes is not None
+    for name in cfg.component_order:
+        cursor = cursors[name]
+        done_current = name == exhausting or cursor.remaining == 0
+        completed = cursor._epoch + (1 if done_current else 0)
+        if completed < cfg.stop_after_passes:
+            return False
+    return True
+
+
+def _stop_after_passes_remaining_samples(
+    cfg: _AllocationConfig, cursors: Mapping[str, "_DatasetCursor"]
+) -> int:
+    """Samples left until the slowest dataset completes ``stop_after_passes`` passes.
+
+    Cursors advance together, so the bound is the ``max`` over datasets of each
+    one's remaining-to-floor (one already past the floor contributes 0) — the
+    opposite of the ``min`` that governs first-exhaustion. Approximate like the
+    sibling estimators; ``compute_quotas`` is the exact stop.
+    """
+    assert cfg.stop_after_passes is not None
+    chunks_needed = 0.0
+    for name in cfg.component_order:
+        avg_quota = cfg.weights[name] * cfg.chunk_size
+        if avg_quota <= 0:
+            continue
+        cursor = cursors[name]
+        if cursor._epoch >= cfg.stop_after_passes:
+            continue
+        remaining_to_floor = (
+            cursor.remaining
+            + (cfg.stop_after_passes - cursor._epoch - 1) * cursor._total_samples
+        )
+        chunks_needed = max(chunks_needed, remaining_to_floor / avg_quota)
+    return int(chunks_needed) * cfg.chunk_size
 
 
 class _DatasetCursor:
@@ -701,6 +827,13 @@ class AllocationStrategy(ABC):
     def checkpoint_state(self) -> dict[str, Any]:
         """Return strategy-specific fields to merge into the checkpoint."""
 
+    def _check_no_redistribute(self) -> None:
+        for name in self._config.component_order:
+            if self._config.exhausted_policy[name] == "redistribute":
+                raise NotImplementedError(
+                    "Exhausted policy 'redistribute' not implemented"
+                )
+
 
 class AccumulatorStrategy(AllocationStrategy):
     """Bresenham-style fractional-accumulator allocation (default).
@@ -799,8 +932,7 @@ class AccumulatorStrategy(AllocationStrategy):
     ) -> dict[str, int] | None:
         """Accumulator-based chunk production (default)."""
         cfg = self._config
-        if cfg.exhausted_policy == "redistribute":
-            raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
+        self._check_no_redistribute()
 
         # Compute quotas, then verify cursors can fulfill them.
         # On exhaustion with repeat policy: rollback accumulators, reset
@@ -814,21 +946,43 @@ class AccumulatorStrategy(AllocationStrategy):
                 quota = quotas[name]
                 cursor = cursors[name]
                 if cursor.remaining < quota:
-                    if cfg.exhausted_policy == "repeat":
-                        if (
-                            cfg.max_repeats is not None
-                            and cursor._epoch >= cfg.max_repeats
-                        ):
+                    if cfg.exhausted_policy[name] == "repeat":
+                        ds_max = cfg.max_repeats[name]
+                        # Roll back this chunk's accumulator advance before any
+                        # terminal None: otherwise a checkpoint taken after the
+                        # engine prefetched it stores debited-but-unfulfilled
+                        # accumulators, and the restored source emits phantom
+                        # chunks before re-exhausting. The terminal None must be
+                        # side-effect-free.
+                        if ds_max is not None and cursor._epoch >= ds_max:
+                            self._accumulators = saved
                             return None
-                        cursor.reset(reshuffle=cfg.reshuffle_on_repeat)
+                        if (
+                            cfg.stop_after_passes is not None
+                            and _stop_after_passes_reached(cfg, cursors, name)
+                        ):
+                            self._accumulators = saved
+                            return None
+                        cursor.reset(reshuffle=cfg.reshuffle_on_repeat[name])
                         self._accumulators = saved
                         needs_retry = True
                         break
                     else:
+                        self._accumulators = saved  # see terminal note above
                         return None  # "stop" policy
 
             if needs_retry:
                 continue
+            # Even when every cursor can fill this chunk, stop if the floor is
+            # already met: a sparse component can finish its pass cleanly (then
+            # draw quota 0) without ever tripping ``remaining < quota`` above,
+            # which would otherwise overshoot the floor. Roll back so the
+            # terminal None stays side-effect-free (see the rollback note above).
+            if cfg.stop_after_passes is not None and _stop_after_passes_reached(
+                cfg, cursors
+            ):
+                self._accumulators = saved
+                return None
             return quotas
 
     # -- length estimation ------------------------------------------------
@@ -841,14 +995,25 @@ class AccumulatorStrategy(AllocationStrategy):
         component could receive a larger-than-average quota in the very next
         chunk, but it is close to correct and consistent with accumulator
         convergence. Actual termination is governed by ``compute_quotas``.
+
+        Repeating datasets with no ``max_repeats`` cap contribute infinitely
+        and are skipped from the ``min``.  Repeating datasets with a finite
+        cap are projected forward by the remaining epochs.  Under ``stop_after_passes``
+        termination is governed by the slowest dataset (a ``max``), so that
+        case is delegated to :func:`_stop_after_passes_remaining_samples`.
         """
         cfg = self._config
+        if cfg.stop_after_passes is not None:
+            return _stop_after_passes_remaining_samples(cfg, cursors)
         chunks_possible: float = math.inf
         for name in cfg.component_order:
             avg_quota = cfg.weights[name] * cfg.chunk_size
             if avg_quota <= 0:
                 continue
-            available = cursors[name].remaining / avg_quota
+            effective_remaining = _effective_remaining_samples(cfg, name, cursors[name])
+            if effective_remaining is None:
+                continue  # unbounded contribution
+            available = effective_remaining / avg_quota
             chunks_possible = min(chunks_possible, available)
             if chunks_possible <= 0:
                 return 0
@@ -957,18 +1122,18 @@ class LegacyFixedStrategy(AllocationStrategy):
     ) -> dict[str, int] | None:
         """Legacy fixed-quota chunk production (pre-accumulator checkpoints)."""
         cfg = self._config
-        if cfg.exhausted_policy == "redistribute":
-            raise NotImplementedError("Exhausted policy 'redistribute' not implemented")
+        self._check_no_redistribute()
 
         # Check exhaustion per component and either stop or reset.
         for name in cfg.component_order:
             quota = self._chunk_quota[name]
             cursor = cursors[name]
             if cursor.remaining < quota:
-                if cfg.exhausted_policy == "repeat":
-                    if cfg.max_repeats is not None and cursor._epoch >= cfg.max_repeats:
+                if cfg.exhausted_policy[name] == "repeat":
+                    ds_max = cfg.max_repeats[name]
+                    if ds_max is not None and cursor._epoch >= ds_max:
                         return None  # hit repeat cap
-                    cursor.reset(reshuffle=cfg.reshuffle_on_repeat)
+                    cursor.reset(reshuffle=cfg.reshuffle_on_repeat[name])
                 else:
                     return None  # "stop" policy
 
@@ -977,6 +1142,8 @@ class LegacyFixedStrategy(AllocationStrategy):
     # -- length estimation ------------------------------------------------
 
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
+        # Legacy mode is reached only from pre-strategy checkpoints, which always
+        # migrate to stop_after_passes=None, so the floor never applies here.
         if not self._chunk_quota:
             return 0
         cfg = self._config
@@ -986,7 +1153,10 @@ class LegacyFixedStrategy(AllocationStrategy):
             quota = self._chunk_quota[name]
             if quota <= 0:
                 continue
-            available_chunks = cursors[name].remaining // quota
+            effective_remaining = _effective_remaining_samples(cfg, name, cursors[name])
+            if effective_remaining is None:
+                continue
+            available_chunks = effective_remaining // quota
             chunks_possible = min(chunks_possible, available_chunks)
             if chunks_possible == 0:
                 return 0
@@ -1045,6 +1215,22 @@ class StaticMixtureWorkSource(WorkSource):
 
     The emitted identifiers have the shape ``(dataset_id, shard_id, sample_idx)``
     where ``dataset_id`` is the position of the dataset in the constructor list.
+
+    ``exhausted_policy``, ``reshuffle_on_repeat``, and ``max_repeats`` each
+    accept either a scalar (broadcast to every dataset) or a per-dataset
+    mapping, so different datasets in the mixture can use different policies
+    (e.g. one repeats forever as padding while another drives termination when
+    exhausted).
+
+    ``stop_after_passes`` is the minimum number of full passes per dataset: every
+    dataset repeats and the run stops once all have been traversed that many
+    times. The slowest dataset is seen exactly this many times and triggers the
+    stop; faster datasets loop more in the meantime to hold the mixing ratio. It
+    is the **default** (``stop_after_passes=1`` — see each dataset once, then
+    stop) when no exhaustion config is passed; giving ``exhausted_policy`` or
+    ``max_repeats`` opts into the explicit per-dataset API and turns it off. An
+    explicit ``stop_after_passes`` requires every dataset to repeat, so it rejects
+    (``ValueError``) a non-``"repeat"`` ``exhausted_policy`` or any ``max_repeats``.
     """
 
     def __init__(
@@ -1056,15 +1242,34 @@ class StaticMixtureWorkSource(WorkSource):
         shuffle_shards: bool = True,
         shuffle_within_shard: bool = False,
         shuffle_block_size: ShuffleBlockSpec = None,
-        exhausted_policy: str = "stop",
-        reshuffle_on_repeat: bool = True,
-        max_repeats: int | None = None,
+        exhausted_policy: str | Mapping[str, str] | None = None,
+        reshuffle_on_repeat: bool | Mapping[str, bool] | _Sentinel = _Sentinel.UNSET,
+        max_repeats: int | None | Mapping[str, int | None] = None,
+        stop_after_passes: int | None | _Sentinel = _STOP_AFTER_PASSES_UNSET,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         if not datasets:
             raise ValueError("At least one dataset must be provided")
         super().__init__()
+
+        # Remember which exhaustion-policy args the caller set explicitly: a
+        # resume rejects a caller that contradicts the checkpoint, while args
+        # left at their defaults still inherit the frozen policy even if the
+        # default has since moved (see load_state_dict).
+        self._explicit_policy_fields: frozenset[str] = frozenset(
+            name
+            for name, provided in (
+                ("exhausted_policy", exhausted_policy is not None),
+                ("reshuffle_on_repeat", reshuffle_on_repeat is not _Sentinel.UNSET),
+                ("max_repeats", max_repeats is not None),
+                (
+                    "stop_after_passes",
+                    stop_after_passes is not _STOP_AFTER_PASSES_UNSET,
+                ),
+            )
+            if provided
+        )
 
         self._datasets: list[Dataset] = list(datasets)
         dataset_names = [ds.name for ds in self._datasets]
@@ -1129,55 +1334,140 @@ class StaticMixtureWorkSource(WorkSource):
             raise ValueError("No active mixture components available")
 
         self._seed = seed
-        valid_policies = {"stop", "redistribute", "repeat"}
-        if exhausted_policy not in valid_policies:
-            raise ValueError(
-                "exhausted_policy must be one of 'stop', 'redistribute', 'repeat'"
+        active_names = list(component_order)
+
+        # Resolve the stop_after_passes default: unset (caller passed nothing) becomes
+        # stop_after_passes=1 — epoch the slowest dataset once, repeat the rest —
+        # unless the caller opted into the explicit stop/cap API, which is
+        # mutually exclusive with stop_after_passes.
+        if stop_after_passes is _STOP_AFTER_PASSES_UNSET:
+            stop_after_passes = (
+                1 if exhausted_policy is None and max_repeats is None else None
             )
 
-        if max_repeats is not None and exhausted_policy != "repeat":
-            warnings.warn(
-                f"max_repeats={max_repeats} has no effect with "
-                f"exhausted_policy='{exhausted_policy}'",
-                RuntimeWarning,
-                stacklevel=2,
+        # Validate stop_after_passes and its interactions up-front so a contradictory
+        # config fails loudly instead of silently overriding the caller.
+        if stop_after_passes is not None:
+            if isinstance(stop_after_passes, bool) or not isinstance(
+                stop_after_passes, int
+            ):
+                raise ValueError(
+                    f"stop_after_passes must be a positive int or None, got {stop_after_passes!r}"
+                )
+            if stop_after_passes < 1:
+                raise ValueError(
+                    f"stop_after_passes must be >= 1, got {stop_after_passes}"
+                )
+
+        # An unspecified policy resolves to "stop" normally, but to "repeat"
+        # under stop_after_passes, which requires every dataset to repeat.
+        policy_default = "repeat" if stop_after_passes is not None else "stop"
+        if exhausted_policy is None:
+            exhausted_policy = policy_default
+        exhausted_policy_map = _normalize_per_dataset(
+            exhausted_policy,
+            active_names,
+            default=policy_default,
+            name="exhausted_policy",
+        )
+        valid_policies = {"stop", "redistribute", "repeat"}
+        for ds_name, policy in exhausted_policy_map.items():
+            if policy not in valid_policies:
+                raise ValueError(
+                    f"exhausted_policy['{ds_name}']={policy!r} must be one of "
+                    f"{sorted(valid_policies)}"
+                )
+
+        if stop_after_passes is not None:
+            conflicting = sorted(
+                ds for ds, pol in exhausted_policy_map.items() if pol != "repeat"
             )
+            if conflicting:
+                raise ValueError(
+                    f"stop_after_passes={stop_after_passes} requires every dataset to repeat "
+                    f"toward the global floor, but exhausted_policy sets "
+                    f"{conflicting} to a non-'repeat' policy. stop_after_passes governs "
+                    f"termination globally (stop once every dataset has completed "
+                    f"{stop_after_passes} pass(es)); drop the explicit exhausted_policy "
+                    f"override or drop stop_after_passes."
+                )
+            if max_repeats is not None:
+                raise ValueError(
+                    f"stop_after_passes={stop_after_passes} cannot be combined with "
+                    f"max_repeats={max_repeats!r}: stop_after_passes is a global lower "
+                    f"bound on passes while max_repeats is a per-dataset upper "
+                    f"cap that could force the stream to end before the floor is "
+                    f"reached. Use one or the other."
+                )
+
+        if reshuffle_on_repeat is _Sentinel.UNSET:
+            reshuffle_on_repeat = True
+        reshuffle_on_repeat_map = _normalize_per_dataset(
+            reshuffle_on_repeat,
+            active_names,
+            default=True,
+            name="reshuffle_on_repeat",
+        )
+
+        max_repeats_map = _normalize_per_dataset(
+            max_repeats,
+            active_names,
+            default=None,
+            name="max_repeats",
+        )
+
+        for ds_name, mr in max_repeats_map.items():
+            if mr is not None and exhausted_policy_map[ds_name] != "repeat":
+                warnings.warn(
+                    f"max_repeats['{ds_name}']={mr} has no effect with "
+                    f"exhausted_policy['{ds_name}']="
+                    f"'{exhausted_policy_map[ds_name]}'",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         self._alloc_config = _AllocationConfig(
             component_order=component_order,
             weights=self._weights,
             chunk_size=chunk_size,
-            exhausted_policy=exhausted_policy,
-            reshuffle_on_repeat=reshuffle_on_repeat,
-            max_repeats=max_repeats,
+            exhausted_policy=exhausted_policy_map,
+            reshuffle_on_repeat=reshuffle_on_repeat_map,
+            max_repeats=max_repeats_map,
+            stop_after_passes=stop_after_passes,
         )
 
-        # Guard: with repeat policy, each dataset must have enough samples to
-        # fill its maximum possible per-chunk quota after a cursor reset.
-        # The accumulator can carry up to ~1.0 of fractional remainder, so the
-        # worst-case single-chunk quota is ceil(weight * chunk_size).  Without
-        # this check the retry loop in _next_chunk_accumulator would spin
-        # forever (rollback → same accumulators → same impossible quota).
-        if exhausted_policy == "repeat":
-            for name in component_order:
-                min_required = math.ceil(self._weights[name] * chunk_size)
-                cursor = self._cursors[name]
-                if cursor._total_samples < min_required:
-                    raise ValueError(
-                        f"Dataset '{name}' has {cursor._total_samples} samples "
-                        f"but repeat policy requires at least {min_required} "
-                        f"(ceil(weight={self._weights[name]:.4g} * "
-                        f"chunk_size={chunk_size})). "
-                        f"Increase dataset size or decrease chunk_size."
-                    )
+        self._validate_repeat_capacity()
 
         self._strategy: AllocationStrategy = AccumulatorStrategy(
             config=self._alloc_config,
         )
 
         self.total_samples: int | float = (
-            float("inf") if exhausted_policy == "repeat" else len(self)
+            float("inf") if _is_unbounded(self._alloc_config) else len(self)
         )
+
+    def _validate_repeat_capacity(self) -> None:
+        """Reject a repeat-policy dataset too small to fill one chunk's quota.
+
+        The accumulator can carry up to ~1.0 of fractional remainder, so the
+        worst-case single-chunk quota is ceil(weight * chunk_size).  Without
+        this check the retry loop in _next_chunk_accumulator would spin
+        forever (rollback → same accumulators → same impossible quota).
+        """
+        cfg = self._alloc_config
+        for name in cfg.component_order:
+            if cfg.exhausted_policy[name] != "repeat":
+                continue
+            min_required = math.ceil(self._weights[name] * cfg.chunk_size)
+            cursor = self._cursors[name]
+            if cursor._total_samples < min_required:
+                raise ValueError(
+                    f"Dataset '{name}' has {cursor._total_samples} samples "
+                    f"but repeat policy requires at least {min_required} "
+                    f"(ceil(weight={self._weights[name]:.4g} * "
+                    f"chunk_size={cfg.chunk_size})). "
+                    f"Increase dataset size or decrease chunk_size."
+                )
 
     def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource:
         """Lightweight clone that avoids deepcopying large cursor buffers.
@@ -1199,6 +1489,7 @@ class StaticMixtureWorkSource(WorkSource):
         clone._dataset_ids = dict(self._dataset_ids)
         clone._datasets_by_id = dict(self._datasets_by_id)
         clone._alloc_config = self._alloc_config  # frozen, safe to share
+        clone._explicit_policy_fields = self._explicit_policy_fields
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
         clone._shuffle_block_size_spec = self._shuffle_block_size_spec
@@ -1286,7 +1577,7 @@ class StaticMixtureWorkSource(WorkSource):
         if not components:
             return None
 
-        if self._alloc_config.exhausted_policy != "repeat":
+        if not _is_unbounded(self._alloc_config):
             self.total_samples = len(self)
 
         return WorkChunk(
@@ -1301,14 +1592,17 @@ class StaticMixtureWorkSource(WorkSource):
     def __len__(self) -> int:
         """Returns the number of available samples across all chunks that can be yielded."""
         if hasattr(self, "_alloc_config"):
-            if self._alloc_config.exhausted_policy == "redistribute":
-                raise NotImplementedError(
-                    "Exhausted policy 'redistribute' not implemented"
-                )
-            if self._alloc_config.exhausted_policy == "repeat":
+            cfg = self._alloc_config
+            for name in cfg.component_order:
+                if cfg.exhausted_policy[name] == "redistribute":
+                    raise NotImplementedError(
+                        "Exhausted policy 'redistribute' not implemented"
+                    )
+            if _is_unbounded(cfg):
                 raise TypeError(
                     "len() is not defined for an infinite work source "
-                    "(exhausted_policy='repeat')"
+                    "(at least one dataset has exhausted_policy='repeat' "
+                    "with max_repeats=None)"
                 )
 
         return self._strategy.estimate_remaining_samples(self._cursors)
@@ -1341,7 +1635,7 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = StaticMixtureStateV2(
+        state = StaticMixtureStateV3(
             version=STATIC_MIXTURE_VERSION,
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
@@ -1367,16 +1661,49 @@ class StaticMixtureWorkSource(WorkSource):
                 name: int(cur_state["epoch"])
                 for name, cur_state in cursor_states.items()
             },
-            exhausted_policy=cfg.exhausted_policy,
-            reshuffle_on_repeat=cfg.reshuffle_on_repeat,
-            max_repeats=cfg.max_repeats,
+            exhausted_policy=dict(cfg.exhausted_policy),
+            reshuffle_on_repeat=dict(cfg.reshuffle_on_repeat),
+            max_repeats=dict(cfg.max_repeats),
+            stop_after_passes=cfg.stop_after_passes,
             accumulators=accumulators,
             allocation_mode=strategy_state["allocation_mode"],
         )
         return state.to_dict()
 
+    def _reject_policy_override(self, ckpt: StaticMixtureStateV3) -> None:
+        """Fail a resume whose explicit policy args contradict the checkpoint.
+
+        A resume restores the policy frozen in the checkpoint, so an explicit
+        constructor arg that disagrees would be silently dropped. Only args the
+        caller set explicitly are compared, so a default that has since moved
+        still resumes cleanly.
+        """
+        seeded = self._alloc_config
+        candidates = (
+            ("exhausted_policy", seeded.exhausted_policy, ckpt.exhausted_policy),
+            (
+                "reshuffle_on_repeat",
+                seeded.reshuffle_on_repeat,
+                ckpt.reshuffle_on_repeat,
+            ),
+            ("max_repeats", seeded.max_repeats, ckpt.max_repeats),
+            ("stop_after_passes", seeded.stop_after_passes, ckpt.stop_after_passes),
+        )
+        conflicts = [
+            f"{name}: constructor={got!r} != checkpoint={want!r}"
+            for name, got, want in candidates
+            if name in self._explicit_policy_fields and got != want
+        ]
+        if conflicts:
+            raise RuntimeError(
+                "Constructor exhaustion-policy args contradict the checkpoint, "
+                "which a resume cannot honor (the frozen policy is restored "
+                "instead). Drop the conflicting args or resume from a matching "
+                "config: " + "; ".join(conflicts)
+            )
+
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = StaticMixtureStateV2.load(state)
+        ckpt = StaticMixtureStateV3.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
@@ -1385,30 +1712,7 @@ class StaticMixtureWorkSource(WorkSource):
         self._seed = ckpt.seed
         self._shuffle_block_size_spec = ckpt.shuffle_block_size_spec
 
-        cur_cfg = self._alloc_config
-        if ckpt.reshuffle_on_repeat != cur_cfg.reshuffle_on_repeat:
-            raise RuntimeError(
-                f"Checkpoint has reshuffle_on_repeat={ckpt.reshuffle_on_repeat} but "
-                f"the current instance was constructed with "
-                f"reshuffle_on_repeat={cur_cfg.reshuffle_on_repeat}. "
-                f"These must match for deterministic continuation."
-            )
-        if ckpt.max_repeats != cur_cfg.max_repeats:
-            raise RuntimeError(
-                f"Checkpoint has max_repeats={ckpt.max_repeats} but "
-                f"the current instance was constructed with "
-                f"max_repeats={cur_cfg.max_repeats}. "
-                f"These must match for deterministic continuation."
-            )
-        if ckpt.exhausted_policy != cur_cfg.exhausted_policy:
-            raise RuntimeError(
-                f"Checkpoint has exhausted_policy={ckpt.exhausted_policy!r} but "
-                f"the current instance was constructed with "
-                f"exhausted_policy={cur_cfg.exhausted_policy!r}. "
-                f"These must match for deterministic continuation."
-            )
-
-        # Verify dataset_ids matching
+        # A different dataset set/order can't be reconciled — fail loudly.
         if not ckpt.dataset_ids:
             raise RuntimeError("Checkpoint missing or invalid dataset_ids mapping.")
         ckpt_dataset_ids = {
@@ -1422,6 +1726,16 @@ class StaticMixtureWorkSource(WorkSource):
                 "Checkpoint dataset_ids do not match current dataset ordering. "
                 f"checkpoint={ckpt_dataset_ids}, current={current_dataset_ids}"
             )
+
+        # The exhaustion-policy block (exhausted_policy / reshuffle_on_repeat /
+        # max_repeats / stop_after_passes) is taken from the checkpoint below,
+        # just like seed / chunk_size / weights: a resumed run keeps the policy
+        # it was frozen with, so a default that has since moved (e.g. the
+        # stop_after_passes default) resumes cleanly and old checkpoints keep
+        # old behavior. The constructor's policy args only seed fresh runs, so
+        # an explicit arg that contradicts the checkpoint is rejected rather
+        # than silently dropped.
+        self._reject_policy_override(ckpt)
 
         # Rebuild cursors deterministically and set positions
         self._cursors.clear()
@@ -1448,10 +1762,11 @@ class StaticMixtureWorkSource(WorkSource):
             )
             self._knobs_by_name[ds.name] = ds_knobs
             cur = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), ds_knobs)
+            reshuffle_for_ds = ckpt.reshuffle_on_repeat[ds.name]
             if ds.name in ckpt.cursor_states:
                 cur.restore_checkpoint_state(
                     ckpt.cursor_states[ds.name],
-                    reshuffle=ckpt.reshuffle_on_repeat,
+                    reshuffle=reshuffle_for_ds,
                 )
             else:
                 # Pre-strategy v1 checkpoint had only cursor_positions/_epochs.
@@ -1460,7 +1775,7 @@ class StaticMixtureWorkSource(WorkSource):
                         "epoch": int(ckpt.cursor_epochs.get(ds.name, 0)),
                         "position": int(ckpt.cursor_positions.get(ds.name, 0)),
                     },
-                    reshuffle=ckpt.reshuffle_on_repeat,
+                    reshuffle=reshuffle_for_ds,
                 )
             self._cursors[ds.name] = cur
 
@@ -1473,6 +1788,7 @@ class StaticMixtureWorkSource(WorkSource):
             exhausted_policy=ckpt.exhausted_policy,
             reshuffle_on_repeat=ckpt.reshuffle_on_repeat,
             max_repeats=ckpt.max_repeats,
+            stop_after_passes=ckpt.stop_after_passes,
         )
         self._weights = dict(ckpt.weights)
 
@@ -1481,6 +1797,7 @@ class StaticMixtureWorkSource(WorkSource):
                 raise RuntimeError(
                     "Accumulator-mode checkpoint missing accumulators field"
                 )
+            self._validate_repeat_capacity()
             self._strategy = AccumulatorStrategy(
                 config=self._alloc_config,
                 accumulators={str(k): float(v) for k, v in ckpt.accumulators.items()},
@@ -1489,7 +1806,5 @@ class StaticMixtureWorkSource(WorkSource):
             self._strategy = LegacyFixedStrategy(config=self._alloc_config)
 
         self.total_samples = (
-            float("inf")
-            if self._alloc_config.exhausted_policy == "repeat"
-            else len(self)
+            float("inf") if _is_unbounded(self._alloc_config) else len(self)
         )

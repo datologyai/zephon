@@ -210,13 +210,21 @@ cursor runs out of samples depends on the **exhaustion policy**.
 
 ### Exhaustion policies
 
+By default the source runs `stop_after_passes=1`: every dataset repeats and
+the stream ends once all of them have completed one full pass.  The largest
+dataset is seen exactly once and triggers the stop; smaller datasets loop in
+the meantime so the mixture ratio holds throughout.  Pass a larger integer to
+require more passes over every dataset.  Passing `exhausted_policy` or
+`max_repeats` turns the floor off and opts into the per-dataset policy below;
+the two are mutually exclusive.
+
 The `exhausted_policy` parameter controls what
 {py:class}`~zephon.work.StaticMixtureWorkSource` does when a mixture
 component can no longer fill its per-chunk quota:
 
 | Policy | Behaviour |
 |---|---|
-| `"stop"` (default) | Return `None` as soon as **any** component is exhausted. The training loop sees end-of-data. |
+| `"stop"` | Return `None` as soon as **any** component is exhausted. The training loop sees end-of-data. |
 | `"repeat"` | Reset the exhausted component's cursor to position 0 and keep going. Each component restarts independently — a small dataset may cycle several times while a large one is still on its first pass. The source never returns `None` (unless `max_repeats` is set). |
 
 ```python
@@ -241,6 +249,23 @@ single component may restart.  Once a component hits the cap, the source
 returns `None` just like `"stop"`.  This is useful as a safety valve when
 you want repetition but do not want to rely solely on `max_steps` to stop
 training.
+
+**Per-dataset policies.** `exhausted_policy`, `reshuffle_on_repeat`, and
+`max_repeats` each accept either a scalar (broadcast to every dataset) or a
+`{dataset_name: value}` mapping, so datasets in the same mix can differ — for
+example one repeating forever as padding while another stops when exhausted.
+
+```python
+ws = StaticMixtureWorkSource(
+    datasets=[web_corpus, instruction_data],
+    mixture={"web": 0.7, "instructions": 0.3},
+    chunk_size=16384,
+    seed=42,
+    # web pads forever; the stream ends once instructions is exhausted
+    exhausted_policy={"web": "repeat", "instructions": "stop"},
+    reshuffle_on_repeat={"web": True, "instructions": False},
+)
+```
 
 ```{note}
 A `"redistribute"` policy (shift an exhausted component's quota

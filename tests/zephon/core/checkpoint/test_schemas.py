@@ -5,11 +5,14 @@
 
 import dataclasses
 
+import pytest
+
 from zephon.core.checkpoint import (
     CursorStateV1,
     EngineStateV1,
     StaticMixtureStateV1,
     StaticMixtureStateV2,
+    StaticMixtureStateV3,
     WorkChunkStateV1,
 )
 from zephon.core.checkpoint._migrations import (
@@ -811,3 +814,234 @@ def test_load_protects_top_level_from_migration_mutation(monkeypatch):
     snapshot = dict(raw)
     _CursorStateV2.load(raw)
     assert raw == snapshot  # migration must not mutate caller's dict
+
+
+# -- StaticMixtureStateV3 ----------------------------------------------------
+
+
+def _minimal_static_mixture_v3_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV3 (one component).
+
+    v3 differs from v2 only in that the three exhaustion-policy knobs are
+    per-dataset dicts keyed by ``component_order`` instead of scalars.
+    """
+    base = {
+        "version": 3,
+        "lane_id": 0,
+        "canonical_replicas": 1,
+        "chunk_size_hint": None,
+        "seed": 0,
+        "chunk_size": 1,
+        "knobs": {"shuffle_shards": False, "shuffle_within_shard": False},
+        "global_chunk_index": 0,
+        "weights": {"a": 1.0},
+        "component_order": ["a"],
+        "dataset_ids": {"a": 0},
+        "cursor_positions": {"a": 0},
+        "cursor_epochs": {"a": 0},
+        "cursor_states": {},
+        "cursor_block_sizes": {"a": None},
+        "shuffle_block_size_spec": None,
+        "exhausted_policy": {"a": "stop"},
+        "reshuffle_on_repeat": {"a": True},
+        "max_repeats": {"a": None},
+        "stop_after_passes": None,
+        "allocation_mode": "legacy_fixed",
+        "accumulators": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_static_mixture_v3_minimal_roundtrip():
+    sm = StaticMixtureStateV3.from_dict(_minimal_static_mixture_v3_raw())
+    assert sm.version == 3
+    assert sm.exhausted_policy == {"a": "stop"}
+    assert sm.reshuffle_on_repeat == {"a": True}
+    assert sm.max_repeats == {"a": None}
+    # Round-trips back to an identical dict.
+    assert StaticMixtureStateV3.from_dict(sm.to_dict()).to_dict() == sm.to_dict()
+
+
+def test_static_mixture_v3_has_no_exhausted_datasets_field():
+    """V3 is Unit-1-only: it must not carry Unit 4's exhausted_datasets."""
+    field_names = {f.name for f in dataclasses.fields(StaticMixtureStateV3)}
+    assert "exhausted_datasets" not in field_names
+    # Nor any token / lane fields (those live in later schema versions).
+    for foreign in (
+        "mixture_unit",
+        "token_deficits",
+        "token_ratios",
+        "lane_assignment",
+    ):
+        assert foreign not in field_names
+
+
+def test_static_mixture_v3_per_dataset_policies():
+    raw = _minimal_static_mixture_v3_raw(
+        weights={"a": 0.5, "b": 0.5},
+        component_order=["a", "b"],
+        dataset_ids={"a": 0, "b": 1},
+        cursor_positions={"a": 0, "b": 0},
+        cursor_epochs={"a": 0, "b": 0},
+        cursor_block_sizes={"a": None, "b": None},
+        exhausted_policy={"a": "repeat", "b": "stop"},
+        reshuffle_on_repeat={"a": False, "b": True},
+        max_repeats={"a": 3, "b": None},
+    )
+    sm = StaticMixtureStateV3.from_dict(raw)
+    assert sm.exhausted_policy == {"a": "repeat", "b": "stop"}
+    assert sm.max_repeats == {"a": 3, "b": None}
+
+
+def test_static_mixture_v3_rejects_scalar_policy():
+    """A scalar (v2-shaped) policy must be rejected at v3 — the migration fans
+    scalars out into per-dataset dicts before construction."""
+    with pytest.raises(ValueError, match="exhausted_policy must be a per-dataset dict"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(exhausted_policy="stop")
+        )
+
+
+def test_static_mixture_v3_rejects_policy_keys_mismatch():
+    with pytest.raises(ValueError, match="exhausted_policy keys"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(exhausted_policy={"b": "stop"})
+        )
+    with pytest.raises(ValueError, match="max_repeats keys"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(max_repeats={"a": None, "b": 2})
+        )
+
+
+def test_static_mixture_v3_rejects_invalid_policy_value():
+    with pytest.raises(ValueError, match="must be one of"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(exhausted_policy={"a": "banana"})
+        )
+
+
+def test_static_mixture_v3_accepts_redistribute_policy():
+    """The schema accepts 'redistribute' as a value; the runtime raises
+    NotImplementedError, but the on-disk shape is still valid."""
+    sm = StaticMixtureStateV3.from_dict(
+        _minimal_static_mixture_v3_raw(exhausted_policy={"a": "redistribute"})
+    )
+    assert sm.exhausted_policy == {"a": "redistribute"}
+
+
+def test_static_mixture_v3_rejects_invalid_allocation_mode():
+    with pytest.raises(ValueError, match="allocation_mode='banana'"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(allocation_mode="banana")
+        )
+
+
+def test_static_mixture_v3_rejects_token_aware_mode():
+    """token_aware was never written as v3 (it is a later schema's mode); a v3
+    dict claiming it is corrupt."""
+    with pytest.raises(ValueError, match="allocation_mode='token_aware'"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(allocation_mode="token_aware")
+        )
+
+
+def test_static_mixture_v3_shares_block_invariants_with_v2():
+    # Stale shuffle_block_size key in knobs (a v2-era invariant) is rejected.
+    with pytest.raises(ValueError, match="shuffle_block_size"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(
+                knobs={
+                    "shuffle_shards": False,
+                    "shuffle_within_shard": False,
+                    "shuffle_block_size": 4,
+                }
+            )
+        )
+    # bool shuffle_block_size_spec is rejected.
+    with pytest.raises(ValueError, match="bool"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(shuffle_block_size_spec=True)
+        )
+    # cursor_block_sizes keys must match dataset_ids.
+    with pytest.raises(ValueError, match="cursor_block_sizes"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(cursor_block_sizes={})
+        )
+
+
+def test_static_mixture_v3_accepts_accumulator_mode():
+    sm = StaticMixtureStateV3.from_dict(
+        _minimal_static_mixture_v3_raw(
+            allocation_mode="accumulator", accumulators={"a": 0.5}
+        )
+    )
+    assert sm.allocation_mode == "accumulator"
+    assert sm.accumulators == {"a": 0.5}
+
+
+def test_static_mixture_v3_requires_stop_after_passes():
+    """stop_after_passes is required (no default) like every v3 field but version; a
+    checkpoint missing it is corruption, not an old shape — the v2 -> v3
+    migration fills it for genuinely older checkpoints."""
+    import pytest
+
+    raw = _minimal_static_mixture_v3_raw()
+    del raw["stop_after_passes"]
+    with pytest.raises(ValueError, match="stop_after_passes: missing"):
+        StaticMixtureStateV3.from_dict(raw)
+
+
+def test_static_mixture_v3_stop_after_passes_roundtrip():
+    # Required but nullable: None and an int both round-trip.
+    assert (
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw()
+        ).stop_after_passes
+        is None
+    )
+    # A set floor requires the repeat policy (mirrors the constructor).
+    sm = StaticMixtureStateV3.from_dict(
+        _minimal_static_mixture_v3_raw(
+            stop_after_passes=2, exhausted_policy={"a": "repeat"}
+        )
+    )
+    assert sm.stop_after_passes == 2
+    assert StaticMixtureStateV3.from_dict(sm.to_dict()).to_dict() == sm.to_dict()
+
+
+def test_static_mixture_v3_rejects_non_positive_stop_after_passes():
+    import pytest
+
+    with pytest.raises(ValueError, match="positive int"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(
+                stop_after_passes=0, exhausted_policy={"a": "repeat"}
+            )
+        )
+
+
+def test_static_mixture_v3_rejects_stop_after_passes_with_non_repeat_policy():
+    """The schema mirrors the constructor: a floor needs every policy "repeat"."""
+    import pytest
+
+    with pytest.raises(ValueError, match="requires every dataset to repeat"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(
+                stop_after_passes=1, exhausted_policy={"a": "stop"}
+            )
+        )
+
+
+def test_static_mixture_v3_rejects_stop_after_passes_with_max_repeats():
+    """The schema mirrors the constructor: a floor can't combine with max_repeats."""
+    import pytest
+
+    with pytest.raises(ValueError, match="cannot be combined with max_repeats"):
+        StaticMixtureStateV3.from_dict(
+            _minimal_static_mixture_v3_raw(
+                stop_after_passes=1,
+                exhausted_policy={"a": "repeat"},
+                max_repeats={"a": 3},
+            )
+        )

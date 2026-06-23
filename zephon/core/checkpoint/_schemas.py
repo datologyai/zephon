@@ -250,7 +250,7 @@ class WorkChunkStateV1(CheckpointMixin):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 2
+STATIC_MIXTURE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -313,22 +313,107 @@ _VALID_ALLOCATION_MODES = frozenset({"accumulator", "legacy_fixed"})
 _REQUIRED_V2_KNOB_KEYS = frozenset({"shuffle_shards", "shuffle_within_shard"})
 
 
-@dataclass(frozen=True)
+def _static_mixture_block_invariant_errors(
+    *,
+    shuffle_block_size_spec: int | str | None,
+    knobs: dict[str, Any],
+    allocation_mode: str,
+    cursor_block_sizes: dict[str, int | None],
+    dataset_ids: dict[str, int],
+) -> list[str]:
+    """Structural invariants shared by ``StaticMixtureStateV2`` and ``V3``.
+
+    These fields are identical across v2 (scalar policies) and v3 (per-dataset
+    policies); only the exhaustion-policy knobs differ. Returns a list of error
+    strings (empty == valid) so each caller raises with its own version tag.
+    """
+    errors: list[str] = []
+
+    # shuffle_block_size_spec — int (not bool), one of two sentinel strings,
+    # or None. The annotation alone is too loose; reject other types here.
+    spec = shuffle_block_size_spec
+    if isinstance(spec, bool):
+        errors.append(
+            f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
+            f"got bool ({spec!r})"
+        )
+    elif isinstance(spec, str):
+        if spec not in ("auto", "global"):
+            errors.append(
+                f"shuffle_block_size_spec={spec!r} is not a valid sentinel "
+                f"(expected 'auto', 'global', int, or None)"
+            )
+    elif spec is not None and not isinstance(spec, int):
+        errors.append(
+            f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
+            f"got {type(spec).__name__} ({spec!r})"
+        )
+
+    # knobs must carry the orthogonal shuffle toggles and must NOT carry
+    # the stale shuffle_block_size key — that field moved out in v2.
+    if not isinstance(knobs, dict):
+        errors.append(f"knobs must be a dict, got {type(knobs).__name__}")
+    else:
+        missing_knobs = _REQUIRED_V2_KNOB_KEYS - set(knobs)
+        if missing_knobs:
+            errors.append(f"knobs missing required keys {sorted(missing_knobs)}")
+        if "shuffle_block_size" in knobs:
+            errors.append(
+                "knobs must not carry 'shuffle_block_size' in v2 — it lives "
+                "in cursor_block_sizes/shuffle_block_size_spec now"
+            )
+
+    if allocation_mode not in _VALID_ALLOCATION_MODES:
+        errors.append(
+            f"allocation_mode={allocation_mode!r} is not one of "
+            f"{sorted(_VALID_ALLOCATION_MODES)}"
+        )
+
+    if not isinstance(cursor_block_sizes, dict):
+        errors.append(
+            f"cursor_block_sizes must be a dict, got {type(cursor_block_sizes).__name__}"
+        )
+    else:
+        for name, value in cursor_block_sizes.items():
+            # bool first — it is an int subclass.
+            if isinstance(value, bool):
+                errors.append(
+                    f"cursor_block_sizes[{name!r}] must be int or None, got bool"
+                )
+            elif value is not None and not isinstance(value, int):
+                errors.append(
+                    f"cursor_block_sizes[{name!r}] must be int or None, "
+                    f"got {type(value).__name__}"
+                )
+        if isinstance(dataset_ids, dict):
+            missing = set(dataset_ids) - set(cursor_block_sizes)
+            extra = set(cursor_block_sizes) - set(dataset_ids)
+            if missing:
+                errors.append(
+                    f"cursor_block_sizes missing entries for {sorted(missing)} "
+                    f"(must match dataset_ids keys)"
+                )
+            if extra:
+                errors.append(
+                    f"cursor_block_sizes has unknown entries {sorted(extra)} "
+                    f"(must match dataset_ids keys)"
+                )
+    return errors
+
+
+@dataclass(frozen=True, kw_only=True)
 class StaticMixtureStateV2(CheckpointMixin):
     """Checkpoint schema for ``StaticMixtureWorkSource`` (version 2).
 
-    The resolved per-dataset block size lives in ``cursor_block_sizes``
-    (always ``int | None``, never a sentinel) and is the source of truth on
-    restore. ``shuffle_block_size_spec`` records the user-given spec verbatim
-    (``int | None`` or the sentinels ``"auto"`` / ``"global"``).
-
-    ``knobs`` no longer carries ``shuffle_block_size`` — it has been promoted
-    to its own field. ``__post_init__`` rejects checkpoints that still carry
-    the stale key so a downstream loader cannot silently ignore it.
+    The resolved per-dataset block size lives in ``cursor_block_sizes`` (always
+    ``int | None``, never a sentinel) and is the source of truth on restore;
+    ``shuffle_block_size_spec`` records the user-given spec verbatim (``int |
+    None`` or the ``"auto"`` / ``"global"`` sentinels). ``knobs`` no longer
+    carries ``shuffle_block_size`` — it was promoted to its own field, and
+    ``__post_init__`` rejects checkpoints that still carry the stale key.
     """
 
     _COMPONENT: ClassVar[str] = "static_mixture"
-    # Always written by every historical v2 producer.
     lane_id: int
     canonical_replicas: int
     chunk_size_hint: int | None
@@ -352,81 +437,144 @@ class StaticMixtureStateV2(CheckpointMixin):
     version: int = 2
 
     def __post_init__(self) -> None:
-        errors: list[str] = []
-
-        # shuffle_block_size_spec — int (not bool), one of two sentinel strings,
-        # or None. The annotation alone is too loose; reject other types here.
-        spec = self.shuffle_block_size_spec
-        if isinstance(spec, bool):
-            errors.append(
-                f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
-                f"got bool ({spec!r})"
-            )
-        elif isinstance(spec, str):
-            if spec not in ("auto", "global"):
-                errors.append(
-                    f"shuffle_block_size_spec={spec!r} is not a valid sentinel "
-                    f"(expected 'auto', 'global', int, or None)"
-                )
-        elif spec is not None and not isinstance(spec, int):
-            errors.append(
-                f"shuffle_block_size_spec must be int, 'auto', 'global', or None; "
-                f"got {type(spec).__name__} ({spec!r})"
-            )
-
-        # knobs must carry the orthogonal shuffle toggles and must NOT carry
-        # the stale shuffle_block_size key — that field moved out in v2.
-        if not isinstance(self.knobs, dict):
-            errors.append(f"knobs must be a dict, got {type(self.knobs).__name__}")
-        else:
-            missing_knobs = _REQUIRED_V2_KNOB_KEYS - set(self.knobs)
-            if missing_knobs:
-                errors.append(f"knobs missing required keys {sorted(missing_knobs)}")
-            if "shuffle_block_size" in self.knobs:
-                errors.append(
-                    "knobs must not carry 'shuffle_block_size' in v2 — it lives "
-                    "in cursor_block_sizes/shuffle_block_size_spec now"
-                )
-
-        if self.allocation_mode not in _VALID_ALLOCATION_MODES:
-            errors.append(
-                f"allocation_mode={self.allocation_mode!r} is not one of "
-                f"{sorted(_VALID_ALLOCATION_MODES)}"
-            )
-
-        if not isinstance(self.cursor_block_sizes, dict):
-            errors.append(
-                "cursor_block_sizes must be a dict, "
-                f"got {type(self.cursor_block_sizes).__name__}"
-            )
-        else:
-            for name, value in self.cursor_block_sizes.items():
-                # bool first — it is an int subclass.
-                if isinstance(value, bool):
-                    errors.append(
-                        f"cursor_block_sizes[{name!r}] must be int or None, got bool"
-                    )
-                elif value is not None and not isinstance(value, int):
-                    errors.append(
-                        f"cursor_block_sizes[{name!r}] must be int or None, "
-                        f"got {type(value).__name__}"
-                    )
-            if isinstance(self.dataset_ids, dict):
-                missing = set(self.dataset_ids) - set(self.cursor_block_sizes)
-                extra = set(self.cursor_block_sizes) - set(self.dataset_ids)
-                if missing:
-                    errors.append(
-                        f"cursor_block_sizes missing entries for {sorted(missing)} "
-                        f"(must match dataset_ids keys)"
-                    )
-                if extra:
-                    errors.append(
-                        f"cursor_block_sizes has unknown entries {sorted(extra)} "
-                        f"(must match dataset_ids keys)"
-                    )
+        errors = _static_mixture_block_invariant_errors(
+            shuffle_block_size_spec=self.shuffle_block_size_spec,
+            knobs=self.knobs,
+            allocation_mode=self.allocation_mode,
+            cursor_block_sizes=self.cursor_block_sizes,
+            dataset_ids=self.dataset_ids,
+        )
         if errors:
             raise ValueError(
                 "StaticMixtureStateV2 invariants violated:\n  - "
+                + "\n  - ".join(errors)
+            )
+
+
+def _static_mixture_policy_invariant_errors(
+    *,
+    component_order: list[str],
+    exhausted_policy: dict[str, str],
+    reshuffle_on_repeat: dict[str, bool],
+    max_repeats: dict[str, int | None],
+) -> list[str]:
+    """Per-dataset exhaustion-policy invariants for v3.
+
+    Each knob must be a dict keyed by exactly ``component_order``, and each
+    policy value must be a recognised policy.
+    """
+    errors: list[str] = []
+    expected = set(component_order)
+    for fname, value in (
+        ("exhausted_policy", exhausted_policy),
+        ("reshuffle_on_repeat", reshuffle_on_repeat),
+        ("max_repeats", max_repeats),
+    ):
+        if not isinstance(value, dict):
+            errors.append(
+                f"{fname} must be a per-dataset dict, got {type(value).__name__}"
+            )
+        elif set(value) != expected:
+            errors.append(
+                f"{fname} keys {sorted(value)} must match component_order "
+                f"{sorted(expected)}"
+            )
+
+    valid_policies = {"stop", "redistribute", "repeat"}
+    if isinstance(exhausted_policy, dict):
+        for name, policy in exhausted_policy.items():
+            if policy not in valid_policies:
+                errors.append(
+                    f"exhausted_policy[{name!r}]={policy!r} must be one of "
+                    f"{sorted(valid_policies)}"
+                )
+    return errors
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV3(CheckpointMixin):
+    """Checkpoint schema for ``StaticMixtureWorkSource`` (version 3).
+
+    The three exhaustion-policy knobs (``exhausted_policy`` /
+    ``reshuffle_on_repeat`` / ``max_repeats``) are per-dataset dicts keyed by
+    dataset name, letting datasets in one mixture use different policies.
+    ``stop_after_passes`` is the global termination floor (``None`` == no floor).
+
+    A standalone class, not a ``StaticMixtureStateV2`` subclass: re-typing those
+    knobs from v2's scalars cannot be expressed as a field override.
+    """
+
+    _COMPONENT: ClassVar[str] = "static_mixture"
+    lane_id: int
+    canonical_replicas: int
+    chunk_size_hint: int | None
+    seed: int
+    chunk_size: int
+    knobs: dict[str, Any]
+    global_chunk_index: int
+    weights: dict[str, float]
+    component_order: list[str]
+    dataset_ids: dict[str, int]
+    cursor_positions: dict[str, int]
+    cursor_epochs: dict[str, int]
+    cursor_states: dict[str, dict[str, Any]]
+    cursor_block_sizes: dict[str, int | None]
+    shuffle_block_size_spec: int | str | None
+    exhausted_policy: dict[str, str]
+    reshuffle_on_repeat: dict[str, bool]
+    max_repeats: dict[str, int | None]
+    stop_after_passes: int | None
+    allocation_mode: str
+    accumulators: dict[str, float] | None
+    version: int = 3
+
+    def __post_init__(self) -> None:
+        errors = _static_mixture_block_invariant_errors(
+            shuffle_block_size_spec=self.shuffle_block_size_spec,
+            knobs=self.knobs,
+            allocation_mode=self.allocation_mode,
+            cursor_block_sizes=self.cursor_block_sizes,
+            dataset_ids=self.dataset_ids,
+        )
+        errors.extend(
+            _static_mixture_policy_invariant_errors(
+                component_order=self.component_order,
+                exhausted_policy=self.exhausted_policy,
+                reshuffle_on_repeat=self.reshuffle_on_repeat,
+                max_repeats=self.max_repeats,
+            )
+        )
+        # Mirror the constructor's stop_after_passes interaction rules: load
+        # paths adopt these fields directly (no constructor), so the schema is
+        # the only gate against a config the public API would reject.
+        if self.stop_after_passes is not None:
+            if self.stop_after_passes < 1:
+                errors.append(
+                    f"stop_after_passes must be a positive int or None, got "
+                    f"{self.stop_after_passes!r}"
+                )
+            if isinstance(self.exhausted_policy, dict):
+                non_repeat = sorted(
+                    ds for ds, pol in self.exhausted_policy.items() if pol != "repeat"
+                )
+                if non_repeat:
+                    errors.append(
+                        f"stop_after_passes={self.stop_after_passes} requires every "
+                        f"dataset to repeat, but {non_repeat} have a non-'repeat' "
+                        f"exhausted_policy"
+                    )
+            if isinstance(self.max_repeats, dict):
+                capped = sorted(
+                    ds for ds, mr in self.max_repeats.items() if mr is not None
+                )
+                if capped:
+                    errors.append(
+                        f"stop_after_passes={self.stop_after_passes} cannot be "
+                        f"combined with max_repeats, but {capped} are capped"
+                    )
+        if errors:
+            raise ValueError(
+                "StaticMixtureStateV3 invariants violated:\n  - "
                 + "\n  - ".join(errors)
             )
 

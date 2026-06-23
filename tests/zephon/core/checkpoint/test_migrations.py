@@ -315,9 +315,25 @@ def test_v1_to_v2_does_not_mutate_v1_knobs():
     assert d["knobs"] is not v1.knobs
 
 
-def test_v1_to_v2_end_to_end_via_migrate_validates_v2():
-    """The migrate() entry point produces a dict V2.from_dict accepts."""
+def test_v1_to_v2_migrate_lands_on_valid_v2(monkeypatch):
+    """Explicit single-hop check: pinning current to 2 makes migrate() stop at
+    v2, so we validate exactly the v1->v2 step — version stamp included —
+    without depending on how many versions exist downstream.
+    """
     from zephon.core.checkpoint._schemas import StaticMixtureStateV2
+
+    monkeypatch.setitem(CURRENT_VERSIONS, "static_mixture", 2)
+    sm = StaticMixtureStateV2.from_dict(
+        migrate("static_mixture", _v1_static_mixture_raw())
+    )
+    assert sm.version == 2
+    assert sm.exhausted_policy == "stop"  # scalar policy preserved at v2
+    assert "shuffle_block_size" not in sm.knobs  # promoted out of knobs in v2
+
+
+def test_v1_end_to_end_via_migrate_validates_current():
+    """The migrate() entry point produces a dict the current (v3) schema accepts."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
 
     raw = _v1_static_mixture_raw(
         knobs={
@@ -332,9 +348,110 @@ def test_v1_to_v2_end_to_end_via_migrate_validates_v2():
         cursor_epochs={"a": 0, "b": 0},
     )
     migrated = migrate("static_mixture", raw)
-    sm = StaticMixtureStateV2.from_dict(migrated)
-    assert sm.version == 2
+    sm = StaticMixtureStateV3.from_dict(migrated)
+    assert sm.version == 3
     assert sm.cursor_block_sizes == {"a": 8, "b": 8}
     assert sm.shuffle_block_size_spec == 8
     assert sm.allocation_mode == "legacy_fixed"
     assert "shuffle_block_size" not in sm.knobs
+    # v2 -> v3 broadcasts the scalar exhaustion knobs across component_order.
+    assert sm.exhausted_policy == {"a": "stop", "b": "stop"}
+    assert sm.reshuffle_on_repeat == {"a": False, "b": False}
+    assert sm.max_repeats == {"a": None, "b": None}
+    # stop_after_passes is an additive v3 field absent in older checkpoints.
+    assert sm.stop_after_passes is None
+
+
+def _v2_static_mixture_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV2 (one component)."""
+    base = {
+        "version": 2,
+        "lane_id": 0,
+        "canonical_replicas": 1,
+        "chunk_size_hint": None,
+        "seed": 0,
+        "chunk_size": 1,
+        "knobs": {"shuffle_shards": False, "shuffle_within_shard": False},
+        "global_chunk_index": 0,
+        "weights": {"a": 1.0},
+        "component_order": ["a"],
+        "dataset_ids": {"a": 0},
+        "cursor_positions": {"a": 0},
+        "cursor_epochs": {"a": 0},
+        "cursor_states": {},
+        "cursor_block_sizes": {"a": None},
+        "shuffle_block_size_spec": None,
+        "exhausted_policy": "stop",
+        "reshuffle_on_repeat": False,
+        "max_repeats": None,
+        "allocation_mode": "legacy_fixed",
+        "accumulators": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_v2_to_v3_broadcasts_scalar_policies_across_components():
+    """v2's scalar exhaustion knobs fan out into per-dataset dicts keyed by
+    component_order, leaving every other field untouched."""
+    from zephon.core.checkpoint._migrations import _static_mixture_v2_to_v3
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV2
+
+    v2 = StaticMixtureStateV2.from_dict(
+        _v2_static_mixture_raw(
+            weights={"a": 0.5, "b": 0.5},
+            component_order=["a", "b"],
+            dataset_ids={"a": 0, "b": 1},
+            cursor_positions={"a": 0, "b": 0},
+            cursor_epochs={"a": 0, "b": 0},
+            cursor_block_sizes={"a": None, "b": None},
+            exhausted_policy="repeat",
+            reshuffle_on_repeat=True,
+            max_repeats=5,
+        )
+    )
+    d = _static_mixture_v2_to_v3(v2)
+    assert d["exhausted_policy"] == {"a": "repeat", "b": "repeat"}
+    assert d["reshuffle_on_repeat"] == {"a": True, "b": True}
+    assert d["max_repeats"] == {"a": 5, "b": 5}
+    assert d["stop_after_passes"] is None  # v2 had no global floor
+    # Non-policy fields are carried through unchanged.
+    assert d["cursor_block_sizes"] == {"a": None, "b": None}
+    assert d["allocation_mode"] == "legacy_fixed"
+
+
+def test_v2_to_v3_migrate_lands_on_valid_v3(monkeypatch):
+    """Explicit single-hop check: pin current to 3 so migrate() stops at v3
+    (stays a v2->v3-only test even once later versions are added)."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+
+    monkeypatch.setitem(CURRENT_VERSIONS, "static_mixture", 3)
+    sm = StaticMixtureStateV3.from_dict(
+        migrate("static_mixture", _v2_static_mixture_raw())
+    )
+    assert sm.version == 3
+    assert sm.exhausted_policy == {"a": "stop"}  # scalar broadcast to a dict
+    assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
+
+
+def test_v2_to_v3_end_to_end_validates_v3():
+    """migrate() on a v2 payload yields a dict StaticMixtureStateV3 accepts."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+
+    migrated = migrate("static_mixture", _v2_static_mixture_raw())
+    sm = StaticMixtureStateV3.from_dict(migrated)
+    assert sm.version == 3
+    assert sm.exhausted_policy == {"a": "stop"}
+    assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
+
+
+def test_v2_to_v3_does_not_mutate_input():
+    """The migration must not alias or mutate the source v2 instance/dict."""
+    from zephon.core.checkpoint._migrations import _static_mixture_v2_to_v3
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV2
+
+    v2 = StaticMixtureStateV2.from_dict(_v2_static_mixture_raw())
+    d = _static_mixture_v2_to_v3(v2)
+    d["exhausted_policy"]["a"] = "repeat"
+    # v2 is frozen; its scalar policy is unaffected by mutating the v3 dict.
+    assert v2.exhausted_policy == "stop"

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,54 @@ def test_repeat_checkpoint_restore_through_pipeline(tmp_path: Path) -> None:
     assert combined == baseline, (
         f"prefix({len(prefix)}) + suffix({len(suffix)}) != baseline({len(baseline)})"
     )
+
+
+def test_stop_after_passes_vs_stop_modes(tmp_path: Path) -> None:
+    """Contrast the two termination modes end-to-end on identical inputs.
+
+    ``exhausted_policy="stop"`` ends the moment the short dataset is exhausted
+    (short seen once, long truncated, no repeats). ``stop_after_passes=1`` (the
+    default) instead repeats the short dataset until the long one is drained once.
+    """
+    ds_long = _write_jsonl(tmp_path, "long", list(range(40)))
+    ds_short = _write_jsonl(tmp_path, "short", list(range(100, 108)))  # 8 samples
+
+    def _run(**policy: object) -> list[tuple[str, int]]:
+        work = StaticMixtureWorkSource(
+            [ds_long, ds_short],
+            {ds_long.name: 0.5, ds_short.name: 0.5},
+            chunk_size=8,
+            seed=42,
+            shuffle_shards=False,
+            **policy,
+        )
+        pipe = PublicPipeline(work).decode_text()
+        pipe = pipe.options(
+            deterministic=True,
+            runner="threads",
+            max_workers=2,
+            mixture_config=MixtureReadConfig(
+                mode=MixtureReadMode.WEIGHTED_ROUND_ROBIN, seed=0
+            ),
+        )
+        return _collect_values(pipe)
+
+    stop_items = _run(exhausted_policy="stop")  # old pre-flip behavior
+    repeat_items = _run(stop_after_passes=1)  # the new default
+
+    def _counts(items: list[tuple[str, int]], name: str) -> Counter[int]:
+        return Counter(v for n, v in items if n == name)
+
+    # Default stop: short consumed once, long truncated, nothing repeated.
+    assert max(_counts(stop_items, "short").values()) == 1
+    assert len(_counts(stop_items, "long")) < 40
+
+    # stop_after_passes=1: long drained exactly once (all 40 unique), short upsampled.
+    long_counts = _counts(repeat_items, "long")
+    short_counts = _counts(repeat_items, "short")
+    assert len(long_counts) == 40 and max(long_counts.values()) == 1
+    assert max(short_counts.values()) > 1
+    assert len(repeat_items) > len(stop_items)
 
 
 def test_repeat_reshuffle_produces_different_order_per_epoch(tmp_path: Path) -> None:
