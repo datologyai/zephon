@@ -259,6 +259,15 @@ class RuntimeOptions:
     # "hard" slashes all join timeouts for fast exit (useful for benchmarks).
     shutdown_mode: Literal["graceful", "hard"] = "graceful"
 
+    # === Auto-validation ===
+    # Controls how Pipeline.__iter__ handles the auto-validation harness.
+    # "strict" (default) raises ValidationError on any error-severity issue.
+    # "warn" runs validation and surfaces the full report via warnings.warn
+    # but does not raise — escape hatch for cases where the validator's
+    # generic checks produce a false positive against a user op.
+    # "off" skips the validator entirely; reserved for last-resort overrides.
+    auto_validation: Literal["strict", "warn", "off"] = "strict"
+
     # === MTP Mode (GIL isolation) ===
     # When True, the Engine runs in a non-daemon subprocess for GIL isolation.
     # The main process only dequeues finished batches via IPC.

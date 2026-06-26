@@ -40,9 +40,16 @@ are:
   into [micro-batches](#micro-batches) for processing.  The `deterministic`
   flag is passed by the runner and controls whether time-based flushing is
   allowed (see [CountingAccumulator](#built-in-accumulators) below).
-- **`process_many(elems)`**: the workhorse.  Takes a list of elements
-  (a micro-batch), transforms them, and returns a list of results.  This is
-  the function that runs in parallel across workers.
+- **`process_many(elems)`**: the workhorse.  Takes a list of stream
+  elements (a micro-batch) — {py:class}`~zephon.core.SampleRecord`
+  instances, or {py:class}`~zephon.core.constants.SampleBatch` objects
+  downstream of `.batch()` — transforms them, and returns a list of the **same element
+  types**.  To transform a sample, rebuild its `.payload` while preserving
+  its `.meta` (which carries the sample's identity, lineage, and ordering
+  cursor); never return a bare `dict`, list, or raw payload.  The engine
+  rejects any other output element type with
+  `TypeError: Unsupported element type`.  This is the function that runs in
+  parallel across workers.
 - **`traits()`**: declares properties that guide compilation and
   scheduling, such as the suggested parallelism and whether the operator
   preserves sample ordering.
@@ -569,11 +576,190 @@ pipeline = (
 See the {py:meth}`~zephon.api.Pipeline.stateful_transform` API reference
 for the full set of parameters.
 
-```{note}
-There is currently no public API for defining fully custom operators with
-custom accumulators.  The `Op` protocol and accumulator interfaces exist
-internally and are used by all built-in operators, but they are not yet
-stabilized for external use.  If the built-in operators and UDF mechanisms
-do not cover your use case, please open an issue; we are evaluating how
-to best expose this extension point.
+## Fully custom operators
+
+When `map_transform` / `map_batch` / `stateful_transform` aren't enough —
+for instance, you need a custom accumulator paired with a custom
+worker-side `process_many`, parallel workers over a non-default batching
+discipline, or full control over operator traits — use
+{py:meth}`~zephon.api.Pipeline.add_op`.  It accepts two forms.
+
+### Instance form: `add_op(op)` with a `BaseOp` subclass
+
+Subclass {py:class}`~zephon.core.BaseOp` when your op needs the full
+lifecycle: configuration in `__init__`, per-worker resource construction
+in `setup` (with access to the runner's
+{py:class}`~zephon.core.OpContext`), per-op traits via `traits`, and a
+custom accumulator.  The framework deep-copies the instance per parallel
+worker and runs `setup` on each copy, so `self.*` attributes are
+isolated per worker on every runner — the same lifecycle built-in
+operators use.
+
+```python
+from zephon.core import BaseOp, CountingAccumulator, OpContext, OpTraits
+
+class Tokenize(BaseOp):
+    def __init__(self, tokenizer_name: str, max_batch: int = 64):
+        super().__init__()
+        self._tokenizer_name = tokenizer_name  # picklable config
+        self._max_batch = max_batch
+        self._tokenizer = None                 # built per-worker in setup()
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True, parallelism=4)
+
+    def setup(self, ctx: OpContext, stage_index, stage_name, op_index, collect_stats):
+        super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+        # Per-worker init: build heavy / non-picklable resources here (the repo
+        # convention — keeps __init__ picklable for the process and Ray
+        # runners), and read services from ctx.
+        self._tokenizer = load_tokenizer(self._tokenizer_name)
+        self._metrics_cb = ctx.get("emit_my_metrics")
+
+    def accumulator(self, *, deterministic, ctx):
+        return CountingAccumulator(max_batch=self._max_batch)
+
+    def process_many(self, elems):
+        # Records in, records out: rebuild each payload, preserve each .meta.
+        for e in elems:
+            e.payload = {**e.payload, "ids": self._tokenizer.encode(e.payload["text"])}
+        return elems
+
+pipeline.add_op(Tokenize("gpt2", max_batch=64))
+```
+
+Traits come from `op.traits()`; pass them via your
+{py:class}`~zephon.core.OpTraits` rather than as kwargs on `add_op`.
+The optional `name` kwarg controls the node name in plan graphs and
+metrics (defaults to the class name); `placement` works the same way
+as in the kwargs form.
+
+### Kwargs form: `add_op(name, *, process_many=…, …)`
+
+Convenience for stateless transforms whose only per-worker dependency
+is picklable config captured in a closure.  The framework builds an
+internal `BaseOp` subclass from the kwargs.
+
+```python
+from zephon.core import CountingAccumulator
+
+eos = " <eos>"  # picklable config captured in the closure
+
+def append_eos(elems):
+    # Records in, records out: rebuild each payload, preserve each .meta.
+    for e in elems:
+        e.payload = {**e.payload, "text": e.payload["text"] + eos}
+    return elems
+
+pipeline.add_op(
+    "append_eos",
+    process_many=append_eos,
+    accumulator=lambda: CountingAccumulator(max_batch=64),
+    parallelism=4,
+    preserves_cursor_order=True,
+)
+```
+
+`name`, `process_many`, and `preserves_cursor_order` are required.
+Pass `preserves_cursor_order=True` for 1:1 maps, payload transforms,
+and non-reordering filters; pass `False` when the op reorders,
+shuffles, or packs — the planner uses this to pick an eviction
+strategy, and getting it wrong corrupts checkpoint semantics silently.
+
+The accumulator factory defaults to a `PassthroughAccumulator`, in
+which case each upstream micro-batch is forwarded as one ready batch.
+The remaining kwargs (`parallelism`, `placement`, `indexable`,
+`batch_shape_sensitive`, `requires_serial_state`,
+`stall_on_epoch_boundary`) map 1:1 to
+{py:class}`~zephon.core.OpTraits` and follow the semantics described in
+[The operator contract](#the-operator-contract) and
+[Stalling: `stall_on_epoch_boundary`](#stalling-stall_on_epoch_boundary)
+above.  See the
+{py:meth}`~zephon.api.Pipeline.add_op` API reference for the full kwarg
+list and signature variants of the `accumulator` factory.
+
+Two invariants the kwargs callables must honor — the same ones the
+built-in operators honor:
+
+- **`process_many` must stay stateless.**  All cross-invocation state
+  belongs in the accumulator returned by your `accumulator` factory,
+  never captured in a closure that mutates between calls.  This is what
+  lets the runtime fan `process_many` out across parallel workers
+  deterministically (see [The operator contract](#the-operator-contract)).
+- **Read-only resources go in closures.**  A tokenizer object, a codec
+  table, a threshold — capture them in the closure around your
+  `process_many` callable.  They will be deep-copied per parallel worker
+  (and cloudpickled across the process/Ray boundary), so they must be
+  picklable on those runners.  Heavy or non-picklable per-worker
+  construction (model handles, open file descriptors) is what the
+  instance form's `setup` hook is for — reach for the class-based path
+  when closures aren't enough.
+
+The {py:class}`~zephon.core.Op` protocol, `BaseOp`,
+{py:class}`~zephon.core.OpContext`, {py:class}`~zephon.core.OpTraits`,
+{py:class}`~zephon.core.CountingAccumulator`, and
+{py:class}`~zephon.core.PassthroughAccumulator` are all exported from
+{py:mod}`zephon.core`.
+
+### Helping the validator: `validation_samples`
+
+When `Pipeline.__iter__` runs the validation harness (controlled by
+`RuntimeOptions.auto_validation`, default `"strict"`), it probes each
+user op with synthetic {py:class}`~zephon.core.SampleRecord` instances
+whose payload is a generic `{'text': str, 'value': int}` dict.  The
+harness never invokes `setup()`, so runtime probes (determinism,
+cross-call state, statelessness, sample identity) run against an
+un-setup'd op.  Two degradation paths fall out of that constraint, one
+per attachment shape.
+
+**Kwargs form.**  The callable is wrapped in a stateless internal op,
+so the runtime probes always run.  When the callable needs payload
+fields the synthetic records don't carry, it typically raises
+`KeyError`, `AttributeError`, or `TypeError`; the validator catches
+those and surfaces `OP_REJECTS_GENERIC_PAYLOAD` — a *warning* that
+skips the runtime checks for that op.  The pipeline still runs.
+
+**Instance form.**  The canonical `BaseOp` pattern stores heavy
+resources (tokenizers, model handles) as `None` in `__init__` and
+populates them in `setup()`, so `process_many` against an un-setup'd
+op would raise spuriously.  A defensive
+`raise RuntimeError("setup() not called")` would also escalate to
+`OP_RAISES_ON_SYNTHETIC_INPUT` (severity *error*) and block iteration
+under `auto_validation="strict"`.  The validator avoids both by
+gating the runtime checks on `validation_samples()` being overridden:
+when it isn't, the validator emits a single
+`OP_INSTANCE_RUNTIME_CHECKS_SKIPPED` *warning* and skips the runtime
+probes.  Static AST checks (self-writes, non-deterministic stdlib
+calls) still run.
+
+To opt an op into the full runtime check suite, supply records the op
+can consume *without* `setup` having run — pre-tokenize / pre-encode
+payloads rather than relying on resources the real `setup` would
+build:
+
+```python
+def custom_records():
+    return [
+        SampleRecord(
+            meta=SampleMeta(sample_id=(lane, i), lane_id=lane,
+                            chunk_id=i // 2, chunk_offset=i),
+            payload={"tokens": [1, 2, 3]},
+        )
+        for lane in (0, 1)
+        for i in range(3)
+    ]
+
+# Kwargs form — pass the factory as a kwarg on add_op.
+pipeline.add_op(
+    "needs_tokens",
+    process_many=tokenize_step,
+    preserves_cursor_order=True,
+    validation_samples=custom_records,
+)
+
+# Instance form — override the method on your BaseOp subclass.
+class MyOp(BaseOp):
+    def validation_samples(self):
+        return custom_records()
+    ...
 ```

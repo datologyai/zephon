@@ -19,8 +19,10 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    overload,
 )
 
+from zephon.core.accumulators import Accumulator, PassthroughAccumulator
 from zephon.core.constants import (
     EngineSample,
     SampleBatch,
@@ -30,7 +32,9 @@ from zephon.core.constants import (
     StreamItem,
 )
 from zephon.core.engine import Engine, RuntimeOptions
+from zephon.core.functional_op import _FunctionalOp
 from zephon.core.graph import Graph, Node, Plan
+from zephon.core.op_base import BaseOp
 from zephon.core.planner import Planner
 from zephon.core.runtime_spec import (
     RuntimeSpec,
@@ -38,6 +42,7 @@ from zephon.core.runtime_spec import (
     resolve_prefetch_batches,
     resolve_runtime_spec,
 )
+from zephon.core.traits import OpTraits
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
@@ -84,6 +89,8 @@ if TYPE_CHECKING:
         _TDataset = _DatasetProto
     TorchIterableDatasetType: TypeAlias = _TIterable  # type: ignore[assignment]
     TorchDatasetType: TypeAlias = _TDataset  # type: ignore[assignment]
+
+    from zephon.api.validate import ValidationReport
 else:
     TorchIterableDatasetType: TypeAlias = _IterableDatasetProto
     TorchDatasetType: TypeAlias = _DatasetProto
@@ -183,6 +190,7 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._iterating: bool = False
+        self._validated: bool = False
         self._options = RuntimeOptions()
         self._fetch_node: Node[FetchOp] = self._graph.add(
             "fetch", FetchOp(), placement="local"
@@ -506,6 +514,283 @@ class Pipeline:
         node = self._graph.add(
             name,
             op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        self._tail = node
+        return self
+
+    @overload
+    def add_op(
+        self,
+        op: BaseOp,
+        /,
+        *,
+        name: Optional[str] = None,
+        placement: str = "auto",
+    ) -> "Pipeline": ...
+
+    @overload
+    def add_op(
+        self,
+        name: str,
+        /,
+        *,
+        process_many: Callable[[list[Any]], list[Any]],
+        preserves_cursor_order: bool,
+        accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
+        process_one: Optional[Callable[[Any], list[Any]]] = None,
+        validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
+        parallelism: int = 1,
+        placement: str = "auto",
+        indexable: bool = False,
+        batch_shape_sensitive: bool = False,
+        requires_serial_state: bool = False,
+        stall_on_epoch_boundary: bool = False,
+    ) -> "Pipeline": ...
+
+    @_mutates_graph
+    def add_op(
+        self,
+        name_or_op: Union[str, BaseOp],
+        /,
+        *,
+        name: Optional[str] = None,
+        process_many: Optional[Callable[[list[Any]], list[Any]]] = None,
+        preserves_cursor_order: Optional[bool] = None,
+        accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
+        process_one: Optional[Callable[[Any], list[Any]]] = None,
+        validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
+        parallelism: Optional[int] = None,
+        placement: str = "auto",
+        indexable: Optional[bool] = None,
+        batch_shape_sensitive: Optional[bool] = None,
+        requires_serial_state: Optional[bool] = None,
+        stall_on_epoch_boundary: Optional[bool] = None,
+    ) -> "Pipeline":
+        """Append a custom operator — two forms.
+
+        **Instance form**: ``pipe.add_op(op, name=..., placement=...)``.
+        Pass a prebuilt :class:`BaseOp` subclass instance.  Use this when
+        the op needs full lifecycle control — ``__init__`` for
+        configuration, ``setup`` for per-worker resource construction
+        (tokenizers, model handles) and :class:`OpContext` services,
+        ``traits`` for any combination of `OpTraits` fields.  The
+        framework deep-copies the instance per parallel worker, so
+        ``self.*`` attributes set in ``setup`` are isolated per worker
+        on every runner (including the thread runner).  This matches
+        the lifecycle built-in operators use.  Traits come from
+        ``op.traits()`` rather than kwargs.
+
+        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., preserves_cursor_order=..., ...)``.
+        Convenience for stateless transforms.  The framework builds an
+        internal `BaseOp` subclass from the supplied callables +
+        accumulator factory + traits.  ``process_many`` must not carry
+        state between calls; any per-lane or cross-invocation state
+        belongs in the accumulator.  Read-only shared resources (codec
+        tables, thresholds) can be captured in a closure over the
+        callables.  See the "Accumulators and Operators" page in the
+        documentation for the operator/accumulator split.
+
+        Args (instance form):
+            op: The :class:`BaseOp` instance to attach.
+            name: Operator name used in plan graphs, metrics, and logs.
+                Defaults to the class name of ``op``.
+            placement: Placement hint passed to the planner (``"auto"``,
+                ``"local"``, or a runner-specific tag).
+
+        Args (kwargs form):
+            name: Operator name used in plan graphs, metrics, and logs.
+            process_many: Required. Callable applied to each ready batch
+                from the accumulator. Receives a list of upstream items,
+                returns the list of downstream items. Runs in parallel
+                workers when ``parallelism > 1``.
+            accumulator: Optional factory returning a fresh `Accumulator`
+                instance. The framework calls the factory once at runner
+                setup and again on ``reset_buffers`` between runs, so a
+                factory (rather than an instance) is required for
+                correctness. Two signatures are supported and auto-detected:
+
+                - ``Callable[[], Accumulator]`` — simplest form. Use
+                  ``lambda: CountingAccumulator(max_batch=N)`` for
+                  size-based per-lane batching (``key_fn=lane_of`` is
+                  the default).
+                - ``Callable[*, deterministic, ctx], Accumulator]`` —
+                  for accumulators whose construction depends on the
+                  deterministic mode (e.g. enabling latency-based flush
+                  only when ``deterministic`` is False) or runtime
+                  context. Example::
+
+                      accumulator=lambda *, deterministic, ctx: (
+                          CountingAccumulator(
+                              max_batch=N,
+                              max_latency_ms=None if deterministic else 3,
+                          )
+                      )
+
+                Defaults to a `PassthroughAccumulator` factory — each
+                upstream micro-batch becomes one ready batch as-is.
+            process_one: Optional fast path for single-element processing.
+                If omitted, the framework wraps each element in a list and
+                routes it through ``process_many``.
+            validation_samples: Optional factory returning a list of
+                :class:`~zephon.core.SampleRecord` instances for the
+                validation harness.  Override when ``process_many``
+                requires payload fields beyond the validator's synthetic
+                ``{'text': str, 'value': int}`` — letting the harness
+                run the full op-level + state-diff suite instead of
+                degrading to ``OP_REJECTS_GENERIC_PAYLOAD``.  Buggy
+                factories surface ``OP_VALIDATION_SAMPLES_FACTORY_FAILED``
+                and the validator falls back to synthetic records.
+                Include at least two distinct ``lane_id`` values so the
+                cross-call-state probe stays meaningful.
+            parallelism: Number of worker invocations to run in parallel
+                for this op.  Default 1 (serial).  Increase when
+                ``process_many`` is CPU/GPU-bound.
+            placement: Placement hint passed to the planner (``"auto"``,
+                ``"local"``, or a runner-specific tag).
+            preserves_cursor_order: Required. True when ``process_many``
+                emits records whose ``chunk_id`` order matches their
+                inputs (1:1 maps, payload transforms, non-reordering
+                filters). False when the op reorders, shuffles, or
+                packs. The planner picks a different eviction strategy
+                based on this trait — getting it wrong corrupts
+                checkpoint semantics silently. See the Checkpointing
+                page in the documentation.
+            indexable: Whether the op preserves indexability through the
+                plan.  Default False; set True only if the transform is
+                1:1 and deterministic.
+            batch_shape_sensitive: Set True when ``process_many``'s output
+                can depend on how inputs are grouped into micro-batches
+                (per-batch RNG, statistics, etc.). In deterministic mode
+                this disables latency-based accumulator flushing for
+                stages containing this op, preserving strong determinism
+                at the cost of some throughput.
+            requires_serial_state: Set True when the op's accumulator
+                holds cross-invocation state that cannot be sharded
+                across parallel worker instances. In deterministic mode
+                the planner pins ``parallelism=1`` for ops with this
+                trait.
+            stall_on_epoch_boundary: Set True to preserve the
+                accumulator's buffer across epoch sentinels instead of
+                flushing immediately. Built-in support is narrow today
+                (``Batch(drop_last=True)``); leave False unless you've
+                read the trait docstring and understand the
+                replay-capsule implications.
+
+        Returns:
+            Self for method chaining.
+
+        Examples::
+
+            # Instance form — class with setup/traits/accumulator overrides.
+            class Tokenize(BaseOp):
+                def __init__(self, name):
+                    super().__init__()
+                    self._name = name
+                    self._tokenizer = None
+                def traits(self):
+                    return OpTraits(preserves_cursor_order=True, parallelism=4)
+                def setup(self, ctx, stage_index, stage_name, op_index, collect_stats):
+                    super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+                    self._tokenizer = load_tokenizer(self._name)
+                def process_many(self, elems):
+                    return [self._tokenizer.encode(e) for e in elems]
+
+            pipeline.add_op(Tokenize("gpt2"))
+
+            # Kwargs form — stateless windowed transform.
+            from zephon.core import CountingAccumulator
+            pipeline.add_op(
+                "windowed_transform",
+                process_many=lambda elems: [...],
+                accumulator=lambda: CountingAccumulator(max_batch=64),
+                parallelism=4,
+                preserves_cursor_order=True,
+            )
+        """
+        if isinstance(name_or_op, BaseOp):
+            mismatched = [
+                kw
+                for kw, val in (
+                    ("process_many", process_many),
+                    ("preserves_cursor_order", preserves_cursor_order),
+                    ("accumulator", accumulator),
+                    ("process_one", process_one),
+                    ("validation_samples", validation_samples),
+                    ("parallelism", parallelism),
+                    ("indexable", indexable),
+                    ("batch_shape_sensitive", batch_shape_sensitive),
+                    ("requires_serial_state", requires_serial_state),
+                    ("stall_on_epoch_boundary", stall_on_epoch_boundary),
+                )
+                if val is not None
+            ]
+            if mismatched:
+                raise ValueError(
+                    "add_op(op) with a BaseOp instance does not accept "
+                    f"{', '.join(mismatched)}; traits, callables, and "
+                    "validation_samples come from the op itself "
+                    "(override `traits()` / `validation_samples()` on "
+                    "your subclass).  Use the kwargs form add_op(name, "
+                    "...) instead if you want to supply callables."
+                )
+            instance_op = name_or_op
+            node_name = name if name is not None else type(instance_op).__name__
+            if not node_name:
+                raise ValueError("add_op() requires a non-empty name")
+            node = self._graph.add(
+                node_name, instance_op, self._tail, placement=placement
+            )
+            self._tail = node
+            return self
+
+        op_name = name_or_op
+        if name is not None:
+            raise ValueError(
+                "add_op(name, ...) takes the op name positionally; the "
+                f"`name=` keyword is only for the instance form. Got positional "
+                f"{op_name!r} and name={name!r} — drop the `name=` kwarg."
+            )
+        if not op_name:
+            raise ValueError("add_op() requires a non-empty name")
+        if process_many is None:
+            raise ValueError("add_op(name, ...) requires `process_many`")
+        if preserves_cursor_order is None:
+            raise ValueError(
+                "add_op(name, ...) requires `preserves_cursor_order` "
+                "(True for 1:1 maps and non-reordering filters; False for "
+                "reorder/shuffle/pack ops)"
+            )
+
+        functional_op = _FunctionalOp(
+            process_many_fn=process_many,
+            accumulator_factory=(
+                accumulator if accumulator is not None else PassthroughAccumulator
+            ),
+            process_one_fn=process_one,
+            validation_samples_factory=validation_samples,
+            op_traits=OpTraits(
+                preserves_cursor_order=preserves_cursor_order,
+                parallelism=1 if parallelism is None else parallelism,
+                indexable=False if indexable is None else indexable,
+                batch_shape_sensitive=(
+                    False if batch_shape_sensitive is None else batch_shape_sensitive
+                ),
+                requires_serial_state=(
+                    False if requires_serial_state is None else requires_serial_state
+                ),
+                stall_on_epoch_boundary=(
+                    False
+                    if stall_on_epoch_boundary is None
+                    else stall_on_epoch_boundary
+                ),
+            ),
+        )
+        node = self._graph.add(
+            op_name,
+            functional_op,
             self._tail,
             placement=placement,
             parallelism=parallelism,
@@ -900,12 +1185,16 @@ class Pipeline:
         # Invalidate cached RuntimeSpec — options may have changed runner
         # selection, parallelism, or other compile-time decisions.
         self._runtime_spec = None
+        # Invalidate the validation cache: toggling auto_validation
+        # between "off" and "strict"/"warn" needs to re-run the harness
+        self._validated = False
         return self
 
     def _invalidate_plan(self) -> None:
         """Invalidate cached plan and derived state when the graph is mutated."""
         self._plan = None
         self._runtime_spec = None
+        self._validated = False
         if self._engine is not None:
             self._engine.close()
             self._engine = None
@@ -975,14 +1264,93 @@ class Pipeline:
         supports = getattr(self.ws, "supports_indexing", lambda: False)()
         return self._plan.indexable and supports
 
+    def validate(self, *, strict: bool = False) -> "ValidationReport":
+        """Run the custom-op validation harness against the current graph.
+
+        Walks every user-supplied operator (those built by :meth:`add_op`)
+        and runs a smoke test that checks: ``process_many`` is stateless
+        across calls, the accumulator conserves samples on push+flush,
+        ``flush(reset=True)`` leaves the accumulator in a fresh state, and
+        ``has_pending_data()`` mirrors reality.  See the
+        ``zephon.api.validate`` module for the full check list and the
+        "Accumulators and Operators" page in the published documentation
+        for the contracts being checked.
+
+        Built-in ops are skipped (framework code, tested separately); a
+        graph with no user ops returns an empty report immediately.
+
+        Args:
+            strict: If True, raise :class:`ValidationError` when any error
+                is found.  Default False — caller inspects ``report.ok``.
+
+        Returns:
+            A :class:`ValidationReport` with structured issues.
+        """
+        from zephon.api.validate import (
+            ValidationError as _ValidationError,
+        )
+        from zephon.api.validate import (
+            validate_pipeline as _validate_pipeline,
+        )
+
+        report = _validate_pipeline(self)
+        if strict and not report.ok:
+            raise _ValidationError(report)
+        return report
+
+    def _run_auto_validation(self) -> None:
+        """Run the validation harness once per graph generation.
+
+        The check is cheap (sub-ms per user op, none if there are no user
+        ops) and only runs on the first ``iter()`` after a graph mutation.
+
+        Behavior is governed by :attr:`RuntimeOptions.auto_validation`:
+
+        - ``"strict"`` (default) surfaces every non-empty report via
+          :func:`warnings.warn` and additionally raises
+          :class:`ValidationError` on any error-severity issue.
+        - ``"warn"`` runs the validator and surfaces the report via
+          :func:`warnings.warn` without raising — escape hatch when a
+          user op trips a false-positive check.
+        - ``"off"`` skips validation entirely.
+        """
+        if self._validated:
+            return
+        raw_mode = self._options.auto_validation
+        mode = raw_mode.lower() if isinstance(raw_mode, str) else raw_mode
+        if mode not in ("strict", "warn", "off"):
+            raise ValueError(
+                f"auto_validation must be one of 'strict', 'warn', 'off' "
+                f"(case-insensitive); got {raw_mode!r}"
+            )
+        if mode == "off":
+            self._validated = True
+            return
+        report = self.validate(strict=False)
+        if report.issues:
+            warnings.warn(report.format(), stacklevel=2)
+        if mode == "strict" and not report.ok:
+            from zephon.api.validate import (
+                ValidationError as _ValidationError,
+            )
+
+            raise _ValidationError(report)
+        self._validated = True
+
     def __iter__(self) -> Iterator[Any]:
         if self._iterating:
             raise RuntimeError(
                 "Pipeline is already being iterated. "
                 "Close the existing iterator before starting a new one."
             )
-        self._iterating = True
+        # Validation runs eagerly so the failure surfaces at iter() time, not
+        # after the first next().
+        self._run_auto_validation()
+        return self._iter_body()
+
+    def _iter_body(self) -> Iterator[Any]:
         try:
+            self._iterating = True
             if self._options.mtp_mode:
                 import multiprocessing as _mp
 

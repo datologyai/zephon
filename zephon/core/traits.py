@@ -6,15 +6,17 @@
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class OpTraits:
     """Static capabilities an operator advertises to the planner.
 
     Attributes:
         indexable: Whether the operator preserves indexability through the plan.
         preserves_cursor_order: Whether the operator preserves per-lane cursor
-            order (no reordering across chunk/offset/lineage). Required for
-            deciding when the cursor-order notify path is safe.
+            order (no reordering across chunk/offset/lineage). Required - every
+            operator author must make an explicit ``True``
+            (1:1 maps, payload transforms, non-reordering filters) or ``False``
+            (reorders, shuffles, packs) call.
         parallelism: Suggested parallelism for the operator when not overridden.
         batch_shape_sensitive: If True, the operator's outputs can depend on how
             inputs are grouped into micro-batches (e.g., per-batch RNG or
@@ -39,7 +41,7 @@ class OpTraits:
     """
 
     indexable: bool = True
-    preserves_cursor_order: bool | None = None
+    preserves_cursor_order: bool
     parallelism: int = 1
     batch_shape_sensitive: bool = False
     requires_serial_state: bool = False

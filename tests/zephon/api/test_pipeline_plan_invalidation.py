@@ -127,6 +127,7 @@ def test_all_graph_mutating_methods_invalidate_plan() -> None:
             "checkpoint",
             "restore",
             "metrics_snapshot",
+            "validate",
             "inflight_summary",
             # Adapters — return a wrapper object, do not mutate the graph
             "to_torch_dataset",

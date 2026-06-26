@@ -97,3 +97,31 @@ def test_pipeline_iter_with_batch_drop_last_true_discards_tail() -> None:
     batches = _consume_all_batches(pipe)
     lengths = [len(b) for b in batches]
     assert lengths == [2, 2]
+
+
+def test_pipeline_unstarted_iter_does_not_lock() -> None:
+    # Regression: iter() without next() (e.g. zip(short_iterable, pipe)) must
+    # not permanently lock the pipeline. The _iterating flag is set inside the
+    # generator body, so an iterator that is created but never advanced never
+    # marks the pipeline as iterating.
+    ds = make_inmem_dataset("tiny", [{"text": b"a"}, {"text": b"b"}])
+    ws = FakeIndexableWorkSource(ds, chunk_size=2)
+    pipe = (
+        PublicPipeline(ws)
+        .decode_text()
+        .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
+    )
+
+    # Create an iterator but never advance it, then discard it.
+    it = iter(pipe)
+    del it
+
+    # A fresh iteration must still succeed and yield records.
+    got = []
+    it2 = iter(pipe)
+    try:
+        for item in it2:
+            got.append(item)
+    finally:
+        it2.close()
+    assert len(got) == 2

@@ -12,15 +12,20 @@ from zephon.core.accumulators import (
 from zephon.core.constants import SampleId, SampleMeta, SampleRecord, ShardId
 from zephon.core.engine import Engine, RuntimeOptions, inside_torch_worker
 from zephon.core.graph import Graph, Node, Plan, Stage
+from zephon.core.op_base import BaseOp, DefaultSetup, Op, OpContext
 from zephon.core.planner import Planner
 from zephon.core.traits import OpTraits
 
 __all__ = [
     "Accumulator",
+    "BaseOp",
     "CountingAccumulator",
+    "DefaultSetup",
     "Engine",
     "Graph",
     "Node",
+    "Op",
+    "OpContext",
     "OpTraits",
     "PassthroughAccumulator",
     "Plan",

@@ -118,12 +118,6 @@ class _ReorderingOp(_OrderedOp):
         return OpTraits(indexable=True, preserves_cursor_order=False, parallelism=1)
 
 
-class _MissingTraitOp(_OrderedOp):
-    def traits(self) -> OpTraits:
-        # Intentionally omit preserves_cursor_order to ensure the planner rejects it.
-        return OpTraits()
-
-
 def test_planner_marks_plan_cursor_order_when_all_ops_preserve() -> None:
     g = Graph()
     a = g.add("a", _OrderedOp())
@@ -140,11 +134,10 @@ def test_planner_marks_plan_non_cursor_order_when_any_op_reorders() -> None:
     assert plan.preserves_cursor_order is False
 
 
-def test_planner_requires_trait_to_be_set() -> None:
-    g = Graph()
-    g.add("a", _MissingTraitOp())
-    with pytest.raises(ValueError):
-        Planner().make_plan(g)
+def test_optraits_requires_preserves_cursor_order() -> None:
+    """OpTraits enforces the trait declaration at construction time."""
+    with pytest.raises(TypeError):
+        OpTraits()  # type: ignore[call-arg]
 
 
 def test_planner_rejects_map_transform_after_batch() -> None:

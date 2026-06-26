@@ -87,14 +87,9 @@ class Planner:
         for stage in stages:
             for nd in stage.nodes:
                 traits = nd.op.traits()
-                if traits.preserves_cursor_order is None:
-                    raise ValueError(
-                        f"Operator {nd.name} ({nd.op.__class__.__name__}) must"
-                        + " set preserves_cursor_order in OpTraits."
-                    )
                 indexable = indexable and traits.indexable
-                preserves_cursor_order = preserves_cursor_order and bool(
-                    traits.preserves_cursor_order
+                preserves_cursor_order = (
+                    preserves_cursor_order and traits.preserves_cursor_order
                 )
 
         batch_size_hint = None
