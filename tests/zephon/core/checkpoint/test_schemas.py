@@ -1104,3 +1104,76 @@ def test_static_mixture_v4_still_enforces_inherited_invariants():
                 max_repeats={"a": 3},
             )
         )
+
+
+# -- WorkChunkStateV2 ---------------------------------------------------------
+
+
+def test_work_chunk_v2_roundtrip_with_target_mixture():
+    from zephon.core.checkpoint import WorkChunkStateV2
+
+    raw = {
+        "version": 2,
+        "seed": 7,
+        "components": [("a", [[0, 0, 0]]), ("b", [[1, 0, 0]])],
+        "component_order": ["a", "b"],
+        "total_samples": 2,
+        "target_mixture": {"a": 0.5, "b": 0.5},
+    }
+    chunk = WorkChunkStateV2.from_dict(raw)
+    assert chunk.target_mixture == {"a": 0.5, "b": 0.5}
+    assert chunk.to_dict()["target_mixture"] == {"a": 0.5, "b": 0.5}
+
+
+def test_work_chunk_v2_missing_target_mixture_rejected():
+    """v2 requires target_mixture present (value may be None); absence is corruption."""
+    from zephon.core.checkpoint import WorkChunkStateV2
+
+    with pytest.raises(ValueError, match="target_mixture"):
+        WorkChunkStateV2.from_dict(
+            {
+                "version": 2,
+                "components": [("a", [[0, 0, 0]])],
+                "component_order": ["a"],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {},
+        {"a": 0.0},
+        {"a": -1.0},
+        {"a": True},
+        {"a": "half"},
+        ["a", 0.5],
+    ],
+)
+def test_work_chunk_v2_rejects_bad_target_mixture(bad):
+    from zephon.core.checkpoint import WorkChunkStateV2
+
+    with pytest.raises(ValueError, match="WorkChunkStateV2"):
+        WorkChunkStateV2.from_dict(
+            {
+                "version": 2,
+                "components": [("a", [[0, 0, 0]])],
+                "component_order": ["a"],
+                "target_mixture": bad,
+            }
+        )
+
+
+def test_work_chunk_v2_inherits_v1_components_coercion():
+    """V2 reuses V1's tuple coercion so a v2 payload structures identically."""
+    from zephon.core.checkpoint import WorkChunkStateV1, WorkChunkStateV2
+
+    raw = {
+        "version": 2,
+        "components": [["a", [[0, 0, 0]]]],  # msgpack decodes tuples as lists
+        "component_order": ["a"],
+        "target_mixture": None,
+    }
+    v2 = WorkChunkStateV2.from_dict(raw)
+    v1 = WorkChunkStateV1.from_dict({**raw, "version": 1})
+    assert v2.components == v1.components == [("a", [[0, 0, 0]])]

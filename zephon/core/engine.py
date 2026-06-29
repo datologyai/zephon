@@ -1046,16 +1046,20 @@ class Engine:
     def _store_chunk_mixture(
         self, lane_id: LaneId, chunk_id: ChunkId, chunk: WorkChunk
     ) -> None:
-        """Store the mixture weights for a chunk, converting names to IDs."""
-        mixture = chunk.mixture  # dict[str, float] normalized
+        """Store a chunk's normalized mixture as component-id weights.
+
+        A stamped ``target_mixture`` takes precedence over the counted
+        composition (see :attr:`WorkChunk.target_mixture`); an unset (``None``)
+        target falls back to the counts. Both are normalized on the chunk, so
+        this only maps component names to ids.
+        """
+        mixture = chunk.target_mixture if chunk.target_mixture else chunk.mixture
         if not mixture:
             return
 
-        id_mixture: dict[int, float] = {}
-        for name, weight in mixture.items():
-            comp_id = self._get_component_id(name)
-            id_mixture[comp_id] = weight
-
+        id_mixture = {
+            self._get_component_id(name): weight for name, weight in mixture.items()
+        }
         with self._mixture_lock:
             self._chunk_mixtures[(lane_id, chunk_id)] = id_mixture
 

@@ -9,7 +9,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
-from zephon.core.checkpoint import WORK_CHUNK_VERSION, WorkChunkStateV1
+from zephon.core.checkpoint import (
+    WORK_CHUNK_VERSION,
+    WorkChunkStateV2,
+)
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
 from zephon.utils.swrr import swrr_iterate
@@ -61,10 +64,18 @@ class WorkChunk:
     ``components`` stores each mixture component (for example, ``"German"``) and
     the ordered sample identifiers that belong to it.  Mapping insertion order is used
     as a stable tie-breaker whenever behaviour depends on component ordering.
+
+    ``target_mixture``, when set, is the per-component target the engine should
+    deliver to downstream mixture correctors (``ensure_mixture``) *instead of*
+    the counted composition. Token-aware work sources stamp the user's token
+    mixture here because their chunks deliberately carry a different sample
+    composition (long-doc components contribute fewer pointers); the counted
+    :attr:`mixture` stays composition-derived for within-chunk interleaving.
     """
 
     components: SamplesPerComponent
     seed: int | None = None
+    target_mixture: Mapping[str, float] | None = None
 
     ### INTERNAL ATTRIBUTES ###
     _order_cache: list[SourcedSampleId] | None = field(
@@ -77,6 +88,10 @@ class WorkChunk:
     def __post_init__(self) -> None:
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
+        if self.target_mixture is not None:
+            # Normalize to canonical ratios (matches the `mixture` property) and
+            # validate (non-empty, positive) in one step.
+            self.target_mixture = MixtureSpec(self.target_mixture).normalized
 
     def __len__(self) -> int:
         return self._total_samples
@@ -244,25 +259,30 @@ class WorkChunk:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Portable, JSON-friendly snapshot of this chunk."""
+        """Portable, JSON-friendly snapshot of this chunk (always the current version)."""
         comps_serial: list[tuple[str, list[list[int]]]] = []
         for name in self._component_order:
             items = self.components.get(name, [])
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        state = WorkChunkStateV1(
+        state = WorkChunkStateV2(
             version=WORK_CHUNK_VERSION,
             seed=None if self.seed is None else int(self.seed),
             components=comps_serial,
             component_order=list(self._component_order),
             total_samples=int(self._total_samples),
+            target_mixture=(
+                None
+                if self.target_mixture is None
+                else {k: float(v) for k, v in self.target_mixture.items()}
+            ),
         )
         return state.to_dict()
 
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        ckpt = WorkChunkStateV1.load(payload)
+        ckpt = WorkChunkStateV2.load(payload)
 
         comps: dict[str, list[SampleId]] = {}
         for name, items in ckpt.components:
@@ -274,7 +294,11 @@ class WorkChunk:
                 restored.append((a, b, c))
             comps[name] = restored
 
-        chunk = cls(components=comps, seed=ckpt.seed)
+        chunk = cls(
+            components=comps,
+            seed=ckpt.seed,
+            target_mixture=ckpt.target_mixture,
+        )
 
         if (
             ckpt.component_order

@@ -381,12 +381,21 @@ def test_workchunk_state_dict_preserves_none_seed():
 
 
 def test_workchunk_state_dict_uses_typed_schema_version():
-    """state_dict() should write the schema's current version."""
+    """state_dict always writes the current schema version: a plain chunk
+    carries ``target_mixture: None``, a stamped chunk carries the target."""
     from zephon.core.checkpoint import WORK_CHUNK_VERSION
 
     chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=1)
     state = chunk.state_dict()
-    assert state["version"] == WORK_CHUNK_VERSION
+    assert state["version"] == WORK_CHUNK_VERSION == 2
+    assert state["target_mixture"] is None
+
+    targeted = WorkChunk(
+        components={"A": make_ids(0, 0, 1)}, seed=1, target_mixture={"A": 1.0}
+    )
+    state = targeted.state_dict()
+    assert state["version"] == 2
+    assert state["target_mixture"] == {"A": 1.0}
 
 
 def test_workchunk_from_state_rejects_bad_sample_id_length():
@@ -452,3 +461,94 @@ def test_workchunk_from_state_rejects_missing_components_key():
     msg = str(exc_info.value)
     assert "components: missing" in msg
     assert "component_order: missing" in msg
+
+
+# ---------------------------------------------------------------------------
+# WorkChunk.target_mixture (v2 state)
+# ---------------------------------------------------------------------------
+
+
+def test_workchunk_target_mixture_round_trip():
+    chunk = WorkChunk(
+        components={"A": make_ids(0, 0, 2), "B": make_ids(1, 0, 1)},
+        seed=5,
+        target_mixture={"A": 0.5, "B": 0.5},
+    )
+    state = chunk.state_dict()
+    assert state["version"] == 2
+    restored = WorkChunk.from_state(state)
+    assert restored.target_mixture == {"A": 0.5, "B": 0.5}
+    assert restored.components == chunk.components
+    # The counted mixture stays composition-derived, unaffected by the target.
+    assert restored.mixture == pytest.approx({"A": 2 / 3, "B": 1 / 3})
+
+
+@pytest.mark.parametrize("bad", [{}, {"A": 0.0}, {"A": -1.0}])
+def test_workchunk_rejects_invalid_target_mixture(bad):
+    """target_mixture is validated at construction (non-empty, positive weights)."""
+    with pytest.raises(ValueError):
+        WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=1, target_mixture=bad)
+
+
+def test_workchunk_normalizes_target_mixture_at_construction():
+    """A raw stamped target is normalized to ratios on the chunk, like `mixture`."""
+    chunk = WorkChunk(
+        components={"A": make_ids(0, 0, 1), "B": make_ids(1, 0, 1)},
+        seed=1,
+        target_mixture={"A": 3.0, "B": 1.0},
+    )
+    assert chunk.target_mixture == {"A": 0.75, "B": 0.25}
+
+
+def test_workchunk_v1_state_restores_with_none_target():
+    v1_state = {
+        "version": 1,
+        "seed": 1,
+        "components": [("A", [[0, 0, 0]])],
+        "component_order": ["A"],
+        "total_samples": 1,
+    }
+    restored = WorkChunk.from_state(v1_state)
+    assert restored.target_mixture is None
+
+
+def test_workchunk_target_mixture_does_not_affect_iteration():
+    comps = {"A": make_ids(0, 0, 4), "B": make_ids(1, 0, 4)}
+    plain = WorkChunk(components=dict(comps), seed=3)
+    targeted = WorkChunk(
+        components=dict(comps), seed=3, target_mixture={"A": 0.9, "B": 0.1}
+    )
+    # Within-chunk interleave must keep using the counted composition.
+    assert list(plain.iter_samples()) == list(targeted.iter_samples())
+
+
+def test_workchunk_from_state_preserves_target_through_reorder():
+    """component_order in the payload reorders components; the target rides along."""
+    state = {
+        "version": 2,
+        "seed": 1,
+        "components": [("B", [[1, 0, 0]]), ("A", [[0, 0, 0]])],
+        "component_order": ["A", "B"],
+        "total_samples": 2,
+        "target_mixture": {"A": 0.7, "B": 0.3},
+    }
+    restored = WorkChunk.from_state(state)
+    assert restored._component_order == ("A", "B")
+    assert restored.target_mixture == {"A": 0.7, "B": 0.3}
+
+
+def test_workchunk_sample_mode_state_dict_is_v2_with_null_target():
+    """An unstamped chunk serialises to the current (v2) shape with
+    ``target_mixture: None`` — the write path never emits an older version."""
+    chunk = WorkChunk(
+        components={"A": make_ids(0, 0, 2), "B": make_ids(1, 0, 1)}, seed=9
+    )
+    assert chunk.target_mixture is None
+    assert chunk.state_dict() == {
+        "version": 2,
+        "seed": 9,
+        "components": [("A", [[0, 0, 0], [0, 0, 1]]), ("B", [[1, 0, 0]])],
+        "component_order": ["A", "B"],
+        "total_samples": 3,
+        "target_mixture": None,
+    }

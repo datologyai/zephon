@@ -744,3 +744,43 @@ def test_lane_stream_seeds_open_epoch_after_recorded_boundary(
     assert boundary_cids[:2] == [4, 8], (
         f"expected boundaries [4, 8], got {boundary_cids}"
     )
+
+
+def test_store_chunk_mixture_prefers_target_mixture(monkeypatch, tmp_path) -> None:
+    """A stamped target_mixture (token-aware sources) wins over the counted
+    composition; untargeted chunks keep deriving the target from counts."""
+    from zephon.work.base import WorkChunk
+
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(aggregate_dir=str(tmp_path))
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, _DummyWorkSource(), spec)
+    try:
+        # 80/20 counted composition, 50/50 stamped target.
+        components = {
+            "short": [(0, 0, i) for i in range(8)],
+            "long": [(1, 0, i) for i in range(2)],
+        }
+        targeted = WorkChunk(
+            components=components, seed=0, target_mixture={"short": 0.5, "long": 0.5}
+        )
+        eng._store_chunk_mixture(0, 0, targeted)
+        by_id = eng._get_chunk_mixture(0, 0)
+        short_id = eng._get_component_id("short")
+        long_id = eng._get_component_id("long")
+        assert by_id == {short_id: 0.5, long_id: 0.5}
+
+        untargeted = WorkChunk(components=components, seed=0)
+        eng._store_chunk_mixture(0, 1, untargeted)
+        assert eng._get_chunk_mixture(0, 1) == {short_id: 0.8, long_id: 0.2}
+
+        # The replay path stores from a deserialized chunk: the stamped target
+        # must survive the state round-trip.
+        restored = WorkChunk.from_state(targeted.state_dict())
+        eng._store_chunk_mixture(0, 2, restored)
+        assert eng._get_chunk_mixture(0, 2) == {short_id: 0.5, long_id: 0.5}
+    finally:
+        eng.close()

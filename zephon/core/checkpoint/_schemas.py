@@ -218,7 +218,7 @@ class CursorStateV1(CheckpointMixin):
 # Component: WorkChunk
 # ---------------------------------------------------------------------------
 
-WORK_CHUNK_VERSION = 1
+WORK_CHUNK_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -244,6 +244,50 @@ class WorkChunkStateV1(CheckpointMixin):
     # Sanity field; None when absent on disk so callers can skip the check.
     # WorkChunk.from_state verifies this against the recomputed total.
     total_samples: int | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class WorkChunkStateV2(WorkChunkStateV1):
+    """Checkpoint schema for ``WorkChunk.state_dict()`` (version 2).
+
+    v2 adds ``target_mixture`` — the worksource-declared per-component target
+    delivered to ``ensure_mixture`` (token-aware mode stamps the user's token
+    mixture here; the counted sample composition deliberately differs from it).
+    Required but nullable: sample-mode chunks write it as ``None`` and the
+    v1->v2 migration fills the same for pre-existing checkpoints.
+    """
+
+    version: int = 2
+    target_mixture: dict[str, float] | None
+
+    def __post_init__(self) -> None:
+        if self.target_mixture is None:
+            return
+        errors: list[str] = []
+        if not isinstance(self.target_mixture, dict):
+            errors.append(
+                f"target_mixture must be a dict, got "
+                f"{type(self.target_mixture).__name__}"
+            )
+        elif not self.target_mixture:
+            errors.append(
+                "target_mixture must be non-empty when set (use None instead)"
+            )
+        else:
+            for name, weight in self.target_mixture.items():
+                if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                    errors.append(
+                        f"target_mixture[{name!r}] must be a number, "
+                        f"got {type(weight).__name__}"
+                    )
+                elif weight <= 0:
+                    errors.append(
+                        f"target_mixture[{name!r}]={weight!r} must be positive"
+                    )
+        if errors:
+            raise ValueError(
+                "WorkChunkStateV2 invariants violated:\n  - " + "\n  - ".join(errors)
+            )
 
 
 # ---------------------------------------------------------------------------

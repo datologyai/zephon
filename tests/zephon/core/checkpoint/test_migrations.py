@@ -48,11 +48,15 @@ def test_migrate_unknown_component_raises():
 def test_migrate_all_components_at_v1():
     # Each component needs whatever minimal v1-required fields its schema
     # demands so the migration framework's pre-migration validation passes.
-    # Components without active migrations (engine, work_chunk, cursor) skip
-    # validation entirely since the migration loop never runs.
+    # Components without active migrations (engine, cursor) skip validation
+    # entirely since the migration loop never runs.
     minimal_v1: dict[str, dict[str, object]] = {
         "engine": {"version": 1},
-        "work_chunk": {"version": 1},
+        "work_chunk": {
+            "version": 1,
+            "components": [("a", [[0, 0, 0]])],
+            "component_order": ["a"],
+        },
         "cursor": {"version": 1},
         "static_mixture": {
             "version": 1,
@@ -551,3 +555,35 @@ def test_v3_to_v4_end_to_end_validates_current():
     sm = StaticMixtureStateV4.from_dict(migrated)
     assert sm.version == 4
     assert sm.lane_assignment == "modulo"
+
+
+def test_work_chunk_v1_migrates_to_v2_with_none_target():
+    raw = {
+        "version": 1,
+        "seed": 3,
+        "components": [("a", [[0, 0, 0], [0, 0, 1]])],
+        "component_order": ["a"],
+        "total_samples": 2,
+    }
+    migrated = migrate("work_chunk", raw)
+    assert migrated["version"] == 2
+    assert migrated["target_mixture"] is None
+    assert migrated["components"] == [("a", [[0, 0, 0], [0, 0, 1]])]
+
+
+def test_work_chunk_v2_payload_loads_directly():
+    from zephon.core.checkpoint import WorkChunkStateV2
+
+    raw = {
+        "version": 2,
+        "components": [("a", [[0, 0, 0]])],
+        "component_order": ["a"],
+        "target_mixture": {"a": 1.0},
+    }
+    chunk = WorkChunkStateV2.load(raw)
+    assert chunk.target_mixture == {"a": 1.0}
+
+
+def test_work_chunk_newer_than_supported_rejected():
+    with pytest.raises(RuntimeError, match="newer"):
+        migrate("work_chunk", {"version": 3, "components": [], "component_order": []})

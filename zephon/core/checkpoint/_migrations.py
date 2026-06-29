@@ -112,6 +112,7 @@ from zephon.core.checkpoint._schemas import (
     StaticMixtureStateV3,
     StaticMixtureStateV4,
     WorkChunkStateV1,
+    WorkChunkStateV2,
 )
 
 
@@ -163,6 +164,13 @@ def _static_mixture_v3_to_v4(v3: StaticMixtureStateV3) -> dict[str, Any]:
     return d
 
 
+def _work_chunk_v1_to_v2(v1: WorkChunkStateV1) -> dict[str, Any]:
+    """v1 chunks carry no stamped target; ``target_mixture`` defaults to None."""
+    d = v1.to_dict()
+    d["target_mixture"] = None
+    return d
+
+
 #: Migration functions take a validated v_N instance and return a v_{N+1} dict.
 MigrationFn = Callable[[Any], dict[str, Any]]
 
@@ -170,7 +178,7 @@ MigrationFn = Callable[[Any], dict[str, Any]]
 #: order: v1->v2, v2->v3, etc.
 _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
     "engine": {},
-    "work_chunk": {},
+    "work_chunk": {1: _work_chunk_v1_to_v2},
     "static_mixture": {
         1: _static_mixture_v1_to_v2,
         2: _static_mixture_v2_to_v3,
@@ -184,7 +192,10 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
 #: dict via ``from_dict``; failure raises immediately, before migration.
 _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
     "engine": {1: EngineStateV1},
-    "work_chunk": {1: WorkChunkStateV1},
+    "work_chunk": {
+        1: WorkChunkStateV1,
+        2: WorkChunkStateV2,
+    },
     "static_mixture": {
         1: StaticMixtureStateV1,
         2: StaticMixtureStateV2,

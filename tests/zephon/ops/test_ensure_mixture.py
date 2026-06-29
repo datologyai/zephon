@@ -882,6 +882,17 @@ class TestEnsureMixtureOperator:
         assert op._config.get_weight(rec2) == 5.0
 
 
+def test_chunk_mixture_drives_swrr_target() -> None:
+    """A chunk mixture from get_chunk_mixture becomes the lane's SWRR target."""
+    from zephon.ops.ensure_mixture import _LaneState
+
+    acc = _make_accumulator_with_chunk_mixture({0: 0.75, 1: 0.25})
+    state = _LaneState()
+    acc._update_lane_swrr(lane_id=0, chunk_id=0, state=state)
+    assert state.swrr is not None
+    assert state.swrr.target_ratios == pytest.approx({0: 0.75, 1: 0.25})
+
+
 class TestObsoleteComponentDraining:
     """Tests for draining samples from obsolete components after mixture change."""
 
