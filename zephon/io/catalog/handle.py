@@ -18,6 +18,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -275,7 +276,22 @@ def _ensure_catalog_file(
         if fp is None or not catalog_io.is_valid(
             sdir / fp, schema_version=SCHEMA_VERSION
         ):
+            logger.info(
+                "Building shard catalog for dataset %r (root=%s): first "
+                "contact runs full discovery (listing + per-shard metadata "
+                "reads, remote roots can take minutes); the result is cached "
+                "under %s for later runs.",
+                header.name,
+                header.root,
+                sdir,
+            )
+            build_start = time.perf_counter()
             built = build_catalog(header)
+            logger.info(
+                "Built shard catalog for dataset %r in %.1fs",
+                header.name,
+                time.perf_counter() - build_start,
+            )
             if expected_fp is not None and built.fingerprint != expected_fp:
                 raise CatalogFingerprintMismatch(
                     f"Rebuilt catalog fingerprint {built.fingerprint} != baked "
