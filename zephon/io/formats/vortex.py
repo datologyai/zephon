@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 import numpy as np
 
 from zephon.io.formats.base import FormatHandler, register_format
-from zephon.io.index import find_and_load_index
+from zephon.io.index import find_and_load_index, warn_missing_index
 from zephon.io.index.index_types import ShardIndex, is_shard_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import StorageBackend
@@ -148,6 +148,7 @@ class VortexFormat(FormatHandler):
         entries = [name for name in storage.listdir(path) if name.endswith(".vortex")]
         if not entries:
             raise ValueError(f"No .vortex shards found under {path}")
+        warn_missing_index(path, self.kind, num_shards=len(entries))
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}

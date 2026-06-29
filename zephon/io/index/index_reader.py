@@ -11,11 +11,23 @@ in a dataset directory.
 from __future__ import annotations
 
 import json
+import logging
 
 from zephon.io.index.index_types import IndexData, is_index_data
 from zephon.io.storage.base import StorageBackend
 
+logger = logging.getLogger(__name__)
+
 _INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
+
+# Command that materializes an index.json for each indexable format.
+_INDEX_BUILD_COMMANDS: dict[str, str] = {
+    "parquet": "python -m zephon.io.index.parquet_index {path}",
+    "vortex": "python -m zephon.io.index.vortex_index {path}",
+}
+
+# Paths already warned about, so we shout once per dataset rather than per scan.
+_warned_paths: set[str] = set()
 
 
 def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | None:
@@ -44,4 +56,39 @@ def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | N
     return None
 
 
-__all__ = ["find_and_load_index"]
+def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) -> None:
+    """Loudly warn that ``path`` has no ``index.json`` and is being scanned shard-by-shard.
+
+    Discovery without an index opens every shard to read its metadata — one
+    network/disk round-trip per shard, which is painfully slow for large
+    datasets. Building an index once makes later discovery O(1). Warns at most
+    once per ``path`` so it shouts per dataset, not per scan.
+
+    Args:
+        path: Dataset directory being scanned.
+        fmt: Format kind (``"parquet"``, ``"vortex"``); selects the build hint.
+        num_shards: Number of shards about to be scanned, if known.
+    """
+    if path in _warned_paths:
+        return
+    _warned_paths.add(path)
+
+    scope = f"{num_shards} shards" if num_shards is not None else "every shard"
+    build_cmd = _INDEX_BUILD_COMMANDS.get(fmt, "").format(path=path)
+    hint = f"\n  ==> Build one once with:  {build_cmd}" if build_cmd else ""
+    logger.warning(
+        """
+================================ SLOW DATASET DISCOVERY ================================
+  No usable index.json found for %s dataset at:
+    %s
+  Falling back to opening %s to read metadata (one read per shard).
+  This can be VERY slow for large datasets.%s
+=======================================================================================""",
+        fmt,
+        path,
+        scope,
+        hint,
+    )
+
+
+__all__ = ["find_and_load_index", "warn_missing_index"]

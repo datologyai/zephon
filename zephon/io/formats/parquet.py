@@ -28,7 +28,7 @@ import numpy as np
 
 from zephon.io.catalog.extra_codec import EncodedExtra, register_extra_codec
 from zephon.io.formats.base import FormatHandler, register_format
-from zephon.io.index import find_and_load_index
+from zephon.io.index import find_and_load_index, warn_missing_index
 from zephon.io.index.index_types import ShardIndex, is_shard_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage.base import StorageBackend
@@ -483,6 +483,7 @@ class ParquetFormat(FormatHandler):
         )
         if not entries:
             raise ValueError(f"No .parquet shards found under {path}")
+        warn_missing_index(path, self.kind, num_shards=len(entries))
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, object]] = {}
