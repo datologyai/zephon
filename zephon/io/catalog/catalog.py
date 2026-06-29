@@ -76,6 +76,7 @@ class ShardCatalog:
         )
         self._shard_id = self._cols["shard_id"]
         self._num_rows = self._cols["num_rows"]
+        self._raw_bytes = self._cols["raw_bytes"]
         # Codecs register at format-module import, so a cold attach in a fresh
         # worker must force that import — the default-codec fallback would
         # silently drop codec-owned extra keys. missing_ok: non-builtin kinds
@@ -124,6 +125,10 @@ class ShardCatalog:
 
     def num_rows(self) -> np.ndarray:
         return self._num_rows
+
+    def raw_bytes(self) -> np.ndarray:
+        """Per-shard raw file sizes in bytes, aligned with :meth:`ids`."""
+        return self._raw_bytes
 
     def total(self) -> int:
         return int(self._num_rows.sum())
@@ -189,7 +194,7 @@ class ShardCatalog:
                 raw_hashes = decoded
         raw = ShardFile(
             basename=raw_basename,
-            bytes=int(self._cols["raw_bytes"][slot]),
+            bytes=int(self._raw_bytes[slot]),
             hashes=raw_hashes,
         )
 

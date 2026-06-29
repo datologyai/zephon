@@ -54,13 +54,18 @@ def _loc(
     zip_name: str | None = None,
     compression: str | None = None,
     extra: dict | None = None,
+    raw_bytes: int | None = None,
 ) -> ShardLocator:
     return ShardLocator(
         dataset=dataset,
         shard_id=shard_id,
         format="jsonl",
         root=root or f"/data/{dataset}",
-        raw=ShardFile(basename=basename, bytes=len(basename), hashes={}),
+        raw=ShardFile(
+            basename=basename,
+            bytes=len(basename) if raw_bytes is None else raw_bytes,
+            hashes={},
+        ),
         zip=ShardFile(basename=zip_name, bytes=1, hashes={}) if zip_name else None,
         compression=compression,
         extra=extra or {},
@@ -102,6 +107,21 @@ def test_shardcatalog_reverse_lookup_raw_and_zip(tmp_path: Path) -> None:
     assert cat.reverse_lookup("s5.jsonl") == (1, "raw")
     assert cat.reverse_lookup("s0.jsonl.zip") == (0, "zip")
     assert cat.reverse_lookup("not-a-shard") is None
+
+
+def test_shardcatalog_raw_bytes_in_slot_order(tmp_path: Path) -> None:
+    # raw_bytes() returns the per-shard raw file sizes aligned with ids(), i.e.
+    # in slot (sorted shard_id) order, not locator-argument order.
+    cset = catalog_set_from_locators(
+        [
+            _loc("ds", 5, "s5.jsonl", raw_bytes=90),
+            _loc("ds", 0, "s0.jsonl", raw_bytes=10),
+        ],
+        tmp_path,
+    )
+    cat = cset.catalog_for("ds")
+    np.testing.assert_array_equal(cat.ids(), np.array([0, 5]))
+    np.testing.assert_array_equal(cat.raw_bytes(), np.array([10, 90]))
 
 
 def test_shardcatalog_columns_are_mmap_views(tmp_path: Path) -> None:
