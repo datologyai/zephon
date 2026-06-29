@@ -58,6 +58,7 @@ import traceback
 import warnings
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
+from multiprocessing.context import BaseContext
 from multiprocessing.util import Finalize
 from typing import Any, Iterator
 
@@ -70,6 +71,19 @@ from zephon.core.notify import (
 )
 from zephon.utils.fault_handling import setup_faulthandler
 from zephon.utils.rank import rank_ctx
+
+
+def _resolve_mp_context(spec: BaseContext | str | None) -> BaseContext:
+    """Normalize a ``RuntimeOptions.mp_context`` spec to a context (default spawn).
+
+    Mirrors ``Engine._resolve_mp_context``; keep the two in sync.
+    """
+    if spec is None:
+        return mp.get_context("spawn")
+    if isinstance(spec, str):
+        return mp.get_context(spec)
+    return spec
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -362,21 +376,28 @@ class MTPPipeline:
         import cloudpickle
 
         self._buffer_size = buffer_size
-        self._data_q: mp.Queue = mp.Queue(maxsize=buffer_size)  # type: ignore[type-arg]
+
+        # Use the engine's start method (RuntimeOptions.mp_context, default
+        # "spawn"), never fork: the parent's live CUDA and obstore tokio runtime
+        # don't survive fork(), so a forked child segfaults. The IPC primitives
+        # below must share this context with the Process.
+        ctx = _resolve_mp_context(pipeline._options.mp_context)
+
+        self._data_q: mp.Queue = ctx.Queue(maxsize=buffer_size)  # type: ignore[type-arg]
 
         # Control pipe: main_conn (main process) ↔ sub_conn (subprocess)
-        self._main_conn, sub_conn = mp.Pipe()
+        self._main_conn, sub_conn = ctx.Pipe()
 
         # Shared-memory inflight counter: subprocess writes, main reads.
         # RawArray (no lock) — single-int writes are atomic on x86/ARM and
         # we tolerate reading a slightly stale value.
-        self._inflight_shm: ctypes.Array[ctypes.c_int] = mp.RawArray(
+        self._inflight_shm: ctypes.Array[ctypes.c_int] = ctx.RawArray(
             ctypes.c_int, self._INFLIGHT_SHM_LANES
         )
 
         pipeline_bytes = cloudpickle.dumps(pipeline)
 
-        self._process = mp.Process(
+        self._process = ctx.Process(
             target=_mtp_worker,
             args=(
                 pipeline_bytes,
