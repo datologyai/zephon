@@ -14,7 +14,7 @@ Key features:
 """
 
 import bisect
-import copy
+import logging
 import os
 import struct
 import threading
@@ -33,9 +33,13 @@ from zephon.io.index.index_types import ShardIndex, is_shard_index
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage.base import StorageBackend
 from zephon.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon.utils.thread_utils import cap_arrow_threads
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
+
+logger = logging.getLogger(__name__)
 
 # Lazy import of PyArrow to avoid hard dependency
 _pa = None
@@ -44,7 +48,12 @@ _PARQUET_FOOTER_PREFETCH_BYTES = 64 * 1024
 
 
 def _ensure_pyarrow():
-    """Lazy import of PyArrow with helpful error message."""
+    """Lazy import of PyArrow with helpful error message.
+
+    Caps PyArrow's CPU/IO thread pools on first import so a process that reads
+    Parquet does not oversubscribe cores across parallel fetch lanes, even if
+    it never called ``suppress_library_threads`` (e.g. the local runners).
+    """
     global _pa, _pq
     if _pa is None:
         try:
@@ -58,6 +67,7 @@ def _ensure_pyarrow():
                 "pyarrow is required for Parquet format support. "
                 "Install with: pip install zephon[parquet]"
             ) from exc
+        cap_arrow_threads()
     return _pa, _pq
 
 
@@ -72,7 +82,7 @@ def _arrow_table_to_numpy(table: Any) -> tuple[_CachedRG, int]:
     pointer table, not the underlying payload.
     """
     pa, _ = _ensure_pyarrow()
-    decoded_bytes = int(table.nbytes)
+    decoded_bytes = table.nbytes
     result: _CachedRG = {}
     for name in table.column_names:
         col = table.column(name)
@@ -98,35 +108,60 @@ def _arrow_table_to_numpy(table: Any) -> tuple[_CachedRG, int]:
 
 
 def _extract_row(columns: _CachedRG, idx: int) -> dict[str, object]:
-    """Materialize one record from the column dict.
+    """Materialize one record from the per-column arrays of a taken sub-table.
 
-    Object-dtype cells are deep-copied so downstream references don't pin the
-    cache's decoded row groups; immutable atoms are effectively zero-copy
-    under ``deepcopy``.
+    ``columns`` is decoded from a freshly ``take``-n sub-table (never the cache,
+    which holds only immutable Arrow buffers), so struct dicts and strings are
+    newly built and already independent. Variable-length list cells are numpy
+    views into the taken values buffer; copying them hands each record an
+    independent, writable array and avoids pinning that shared buffer.
+    Fixed-size-list rows and numeric scalars are returned as-is.
     """
     out: dict[str, object] = {}
     for name, arr in columns.items():
         val = arr[idx]
-        if arr.dtype == object:
-            val = copy.deepcopy(val)
+        if arr.dtype == object and isinstance(val, np.ndarray):
+            val = val.copy()
         out[name] = val
     return out
 
 
 _DEFAULT_RG_CACHE_BYTES = 2 * 1024**3  # 2 GiB
 
+# Thrash detection. A "reload" is reading a row group we previously evicted —
+# direct evidence the shuffle working set exceeds the cache. We remember the
+# last _GHOST_CAPACITY evicted keys to recognise reloads. Thrash is only
+# *possible* once the cache has FILLED (the first eviction), so detection is
+# armed at fill and warns when reloads exceed _THRASH_RATE of the reads since
+# then, over at least _THRASH_MIN_READS_AFTER_FILL reads. Gating on reads since
+# fill (not a fixed count from process start) is deliberate: thrashing throttles
+# reads, so a fixed warmup can take many minutes of wall-clock to reach — long
+# after the slow first batch it explains. Anchoring at fill fires the warning
+# within a couple hundred reads of thrash onset.
+_GHOST_CAPACITY = 8192
+_THRASH_MIN_READS_AFTER_FILL = 256
+_THRASH_RATE = 0.10
+
 
 class _CacheEntry(NamedTuple):
-    columns: _CachedRG
+    table: Any  # pyarrow.Table
     byte_size: int
 
 
 class _RowGroupCache:
-    """Thread-safe LRU keyed by ``(file_path, row_group_id)``.
+    """Thread-safe LRU of Arrow row-group tables.
+
+    Keyed by ``(file_path, row_group_id)``. Stores the packed, immutable Arrow
+    table; per-record numpy/Python materialisation is deferred to the rows
+    actually accessed (via ``take``), so a given byte budget holds far more row
+    groups than object arrays of Python dicts/strings would. ``byte_size`` is
+    the table's ``nbytes`` — the exact buffer footprint of what is stored, with
+    no object-pointer undercount.
 
     Evicts LRU entries when ``used_bytes`` exceeds ``max_bytes``. Set
     ``max_bytes=0`` to disable: ``put`` becomes a no-op and ``get`` always
-    returns ``None``.
+    returns ``None``. Counts hits/misses/evictions/reloads and warns once when
+    reloads show the cache is too small (see module thrash constants).
     """
 
     def __init__(self, max_bytes: int = _DEFAULT_RG_CACHE_BYTES) -> None:
@@ -134,29 +169,97 @@ class _RowGroupCache:
         self._lock = threading.Lock()
         self._max_bytes = max_bytes
         self._used_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._reloads = 0
+        self._ghost: OrderedDict[tuple[str, int], None] = OrderedDict()
+        self._thrash_warned = False
+        # Reads (hits+misses) when the cache first filled, i.e. the first
+        # eviction; -1 until then. Thrash detection is armed from this point.
+        self._reads_at_fill = -1
 
-    def get(self, path: str, rg_id: int) -> _CachedRG | None:
+    def get(self, path: str, rg_id: int) -> Any:
         key = (path, rg_id)
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
+                self._misses += 1
                 return None
+            self._hits += 1
             self._cache.move_to_end(key)
-            return entry.columns
+            return entry.table
 
-    def put(self, path: str, rg_id: int, columns: _CachedRG, byte_size: int) -> None:
+    def put(self, path: str, rg_id: int, table: Any, byte_size: int) -> None:
         if self._max_bytes == 0:
             return
         key = (path, rg_id)
+        warn_payload: tuple[int, int] | None = None
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return
-            self._cache[key] = _CacheEntry(columns, byte_size)
+            if key in self._ghost:
+                del self._ghost[key]
+                self._reloads += 1
+                warn_payload = self._maybe_flag_thrash()
+            self._cache[key] = _CacheEntry(table, byte_size)
             self._used_bytes += byte_size
-            while self._used_bytes > self._max_bytes and len(self._cache) > 1:
-                _, evicted = self._cache.popitem(last=False)
-                self._used_bytes -= evicted.byte_size
+            self._evict_to_fit()
+        if warn_payload is not None:
+            self._emit_thrash_warning(*warn_payload)
+
+    def set_max_bytes(self, max_bytes: int) -> None:
+        """Update the byte cap at runtime, evicting LRU entries to fit."""
+        with self._lock:
+            self._max_bytes = max_bytes
+            if max_bytes == 0:
+                self._cache.clear()
+                self._used_bytes = 0
+                return
+            self._evict_to_fit()
+
+    def _evict_to_fit(self) -> None:
+        """Evict LRU entries until under cap. Caller must hold the lock."""
+        while self._used_bytes > self._max_bytes and len(self._cache) > 1:
+            if self._reads_at_fill < 0:
+                # First eviction => the cache is full; arm thrash detection here.
+                self._reads_at_fill = self._hits + self._misses
+            ev_key, evicted = self._cache.popitem(last=False)
+            self._used_bytes -= evicted.byte_size
+            self._evictions += 1
+            self._ghost[ev_key] = None
+            if len(self._ghost) > _GHOST_CAPACITY:
+                self._ghost.popitem(last=False)
+
+    def _maybe_flag_thrash(self) -> tuple[int, int] | None:
+        """Return warning payload once thrash crosses threshold. Lock held.
+
+        Armed only after the cache has filled (``_reads_at_fill`` set on the
+        first eviction); warns when the reload rate over the reads since fill
+        crosses ``_THRASH_RATE``. Reloads can only happen post-fill, so the
+        cumulative ``_reloads`` is effectively the post-fill reload count.
+        """
+        if self._thrash_warned or self._reads_at_fill < 0:
+            return None
+        reads_since_fill = (self._hits + self._misses) - self._reads_at_fill
+        if reads_since_fill >= _THRASH_MIN_READS_AFTER_FILL and (
+            self._reloads >= reads_since_fill * _THRASH_RATE
+        ):
+            self._thrash_warned = True
+            return self._reloads, self._max_bytes
+        return None
+
+    @staticmethod
+    def _emit_thrash_warning(reloads: int, max_bytes: int) -> None:
+        logger.warning(
+            "Parquet row-group cache is thrashing: %d row groups re-decoded "
+            "after eviction (cache cap %.2f GiB). The shuffle working set "
+            "exceeds the cache; raise it via io_options cache.rg_cache_bytes or "
+            "ZEPHON_PARQUET_RG_CACHE_BYTES to cut redundant decode work.",
+            reloads,
+            max_bytes / 1024**3,
+        )
 
     def clear(self) -> None:
         with self._lock:
@@ -171,6 +274,24 @@ class _RowGroupCache:
     def used_bytes(self) -> int:
         with self._lock:
             return self._used_bytes
+
+    @property
+    def max_bytes(self) -> int:
+        with self._lock:
+            return self._max_bytes
+
+    def stats(self) -> dict[str, int]:
+        """Snapshot of cache counters for observability and tests."""
+        with self._lock:
+            return {
+                "hits": self._hits,
+                "misses": self._misses,
+                "evictions": self._evictions,
+                "reloads": self._reloads,
+                "entries": len(self._cache),
+                "used_bytes": self._used_bytes,
+                "max_bytes": self._max_bytes,
+            }
 
 
 class ParquetShard(RandomAccessShard):
@@ -228,19 +349,35 @@ class ParquetShard(RandomAccessShard):
         local_idx = index - self._rg_boundaries[rg_id]
         return rg_id, local_idx
 
-    def _read_row_group(self, rg_id: int) -> _CachedRG:
+    def _read_row_group_table(self, rg_id: int) -> Any:
+        """Return the cached Arrow table for ``rg_id``, reading it on a miss."""
         path_key = str(self._path)
         cached = self._rg_cache.get(path_key, rg_id)
         if cached is not None:
             return cached
 
         pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
-        table = pq_file.read_row_group(rg_id)
+        table = pq_file.read_row_group(rg_id, use_threads=False)
         del pq_file
 
-        columns, byte_size = _arrow_table_to_numpy(table)
-        self._rg_cache.put(path_key, rg_id, columns, byte_size)
-        return columns
+        self._rg_cache.put(path_key, rg_id, table, table.nbytes)
+        return table
+
+    def _rows_from_table(
+        self, table: Any, local_indices: list[int]
+    ) -> list[dict[str, object]]:
+        """Materialise records for ``local_indices`` from a row-group table.
+
+        ``take`` (C++, GIL-released) gathers just the requested rows into a
+        small private sub-table before decode, so per-record numpy/Python
+        materialisation is proportional to rows accessed, not row-group size.
+        Reusing ``_arrow_table_to_numpy`` keeps types identical to a full
+        decode: numpy scalars for primitives, object-arrays-of-numpy for lists,
+        dicts for structs.
+        """
+        sub = table.take(_pa.array(local_indices, type=_pa.int64()))
+        columns, _ = _arrow_table_to_numpy(sub)
+        return [_extract_row(columns, j) for j in range(len(local_indices))]
 
     def __getitem__(self, index: int) -> dict[str, object]:
         """Single record random access.
@@ -258,17 +395,17 @@ class ParquetShard(RandomAccessShard):
             raise IndexError(index)
 
         rg_id, local_idx = self._locate_row_group(index)
-        columns = self._read_row_group(rg_id)
-        return _extract_row(columns, local_idx)
+        table = self._read_row_group_table(rg_id)
+        return self._rows_from_table(table, [local_idx])[0]
 
     def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
         """Bulk read: groups by row group, single file open for cache misses.
 
-        Holds decoded row groups in a call-local dict so correctness is
-        independent of cache retention (e.g. ``ZEPHON_PARQUET_RG_CACHE_BYTES=0``
-        or concurrent eviction by other shards). Note that call-local peak
-        memory is roughly the sum of the requested row groups' decoded sizes,
-        regardless of the cache cap.
+        Holds the (compact, immutable) Arrow tables for the requested row groups
+        in a call-local dict so correctness is independent of cache retention
+        (e.g. ``ZEPHON_PARQUET_RG_CACHE_BYTES=0`` or concurrent eviction by
+        other shards). Each row group is decoded to numpy only for the rows
+        requested from it, via ``take``.
         """
         if not indices:
             return []
@@ -283,29 +420,29 @@ class ParquetShard(RandomAccessShard):
             rg_groups[rg_id].append((orig_pos, local_idx))
 
         path_key = str(self._path)
-        decoded: dict[int, _CachedRG] = {}
+        tables: dict[int, Any] = {}
         missing_rg_ids: list[int] = []
         for rg_id in rg_groups:
             cached = self._rg_cache.get(path_key, rg_id)
             if cached is not None:
-                decoded[rg_id] = cached
+                tables[rg_id] = cached
             else:
                 missing_rg_ids.append(rg_id)
 
         if missing_rg_ids:
             pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
             for rg_id in missing_rg_ids:
-                table = pq_file.read_row_group(rg_id)
-                columns, byte_size = _arrow_table_to_numpy(table)
-                decoded[rg_id] = columns
-                self._rg_cache.put(path_key, rg_id, columns, byte_size)
+                table = pq_file.read_row_group(rg_id, use_threads=False)
+                tables[rg_id] = table
+                self._rg_cache.put(path_key, rg_id, table, table.nbytes)
             del pq_file
 
         results: list[dict[str, object] | None] = [None] * len(indices)
         for rg_id, items in rg_groups.items():
-            columns = decoded[rg_id]
-            for orig_pos, local_idx in items:
-                results[orig_pos] = _extract_row(columns, local_idx)
+            local_indices = [local_idx for _, local_idx in items]
+            rows = self._rows_from_table(tables[rg_id], local_indices)
+            for (orig_pos, _), row in zip(items, rows):
+                results[orig_pos] = row
 
         return results  # type: ignore[return-value]
 
@@ -339,6 +476,18 @@ class ParquetFormat(FormatHandler):
             os.environ.get("ZEPHON_PARQUET_RG_CACHE_BYTES", _DEFAULT_RG_CACHE_BYTES)
         )
         self._rg_cache = _RowGroupCache(max_bytes=max_bytes)
+
+    def apply_store_options(self, options: "StoreOptions") -> None:
+        """Apply runtime store options to this shared handler.
+
+        ``cache.rg_cache_bytes`` (when set) overrides the in-memory row-group
+        cache cap for this process, so it is a runtime knob rather than only the
+        import-time ``ZEPHON_PARQUET_RG_CACHE_BYTES`` env var. Called per worker
+        at store-build time.
+        """
+        rg_bytes = options.cache.rg_cache_bytes
+        if rg_bytes is not None:
+            self._rg_cache.set_max_bytes(rg_bytes)
 
     def _read_metadata_only(
         self, path: str, storage: StorageBackend, *, size: int

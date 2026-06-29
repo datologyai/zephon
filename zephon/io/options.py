@@ -46,6 +46,10 @@ class CacheOptions:
     root: str | Path = Path("~/.cache/zephon").expanduser()
     # Bound on the on-disk shard cache only, not in-memory cache.
     limit_bytes: int | None = None
+    # Bound on the in-memory parquet row-group decode cache (per process).
+    # Independent of ``enabled``/``limit_bytes`` (the on-disk cache); ``None``
+    # keeps the format default (the ZEPHON_PARQUET_RG_CACHE_BYTES env var).
+    rg_cache_bytes: int | None = None
     keep_zip: bool = False
     validate_hash: str | None = None
     download_retry: int = 12
@@ -66,6 +70,8 @@ class CacheOptions:
             data = dict(obj)
             if "limit_bytes" in data and isinstance(data["limit_bytes"], str):
                 data["limit_bytes"] = parse_size_bytes(data["limit_bytes"])
+            if "rg_cache_bytes" in data and isinstance(data["rg_cache_bytes"], str):
+                data["rg_cache_bytes"] = parse_size_bytes(data["rg_cache_bytes"])
             return cls(**data)
         raise TypeError(f"Cannot interpret cache options from {obj!r}")
 

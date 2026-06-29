@@ -20,6 +20,7 @@ from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.catalog import extra_codec
 from zephon.io.dataset import Dataset
 from zephon.io.formats.parquet import (
+    _THRASH_MIN_READS_AFTER_FILL,
     ParquetFormat,
     ParquetShard,
     _arrow_table_to_numpy,
@@ -970,6 +971,192 @@ class TestRowGroupCacheAccounting:
         assert second["text"]["hash"] != "MUTATED"
         # And the two reads are not the same Python object identity.
         assert first["text"] is not second["text"]
+
+
+class TestRowGroupCacheRuntimeResize:
+    """Runtime cache-size knob: set_max_bytes / ParquetFormat.apply_store_options."""
+
+    @pytest.fixture
+    def shard_file(self, tmp_path):
+        shard_path = tmp_path / "resize.parquet"
+        create_test_parquet_file(shard_path, num_rows=10000, row_group_size=2000)
+        return shard_path
+
+    @pytest.fixture
+    def shard_metadata(self, shard_file):
+        metadata = pq.read_metadata(str(shard_file))
+        return [
+            {
+                "num_rows": metadata.row_group(i).num_rows,
+                "total_byte_size": metadata.row_group(i).total_byte_size,
+            }
+            for i in range(metadata.num_row_groups)
+        ]
+
+    def test_set_max_bytes_evicts_to_fit(self, shard_file, shard_metadata):
+        cache = _RowGroupCache()
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        _ = shard.getsamples([0, 2000, 4000])  # three row groups cached
+        assert len(cache) == 3
+
+        cache.set_max_bytes(1)  # below one row group → evict down to a single entry
+        assert len(cache) == 1
+        assert cache.max_bytes == 1
+
+    def test_set_max_bytes_zero_clears(self, shard_file, shard_metadata):
+        cache = _RowGroupCache()
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        _ = shard[0]
+        assert len(cache) == 1
+
+        cache.set_max_bytes(0)
+        assert len(cache) == 0
+        assert cache.used_bytes == 0
+
+    def test_apply_store_options_overrides_cap(self):
+        from zephon.io.options import CacheOptions, StoreOptions
+
+        fmt = ParquetFormat()
+        fmt.apply_store_options(StoreOptions(cache=CacheOptions(rg_cache_bytes=12345)))
+        assert fmt._rg_cache.max_bytes == 12345
+
+    def test_apply_store_options_none_keeps_default(self):
+        from zephon.io.options import StoreOptions
+
+        fmt = ParquetFormat()
+        default = fmt._rg_cache.max_bytes
+        fmt.apply_store_options(StoreOptions())  # rg_cache_bytes is None
+        assert fmt._rg_cache.max_bytes == default
+
+    def test_cache_options_parses_human_size(self):
+        from zephon.io.options import CacheOptions
+
+        opts = CacheOptions.from_any({"rg_cache_bytes": "4gb"})
+        assert opts.rg_cache_bytes == 4 * 1024**3
+
+
+class TestRowGroupCacheThrash:
+    """Ghost-list reload counter flags a too-small cache."""
+
+    @pytest.fixture
+    def shard_file(self, tmp_path):
+        shard_path = tmp_path / "thrash.parquet"
+        create_test_parquet_file(shard_path, num_rows=10000, row_group_size=2000)
+        return shard_path
+
+    @pytest.fixture
+    def shard_metadata(self, shard_file):
+        metadata = pq.read_metadata(str(shard_file))
+        return [
+            {
+                "num_rows": metadata.row_group(i).num_rows,
+                "total_byte_size": metadata.row_group(i).total_byte_size,
+            }
+            for i in range(metadata.num_row_groups)
+        ]
+
+    def test_reloads_counted_when_working_set_exceeds_cache(
+        self, shard_file, shard_metadata
+    ):
+        probe = _RowGroupCache()
+        _ = ParquetShard(shard_file, shard_metadata, rg_cache=probe)[0]
+        one_rg = probe.used_bytes
+
+        cache = _RowGroupCache(max_bytes=one_rg + 1)  # room for ~one row group
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        # Alternate two row groups so each access evicts (then reloads) the other.
+        for _ in range(3):
+            _ = shard[0]
+            _ = shard[2000]
+
+        stats = cache.stats()
+        assert stats["evictions"] >= 1
+        assert stats["reloads"] >= 1
+
+    def test_no_reloads_when_cache_fits(self, shard_file, shard_metadata):
+        cache = _RowGroupCache()  # 2 GiB default easily holds both row groups
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        for _ in range(3):
+            _ = shard[0]
+            _ = shard[2000]
+
+        stats = cache.stats()
+        assert stats["reloads"] == 0
+        assert stats["evictions"] == 0
+
+    def test_thrash_warning_fires_after_fill(self, shard_file, shard_metadata, caplog):
+        """The warning fires once reloads dominate the reads since the cache
+        filled — anchored at the first eviction, not a fixed read count."""
+        import logging
+
+        probe = _RowGroupCache()
+        _ = ParquetShard(shard_file, shard_metadata, rg_cache=probe)[0]
+        one_rg = probe.used_bytes
+
+        cache = _RowGroupCache(max_bytes=one_rg + 1)  # holds ~one row group
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        # Alternate two row groups so each access reloads the other, well past
+        # _THRASH_MIN_READS_AFTER_FILL reads after the cache fills.
+        with caplog.at_level(logging.WARNING, logger="zephon.io.formats.parquet"):
+            for _ in range(_THRASH_MIN_READS_AFTER_FILL + 20):
+                _ = shard[0]
+                _ = shard[2000]
+
+        warnings = [r for r in caplog.records if "thrashing" in r.message.lower()]
+        assert len(warnings) == 1  # warns exactly once
+        assert cache._thrash_warned is True
+
+    def test_thrash_warning_silent_when_cache_fits(
+        self, shard_file, shard_metadata, caplog
+    ):
+        """No warning (and no arming) when the cache never fills, even over many
+        reads — guards against false positives on a fitting working set."""
+        import logging
+
+        cache = _RowGroupCache()  # 2 GiB holds both row groups -> no eviction
+        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
+        with caplog.at_level(logging.WARNING, logger="zephon.io.formats.parquet"):
+            for _ in range(_THRASH_MIN_READS_AFTER_FILL + 20):
+                _ = shard[0]
+                _ = shard[2000]
+
+        assert cache._reads_at_fill == -1  # never filled, detection unarmed
+        assert not [r for r in caplog.records if "thrashing" in r.message.lower()]
+
+
+def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
+    """Take-based decode keeps variable-length list cells as writable numpy
+    arrays (not Python lists), including across a row-group boundary."""
+    import numpy as np
+
+    list_arr = pa.array(
+        [[1, 2], [3, 4, 5], [6], [7, 8, 9, 10]], type=pa.list_(pa.int64())
+    )
+    table = pa.table({"id": pa.array(range(4)), "tok": list_arr})
+    path = tmp_path / "vl.parquet"
+    pq.write_table(table, str(path), row_group_size=2)
+
+    metadata = pq.read_metadata(str(path))
+    row_groups = [
+        {
+            "num_rows": metadata.row_group(i).num_rows,
+            "total_byte_size": metadata.row_group(i).total_byte_size,
+        }
+        for i in range(metadata.num_row_groups)
+    ]
+    shard = ParquetShard(path, row_groups, rg_cache=_RowGroupCache())
+
+    row = shard[1]
+    assert isinstance(row["tok"], np.ndarray)
+    assert row["tok"].dtype == np.int64
+    assert row["tok"].flags.writeable  # _extract_row copies list cells
+    np.testing.assert_array_equal(row["tok"], [3, 4, 5])
+
+    # getsamples spanning both row groups, arbitrary order.
+    rows = shard.getsamples([3, 0, 1])
+    np.testing.assert_array_equal(rows[0]["tok"], [7, 8, 9, 10])
+    np.testing.assert_array_equal(rows[1]["tok"], [1, 2])
+    np.testing.assert_array_equal(rows[2]["tok"], [3, 4, 5])
 
 
 class TestParquetAutoDetection:

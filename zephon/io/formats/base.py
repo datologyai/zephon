@@ -13,6 +13,7 @@ from zephon.io.types import LocalShardRef, ShardLocator
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 
 class FormatHandler(Protocol):
@@ -55,6 +56,15 @@ class FormatHandler(Protocol):
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard: ...
+
+    def apply_store_options(self, options: "StoreOptions") -> None:
+        """Apply runtime store options to this (process-global) handler.
+
+        Default is a no-op. Formats with process-wide runtime state — e.g. an
+        in-memory decode cache — override this to honour ``StoreOptions`` set on
+        the pipeline. Called once per dataset when the shard store is built.
+        """
+        del options
 
 
 _REGISTRY: dict[str, FormatHandler] = {}

@@ -243,6 +243,7 @@ def build_multi_dataset_store(
                 raise ValueError(
                     f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
                 ) from exc
+            handler.apply_store_options(store_opts)
             catalog: ShardCatalog | None = None
             if catalog_set is not None and dataset.catalog_handle is not None:
                 catalog = catalog_set.catalog_for(dataset.name)
