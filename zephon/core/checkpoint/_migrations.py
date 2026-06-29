@@ -55,13 +55,14 @@ keeps its historical defaults.
 previous, so an additive change is a few lines, not a field-list copy::
 
     @dataclass(frozen=True, kw_only=True)
-    class StaticMixtureStateV4(StaticMixtureStateV3):
+    class StaticMixtureStateV5(StaticMixtureStateV4):
         new_field: SomeType   # required; kw_only lets it follow the version default
-        version: int = 4
+        version: int = 5
 
-Pair it with a ``_..._v3_to_v4`` migration that fills ``new_field``. ``kw_only``
+Pair it with a ``_..._v4_to_v5`` migration that fills ``new_field``. ``kw_only``
 is load-bearing: without it a required field after the inherited ``version``
 default raises "non-default argument follows default argument".
+(``StaticMixtureStateV4`` adding ``lane_assignment`` onto v3 is a live example.)
 
 **Copy instead of inherit when you cannot extend additively.** A field cannot
 be re-typed in a subclass (an incompatible override under static type checking)
@@ -109,6 +110,7 @@ from zephon.core.checkpoint._schemas import (
     StaticMixtureStateV1,
     StaticMixtureStateV2,
     StaticMixtureStateV3,
+    StaticMixtureStateV4,
     WorkChunkStateV1,
 )
 
@@ -150,6 +152,17 @@ def _static_mixture_v2_to_v3(v2: StaticMixtureStateV2) -> dict[str, Any]:
     return d
 
 
+def _static_mixture_v3_to_v4(v3: StaticMixtureStateV3) -> dict[str, Any]:
+    """Default the new ``lane_assignment`` field to ``"modulo"``.
+
+    v3 predates chunk->lane routing modes, so its in-flight epoch was produced
+    by plain modulo routing and must keep replaying that way.
+    """
+    d = v3.to_dict()
+    d["lane_assignment"] = "modulo"
+    return d
+
+
 #: Migration functions take a validated v_N instance and return a v_{N+1} dict.
 MigrationFn = Callable[[Any], dict[str, Any]]
 
@@ -161,6 +174,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
     "static_mixture": {
         1: _static_mixture_v1_to_v2,
         2: _static_mixture_v2_to_v3,
+        3: _static_mixture_v3_to_v4,
     },
     "cursor": {},
 }
@@ -175,6 +189,7 @@ _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
         1: StaticMixtureStateV1,
         2: StaticMixtureStateV2,
         3: StaticMixtureStateV3,
+        4: StaticMixtureStateV4,
     },
     "cursor": {1: CursorStateV1},
 }

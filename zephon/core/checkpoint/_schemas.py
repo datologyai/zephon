@@ -250,7 +250,7 @@ class WorkChunkStateV1(CheckpointMixin):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 3
+STATIC_MIXTURE_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -576,6 +576,31 @@ class StaticMixtureStateV3(CheckpointMixin):
             raise ValueError(
                 "StaticMixtureStateV3 invariants violated:\n  - "
                 + "\n  - ".join(errors)
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV4(StaticMixtureStateV3):
+    """Checkpoint schema for ``StaticMixtureWorkSource`` (version 4).
+
+    Adds ``lane_assignment``, the chunk->lane routing mode: ``"permute"`` is the
+    per-block seeded permutation that breaks cadence-sharding resonance (see
+    ``StaticMixtureWorkSource._lane_for_chunk``); ``"modulo"`` is plain
+    ``g % canonical_replicas``. An additive change, so it extends v3 by
+    inheritance. Required, no default — the v3 -> v4 migration fills pre-fix
+    checkpoints with ``"modulo"`` so a resumed run replays the routing it used.
+    """
+
+    lane_assignment: str
+    version: int = 4
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.lane_assignment not in ("modulo", "permute"):
+            raise ValueError(
+                "StaticMixtureStateV4 invariants violated:\n  - "
+                f"lane_assignment={self.lane_assignment!r} must be "
+                "'modulo' or 'permute'"
             )
 
 

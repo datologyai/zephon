@@ -15,9 +15,8 @@ from typing import Any, Literal
 import numpy as np
 
 from zephon.core.checkpoint import (
-    STATIC_MIXTURE_VERSION,
     CursorStateV1,
-    StaticMixtureStateV3,
+    StaticMixtureStateV4,
 )
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
@@ -1231,6 +1230,11 @@ class StaticMixtureWorkSource(WorkSource):
     ``max_repeats`` opts into the explicit per-dataset API and turns it off. An
     explicit ``stop_after_passes`` requires every dataset to repeat, so it rejects
     (``ValueError``) a non-``"repeat"`` ``exhausted_policy`` or any ``max_repeats``.
+
+    ``lane_assignment`` selects chunk->lane routing. ``"permute"`` (default)
+    uses a seeded per-block permutation that breaks cadence-sharding resonance
+    (see :meth:`_lane_for_chunk`); ``"modulo"`` is plain
+    ``g % canonical_replicas`` and reproduces pre-fix routing.
     """
 
     def __init__(
@@ -1246,11 +1250,17 @@ class StaticMixtureWorkSource(WorkSource):
         reshuffle_on_repeat: bool | Mapping[str, bool] | _Sentinel = _Sentinel.UNSET,
         max_repeats: int | None | Mapping[str, int | None] = None,
         stop_after_passes: int | None | _Sentinel = _STOP_AFTER_PASSES_UNSET,
+        lane_assignment: Literal["modulo", "permute"] = "permute",
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         if not datasets:
             raise ValueError("At least one dataset must be provided")
+        if lane_assignment not in ("modulo", "permute"):
+            raise ValueError(
+                "lane_assignment must be 'modulo' or 'permute', "
+                f"got {lane_assignment!r}"
+            )
         super().__init__()
 
         # Remember which exhaustion-policy args the caller set explicitly: a
@@ -1284,6 +1294,10 @@ class StaticMixtureWorkSource(WorkSource):
             mixture_spec.normalized
         )  # create an internal copy
         self._global_chunk_index = 0
+        self._lane_assignment: str = lane_assignment
+        # _perm_* memoize the current block's permutation (reshuffled once per block).
+        self._perm_block: int = -1
+        self._perm_order: list[int] = []
 
         self._shuffle_block_size_spec: ShuffleBlockSpec = shuffle_block_size
 
@@ -1492,6 +1506,9 @@ class StaticMixtureWorkSource(WorkSource):
         clone._explicit_policy_fields = self._explicit_policy_fields
         clone._seed = self._seed
         clone._global_chunk_index = self._global_chunk_index
+        clone._lane_assignment = self._lane_assignment
+        clone._perm_block = -1
+        clone._perm_order = []
         clone._shuffle_block_size_spec = self._shuffle_block_size_spec
         clone._knobs_by_name = dict(self._knobs_by_name)
 
@@ -1535,7 +1552,7 @@ class StaticMixtureWorkSource(WorkSource):
         This implementation follows a compute-everywhere-then-discard strategy:
         - Enumerate the global chunk stream deterministically using the existing
           chunking logic.
-        - Assign each global chunk index ``g`` to a lane via ``g % canonical_replicas``.
+        - Assign each global chunk index ``g`` to a lane via :meth:`_lane_for_chunk`.
         - Discard non-matching chunks locally.
         """
         assert self._lane is not None, (
@@ -1550,10 +1567,38 @@ class StaticMixtureWorkSource(WorkSource):
                 return None
             g = self._global_chunk_index
             self._global_chunk_index += 1
-            chunk_lane = g % self._canon
-            if chunk_lane != (self._lane % self._canon):
+            if self._lane_for_chunk(g) != (self._lane % self._canon):
                 continue
             return chunk
+
+    def _lane_for_chunk(self, g: int) -> int:
+        """Map global chunk index ``g`` to a canonical lane.
+
+        Plain ``g % canon`` (``lane_assignment="modulo"``) is vulnerable to
+        cadence-sharding resonance: the SWRR allocator emits a rare component
+        roughly every ``1 / weight`` chunks, and when that period shares a
+        factor with ``canon`` the component lands on only ``gcd(period, canon)``
+        of the lanes. The starved lanes can stall a downstream gate (e.g. a
+        strict ``ensure_mixture``) that waits for that component.
+
+        ``"permute"`` (the default) routes each block of ``canon`` consecutive
+        chunks through a seeded permutation of the lanes: every block still
+        hands each lane exactly one chunk (load balance and exactly-once
+        preserved), the map is a pure function of ``(seed, g)`` so replay is
+        unaffected, and a periodic emitter now sprays lanes ~uniformly. The seed
+        composes integers rather than hashing a tuple because ``hash()`` is not
+        stable across processes (PYTHONHASHSEED).
+        """
+        assert self._canon is not None
+        if self._lane_assignment != "permute":
+            return g % self._canon
+        block, slot = divmod(g, self._canon)
+        if block != self._perm_block:
+            order = list(range(self._canon))
+            random.Random(self._seed + block * _GOLDEN_RATIO_64).shuffle(order)
+            self._perm_block = block
+            self._perm_order = order
+        return self._perm_order[slot]
 
     def _next_chunk(self) -> WorkChunk | None:
         quotas = self._strategy.compute_quotas(self._cursors)
@@ -1635,8 +1680,7 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = StaticMixtureStateV3(
-            version=STATIC_MIXTURE_VERSION,
+        state = StaticMixtureStateV4(
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
             chunk_size_hint=base["chunk_size_hint"],
@@ -1665,12 +1709,13 @@ class StaticMixtureWorkSource(WorkSource):
             reshuffle_on_repeat=dict(cfg.reshuffle_on_repeat),
             max_repeats=dict(cfg.max_repeats),
             stop_after_passes=cfg.stop_after_passes,
+            lane_assignment=self._lane_assignment,
             accumulators=accumulators,
             allocation_mode=strategy_state["allocation_mode"],
         )
         return state.to_dict()
 
-    def _reject_policy_override(self, ckpt: StaticMixtureStateV3) -> None:
+    def _reject_policy_override(self, ckpt: StaticMixtureStateV4) -> None:
         """Fail a resume whose explicit policy args contradict the checkpoint.
 
         A resume restores the policy frozen in the checkpoint, so an explicit
@@ -1703,13 +1748,18 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = StaticMixtureStateV3.load(state)
+        ckpt = StaticMixtureStateV4.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
         is_accumulator_ckpt = ckpt.allocation_mode == "accumulator"
 
         self._seed = ckpt.seed
+        # Replay the routing the checkpoint was produced with; pre-fix states
+        # have no field and the v3 -> v4 migration fills "modulo".
+        self._lane_assignment = ckpt.lane_assignment
+        self._perm_block = -1
+        self._perm_order = []
         self._shuffle_block_size_spec = ckpt.shuffle_block_size_spec
 
         # A different dataset set/order can't be reconciled — fail loudly.

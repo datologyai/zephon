@@ -3375,3 +3375,261 @@ def test_terminal_stop_does_not_advance_accumulators() -> None:
     # Calling again must not perturb the accumulators (idempotent terminal).
     assert ws.next_chunk() is None
     assert ws.state_dict()["accumulators"] == state_after_first_none
+
+
+# ---------------------------------------------------------------------------
+# Lane assignment (cadence-sharding resonance fix)
+# ---------------------------------------------------------------------------
+
+
+def test_lane_assignment_defaults_to_permute() -> None:
+    # New runs route through the permutation by default; see _lane_for_chunk.
+    ds = make_dataset("a", 100)
+    ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=4, seed=0)
+    lane = ws.clone_for_lane(0, canonical_replicas=16)
+    assert lane._lane_assignment == "permute"
+
+
+def test_lane_assignment_modulo_routes_by_plain_modulo() -> None:
+    ds = make_dataset("a", 100)
+    ws = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, seed=0, lane_assignment="modulo"
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=16)
+    assert lane._lane_assignment == "modulo"
+    assert [lane._lane_for_chunk(g) for g in range(64)] == [g % 16 for g in range(64)]
+
+
+def test_lane_assignment_invalid_value_raises() -> None:
+    ds = make_dataset("a", 10)
+    with pytest.raises(ValueError, match="lane_assignment"):
+        StaticMixtureWorkSource(
+            [ds], {"a": 1.0}, chunk_size=4, lane_assignment="round_robin"
+        )
+
+
+def test_modulo_chunk_stream_matches_plain_modulo_routing() -> None:
+    """``lane_assignment="modulo"`` reproduces the pre-fix chunk stream exactly:
+    each lane gets the chunks plain ``g % canon`` routes to it, and nothing else.
+    """
+    ds_a = make_sharded_dataset("alpha", [30, 20, 15])
+    ds_b = make_sharded_dataset("beta", [25, 10])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=2026,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        lane_assignment="modulo",
+    )
+    canonical_replicas = 4
+    for lane in range(canonical_replicas):
+        ws = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        assert [ws._lane_for_chunk(g) for g in range(40)] == [
+            g % canonical_replicas for g in range(40)
+        ]
+        assert _drain_chunks(ws)  # routing actually yields this lane some chunks
+
+
+def test_state_dict_always_writes_v4_with_lane_assignment() -> None:
+    """The checkpoint always carries the current schema (v4) and the routing
+    tag, for both modes — there is no conditional legacy-shape write.
+    """
+    ds_a = make_dataset("alpha", 60)
+    ds_b = make_dataset("beta", 40)
+    for mode in ("modulo", "permute"):
+        ws = StaticMixtureWorkSource(
+            datasets=[ds_a, ds_b],
+            mixture={"alpha": 0.6, "beta": 0.4},
+            chunk_size=5,
+            seed=7,
+            lane_assignment=mode,
+        ).clone_for_lane(0, canonical_replicas=2)
+        _drain_chunks(ws, limit=3)
+        state = ws.state_dict()
+        assert state["version"] == 4
+        assert state["lane_assignment"] == mode
+
+
+def test_permute_partitions_every_block() -> None:
+    # Each block of `canon` consecutive chunks hands every lane exactly one
+    # chunk — same load balance / exactly-once property as plain modulo.
+    ds = make_dataset("a", 50)
+    ws = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=16)
+    for block in range(50):
+        lanes = {ws._lane_for_chunk(block * 16 + slot) for slot in range(16)}
+        assert lanes == set(range(16))
+
+
+def test_permute_deterministic_across_instances_and_lanes() -> None:
+    # The mapping is a pure function of (seed, g): identical seed => identical
+    # routing, regardless of which lane asks.
+    ds = make_dataset("a", 50)
+    a = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, seed=7, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=16)
+    b = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, seed=7, lane_assignment="permute"
+    ).clone_for_lane(3, canonical_replicas=16)
+    assert [a._lane_for_chunk(g) for g in range(500)] == [
+        b._lane_for_chunk(g) for g in range(500)
+    ]
+
+
+def test_permute_different_seeds_diverge() -> None:
+    ds = make_dataset("a", 50)
+    a = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, seed=1, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=16)
+    b = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=4, seed=2, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=16)
+    assert [a._lane_for_chunk(g) for g in range(500)] != [
+        b._lane_for_chunk(g) for g in range(500)
+    ]
+
+
+@pytest.mark.parametrize("canon", [8, 16])
+def test_modulo_starves_lanes_under_cadence_resonance(canon: int) -> None:
+    """The regression permute fixes, shown end to end.
+
+    A rare component whose emission cadence resonates with
+    ``canonical_replicas`` (here it surfaces every ``canon`` global chunks)
+    reaches only a single lane under ``"modulo"`` routing — the other lanes
+    never see it and would stall a downstream gate (e.g. a strict
+    ``ensure_mixture``) waiting on that component. ``"permute"`` sprays it
+    across every lane.
+    """
+    common = make_dataset("common", 50_000)
+    rare = make_dataset("rare", 2_000)
+    chunk_size = 32
+    # Period (in chunks) of the rare component == canon: the worst case for
+    # plain modulo, which then locks it onto a single lane.
+    w_rare = 1.0 / (canon * chunk_size)
+
+    def lanes_seeing_rare(mode: str) -> set[int]:
+        seen: set[int] = set()
+        for lane in range(canon):
+            ws = StaticMixtureWorkSource(
+                datasets=[common, rare],
+                mixture={"common": 1.0 - w_rare, "rare": w_rare},
+                chunk_size=chunk_size,
+                seed=0,
+                exhausted_policy="stop",
+                lane_assignment=mode,
+            ).clone_for_lane(lane, canonical_replicas=canon)
+            if any(ch.get("rare") for ch in _drain_chunks(ws, limit=80)):
+                seen.add(lane)
+        return seen
+
+    assert len(lanes_seeing_rare("modulo")) == 1  # regression: one lane only
+    assert lanes_seeing_rare("permute") == set(range(canon))  # fix: every lane
+
+
+def test_permute_multilane_disjoint_and_complete() -> None:
+    """Permuted lanes still partition the global stream exactly once."""
+    kwargs: dict = dict(
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=0,
+        exhausted_policy="stop",  # single pass: "exactly once" needs no repeats
+        lane_assignment="permute",
+    )
+    canonical_replicas = 4
+    per_lane = [
+        _drain_chunks(
+            StaticMixtureWorkSource(
+                datasets=[make_dataset("alpha", 200), make_dataset("beta", 200)],
+                **kwargs,
+            ).clone_for_lane(lane, canonical_replicas=canonical_replicas)
+        )
+        for lane in range(canonical_replicas)
+    ]
+    sample_sets = [
+        {sid for ch in chunks for sids in ch.values() for sid in sids}
+        for chunks in per_lane
+    ]
+    for i in range(canonical_replicas):
+        for j in range(i + 1, canonical_replicas):
+            assert not (sample_sets[i] & sample_sets[j]), f"lanes {i},{j} overlap"
+
+    # Together the lanes cover exactly the single-lane (whole) stream.
+    whole = _drain_chunks(
+        StaticMixtureWorkSource(
+            datasets=[make_dataset("alpha", 200), make_dataset("beta", 200)],
+            **kwargs,
+        ).clone_for_lane(0, canonical_replicas=1)
+    )
+    union = {sid for s in sample_sets for sid in s}
+    whole_samples = {sid for ch in whole for sids in ch.values() for sid in sids}
+    assert union == whole_samples
+
+
+@pytest.mark.parametrize("canonical_replicas", [1, 2, 3, 4])
+def test_permute_checkpoint_restore_matches_baseline(canonical_replicas: int) -> None:
+    """Permute routing is reproduced across checkpoint/restore for every lane.
+
+    The routing mode is carried on the checkpoint, so a restored source must
+    continue the identical permuted chunk sequence.
+    """
+    ds_a = make_sharded_dataset("alpha", [30, 20, 15])
+    ds_b = make_sharded_dataset("beta", [25, 10])
+    kwargs: dict = dict(
+        datasets=[ds_a, ds_b],
+        mixture={"alpha": 0.6, "beta": 0.4},
+        chunk_size=5,
+        seed=2026,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        lane_assignment="permute",
+    )
+    for lane in range(canonical_replicas):
+        baseline = _drain_chunks(
+            StaticMixtureWorkSource(**kwargs).clone_for_lane(
+                lane, canonical_replicas=canonical_replicas
+            )
+        )
+        assert baseline
+
+        ws_save = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        prefix = _drain_chunks(ws_save, limit=2)
+        state = ws_save.state_dict()
+        assert state["lane_assignment"] == "permute"
+        assert state["version"] == 4
+
+        ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
+            lane, canonical_replicas=canonical_replicas
+        )
+        ws_load.load_state_dict(state)
+        assert ws_load._lane_assignment == "permute"
+        suffix = _drain_chunks(ws_load)
+
+        assert prefix + suffix == baseline, f"lane {lane} mismatch"
+
+
+def test_old_checkpoint_without_lane_assignment_replays_as_modulo() -> None:
+    ds = make_dataset("a", 80)
+    ws = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=5, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=2)
+    state = ws.state_dict()
+    assert state["lane_assignment"] == "permute"
+
+    # A pre-fix checkpoint carries no routing tag (it is a v3 shape); the
+    # v3 -> v4 migration fills "modulo", so replay keeps the routing those runs
+    # actually used regardless of the current instance's construction.
+    legacy = dict(state)
+    del legacy["lane_assignment"]
+    legacy["version"] = 3
+    old = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=5, lane_assignment="permute"
+    ).clone_for_lane(0, canonical_replicas=2)
+    old.load_state_dict(legacy)
+    assert old._lane_assignment == "modulo"

@@ -332,8 +332,8 @@ def test_v1_to_v2_migrate_lands_on_valid_v2(monkeypatch):
 
 
 def test_v1_end_to_end_via_migrate_validates_current():
-    """The migrate() entry point produces a dict the current (v3) schema accepts."""
-    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+    """The migrate() entry point produces a dict the current schema accepts."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
 
     raw = _v1_static_mixture_raw(
         knobs={
@@ -348,8 +348,8 @@ def test_v1_end_to_end_via_migrate_validates_current():
         cursor_epochs={"a": 0, "b": 0},
     )
     migrated = migrate("static_mixture", raw)
-    sm = StaticMixtureStateV3.from_dict(migrated)
-    assert sm.version == 3
+    sm = StaticMixtureStateV4.from_dict(migrated)
+    assert sm.version == 4
     assert sm.cursor_block_sizes == {"a": 8, "b": 8}
     assert sm.shuffle_block_size_spec == 8
     assert sm.allocation_mode == "legacy_fixed"
@@ -360,6 +360,8 @@ def test_v1_end_to_end_via_migrate_validates_current():
     assert sm.max_repeats == {"a": None, "b": None}
     # stop_after_passes is an additive v3 field absent in older checkpoints.
     assert sm.stop_after_passes is None
+    # v3 -> v4 fills the routing tag with the pre-fix default.
+    assert sm.lane_assignment == "modulo"
 
 
 def _v2_static_mixture_raw(**overrides):
@@ -434,15 +436,16 @@ def test_v2_to_v3_migrate_lands_on_valid_v3(monkeypatch):
     assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
 
 
-def test_v2_to_v3_end_to_end_validates_v3():
-    """migrate() on a v2 payload yields a dict StaticMixtureStateV3 accepts."""
-    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+def test_v2_end_to_end_via_migrate_validates_current():
+    """migrate() chains a v2 payload all the way to the current schema."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
 
     migrated = migrate("static_mixture", _v2_static_mixture_raw())
-    sm = StaticMixtureStateV3.from_dict(migrated)
-    assert sm.version == 3
-    assert sm.exhausted_policy == {"a": "stop"}
+    sm = StaticMixtureStateV4.from_dict(migrated)
+    assert sm.version == 4
+    assert sm.exhausted_policy == {"a": "stop"}  # v2 -> v3 scalar broadcast
     assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
+    assert sm.lane_assignment == "modulo"  # v3 -> v4 fill
 
 
 def test_v2_to_v3_does_not_mutate_input():
@@ -455,3 +458,96 @@ def test_v2_to_v3_does_not_mutate_input():
     d["exhausted_policy"]["a"] = "repeat"
     # v2 is frozen; its scalar policy is unaffected by mutating the v3 dict.
     assert v2.exhausted_policy == "stop"
+
+
+# ---------------------------------------------------------------------------
+# StaticMixture v3 -> v4 migration (lane_assignment)
+# ---------------------------------------------------------------------------
+
+
+def _v3_static_mixture_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV3 (one component)."""
+    base = {
+        "version": 3,
+        "lane_id": 0,
+        "canonical_replicas": 1,
+        "chunk_size_hint": None,
+        "seed": 0,
+        "chunk_size": 1,
+        "knobs": {"shuffle_shards": False, "shuffle_within_shard": False},
+        "global_chunk_index": 0,
+        "weights": {"a": 1.0},
+        "component_order": ["a"],
+        "dataset_ids": {"a": 0},
+        "cursor_positions": {"a": 0},
+        "cursor_epochs": {"a": 0},
+        "cursor_states": {},
+        "cursor_block_sizes": {"a": None},
+        "shuffle_block_size_spec": None,
+        "exhausted_policy": {"a": "stop"},
+        "reshuffle_on_repeat": {"a": True},
+        "max_repeats": {"a": None},
+        "stop_after_passes": None,
+        "allocation_mode": "legacy_fixed",
+        "accumulators": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_v3_to_v4_defaults_lane_assignment_to_modulo():
+    """A v3 checkpoint predates the fix, so it must replay through modulo."""
+    from zephon.core.checkpoint._migrations import _static_mixture_v3_to_v4
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+
+    v3 = StaticMixtureStateV3.from_dict(_v3_static_mixture_raw())
+    d = _static_mixture_v3_to_v4(v3)
+    assert d["lane_assignment"] == "modulo"
+
+
+def test_v3_to_v4_preserves_all_other_fields():
+    from zephon.core.checkpoint._migrations import _static_mixture_v3_to_v4
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+
+    v3 = StaticMixtureStateV3.from_dict(
+        _v3_static_mixture_raw(allocation_mode="accumulator", accumulators={"a": 0.3})
+    )
+    d = _static_mixture_v3_to_v4(v3)
+    assert d["allocation_mode"] == "accumulator"
+    assert d["accumulators"] == {"a": 0.3}
+    assert d["exhausted_policy"] == {"a": "stop"}
+    assert d["stop_after_passes"] is None
+
+
+def test_v3_to_v4_does_not_mutate_input():
+    from zephon.core.checkpoint._migrations import _static_mixture_v3_to_v4
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV3
+
+    v3 = StaticMixtureStateV3.from_dict(_v3_static_mixture_raw())
+    d = _static_mixture_v3_to_v4(v3)
+    # The added field lives only on the migrated dict, not the frozen v3.
+    assert d["lane_assignment"] == "modulo"
+    assert not hasattr(v3, "lane_assignment")
+
+
+def test_v3_to_v4_migrate_lands_on_valid_v4(monkeypatch):
+    """Single-hop check: pin current to 4 so this stays a v3->v4-only test
+    even once later versions are added."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+
+    monkeypatch.setitem(CURRENT_VERSIONS, "static_mixture", 4)
+    sm = StaticMixtureStateV4.from_dict(
+        migrate("static_mixture", _v3_static_mixture_raw())
+    )
+    assert sm.version == 4
+    assert sm.lane_assignment == "modulo"
+
+
+def test_v3_to_v4_end_to_end_validates_current():
+    """migrate() upgrades a v3 dict to a v4 the current schema accepts."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+
+    migrated = migrate("static_mixture", _v3_static_mixture_raw())
+    sm = StaticMixtureStateV4.from_dict(migrated)
+    assert sm.version == 4
+    assert sm.lane_assignment == "modulo"

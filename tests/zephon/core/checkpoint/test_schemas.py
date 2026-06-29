@@ -13,6 +13,7 @@ from zephon.core.checkpoint import (
     StaticMixtureStateV1,
     StaticMixtureStateV2,
     StaticMixtureStateV3,
+    StaticMixtureStateV4,
     WorkChunkStateV1,
 )
 from zephon.core.checkpoint._migrations import (
@@ -1040,6 +1041,64 @@ def test_static_mixture_v3_rejects_stop_after_passes_with_max_repeats():
     with pytest.raises(ValueError, match="cannot be combined with max_repeats"):
         StaticMixtureStateV3.from_dict(
             _minimal_static_mixture_v3_raw(
+                stop_after_passes=1,
+                exhausted_policy={"a": "repeat"},
+                max_repeats={"a": 3},
+            )
+        )
+
+
+# -- StaticMixtureStateV4 ----------------------------------------------------
+
+
+def _minimal_static_mixture_v4_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV4 (v3 + lane_assignment)."""
+    base = _minimal_static_mixture_v3_raw(version=4, lane_assignment="modulo")
+    base.update(overrides)
+    return base
+
+
+def test_static_mixture_v4_minimal_roundtrip():
+    sm = StaticMixtureStateV4.from_dict(_minimal_static_mixture_v4_raw())
+    assert sm.version == 4
+    assert sm.lane_assignment == "modulo"
+    assert StaticMixtureStateV4.from_dict(sm.to_dict()).to_dict() == sm.to_dict()
+
+
+def test_static_mixture_v4_requires_lane_assignment():
+    """lane_assignment is required (no default); a v4 dict missing it is
+    corruption, not an old shape — the v3 -> v4 migration fills it for genuinely
+    older checkpoints."""
+    raw = _minimal_static_mixture_v4_raw()
+    del raw["lane_assignment"]
+    with pytest.raises(ValueError, match="lane_assignment: missing"):
+        StaticMixtureStateV4.from_dict(raw)
+
+
+def test_static_mixture_v4_roundtrips_permute():
+    sm = StaticMixtureStateV4.from_dict(
+        _minimal_static_mixture_v4_raw(lane_assignment="permute")
+    )
+    assert sm.lane_assignment == "permute"
+    assert StaticMixtureStateV4.from_dict(sm.to_dict()).lane_assignment == "permute"
+
+
+def test_static_mixture_v4_rejects_invalid_lane_assignment():
+    with pytest.raises(ValueError, match="lane_assignment='banana'"):
+        StaticMixtureStateV4.from_dict(
+            _minimal_static_mixture_v4_raw(lane_assignment="banana")
+        )
+
+
+def test_static_mixture_v4_still_enforces_inherited_invariants():
+    """The v3 invariants run via super().__post_init__()."""
+    with pytest.raises(ValueError, match="allocation_mode='banana'"):
+        StaticMixtureStateV4.from_dict(
+            _minimal_static_mixture_v4_raw(allocation_mode="banana")
+        )
+    with pytest.raises(ValueError, match="cannot be combined with max_repeats"):
+        StaticMixtureStateV4.from_dict(
+            _minimal_static_mixture_v4_raw(
                 stop_after_passes=1,
                 exhausted_policy={"a": "repeat"},
                 max_repeats={"a": 3},
