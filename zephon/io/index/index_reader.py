@@ -18,7 +18,7 @@ from zephon.io.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-_INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
+INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 # Command that materializes an index.json for each indexable format.
 _INDEX_BUILD_COMMANDS: dict[str, str] = {
@@ -33,7 +33,7 @@ _warned_paths: set[str] = set()
 def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | None:
     """Find and load the first existing index file in a dataset directory.
 
-    Tries each candidate in _INDEX_FILENAMES in order. Returns parsed JSON data
+    Tries each candidate in INDEX_FILENAMES in order. Returns parsed JSON data
     for the first existing file, or None if none exist.
     JSON parse errors propagate to the caller.
 
@@ -45,7 +45,7 @@ def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | N
         Parsed :class:`IndexData` for the first existing file, or ``None``.
     """
     base = dir_path.rstrip("/") or dir_path
-    for filename in _INDEX_FILENAMES:
+    for filename in INDEX_FILENAMES:
         path = f"{base}/{filename}"
         if storage.exists(path):
             with storage.open(path, "r", encoding="utf-8") as f:
@@ -91,4 +91,4 @@ def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) ->
     )
 
 
-__all__ = ["find_and_load_index", "warn_missing_index"]
+__all__ = ["INDEX_FILENAMES", "find_and_load_index", "warn_missing_index"]

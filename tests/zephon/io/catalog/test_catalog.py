@@ -500,6 +500,32 @@ def test_stale_source_sig_forces_rebuild(catalog_dir: Path, tmp_path: Path) -> N
     assert attach(h2).total() == 13
 
 
+def test_source_sig_recognizes_underscore_index(tmp_path: Path) -> None:
+    # _index.json must short-circuit the O(N) scan, like discovery. The branches
+    # differ on an unrelated sibling: the index branch folds only the index file
+    # (sig stable), the scan branch folds every file (sig moves).
+    idx_root = tmp_path / "with_index"
+    idx_root.mkdir()
+    index = {"shards": [{"samples": 3, "raw": {"basename": "s0.mds", "bytes": 1}}]}
+    (idx_root / "_index.json").write_text(json.dumps(index), encoding="utf-8")
+    idx_header = DatasetHeader(
+        name="ds", root=str(idx_root), format="mds", path=str(idx_root)
+    )
+    idx_sig = handle_mod._source_sig(idx_header)
+    (idx_root / "s0.mds").write_bytes(b"x")
+    assert handle_mod._source_sig(idx_header) == idx_sig
+
+    scan_root = tmp_path / "no_index"
+    scan_root.mkdir()
+    (scan_root / "s0.mds").write_bytes(b"x")
+    scan_header = DatasetHeader(
+        name="ds", root=str(scan_root), format="mds", path=str(scan_root)
+    )
+    scan_sig = handle_mod._source_sig(scan_header)
+    (scan_root / "s1.mds").write_bytes(b"x")
+    assert handle_mod._source_sig(scan_header) != scan_sig
+
+
 def test_catalog_is_mmap_backed_not_anonymous(
     catalog_dir: Path, tmp_path: Path
 ) -> None:

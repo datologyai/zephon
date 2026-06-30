@@ -9,7 +9,11 @@ parquet_index).
 """
 
 from zephon.io.index.index_builder import IndexBuilder, ShardInfo, create_index
-from zephon.io.index.index_reader import find_and_load_index, warn_missing_index
+from zephon.io.index.index_reader import (
+    INDEX_FILENAMES,
+    find_and_load_index,
+    warn_missing_index,
+)
 from zephon.io.index.index_types import (
     IndexData,
     LitDataIndex,
@@ -22,6 +26,7 @@ from zephon.io.index.index_types import (
 )
 
 __all__ = [
+    "INDEX_FILENAMES",
     "IndexBuilder",
     "IndexData",
     "LitDataIndex",

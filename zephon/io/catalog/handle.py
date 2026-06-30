@@ -29,6 +29,7 @@ from zephon.io.catalog import io as catalog_io
 from zephon.io.catalog.builder import DatasetHeader, build_catalog
 from zephon.io.catalog.catalog import ShardCatalog
 from zephon.io.catalog.io import SCHEMA_VERSION
+from zephon.io.index.index_reader import INDEX_FILENAMES
 
 if TYPE_CHECKING:
     from zephon.io.options import StoreOptions
@@ -220,11 +221,16 @@ def _source_sig(header: DatasetHeader) -> str:
     parts = [header.format, header.root]
     try:
         storage = RouterStorageBackend()
-        index_path = os.path.join(header.root, "index.json")
-        try:
-            st = storage.stat(index_path)
-            parts.append(f"index.json:{st.get('size', '')}:{st.get('mtime', '')}")
-        except Exception:
+        # Reuse discovery's candidate order; the matched name is folded into the
+        # sig so an index.json <-> _index.json swap re-keys too.
+        for name in INDEX_FILENAMES:
+            try:
+                st = storage.stat(os.path.join(header.root, name))
+            except Exception:
+                continue
+            parts.append(f"{name}:{st.get('size', '')}:{st.get('mtime', '')}")
+            break
+        else:
             # No index (scan formats): fold a sorted (name,size) listing so an
             # in-place change re-keys the build.
             for name in sorted(storage.listdir(header.root)):
