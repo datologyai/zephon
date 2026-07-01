@@ -190,6 +190,7 @@ def test_pipeline_shuffle_default_buffer_size() -> None:
 
     op = _shuffle_node_op(pipe)
     assert op.buffer_size == 8192
+    assert op.algorithm == "streaming"
 
 
 def test_pipeline_shuffle_explicit_buffer_size() -> None:
@@ -202,3 +203,18 @@ def test_pipeline_shuffle_explicit_buffer_size() -> None:
 
     op = _shuffle_node_op(pipe)
     assert op.buffer_size == 42
+
+
+def test_pipeline_shuffle_explicit_algorithm() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = (
+        PublicPipeline(ws)
+        .shuffle(buffer_size=42, algorithm="block")
+        .batch(microbatch_size=8)
+    )
+    pipe.compile()
+
+    op = _shuffle_node_op(pipe)
+    assert op.algorithm == "block"

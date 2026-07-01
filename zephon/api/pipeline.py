@@ -852,6 +852,8 @@ class Pipeline:
         buffer_size: int | None = None,
         *,
         seed: int = 0,
+        algorithm: Literal["streaming", "block", "block_warmup"] = "streaming",
+        warmup_growth: float = 1.5,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -861,13 +863,24 @@ class Pipeline:
             buffer_size: Number of samples to buffer for shuffling. If None,
                 a default of 8192 is used.
             seed: RNG seed for the shuffle.
+            algorithm: ``"streaming"`` uses a deterministic reservoir (default).
+                ``"block"`` uses legacy tumbling blocks. ``"block_warmup"`` uses
+                tumbling blocks with a post-flush block-size ramp.
+            warmup_growth: Multiplicative block-size growth per step for
+                ``algorithm="block_warmup"`` (ignored otherwise). Default 1.5;
+                lower values ramp more smoothly and reach the full window later.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.
 
         Returns:
             Self for method chaining.
         """
-        op = ShuffleBuffer(buffer_size=buffer_size, seed=seed)
+        op = ShuffleBuffer(
+            buffer_size=buffer_size,
+            seed=seed,
+            algorithm=algorithm,
+            warmup_growth=warmup_growth,
+        )
         node = self._graph.add(
             "shuffle_buffer",
             op,
