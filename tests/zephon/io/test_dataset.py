@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests._helpers import catalog_locators, counts_dict
+from tests._helpers import attach_catalog, catalog_locators, counts_dict
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 
@@ -181,3 +181,42 @@ def test_dataset_accessors_empty() -> None:
     assert ds.max_count() == 0
     assert ds.shard_count() == 0
     assert len(ds) == 0
+
+
+def test_dataset_raw_bytes_dict_backed() -> None:
+    from zephon.io import InMemoryShard
+
+    shards = {
+        2: InMemoryShard([{"text": "ab"} for _ in range(3)]),  # 2 * 3
+        0: InMemoryShard([{"text": "abcd"} for _ in range(5)]),  # 4 * 5
+        1: InMemoryShard([{"text": "x"} for _ in range(2)]),  # 1 * 2
+    }
+    ds = Dataset.from_dict("demo", shards)
+
+    raw = ds.raw_bytes()
+    assert raw.dtype == np.int64
+    assert ds.ids().tolist() == [0, 1, 2]
+    assert raw.tolist() == [20, 2, 6]
+
+
+def test_dataset_raw_bytes_empty() -> None:
+    ds = Dataset.from_dict("empty", {})
+    assert ds.raw_bytes().dtype == np.int64
+    assert ds.raw_bytes().tolist() == []
+
+
+def test_dataset_raw_bytes_file_backed_matches_catalog(tmp_path: Path) -> None:
+    (tmp_path / "shard0.jsonl").write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
+    (tmp_path / "shard1.jsonl").write_text('{"id":3}\n', encoding="utf-8")
+    ds = Dataset.from_path("demo", str(tmp_path))
+
+    catalog = attach_catalog(ds)
+    raw = ds.raw_bytes()
+    assert raw.dtype == np.int64
+    assert ds.ids().tolist() == catalog.ids().tolist()
+    assert raw.tolist() == catalog.raw_bytes().tolist()
+    # jsonl shard bytes are the on-disk file sizes.
+    assert raw.tolist() == [
+        (tmp_path / "shard0.jsonl").stat().st_size,
+        (tmp_path / "shard1.jsonl").stat().st_size,
+    ]

@@ -1,4 +1,14 @@
-"""Utility helpers for estimating the size of data structures."""
+"""Utility helpers for estimating the size of data structures.
+
+Two entry points with different semantics:
+
+- :func:`estimate_bytes` approximates a value's in-memory footprint (object
+  overhead + mapping keys, cycle-safe). Use it for observability metrics such
+  as per-invocation consumed/produced bytes.
+- :func:`content_bytes` measures decoded payload bytes only (no object
+  overhead, no mapping keys, no cycle guard). Use it for data-volume sizing
+  that should line up with on-disk bytes, such as :meth:`Dataset.raw_bytes`.
+"""
 
 from __future__ import annotations
 
@@ -73,6 +83,20 @@ def _estimate_mapping_bytes(obj: Mapping[Any, Any], visited: set[int]) -> int:
     return size
 
 
+def _leaf_bytes(obj: Any) -> int | None:
+    """Leaf byte size shared by estimate_bytes and content_bytes."""
+    if isinstance(obj, str):
+        return len(obj.encode("utf-8", errors="ignore"))
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return len(obj)
+    if _np is not None and isinstance(obj, _np.ndarray):
+        return int(obj.nbytes)
+    _t = _lazy_torch()
+    if _t is not None and isinstance(obj, _t.Tensor):
+        return int(obj.element_size() * obj.nelement())
+    return None
+
+
 def estimate_bytes(obj: Any, visited: set[int] | None = None) -> int:
     """Best-effort estimate of allocated bytes for ``obj``.
 
@@ -88,18 +112,12 @@ def estimate_bytes(obj: Any, visited: set[int] | None = None) -> int:
 
     if obj is None:
         return 0
-    if isinstance(obj, (bytes, bytearray, memoryview)):
-        return len(obj)
-    if isinstance(obj, str):
-        return len(obj.encode("utf-8"))
-    if _np is not None and isinstance(obj, _np.ndarray):
-        return int(obj.nbytes)
-    _t = _lazy_torch()
-    if _t is not None and isinstance(obj, _t.Tensor):
-        return int(obj.element_size() * obj.nelement())
+    leaf = _leaf_bytes(obj)
+    if leaf is not None:
+        return leaf
     if isinstance(obj, Mapping):
         return _estimate_mapping_bytes(obj, visited)
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+    if isinstance(obj, Sequence):  # str/bytes/bytearray handled as leaves above
         return _estimate_sequence_bytes(obj, visited)
     field_names = _struct_field_names(type(obj))
     if field_names is not None:
@@ -109,3 +127,23 @@ def estimate_bytes(obj: Any, visited: set[int] | None = None) -> int:
         return sys.getsizeof(obj)
     except TypeError:  # pragma: no cover - fallback for objects without __sizeof__
         return 0
+
+
+def content_bytes(obj: Any) -> int:
+    """Content-only payload bytes, excluding object overhead and mapping keys.
+
+    No cycle guard: payloads are expected to be acyclic.
+    """
+    leaf = _leaf_bytes(obj)
+    if leaf is not None:
+        return leaf
+    if isinstance(obj, Mapping):
+        return sum(content_bytes(v) for v in obj.values())
+    if isinstance(obj, Sequence):  # str/bytes handled as leaves above
+        return sum(content_bytes(item) for item in obj)
+    field_names = _struct_field_names(type(obj))
+    if field_names is not None:
+        return sum(content_bytes(getattr(obj, name, None)) for name in field_names)
+    if isinstance(obj, (int, float, bool)) or obj is None:
+        return 8
+    return 0

@@ -14,6 +14,7 @@ from zephon.io.formats import ensure_builtin_formats
 from zephon.io.formats.base import FormatHandler, get_format
 from zephon.io.index import find_and_load_index
 from zephon.io.index.index_types import IndexData
+from zephon.io.memory import InMemoryShard
 from zephon.io.protocols import RandomAccessShard
 from zephon.io.storage import RouterStorageBackend, StorageBackend
 
@@ -36,7 +37,7 @@ class Dataset:
     Backend kinds used by the internal store builder:
     - "litdata"/"mds"/"jsonl"/"parquet"/"vortex": {"kind", "path"} (no per-shard
       ``shards`` graph — that lives in the catalog now)
-    - "inmem": {"shards": dict[int, RandomAccessShard]}
+    - "inmem": {"shards": dict[int, InMemoryShard]}
 
     Note: this class does not expose any method to fetch rows; IO is delegated
     to an internal shard store owned by the FetchOp.
@@ -55,15 +56,18 @@ class Dataset:
     _ids: np.ndarray | None = field(default=None, compare=False, repr=False)
     _counts: np.ndarray | None = field(default=None, compare=False, repr=False)
 
+    def _inmem_shards(self) -> Mapping[int, InMemoryShard]:
+        shards = self.backend.get("shards")
+        assert self.backend.get("kind") == "inmem" and isinstance(shards, Mapping)
+        return shards
+
     def ids(self) -> np.ndarray:
         """Return the sorted shard ids as an ``int64`` array."""
         if self._ids is not None:
             return self._ids
         if self.catalog_handle is not None:
             return self.catalog_handle.attach().ids()
-        shards = self.backend.get("shards")  # in-memory only (post-unpickle)
-        assert self.backend.get("kind") == "inmem" and isinstance(shards, Mapping)
-        return _inmem_ids_counts(shards)[0]
+        return _inmem_ids_counts(self._inmem_shards())[0]
 
     def counts(self) -> np.ndarray:
         """Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""
@@ -71,9 +75,18 @@ class Dataset:
             return self._counts
         if self.catalog_handle is not None:
             return self.catalog_handle.attach().num_rows()
-        shards = self.backend.get("shards")  # in-memory only (post-unpickle)
-        assert self.backend.get("kind") == "inmem" and isinstance(shards, Mapping)
-        return _inmem_ids_counts(shards)[1]
+        return _inmem_ids_counts(self._inmem_shards())[1]
+
+    def raw_bytes(self) -> np.ndarray:
+        """Return per-shard byte sizes (``int64``), aligned with :meth:`ids`.
+
+        File-backed datasets read the catalog's on-disk shard sizes; in-memory
+        shards size their resident payloads lazily (:attr:`InMemoryShard.raw_bytes`).
+        """
+        if self.catalog_handle is not None:
+            return self.catalog_handle.ensure_attached().raw_bytes()
+        shards = self._inmem_shards()
+        return np.array([shards[i].raw_bytes for i in sorted(shards)], dtype=np.int64)
 
     def total(self) -> int:
         """Total sample count across all shards."""
@@ -182,7 +195,7 @@ class Dataset:
         )
 
     @classmethod
-    def from_dict(cls, name: str, shards: Mapping[int, RandomAccessShard]) -> "Dataset":
+    def from_dict(cls, name: str, shards: Mapping[int, InMemoryShard]) -> "Dataset":
         """Construct an in-memory dataset descriptor."""
         norm = {int(sid): shard for sid, shard in shards.items()}
         backend: Mapping[str, object] = {"kind": "inmem", "shards": norm}

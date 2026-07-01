@@ -20,3 +20,13 @@ def test_inmemory_shard_and_stores() -> None:
 
     multi = InMemoryMultiDatasetStore({5: ds_view})
     assert multi.for_dataset(5) is ds_view
+
+
+def test_inmemory_shard_raw_bytes() -> None:
+    shard = InMemoryShard([{"text": "abcd"} for _ in range(10)])
+    assert shard.raw_bytes == 40
+    assert shard.raw_bytes == 40
+
+
+def test_inmemory_shard_raw_bytes_empty() -> None:
+    assert InMemoryShard([]).raw_bytes == 0
