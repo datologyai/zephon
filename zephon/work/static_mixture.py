@@ -572,6 +572,47 @@ class _DatasetCursor:
             return self._next_many_block_shuffle(limit)
         return self._next_many_sequential(limit)
 
+    def next_one(self) -> SampleId | None:
+        """Consume one sample without the ``next_many(1)`` numpy/list overhead."""
+        if self._position >= self._total_samples:
+            return None
+        if self._has_block_shuffle:
+            if self._block_buffer is not None and self._block_buffer_pos < len(
+                self._block_buffer
+            ):
+                row = self._block_buffer[self._block_buffer_pos]
+                self._block_buffer_pos += 1
+                self._position += 1
+                self.remaining -= 1
+                return tuple(row.tolist())
+            got = self.next_many(1)
+            return got[0] if got else None
+
+        # Mirror _pull_from_shards_array(take=1) without building the array wrapper.
+        # Skip empty shards; the _position guard guarantees a real one remains.
+        while (
+            self._current_shard_idx < len(self._shard_order)
+            and int(self._shard_sizes[self._current_shard_idx]) == 0
+        ):
+            self._current_shard_idx += 1
+            self._current_offsets = None
+        assert self._current_shard_idx < len(self._shard_order)
+        shard_id = int(self._shard_order[self._current_shard_idx])
+        if self._knobs.shuffle_within_shard:
+            self._ensure_shuffled_shard_offsets()
+            assert self._current_offsets is not None
+            offset = int(self._current_offsets[self._current_shard_pos])
+        else:
+            offset = self._current_shard_pos
+        self._current_shard_pos += 1
+        if self._current_shard_pos >= int(self._shard_sizes[self._current_shard_idx]):
+            self._current_shard_idx += 1
+            self._current_shard_pos = 0
+            self._current_offsets = None
+        self._position += 1
+        self.remaining -= 1
+        return (self._dataset_id, shard_id, offset)
+
     def _next_many_sequential(self, limit: int) -> list[SampleId]:
         actual = min(limit, self._total_samples - self._position)
         arr = self._pull_from_shards_array(actual)
@@ -795,7 +836,7 @@ class _DatasetCursor:
 
 
 class AllocationStrategy(ABC):
-    """Encapsulates per-chunk quota computation, length estimation, and checkpoint state.
+    """Encapsulates per-chunk sample production, length estimation, and checkpoint state.
 
     Concrete subclasses own mode-specific mutable state (e.g. fractional
     accumulators or fixed quotas) and the exhaustion-handling loop.
@@ -805,13 +846,12 @@ class AllocationStrategy(ABC):
         self._config = config
 
     @abstractmethod
-    def compute_quotas(
+    def produce(
         self, cursors: dict[str, _DatasetCursor]
-    ) -> dict[str, int] | None:
-        """Return per-component quotas for one chunk, or None if exhausted.
+    ) -> dict[str, list[SampleId]] | None:
+        """Materialize one chunk's samples, or None if exhausted.
 
-        Owns the exhaustion-handling loop (cursor resets, accumulator
-        rollback).  May call ``cursor.reset()`` when repeat policy triggers.
+        Implementations own exhaustion rollback. Zero-sample components are omitted.
         """
 
     @abstractmethod
@@ -834,7 +874,43 @@ class AllocationStrategy(ABC):
                 )
 
 
-class AccumulatorStrategy(AllocationStrategy):
+class QuotaAllocationStrategy(AllocationStrategy):
+    """Shared ``produce`` for strategies that first compute integer quotas.
+
+    Subclasses own quota policy; this class centralizes cursor pulls, zero
+    quotas, and underfill handling.
+    """
+
+    @abstractmethod
+    def compute_quotas(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, int] | None:
+        """Return per-component quotas for one chunk, or None if exhausted."""
+
+    def produce(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, list[SampleId]] | None:
+        quotas = self.compute_quotas(cursors)
+        if quotas is None:
+            return None
+
+        components: dict[str, list[SampleId]] = {}
+        for name in self._config.component_order:
+            quota = quotas[name]
+            if quota <= 0:
+                continue
+            cursor = cursors[name]
+            samples = cursor.next_many(quota)
+            if len(samples) != quota:
+                raise RuntimeError(
+                    f"Cursor for component '{name}' returned {len(samples)}"
+                    f" samples, expected {quota}"
+                )
+            components[name] = samples
+        return components
+
+
+class AccumulatorStrategy(QuotaAllocationStrategy):
     """Bresenham-style fractional-accumulator allocation (default).
 
     Over many chunks the running average converges to exact requested
@@ -1035,7 +1111,7 @@ class AccumulatorStrategy(AllocationStrategy):
         }
 
 
-class LegacyFixedStrategy(AllocationStrategy):
+class LegacyFixedStrategy(QuotaAllocationStrategy):
     """Fixed per-chunk quota allocation (pre-accumulator checkpoints only).
 
     Each component gets at least 1 sample per chunk; the remainder is
@@ -1601,24 +1677,7 @@ class StaticMixtureWorkSource(WorkSource):
         return self._perm_order[slot]
 
     def _next_chunk(self) -> WorkChunk | None:
-        quotas = self._strategy.compute_quotas(self._cursors)
-        if quotas is None:
-            return None
-
-        components: dict[str, list[SampleId]] = {}
-        for name in self._alloc_config.component_order:
-            quota = quotas[name]
-            if quota <= 0:
-                continue
-            cursor = self._cursors[name]
-            samples = cursor.next_many(quota)
-            if len(samples) != quota:
-                raise RuntimeError(
-                    f"Cursor for component '{name}' returned {len(samples)}"
-                    f" samples, expected {quota}"
-                )
-            components[name] = samples
-
+        components = self._strategy.produce(self._cursors)
         if not components:
             return None
 

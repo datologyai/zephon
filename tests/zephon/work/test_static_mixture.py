@@ -12,6 +12,8 @@ from zephon.work.static_mixture import (
     _AUTO_BLOCK_SIZE_FACTOR,
     AccumulatorStrategy,
     LegacyFixedStrategy,
+    QuotaAllocationStrategy,
+    _AllocationConfig,
     _DatasetCursor,
     _DatasetKnobs,
     _resolve_block_size,
@@ -1064,6 +1066,241 @@ def test_streaming_cursor_reference_multiple_seeds(seed: int) -> None:
     cursor = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
     actual = cursor.next_many(cursor._total_samples)
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# next_one: single-draw equivalence with next_many
+# ---------------------------------------------------------------------------
+
+_NEXT_ONE_MATRIX = [
+    (False, False, None),
+    (True, False, None),
+    (False, True, None),
+    (True, True, None),
+    (False, False, 2),
+    (True, True, 2),
+    (True, True, 4),
+    (True, True, 1),
+    # block_size larger than total samples
+    (True, True, 100),
+]
+
+
+@pytest.mark.parametrize("shuffle_shards,shuffle_within,block_size", _NEXT_ONE_MATRIX)
+def test_next_one_matches_reference(
+    shuffle_shards: bool, shuffle_within: bool, block_size: int | None
+) -> None:
+    knobs = _DatasetKnobs(
+        seed=42,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    ref = _DatasetCursor._build_order_reference(
+        dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs
+    )
+    expected = [tuple(row) for row in ref.tolist()]
+
+    cursor = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
+    actual: list[tuple[int, int, int]] = []
+    while (sample := cursor.next_one()) is not None:
+        actual.append(sample)
+
+    assert actual == expected
+    # Triples are plain Python ints, not numpy scalars (matches next_many).
+    assert all(type(v) is int for sid in actual for v in sid)
+    assert cursor.next_one() is None
+    assert cursor._position == cursor._total_samples
+    assert cursor.remaining == 0
+
+
+@pytest.mark.parametrize("shuffle_shards,shuffle_within,block_size", _NEXT_ONE_MATRIX)
+def test_next_one_interleaves_with_next_many(
+    shuffle_shards: bool, shuffle_within: bool, block_size: int | None
+) -> None:
+    knobs = _DatasetKnobs(
+        seed=7,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    expected = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs).next_many(
+        int(_EQUIV_SIZES.sum())
+    )
+
+    cursor = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
+    got: list[tuple[int, int, int]] = []
+    single = True
+    while len(got) < len(expected):
+        if single:
+            sample = cursor.next_one()
+            if sample is None:
+                break
+            got.append(sample)
+        else:
+            got.extend(cursor.next_many(2))
+        single = not single
+
+    assert got == expected
+
+
+@pytest.mark.parametrize("shuffle_shards,shuffle_within,block_size", _NEXT_ONE_MATRIX)
+@pytest.mark.parametrize("draw_n", [1, 7, 14])
+def test_next_one_leaves_same_state_as_next_many_one(
+    shuffle_shards: bool,
+    shuffle_within: bool,
+    block_size: int | None,
+    draw_n: int,
+) -> None:
+    knobs = _DatasetKnobs(
+        seed=99,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    dataset_id = 0
+    total = int(_EQUIV_SIZES.sum())
+
+    one = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
+    one_seq = [one.next_one() for _ in range(draw_n)]
+
+    many = _DatasetCursor(dataset_id, _EQUIV_IDS, _EQUIV_SIZES, knobs)
+    many_seq = [many.next_many(1)[0] for _ in range(draw_n)]
+
+    assert one_seq == many_seq
+    assert one._position == many._position == draw_n
+    assert one.remaining == many.remaining
+    # Checkpoint state must match next_many(1).
+    assert one.checkpoint_state() == many.checkpoint_state()
+    assert one.next_many(total) == many.next_many(total)
+
+
+# Empty shards (count 0) in leading, interior, and trailing positions. next_one
+# must skip them exactly as next_many does — otherwise it emits phantom samples
+# from empty shards (or IndexErrors when shuffling within a shard).
+_EMPTY_SHARD_CASES = [
+    ([10, 11], [0, 3]),  # leading empty
+    ([10, 11, 12], [2, 0, 2]),  # interior empty
+    ([10, 11], [3, 0]),  # trailing empty
+    ([10, 11, 12, 13], [0, 0, 4, 0]),  # consecutive + trailing empties
+]
+
+
+@pytest.mark.parametrize("ids,sizes", _EMPTY_SHARD_CASES)
+@pytest.mark.parametrize("shuffle_shards,shuffle_within,block_size", _NEXT_ONE_MATRIX)
+def test_next_one_skips_empty_shards(
+    ids: list[int],
+    sizes: list[int],
+    shuffle_shards: bool,
+    shuffle_within: bool,
+    block_size: int | None,
+) -> None:
+    knobs = _DatasetKnobs(
+        seed=13,
+        shuffle_shards=shuffle_shards,
+        shuffle_within_shard=shuffle_within,
+        shuffle_block_size=block_size,
+    )
+    ids_arr = np.array(ids, dtype=np.int64)
+    sizes_arr = np.array(sizes, dtype=np.int64)
+
+    expected = _DatasetCursor(0, ids_arr, sizes_arr, knobs).next_many(
+        int(sizes_arr.sum())
+    )
+
+    cursor = _DatasetCursor(0, ids_arr, sizes_arr, knobs)
+    got: list[tuple[int, int, int]] = []
+    while (sample := cursor.next_one()) is not None:
+        got.append(sample)
+
+    assert got == expected
+    assert cursor._position == cursor._total_samples
+    assert cursor.remaining == 0
+
+
+# ---------------------------------------------------------------------------
+# QuotaAllocationStrategy.produce template
+# ---------------------------------------------------------------------------
+
+
+class _FixedQuotaStrategy(QuotaAllocationStrategy):
+    def __init__(
+        self, config: _AllocationConfig, quotas: dict[str, int] | None
+    ) -> None:
+        super().__init__(config)
+        self._quotas = quotas
+
+    def compute_quotas(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, int] | None:
+        return self._quotas
+
+    def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
+        return 0
+
+    def clone(self) -> "_FixedQuotaStrategy":
+        return _FixedQuotaStrategy(self._config, self._quotas)
+
+    def checkpoint_state(self) -> dict[str, object]:
+        return {}
+
+
+def _single_shard_cursor(dataset_id: int, size: int) -> _DatasetCursor:
+    knobs = _DatasetKnobs(
+        seed=0,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+        shuffle_block_size=None,
+    )
+    return _DatasetCursor(
+        dataset_id,
+        np.array([0], dtype=np.int64),
+        np.array([size], dtype=np.int64),
+        knobs,
+    )
+
+
+def _alloc_config(
+    component_order: tuple[str, ...], chunk_size: int
+) -> _AllocationConfig:
+    return _AllocationConfig(
+        component_order=component_order,
+        weights=dict.fromkeys(component_order, 1.0 / len(component_order)),
+        chunk_size=chunk_size,
+        exhausted_policy=dict.fromkeys(component_order, "stop"),
+        reshuffle_on_repeat=dict.fromkeys(component_order, False),
+        max_repeats=dict.fromkeys(component_order, None),
+    )
+
+
+def test_produce_pulls_quota_and_omits_zero_components() -> None:
+    config = _alloc_config(("a", "b"), chunk_size=3)
+    cursors = {"a": _single_shard_cursor(0, 10), "b": _single_shard_cursor(1, 10)}
+    strategy = _FixedQuotaStrategy(config, {"a": 3, "b": 0})
+
+    components = strategy.produce(cursors)
+
+    assert components is not None
+    assert set(components) == {"a"}
+    assert components["a"] == [(0, 0, 0), (0, 0, 1), (0, 0, 2)]
+    assert cursors["b"].remaining == 10  # zero-quota component is never drawn from
+
+
+def test_produce_returns_none_when_quotas_none() -> None:
+    config = _alloc_config(("a",), chunk_size=3)
+    cursors = {"a": _single_shard_cursor(0, 10)}
+    assert _FixedQuotaStrategy(config, None).produce(cursors) is None
+
+
+def test_produce_raises_when_cursor_underfills_quota() -> None:
+    config = _alloc_config(("a",), chunk_size=3)
+    cursors = {"a": _single_shard_cursor(0, 2)}
+    strategy = _FixedQuotaStrategy(config, {"a": 5})
+
+    with pytest.raises(RuntimeError, match="expected 5"):
+        strategy.produce(cursors)
 
 
 @pytest.mark.parametrize(
