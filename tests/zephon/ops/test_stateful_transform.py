@@ -942,3 +942,96 @@ class TestStatefulTransformAccumulatorMidStreamFlush:
             f"Expected ['a', 'c'] (fresh dedup state), got {ids}. "
             f"Stale seen set from epoch 1 leaked across flush boundary."
         )
+
+
+def _lane_rec(lane: int, item_id: str, *, offset: int = 0) -> SampleRecord:
+    """A record on a specific lane (the default ``_rec`` is lane 0 only)."""
+    meta = SampleMeta(
+        sample_id=(0, lane, offset), lane_id=lane, chunk_id=0, chunk_offset=offset
+    )
+    return SampleRecord(meta=meta, payload={"id": item_id})
+
+
+def _dedup_push(seen: set, items: list[SampleRecord]) -> tuple[set, list[SampleRecord]]:
+    """Per-lane dedup by ``payload['id']`` — state is the seen-id set."""
+    outputs = []
+    for item in items:
+        if item.payload["id"] not in seen:
+            seen.add(item.payload["id"])
+            outputs.append(item)
+    return seen, outputs
+
+
+class TestStatefulTransformAccumulatorPerLane:
+    """State is partitioned by lane: a flush sentinel for one lane must not
+    disturb another lane's epoch, and push_fn must see one lane at a time."""
+
+    def test_per_lane_flush_resets_only_target_lane(self) -> None:
+        """flush(reset=True, lane_id=L) resets lane L's state and no other's.
+
+        Feed 'a' to lane 0 and 'x' to lane 1, then flush only lane 0.
+        Re-feeding both: lane 0 forgot 'a' (emitted again), lane 1 still
+        remembers 'x' (filtered) — so the flush touched only lane 0.  Flushing
+        every lane would re-emit 'x' too.
+        """
+        acc = StatefulTransformAccumulator(
+            init_state=set,
+            push_fn=_dedup_push,
+            flush_fn=lambda s: [],
+            should_flush_fn=None,
+        )
+
+        acc.push_many([_lane_rec(0, "a"), _lane_rec(1, "x")])
+        acc.flush(reset=True, lane_id=0)
+
+        out = [
+            r
+            for b, _ in acc.push_many([_lane_rec(0, "a"), _lane_rec(1, "x")])
+            for r in b
+        ]
+        emitted = {(r.meta.lane_id, r.payload["id"]) for r in out}
+        assert emitted == {(0, "a")}, (
+            f"only lane 0 should forget its epoch; got {emitted}"
+        )
+
+    def test_has_pending_data_is_per_lane(self) -> None:
+        """has_pending_data(lane) tracks each lane independently."""
+        acc = StatefulTransformAccumulator(
+            init_state=lambda: {"buf": []},
+            push_fn=lambda s, items: ({"buf": s["buf"] + items}, []),
+            flush_fn=lambda s: s["buf"],
+            should_flush_fn=None,
+        )
+
+        acc.push_many([_lane_rec(0, "a"), _lane_rec(1, "x")])
+        assert acc.has_pending_data(0) is True
+        assert acc.has_pending_data(1) is True
+        assert acc.has_pending_data() is True
+
+        acc.flush(reset=True, lane_id=0)
+        assert acc.has_pending_data(0) is False
+        assert acc.has_pending_data(1) is True, "lane 1's buffer must survive"
+        assert acc.has_pending_data() is True
+
+    def test_push_fn_receives_one_lane_at_a_time(self) -> None:
+        """push_fn is called per lane, never with a mixed-lane batch."""
+        seen_lane_sets: list[set[int]] = []
+
+        def push(
+            state: None, items: list[SampleRecord]
+        ) -> tuple[None, list[SampleRecord]]:
+            seen_lane_sets.append({i.meta.lane_id for i in items})
+            return state, items
+
+        acc = StatefulTransformAccumulator(
+            init_state=lambda: None, push_fn=push, flush_fn=None, should_flush_fn=None
+        )
+        batches = acc.push_many(
+            [_lane_rec(0, "a"), _lane_rec(1, "x"), _lane_rec(0, "b"), _lane_rec(1, "y")]
+        )
+
+        assert all(len(lanes) == 1 for lanes in seen_lane_sets), (
+            f"push_fn must see lane-pure batches, got {seen_lane_sets}"
+        )
+        for batch, _ in batches:
+            assert len({r.meta.lane_id for r in batch}) == 1, "output must be lane-pure"

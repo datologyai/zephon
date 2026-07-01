@@ -542,6 +542,27 @@ class TestEnsureMixtureAccumulator:
         assert not acc.has_pending_data()
         assert len(emitted) == 1
 
+    def test_flush_reset_is_lane_scoped(self) -> None:
+        """A per-lane flush sentinel must only flush its own lane's buffer.
+
+        SWRR deficit state and buffers are per-lane; flushing every lane at
+        one lane's epoch boundary corrupts the others' mixture state and
+        breaks checkpoint replay.
+        """
+        # Target wants component 0; feeding component 1 forces buffering.
+        acc = _make_accumulator_with_chunk_mixture({0: 1.0}, max_buffer_size=100)
+        for lane in (0, 1):
+            acc.push_many([_rec(i, component_id=1, lane=lane) for i in range(3)])
+        assert acc.has_pending_data(lane_id=0)
+        assert acc.has_pending_data(lane_id=1)
+
+        flushed = _flatten_ready(acc.flush(reset=True, lane_id=0))
+
+        assert {r.meta.lane_id for r in flushed} == {0}
+        assert len(flushed) == 3
+        assert not acc.has_pending_data(lane_id=0)
+        assert acc.has_pending_data(lane_id=1)
+
     def test_flush_emits_remaining(self) -> None:
         """Flush should emit all remaining buffered records.
 
@@ -1448,6 +1469,33 @@ def test_strict_discard_is_lane_scoped() -> None:
     lanes = {t.meta.lane_id for t in tombstones}
     assert lanes == {0, 1}
     assert not acc.has_pending_data()
+
+
+def test_strict_per_lane_flush_discards_only_target_lane() -> None:
+    """A per-lane flush in strict mode discards only its own lane.
+
+    The runner injects one flush sentinel per lane at epoch boundaries, so an
+    unbounded (strict) accumulator must discard the target lane's buffer while
+    leaving every other lane's buffer pending — the discard path is lane-scoped
+    just like the bounded drain path.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    acc.push_many([_rec(i, component_id=0, lane=0) for i in range(10)])
+    acc.push_many([_rec(i, component_id=0, lane=1) for i in range(7)])
+    buffered_0 = acc._lanes[0].total_buffered
+    buffered_1 = acc._lanes[1].total_buffered
+    assert buffered_0 and buffered_1
+
+    tombstones = _assert_tombstones_only(acc.flush(reset=True, lane_id=0))
+
+    assert {t.meta.lane_id for t in tombstones} == {0}
+    assert len(tombstones) == buffered_0
+    assert not acc.has_pending_data(lane_id=0)
+    assert acc.has_pending_data(lane_id=1)
+    assert acc._lanes[1].total_buffered == buffered_1
 
 
 def test_strict_discard_batches_tombstones() -> None:

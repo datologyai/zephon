@@ -3,10 +3,11 @@
 
 """Batching operator for grouping sample records (lane-pure)."""
 
+from collections.abc import Iterable
 from typing import Any
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
-from zephon.core.constants import SampleBatch, SampleRecord, lane_of
+from zephon.core.constants import SampleBatch, SampleRecord
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
 
@@ -14,20 +15,29 @@ from zephon.core.traits import OpTraits
 class BatchAccumulator(CountingAccumulator[SampleRecord]):
     """Lane-keyed counting accumulator with chunk-aware ``try_epoch_reset``.
 
-    Subclasses ``CountingAccumulator`` with two Batch-specific additions:
-
-    1. ``key_fn`` is hardcoded to ``lane_of`` (Batch always groups by lane).
-    2. ``try_epoch_reset`` checks ``chunk_id`` so that a stalled flush
-       sentinel can be released as soon as all pre-boundary records have
-       left the buffer, even if post-boundary records remain.
+    Subclasses ``CountingAccumulator`` (which already groups per lane) to add a
+    Batch-specific ``try_epoch_reset``: it checks ``chunk_id`` so a stalled
+    flush sentinel can be released as soon as all pre-boundary records have left
+    the buffer, even if post-boundary records remain.
     """
 
     def __init__(self, max_batch: int, *, drop_last: bool = True) -> None:
-        super().__init__(max_batch, key_fn=lane_of, drop_last=drop_last)
+        super().__init__(max_batch, drop_last=drop_last)
 
-    def try_epoch_reset(self, boundary_chunk_id: int) -> bool:
-        """Return True once no buffered record has chunk_id < boundary_chunk_id."""
-        for buf in self._buffers.values():
+    def try_epoch_reset(
+        self, boundary_chunk_id: int, lane_id: int | None = None
+    ) -> bool:
+        """Return True once no in-scope buffered record has chunk_id < boundary.
+
+        ``lane_id`` scopes the check to the stalled sentinel's lane; ``None``
+        checks every lane.
+        """
+        if lane_id is None:
+            bufs: Iterable[list[SampleRecord]] = self._buffers.values()
+        else:
+            buf = self._buffers.get(lane_id)
+            bufs = (buf,) if buf is not None else ()
+        for buf in bufs:
             for elem in buf:
                 if (
                     isinstance(elem, SampleRecord)

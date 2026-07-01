@@ -430,21 +430,27 @@ class Pipeline:
 
         This split enables patterns like "deduplicate (serial) then encode (parallel)".
 
-        The state lifecycle:
-        1. State is lazily initialized on first batch via init_state()
-        2. Each batch calls push(state, items) -> (new_state, outputs)
-        3. If should_flush returns True, flush is called and state is reset
-        4. On stream end (or epoch boundary), flush() emits remaining buffered items
+        State is partitioned per lane — each lane keeps its own state instance
+        and your callbacks see one lane at a time, so an epoch-boundary flush
+        resets only that lane (required for deterministic replay when one engine
+        owns several lanes).  The per-lane lifecycle:
+        1. A lane's state is lazily initialized on its first record via init_state()
+        2. push(state, items) is called with one lane's records -> (new_state, outputs)
+        3. If should_flush returns True, that lane's flush runs and its state resets
+        4. On stream end (all lanes) or a lane's epoch boundary, flush() emits that
+           lane's remaining buffered items
         5. Each output item goes through transform (if provided) in parallel
 
         Args:
             name: Operator name for debugging/metrics.
-            init_state: Factory that creates initial state (called once per worker).
-            push: Called with (state, batch) -> (new_state, outputs).
-                Outputs are emitted immediately; state carries forward.
-            flush: Optional. Called at end-of-stream to emit remaining buffered
-                items.  In non-monotonic pipelines, also called mid-stream at
-                epoch boundaries; state is re-initialized afterward.
+            init_state: Factory that creates initial state (called lazily per lane).
+            push: Called with (lane_state, one lane's records) -> (new_state,
+                outputs).  Outputs are emitted immediately; state carries forward
+                for that lane.
+            flush: Optional. Emits a lane's remaining buffered items at
+                end-of-stream.  In non-monotonic pipelines, also called per lane
+                mid-stream at that lane's epoch boundary; the lane's state is
+                re-initialized afterward.
             should_flush: Optional. If returns True, triggers early flush and state reset.
             transform: Optional. Batch-level transform that runs in parallel workers.
                 Receives the full batch from the accumulator, preserving batch structure
@@ -614,8 +620,7 @@ class Pipeline:
 
                 - ``Callable[[], Accumulator]`` — simplest form. Use
                   ``lambda: CountingAccumulator(max_batch=N)`` for
-                  size-based per-lane batching (``key_fn=lane_of`` is
-                  the default).
+                  size-based per-lane batching (it always groups by lane).
                 - ``Callable[*, deterministic, ctx], Accumulator]`` —
                   for accumulators whose construction depends on the
                   deterministic mode (e.g. enabling latency-based flush

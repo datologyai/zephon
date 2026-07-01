@@ -24,7 +24,7 @@ class _DeferringAccumulator(Accumulator[SampleRecord]):
     def __init__(self) -> None:
         self._first: SampleRecord | None = None
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return self._first is not None
 
     def push_many(
@@ -40,7 +40,9 @@ class _DeferringAccumulator(Accumulator[SampleRecord]):
                 ready.append(([elem], 0))
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
         if self._first is None:
             return []
         elem = self._first

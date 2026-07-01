@@ -26,6 +26,8 @@ class PassthroughAccumulator(Accumulator[T]):
         batch = elems if isinstance(elems, list) else list(elems)
         return [(batch, 0)]
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[T]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[T]]:
         """No buffered state to flush."""
         return []

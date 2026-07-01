@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
@@ -184,11 +184,16 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         state.total_buffered = 0
         return ready, dropped
 
-    def has_pending_data(self) -> bool:
-        """Return True if there are any buffered records."""
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        """Return True if buffered records remain (in ``lane_id`` if given)."""
+        if lane_id is None:
+            states: Iterable[_LaneState] = self._lanes.values()
+        else:
+            state = self._lanes.get(lane_id)
+            states = (state,) if state is not None else ()
         return any(
-            any(buf for buf in state.buffers.values()) or state.multi_component_buffer
-            for state in self._lanes.values()
+            any(buf for buf in s.buffers.values()) or s.multi_component_buffer
+            for s in states
         )
 
     def _can_emit_optimal(self, state: _LaneState) -> bool:
@@ -313,8 +318,10 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
-        """Emit all remaining buffered records, per-lane.
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Emit remaining buffered records for the given lane(s).
 
         Bounded mode drains the buffer in SWRR order (lossless), accelerating
         obsolete-component draining so nothing is stranded. Unbounded mode
@@ -322,41 +329,65 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         mid-stream sentinel (``reset=True``) and terminal close
         (``reset=False``) alike — since it only holds the surplus SWRR withheld
         to keep the mixture exact; draining it would skew the output.
+
+        ``lane_id=None`` flushes every lane; otherwise only that lane is
+        flushed and (when ``reset=True``) reset, leaving the others untouched.
         """
+        if lane_id is None:
+            lane_ids = list(self._lanes)
+        else:
+            lane_ids = [lane_id] if lane_id in self._lanes else []
+
         ready: list[ReadyBatch[SampleRecord]] = []
         discarded = 0
         discarded_lanes = 0
 
-        for lane_id, state in list(self._lanes.items()):
+        for lid in lane_ids:
+            state = self._lanes[lid]
+
             if self._config.max_buffer_size is None:
                 batches, dropped = self._discard_lane_buffers(state)
                 ready.extend(batches)
                 if dropped:
                     discarded += dropped
                     discarded_lanes += 1
-                continue
+            else:
+                emitted_batch: list[SampleRecord] = []
 
-            emitted_batch: list[SampleRecord] = []
+                while self._has_buffered_samples(state):
+                    # During flush, accelerate obsolete draining by resetting the counter
+                    # This ensures obsolete samples are drained promptly
+                    obsolete = self._get_obsolete_components(state)
+                    if obsolete:
+                        # Force obsolete drain by setting counter to threshold
+                        if self._config.obsolete_drain_rate > 0:
+                            drain_interval = int(1.0 / self._config.obsolete_drain_rate)
+                            state.emissions_since_obsolete_drain = drain_interval
 
-            while self._has_buffered_samples(state):
-                # During flush, accelerate obsolete draining by resetting the counter
-                # This ensures obsolete samples are drained promptly
-                obsolete = self._get_obsolete_components(state)
-                if obsolete:
-                    # Force obsolete drain by setting counter to threshold
-                    if self._config.obsolete_drain_rate > 0:
-                        drain_interval = int(1.0 / self._config.obsolete_drain_rate)
-                        state.emissions_since_obsolete_drain = drain_interval
+                    record = self._emit_one(lid, state)
+                    if record is not None:
+                        state.total_buffered -= 1
+                        emitted_batch.append(record)
+                    else:
+                        break
 
-                record = self._emit_one(lane_id, state)
-                if record is not None:
-                    state.total_buffered -= 1
-                    emitted_batch.append(record)
-                else:
-                    break
+                if emitted_batch:
+                    ready.append((emitted_batch, 0))
 
-            if emitted_batch:
-                ready.append((emitted_batch, 0))
+            # Mid-stream flush: reset emission history so the next epoch starts
+            # with clean SWRR state, identical to a freshly constructed
+            # accumulator.  Done even when the buffer was already empty — a stale
+            # SWRR deficit would otherwise perturb the next epoch on replay.  We
+            # null out swrr (not just reset()) so _update_lane_swrr builds a fresh
+            # instance with sorted _order — otherwise update_target() on the old
+            # instance keeps stale _order/_index entries, which can diverge
+            # tie-breaking if mixture components change across epochs.
+            if reset:
+                state.emitted_by_component.clear()
+                state.total_emitted = 0.0
+                state.emissions_since_obsolete_drain = 0
+                state.current_chunk_id = None
+                state.swrr = None
 
         if discarded:
             self._total_discarded += discarded
@@ -383,20 +414,6 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     discarded_lanes,
                     self._total_discarded,
                 )
-
-        # Mid-stream flush: reset emission history so the next epoch starts
-        # with clean SWRR state, identical to a freshly constructed accumulator.
-        # We null out swrr (not just reset()) so that _update_lane_swrr creates
-        # a fresh instance with sorted _order — otherwise update_target() on the
-        # old instance preserves stale _order/_index entries, which can cause
-        # divergent tie-breaking if mixture components change across epochs.
-        if reset:
-            for state in self._lanes.values():
-                state.emitted_by_component.clear()
-                state.total_emitted = 0.0
-                state.emissions_since_obsolete_drain = 0
-                state.current_chunk_id = None
-                state.swrr = None
 
         return ready
 

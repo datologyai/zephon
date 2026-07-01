@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional
 
 from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.children import tombstones_for_record
-from zephon.core.constants import SampleBatch, SamplePayload, SampleRecord, lane_of
+from zephon.core.constants import SampleBatch, SamplePayload, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 
@@ -119,7 +119,6 @@ class MapTransform(_BaseMapTransform):
         return CountingAccumulator[SampleRecord](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
-            key_fn=lane_of,
         )
 
     def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
@@ -214,7 +213,6 @@ class MapBatchTransform(_BaseMapTransform):
         return CountingAccumulator[SampleRecord | SampleBatch](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
-            key_fn=lane_of,
         )
 
     def process_one(self, elem: SampleBatch) -> list[SampleBatch | SampleRecord]:

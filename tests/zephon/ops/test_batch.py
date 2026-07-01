@@ -29,16 +29,15 @@ def test_batch_invalid_microbatch_size_raises() -> None:
 
 def test_batch_accumulator_invalid_microbatch_size_raises() -> None:
     with pytest.raises(ValueError):
-        CountingAccumulator(0, key_fn=lambda r: r.meta.lane_id)
+        CountingAccumulator(0)
     with pytest.raises(ValueError):
-        CountingAccumulator(-2, key_fn=lambda r: r.meta.lane_id)
+        CountingAccumulator(-2)
 
 
 def _lane_acc(size: int, drop_last: bool = True) -> CountingAccumulator[SampleRecord]:
     """Create a lane-keyed CountingAccumulator matching Batch's usage."""
     return CountingAccumulator[SampleRecord](
         max_batch=size,
-        key_fn=lambda r: r.meta.lane_id,
         drop_last=drop_last,
     )
 

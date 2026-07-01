@@ -294,6 +294,36 @@ def test_multiple_stalled_sentinels_released_on_force() -> None:
     assert len(state._stalled_sentinels) == 0
 
 
+def test_stalled_sentinel_release_is_per_lane() -> None:
+    """A blocked lane must not hold back another lane's ready sentinel.
+
+    Both lanes stall at boundary_cid=2.  Lane 1 then drains its pre-boundary
+    record (its batch fills and emits), so lane 1's sentinel becomes
+    releasable while lane 0 — still holding a chunk_id=1 record — stays
+    blocked.  The old all-lane ``try_epoch_reset()`` checked every buffer at
+    once and stopped at the FIFO head, so lane 0 starved lane 1's release.
+    """
+    state = _make_batch_runner(batch_size=2).ops[0]
+
+    # Each lane buffers one pre-boundary (chunk_id=1) record, then stalls.
+    state.enqueue(
+        [_rec(0, chunk_id=1, lane_id=0), _flush_sentinel(lane_id=0, boundary_cid=2)]
+    )
+    state.enqueue(
+        [_rec(1, chunk_id=1, lane_id=1), _flush_sentinel(lane_id=1, boundary_cid=2)]
+    )
+    assert len(state._stalled_sentinels) == 2
+
+    # A post-boundary record fills lane 1's batch (size 2), draining its
+    # pre-boundary record; lane 1's sentinel releases, lane 0's stays stalled.
+    batches = state.enqueue([_rec(2, chunk_id=2, lane_id=1)])
+
+    released = _sentinel_batches(batches)
+    assert len(released) == 1
+    assert released[0][0].meta.lane_id == 1
+    assert [s.meta.lane_id for s, _ in state._stalled_sentinels] == [0]
+
+
 def test_stalled_batch_produces_cross_epoch_batches() -> None:
     """When Batch stalls, cross-epoch mixing in output is expected.
 
@@ -344,6 +374,54 @@ def test_flush_sentinel_dummy_chunk_id_does_not_corrupt_floor() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-lane flush sentinel scoping
+# ---------------------------------------------------------------------------
+
+
+def _emitted_lanes(batches: list[tuple[list[SampleRecord], int]]) -> set[int]:
+    """Lane ids of the non-sentinel records emitted by enqueue()."""
+    return {
+        r.meta.lane_id for b, _ in batches for r in b if not r.meta.is_flush_sentinel
+    }
+
+
+def test_flush_sentinel_only_flushes_its_own_lane() -> None:
+    """A per-lane flush sentinel must not flush other lanes' buffered state.
+
+    The engine injects one flush sentinel per lane.  When lane 0's sentinel
+    arrives, only lane 0's accumulator state may flush; lane 1's buffered
+    records must survive until lane 1's own sentinel (or end of stream).
+    Flushing every lane corrupts the other lanes' epochs mid-stream and
+    breaks deterministic replay across checkpoint/restore.
+    """
+    state = _make_pack_runner().ops[0]
+
+    # Each lane buffers a partial bin (length 1 << max_length=10).
+    state.enqueue([_rec(0, chunk_id=1, lane_id=0), _rec(0, chunk_id=1, lane_id=1)])
+    assert state.accumulator_impl.has_pending_data()
+
+    batches = state.enqueue([_flush_sentinel(lane_id=0, boundary_cid=2)])
+
+    assert _emitted_lanes(batches) == {0}, "lane-0 sentinel must flush only lane 0"
+    assert len(_sentinel_batches(batches)) == 1, "sentinel still passes through"
+    # Lane 1's bin is untouched and still pending.
+    assert state.accumulator_impl.has_pending_data()
+
+
+def test_each_lane_sentinel_flushes_independently() -> None:
+    """Two lanes flush at their own sentinels, in order, exactly once each."""
+    state = _make_pack_runner().ops[0]
+    state.enqueue([_rec(0, chunk_id=1, lane_id=0), _rec(0, chunk_id=1, lane_id=1)])
+
+    b0 = state.enqueue([_flush_sentinel(lane_id=0, boundary_cid=2)])
+    assert _emitted_lanes(b0) == {0}
+
+    b1 = state.enqueue([_flush_sentinel(lane_id=1, boundary_cid=2)])
+    assert _emitted_lanes(b1) == {1}
+    assert not state.accumulator_impl.has_pending_data()
+
+
+# ---------------------------------------------------------------------------
 # stall_on_epoch_boundary trait
 # ---------------------------------------------------------------------------
 
@@ -366,7 +444,9 @@ class _FlushTrackingAccumulator(Accumulator[SampleRecord]):
             ready.append((batch, 0))
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
         if reset:
             self.mid_stream_flush_called = True
         result: list[ReadyBatch[SampleRecord]] = []
@@ -375,10 +455,12 @@ class _FlushTrackingAccumulator(Accumulator[SampleRecord]):
             self._buffer.clear()
         return result
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buffer)
 
-    def try_epoch_reset(self, boundary_chunk_id: int) -> bool:
+    def try_epoch_reset(
+        self, boundary_chunk_id: int, lane_id: int | None = None
+    ) -> bool:
         for rec in self._buffer:
             if rec.meta.chunk_id < boundary_chunk_id:
                 return False
@@ -422,10 +504,12 @@ class _BrokenFlushAccumulator(Accumulator[SampleRecord]):
         self._buffer.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
         return []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buffer)
 
 

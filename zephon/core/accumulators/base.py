@@ -40,7 +40,9 @@ class Accumulator(ABC, Generic[T]):
         """
 
     @abstractmethod
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[T]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[T]]:
         """Emit any remaining ready batches.
 
         Called both at upstream close (default, ``reset=False``) and
@@ -48,10 +50,19 @@ class Accumulator(ABC, Generic[T]):
         must fully reset internal state so the accumulator is indistinguishable
         from a freshly constructed instance.
 
+        Flush sentinels are injected **per lane**, so a mid-stream flush is
+        scoped to ``lane_id``: only that lane's state is emitted and reset,
+        leaving other lanes' epochs untouched.  Flushing every lane at one
+        lane's epoch boundary corrupts the others and breaks deterministic
+        replay across checkpoint/restore.  ``lane_id=None`` flushes all lanes
+        (used at upstream close, when every lane is done).
+
         Args:
             reset: True when triggered by a flush sentinel mid-stream
                 (the accumulator must reset to fresh state), False when
                 called at upstream close.
+            lane_id: When set, flush only this lane.  When None, flush all
+                lanes.
 
         Returns:
             List of remaining batches. These are typically partial batches
@@ -68,15 +79,21 @@ class Accumulator(ABC, Generic[T]):
         """
         return False
 
-    def has_pending_data(self) -> bool:
-        """Return True if the accumulator has buffered data that would be emitted on flush().
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        """Return True if buffered data would be emitted on flush().
 
         Default implementation returns False. Subclasses with internal buffers
         should override this to return True when they have pending data.
+
+        Args:
+            lane_id: When set, report only this lane's pending state.  When
+                None, report whether any lane has pending data.
         """
         return False
 
-    def try_epoch_reset(self, boundary_chunk_id: int) -> bool:
+    def try_epoch_reset(
+        self, boundary_chunk_id: int, lane_id: int | None = None
+    ) -> bool:
         """Attempt a delayed epoch reset for stalled flush sentinels.
 
         Called when a flush sentinel was stalled (held behind buffered data)
@@ -99,9 +116,11 @@ class Accumulator(ABC, Generic[T]):
             boundary_chunk_id: The ``_boundary_cid`` from the stalled flush
                 sentinel.  Records with ``chunk_id < boundary_chunk_id`` are
                 pre-boundary (old epoch).
+            lane_id: The stalled sentinel's lane.  When set, only this lane's
+                buffered records gate the reset; other lanes are independent.
 
         Returns:
             True if the reset was performed and the sentinel can be released.
             False if pre-boundary records still exist in the buffer.
         """
-        return not self.has_pending_data()
+        return not self.has_pending_data(lane_id)

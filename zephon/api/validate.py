@@ -1280,6 +1280,89 @@ def _check_acc_lane_pure_batches(
     return []
 
 
+def _check_acc_flush_is_lane_scoped(
+    factory: Callable[[], Accumulator[Any]], op_name: str, samples: list[SampleRecord]
+) -> list[Issue]:
+    """A per-lane flush must accept ``lane_id`` and touch only that lane.
+
+    The engine injects one flush sentinel per lane, so at every epoch boundary
+    the runner flushes a single lane — ``flush(reset=True, lane_id=lane)`` then
+    ``has_pending_data(lane)`` — regardless of how many lanes a rank owns.  Three
+    failure modes surface here at construction time rather than as a pump-thread
+    traceback or silent replay divergence:
+
+    - ``ACC_NO_PER_LANE_FLUSH``: the methods reject the ``lane_id`` argument.
+    - ``ACC_PER_LANE_FLUSH_NOT_DRAINED``: the target lane is left pending.
+    - ``ACC_FLUSH_LEAKS_OTHER_LANES``: the flush emitted or drained a *different*
+      lane, corrupting its epoch — exactly the multi-lane checkpoint bug the
+      per-lane flush model exists to prevent.
+    """
+    lanes = list(dict.fromkeys(r.meta.lane_id for r in samples))
+    if not lanes:
+        return []
+    target, others = lanes[0], lanes[1:]
+
+    try:
+        acc = factory()
+        acc.push_many(copy.deepcopy(samples))
+    except Exception:
+        return []  # construction / push failures are other checks' domain
+
+    try:
+        pending_before = {lane for lane in others if acc.has_pending_data(lane)}
+        emitted = _iter_records(_drain_batches(acc.flush(reset=True, lane_id=target)))
+        leftover = acc.has_pending_data(target)
+        leaked = ({r.meta.lane_id for r in emitted} - {target}) | {
+            lane for lane in pending_before if not acc.has_pending_data(lane)
+        }
+    except TypeError as exc:
+        return [
+            Issue(
+                severity="error",
+                code="ACC_NO_PER_LANE_FLUSH",
+                op_name=op_name,
+                message=(
+                    f"Accumulator does not accept a lane_id ({exc}). The runner "
+                    f"flushes one lane at a time at epoch boundaries, so both "
+                    f"methods must take the optional parameter: "
+                    f"def flush(self, *, reset=False, lane_id=None) and "
+                    f"def has_pending_data(self, lane_id=None)."
+                ),
+            )
+        ]
+    except Exception:
+        return []  # non-signature raises belong to the conservation check
+
+    if leftover:
+        return [
+            Issue(
+                severity="error",
+                code="ACC_PER_LANE_FLUSH_NOT_DRAINED",
+                op_name=op_name,
+                message=(
+                    f"flush(reset=True, lane_id={target!r}) left lane {target!r} "
+                    f"with pending data. A per-lane flush must fully drain that "
+                    f"lane; the runner raises at the epoch boundary otherwise."
+                ),
+            )
+        ]
+    if leaked:
+        return [
+            Issue(
+                severity="error",
+                code="ACC_FLUSH_LEAKS_OTHER_LANES",
+                op_name=op_name,
+                message=(
+                    f"flush(reset=True, lane_id={target!r}) emitted or drained "
+                    f"other lane(s) {sorted(leaked)}. A per-lane flush must touch "
+                    f"only its own lane — flushing every lane at one lane's epoch "
+                    f"boundary corrupts the others and breaks checkpoint replay."
+                ),
+            )
+        ]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -1507,6 +1590,13 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
                     name,
                     "acc-lane-pure-batches",
                     lambda: _check_acc_lane_pure_batches(factory, name, samples),
+                )
+            )
+            report.issues.extend(
+                _guard(
+                    name,
+                    "acc-flush-lane-scoped",
+                    lambda: _check_acc_flush_is_lane_scoped(factory, name, samples),
                 )
             )
     return report

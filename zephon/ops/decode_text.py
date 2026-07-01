@@ -11,7 +11,6 @@ from zephon.core.constants import (
     SamplePayloadDict,
     SampleRecord,
     is_bytes_like,
-    lane_of,
 )
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
@@ -49,7 +48,6 @@ class DecodeText(DefaultSetup):
         return CountingAccumulator[SampleRecord](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
-            key_fn=lane_of,
         )
 
     def _decode(self, value: Any) -> str:

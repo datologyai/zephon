@@ -246,12 +246,14 @@ class _DroppingAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         kept = self._buf[::2]  # drop every other sample
         self._buf = []
         return [(kept, 0)] if kept else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -281,14 +283,16 @@ class _ResetIgnoringAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         if not reset:
             self._buf = []
         # When reset=True we deliberately keep _buf — bug.
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -317,7 +321,9 @@ class _RoundCounterAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out: list[Any] = []
         for elem in self._buf:
             payload = dict(elem.payload) if isinstance(elem.payload, dict) else {}
@@ -330,7 +336,7 @@ class _RoundCounterAccumulator(Accumulator[Any]):
             self._round += 1
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -367,12 +373,14 @@ class _LyingPendingAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         self._buf = []
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return True  # always lies
 
 
@@ -401,12 +409,14 @@ class _AlwaysFalseAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []  # always buffer; never emit
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         self._buf = []
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return False  # always lies
 
 
@@ -548,12 +558,14 @@ class _LaneScramblingAccumulator(Accumulator[Any]):
             self._buf.append(elem)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         self._buf = []
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -590,12 +602,14 @@ class _CrossPollinatingAccumulator(Accumulator[Any]):
                 self._buf = []
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         self._buf = []
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -623,7 +637,7 @@ def test_validate_skips_lane_purity_for_passthrough_shape() -> None:
 
 
 def test_validate_passes_lane_purity_for_lane_keyed_counting_accumulator() -> None:
-    """CountingAccumulator with default key_fn=lane_of must not trip the check."""
+    """CountingAccumulator keyed by lane must not trip the check."""
     pipe = _empty_pipeline().add_op(
         "lane_keyed",
         process_many=lambda elems: list(elems),
@@ -632,6 +646,130 @@ def test_validate_passes_lane_purity_for_lane_keyed_counting_accumulator() -> No
     )
     report = pipe.validate()
     assert "ACC_BATCH_NOT_LANE_PURE" not in _codes(report)
+
+
+# ---------------------------------------------------------------------------
+# ACC_NO_PER_LANE_FLUSH / ACC_PER_LANE_FLUSH_NOT_DRAINED
+# ---------------------------------------------------------------------------
+
+
+def _emit_lane_pure(buf: list[Any]) -> list[ReadyBatch[Any]]:
+    """Drain ``buf`` into one lane-pure batch per lane (a valid flush shape)."""
+    by_lane: dict[Any, list[Any]] = {}
+    for rec in buf:
+        by_lane.setdefault(rec.meta.lane_id, []).append(rec)
+    return [(batch, 0) for batch in by_lane.values()]
+
+
+class _NoLaneIdAccumulator(Accumulator[Any]):
+    """Pre-per-lane signature: ``flush``/``has_pending_data`` omit ``lane_id``.
+
+    Otherwise correct — the runner flushes one lane at a time
+    (``flush(reset=True, lane_id=lane)``), so this raises at the first epoch
+    boundary even though every other contract holds.
+    """
+
+    def __init__(self) -> None:
+        self._buf: list[Any] = []
+
+    def push_many(self, elems: Any) -> list[ReadyBatch[Any]]:
+        self._buf.extend(elems)
+        return []
+
+    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+        out = _emit_lane_pure(self._buf)
+        self._buf = []
+        return out
+
+    def has_pending_data(self) -> bool:
+        return bool(self._buf)
+
+
+def test_validate_catches_accumulator_without_lane_id() -> None:
+    pipe = _empty_pipeline().add_op(
+        "no_lane_id",
+        process_many=lambda elems: list(elems),
+        accumulator=_NoLaneIdAccumulator,
+        preserves_cursor_order=True,
+    )
+    report = pipe.validate()
+    assert "ACC_NO_PER_LANE_FLUSH" in _codes(report)
+
+
+class _LaneFlushNoOpAccumulator(Accumulator[Any]):
+    """Accepts ``lane_id`` but ignores it: a per-lane flush drains nothing.
+
+    Only the all-lanes flush (``lane_id is None``) clears the buffer, so a
+    per-lane flush leaves the target lane pending — exactly what the runner's
+    post-flush guard rejects.
+    """
+
+    def __init__(self) -> None:
+        self._buf: list[Any] = []
+
+    def push_many(self, elems: Any) -> list[ReadyBatch[Any]]:
+        self._buf.extend(elems)
+        return []
+
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
+        if lane_id is not None:
+            return []  # bug: drops the per-lane flush on the floor
+        out = _emit_lane_pure(self._buf)
+        self._buf = []
+        return out
+
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        return bool(self._buf)
+
+
+def test_validate_catches_per_lane_flush_that_does_not_drain() -> None:
+    pipe = _empty_pipeline().add_op(
+        "lane_flush_noop",
+        process_many=lambda elems: list(elems),
+        accumulator=_LaneFlushNoOpAccumulator,
+        preserves_cursor_order=True,
+    )
+    report = pipe.validate()
+    assert "ACC_PER_LANE_FLUSH_NOT_DRAINED" in _codes(report)
+
+
+class _AllLaneFlushAccumulator(Accumulator[Any]):
+    """Accepts ``lane_id`` but flushes *every* lane regardless.
+
+    The target lane drains (so the not-drained check passes), but the other
+    lanes are emitted and cleared too — the cross-lane corruption a per-lane
+    flush must never cause.
+    """
+
+    def __init__(self) -> None:
+        self._buf: list[Any] = []
+
+    def push_many(self, elems: Any) -> list[ReadyBatch[Any]]:
+        self._buf.extend(elems)
+        return []
+
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
+        out = _emit_lane_pure(self._buf)  # bug: ignores lane_id, drains all lanes
+        self._buf = []
+        return out
+
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        return bool(self._buf)
+
+
+def test_validate_catches_per_lane_flush_that_leaks_other_lanes() -> None:
+    pipe = _empty_pipeline().add_op(
+        "all_lane_flush",
+        process_many=lambda elems: list(elems),
+        accumulator=_AllLaneFlushAccumulator,
+        preserves_cursor_order=True,
+    )
+    report = pipe.validate()
+    assert "ACC_FLUSH_LEAKS_OTHER_LANES" in _codes(report)
 
 
 # ---------------------------------------------------------------------------
@@ -1405,12 +1543,14 @@ class _PayloadReadingAccumulator(Accumulator[Any]):
         self._buf.extend(elems)
         return []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         out = list(self._buf)
         self._buf = []
         return [(out, 0)] if out else []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return bool(self._buf)
 
 
@@ -1448,10 +1588,12 @@ class _PassthroughPayloadReadingAccumulator(Accumulator[Any]):
             _ = e.payload["tokens"]  # KeyError on generic synthetic input
         return [(elems, 0)] if elems else []
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[Any]]:
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[Any]]:
         return []
 
-    def has_pending_data(self) -> bool:
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
         return False
 
 

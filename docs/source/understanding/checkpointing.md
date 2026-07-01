@@ -299,8 +299,9 @@ the source stream every `flush_every_k_chunks` chunks per lane.  The
 sentinel flows through the pipeline like any other record, but at each
 operator boundary the runner intercepts it:
 
-- The runner calls `flush(reset=True)` on the accumulator, which
-  emits all buffered data and **fully resets** its internal state.  For
+- The runner calls `flush(reset=True, lane_id=lane)` on the accumulator,
+  which emits and **fully resets** that lane's state — sentinels are per-lane,
+  so other lanes are untouched.  For
   history-dependent accumulators (`preserves_cursor_order=False`) this is
   the load-bearing reset.  For order-preserving accumulators the flush is
   harmless (a no-op or trivial drain).  The only built-in operator that

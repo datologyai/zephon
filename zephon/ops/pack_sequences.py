@@ -474,11 +474,13 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     def reads_payload(self) -> bool:
         return True
 
-    def has_pending_data(self) -> bool:
-        """Return True if there are any bins or wrap-mode segments with data."""
-        if any(bins for bins in self._bins.values()):
-            return True
-        return any(total > 0 for total in self._wrap_total.values())
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        """Return True if any bins or wrap segments hold data (in ``lane_id`` if given)."""
+        if lane_id is None:
+            if any(bins for bins in self._bins.values()):
+                return True
+            return any(total > 0 for total in self._wrap_total.values())
+        return bool(self._bins.get(lane_id)) or self._wrap_total.get(lane_id, 0) > 0
 
     def push_many(
         self, elems: Sequence[SampleRecord]
@@ -487,17 +489,18 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if not elems:
             return []
 
-        work_list = list(elems)
-
-        # Apply shuffle strategy to order sequences
+        # Only materialize a list when we reorder; otherwise iterate elems directly.
         if self.shuffle_strategy == "random":
+            work_list = list(elems)
             rng = random.Random(batch_seed(self.shuffle_seed, work_list))
             rng.shuffle(work_list)
         elif self.shuffle_strategy == "length":
             work_list = sorted(
-                work_list,
+                elems,
                 key=lambda rec: (-self.length_fn(rec), rec.meta.cursor.as_key()),
             )
+        else:
+            work_list = elems
 
         ready: list[ReadyBatch[SampleRecord]] = []
 
@@ -541,15 +544,22 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
-        """Emit any remaining partially-filled bins."""
-        ready: list[ReadyBatch[SampleRecord]] = []
-        for lane_id, bins in self._bins.items():
-            for bin_data in bins:
-                if bin_data.segments:
-                    ready.append(([self._emit_first_best_bin(bin_data, lane_id)], 0))
-        self._bins.clear()
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Emit any remaining partially-filled bins / wrap tails."""
+        if lane_id is None:
+            # Stable lane order at upstream close (set iteration is layout-dependent).
+            lanes = sorted(
+                set(self._bins)
+                | set(self._wrap_total)
+                | set(self._wrap_segments)
+                | set(self._wrap_lane_auto_field)
+            )
+        else:
+            lanes = [lane_id]
 
+        ready: list[ReadyBatch[SampleRecord]] = []
         # Wrap mode: drop any tail that did not fill a full ``max_length``, emit
         # tombstones so dropped records still close contributor offsets, and
         # clear buffered state. ``tombstones_for_record`` only emits for
@@ -557,15 +567,20 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         # MapTransform), so non-closing contributors are not falsely advanced.
         tail_drop_lanes: list[tuple[int, int]] = []
         wrap_tombstones: list[ReadyBatch[SampleRecord]] = []
-        for lane_id, total in list(self._wrap_total.items()):
-            if total <= 0:
-                continue
-            tail_drop_lanes.append((lane_id, total))
-            for seg in self._wrap_segments[lane_id]:
-                rec = seg.record
-                self._wrap_comp_emitted.pop((lane_id, rec.meta.cursor.as_key()), None)
-                for tomb in tombstones_for_record(rec):
-                    wrap_tombstones.append(([tomb], 0))
+        for lid in lanes:
+            for bin_data in self._bins.pop(lid, []):
+                if bin_data.segments:
+                    ready.append(([self._emit_first_best_bin(bin_data, lid)], 0))
+
+            total = self._wrap_total.pop(lid, 0)
+            segments = self._wrap_segments.pop(lid, None)
+            self._wrap_lane_auto_field.pop(lid, None)
+            if total > 0 and segments:
+                tail_drop_lanes.append((lid, total))
+                for seg in segments:
+                    rec = seg.record
+                    self._wrap_comp_emitted.pop((lid, rec.meta.cursor.as_key()), None)
+                    wrap_tombstones.extend(([t], 0) for t in tombstones_for_record(rec))
 
         if tail_drop_lanes:
             dropped_tokens = sum(t for _, t in tail_drop_lanes)
@@ -579,17 +594,16 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 len(wrap_tombstones),
             )
 
-        self._wrap_segments.clear()
-        self._wrap_total.clear()
-        self._wrap_lane_auto_field.clear()
-        self._wrap_comp_emitted.clear()
+        if lane_id is None:
+            self._wrap_comp_emitted.clear()
         ready.extend(wrap_tombstones)
 
         # first_fit/best_fit oversized drops: surface the count so a comparison
-        # against wrap (which keeps every token by splitting) is honest. Report
-        # and reset on every flush — mid-stream flush(reset=True) must leave the
-        # accumulator indistinguishable from a fresh one.
-        if self._dropped_oversized_count:
+        # against wrap (which keeps every token by splitting) is honest.  These
+        # are global diagnostic counters (the drop+tombstone already happened in
+        # push_many), not per-lane replay state, so report and reset only on the
+        # all-lanes flush at upstream close.
+        if lane_id is None and self._dropped_oversized_count:
             logger.warning(
                 "PackSequences %s: dropped %d document(s) (%d token(s)) longer "
                 "than max_length=%d; these algorithms cannot split a record, so "

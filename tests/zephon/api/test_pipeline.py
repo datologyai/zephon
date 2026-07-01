@@ -618,7 +618,7 @@ def test_add_op_advanced_traits_default_false() -> None:
 def test_legacy_shuffle_pack_v2_pattern_via_kwargs_add_op() -> None:
     """Smoke-test the per-lane CountingAccumulator pattern Maxi calls out
     in legacy_shuffle_pack.py: the v2 fix is "use a real op with
-    CountingAccumulator(key_fn=lane_of)" instead of stateful_transform.
+    CountingAccumulator" instead of stateful_transform.
     With the new add_op, that pattern is a single call.
     """
     window_size = 3

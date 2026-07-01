@@ -3,7 +3,7 @@
 
 """Tests for CountingAccumulator lane-aware buffering.
 
-CountingAccumulator routes elements to per-lane buffers via ``key_fn``,
+CountingAccumulator routes elements to per-lane buffers (keyed by lane),
 ensuring each emitted batch is lane-pure.  This is critical for
 deterministic shuffle: ``batch_seed`` must not depend on the cross-lane
 interleaving order from the source stream.
@@ -12,7 +12,7 @@ interleaving order from the source stream.
 from __future__ import annotations
 
 from zephon.core.accumulators.counting import CountingAccumulator
-from zephon.core.constants import SampleMeta, SampleRecord, lane_of
+from zephon.core.constants import EngineSample, SampleMeta, SampleRecord
 
 
 def _rec(lane_id: int, offset: int) -> SampleRecord:
@@ -29,8 +29,8 @@ def _rec(lane_id: int, offset: int) -> SampleRecord:
 
 def test_batches_identical_regardless_of_interleaving_order() -> None:
     """Same records, different lane interleaving -> identical batches."""
-    acc_a = CountingAccumulator[SampleRecord](max_batch=4, key_fn=lane_of)
-    acc_b = CountingAccumulator[SampleRecord](max_batch=4, key_fn=lane_of)
+    acc_a = CountingAccumulator[SampleRecord](max_batch=4)
+    acc_b = CountingAccumulator[SampleRecord](max_batch=4)
 
     lane0 = [_rec(0, i) for i in range(4)]
     lane1 = [_rec(1, i) for i in range(4)]
@@ -53,7 +53,7 @@ def test_batches_identical_regardless_of_interleaving_order() -> None:
 
 def test_batches_are_lane_pure() -> None:
     """Batches from a multi-lane stream should each contain a single lane."""
-    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+    acc = CountingAccumulator[SampleRecord](max_batch=3)
 
     # Alternating lanes, as _source_stream round-robin would produce
     records = [_rec(lane_id=i % 2, offset=i) for i in range(6)]
@@ -71,7 +71,7 @@ def test_batches_are_lane_pure() -> None:
 
 def test_drop_last_discards_partial_batches() -> None:
     """drop_last=True discards partial per-lane buffers on flush."""
-    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of, drop_last=True)
+    acc = CountingAccumulator[SampleRecord](max_batch=3, drop_last=True)
     acc.push_many([_rec(0, 0), _rec(0, 1)])  # partial lane 0
     assert acc.has_pending_data()
     assert acc.flush() == []
@@ -80,9 +80,7 @@ def test_drop_last_discards_partial_batches() -> None:
 
 def test_flush_emits_partial_batches() -> None:
     """drop_last=False emits partial per-lane buffers on flush."""
-    acc = CountingAccumulator[SampleRecord](
-        max_batch=3, key_fn=lane_of, drop_last=False
-    )
+    acc = CountingAccumulator[SampleRecord](max_batch=3, drop_last=False)
     acc.push_many([_rec(0, 0), _rec(1, 0)])  # 1 per lane
     flushed = acc.flush()
     assert len(flushed) == 2
@@ -98,7 +96,7 @@ def test_flush_reset_produces_fresh_equivalent_state() -> None:
     actually produces fresh-equivalent state — catching future fields that
     might be added without corresponding reset logic.
     """
-    acc = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+    acc = CountingAccumulator[SampleRecord](max_batch=3)
 
     # Build up state across multiple lanes
     acc.push_many([_rec(0, i) for i in range(5)])
@@ -107,7 +105,7 @@ def test_flush_reset_produces_fresh_equivalent_state() -> None:
 
     acc.flush(reset=True)
 
-    fresh = CountingAccumulator[SampleRecord](max_batch=3, key_fn=lane_of)
+    fresh = CountingAccumulator[SampleRecord](max_batch=3)
 
     # Compare all instance attributes (excluding callables/config)
     assert not acc.has_pending_data()
@@ -115,9 +113,30 @@ def test_flush_reset_produces_fresh_equivalent_state() -> None:
     assert acc._first_ts_ns == fresh._first_ts_ns
 
 
+def test_flush_reset_is_lane_scoped() -> None:
+    """flush(reset=True, lane_id=L) drains and resets only lane L.
+
+    Flush sentinels are per-lane, so a mid-stream flush for one lane must
+    leave other lanes' buffers intact — otherwise multi-lane epochs corrupt
+    each other and checkpoint replay diverges.
+    """
+    acc = CountingAccumulator[SampleRecord](max_batch=10)
+    acc.push_many([_rec(0, 0), _rec(0, 1), _rec(1, 0)])  # 2 in lane 0, 1 in lane 1
+
+    flushed = acc.flush(reset=True, lane_id=0)
+
+    emitted = [r for batch, _ in flushed for r in batch]
+    assert {r.meta.lane_id for r in emitted} == {0}
+    assert len(emitted) == 2
+    # Lane 0 is drained; lane 1 survives.
+    assert not acc.has_pending_data(lane_id=0)
+    assert acc.has_pending_data(lane_id=1)
+    assert acc.has_pending_data()
+
+
 def test_engine_sample_keying() -> None:
     """EngineSample tuples are keyed by lane_id at index 1."""
-    acc = CountingAccumulator[tuple](max_batch=2, key_fn=lane_of)
+    acc = CountingAccumulator[EngineSample](max_batch=2)
     # EngineSample = (sample_id, lane_id, chunk_id, offset, component_id)
     elems = [
         ((0, 0, 0), 0, 0, 0, 0),  # lane 0

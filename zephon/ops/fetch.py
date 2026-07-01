@@ -11,7 +11,6 @@ from zephon.core.constants import (
     SampleMeta,
     SamplePayload,
     SampleRecord,
-    lane_of,
 )
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
@@ -73,7 +72,6 @@ class FetchOp(DefaultSetup):
         return CountingAccumulator[EngineSample](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
-            key_fn=lane_of,
         )
 
     def process_one(self, elem: EngineSample) -> list[SampleRecord]:

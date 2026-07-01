@@ -212,6 +212,23 @@ def test_has_pending_data() -> None:
     assert not acc.has_pending_data()
 
 
+def test_flush_reset_is_lane_scoped() -> None:
+    """A per-lane flush sentinel must only flush its own lane's bins.
+
+    Bins are per-lane and history-dependent; flushing every lane at one
+    lane's epoch boundary corrupts the others' packing and breaks replay.
+    """
+    acc = _pack(10, num_bins=10, length_fn=_simple_length_fn, drop_oversized=False)
+    # Partial open bins in two lanes (length 3 << max_length=10).
+    acc.push_many([_rec(0, 3, lane=0), _rec(1, 3, lane=1)])
+
+    flushed = acc.flush(reset=True, lane_id=0)
+
+    assert {r.meta.lane_id for r in _records(flushed)} == {0}
+    assert not acc.has_pending_data(lane_id=0)
+    assert acc.has_pending_data(lane_id=1)
+
+
 def test_contributors_set_for_1to1_inputs() -> None:
     acc = _pack(10, num_bins=10, length_fn=_simple_length_fn, drop_oversized=False)
     rec1, rec2 = _rec(0, 5), _rec(1, 5)

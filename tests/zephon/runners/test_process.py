@@ -25,7 +25,7 @@ from zephon.core.accumulators import (
     CountingAccumulator,
     PassthroughAccumulator,
 )
-from zephon.core.constants import SampleRecord, StreamItem, lane_of
+from zephon.core.constants import SampleRecord, StreamItem
 from zephon.core.graph import Node, Stage
 from zephon.core.op_base import DefaultSetup, Op, OpContext
 from zephon.core.traits import OpTraits
@@ -269,7 +269,6 @@ class _DecodeAndAnnotateBatchOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
         return CountingAccumulator[SampleRecord](
             max_batch=self.max_batch,
             max_latency_ms=None if deterministic else 1,
-            key_fn=lane_of,
         )
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
@@ -547,7 +546,7 @@ class _BatchTensorizeOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
         return CountingAccumulator[SampleRecord](
-            max_batch=self.max_batch, max_latency_ms=None, key_fn=lane_of
+            max_batch=self.max_batch, max_latency_ms=None
         )
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
@@ -1496,9 +1495,7 @@ class _CrashOnValue(DefaultSetup, Op[Any, Any]):
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[StreamItem]:
-        return CountingAccumulator[StreamItem](
-            max_batch=1, max_latency_ms=None, key_fn=lane_of
-        )
+        return CountingAccumulator[StreamItem](max_batch=1, max_latency_ms=None)
 
     def process_one(self, elem: StreamItem) -> list[StreamItem]:
         return self.process_many([elem])
@@ -1546,9 +1543,7 @@ class _CrashNTimes(DefaultSetup, Op[Any, Any]):
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[StreamItem]:
-        return CountingAccumulator[StreamItem](
-            max_batch=1, max_latency_ms=None, key_fn=lane_of
-        )
+        return CountingAccumulator[StreamItem](max_batch=1, max_latency_ms=None)
 
     def process_one(self, elem: StreamItem) -> list[StreamItem]:
         return self.process_many([elem])

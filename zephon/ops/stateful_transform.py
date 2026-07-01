@@ -20,11 +20,20 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
     implement custom buffering and batching logic without understanding the
     full Op protocol complexity.
 
-    The state lifecycle:
-    1. State is lazily initialized on first push_many() call via init_state()
-    2. Each push_many() calls push_fn(state, items) -> (new_state, outputs)
-    3. If should_flush_fn returns True, flush_fn is called and state is reset
-    4. On stream end, flush() emits any remaining buffered items
+    State is partitioned by lane, like every other stateful accumulator: each
+    lane gets its own ``init_state()`` instance and ``push_fn`` sees one lane's
+    records at a time.  Lanes are independent streams, so a flush sentinel for
+    one lane resets only that lane's state — required for deterministic replay
+    across checkpoint/restore when one engine owns several lanes.
+
+    The per-lane state lifecycle:
+    1. A lane's state is created lazily on its first ``push_many()`` element.
+    2. Each ``push_many()`` groups elements by lane and calls
+       ``push_fn(state, lane_items) -> (new_state, outputs)`` per lane.
+    3. If ``should_flush_fn`` returns True for a lane, ``flush_fn`` runs and
+       that lane's state resets.
+    4. ``flush(lane_id=...)`` drains one lane; ``flush()`` (stream end) drains
+       every lane.
     """
 
     def __init__(
@@ -38,10 +47,12 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
         self._push_fn = push_fn
         self._flush_fn = flush_fn
         self._should_flush_fn = should_flush_fn
-        self._state: S | None = None
-        self._initialized = False
+        # One user state per lane, created lazily on that lane's first element.
+        self._states: dict[int, S] = {}
+        # Lanes that have taken data since their last flush.  Only tracked when
+        # a flush_fn exists, since without one flush() emits nothing.
+        self._pending: set[int] = set()
         self._flushed = False
-        self._has_pending = False
 
     # TODO: StatefulTransformAccumulator delegates to a user-supplied push_fn
     # which *may* read payload. For now we default to False (no eager resolution)
@@ -52,62 +63,82 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
     def push_many(
         self, items: Sequence[SampleRecord]
     ) -> list[ReadyBatch[SampleRecord]]:
-        if not self._initialized:
-            self._state = self._init_state()
-            self._initialized = True
-
         result: list[ReadyBatch[SampleRecord]] = []
-        items_list = items if isinstance(items, list) else list(items)
-        if not items_list:
+        if not items:
             return result
-        if self._flush_fn is not None:
-            self._has_pending = True
-        self._state, outputs = self._push_fn(self._state, items_list)
 
-        if self._should_flush_fn and self._should_flush_fn(self._state):
-            flush_outputs = self._flush_fn(self._state) if self._flush_fn else []
-            self._state = self._init_state()
-            self._has_pending = False
-            outputs.extend(flush_outputs)
+        # Fold each lane's records into that lane's own state, so push_fn never
+        # mixes lanes and a later per-lane flush can reset one lane in isolation.
+        by_lane: dict[int, list[SampleRecord]] = {}
+        for item in items:
+            by_lane.setdefault(item.meta.lane_id, []).append(item)
 
-        if outputs:
-            result.append((outputs, len(outputs)))
-        return result
+        for lane_id, lane_items in by_lane.items():
+            state = self._states.get(lane_id)
+            if state is None:
+                state = self._init_state()
+            if self._flush_fn is not None:
+                self._pending.add(lane_id)
+            state, outputs = self._push_fn(state, lane_items)
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
-        """Emit any remaining buffered items.
+            if self._should_flush_fn and self._should_flush_fn(state):
+                flush_outputs = self._flush_fn(state) if self._flush_fn else []
+                state = self._init_state()
+                self._pending.discard(lane_id)
+                outputs.extend(flush_outputs)
 
-        Args:
-            reset: If True (epoch boundary), re-initialize state so the
-                accumulator is ready for the next epoch. If False (default),
-                this is the final flush — mark as done and discard state.
-        """
-        result: list[ReadyBatch[SampleRecord]] = []
-        if self._flush_fn and self._initialized and self._state is not None:
-            outputs = self._flush_fn(self._state)
+            self._states[lane_id] = state
             if outputs:
                 result.append((outputs, len(outputs)))
-
-        if not reset:
-            # Final flush — mark as done, discard state.
-            self._flushed = True
-            self._state = None
-        else:
-            # Mid-stream flush — re-initialize for the next epoch.
-            # _initialized stays True (init_state already called).
-            # _flushed stays False (accumulator continues to accept data).
-            self._state = self._init_state()
-        self._has_pending = False
-
         return result
 
-    def has_pending_data(self) -> bool:
-        """Return True if the accumulator may still need a flush."""
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Emit any remaining buffered items.
+
+        Flush sentinels are per-lane: when ``lane_id`` is set only that lane's
+        state is flushed and reset, leaving other lanes' state for their own
+        sentinels.  ``lane_id=None`` flushes every lane (stream end).
+
+        Args:
+            reset: True at an epoch boundary — re-initialize the flushed lane(s)
+                for the next epoch.  False (default) is the final flush, which
+                discards state.
+            lane_id: Flush only this lane when set; all lanes when None.
+        """
+        if lane_id is None:
+            lanes = sorted(self._states)
+        else:
+            lanes = [lane_id] if lane_id in self._states else []
+
+        result: list[ReadyBatch[SampleRecord]] = []
+        for lid in lanes:
+            if self._flush_fn is not None:
+                outputs = self._flush_fn(self._states[lid])
+                if outputs:
+                    result.append((outputs, len(outputs)))
+            self._pending.discard(lid)
+            if reset:
+                self._states[lid] = self._init_state()
+            else:
+                del self._states[lid]
+
+        # The all-lanes, non-reset flush is the terminal stream-end drain.
+        if lane_id is None and not reset:
+            self._flushed = True
+        return result
+
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        """Return True if a flush would still emit buffered data.
+
+        Scoped to ``lane_id`` when set; otherwise True if any lane is pending.
+        """
         if self._flushed:
             return False
-        if not self._initialized or self._state is None:
-            return False
-        return self._has_pending
+        if lane_id is None:
+            return bool(self._pending)
+        return lane_id in self._pending
 
 
 class StatefulTransformOp(DefaultSetup, Generic[S]):

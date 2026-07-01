@@ -228,24 +228,25 @@ this diversity through a simple interface:
 
 - **`push_many(elems)`**: consume new elements from upstream.  Buffer
   them internally and return zero or more ready micro-batches.
-- **`flush(*, reset=False)`**: emit remaining buffered data.
+- **`flush(*, reset=False, lane_id=None)`**: emit remaining buffered data.
   Called in two contexts:
-  - **End of stream** (`reset=False`, the default): the lane is done.
-    Emit any remaining partial micro-batches.
-  - **Mid-stream** (`reset=True`): a flush sentinel has
+  - **End of stream** (`reset=False`, `lane_id=None`, the default): every
+    lane is done.  Emit any remaining partial micro-batches.
+  - **Mid-stream** (`reset=True`, `lane_id` set): a flush sentinel has
     arrived (see [Flush sentinels](checkpointing.md#flush-sentinels-and-epoch-boundaries)).
-    The accumulator must emit **all** buffered data and **fully reset**
-    its internal state so it is indistinguishable from a freshly
-    constructed instance.  This is what makes epoch boundaries safe for
-    replay: the next epoch starts from clean state.
+    Flush sentinels are injected **per lane**, so the flush is scoped to
+    `lane_id`: emit and **fully reset** only that lane's state, leaving the
+    other lanes untouched.  This is what makes epoch boundaries safe for
+    replay — each lane's next epoch starts from clean state; flushing every
+    lane at one lane's boundary corrupts the others and breaks replay.
     The only built-in operator that intentionally stalls instead of
     flushing is {py:class}`~zephon.ops.Batch` with `drop_last=True`.
     Other operators must flush to a fresh state at the sentinel.  See
     [Flush sentinels and accumulator stalling](#flush-sentinels-and-accumulator-stalling)
     below.
-- **`has_pending_data()`**: returns whether the accumulator has buffered
-  data that would be emitted on `flush()`.  The runner uses this to avoid
-  premature termination and to detect
+- **`has_pending_data(lane_id=None)`**: returns whether the accumulator has
+  buffered data that would be emitted on `flush()`, scoped to `lane_id` when
+  set.  The runner uses this to avoid premature termination and to detect
   [stalling](#flush-sentinels-and-accumulator-stalling).
 
 `flush()` is deterministic: its output depends only on the elements the
@@ -424,18 +425,20 @@ reproducible.
 Non-monotonic pipelines (those with packing, shuffling, or mixture
 correction) use **flush sentinels** to create epoch boundaries for safe
 checkpoint eviction.  Every `flush_every_k_chunks` chunks per lane, the
-engine injects a sentinel that triggers `flush(reset=True)` on
-each history-dependent accumulator.  For the full motivation and eviction
-model, see [Epoch-Based Eviction](checkpointing.md#epoch-based-eviction).
+engine injects a sentinel that triggers `flush(reset=True, lane_id=lane)` on
+each history-dependent accumulator, scoped to that sentinel's lane.  For the
+full motivation and eviction model, see
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction).
 
 This section covers the accumulator side: which accumulators are flushed,
 what "fully reset" means, and the stalling mechanism.
 
 ### Which accumulators are flushed
 
-The runner calls `flush(reset=True)` on **every** accumulator
-when a flush sentinel arrives, unless the operator sets
-`stall_on_epoch_boundary=True` (see [below](#stalling-stall_on_epoch_boundary)).
+The runner calls `flush(reset=True, lane_id=lane)` on **every** accumulator
+when a flush sentinel arrives — scoped to the sentinel's lane — unless the
+operator sets `stall_on_epoch_boundary=True`
+(see [below](#stalling-stall_on_epoch_boundary)).
 For history-dependent accumulators (`preserves_cursor_order=False`) this
 flush is critical — it resets state so the next epoch can replay
 independently.  For order-preserving accumulators, the flush is harmless
@@ -453,13 +456,14 @@ independently.  For order-preserving accumulators, the flush is harmless
 
 ### What "fully reset" means
 
-After `flush(reset=True)`, the accumulator must be
-indistinguishable from a freshly constructed instance.  All internal
-buffers, counters, and derived state must be cleared.  For the packing
-accumulator, this means all bins are emptied and partially filled bins are
-emitted with padding.  For the mixture corrector, SWRR deficit weights are
-reset.  This guarantee is what allows the next epoch to replay
-independently from a clean state.
+After `flush(reset=True, lane_id=lane)`, the flushed lane must be
+indistinguishable from a freshly constructed instance.  That lane's internal
+buffers, counters, and derived state must be cleared, while other lanes are
+left untouched.  For the packing accumulator, this means the lane's bins are
+emptied and its partially filled bins are emitted with padding.  For the
+mixture corrector, the lane's SWRR deficit weights are reset.  This guarantee
+is what allows each lane's next epoch to replay independently from a clean
+state.
 
 ### Stalling: `stall_on_epoch_boundary`
 
@@ -495,13 +499,15 @@ Batch, and Batch rebuilds the suffix from an empty buffer at the same
 batch boundary.
 
 When the runner sees a flush sentinel for a supported stalling accumulator
-with pending data, it skips the mid-stream flush and holds the sentinel
-behind the buffered data.  The sentinel is released once the accumulator's
-carry has drained enough that `try_epoch_reset()` succeeds.
+with pending data on the sentinel's lane, it skips the mid-stream flush and
+holds the sentinel behind the buffered data.  The sentinel is released once
+that lane's carry has drained enough that `try_epoch_reset(boundary, lane)`
+succeeds; lanes stall independently, so a blocked lane does not hold back
+another lane's ready sentinel.
 
 Operators that do **not** opt into the supported Batch stalling path must
-fully flush at the sentinel.  If `flush(reset=True)` returns
-while `has_pending_data()` is still `True`, the flush contract has been
+fully flush at the sentinel.  If `flush(reset=True, lane_id=lane)` returns
+while `has_pending_data(lane)` is still `True`, the flush contract has been
 violated and the runner raises.  Leaving residual cross-boundary state
 would break the checkpoint/replay contract.
 
@@ -545,16 +551,20 @@ post-batch processing like tensor collation or padding.
 {py:meth}`~zephon.api.Pipeline.stateful_transform` is the most flexible
 option.  It lets you provide custom state management functions that run
 serially in the accumulator, with an optional parallel
-`transform_fn` for the workers.  The key callbacks are:
+`transform_fn` for the workers.  State is partitioned **per lane** — each
+lane gets its own state instance and your callbacks only ever see one lane at
+a time — so a mid-stream flush resets just that lane's epoch, keeping replay
+deterministic when one engine owns several lanes.  The key callbacks are:
 
 - **`init_state()`**: returns the initial state object (called lazily on
-  first data).
-- **`push(state, items)`**: called serially for each incoming
-  micro-batch.  Returns `(new_state, outputs)`.
-- **`flush(state)`**: called at end-of-stream to emit remaining buffered
-  items.  In non-monotonic pipelines, also called mid-stream at epoch
-  boundaries; state is re-initialized afterward via `init_state()`.
-- **`should_flush(state)`**: optional early-flush predicate.
+  each lane's first record).
+- **`push(state, items)`**: called serially with one lane's records at a
+  time.  Returns `(new_state, outputs)`.
+- **`flush(state)`**: emit a lane's remaining buffered items.  Called at
+  end-of-stream and, in non-monotonic pipelines, mid-stream at each lane's
+  epoch boundary; that lane's state is re-initialized afterward via
+  `init_state()`.
+- **`should_flush(state)`**: optional per-lane early-flush predicate.
 
 ```python
 pipeline = (

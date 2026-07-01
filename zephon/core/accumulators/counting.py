@@ -3,34 +3,38 @@
 
 """Counting accumulator that batches elements by count, optionally with time.
 
-Elements are routed to per-lane buffers via a caller-supplied ``key_fn``,
-ensuring each emitted batch is lane-pure.  This is critical for
-deterministic shuffle: ``batch_seed`` must not depend on the cross-lane
-interleaving order from the source stream.
+Elements are routed to per-lane buffers (keyed by :func:`lane_of`), so each
+emitted batch is lane-pure.  This is critical for deterministic shuffle:
+``batch_seed`` must not depend on the cross-lane interleaving order from the
+source stream, and it lets a per-lane flush sentinel reset one lane alone.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Sequence
 from typing import TypeVar
 
 from zephon.core.accumulators.base import Accumulator, ReadyBatch
-from zephon.core.constants import lane_of
+from zephon.core.constants import RunnerStreamIn, lane_of
 
-T = TypeVar("T")
+# Bounded to RunnerStreamIn: the accumulator only batches pipeline elements,
+# which is exactly what lane_of can key by (SampleRecord/SampleBatch/EngineSample).
+T = TypeVar("T", bound=RunnerStreamIn)
 
 
 class CountingAccumulator(Accumulator[T]):
     """Accumulator that batches elements by count, optionally with time-based flushing.
 
-    Elements are routed to per-key buffers via ``key_fn`` so each emitted
-    batch is key-pure (typically lane-pure).  By default ``key_fn`` uses
-    :func:`~zephon.core.constants.lane_of` to extract the lane id.
+    Elements are routed to per-lane buffers keyed by :func:`lane_of`, so each
+    emitted batch is lane-pure.  ``lane_of`` extracts the lane from whichever
+    element type the accumulator carries (a ``SampleRecord``, or a raw
+    ``EngineSample`` tuple at the fetch stage), so the buffer key is always the
+    lane id — which is what lets a per-lane flush sentinel reset one lane alone.
 
     When ``max_latency_ms`` is None, this is a pure count-based accumulator
     suitable for deterministic execution.  When set, batches are also flushed
-    after the timeout expires (per key).
+    after the timeout expires (per lane).
 
     When ``drop_last`` is True, ``flush()`` discards partial batches instead
     of emitting them.
@@ -41,21 +45,21 @@ class CountingAccumulator(Accumulator[T]):
         max_batch: int,
         max_latency_ms: int | None = None,
         *,
-        key_fn: Callable[[T], Hashable] = lane_of,
         drop_last: bool = False,
     ) -> None:
         if max_batch <= 0:
             raise ValueError("max_batch must be positive")
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
-        self._key_fn = key_fn
         self._drop_last = drop_last
-        self._buffers: dict[Hashable, list[T]] = {}
-        self._first_ts_ns: dict[Hashable, int] = {}
+        self._buffers: dict[int, list[T]] = {}
+        self._first_ts_ns: dict[int, int] = {}
 
-    def has_pending_data(self) -> bool:
-        """Return True if there are elements in any buffer."""
-        return any(self._buffers.values())
+    def has_pending_data(self, lane_id: int | None = None) -> bool:
+        """Return True if buffered elements remain (in ``lane_id`` if given)."""
+        if lane_id is None:
+            return any(self._buffers.values())
+        return bool(self._buffers.get(lane_id))
 
     def push_many(self, elems: Sequence[T]) -> list[ReadyBatch[T]]:
         """Accumulate elements and emit based on count or time thresholds."""
@@ -68,9 +72,9 @@ class CountingAccumulator(Accumulator[T]):
         ready: list[ReadyBatch[T]] = []
         bufs = self._buffers
         max_batch = self._max_batch
-        key_fn = self._key_fn
+        lane_fn = lane_of
         for elem in elems:
-            k = key_fn(elem)
+            k = lane_fn(elem)
             buf = bufs.get(k)
             if buf is None:
                 buf = []
@@ -86,9 +90,9 @@ class CountingAccumulator(Accumulator[T]):
         ready: list[ReadyBatch[T]] = []
         now_ns = time.perf_counter_ns()
         max_latency_ns = self._max_latency_ms * 1_000_000  # type: ignore[operator]
-        key_fn = self._key_fn
+        lane_fn = lane_of
         for elem in elems:
-            k = key_fn(elem)
+            k = lane_fn(elem)
             buf = self._buffers.get(k)
             if buf is None:
                 buf = []
@@ -108,26 +112,25 @@ class CountingAccumulator(Accumulator[T]):
 
         return ready
 
-    def flush(self, *, reset: bool = False) -> list[ReadyBatch[T]]:
-        """Emit any remaining buffered elements (or discard if drop_last)."""
-        if self._drop_last:
-            self._buffers.clear()
-            self._first_ts_ns.clear()
-            return []
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[T]]:
+        """Emit any remaining buffered elements (or discard if drop_last).
 
+        Buffers are keyed by lane, so ``lane_id`` is the buffer key for a
+        per-lane flush.
+        """
+        keys = [lane_id] if lane_id is not None else list(self._buffers)
         ready: list[ReadyBatch[T]] = []
-        for k in list(self._buffers):
-            buf = self._buffers[k]
-            if buf:
+        for k in keys:
+            if not self._drop_last and self._buffers.get(k):
                 ready.append(self._emit_batch_for_key(k))
-        self._buffers.clear()
-        self._first_ts_ns.clear()
+            self._buffers.pop(k, None)
+            self._first_ts_ns.pop(k, None)
         return ready
 
-    def _emit_batch_for_key(
-        self, key: Hashable, now_ns: int | None = None
-    ) -> ReadyBatch[T]:
-        """Emit the buffer for a single key as a batch."""
+    def _emit_batch_for_key(self, key: int, now_ns: int | None = None) -> ReadyBatch[T]:
+        """Emit the buffer for a single lane as a batch."""
         buf = self._buffers.get(key, [])
         first = self._first_ts_ns.pop(key, None)
         if now_ns is None:

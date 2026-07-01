@@ -14,7 +14,6 @@ from zephon.core.constants import (
     SampleBatch,
     SampleMeta,
     SampleRecord,
-    lane_of,
     resolve_lazy_payloads,
 )
 from zephon.ops.decode_text import DecodeText
@@ -452,9 +451,7 @@ class TestCoalesceBytes:
         Accumulator routes by meta only (lazy payloads stay unresolved),
         then we resolve after accumulator output to verify data.
         """
-        acc = CountingAccumulator[SampleRecord](
-            max_batch=3, max_latency_ms=None, key_fn=lane_of
-        )
+        acc = CountingAccumulator[SampleRecord](max_batch=3, max_latency_ms=None)
         records = [
             SampleRecord(
                 meta=_meta(i),
@@ -737,9 +734,7 @@ class TestShmLazyPayload:
 
     def test_counting_accumulator_routes_lazy_records(self) -> None:
         """CountingAccumulator routes lazy records by meta without resolving."""
-        acc = CountingAccumulator[SampleRecord](
-            max_batch=2, max_latency_ms=None, key_fn=lane_of
-        )
+        acc = CountingAccumulator[SampleRecord](max_batch=2, max_latency_ms=None)
         records = [
             SampleRecord(
                 meta=_meta(i),

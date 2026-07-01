@@ -156,21 +156,30 @@ class BaseOperatorState:
     ) -> None:
         """Release stalled sentinels whose pre-boundary records have drained.
 
-        Processes sentinels FIFO.  For each, calls
-        ``accumulator.try_epoch_reset(boundary_cid)``.  If the reset succeeds
-        (no pre-boundary records remain and ordering state has been reset),
-        the sentinel is released downstream and ``_epoch_floor`` advances.
-        The first sentinel that cannot be released stops the walk.
+        Sentinels are per-lane, so each is checked against its own lane via
+        ``accumulator.try_epoch_reset(boundary_cid, lane_id)``.  Per-lane FIFO
+        order is preserved (a lane's later sentinel waits for its earlier one),
+        but lanes are independent: a blocked lane does not hold back another
+        lane's ready sentinel.
         """
-        while self._stalled_sentinels:
-            sentinel, boundary_cid = self._stalled_sentinels[0]
-            if not self.accumulator_impl.try_epoch_reset(boundary_cid):
-                break  # pre-boundary records still buffered
-            self._stalled_sentinels.pop(0)
+        if not self._stalled_sentinels:
+            return  # common case: nothing stalled — skip the rebuild allocation
+
+        blocked_lanes: set[int] = set()
+        remaining: list[tuple[SampleRecord, int]] = []
+        for sentinel, boundary_cid in self._stalled_sentinels:
+            lane = sentinel.meta.lane_id
+            if lane in blocked_lanes or not self.accumulator_impl.try_epoch_reset(
+                boundary_cid, lane
+            ):
+                blocked_lanes.add(lane)
+                remaining.append((sentinel, boundary_cid))
+                continue
             ready.append(([sentinel], 0))
             # Advance epoch floor now that the reset is committed.
             if not self._preserves_cursor_order:
                 self._epoch_floor = boundary_cid
+        self._stalled_sentinels = remaining
 
     def _force_release_all_stalled_sentinels(
         self, ready: list[tuple[list[RunnerStreamIn], int]]
@@ -204,8 +213,9 @@ class BaseOperatorState:
         accumulator entirely and are emitted as individual ready batches.
         This ensures operators never see sentinels unless they create them.
 
-        Flush sentinels trigger ``accumulator.flush(reset=True)``
-        to drain buffered data before the sentinel passes downstream.
+        Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
+        to drain that lane's buffered data before the sentinel passes
+        downstream.
         This is critical: if the sentinel overtakes buffered data,
         downstream stateful operators see the epoch boundary before the
         data, breaking deterministic replay.
@@ -286,11 +296,12 @@ class BaseOperatorState:
                 if e.meta.is_flush_sentinel:
                     boundary_cid_tag = e.meta.tags.get("_boundary_cid")
                     bcid = int(boundary_cid_tag) if boundary_cid_tag is not None else 0
+                    lane = e.meta.lane_id
                     stalled = False
 
                     if (
                         self._stall_on_epoch_boundary
-                        and self.accumulator_impl.has_pending_data()
+                        and self.accumulator_impl.has_pending_data(lane)
                     ):
                         # Explicit stall: skip flush, preserve buffer across
                         # epoch boundary.  The sentinel is held behind the
@@ -301,10 +312,10 @@ class BaseOperatorState:
                     else:
                         # Flush accumulator to drain buffered data before the
                         # sentinel passes downstream.
-                        flushed = self.accumulator_impl.flush(reset=True)
+                        flushed = self.accumulator_impl.flush(reset=True, lane_id=lane)
                         ready.extend(flushed)
 
-                        if self.accumulator_impl.has_pending_data():
+                        if self.accumulator_impl.has_pending_data(lane):
                             op_name = type(self.node.op).__name__
                             raise RuntimeError(
                                 f"{op_name}: flush(reset=True) left "
