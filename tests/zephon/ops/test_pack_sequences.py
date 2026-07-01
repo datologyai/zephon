@@ -25,6 +25,7 @@ from zephon.ops.pack_sequences import (
     PackingAccumulator,
     PackSequences,
     Segment,
+    _DeferredBin,
     _EnvelopeSerializer,
     _FlatSerializer,
 )
@@ -63,12 +64,34 @@ def _simple_length_fn(rec: SampleRecord) -> int:
     return payload.get("length", 0) if isinstance(payload, dict) else 0
 
 
-def _pack(max_length: int, *, num_bins: int = 8, **kwargs: Any) -> PackingAccumulator:
-    """Build an accumulator via the operator (exercises the real wiring)."""
+class _MaterializingAccumulator:
+    """Test shim: real accumulator decides bins; operator materializes payloads."""
+
+    def __init__(self, op: PackSequences, acc: PackingAccumulator) -> None:
+        self._op = op
+        self._acc = acc
+
+    def _materialize(self, batches: list[Any]) -> list[Any]:
+        return [(self._op.process_many(records), wait) for records, wait in batches]
+
+    def push_many(self, elems: Any) -> list[Any]:
+        return self._materialize(self._acc.push_many(elems))
+
+    def flush(self, *, reset: bool = False, lane_id: int | None = None) -> list[Any]:
+        return self._materialize(self._acc.flush(reset=reset, lane_id=lane_id))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._acc, name)
+
+
+def _pack(
+    max_length: int, *, num_bins: int = 8, **kwargs: Any
+) -> _MaterializingAccumulator:
+    """Build an accumulator via the operator and materialize emitted bins inline."""
     op = PackSequences(max_length=max_length, num_bins=num_bins, **kwargs)
     acc = op.accumulator(deterministic=False, ctx={})
     assert isinstance(acc, PackingAccumulator)
-    return acc
+    return _MaterializingAccumulator(op, acc)
 
 
 def _records(batches: list[Any]) -> list[SampleRecord]:
@@ -116,8 +139,8 @@ def test_string_length_fn_rejected() -> None:
         PackSequences(max_length=4, num_bins=4, length_fn="input_ids")  # type: ignore[arg-type]
 
 
-def test_operator_passthrough() -> None:
-    """process_many returns the already-packed records untouched."""
+def test_operator_passthrough_non_deferred() -> None:
+    """process_many leaves non-deferred payloads (e.g. tombstones) untouched."""
     op = PackSequences(max_length=10, num_bins=10, tokens_field="length")
     packed = SampleRecord(
         meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
@@ -125,6 +148,78 @@ def test_operator_passthrough() -> None:
     )
     result = op.process_many([packed])
     assert result == [packed]
+
+
+# ---------------------------------------------------------------------------
+# Deferred materialization: accumulator emits a plan; the operator builds payload
+# ---------------------------------------------------------------------------
+
+
+def test_accumulator_defers_payload_but_meta_is_complete() -> None:
+    """push_many emits a deferred payload plan with final lineage/meta."""
+    op = PackSequences(
+        max_length=10, num_bins=10, length_fn=_simple_length_fn, drop_oversized=False
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+    rec = _rec(0, 10)  # exactly fills a bin -> self-emits
+    ready = acc.push_many([rec])
+    assert len(ready) == 1
+    record = ready[0][0][0]
+
+    assert isinstance(record.payload, _DeferredBin)
+    assert [seg.record for seg in record.payload.segments] == [rec]
+
+    meta = record.meta.tags["_packing_metadata"]
+    assert meta["total_length"] == 10
+    assert meta["packing_efficiency"] == 1.0
+    assert {r.cursor for r in record.meta.contributors} == {rec.meta.cursor}
+
+
+def test_process_many_materializes_deferred_bins() -> None:
+    """process_many turns deferred plans into real payloads, preserving meta."""
+    op = PackSequences(
+        max_length=4,
+        num_bins=1,
+        algorithm="wrap",
+        output="flat",
+        tokens_field="input_ids",
+        drop_oversized=False,
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+    deferred = [
+        b[0][0] for b in acc.push_many([_rec_tokens(0, [1, 2, 3, 4, 5, 6, 7, 8])])
+    ]
+    assert deferred and all(isinstance(r.payload, _DeferredBin) for r in deferred)
+
+    materialized = op.process_many(deferred)
+    assert [r.payload["input_ids"] for r in materialized] == [
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+    ]
+    assert [r.meta for r in materialized] == [r.meta for r in deferred]
+
+
+def test_process_many_is_stateless_across_instances() -> None:
+    """Deferred bins materialize identically on any operator instance (parallel
+    workers are deep-copied instances), so output is parallelism-invariant."""
+    import copy
+
+    op = PackSequences(
+        max_length=4,
+        num_bins=1,
+        algorithm="wrap",
+        output="flat",
+        tokens_field="input_ids",
+        drop_oversized=False,
+    )
+    acc = op.accumulator(deterministic=False, ctx={})
+    deferred = [b[0][0] for b in acc.push_many([_rec_tokens(0, list(range(8)))])]
+
+    worker_a, worker_b = copy.deepcopy(op), copy.deepcopy(op)
+    out_a = worker_a.process_many([deferred[0]])
+    out_b = worker_b.process_many([deferred[1]])
+    assert out_a[0].payload["input_ids"] == [0, 1, 2, 3]
+    assert out_b[0].payload["input_ids"] == [4, 5, 6, 7]
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +490,7 @@ def test_custom_pack_payloads_merge() -> None:
 
 def _wrap(
     max_length: int, *, tokens_field: str = "input_ids", **kw: Any
-) -> PackingAccumulator:
+) -> _MaterializingAccumulator:
     return _pack(
         max_length,
         num_bins=1,
@@ -614,7 +709,7 @@ def test_wrap_component_token_remainder_matches_targets() -> None:
 
 def _flat(
     max_length: int, *, algorithm: str = "first_fit", **kw: Any
-) -> PackingAccumulator:
+) -> _MaterializingAccumulator:
     kw.setdefault("pad_token_id", 0)
     return _pack(
         max_length,

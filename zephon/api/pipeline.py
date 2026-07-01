@@ -1029,6 +1029,7 @@ class Pipeline:
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
         placement: str = "auto",
+        parallelism: Optional[int] = None,
     ) -> "Pipeline":
         """Add a sequence-packing operator that emits the lossless envelope.
 
@@ -1060,6 +1061,8 @@ class Pipeline:
             pack_payloads: How to merge the segment list. "keep_list" (default),
                 "torch_tensor", "numpy_array", or a custom callable taking list[Any].
             placement: Placement strategy for this operator.
+            parallelism: Worker count for materializing packed-bin payloads.
+                Bin assignment remains serial, so output is unchanged.
         """
         op = PackSequences(
             max_length=max_length,
@@ -1075,7 +1078,13 @@ class Pipeline:
             flush_strategy=flush_strategy,
             pack_payloads=pack_payloads,
         )
-        node = self._graph.add("pack_sequences", op, self._tail, placement=placement)
+        node = self._graph.add(
+            "pack_sequences",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
         self._tail = node
         return self
 
@@ -1095,6 +1104,7 @@ class Pipeline:
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         placement: str = "auto",
+        parallelism: Optional[int] = None,
     ) -> "Pipeline":
         """Add a sequence-packing operator that emits flat training records.
 
@@ -1127,6 +1137,8 @@ class Pipeline:
             shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
             flush_strategy: "fifo" (default) or "fullest" when num_bins is reached.
             placement: Placement strategy for this operator.
+            parallelism: Worker count for materializing packed-bin payloads.
+                Bin assignment remains serial, so output is unchanged.
         """
         op = PackSequences(
             max_length=max_length,
@@ -1142,7 +1154,9 @@ class Pipeline:
             emit_positions=emit_positions,
             pad_token_id=pad_token_id,
         )
-        node = self._graph.add("pack_flat", op, self._tail, placement=placement)
+        node = self._graph.add(
+            "pack_flat", op, self._tail, placement=placement, parallelism=parallelism
+        )
         self._tail = node
         return self
 

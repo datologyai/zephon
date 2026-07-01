@@ -288,6 +288,13 @@ class Segment:
         return self.end - self.start
 
 
+@dataclass(slots=True)
+class _DeferredBin:
+    """Deferred payload plan materialized by :meth:`PackSequences.process_many`."""
+
+    segments: list[Segment]
+
+
 # ----------------------------------------------------------------------
 # Serializers (output format only; algorithm-agnostic)
 # ----------------------------------------------------------------------
@@ -489,11 +496,13 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if not elems:
             return []
 
-        # Only materialize a list when we reorder; otherwise iterate elems directly.
+        # Avoid copying unless random shuffle mutates the batch.
+        work_list: Sequence[SampleRecord]
         if self.shuffle_strategy == "random":
-            work_list = list(elems)
-            rng = random.Random(batch_seed(self.shuffle_seed, work_list))
-            rng.shuffle(work_list)
+            shuffled = list(elems)
+            rng = random.Random(batch_seed(self.shuffle_seed, shuffled))
+            rng.shuffle(shuffled)
+            work_list = shuffled
         elif self.shuffle_strategy == "length":
             work_list = sorted(
                 elems,
@@ -531,7 +540,6 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                     f"Sequence length {seq_len} exceeds max_length {self.max_length}"
                 )
 
-            # Pack using selected algorithm
             if self.algorithm == "first_fit":
                 packed = self._first_fit_pack(lane_id, elem, seq_len)
             elif self.algorithm == "best_fit":
@@ -737,14 +745,12 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     def _emit_bin(self, segments: list[Segment], lane_id: int) -> SampleRecord:
         """Build the output record for one finished bin.
 
-        Lineage/meta is computed identically for every output format; only the
-        serializer-built payload differs.
+        Meta is computed serially; payload materialization is deferred.
         """
         if not segments:
             raise ValueError("cannot emit a packed record from an empty bin")
         meta = self._build_meta(segments, lane_id)
-        payload = self._serializer.build_payload(segments)
-        return SampleRecord(meta=meta, payload=payload)
+        return SampleRecord(meta=meta, payload=_DeferredBin(segments))
 
     def _record_component_token_targets(
         self, record: SampleRecord, record_len: int
@@ -890,11 +896,13 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         Empty records carry no tokens but still emit tombstones so their
         contributor offsets close.
         """
-        seq_len = self.length_fn(elem)
+        # Measure the resolved wrap field directly; avoids repeated auto-detection.
+        wrap_field = self._resolve_wrap_field(elem, lane_id)
+        payload = elem.payload
+        assert isinstance(payload, dict)  # guaranteed by _resolve_wrap_field
+        seq_len = _get_length(payload[wrap_field], wrap_field)
         if seq_len <= 0:
             return tombstones_for_record(elem)
-
-        wrap_field = self._resolve_wrap_field(elem, lane_id)
 
         segments = self._wrap_segments[lane_id]
         segments.append(
@@ -908,39 +916,45 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 is_slice=True,
             )
         )
-        self._wrap_total[lane_id] += seq_len
+        # Keep the hot buffered-token count local across the drain.
+        total = self._wrap_total[lane_id] + seq_len
 
         outputs: list[SampleRecord] = []
-        while self._wrap_total[lane_id] >= self.max_length:
+        max_length = self.max_length
+        while total >= max_length:
             bin_slices: list[Segment] = []
-            remaining = self.max_length
+            remaining = max_length
             while remaining > 0:
                 seg = segments[0]
-                take = min(remaining, seg.length)
-                new_start = seg.start + take
-                # ``is_last`` is True exactly when this slice consumes the
-                # record's final token (i.e. its segment is fully drained).
-                consumes_record = new_start == seg.end
-                bin_slices.append(
-                    Segment(
-                        record=seg.record,
-                        start=seg.start,
-                        end=new_start,
-                        seq_len=seg.seq_len,
-                        field=seg.field,
-                        is_last=consumes_record,
-                        is_slice=True,
-                    )
-                )
-                if consumes_record:
+                seg_len = seg.end - seg.start
+                if seg_len <= remaining:
+                    # Reuse fully drained segments; mark them as closers.
+                    seg.is_last = True
+                    bin_slices.append(seg)
                     segments.popleft()
+                    remaining -= seg_len
+                    total -= seg_len
                 else:
+                    # Split off the consumed prefix and keep the remainder buffered.
+                    new_start = seg.start + remaining
+                    bin_slices.append(
+                        Segment(
+                            record=seg.record,
+                            start=seg.start,
+                            end=new_start,
+                            seq_len=seg.seq_len,
+                            field=seg.field,
+                            is_last=False,
+                            is_slice=True,
+                        )
+                    )
                     seg.start = new_start
-                remaining -= take
-                self._wrap_total[lane_id] -= take
+                    total -= remaining
+                    remaining = 0
 
             outputs.append(self._emit_bin(bin_slices, lane_id))
 
+        self._wrap_total[lane_id] = total
         return outputs
 
 
@@ -1092,6 +1106,8 @@ class PackSequences(DefaultSetup):
         # Envelope payload merge (ignored in flat output).
         self._pack_payloads_fn = self._resolve_pack_payloads_fn(pack_payloads)
 
+        self._serializer = self._make_serializer()
+
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=False,
@@ -1101,19 +1117,20 @@ class PackSequences(DefaultSetup):
             preserves_cursor_order=False,
         )
 
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        serializer: _EnvelopeSerializer | _FlatSerializer
+    def _make_serializer(self) -> _EnvelopeSerializer | _FlatSerializer:
+        """Build a fresh stateless serializer for the configured output format."""
         if self.output == "flat":
-            serializer = _FlatSerializer(
+            return _FlatSerializer(
                 max_length=self.max_length,
                 tokens_field=self.tokens_field,
                 pad_token_id=self.pad_token_id,
                 emit_positions=self.emit_positions,
             )
-        else:
-            serializer = _EnvelopeSerializer(self._pack_payloads_fn)
+        return _EnvelopeSerializer(self._pack_payloads_fn)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
         return PackingAccumulator(
             max_length=self.max_length,
             num_bins=self.num_bins,
@@ -1124,7 +1141,7 @@ class PackSequences(DefaultSetup):
             shuffle_strategy=self.shuffle_strategy,
             shuffle_seed=self.shuffle_seed,
             flush_strategy=self.flush_strategy,
-            serializer=serializer,
+            serializer=self._make_serializer(),
             wrap_field=self._wrap_field,
         )
 
@@ -1149,7 +1166,8 @@ class PackSequences(DefaultSetup):
             "Must be one of: 'keep_list', 'torch_tensor', 'numpy_array', or a callable."
         )
 
-    def _pack_torch_tensors(self, payloads: list[Any]) -> Any:
+    @staticmethod
+    def _pack_torch_tensors(payloads: list[Any]) -> Any:
         """Pack PyTorch tensors by concatenating along first dimension."""
         try:
             import torch
@@ -1191,7 +1209,8 @@ class PackSequences(DefaultSetup):
                 + f"but found non-tensor types: {non_tensor_types}"
             )
 
-    def _pack_numpy_arrays(self, payloads: list[Any]) -> Any:
+    @staticmethod
+    def _pack_numpy_arrays(payloads: list[Any]) -> Any:
         """Pack NumPy arrays by concatenating along first axis."""
         try:
             import numpy as np
@@ -1232,18 +1251,28 @@ class PackSequences(DefaultSetup):
             + f"but found non-array types: {non_array_types}"
         )
 
-    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
-        """Process a single sample record.
+    def _materialize(self, elem: SampleRecord) -> SampleRecord:
+        """Serialize one :class:`_DeferredBin` into its real payload.
 
-        The accumulator handles the actual packing logic. This method just
-        passes through the record since the accumulator already packed it.
+        Records without a deferred payload (e.g. tombstones) pass through.
         """
-        return [elem]
+        payload = elem.payload
+        if isinstance(payload, _DeferredBin):
+            return SampleRecord(
+                meta=elem.meta,
+                payload=self._serializer.build_payload(payload.segments),
+            )
+        return elem
+
+    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
+        """Materialize one packed bin (the accumulator decided its composition)."""
+        return [self._materialize(elem)]
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        """Process multiple sample records.
+        """Materialize each :class:`_DeferredBin` into its real payload.
 
-        The accumulator handles the actual packing logic. This method just
-        passes through the records since the accumulator already packed them.
+        The slice/concatenate/pad runs here rather than in the accumulator, so
+        it fans out across ``parallelism`` workers and its GIL-releasing concat
+        overlaps the pump thread that runs the accumulator.
         """
-        return list(elems)
+        return [self._materialize(elem) for elem in elems]

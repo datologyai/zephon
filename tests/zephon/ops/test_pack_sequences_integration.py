@@ -807,3 +807,81 @@ def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
         return [t for rec in p for t in rec.payload["input_ids"] if t != -1]
 
     assert flat_tokens() == env_tokens()
+
+
+# ---------------------------------------------------------------------------
+# Parallel materialization
+# ---------------------------------------------------------------------------
+
+
+def _big_token_work() -> StaticMixtureWorkSource:
+    """Dataset large enough to fan many bins across worker threads."""
+    seqs = [list(range(i, i + (i % 7) + 1)) for i in range(200)]
+    ds = _mk_token_dataset("big", seqs)
+    return StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=8,
+        seed=7,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+
+def _norm_payload(payload: Any) -> Any:
+    """Normalize a packed payload for equality (numpy arrays -> lists)."""
+    import numpy as np
+
+    def norm(v: Any) -> Any:
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, dict):
+            return {k: norm(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [norm(x) for x in v]
+        return v
+
+    return norm(payload)
+
+
+def test_pack_parallelism_plumbed_to_node() -> None:
+    """The pack_flat/pack_sequences ``parallelism`` arg reaches the graph node."""
+    p = Pipeline(_matrix_work())
+    p.pack_flat(
+        max_length=4, num_bins=8, algorithm="wrap", drop_oversized=False, parallelism=4
+    )
+    node = p._graph.nodes[-1]
+    assert node.name == "pack_flat" and node.parallelism == 4
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize("output", ["envelope", "flat"], ids=["envelope", "flat"])
+def test_pack_parallelism_invariant(algorithm: str, output: str) -> None:
+    """parallelism>1 produces identical payloads, order, and lineage as
+    parallelism=1: bin assignment stays serial, only materialization fans out."""
+
+    def run(parallelism: int) -> list[tuple[Any, Any]]:
+        p = Pipeline(_big_token_work())
+        if output == "flat":
+            p.pack_flat(
+                max_length=8,
+                num_bins=8,
+                algorithm=algorithm,
+                pad_token_id=-1,
+                drop_oversized=False,
+                parallelism=parallelism,
+            )
+        else:
+            p.pack_sequences(
+                max_length=8,
+                num_bins=8,
+                algorithm=algorithm,
+                drop_oversized=False,
+                parallelism=parallelism,
+            )
+        p.options(deterministic=True, runner="threads", default_stage_prefetch=16)
+        return [(r.meta.cursor.as_key(), _norm_payload(r.payload)) for r in p]
+
+    serial = run(1)
+    assert serial
+    assert run(4) == serial
