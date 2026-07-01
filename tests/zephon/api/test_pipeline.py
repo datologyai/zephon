@@ -41,6 +41,7 @@ from zephon.core import (
     SampleRecord,
 )
 from zephon.io import Dataset
+from zephon.ops.ensure_mixture import EnsureMixture
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,25 @@ def test_unknown_options_warn(tmp_path: Path) -> None:
     # deterministic is valid and should NOT trigger a warning
     deterministic_warnings = [w for w in caught if "deterministic" in str(w.message)]
     assert len(deterministic_warnings) == 0, "Valid option should not trigger a warning"
+
+
+def test_ensure_mixture_accepts_unbounded_buffer(tmp_path: Path) -> None:
+    """The public ensure_mixture() wrapper exposes strict mode: passing
+    max_buffer_size=None wires through to an unbounded EnsureMixture op."""
+    shard = tmp_path / "shard.jsonl"
+    shard.write_text(json.dumps({"text": "hello"}), encoding="utf-8")
+    ds = Dataset.from_path("demo", str(tmp_path))
+    ws = StaticMixtureWorkSource(
+        [ds],
+        mixture=MixtureSpec({ds.name: 1.0}).weights,
+        chunk_size=1,
+        seed=0,
+    )
+    pipe = PublicPipeline(ws).decode_text().ensure_mixture(max_buffer_size=None)
+
+    ops = [node.op for node in pipe._graph.nodes if isinstance(node.op, EnsureMixture)]
+    assert len(ops) == 1
+    assert ops[0]._config.max_buffer_size is None
 
 
 # ---------------------------------------------------------------------------

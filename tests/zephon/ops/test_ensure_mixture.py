@@ -3,17 +3,34 @@
 
 """Unit tests for the streaming EnsureMixture operator."""
 
+import logging
 from typing import Any
 
 import pytest
 
-from zephon.core.constants import SampleMeta, SampleRecord
+from zephon.core.constants import (
+    ContributorRef,
+    SampleCursor,
+    SampleMeta,
+    SampleRecord,
+)
 from zephon.core.op_base import OpContext
 from zephon.ops.ensure_mixture import (
     EnsureMixture,
     EnsureMixtureAccumulator,
     EnsureMixtureConfig,
+    _LaneState,
 )
+
+
+def _assert_tombstones_only(ready, expected_count=None):
+    """Discard output must be tombstones (payload-free offset closers) only."""
+    records = _flatten_ready(ready)
+    assert all(r.meta.tombstone for r in records)
+    assert all(r.payload is None for r in records)
+    if expected_count is not None:
+        assert len(records) == expected_count
+    return records
 
 
 def _rec(
@@ -68,7 +85,7 @@ def _make_config(
     warn_tolerance: float | None = None,
     warn_warmup: float = 1000.0,
     mixture_override: dict[str, float] | None = None,
-    max_buffer_size: int = 1,
+    max_buffer_size: int | None = 1,
     drain_target_ratio: float = 0.8,
     obsolete_drain_rate: float = 0.1,
 ) -> EnsureMixtureConfig:
@@ -89,7 +106,7 @@ def _make_accumulator_with_chunk_mixture(
     chunk_mixture: dict[int, float],
     weight_by: str = "samples",
     warn_tolerance: float | None = None,
-    max_buffer_size: int = 1,
+    max_buffer_size: int | None = 1,
     drain_target_ratio: float = 0.8,
     obsolete_drain_rate: float = 0.1,
 ) -> EnsureMixtureAccumulator:
@@ -884,8 +901,6 @@ class TestEnsureMixtureOperator:
 
 def test_chunk_mixture_drives_swrr_target() -> None:
     """A chunk mixture from get_chunk_mixture becomes the lane's SWRR target."""
-    from zephon.ops.ensure_mixture import _LaneState
-
     acc = _make_accumulator_with_chunk_mixture({0: 0.75, 1: 0.25})
     state = _LaneState()
     acc._update_lane_swrr(lane_id=0, chunk_id=0, state=state)
@@ -1152,8 +1167,6 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
         a new stateful field to _LaneState, this test will catch it if
         flush() forgets to reset it.
         """
-        from zephon.ops.ensure_mixture import _LaneState
-
         mixture: dict[int, float] = {0: 0.7, 1: 0.3}
         acc = _make_accumulator_with_chunk_mixture(mixture, max_buffer_size=50)
 
@@ -1205,7 +1218,409 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
 
 def test_stall_trait_default_is_false() -> None:
     """EnsureMixture defaults to stall_on_epoch_boundary=False (flush)."""
-    from zephon.ops.ensure_mixture import EnsureMixture
-
     op = EnsureMixture()
     assert op.traits().stall_on_epoch_boundary is False
+
+
+# ---------------------------------------------------------------------------
+# Strict (unbounded) buffering: max_buffer_size=None + discard-on-flush
+# ---------------------------------------------------------------------------
+
+
+def test_max_buffer_size_none_accepted() -> None:
+    """The operator accepts max_buffer_size=None and rejects non-positive ints."""
+    EnsureMixture(max_buffer_size=None)
+    with pytest.raises(ValueError, match="positive"):
+        EnsureMixture(max_buffer_size=0)
+    with pytest.raises(ValueError, match="positive"):
+        EnsureMixture(max_buffer_size=-5)
+
+
+def test_unbounded_buffer_never_force_drains_when_target_unmet() -> None:
+    """With max_buffer_size=None, no force-drain compromises the mixture.
+
+    A heavily skewed input (all component 0 first, then component 1) must not
+    drain hundreds of component-0 samples while waiting on component 1.  At
+    most one emission may occur on the initial SWRR tie-break before the
+    operator starts waiting; after that no further emissions happen until
+    component 1 arrives.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(100)]
+    ready = acc.push_many(only_a)
+    emitted_a_phase = [rec for batch, _ in ready for rec in batch]
+    # At most one initial emission (SWRR tie-break) — otherwise we're force-
+    # draining, which is exactly what unbounded mode forbids.
+    assert len(emitted_a_phase) <= 1
+    # Subsequent unbalanced pushes must not drain further.
+    more_a = [_rec(i, component_id=0) for i in range(100, 150)]
+    ready = acc.push_many(more_a)
+    emitted = [rec for batch, _ in ready for rec in batch]
+    assert emitted == []
+    # Now push component-1 samples — SWRR can satisfy its target.
+    some_b = [_rec(i, component_id=1) for i in range(200, 220)]
+    ready = acc.push_many(some_b)
+    emitted_b_phase = [rec for batch, _ in ready for rec in batch]
+    components = [_get_component(r.meta) for r in emitted_b_phase]
+    # Components 0 and 1 should be roughly balanced now that 1 is available.
+    assert abs(components.count(0) - components.count(1)) <= 1
+
+
+def test_unbounded_buffer_grows_without_bound_when_target_unmet() -> None:
+    """Unbounded mode buffers everything it cannot emit on-target.
+
+    The whole point of the strict mode: with no cap, a one-sided stream
+    accumulates in the buffer (rather than the bounded mode's pressure-valve
+    force-drain). The buffered count must equal the unservable surplus.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(200)]
+    emitted = _flatten_ready(acc.push_many(only_a))
+    assert len(emitted) <= 1  # at most the initial tie-break emission
+    assert acc.has_pending_data()
+    assert acc._lanes[0].total_buffered == 200 - len(emitted)
+
+
+def test_strict_mode_no_discard_when_supply_matches_target() -> None:
+    """Strict mode only drops the surplus it cannot place on-target.
+
+    A stream that can satisfy the target emits in full and leaves nothing
+    buffered, so flush discards nothing — data loss is confined to genuine
+    over-supply, not a side effect of enabling strict mode.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    balanced = []
+    for i in range(20):
+        balanced.append(_rec(2 * i, component_id=0))
+        balanced.append(_rec(2 * i + 1, component_id=1))
+    emitted = _flatten_ready(acc.push_many(balanced))
+    # SWRR places every record on-target; nothing is withheld.
+    assert len(emitted) == 40
+    assert not acc.has_pending_data()
+    # Empty buffer → flush has nothing to discard.
+    assert acc.flush(reset=False) == []
+
+
+def test_terminal_flush_discards_in_strict_mode() -> None:
+    """End-of-stream flush() discards the strict buffer with tombstones.
+
+    Draining it would emit the mixture-withheld surplus as a skewed tail."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(8)]
+    emitted = _flatten_ready(acc.push_many(only_a))
+    buffered = 8 - len(emitted)
+    assert buffered > 0
+
+    out = acc.flush(reset=False)
+    _assert_tombstones_only(out, expected_count=buffered)
+    assert not acc.has_pending_data()
+
+
+def test_unbounded_mid_stream_flush_discards_buffer() -> None:
+    """flush(reset=True) with max_buffer_size=None discards buffered content.
+
+    Flush sentinels (flush_every_k_chunks) must not dump the held-back buffer
+    into the output stream — that would corrupt the mixture across epoch
+    boundaries.  The discarded data is content SWRR had deliberately withheld
+    because it was over-represented.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.9, 1: 0.1},  # mostly A, little B
+        max_buffer_size=None,
+    )
+    # Feed only component 0 (A) — it fills its quota quickly, the rest buffers
+    only_a = [_rec(i, component_id=0) for i in range(50)]
+    emitted = acc.push_many(only_a)
+    # Some A gets emitted (it's the ideal component initially), rest buffers
+    assert acc.has_pending_data()
+
+    # Mid-stream flush (epoch boundary) must discard, not drain — but each
+    # dropped record's closing contributor must come back as a tombstone, or
+    # its offset never closes and per-epoch eviction stalls for the run.
+    result = acc.flush(reset=True)
+    tombstones = _assert_tombstones_only(
+        result, expected_count=50 - len(_flatten_ready(emitted))
+    )
+    assert not acc.has_pending_data(), "buffer must be empty after discard"
+    # Plain records self-close: the tombstones target exactly the dropped ids.
+    assert {t.meta.sample_id for t in tombstones} == {
+        r.meta.sample_id for r in only_a
+    } - {r.meta.sample_id for r in _flatten_ready(emitted)}
+
+
+def test_strict_flush_reset_clears_state_like_fresh_accumulator() -> None:
+    """After a mid-stream discard, the lane state is reset (SWRR history,
+    chunk id) so the next epoch behaves like a freshly constructed
+    accumulator — the flush(reset=True) replay contract."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.9, 1: 0.1},
+        max_buffer_size=None,
+    )
+    acc.push_many([_rec(i, component_id=0) for i in range(20)])
+    assert acc.has_pending_data()
+
+    acc.flush(reset=True)
+    state = acc._lanes[0]
+    assert not acc.has_pending_data()
+    assert state.swrr is None
+    assert state.current_chunk_id is None
+    assert state.total_emitted == 0.0
+    assert state.emissions_since_obsolete_drain == 0
+
+
+def test_strict_discard_tombstones_for_multi_component_records() -> None:
+    """Packed (multi-component) buffered records are tombstoned on discard too.
+
+    The discard path walks the multi-component buffer as well as the
+    per-component buffers; each packed record closes its own offset.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    # Packed records contributing to BOTH components. With only these in the
+    # buffer and a 50/50 target, SWRR can serve its ideal from the packed
+    # buffer, so feed a stream that leaves a surplus by adding lone-component
+    # records the packed ones cannot balance.
+    packed = []
+    for i in range(4):
+        meta = SampleMeta(
+            sample_id=(0, 0, i),
+            lane_id=0,
+            chunk_id=0,
+            chunk_offset=i,
+            component_sample_counts={0: 1, 1: 1},
+        )
+        packed.append(SampleRecord(meta=meta, payload={"value": i}))
+    # Lone component-0 records that can never be balanced (no lone 1s arrive).
+    lone = [_rec(100 + i, component_id=0) for i in range(10)]
+    acc.push_many(packed + lone)
+    assert acc.has_pending_data()
+    # Some packed records may emit; whatever remains (packed and/or lone) must
+    # be tombstoned exactly once each on discard.
+    remaining_single = sum(len(b) for b in acc._lanes[0].buffers.values())
+    remaining_multi = len(acc._lanes[0].multi_component_buffer)
+    out = acc.flush(reset=True)
+    _assert_tombstones_only(out, expected_count=remaining_single + remaining_multi)
+    assert not acc.has_pending_data()
+
+
+def test_strict_flush_on_empty_buffer_is_noop() -> None:
+    """A flush with nothing buffered emits no tombstones (no offsets to close)."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 1.0},  # single-component target: SWRR is always happy, nothing buffers
+        max_buffer_size=None,
+    )
+    out = _flatten_ready(acc.push_many([_rec(i, component_id=0) for i in range(5)]))
+    assert len(out) == 5
+    assert not acc.has_pending_data()
+    assert acc.flush(reset=True) == []
+    assert acc.flush(reset=False) == []
+
+
+def test_strict_discard_is_lane_scoped() -> None:
+    """Each lane discards its own buffer independently; a flush clears all
+    lanes but the tombstones carry each lane's own ids."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    acc.push_many([_rec(i, component_id=0, lane=0) for i in range(10)])
+    acc.push_many([_rec(i, component_id=0, lane=1) for i in range(7)])
+    assert acc.has_pending_data()
+
+    buffered_0 = acc._lanes[0].total_buffered
+    buffered_1 = acc._lanes[1].total_buffered
+    tombstones = _assert_tombstones_only(acc.flush(reset=True))
+    assert len(tombstones) == buffered_0 + buffered_1
+    lanes = {t.meta.lane_id for t in tombstones}
+    assert lanes == {0, 1}
+    assert not acc.has_pending_data()
+
+
+def test_strict_discard_batches_tombstones() -> None:
+    """A large discard is split into ReadyBatches of at most _TOMBSTONE_BATCH
+    records, so an unbounded-buffer discard never becomes one oversized dispatch."""
+    batch = EnsureMixtureAccumulator._TOMBSTONE_BATCH
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    n = batch * 2 + 3  # spans three batches
+    acc.push_many([_rec(i, component_id=0) for i in range(n)])
+    buffered = acc._lanes[0].total_buffered
+    assert buffered > batch
+
+    ready = acc.flush(reset=True)
+    assert all(len(records) <= batch for records, _ in ready)
+    assert sum(len(records) for records, _ in ready) == buffered
+
+
+def test_discard_tombstones_skip_non_closing_children() -> None:
+    """Only closing contributors (is_last_child=True) produce tombstones.
+
+    A discarded middle piece of a split document must not close its base
+    offset — the closing sibling (delivered, or discarded itself) does.
+    """
+    acc = _make_accumulator_with_chunk_mixture({0: 0.9, 1: 0.1}, max_buffer_size=None)
+    records = []
+    for i in range(6):
+        rec = _rec(i, component_id=0)
+        cursor = SampleCursor(
+            sample_id=rec.meta.sample_id,
+            chunk_id=rec.meta.chunk_id,
+            chunk_offset=rec.meta.chunk_offset,
+        )
+        meta = rec.meta.with_contributors(
+            (ContributorRef(cursor=cursor, is_last_child=(i % 2 == 0)),)
+        )
+        records.append(SampleRecord(meta=meta, payload=rec.payload))
+    emitted = _flatten_ready(acc.push_many(records))
+    buffered = [r for r in records if r not in emitted]
+    assert buffered
+
+    tombstones = _assert_tombstones_only(acc.flush(reset=True))
+    closing = [r for r in buffered if r.meta.contribution_refs()[0].is_last_child]
+    assert len(tombstones) == len(closing)
+
+
+def test_strict_discard_logs_warning(caplog) -> None:
+    """A strict-mode discard logs a WARNING with the per-flush and cumulative
+    dropped counts, so silent data loss is observable."""
+    acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=None)
+    acc.push_many([_rec(i, component_id=0) for i in range(20)])
+    buffered = acc._lanes[0].total_buffered
+    assert buffered > 0
+
+    with caplog.at_level(logging.WARNING, logger="zephon.ops.ensure_mixture"):
+        acc.flush(reset=True)
+
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("discarded" in r.getMessage() for r in warned)
+    assert str(buffered) in caplog.text
+    assert acc._total_discarded == buffered
+
+
+def test_strict_no_discard_emits_no_warning(caplog) -> None:
+    """A flush that discards nothing stays quiet — no spurious data-loss warning
+    and the cumulative counter is untouched."""
+    acc = _make_accumulator_with_chunk_mixture({0: 1.0}, max_buffer_size=None)
+    out = _flatten_ready(acc.push_many([_rec(i, component_id=0) for i in range(5)]))
+    assert len(out) == 5  # single-component target: all emit, nothing buffers
+
+    with caplog.at_level(logging.WARNING, logger="zephon.ops.ensure_mixture"):
+        assert acc.flush(reset=True) == []
+
+    assert "discarded" not in caplog.text
+    assert acc._total_discarded == 0
+
+
+def test_strict_discard_warns_once_then_logs_debug(caplog) -> None:
+    """Skewed strict runs discard on roughly every flush, so only the first
+    discard warns; later ones drop to DEBUG so the log isn't flooded."""
+    acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=None)
+
+    # First discard warns, and the warning announces that the rest go to DEBUG.
+    acc.push_many([_rec(i, component_id=0) for i in range(20)])
+    with caplog.at_level(logging.WARNING, logger="zephon.ops.ensure_mixture"):
+        acc.flush(reset=True)
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert "DEBUG" in warned[0].getMessage()
+
+    # Second discard stays silent at WARNING but is still recorded at DEBUG.
+    caplog.clear()
+    acc.push_many([_rec(i, component_id=0) for i in range(20, 40)])
+    with caplog.at_level(logging.DEBUG, logger="zephon.ops.ensure_mixture"):
+        acc.flush(reset=True)
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        r.levelno == logging.DEBUG and "discarded" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bounded mode is unchanged by the strict-mode addition (the invariant)
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_buffer_force_drains_when_full() -> None:
+    """With a small max_buffer_size, the operator force-drains when stuck."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=10,
+        drain_target_ratio=0.5,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(50)]
+    ready = acc.push_many(only_a)
+    emitted = [rec for batch, _ in ready for rec in batch]
+    # Force-drain triggered; we should have emitted some component-0 samples
+    # even though the mixture target was unsatisfiable.
+    assert len(emitted) > 0
+
+
+def test_bounded_mid_stream_flush_drains_buffer() -> None:
+    """flush(reset=True) with bounded max_buffer_size still drains normally."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=100,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(10)]
+    acc.push_many(only_a)
+    assert acc.has_pending_data()
+
+    result = acc.flush(reset=True)
+    # Bounded mode: content is emitted (not discarded), losslessly.
+    emitted = _flatten_ready(result)
+    assert len(emitted) > 0
+    assert all(not r.meta.tombstone for r in emitted), "bounded flush never discards"
+    assert not acc.has_pending_data()
+
+
+def test_bounded_terminal_flush_drains_losslessly() -> None:
+    """End-of-stream flush in bounded mode emits every buffered record (no
+    discard, no tombstones) — the behavior unchanged from origin/main."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=100,
+    )
+    only_a = [_rec(i, component_id=0) for i in range(12)]
+    emitted_push = _flatten_ready(acc.push_many(only_a))
+    buffered = 12 - len(emitted_push)
+    assert buffered > 0
+
+    out = _flatten_ready(acc.flush(reset=False))
+    assert all(not r.meta.tombstone for r in out)
+    # Every buffered record drains out; total in == total out.
+    assert len(emitted_push) + len(out) == 12
+    assert not acc.has_pending_data()
+
+
+def test_bounded_mode_passes_balanced_stream_through() -> None:
+    """The bounded-mode emission path is unaffected by the strict addition:
+    a balanced interleaved stream passes straight through under a cap."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=8,
+    )
+    interleaved = []
+    for i in range(8):
+        interleaved.append(_rec(2 * i, component_id=0))
+        interleaved.append(_rec(2 * i + 1, component_id=1))
+    out = _flatten_ready(acc.push_many(interleaved))
+    # SWRR is always happy on a balanced stream: everything emits, in order.
+    assert len(out) == 16
+    assert not acc.has_pending_data()

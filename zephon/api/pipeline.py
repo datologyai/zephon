@@ -877,7 +877,7 @@ class Pipeline:
     def ensure_mixture(
         self,
         *,
-        max_buffer_size: int = 1000,
+        max_buffer_size: Optional[int] = 1000,
         drain_target_ratio: float = 0.8,
         obsolete_drain_rate: float = 0.1,
         weight_by: Union[
@@ -902,11 +902,23 @@ class Pipeline:
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
         Args:
-            max_buffer_size: Maximum samples to buffer before forcing emission. Only
-                reached when the desired component isn't available. Default is 1000.
+            max_buffer_size: Samples to hold while waiting for the component the
+                target mixture needs next. Default 1000; when the buffer fills, the
+                operator emits what it has, so the output mixture may drift if a
+                component stays scarce. Pass ``None`` to instead **drop** the surplus
+                it cannot place on-target — at every epoch boundary and at end of
+                stream. This makes the mixture exact but discards data, so use it only
+                when an exact mixture matters more than keeping every sample. How much
+                is dropped depends on the stream's skew and on ``flush_every_k_chunks``
+                (smaller → more dropped). ensure_mixture is always non-monotonic, so
+                that cadence defaults to 8; in strict mode the buffer is then discarded
+                on roughly every flush. If drops are too frequent, raise
+                ``flush_every_k_chunks`` above the default to give scarce components
+                more time to absorb the buffer (at the cost of holding more in memory
+                between flushes).
             drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
                 the buffer down to this fraction of max_buffer_size before stopping.
-                Default is 0.8 (drain to 80% of max).
+                Default is 0.8 (drain to 80% of max).  Ignored when ``max_buffer_size=None``.
             obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
                 components (those no longer in the current mixture target). Default is
                 0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample.

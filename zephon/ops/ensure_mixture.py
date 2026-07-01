@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
@@ -12,11 +13,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
 from zephon.core.accumulators import Accumulator, ReadyBatch
+from zephon.core.children import tombstones_for_record
 from zephon.core.constants import ChunkId, ComponentId, LaneId, SampleRecord
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.utils.length_extraction import extract_length
 from zephon.utils.swrr import SmoothWeightedRoundRobin
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,7 +36,10 @@ class EnsureMixtureConfig:
     warn_tolerance: float | None
     warn_warmup: float  # Min emitted weight before ratio warnings are enabled
     mixture_override: dict[str, float] | None  # component_name -> target weight
-    max_buffer_size: int  # Samples to buffer before emitting (enables reordering)
+    # Samples to buffer before force-emitting (enables reordering).  When
+    # ``None`` the buffer is unbounded — the operator only emits while SWRR's
+    # ideal component is available, never compromising the target mixture.
+    max_buffer_size: int | None
     drain_target_ratio: (
         float  # When forced to emit, drain to this fraction of max_buffer_size
     )
@@ -126,6 +133,56 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         self._get_chunk_mixture = get_chunk_mixture
         self._get_component_name = get_component_name
         self._lanes: dict[int, _LaneState] = defaultdict(_LaneState)
+        self._total_discarded: int = 0
+        #: Strict mode discards on roughly every flush in a skewed stream, so
+        #: only the first one warns; the rest drop to DEBUG to avoid log spam.
+        self._discard_warned: bool = False
+
+    #: Cap on tombstones per ReadyBatch when discarding. The strict-mode buffer
+    #: is unbounded, so a discard can dump a whole flush window at once; splitting
+    #: it keeps any one discard from becoming a single oversized worker dispatch.
+    _TOMBSTONE_BATCH = 1024
+
+    def _discard_lane_buffers(
+        self, state: _LaneState
+    ) -> tuple[list[ReadyBatch[SampleRecord]], int]:
+        """Discard a lane's buffers, emitting tombstones that close offsets.
+
+        Discarded records carried the closing contributors for their base
+        offsets; dropping them silently would leave those offsets open
+        forever — the epoch never completes and per-epoch eviction halts at
+        the first discard. A tombstone per closing contributor keeps eviction
+        moving, the same bookkeeping pack_sequences uses for its dropped
+        records.
+
+        Records are freed as they are walked rather than held alongside the
+        full tombstone list, which on the unbounded buffer would double peak
+        memory. Returns the batches and the discarded-record count.
+        """
+        dropped = state.total_buffered
+        ready: list[ReadyBatch[SampleRecord]] = []
+        batch: list[SampleRecord] = []
+
+        def take(record: SampleRecord) -> None:
+            batch.extend(tombstones_for_record(record))
+            while len(batch) >= self._TOMBSTONE_BATCH:
+                ready.append((batch[: self._TOMBSTONE_BATCH], 0))
+                del batch[: self._TOMBSTONE_BATCH]
+
+        for buf in state.buffers.values():
+            while buf:
+                record, _ = buf.popleft()
+                take(record)
+        while state.multi_component_buffer:
+            take(state.multi_component_buffer.popleft().record)
+
+        if batch:
+            ready.append((batch, 0))
+
+        state.buffers.clear()
+        state.multi_component_buffer.clear()
+        state.total_buffered = 0
+        return ready, dropped
 
     def has_pending_data(self) -> bool:
         """Return True if there are any buffered records."""
@@ -220,12 +277,15 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             state = self._lanes[lane_id]
             emitted_batch: list[SampleRecord] = []
 
-            # Compute drain target: when forced to emit, drain to this level
-            drain_target = int(
-                self._config.drain_target_ratio * self._config.max_buffer_size
-            )
-            # Check if we need to start forced draining (buffer hit max)
-            started_forced_drain = state.total_buffered >= self._config.max_buffer_size
+            # Compute drain target: when forced to emit, drain to this level.
+            max_buf = self._config.max_buffer_size
+            if max_buf is None:
+                # Unbounded: never force-drain (drain_target unused here).
+                started_forced_drain = False
+                drain_target = 0
+            else:
+                drain_target = int(self._config.drain_target_ratio * max_buf)
+                started_forced_drain = state.total_buffered >= max_buf
 
             # Greedy emit: while SWRR is happy OR buffer needs draining
             while self._has_buffered_samples(state):
@@ -254,15 +314,28 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         return ready
 
     def flush(self, *, reset: bool = False) -> list[ReadyBatch[SampleRecord]]:
-        """Emit all remaining buffered records using SWRR ordering.
+        """Emit all remaining buffered records, per-lane.
 
-        Emits batched per-lane to minimize scheduling overhead.
-        During flush, obsolete components are drained at an accelerated rate
-        to ensure all samples are emitted.
+        Bounded mode drains the buffer in SWRR order (lossless), accelerating
+        obsolete-component draining so nothing is stranded. Unbounded mode
+        (``max_buffer_size=None``) instead discards the buffer on every flush —
+        mid-stream sentinel (``reset=True``) and terminal close
+        (``reset=False``) alike — since it only holds the surplus SWRR withheld
+        to keep the mixture exact; draining it would skew the output.
         """
         ready: list[ReadyBatch[SampleRecord]] = []
+        discarded = 0
+        discarded_lanes = 0
 
         for lane_id, state in list(self._lanes.items()):
+            if self._config.max_buffer_size is None:
+                batches, dropped = self._discard_lane_buffers(state)
+                ready.extend(batches)
+                if dropped:
+                    discarded += dropped
+                    discarded_lanes += 1
+                continue
+
             emitted_batch: list[SampleRecord] = []
 
             while self._has_buffered_samples(state):
@@ -284,6 +357,32 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
             if emitted_batch:
                 ready.append((emitted_batch, 0))
+
+        if discarded:
+            self._total_discarded += discarded
+            # Skewed strict-mode runs discard on roughly every flush, so warn
+            # once and log the rest at DEBUG. The cumulative count is per
+            # accumulator (one per rank), not run-wide across ranks.
+            if not self._discard_warned:
+                self._discard_warned = True
+                logger.warning(
+                    "EnsureMixture strict mode discarded %d record(s) across %d "
+                    "lane(s) to keep the mixture exact (%d dropped cumulatively "
+                    "on this rank). Raise flush_every_k_chunks to discard less "
+                    "often; further discards on this rank are logged at DEBUG.",
+                    discarded,
+                    discarded_lanes,
+                    self._total_discarded,
+                )
+            else:
+                logger.debug(
+                    "EnsureMixture strict mode discarded %d record(s) across %d "
+                    "lane(s) to keep the mixture exact (%d dropped cumulatively "
+                    "on this rank).",
+                    discarded,
+                    discarded_lanes,
+                    self._total_discarded,
+                )
 
         # Mid-stream flush: reset emission history so the next epoch starts
         # with clean SWRR state, identical to a freshly constructed accumulator.
@@ -614,13 +713,22 @@ class EnsureMixture(DefaultSetup):
     - Single component: No buffering, immediate passthrough
 
     Args:
-        max_buffer_size: Maximum samples to buffer before forcing emission. Only
-            reached when the desired component isn't available. Default is 1000.
+        max_buffer_size: Samples to buffer while waiting for the component the
+            target needs next. Default 1000; when the buffer fills the operator
+            force-emits, so the mixture may drift if a component stays scarce.
+            ``None`` removes the cap and instead *discards* the surplus it cannot
+            place on-target, on every flush (epoch boundaries and end of stream):
+            the mixture stays exact, at the cost of dropping data. Useful when a
+            component is rare in the stream (e.g. on-the-fly tokenization of a
+            small, non-repeating dataset). Memory is then bounded only by
+            ``flush_every_k_chunks``, which also bounds how much is dropped: a
+            smaller value flushes (and discards the unplaced surplus) sooner,
+            leaving the scarce component less time to absorb the buffer.
         drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
             the buffer down to this fraction of max_buffer_size before stopping.
             Default is 0.8 (drain to 80% of max). This ensures meaningful progress
             when suboptimal emissions are required, rather than emitting just one
-            sample per push_many call.
+            sample per push_many call.  Ignored when ``max_buffer_size=None``.
         obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
             components (those no longer in the current mixture target). Default is
             0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample
@@ -646,7 +754,7 @@ class EnsureMixture(DefaultSetup):
     def __init__(
         self,
         *,
-        max_buffer_size: int = 1000,
+        max_buffer_size: int | None = 1000,
         drain_target_ratio: float = 0.8,
         obsolete_drain_rate: float = 0.1,
         weight_by: Callable[[SampleRecord], float]
@@ -659,8 +767,8 @@ class EnsureMixture(DefaultSetup):
     ) -> None:
         DefaultSetup.__init__(self)
 
-        if max_buffer_size <= 0:
-            raise ValueError("max_buffer_size must be positive")
+        if max_buffer_size is not None and max_buffer_size <= 0:
+            raise ValueError("max_buffer_size must be positive (or None for unbounded)")
         if not 0 < drain_target_ratio < 1:
             raise ValueError("drain_target_ratio must be between 0 and 1 (exclusive)")
         if not 0 <= obsolete_drain_rate <= 1:

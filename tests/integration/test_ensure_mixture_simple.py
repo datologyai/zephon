@@ -362,3 +362,68 @@ class TestEnsureMixtureIntegration:
         # Should complete without errors
         records = _collect_records(pipe)
         assert len(records) > 0
+
+    def test_strict_vs_bounded_mixture_quality_tradeoff(self, tmp_path: Path) -> None:
+        """Strict mode (max_buffer_size=None) hits the target mixture far more
+        closely than bounded mode on an imbalanced stream — at the cost of
+        dropping the surplus it cannot place on-target.
+
+        The work source emits a code-heavy stream (~90% code) while the target
+        is 50/50. Bounded mode never discards, so reordering cannot change its
+        counts: its output keeps the input's skew. Strict mode discards the
+        unplaceable code surplus, so its output is balanced but smaller.
+        """
+        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=300, text_count=300)
+
+        def make_work() -> StaticMixtureWorkSource:
+            return StaticMixtureWorkSource(
+                [ds_code, ds_text],
+                {"code": 0.9, "text": 0.1},  # code-heavy supply
+                chunk_size=20,
+                seed=42,
+            )
+
+        def run(max_buffer_size: int | None) -> dict[str, int]:
+            pipe = (
+                Pipeline(make_work())
+                .decode_text()
+                .ensure_mixture(
+                    max_buffer_size=max_buffer_size,
+                    weight_by="samples",
+                    mixture={"code": 0.5, "text": 0.5},  # but we want 50/50
+                )
+                .options(deterministic=True, max_workers=2)
+            )
+            return _count_components(_collect_records(pipe))
+
+        # Baseline: same stream, no enforcement — fixes the input skew and size.
+        baseline = _count_components(
+            _collect_records(
+                Pipeline(make_work())
+                .decode_text()
+                .options(deterministic=True, max_workers=2)
+            )
+        )
+        bounded = run(20)
+        strict = run(None)
+
+        def total(c: dict[str, int]) -> int:
+            return c["code"] + c["text"]
+
+        def code_ratio(c: dict[str, int]) -> float:
+            return c["code"] / total(c) if total(c) else 0.0
+
+        assert total(baseline) > 0
+        assert code_ratio(baseline) > 0.7, "baseline supply should be code-heavy"
+
+        # Bounded mode never discards: same counts as the unenforced stream, so
+        # it is lossless but cannot undo the skew.
+        assert total(bounded) == total(baseline)
+        assert code_ratio(bounded) > 0.7
+
+        # Strict mode reaches the 50/50 target...
+        assert 0.4 <= code_ratio(strict) <= 0.6
+        assert abs(code_ratio(strict) - 0.5) < abs(code_ratio(bounded) - 0.5)
+
+        # ...by dropping the code surplus it could not place on-target.
+        assert 0 < total(strict) < total(baseline)
