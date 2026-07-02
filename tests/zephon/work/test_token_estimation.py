@@ -1,18 +1,22 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for zephon.work.token_estimation (cost model + estimation primitives)."""
+"""Tests for zephon.work.token_estimation (cost model + estimation + priming)."""
 
 import json
+import pickle
 from pathlib import Path
 
+import cloudpickle
 import numpy as np
 import pytest
 
 from zephon.io import Dataset, InMemoryShard
+from zephon.io.stores.multi import build_multi_dataset_store
 from zephon.observability.size_estimator import content_bytes
 from zephon.ops.tokenize_text import TokenizeText
 from zephon.utils.tokenizer import fallback_tokenizer
+from zephon.work import token_estimation
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
     PerShardByteSize,
@@ -20,13 +24,28 @@ from zephon.work.token_estimation import (
     TokenEstimation,
     TokenizeProfile,
     TokenRatio,
+    _calibration_shard_count,
+    _CalibrationScan,
     _count_raw_tokens,
+    _dataset_content_key,
+    _DatasetMeasurement,
+    _fallback,
+    _fetch_payloads,
+    _hansen_hurwitz_ratio,
     _instantiate_tokenizer,
+    _measure_dataset,
+    _plan_delivery,
+    _pps_select,
     _pretokenized_field,
+    _prime_cache_key,
+    _read_prime_cache,
+    _shard_bytes_cv,
     _token_array_length,
+    _write_prime_cache,
     build_byte_source,
     choose_text_field,
     extract_text,
+    prime_token_ratios,
 )
 
 # ---------------------------------------------------------------------------
@@ -104,6 +123,17 @@ def test_token_estimation_rejects_bad_config(kwargs):
 def test_token_estimation_accepts_partial_pin_mapping():
     est = TokenEstimation(primer={"a": 0.3, "b": 1.5})
     assert est.primer == {"a": 0.3, "b": 1.5}
+
+
+def test_token_estimation_std_pickles_with_lambda_measure():
+    est = TokenEstimation(measure=lambda p: len(p["text"]))
+    restored = pickle.loads(pickle.dumps(est))
+    assert restored.measure is not None
+    assert restored.measure({"text": "abc"}) == 3
+    # cloudpickle transport (census inputs) must keep working too.
+    doubled = cloudpickle.loads(cloudpickle.dumps(est))
+    assert doubled.measure is not None
+    assert doubled.measure({"text": "abcd"}) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -446,3 +476,652 @@ def test_count_raw_tokens_reads_input_ids_attribute():
 
     profile = TokenizeProfile(special_tokens="none")
     assert _count_raw_tokens(_AttrTokenizer(), "a b c d", profile) == 4
+
+
+# ---------------------------------------------------------------------------
+# Priming: sampling / estimator primitives
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cv,expected",
+    [(0.0, 4), (0.03, 4), (0.06, 4), (0.09, 9), (0.3, 16)],
+)
+def test_calibration_shard_count_scales_with_spread(cv, expected):
+    assert _calibration_shard_count(cv, 4, 16) == expected
+
+
+def test_shard_bytes_cv_uniform_is_zero():
+    assert _shard_bytes_cv(np.array([10, 10, 10]), np.array([100, 100, 100])) == 0.0
+
+
+def test_shard_bytes_cv_positive_when_heterogeneous():
+    assert _shard_bytes_cv(np.array([10, 10]), np.array([100, 900])) > 0
+
+
+def test_shard_bytes_cv_skips_empty_shards():
+    assert _shard_bytes_cv(np.array([0, 0]), np.array([100, 200])) == 0.0
+
+
+def test_hansen_hurwitz_ratio_is_byte_weighted():
+    # (1 draw)*10/100 + (3 draws)*30/100 = 1.0, over 4 draws -> 0.25.
+    assert _hansen_hurwitz_ratio([(10, 100, 1), (30, 100, 3)]) == pytest.approx(0.25)
+
+
+def test_hansen_hurwitz_ratio_single_record():
+    assert _hansen_hurwitz_ratio([(42, 84, 7)]) == pytest.approx(0.5)
+
+
+def test_pps_select_is_independent_of_candidate_dict_order():
+    # scan.sizes is merged in nondeterministic census-completion order; the seeded
+    # draw must select the same records regardless of that ordering.
+    sizes = {(s, o): s * 10 + o + 1 for s in range(4) for o in range(50)}
+    forward = dict(sorted(sizes.items()))
+    reverse = dict(sorted(sizes.items(), reverse=True))
+    assert _pps_select(0, forward, 200, seed=7) == _pps_select(0, reverse, 200, seed=7)
+
+
+def test_pps_select_weights_by_size():
+    sizes = {(0, 0): 1000, (0, 1): 10, (0, 2): 10}
+    ids, counts = _pps_select(0, sizes, 1000, seed=1)
+    by_offset = {sid[2]: c for sid, c in zip(ids, counts)}
+    assert by_offset[0] > by_offset[1] + by_offset[2]
+
+
+def test_pps_select_draws_with_replacement_conserve_count():
+    sizes = {(0, 0): 5, (0, 1): 5}
+    ids, counts = _pps_select(0, sizes, 100, seed=2)
+    assert sum(counts) == 100
+    assert len(ids) <= 2
+
+
+def test_pps_select_empty_pool():
+    assert _pps_select(0, {}, 10, seed=0) == ([], [])
+    assert _pps_select(0, {(0, 0): 0}, 10, seed=0) == ([], [])
+
+
+def test_pps_select_returns_records_in_fetch_order():
+    sizes = {(2, 0): 3, (0, 5): 3, (1, 1): 3}
+    ids, _ = _pps_select(0, sizes, 300, seed=3)
+    assert ids == sorted(ids)
+
+
+# ---------------------------------------------------------------------------
+# Priming: delivery planning + fallback
+# ---------------------------------------------------------------------------
+
+
+def test_plan_delivery_prefers_measure_callable():
+    est = TokenEstimation(measure=lambda p: 1)
+    assert _plan_delivery(est, None, [{"text": "hi"}]).mode == "measure callable"
+
+
+def test_plan_delivery_detects_pretokenized():
+    plan = _plan_delivery(TokenEstimation(), None, [{"input_ids": np.arange(5)}])
+    assert plan.mode == "pretokenized"
+    assert plan.path == ("input_ids",)
+
+
+def test_plan_delivery_falls_through_to_text():
+    plan = _plan_delivery(TokenEstimation(), None, [{"body": "hello world"}])
+    assert plan.mode == "text"
+    assert plan.path == ("body",)
+
+
+def test_plan_delivery_uses_configured_field_path():
+    plan = _plan_delivery(TokenEstimation(), ("doc", "text"), [{"doc": {"text": "x"}}])
+    assert plan.mode == "text"
+    assert plan.path == ("doc", "text")
+
+
+def test_plan_delivery_prefix_outvotes_anomalous_first_payload():
+    payloads = [{"url": "https://example.com/a", "id": "0"}] + [
+        {"url": "https://example.com/b", "text": "real document body"}
+    ] * 7
+    plan = _plan_delivery(TokenEstimation(), None, payloads)
+    assert plan.mode == "text"
+    assert plan.path == ("text",)
+
+
+def test_plan_delivery_prefix_detects_pretokenized_past_bad_record():
+    payloads = [{"input_ids": None}, {"input_ids": np.arange(4)}]
+    plan = _plan_delivery(TokenEstimation(), None, payloads)
+    assert plan.mode == "pretokenized"
+    assert plan.path == ("input_ids",)
+
+
+def test_plan_delivery_prefix_outvotes_anomalous_pretokenized_record():
+    payloads = [{"text": "x", "input_ids": np.arange(3)}] + [
+        {"text": "real document body"}
+    ] * 7
+    plan = _plan_delivery(TokenEstimation(), None, payloads)
+    assert plan.mode == "text"
+    assert plan.path == ("text",)
+
+
+def test_plan_delivery_majority_field_beats_minority_priority_key():
+    payloads = [{"text": "t"}] + [{"content": "long body"}] * 7
+    plan = _plan_delivery(TokenEstimation(), None, payloads)
+    assert plan.mode == "text"
+    assert plan.path == ("content",)
+
+
+def test_plan_delivery_configured_field_mode_follows_majority():
+    payloads = [{"f": np.arange(4)}] + [{"f": "words in the field"}] * 7
+    plan = _plan_delivery(TokenEstimation(), ("f",), payloads)
+    assert plan.mode == "text"
+    assert plan.path == ("f",)
+
+
+def test_fallback_without_scan_uses_raw_constant():
+    m = _fallback(TokenEstimation(fallback_tokens_per_byte=0.3), None, "boom")
+    assert m.ratio.tokens_per_byte == pytest.approx(0.3)
+    assert m.ratio.source == "fallback"
+    assert m.reason == "boom"
+    assert m.retryable is False
+
+
+def test_fallback_with_scan_rebases_onto_raw_bytes():
+    scan = _CalibrationScan(sizes={}, payload_total=200.0, raw_total=100.0)
+    m = _fallback(
+        TokenEstimation(fallback_tokens_per_byte=0.3), scan, "io", retryable=True
+    )
+    assert m.ratio.tokens_per_byte == pytest.approx(0.6)
+    assert m.retryable is True
+
+
+# ---------------------------------------------------------------------------
+# Priming: single-flight cache
+# ---------------------------------------------------------------------------
+
+
+def test_dataset_content_key_stable_and_data_sensitive():
+    a = Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 3)})
+    a_again = Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 3)})
+    bigger = Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 4)})
+    assert _dataset_content_key(a) == _dataset_content_key(a_again)
+    assert _dataset_content_key(a) != _dataset_content_key(bigger)
+
+
+def test_prime_cache_key_stable_and_input_sensitive():
+    by_name = {"a": Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 3)})}
+    est = TokenEstimation()
+    key = _prime_cache_key(["a"], by_name, est, None, seed=0)
+    assert key == _prime_cache_key(["a"], by_name, est, None, seed=0)
+    assert key != _prime_cache_key(["a"], by_name, est, None, seed=1)
+    assert key != _prime_cache_key(
+        ["a"], by_name, TokenEstimation(calibration_samples=999), None, seed=0
+    )
+    assert key != _prime_cache_key(
+        ["a"], by_name, est, TokenizeProfile(max_length=128), seed=0
+    )
+
+
+def test_prime_cache_round_trip(tmp_path):
+    path = tmp_path / "ratios.json"
+    measured = {
+        "a": _DatasetMeasurement(TokenRatio(0.3, "measured")),
+        "b": _DatasetMeasurement(TokenRatio(0.25, "fallback"), reason="no text"),
+    }
+    _write_prime_cache(path, "KEY", measured)
+    got = _read_prime_cache(path, "KEY")
+    assert got is not None
+    assert got["a"].ratio == TokenRatio(0.3, "measured")
+    assert got["b"].ratio == TokenRatio(0.25, "fallback")
+    assert got["b"].reason == "no text"
+
+
+def test_prime_cache_miss_on_absent_file(tmp_path):
+    assert _read_prime_cache(tmp_path / "nope.json", "KEY") is None
+
+
+def test_prime_cache_miss_on_key_mismatch(tmp_path):
+    path = tmp_path / "r.json"
+    _write_prime_cache(
+        path, "KEY", {"a": _DatasetMeasurement(TokenRatio(0.3, "measured"))}
+    )
+    assert _read_prime_cache(path, "OTHER") is None
+
+
+def test_prime_cache_miss_on_corruption(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text("{ not json")
+    assert _read_prime_cache(path, "KEY") is None
+
+
+# ---------------------------------------------------------------------------
+# Priming: measuring one dataset (no process pool)
+# ---------------------------------------------------------------------------
+
+
+def _uniform_dataset(name: str, row: dict, per_shard: int = 40, n_shards: int = 2):
+    return Dataset.from_dict(
+        name, {s: InMemoryShard([row] * per_shard) for s in range(n_shards)}
+    )
+
+
+def test_fetch_payloads_keys_payloads_by_sample_id():
+    ds = Dataset.from_dict(
+        "d",
+        {
+            0: InMemoryShard([{"i": i} for i in range(10)]),
+            1: InMemoryShard([{"i": 100 + i} for i in range(10)]),
+        },
+    )
+    store = build_multi_dataset_store({0: ds})
+    # Deliberately unsorted: pairing must not depend on caller ordering.
+    sample_ids = [(0, 1, 7), (0, 0, 5), (0, 0, 2), (0, 1, 1)]
+    payloads = _fetch_payloads(store, 0, sample_ids)
+    assert {sid: p["i"] for sid, p in payloads.items()} == {
+        (0, 0, 2): 2,
+        (0, 0, 5): 5,
+        (0, 1, 1): 101,
+        (0, 1, 7): 107,
+    }
+
+
+def test_measure_dataset_measure_callable_matches_byte_weighted_ratio():
+    row = {"text": "a b c d"}
+    ds = _uniform_dataset("d", row)
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(
+        measure=lambda p: len(p["text"].split()), calibration_samples=200
+    )
+    m = _measure_dataset(ds, 0, store, est, None, None, seed=1)
+    assert m.ratio.source == "measured"
+    assert m.ratio.tokens_per_byte == pytest.approx(4 / content_bytes(row))
+
+
+def test_measure_dataset_text_path_tokenizes():
+    row = {"text": "one two three four five"}
+    ds = _uniform_dataset("d", row)
+    store = build_multi_dataset_store({0: ds})
+    profile = TokenizeProfile(special_tokens="none")
+    m = _measure_dataset(
+        ds,
+        0,
+        store,
+        TokenEstimation(calibration_samples=100),
+        profile,
+        fallback_tokenizer(),
+        seed=1,
+    )
+    assert m.ratio.source == "measured"
+    assert m.ratio.tokens_per_byte == pytest.approx(5 / content_bytes(row))
+
+
+def test_measure_dataset_pretokenized_counts_exactly():
+    row = {"input_ids": np.arange(8, dtype=np.int64)}
+    ds = _uniform_dataset("d", row, per_shard=30)
+    store = build_multi_dataset_store({0: ds})
+    m = _measure_dataset(
+        ds, 0, store, TokenEstimation(calibration_samples=100), None, None, seed=1
+    )
+    assert m.ratio.source == "measured"
+    assert m.ratio.tokens_per_byte == pytest.approx(8 / content_bytes(row))
+
+
+def test_measure_dataset_falls_back_when_unmeasurable():
+    ds = _uniform_dataset("d", {"score": 1.0, "n": 3}, per_shard=20)
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(calibration_samples=50, fallback_tokens_per_byte=0.3)
+    m = _measure_dataset(
+        ds, 0, store, est, TokenizeProfile(), fallback_tokenizer(), seed=1
+    )
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert m.retryable is False
+
+
+def test_measure_dataset_measure_callable_zero_counts_names_plan():
+    ds = _uniform_dataset("d", {"text": "a b c d"})
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(measure=lambda p: 0, calibration_samples=50)
+    m = _measure_dataset(ds, 0, store, est, None, None, seed=1)
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert "measure callable" in m.reason
+    # No false "text" diagnosis when the callable owns counting.
+    assert "field" not in m.reason
+
+
+def test_measure_dataset_falls_back_when_plan_coverage_is_low():
+    # The configured field covers only a sliver of the PPS draw mass.
+    rows = [{"text": "five words of real text"}] + [{"image": b"\xff" * 200}] * 3
+    ds = Dataset.from_dict("d", {s: InMemoryShard(rows * 10) for s in range(2)})
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(calibration_samples=100, fallback_tokens_per_byte=0.3)
+    m = _measure_dataset(
+        ds,
+        0,
+        store,
+        est,
+        TokenizeProfile(field="text", special_tokens="none"),
+        fallback_tokenizer(),
+        seed=1,
+    )
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert "measured only" in m.reason
+    assert "(text, field: text)" in m.reason
+    assert m.retryable is False
+
+
+class _PoisonTokenizer:
+    """Raises on documents containing 'poison'; whitespace-counts otherwise."""
+
+    def __init__(self):
+        self.raised = 0
+
+    def __call__(self, text, **kwargs):
+        if "poison" in text:
+            self.raised += 1
+            raise RuntimeError("tokenizer exploded")
+        return {"input_ids": text.split()}
+
+
+def test_measure_dataset_skips_docs_that_crash_the_tokenizer():
+    good = {"text": "one two three four five"}
+    bad = {"text": "poison"}
+    ds = Dataset.from_dict("d", {s: InMemoryShard([good, bad] * 20) for s in range(2)})
+    store = build_multi_dataset_store({0: ds})
+    tok = _PoisonTokenizer()
+    m = _measure_dataset(
+        ds,
+        0,
+        store,
+        TokenEstimation(calibration_samples=100),
+        TokenizeProfile(special_tokens="none"),
+        tok,
+        seed=1,
+    )
+    assert tok.raised > 0
+    assert m.ratio.source == "measured"
+    assert m.ratio.tokens_per_byte == pytest.approx(5 / content_bytes(good))
+
+
+def test_measure_dataset_falls_back_when_tokenizer_always_crashes():
+    ds = _uniform_dataset("d", {"text": "poison"}, per_shard=20)
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(calibration_samples=50, fallback_tokens_per_byte=0.3)
+    m = _measure_dataset(
+        ds,
+        0,
+        store,
+        est,
+        TokenizeProfile(special_tokens="none"),
+        _PoisonTokenizer(),
+        seed=1,
+    )
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert "tokenizer failed" in m.reason
+    assert "tokenizer exploded" in m.reason
+    assert m.retryable is False
+
+
+# ---------------------------------------------------------------------------
+# prime_token_ratios orchestration
+# ---------------------------------------------------------------------------
+
+
+def test_prime_token_ratios_float_primer_pins_all_without_io():
+    ratios = prime_token_ratios(
+        datasets=[],
+        dataset_ids={"a": 0, "b": 1},
+        estimation=TokenEstimation(primer=0.3),
+        tokenize_profile=None,
+    )
+    assert set(ratios) == {"a", "b"}
+    assert all(
+        r.source == "pinned" and r.tokens_per_byte == pytest.approx(0.3)
+        for r in ratios.values()
+    )
+
+
+def test_prime_token_ratios_rejects_unknown_pins():
+    with pytest.raises(ValueError, match="unknown datasets"):
+        prime_token_ratios(
+            datasets=[],
+            dataset_ids={"a": 0},
+            estimation=TokenEstimation(primer={"ghost": 0.5}),
+            tokenize_profile=None,
+        )
+
+
+def test_prime_token_ratios_missing_descriptor_falls_back():
+    with pytest.warns(RuntimeWarning, match="fell back"):
+        ratios = prime_token_ratios(
+            datasets=[],
+            dataset_ids={"ghost": 0},
+            estimation=TokenEstimation(primer="measure"),
+            tokenize_profile=None,
+        )
+    assert ratios["ghost"].source == "fallback"
+
+
+def test_prime_token_ratios_caches_census_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path))
+    ds = Dataset.from_dict("b", {0: InMemoryShard([{"text": "x"}] * 4)})
+    calls: list[int] = []
+
+    def fake_census(*args, **kwargs):
+        calls.append(1)
+        return {"b": _DatasetMeasurement(TokenRatio(0.4, "measured"))}
+
+    monkeypatch.setattr(token_estimation, "_run_census", fake_census)
+    kwargs = dict(
+        datasets=[ds],
+        dataset_ids={"b": 0},
+        estimation=TokenEstimation(primer="measure"),
+        tokenize_profile=None,
+    )
+    first = prime_token_ratios(**kwargs)
+    second = prime_token_ratios(**kwargs)
+    assert first["b"].tokens_per_byte == pytest.approx(0.4)
+    assert second["b"] == first["b"]
+    assert len(calls) == 1
+
+
+def test_prime_token_ratios_does_not_cache_transient_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path))
+    ds = Dataset.from_dict("b", {0: InMemoryShard([{"text": "x"}] * 4)})
+    calls: list[int] = []
+
+    def fake_census(*args, **kwargs):
+        calls.append(1)
+        return {
+            "b": _DatasetMeasurement(
+                TokenRatio(0.25, "fallback"),
+                reason="calibration fetch failed: boom",
+                retryable=True,
+            )
+        }
+
+    monkeypatch.setattr(token_estimation, "_run_census", fake_census)
+    kwargs = dict(
+        datasets=[ds],
+        dataset_ids={"b": 0},
+        estimation=TokenEstimation(primer="measure"),
+        tokenize_profile=None,
+    )
+    with pytest.warns(RuntimeWarning):
+        prime_token_ratios(**kwargs)
+    with pytest.warns(RuntimeWarning):
+        prime_token_ratios(**kwargs)
+    assert len(calls) == 2
+
+
+def test_prime_token_ratios_end_to_end_measure_callable(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "cat"))
+    root = tmp_path / "web"
+    root.mkdir()
+    for s in range(2):
+        lines = [json.dumps({"text": "a b c d", "id": f"{s}-{i}"}) for i in range(30)]
+        (root / f"shard_{s:05d}.jsonl").write_text("\n".join(lines) + "\n")
+    ds = Dataset.from_path("web", str(root))
+    est = TokenEstimation(
+        measure=lambda p: len(p["text"].split()),
+        calibration_samples=50,
+        calibration_shards_min=1,
+        calibration_shards_max=2,
+    )
+    ratios = prime_token_ratios(
+        datasets=[ds],
+        dataset_ids={"web": 0},
+        estimation=est,
+        tokenize_profile=None,
+        seed=1,
+    )
+    assert ratios["web"].source == "measured"
+    assert ratios["web"].tokens_per_byte > 0
+
+
+class _ClosureTokenizer:
+    """Whitespace tokenizer whose lambda attribute defeats standard pickle."""
+
+    def __init__(self):
+        self.split = lambda text: text.split()
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": self.split(text)}
+
+
+def test_prime_token_ratios_live_tokenizer_survives_spawn(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "cat"))
+    root = tmp_path / "web"
+    root.mkdir()
+    for s in range(2):
+        lines = [json.dumps({"text": "a b c d", "id": f"{s}-{i}"}) for i in range(30)]
+        (root / f"shard_{s:05d}.jsonl").write_text("\n".join(lines) + "\n")
+    ds = Dataset.from_path("web", str(root))
+    tok = _ClosureTokenizer()
+    # The test is only meaningful while std pickle rejects this tokenizer.
+    with pytest.raises((pickle.PicklingError, AttributeError)):
+        pickle.dumps(tok)
+    ratios = prime_token_ratios(
+        datasets=[ds],
+        dataset_ids={"web": 0},
+        estimation=TokenEstimation(
+            calibration_samples=50,
+            calibration_shards_min=1,
+            calibration_shards_max=2,
+        ),
+        tokenize_profile=TokenizeProfile(tokenizer=tok, special_tokens="none"),
+        seed=1,
+    )
+    assert ratios["web"].source == "measured"
+    assert ratios["web"].tokens_per_byte > 0
+
+
+class _CountingTokenizer:
+    """Live tokenizer whose counting behavior is instance state."""
+
+    def __init__(self, factor: int):
+        self.factor = factor
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": text.split() * self.factor}
+
+
+class _UnpicklableTokenizer:
+    """Simulates a live tokenizer that cannot leave the driver process."""
+
+    def __getstate__(self):
+        raise TypeError("cannot pickle live tokenizer")
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": text.split()}
+
+
+def test_prime_cache_key_distinguishes_live_tokenizer_state():
+    ds = Dataset.from_dict("b", {0: InMemoryShard([{"text": "x"}] * 4)})
+    est = TokenEstimation()
+
+    def key(profile):
+        return _prime_cache_key(["b"], {"b": ds}, est, profile, seed=0)
+
+    k1 = key(TokenizeProfile(tokenizer=_CountingTokenizer(1)))
+    k3 = key(TokenizeProfile(tokenizer=_CountingTokenizer(3)))
+    assert k1 != k3
+    assert k1 == key(TokenizeProfile(tokenizer=_CountingTokenizer(1)))
+    # An unpicklable live tokenizer must not alias the no-tokenizer key.
+    assert key(TokenizeProfile(tokenizer=_UnpicklableTokenizer())) != key(
+        TokenizeProfile()
+    )
+
+
+def test_prime_token_ratios_unpicklable_tokenizer_degrades_to_fallback(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "cat"))
+    root = tmp_path / "web"
+    root.mkdir()
+    lines = [json.dumps({"text": "a b c d", "id": str(i)}) for i in range(30)]
+    (root / "shard_00000.jsonl").write_text("\n".join(lines) + "\n")
+    ds = Dataset.from_path("web", str(root))
+    # Defeats even the profile's cloudpickle hook: worker spawn fails in the
+    # parent and the pool-level guard degrades every dataset to a fallback.
+    with pytest.warns(RuntimeWarning, match="census pool failed"):
+        ratios = prime_token_ratios(
+            datasets=[ds],
+            dataset_ids={"web": 0},
+            estimation=TokenEstimation(
+                calibration_samples=10,
+                calibration_shards_min=1,
+                calibration_shards_max=1,
+            ),
+            tokenize_profile=TokenizeProfile(
+                tokenizer=_UnpicklableTokenizer(), special_tokens="none"
+            ),
+            seed=1,
+        )
+    assert ratios["web"].source == "fallback"
+    # A crash is retryable: nothing cached, a later prime retries.
+    assert not list((tmp_path / "cat").rglob("token_ratios/*.json"))
+
+
+def test_tokenize_profile_std_pickles_with_closure_tokenizer():
+    profile = TokenizeProfile(tokenizer=_ClosureTokenizer(), special_tokens="none")
+    restored = pickle.loads(pickle.dumps(profile))
+    assert restored.tokenizer is not None
+    assert restored.tokenizer("a b c")["input_ids"] == ["a", "b", "c"]
+
+
+class _ExplodesOnUnpickle:
+    """Simulates a tokenizer that cannot be rebuilt inside pool workers."""
+
+    def __getstate__(self):
+        return {}
+
+    def __setstate__(self, state):
+        raise RuntimeError("cannot rebuild in worker")
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": text.split()}
+
+
+def test_prime_token_ratios_broken_pool_degrades_to_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "cat"))
+    root = tmp_path / "web"
+    root.mkdir()
+    lines = [json.dumps({"text": "a b c d", "id": str(i)}) for i in range(30)]
+    (root / "shard_00000.jsonl").write_text("\n".join(lines) + "\n")
+    ds = Dataset.from_path("web", str(root))
+    with pytest.warns(RuntimeWarning, match="measurement crashed"):
+        ratios = prime_token_ratios(
+            datasets=[ds],
+            dataset_ids={"web": 0},
+            estimation=TokenEstimation(
+                calibration_samples=10,
+                calibration_shards_min=1,
+                calibration_shards_max=1,
+            ),
+            tokenize_profile=TokenizeProfile(
+                tokenizer=_ExplodesOnUnpickle(), special_tokens="none"
+            ),
+            seed=1,
+        )
+    assert ratios["web"].source == "fallback"
+    # A crash is a transient fallback: nothing cached, a later prime retries.
+    assert not list((tmp_path / "cat").rglob("token_ratios/*.json"))
