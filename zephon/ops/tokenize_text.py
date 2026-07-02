@@ -18,7 +18,6 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Protocol,
     Sequence,
     TypeAlias,
     TypeVar,
@@ -44,10 +43,13 @@ from zephon.core.constants import (
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
 from zephon.utils.thread_utils import suppress_library_threads
-from zephon.utils.tokenizer_cloud import (
-    PermanentCloudTokenizerError,
-    resolve_tokenizer_id,
+from zephon.utils.tokenizer import (
+    TokenBatch,
+    TokenizerLike,
+    TokenizerOutput,
+    fallback_tokenizer,
 )
+from zephon.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 from zephon.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
     _gil_disabled,
@@ -75,43 +77,12 @@ TokenSeq: TypeAlias = Union[
 # Bound TypeVar ensures "Tensor in -> Tensor out" relationship
 T_TokenSeq = TypeVar("T_TokenSeq", bound=TokenSeq)
 
-TokenBatch: TypeAlias = Union[
-    "np.ndarray",
-    "torch.Tensor",
-    "tf.Tensor",
-    Sequence[int],
-    Sequence[Sequence[int]],
-]
-TokenizerOutput: TypeAlias = Mapping[str, TokenBatch]
-
 
 # Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
 _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 # Free-threaded Python only: serializes _setup_tokenizer's check-then-set so
 # concurrent _process threads can't race into double-loading the tokenizer.
 _SETUP_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
-
-
-@retry(
-    wait=wait_random_exponential(multiplier=2, max=15),
-    stop=stop_after_attempt(5),
-    retry=retry_if_not_exception_type((ValueError, PermanentCloudTokenizerError)),
-    reraise=True,
-)
-def _resolve_with_retry(tokenizer_id: str | None) -> str | None:
-    return resolve_tokenizer_id(tokenizer_id)
-
-
-class TokenizerLike(Protocol):
-    """Minimal interface used for tokenization."""
-
-    name_or_path: str | None
-    pad_token: int | str | None
-    eos_token: int | str | None
-
-    def __call__(
-        self, texts: Sequence[str] | str, **kwargs: Any
-    ) -> TokenizerOutput: ...
 
 
 class TokenizeText(DefaultSetup):
@@ -391,14 +362,14 @@ class TokenizeText(DefaultSetup):
                 suppress_library_threads()
 
                 if self.tokenizer_id in (None, "__fallback__"):
-                    self.tok = _fallback_tokenizer()
+                    self.tok = fallback_tokenizer()
                 else:
                     with import_lock_ctx:
                         from transformers import AutoTokenizer
 
                     # Resolve before the HF retry — nesting would re-list the
                     # bucket on every HF retry attempt.
-                    load_id = _resolve_with_retry(self.tokenizer_id)
+                    load_id = resolve_tokenizer_id_with_retry(self.tokenizer_id)
 
                     @retry(
                         wait=wait_random_exponential(multiplier=2, max=15),
@@ -1302,117 +1273,3 @@ class TokenizeText(DefaultSetup):
             self._set_payload_tensors(child_payload, conv_ids, conv_mask)
             records.append(SampleRecord(meta=child_meta, payload=child_payload))
         return records
-
-
-def _fallback_tokenizer() -> TokenizerLike:
-    class _Tokenizer:
-        name_or_path: str | None = "__fallback__"
-        # Distinct ids so a bracketed sample reads naturally as
-        # [bos=1, ..., eos=2] padded with pad=0.
-        pad_token: int | str | None = 0
-        pad_token_id: int | None = 0
-        bos_token: int | str | None = 1
-        bos_token_id: int | None = 1
-        eos_token: int | str | None = 2
-        eos_token_id: int | None = 2
-
-        def __call__(
-            self,
-            texts: Sequence[str] | str,
-            **kwargs: Any,
-        ) -> TokenizerOutput:
-            truncation = bool(kwargs.get("truncation", False))
-            max_length = kwargs.get("max_length", None)
-            padding = kwargs.get("padding", False)
-            return_tensors = kwargs.get("return_tensors", None)
-
-            max_len_int = int(max_length) if max_length is not None else None
-
-            def encode_single(value: str) -> dict[str, list[int]]:
-                # Offset content ids past the reserved range (pad=0, bos=1,
-                # eos=2) so a hash collision can't masquerade as a special
-                # token. PYTHONHASHSEED randomization across runs means
-                # without the offset, content ids of 1 or 2 are possible and
-                # tests like ``ids[0] != _BOS`` become flaky.
-                tokens = [abs(hash(word)) % 10000 + 10 for word in value.split()]
-                if truncation and max_len_int is not None:
-                    tokens = tokens[:max_len_int]
-                return {"input_ids": tokens, "attention_mask": [1] * len(tokens)}
-
-            single_input = isinstance(texts, str)
-            items = [texts] if single_input else list(texts)
-
-            encoded = [encode_single(item) for item in items]
-            input_ids: list[list[int]] = [item["input_ids"] for item in encoded]
-            attention_masks: list[list[int]] = [
-                item["attention_mask"] for item in encoded
-            ]
-
-            if padding:
-                target = max(len(ids) for ids in input_ids) if input_ids else 0
-                if padding == "max_length" and max_len_int is not None:
-                    target = max_len_int
-
-                pad_val = 0
-                if isinstance(self.pad_token, int):
-                    pad_val = self.pad_token
-                elif self.pad_token is not None:
-                    pad_val = 0
-
-                def _pad(seq: list[int]) -> list[int]:
-                    if len(seq) >= target:
-                        return seq
-                    return seq + [pad_val] * (target - len(seq))
-
-                input_ids = [_pad(ids) for ids in input_ids]
-                attention_masks = [_pad(mask) for mask in attention_masks]
-
-            result: dict[str, Any] = {
-                "input_ids": input_ids,
-                "attention_mask": attention_masks,
-            }
-
-            if single_input:
-                result = {
-                    "input_ids": input_ids[0] if input_ids else [],
-                    "attention_mask": attention_masks[0] if attention_masks else [],
-                }
-
-            if return_tensors is None:
-                return cast(TokenizerOutput, result)
-
-            if return_tensors == "pt":
-                try:  # pragma: no cover
-                    import torch
-                except Exception as exc:  # pragma: no cover
-                    raise RuntimeError(
-                        "return_tensors='pt' requested but torch is not available"
-                    ) from exc
-                with _tensor_lock_ctx():
-                    return {key: torch.tensor(value) for key, value in result.items()}
-
-            if return_tensors in ("np", "numpy"):
-                try:  # pragma: no cover
-                    import numpy as np
-                except Exception as exc:  # pragma: no cover
-                    raise RuntimeError(
-                        "return_tensors='np' requested but numpy is not available"
-                    ) from exc
-                return {key: np.asarray(value) for key, value in result.items()}
-
-            if return_tensors == "tf":
-                try:  # pragma: no cover
-                    import tensorflow as tf
-                except Exception as exc:  # pragma: no cover
-                    raise RuntimeError(
-                        "return_tensors='tf' requested but tensorflow is not available"
-                    ) from exc
-                return {
-                    key: tf.convert_to_tensor(value) for key, value in result.items()
-                }
-
-            raise ValueError(
-                f"fallback tokenizer does not support return_tensors='{return_tensors}'"
-            )
-
-    return _Tokenizer()

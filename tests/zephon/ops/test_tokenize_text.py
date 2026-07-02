@@ -7,17 +7,17 @@ import types
 from typing import Any
 
 import pytest
+from tenacity.wait import wait_none
 
 from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.op_base import OpContext
 from zephon.ops.tokenize_text import (
     SpecialTokensMode,
     TokenizeText,
-    _resolve_with_retry,
 )
 from zephon.utils.tokenizer_cloud import (
-    PermanentCloudTokenizerError,
     TransientCloudTokenizerError,
+    resolve_tokenizer_id_with_retry,
 )
 from zephon.utils.torch_compat import _should_use_tensor_lock
 
@@ -1088,7 +1088,9 @@ def test_setup_resolves_cloud_uri_before_loading(
         assert tokenizer_id == "s3://fake-bucket/fake/prefix/"
         return resolved_path
 
-    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", fake_resolve)
+    monkeypatch.setattr(
+        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", fake_resolve
+    )
 
     op = TokenizeText(
         tokenizer=None,
@@ -1155,7 +1157,9 @@ def test_setup_does_not_resolve_when_tokenizer_passed_directly(
         calls.append(tokenizer_id)
         return tokenizer_id
 
-    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", fake_resolve)
+    monkeypatch.setattr(
+        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", fake_resolve
+    )
 
     class _Tok:
         name_or_path = "user-supplied"
@@ -1184,7 +1188,7 @@ def test_setup_does_not_resolve_when_tokenizer_passed_directly(
 def test_setup_retries_transient_cloud_sync_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """Transient cloud-sync failures are retried by the same tenacity envelope as HF load."""
+    """Setup retries a transient resolver failure, then loads the tokenizer."""
     resolved_path = str(tmp_path / "fake-resolved-tokenizer")
     resolve_attempts = 0
 
@@ -1195,13 +1199,13 @@ def test_setup_retries_transient_cloud_sync_failure(
             raise TransientCloudTokenizerError("simulated transient S3 5xx")
         return resolved_path
 
-    monkeypatch.setattr("zephon.ops.tokenize_text.resolve_tokenizer_id", flaky_resolve)
-
-    # Zero out the tenacity backoff so the test runs fast.
     monkeypatch.setattr(
-        "zephon.ops.tokenize_text.wait_random_exponential",
-        lambda **kw: __import__("tenacity").wait.wait_none(),
+        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", flaky_resolve
     )
+
+    # Drop the resolve backoff so the test runs fast. The retry envelope is
+    # built at import, so mutate the controller rather than patch the wait.
+    monkeypatch.setattr(resolve_tokenizer_id_with_retry.retry, "wait", wait_none())
 
     fake = types.ModuleType("transformers")
 
@@ -1238,27 +1242,6 @@ def test_setup_retries_transient_cloud_sync_failure(
 
     assert resolve_attempts == 2, "Transient sync error must be retried once"
     assert received_ids == [resolved_path]
-
-
-def test_setup_does_not_retry_permanent_cloud_sync_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Deterministic resolver failures must surface without backoff retries."""
-    attempts = 0
-
-    def permanent_resolve(tokenizer_id):
-        nonlocal attempts
-        attempts += 1
-        raise PermanentCloudTokenizerError(f"empty prefix: {tokenizer_id}")
-
-    monkeypatch.setattr(
-        "zephon.ops.tokenize_text.resolve_tokenizer_id", permanent_resolve
-    )
-
-    with pytest.raises(PermanentCloudTokenizerError, match="empty prefix"):
-        _resolve_with_retry("s3://fake-bucket/empty/")
-
-    assert attempts == 1
 
 
 def test_torch_has_allocator_fix_detects_new_versions() -> None:
@@ -2120,17 +2103,6 @@ def test_override_under_bracket_mode_is_accepted() -> None:
 # (pad=0, bos=1, eos=2). PYTHONHASHSEED makes this hash-seed-dependent in
 # the worst case; the offset pushes content past the reserved range.
 # ---------------------------------------------------------------------------
-
-
-def test_fallback_content_ids_avoid_reserved_range() -> None:
-    """``abs(hash(word)) % 10000`` can be 0 or 1 → without an offset, content
-    tokens collide with bos=1 / eos=2. The offset puts content at >= 10."""
-    from zephon.ops.tokenize_text import _fallback_tokenizer
-
-    tok = _fallback_tokenizer()
-    # Try a handful of words; the offset must hold for all of them.
-    out = tok(["a b c d e f g h hello world"])
-    assert all(tid >= 10 for tid in out["input_ids"][0])
 
 
 # ---------------------------------------------------------------------------

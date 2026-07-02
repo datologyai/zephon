@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from tenacity.wait import wait_none
 
 from zephon.utils.tokenizer_cloud import (
     CLOUD_TOKENIZER_SCHEMES,
@@ -20,6 +21,7 @@ from zephon.utils.tokenizer_cloud import (
     TransientCloudTokenizerError,
     is_cloud_tokenizer_uri,
     resolve_tokenizer_id,
+    resolve_tokenizer_id_with_retry,
     tokenizer_cache_root,
 )
 
@@ -595,3 +597,55 @@ def test_real_walk_through_obstore_boundary(
     assert not any(src.endswith("subdir/") for src in downloads)
     assert not any("other/leak.json" in src for src in downloads)
     assert len(downloads) == 2
+
+
+# ---------- resolve_tokenizer_id_with_retry ---------- #
+# The wrapper resolves the module-global ``resolve_tokenizer_id`` at call time,
+# so tests must patch it here in ``tokenizer_cloud`` (not wherever the wrapper
+# is imported). The retry envelope is built at import, so backoff is dropped by
+# mutating the controller rather than patching ``wait_random_exponential``.
+
+
+def test_resolve_with_retry_does_not_retry_permanent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic resolver failures must surface without backoff retries."""
+    attempts = 0
+
+    def permanent_resolve(tokenizer_id: str | None) -> str | None:
+        nonlocal attempts
+        attempts += 1
+        raise PermanentCloudTokenizerError(f"empty prefix: {tokenizer_id}")
+
+    monkeypatch.setattr(
+        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", permanent_resolve
+    )
+
+    with pytest.raises(PermanentCloudTokenizerError, match="empty prefix"):
+        resolve_tokenizer_id_with_retry("s3://fake-bucket/empty/")
+
+    assert attempts == 1
+
+
+def test_resolve_with_retry_retries_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient sync failures are retried; the second attempt succeeds."""
+    attempts = 0
+
+    def flaky_resolve(tokenizer_id: str | None) -> str | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TransientCloudTokenizerError("simulated transient S3 5xx")
+        return "/local/resolved"
+
+    monkeypatch.setattr(
+        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", flaky_resolve
+    )
+    monkeypatch.setattr(resolve_tokenizer_id_with_retry.retry, "wait", wait_none())
+
+    assert (
+        resolve_tokenizer_id_with_retry("s3://fake-bucket/prefix/") == "/local/resolved"
+    )
+    assert attempts == 2

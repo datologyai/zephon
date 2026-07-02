@@ -19,6 +19,13 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
+
 from zephon.io.storage import RouterStorageBackend
 
 logger = logging.getLogger(__name__)
@@ -238,6 +245,22 @@ def resolve_tokenizer_id(tokenizer_id: str | None) -> str | None:
     return str(local_dir)
 
 
+@retry(
+    wait=wait_random_exponential(multiplier=2, max=15),
+    stop=stop_after_attempt(5),
+    retry=retry_if_not_exception_type((ValueError, PermanentCloudTokenizerError)),
+    reraise=True,
+)
+def resolve_tokenizer_id_with_retry(tokenizer_id: str | None) -> str | None:
+    """Retrying wrapper around :func:`resolve_tokenizer_id`.
+
+    Retries transient sync failures with exponential backoff; ``ValueError``
+    (malformed URI) and :class:`PermanentCloudTokenizerError` are raised
+    immediately.
+    """
+    return resolve_tokenizer_id(tokenizer_id)
+
+
 __all__ = [
     "CloudTokenizerError",
     "CLOUD_TOKENIZER_SCHEMES",
@@ -246,5 +269,6 @@ __all__ = [
     "TransientCloudTokenizerError",
     "is_cloud_tokenizer_uri",
     "resolve_tokenizer_id",
+    "resolve_tokenizer_id_with_retry",
     "tokenizer_cache_root",
 ]
