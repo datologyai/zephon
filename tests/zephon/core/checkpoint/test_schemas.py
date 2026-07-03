@@ -870,7 +870,6 @@ def test_static_mixture_v3_has_no_exhausted_datasets_field():
     assert "exhausted_datasets" not in field_names
     # Nor any token / lane fields (those live in later schema versions).
     for foreign in (
-        "mixture_unit",
         "token_deficits",
         "token_ratios",
         "lane_assignment",
@@ -1177,3 +1176,146 @@ def test_work_chunk_v2_inherits_v1_components_coercion():
     v2 = WorkChunkStateV2.from_dict(raw)
     v1 = WorkChunkStateV1.from_dict({**raw, "version": 1})
     assert v2.components == v1.components == [("a", [[0, 0, 0]])]
+
+
+# -- StaticMixtureStateV5 (token-aware) --------------------------------------
+
+
+def _minimal_static_mixture_v5_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV5 in sample mode."""
+    base = _minimal_static_mixture_v4_raw(
+        version=5, token_deficits=None, token_ratios=None
+    )
+    base.update(overrides)
+    return base
+
+
+def _token_static_mixture_v5_raw(**overrides):
+    """A valid token-aware v5 payload with one component."""
+    base = _minimal_static_mixture_v5_raw(
+        allocation_mode="token_aware",
+        token_deficits={"a": 0.0},
+        token_ratios={"a": [0.25, "measured"]},
+    )
+    base.update(overrides)
+    return base
+
+
+def test_static_mixture_v5_sample_mode_defaults():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    sm = StaticMixtureStateV5.from_dict(_minimal_static_mixture_v5_raw())
+    assert sm.token_deficits is None
+    assert sm.token_ratios is None
+
+
+def test_static_mixture_v5_sample_mode_rejects_token_fields():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    with pytest.raises(ValueError, match="token_deficits"):
+        StaticMixtureStateV5.from_dict(
+            _minimal_static_mixture_v5_raw(token_deficits={"a": 0.0})
+        )
+    with pytest.raises(ValueError, match="token_ratios"):
+        StaticMixtureStateV5.from_dict(
+            _minimal_static_mixture_v5_raw(token_ratios={"a": [0.25, "measured"]})
+        )
+
+
+def test_static_mixture_v5_token_mode_roundtrip():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    sm = StaticMixtureStateV5.from_dict(_token_static_mixture_v5_raw())
+    assert sm.allocation_mode == "token_aware"
+    assert sm.token_ratios == {"a": [0.25, "measured"]}
+    assert StaticMixtureStateV5.from_dict(sm.to_dict()).to_dict() == sm.to_dict()
+
+
+def test_static_mixture_v5_token_mode_validation():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    # Deficits stay required even when token_ratios is unprimed.
+    with pytest.raises(ValueError, match="token_deficits"):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(token_deficits=None)
+        )
+    with pytest.raises(ValueError, match="token_ratios"):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(token_ratios={"a": [-1.0, "measured"]})
+        )
+    with pytest.raises(ValueError, match="accumulators"):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(accumulators={"a": 0.0})
+        )
+
+
+@pytest.mark.parametrize("deficit", [True, "0", float("nan"), float("inf")])
+def test_static_mixture_v5_rejects_bad_token_deficits(deficit):
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    with pytest.raises(ValueError, match="token_deficits"):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(token_deficits={"a": deficit})
+        )
+
+
+def test_static_mixture_v5_accepts_unprimed_token_ratios():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    # token_ratios=None encodes an unprimed token-aware template.
+    sm = StaticMixtureStateV5.from_dict(_token_static_mixture_v5_raw(token_ratios=None))
+    assert sm.allocation_mode == "token_aware"
+    assert sm.token_ratios is None
+    assert sm.token_deficits == {"a": 0.0}
+    assert StaticMixtureStateV5.from_dict(sm.to_dict()).to_dict() == sm.to_dict()
+
+
+@pytest.mark.parametrize(
+    "ratios",
+    [
+        {"a": [0.0, "measured"]},
+        {"a": [-1.0, "pinned"]},
+        {"a": [0.25, "guessed"]},
+        {"a": [0.25]},
+        {"a": 0.25},
+        {"b": [0.25, "measured"]},
+    ],
+)
+def test_static_mixture_v5_rejects_bad_token_ratios(ratios):
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    with pytest.raises(ValueError):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(token_ratios=ratios)
+        )
+
+
+def test_static_mixture_v5_rejects_mismatched_deficit_keys():
+    from zephon.core.checkpoint import StaticMixtureStateV5
+
+    with pytest.raises(ValueError, match="token_deficits"):
+        StaticMixtureStateV5.from_dict(
+            _token_static_mixture_v5_raw(token_deficits={"b": 0.0})
+        )
+
+
+def test_static_mixture_v5_token_ratio_sources_match_ratio_source_literal():
+    """Drift guard: the schema's frozenset must track TokenRatio's source set.
+
+    The layering (work -> core.checkpoint) prevents the schema from importing
+    RatioSource directly, so this test is the single sync point.
+    """
+    from typing import get_args
+
+    from zephon.core.checkpoint import VALID_TOKEN_RATIO_SOURCES
+    from zephon.work.token_estimation import RatioSource
+
+    assert VALID_TOKEN_RATIO_SOURCES == frozenset(get_args(RatioSource))
+
+
+def test_static_mixture_v2_rejects_token_aware_allocation_mode():
+    """Token mode was never written as v2, so a v2 dict claiming it is corrupt."""
+    with pytest.raises(ValueError, match="allocation_mode"):
+        StaticMixtureStateV2.from_dict(
+            _minimal_static_mixture_v2_raw(allocation_mode="token_aware")
+        )

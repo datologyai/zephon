@@ -111,6 +111,7 @@ from zephon.core.checkpoint._schemas import (
     StaticMixtureStateV2,
     StaticMixtureStateV3,
     StaticMixtureStateV4,
+    StaticMixtureStateV5,
     WorkChunkStateV1,
     WorkChunkStateV2,
 )
@@ -164,6 +165,14 @@ def _static_mixture_v3_to_v4(v3: StaticMixtureStateV3) -> dict[str, Any]:
     return d
 
 
+def _static_mixture_v4_to_v5(v4: StaticMixtureStateV4) -> dict[str, Any]:
+    """Fill v5 token fields with inert sample-mode defaults."""
+    d = v4.to_dict()
+    d["token_deficits"] = None
+    d["token_ratios"] = None
+    return d
+
+
 def _work_chunk_v1_to_v2(v1: WorkChunkStateV1) -> dict[str, Any]:
     """v1 chunks carry no stamped target; ``target_mixture`` defaults to None."""
     d = v1.to_dict()
@@ -183,6 +192,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
         1: _static_mixture_v1_to_v2,
         2: _static_mixture_v2_to_v3,
         3: _static_mixture_v3_to_v4,
+        4: _static_mixture_v4_to_v5,
     },
     "cursor": {},
 }
@@ -201,6 +211,7 @@ _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
         2: StaticMixtureStateV2,
         3: StaticMixtureStateV3,
         4: StaticMixtureStateV4,
+        5: StaticMixtureStateV5,
     },
     "cursor": {1: CursorStateV1},
 }

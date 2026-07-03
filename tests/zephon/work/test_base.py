@@ -11,6 +11,7 @@ from zephon.work.base import (
     MixtureReadConfig,
     MixtureReadMode,
     WorkChunk,
+    WorkSource,
 )
 
 # ----------------------------
@@ -552,3 +553,23 @@ def test_workchunk_sample_mode_state_dict_is_v2_with_null_target():
         "total_samples": 3,
         "target_mixture": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# WorkSource token-priming protocol (default no-op)
+# ---------------------------------------------------------------------------
+
+
+class _PlainWorkSource(WorkSource):
+    def next_chunk(self) -> WorkChunk | None:
+        return None
+
+
+def test_worksource_requires_token_priming_defaults_false():
+    assert _PlainWorkSource().requires_token_priming is False
+
+
+def test_worksource_prime_is_a_noop_accepting_keyword_context():
+    ws = _PlainWorkSource()
+    assert ws.prime(io_options=None, tokenize_profile=None) is None
+    assert ws.prime() is None

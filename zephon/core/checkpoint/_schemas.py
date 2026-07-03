@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import math
 import types
 import typing
 from dataclasses import dataclass, field
@@ -294,7 +295,7 @@ class WorkChunkStateV2(WorkChunkStateV1):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 4
+STATIC_MIXTURE_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -354,7 +355,12 @@ class StaticMixtureStateV1(CheckpointMixin):
 
 
 _VALID_ALLOCATION_MODES = frozenset({"accumulator", "legacy_fixed"})
+#: v5 adds "token_aware"; earlier schemas reject it as corrupt.
+_VALID_ALLOCATION_MODES_V5 = _VALID_ALLOCATION_MODES | {"token_aware"}
 _REQUIRED_V2_KNOB_KEYS = frozenset({"shuffle_shards", "shuffle_within_shard"})
+
+#: Provenance tags a primed tokens/byte ratio may carry in v5 checkpoints.
+VALID_TOKEN_RATIO_SOURCES = frozenset({"measured", "pinned", "fallback"})
 
 
 def _static_mixture_block_invariant_errors(
@@ -364,12 +370,15 @@ def _static_mixture_block_invariant_errors(
     allocation_mode: str,
     cursor_block_sizes: dict[str, int | None],
     dataset_ids: dict[str, int],
+    valid_allocation_modes: frozenset[str] = _VALID_ALLOCATION_MODES,
 ) -> list[str]:
-    """Structural invariants shared by ``StaticMixtureStateV2`` and ``V3``.
+    """Structural invariants shared by ``StaticMixtureStateV2`` and ``V3``+.
 
     These fields are identical across v2 (scalar policies) and v3 (per-dataset
     policies); only the exhaustion-policy knobs differ. Returns a list of error
     strings (empty == valid) so each caller raises with its own version tag.
+    ``valid_allocation_modes`` lets a later schema widen the accepted set (v5
+    adds ``token_aware``) while sharing the rest of the checks.
     """
     errors: list[str] = []
 
@@ -407,10 +416,10 @@ def _static_mixture_block_invariant_errors(
                 "in cursor_block_sizes/shuffle_block_size_spec now"
             )
 
-    if allocation_mode not in _VALID_ALLOCATION_MODES:
+    if allocation_mode not in valid_allocation_modes:
         errors.append(
             f"allocation_mode={allocation_mode!r} is not one of "
-            f"{sorted(_VALID_ALLOCATION_MODES)}"
+            f"{sorted(valid_allocation_modes)}"
         )
 
     if not isinstance(cursor_block_sizes, dict):
@@ -572,6 +581,9 @@ class StaticMixtureStateV3(CheckpointMixin):
     accumulators: dict[str, float] | None
     version: int = 3
 
+    # Allocation modes this schema accepts; v5 overrides to add "token_aware".
+    _ALLOCATION_MODES: ClassVar[frozenset[str]] = _VALID_ALLOCATION_MODES
+
     def __post_init__(self) -> None:
         errors = _static_mixture_block_invariant_errors(
             shuffle_block_size_spec=self.shuffle_block_size_spec,
@@ -579,6 +591,7 @@ class StaticMixtureStateV3(CheckpointMixin):
             allocation_mode=self.allocation_mode,
             cursor_block_sizes=self.cursor_block_sizes,
             dataset_ids=self.dataset_ids,
+            valid_allocation_modes=self._ALLOCATION_MODES,
         )
         errors.extend(
             _static_mixture_policy_invariant_errors(
@@ -645,6 +658,96 @@ class StaticMixtureStateV4(StaticMixtureStateV3):
                 "StaticMixtureStateV4 invariants violated:\n  - "
                 f"lane_assignment={self.lane_assignment!r} must be "
                 "'modulo' or 'permute'"
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV5(StaticMixtureStateV4):
+    """StaticMixture checkpoint schema with token-aware allocation fields."""
+
+    # Widen the inherited mode set for the shared invariant check.
+    _ALLOCATION_MODES: ClassVar[frozenset[str]] = _VALID_ALLOCATION_MODES_V5
+    token_deficits: dict[str, float] | None
+    token_ratios: dict[str, Any] | None
+    version: int = 5
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        errors: list[str] = []
+
+        token_aware = self.allocation_mode == "token_aware"
+        if token_aware:
+            if self.accumulators is not None:
+                errors.append(
+                    "accumulators must be None in token_aware mode, got "
+                    f"{type(self.accumulators).__name__}"
+                )
+            if not isinstance(self.token_deficits, dict):
+                errors.append(
+                    "token_deficits must be a per-component dict in token_aware "
+                    f"mode, got {type(self.token_deficits).__name__}"
+                )
+            elif set(self.token_deficits) != set(self.component_order):
+                errors.append(
+                    f"token_deficits keys {sorted(self.token_deficits)} must "
+                    f"match component_order {sorted(self.component_order)}"
+                )
+            else:
+                for name, deficit in self.token_deficits.items():
+                    if (
+                        isinstance(deficit, bool)
+                        or not isinstance(deficit, (int, float))
+                        or not math.isfinite(deficit)
+                    ):
+                        errors.append(
+                            f"token_deficits[{name!r}]={deficit!r} must be "
+                            "a finite number"
+                        )
+            # token_ratios=None means unprimed; token_deficits stays required.
+            if self.token_ratios is None:
+                pass
+            elif not isinstance(self.token_ratios, dict):
+                errors.append(
+                    "token_ratios must be a per-dataset dict or None in "
+                    f"token_aware mode, got {type(self.token_ratios).__name__}"
+                )
+            elif set(self.token_ratios) != set(self.component_order):
+                errors.append(
+                    f"token_ratios keys {sorted(self.token_ratios)} must "
+                    f"match component_order {sorted(self.component_order)}"
+                )
+            else:
+                for name, entry in self.token_ratios.items():
+                    if (
+                        not isinstance(entry, (list, tuple))
+                        or len(entry) != 2
+                        or isinstance(entry[0], bool)
+                        or not isinstance(entry[0], (int, float))
+                        or not math.isfinite(entry[0])
+                        or entry[0] <= 0
+                        or entry[1] not in VALID_TOKEN_RATIO_SOURCES
+                    ):
+                        errors.append(
+                            f"token_ratios[{name!r}]={entry!r} must be "
+                            f"[positive ratio, source in "
+                            f"{sorted(VALID_TOKEN_RATIO_SOURCES)}]"
+                        )
+        else:
+            if self.token_deficits is not None:
+                errors.append(
+                    "token_deficits must be None outside token_aware mode, got "
+                    f"{type(self.token_deficits).__name__}"
+                )
+            if self.token_ratios is not None:
+                errors.append(
+                    "token_ratios must be None outside token_aware mode, got "
+                    f"{type(self.token_ratios).__name__}"
+                )
+
+        if errors:
+            raise ValueError(
+                "StaticMixtureStateV5 invariants violated:\n  - "
+                + "\n  - ".join(errors)
             )
 
 

@@ -337,7 +337,7 @@ def test_v1_to_v2_migrate_lands_on_valid_v2(monkeypatch):
 
 def test_v1_end_to_end_via_migrate_validates_current():
     """The migrate() entry point produces a dict the current schema accepts."""
-    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV5
 
     raw = _v1_static_mixture_raw(
         knobs={
@@ -352,8 +352,8 @@ def test_v1_end_to_end_via_migrate_validates_current():
         cursor_epochs={"a": 0, "b": 0},
     )
     migrated = migrate("static_mixture", raw)
-    sm = StaticMixtureStateV4.from_dict(migrated)
-    assert sm.version == 4
+    sm = StaticMixtureStateV5.from_dict(migrated)
+    assert sm.version == 5
     assert sm.cursor_block_sizes == {"a": 8, "b": 8}
     assert sm.shuffle_block_size_spec == 8
     assert sm.allocation_mode == "legacy_fixed"
@@ -366,6 +366,8 @@ def test_v1_end_to_end_via_migrate_validates_current():
     assert sm.stop_after_passes is None
     # v3 -> v4 fills the routing tag with the pre-fix default.
     assert sm.lane_assignment == "modulo"
+    assert sm.token_deficits is None
+    assert sm.token_ratios is None
 
 
 def _v2_static_mixture_raw(**overrides):
@@ -442,14 +444,16 @@ def test_v2_to_v3_migrate_lands_on_valid_v3(monkeypatch):
 
 def test_v2_end_to_end_via_migrate_validates_current():
     """migrate() chains a v2 payload all the way to the current schema."""
-    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV5
 
     migrated = migrate("static_mixture", _v2_static_mixture_raw())
-    sm = StaticMixtureStateV4.from_dict(migrated)
-    assert sm.version == 4
+    sm = StaticMixtureStateV5.from_dict(migrated)
+    assert sm.version == 5
     assert sm.exhausted_policy == {"a": "stop"}  # v2 -> v3 scalar broadcast
     assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
     assert sm.lane_assignment == "modulo"  # v3 -> v4 fill
+    assert sm.token_deficits is None
+    assert sm.token_ratios is None
 
 
 def test_v2_to_v3_does_not_mutate_input():
@@ -547,14 +551,63 @@ def test_v3_to_v4_migrate_lands_on_valid_v4(monkeypatch):
     assert sm.lane_assignment == "modulo"
 
 
-def test_v3_to_v4_end_to_end_validates_current():
-    """migrate() upgrades a v3 dict to a v4 the current schema accepts."""
-    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+def test_v3_end_to_end_validates_current():
+    """migrate() upgrades a v3 dict all the way to the current schema."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV5
 
     migrated = migrate("static_mixture", _v3_static_mixture_raw())
-    sm = StaticMixtureStateV4.from_dict(migrated)
-    assert sm.version == 4
-    assert sm.lane_assignment == "modulo"
+    sm = StaticMixtureStateV5.from_dict(migrated)
+    assert sm.version == 5
+    assert sm.lane_assignment == "modulo"  # v3 -> v4 fill
+    assert sm.token_deficits is None
+    assert sm.token_ratios is None
+
+
+# ---------------------------------------------------------------------------
+# StaticMixture v4 -> v5 migration (token-aware fields)
+# ---------------------------------------------------------------------------
+
+
+def _v4_static_mixture_raw(**overrides):
+    """Smallest dict that satisfies StaticMixtureStateV4 (v3 + lane_assignment)."""
+    base = _v3_static_mixture_raw(version=4, lane_assignment="modulo")
+    base.update(overrides)
+    return base
+
+
+def test_v4_to_v5_fills_inert_token_defaults():
+    from zephon.core.checkpoint._migrations import _static_mixture_v4_to_v5
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+
+    v4 = StaticMixtureStateV4.from_dict(_v4_static_mixture_raw())
+    d = _static_mixture_v4_to_v5(v4)
+    assert d["token_deficits"] is None
+    assert d["token_ratios"] is None
+    assert d["lane_assignment"] == "modulo"
+    assert d["exhausted_policy"] == {"a": "stop"}
+
+
+def test_v4_to_v5_migrate_lands_on_valid_v5(monkeypatch):
+    """Single-hop check: pin current to 5 so this stays a v4->v5-only test."""
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV5
+
+    monkeypatch.setitem(CURRENT_VERSIONS, "static_mixture", 5)
+    sm = StaticMixtureStateV5.from_dict(
+        migrate("static_mixture", _v4_static_mixture_raw())
+    )
+    assert sm.version == 5
+    assert sm.token_deficits is None
+    assert sm.token_ratios is None
+
+
+def test_v4_to_v5_does_not_mutate_input():
+    from zephon.core.checkpoint._migrations import _static_mixture_v4_to_v5
+    from zephon.core.checkpoint._schemas import StaticMixtureStateV4
+
+    v4 = StaticMixtureStateV4.from_dict(_v4_static_mixture_raw())
+    d = _static_mixture_v4_to_v5(v4)
+    assert d["token_deficits"] is None
+    assert not hasattr(v4, "token_deficits")
 
 
 def test_work_chunk_v1_migrates_to_v2_with_none_target():

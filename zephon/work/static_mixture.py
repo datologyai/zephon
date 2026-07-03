@@ -7,21 +7,28 @@ import math
 import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 
 from zephon.core.checkpoint import (
     CursorStateV1,
-    StaticMixtureStateV4,
+    StaticMixtureStateV5,
 )
 from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
 from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
+from zephon.work.token_estimation import (
+    PerShardTokenCost,
+    TokenEstimation,
+    TokenizeProfile,
+    TokenRatio,
+    prime_token_ratios,
+)
 
 _GOLDEN_RATIO_64 = 0x9E3779B97F4A7C15  # Used to decorrelate derived seeds.
 
@@ -104,6 +111,15 @@ class _DatasetKnobs:
 
 
 @dataclass(frozen=True, slots=True)
+class _CursorSnapshot:
+    """Internal rollback state for a dataset cursor."""
+
+    position: int
+    epoch: int
+    block_rng_snapshot: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
 class _AllocationConfig:
     """Immutable parameters shared by all allocation strategies.
 
@@ -183,20 +199,24 @@ def _stop_after_passes_reached(
 
 
 def _stop_after_passes_remaining_samples(
-    cfg: _AllocationConfig, cursors: Mapping[str, "_DatasetCursor"]
+    cfg: _AllocationConfig,
+    cursors: Mapping[str, "_DatasetCursor"],
+    per_chunk_draws: Mapping[str, float],
 ) -> int:
     """Samples left until the slowest dataset completes ``stop_after_passes`` passes.
 
     Cursors advance together, so the bound is the ``max`` over datasets of each
     one's remaining-to-floor (one already past the floor contributes 0) — the
-    opposite of the ``min`` that governs first-exhaustion. Approximate like the
+    opposite of the ``min`` that governs first-exhaustion. ``per_chunk_draws`` is
+    each component's average samples-per-chunk (``weight * chunk_size`` in sample
+    mode, ``effective_share * chunk_size`` in token mode). Approximate like the
     sibling estimators; ``compute_quotas`` is the exact stop.
     """
     assert cfg.stop_after_passes is not None
     chunks_needed = 0.0
     for name in cfg.component_order:
-        avg_quota = cfg.weights[name] * cfg.chunk_size
-        if avg_quota <= 0:
+        rate = per_chunk_draws[name]
+        if rate <= 0:
             continue
         cursor = cursors[name]
         if cursor._epoch >= cfg.stop_after_passes:
@@ -205,8 +225,62 @@ def _stop_after_passes_remaining_samples(
             cursor.remaining
             + (cfg.stop_after_passes - cursor._epoch - 1) * cursor._total_samples
         )
-        chunks_needed = max(chunks_needed, remaining_to_floor / avg_quota)
+        chunks_needed = max(chunks_needed, remaining_to_floor / rate)
     return int(chunks_needed) * cfg.chunk_size
+
+
+def _average_quota_remaining_samples(
+    cfg: _AllocationConfig,
+    cursors: Mapping[str, "_DatasetCursor"],
+    per_chunk_draws: Mapping[str, float],
+) -> int:
+    """Samples left until the first finite component runs out.
+
+    ``per_chunk_draws`` is each component's average draws per chunk (see
+    :func:`_stop_after_passes_remaining_samples`, which handles the
+    ``stop_after_passes`` case). Uncapped repeats contribute no finite limit.
+    """
+    if cfg.stop_after_passes is not None:
+        return _stop_after_passes_remaining_samples(cfg, cursors, per_chunk_draws)
+    chunks_possible: float = math.inf
+    for name in cfg.component_order:
+        avg_quota = per_chunk_draws[name]
+        if avg_quota <= 0:
+            continue
+        effective_remaining = _effective_remaining_samples(cfg, name, cursors[name])
+        if effective_remaining is None:
+            continue
+        available = effective_remaining / avg_quota
+        chunks_possible = min(chunks_possible, available)
+        if chunks_possible <= 0:
+            return 0
+    if chunks_possible is math.inf:
+        return 0
+    return int(chunks_possible) * cfg.chunk_size
+
+
+def _validate_repeat_liveness(
+    cfg: _AllocationConfig,
+    cursors: Mapping[str, "_DatasetCursor"],
+    min_required: Callable[[str], int],
+    formula: Callable[[str], str],
+) -> None:
+    """Reject repeat datasets smaller than their per-chunk demand bound.
+
+    ``min_required`` is the mode's bound; ``formula`` renders it for the error.
+    """
+    for name in cfg.component_order:
+        if cfg.exhausted_policy[name] != "repeat":
+            continue
+        required = min_required(name)
+        cursor = cursors[name]
+        if cursor._total_samples < required:
+            raise ValueError(
+                f"Dataset '{name}' has {cursor._total_samples} samples "
+                f"but repeat policy requires at least {required} "
+                f"({formula(name)}). "
+                f"Increase dataset size or decrease chunk_size."
+            )
 
 
 class _DatasetCursor:
@@ -805,18 +879,40 @@ class _DatasetCursor:
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Return cursor state needed for deterministic continuation."""
+        snapshot = self._snapshot_state()
+        state = CursorStateV1(
+            position=snapshot.position,
+            epoch=snapshot.epoch,
+            block_rng_snapshot=snapshot.block_rng_snapshot,
+        )
+        return state.to_dict(strip_none=True)
+
+    def _snapshot_state(self) -> _CursorSnapshot:
+        """Return lightweight cursor state for same-process rollback."""
         snapshot = None
         if self._pre_fill_rng_state is not None:
             snapshot = {
                 "rng_state": self._pre_fill_rng_state,
                 "block_count": self._pre_fill_block_count,
             }
-        state = CursorStateV1(
+        return _CursorSnapshot(
             position=int(self._position),
             epoch=int(self._epoch),
             block_rng_snapshot=snapshot,
         )
-        return state.to_dict(strip_none=True)
+
+    def _restore_snapshot_state(
+        self,
+        state: _CursorSnapshot,
+        *,
+        reshuffle: bool,
+    ) -> None:
+        """Restore lightweight same-process rollback state."""
+        self._seek_epoch(state.epoch, reshuffle=reshuffle)
+        self._seek_to_position(
+            state.position,
+            block_rng_snapshot=state.block_rng_snapshot,
+        )
 
     def restore_checkpoint_state(
         self,
@@ -839,8 +935,19 @@ class AllocationStrategy(ABC):
     """Encapsulates per-chunk sample production, length estimation, and checkpoint state.
 
     Concrete subclasses own mode-specific mutable state (e.g. fractional
-    accumulators or fixed quotas) and the exhaustion-handling loop.
+    accumulators or token deficits) and the exhaustion-handling loop. They also
+    answer the mode-specific questions the work source would otherwise branch on
+    (:attr:`mixture_unit`, :attr:`requires_priming`, :meth:`target_mixture`, …),
+    so the source stays mode-agnostic: it holds one strategy and forwards.
     """
+
+    #: Unit the user's mixture weights are denominated in ("samples"/"tokens").
+    #: Drives the checkpoint mode-parity check; the mode itself is selected by
+    #: the presence of ``token_estimation``.
+    mixture_unit: ClassVar[str]
+
+    #: Persisted checkpoint tag; also this strategy's ``_STRATEGY_BY_MODE`` key.
+    allocation_mode: ClassVar[str]
 
     def __init__(self, config: _AllocationConfig) -> None:
         self._config = config
@@ -864,7 +971,91 @@ class AllocationStrategy(ABC):
 
     @abstractmethod
     def checkpoint_state(self) -> dict[str, Any]:
-        """Return strategy-specific fields to merge into the checkpoint."""
+        """Return only this strategy's own persisted fields.
+
+        :meth:`StaticMixtureWorkSource.state_dict` reads mode fields with
+        ``.get``, so fields belonging to other modes are simply absent here
+        and serialize as ``None``.
+        """
+
+    @classmethod
+    @abstractmethod
+    def from_checkpoint(
+        cls,
+        config: _AllocationConfig,
+        ckpt: StaticMixtureStateV5,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "AllocationStrategy":
+        """Rebuild this strategy from its checkpoint fields (the load-time factory).
+
+        The token-only context (datasets/ids/estimation) is accepted by every
+        subclass so the registry can dispatch uniformly; sample strategies
+        ignore it.
+        """
+
+    @classmethod
+    def from_scratch(
+        cls,
+        config: _AllocationConfig,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "AllocationStrategy":
+        """Construct with empty carry state (the build-time factory).
+
+        Mirrors :meth:`from_checkpoint`'s uniform signature so the work source
+        dispatches fresh and restored builds through one registry. The default
+        ignores the token-only context; the token strategy overrides.
+        """
+        return cls(config)
+
+    # -- mode-specific hooks (concrete defaults; the token strategy overrides) --
+
+    @property
+    def requires_priming(self) -> bool:
+        """Whether the source must run :meth:`prime` before it can produce chunks."""
+        return False
+
+    @property
+    def length_ready(self) -> bool:
+        """Whether :meth:`estimate_remaining_samples` can be computed yet.
+
+        Token mode cannot estimate length until primed (it needs the cost
+        table), so the source leaves ``total_samples`` unset (reads raise)
+        until this is True.
+        """
+        return True
+
+    def target_mixture(self) -> dict[str, float] | None:
+        """Per-chunk target the engine must enforce, or None to count the chunk.
+
+        Token mode emits a deliberately sample-skewed chunk and hands the engine
+        the declared token target instead of the counted composition; sample
+        modes have nothing to declare.
+        """
+        return None
+
+    def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
+        """Guard the repeat retry loop against datasets too small to refill a chunk.
+
+        A no-op by default. Strategies with a closed-form per-chunk demand
+        override. Safe to call eagerly: a strategy that cannot check yet (token
+        mode before priming) returns without raising.
+        """
+
+    def prime(
+        self,
+        *,
+        tokenize_profile: TokenizeProfile | None,
+        io_options: Any,
+        seed: int,
+        mp_context: Any = None,
+    ) -> None:
+        """Calibrate per-run state (no-op outside token mode; idempotent)."""
 
     def _check_no_redistribute(self) -> None:
         for name in self._config.component_order:
@@ -918,6 +1109,9 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     Individual chunks may be sparse (a dataset may contribute 0 samples).
     """
 
+    mixture_unit: ClassVar[str] = "samples"
+    allocation_mode: ClassVar[str] = "accumulator"
+
     def __init__(
         self,
         config: _AllocationConfig,
@@ -928,6 +1122,26 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
             dict(accumulators)
             if accumulators is not None
             else dict.fromkeys(config.component_order, 0.0)
+        )
+
+    def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
+        """Reject a repeat dataset too small to fill its worst-case chunk quota.
+
+        With repeat policy each dataset must hold enough samples to fill its
+        maximum possible per-chunk quota after a cursor reset. The accumulator
+        can carry up to ~1.0 of fractional remainder, so the worst-case single
+        chunk quota is ``ceil(weight * chunk_size)``. Without this the retry
+        loop in :meth:`compute_quotas` would spin forever (rollback -> same
+        accumulators -> same impossible quota).
+        """
+        cfg = self._config
+        _validate_repeat_liveness(
+            cfg,
+            cursors,
+            lambda n: math.ceil(cfg.weights[n] * cfg.chunk_size),
+            lambda n: (
+                f"ceil(weight={cfg.weights[n]:.4g} * chunk_size={cfg.chunk_size})"
+            ),
         )
 
     # -- quota computation ------------------------------------------------
@@ -1078,23 +1292,11 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         case is delegated to :func:`_stop_after_passes_remaining_samples`.
         """
         cfg = self._config
-        if cfg.stop_after_passes is not None:
-            return _stop_after_passes_remaining_samples(cfg, cursors)
-        chunks_possible: float = math.inf
-        for name in cfg.component_order:
-            avg_quota = cfg.weights[name] * cfg.chunk_size
-            if avg_quota <= 0:
-                continue
-            effective_remaining = _effective_remaining_samples(cfg, name, cursors[name])
-            if effective_remaining is None:
-                continue  # unbounded contribution
-            available = effective_remaining / avg_quota
-            chunks_possible = min(chunks_possible, available)
-            if chunks_possible <= 0:
-                return 0
-        if chunks_possible is math.inf:
-            return 0
-        return int(chunks_possible) * cfg.chunk_size
+        return _average_quota_remaining_samples(
+            cfg,
+            cursors,
+            {n: cfg.weights[n] * cfg.chunk_size for n in cfg.component_order},
+        )
 
     # -- clone / checkpoint -----------------------------------------------
 
@@ -1106,9 +1308,25 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
 
     def checkpoint_state(self) -> dict[str, Any]:
         return {
-            "allocation_mode": "accumulator",
-            "accumulators": {name: float(v) for name, v in self._accumulators.items()},
+            "accumulators": {name: float(v) for name, v in self._accumulators.items()}
         }
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        config: _AllocationConfig,
+        ckpt: StaticMixtureStateV5,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "AccumulatorStrategy":
+        if ckpt.accumulators is None:
+            raise RuntimeError("Accumulator-mode checkpoint missing accumulators field")
+        return cls(
+            config=config,
+            accumulators={str(k): float(v) for k, v in ckpt.accumulators.items()},
+        )
 
 
 class LegacyFixedStrategy(QuotaAllocationStrategy):
@@ -1118,6 +1336,9 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     distributed via largest-remainder allocation.  Quotas are computed
     once at construction and reused for every chunk.
     """
+
+    mixture_unit: ClassVar[str] = "samples"
+    allocation_mode: ClassVar[str] = "legacy_fixed"
 
     def __init__(self, config: _AllocationConfig) -> None:
         super().__init__(config)
@@ -1248,7 +1469,355 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
         return s
 
     def checkpoint_state(self) -> dict[str, Any]:
-        return {"allocation_mode": "legacy_fixed"}
+        return {}
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        config: _AllocationConfig,
+        ckpt: StaticMixtureStateV5,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "LegacyFixedStrategy":
+        return cls(config=config)
+
+
+class TokenAwareStrategy(AllocationStrategy):
+    """Per-draw deficit allocation for token-denominated mixtures.
+
+    Each draw serves the component most owed tokens and charges that sample's
+    estimated token cost. Deficits and primed ratios are checkpointed; the
+    shard-derived cost table is rebuilt lazily per process.
+    """
+
+    mixture_unit: ClassVar[str] = "tokens"
+    allocation_mode: ClassVar[str] = "token_aware"
+
+    #: Heuristic cushion over the average per-chunk draws (share * chunk_size):
+    #: carried deficits let a single chunk draw well above its average. A false
+    #: pass ends in _MAX_CHUNK_RESETS' "cannot converge" error, not a hang.
+    _TOKEN_LIVENESS_SAFETY: ClassVar[float] = 2.0
+
+    #: Filling a chunk needs at most one reset per repeat dataset (the retry
+    #: restarts it from the top of a fresh epoch); repeated re-exhaustion means
+    #: the carried deficit demands more than a full pass within one chunk, so
+    #: deterministic retrying cannot converge. Small slack for reshuffled order.
+    _MAX_CHUNK_RESETS: ClassVar[int] = 3
+
+    def __init__(
+        self,
+        config: _AllocationConfig,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation,
+        deficits: dict[str, float] | None = None,
+        ratios: dict[str, TokenRatio] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._datasets_by_name = dict(datasets_by_name)
+        self._dataset_ids = dict(dataset_ids)
+        self._estimation = estimation
+        self._deficits: dict[str, float] = (
+            dict(deficits)
+            if deficits is not None
+            else dict.fromkeys(config.component_order, 0.0)
+        )
+        self._ratios: dict[str, TokenRatio] | None = (
+            dict(ratios) if ratios is not None else None
+        )
+        # O(shards) lookup table; rebuilt per process from the local catalog
+        # rather than pickled (see __getstate__) or cloned.
+        self._cost_table: PerShardTokenCost | None = None
+
+    # -- priming ------------------------------------------------------------
+
+    @property
+    def is_primed(self) -> bool:
+        return self._ratios is not None
+
+    @property
+    def requires_priming(self) -> bool:
+        """Token mode must measure ratios before it can charge token costs."""
+        return not self.is_primed
+
+    @property
+    def length_ready(self) -> bool:
+        """Length needs the cost table, which needs the primed ratios."""
+        return self.is_primed
+
+    def prime(
+        self,
+        *,
+        tokenize_profile: TokenizeProfile | None,
+        io_options: Any,
+        seed: int,
+        mp_context: Any = None,
+    ) -> None:
+        """Measure per-dataset tokens/byte ratios once."""
+        if self.is_primed:
+            return
+        self._ratios = prime_token_ratios(
+            datasets=list(self._datasets_by_name.values()),
+            dataset_ids=self._dataset_ids,
+            estimation=self._estimation,
+            tokenize_profile=tokenize_profile,
+            io_options=io_options,
+            seed=seed,
+            mp_context=mp_context,
+        )
+
+    def _ensure_cost_table(self) -> PerShardTokenCost:
+        if self._cost_table is None:
+            if self._ratios is None:
+                raise RuntimeError(
+                    "Token-aware work source has no token ratios. prime() must "
+                    "run (or a checkpoint must be restored) before chunks can "
+                    "be produced."
+                )
+            self._cost_table = PerShardTokenCost(self._datasets_by_name, self._ratios)
+        return self._cost_table
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        # O(shards) table; rebuilt per process from the local catalog, not shipped.
+        state["_cost_table"] = None
+        return state
+
+    # -- chunk production ---------------------------------------------------
+
+    def _snapshot(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> tuple[dict[str, float], dict[str, _CursorSnapshot]]:
+        """Copy retry-start state (deficits + cursor positions) for rollback."""
+        return (
+            dict(self._deficits),
+            {name: cur._snapshot_state() for name, cur in cursors.items()},
+        )
+
+    def _restore(
+        self,
+        cursors: dict[str, _DatasetCursor],
+        snapshot: tuple[dict[str, float], dict[str, _CursorSnapshot]],
+    ) -> None:
+        """Wind deficits and every cursor back to a retry-start snapshot."""
+        deficits, cursor_states = snapshot
+        self._deficits = dict(deficits)
+        for name, state in cursor_states.items():
+            cursors[name]._restore_snapshot_state(
+                state, reshuffle=self._config.reshuffle_on_repeat[name]
+            )
+
+    def produce(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, list[SampleId]] | None:
+        """Draw one chunk with token-cost weighted SWRR deficits."""
+        cfg = self._config
+        self._check_no_redistribute()
+        cost_table = self._ensure_cost_table()
+
+        order = cfg.component_order
+        n = len(order)
+        weights = [cfg.weights[name] for name in order]
+        cursor_list = [cursors[name] for name in order]
+        cost = cost_table.cost  # bound once; called per draw
+        snapshot = self._snapshot(cursors)
+        resets: dict[str, int] = {}
+
+        while True:
+            # A dataset may satisfy the pass floor on an earlier chunk boundary.
+            if cfg.stop_after_passes is not None and _stop_after_passes_reached(
+                cfg, cursors
+            ):
+                return None
+            deficits = [self._deficits[name] for name in order]
+            drawn: list[list[SampleId]] = [[] for _ in order]
+            retry = False
+
+            for _ in range(cfg.chunk_size):
+                # Ties break to the earliest component, like the quota strategies.
+                best = 0
+                best_deficit = deficits[0]
+                for i in range(1, n):
+                    if deficits[i] > best_deficit:
+                        best = i
+                        best_deficit = deficits[i]
+
+                sample_id = cursor_list[best].next_one()
+                if sample_id is None:
+                    name = order[best]
+                    # Roll back the partial attempt before deciding whether this
+                    # is a repeat retry or a fixed-point terminal state.
+                    self._restore(cursors, snapshot)
+                    if cfg.exhausted_policy[name] == "repeat":
+                        ds_max = cfg.max_repeats[name]
+                        if ds_max is not None and cursors[name]._epoch >= ds_max:
+                            return None
+                        # Count the just-exhausted pass without consuming this chunk.
+                        if cfg.stop_after_passes is not None and (
+                            _stop_after_passes_reached(cfg, cursors, exhausting=name)
+                        ):
+                            return None
+                        resets[name] = resets.get(name, 0) + 1
+                        if resets[name] > self._MAX_CHUNK_RESETS:
+                            raise RuntimeError(
+                                f"Dataset '{name}' "
+                                f"({cursors[name]._total_samples} samples) was "
+                                f"exhausted {resets[name]} times while filling "
+                                f"one chunk: its carried token deficit "
+                                f"({self._deficits[name]:.0f}) demands more "
+                                f"than a full pass per attempt, so retrying "
+                                f"cannot converge. Increase the dataset, lower "
+                                f"chunk_size, or bound the run via "
+                                f"max_repeats/stop_after_passes."
+                            )
+                        cursors[name].reset(reshuffle=cfg.reshuffle_on_repeat[name])
+                        # Preserve the reset so another dry cursor on retry
+                        # restores to the deterministic top of that retry.
+                        snapshot[1][name] = cursors[name]._snapshot_state()
+                        retry = True
+                        break
+                    return None  # "stop" policy; snapshot already restored
+
+                est = cost(order[best], sample_id)
+                # Mirrors utils/swrr.py SmoothWeightedRoundRobin's update rule;
+                # inlined because rollback + checkpointed deficits need raw state.
+                for i in range(n):
+                    deficits[i] += weights[i] * est
+                deficits[best] -= est
+                drawn[best].append(sample_id)
+
+            if retry:
+                continue
+
+            self._deficits = {name: deficits[i] for i, name in enumerate(order)}
+            return {name: samples for name, samples in zip(order, drawn) if samples}
+
+    def target_mixture(self) -> dict[str, float] | None:
+        """Declared token mixture for downstream enforcement."""
+        return dict(self._config.weights)
+
+    # -- length estimation --------------------------------------------------
+
+    def effective_shares(self) -> dict[str, float]:
+        """Long-run sample shares ``normalize(m_c / mean_tokens_c)``."""
+        cost_table = self._ensure_cost_table()
+        cfg = self._config
+        raw = {
+            name: cfg.weights[name] / cost_table.mean_cost(name)
+            for name in cfg.component_order
+        }
+        total = sum(raw.values())
+        return {name: value / total for name, value in raw.items()}
+
+    def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
+        """Reject repeat datasets that are clearly too small for token draws."""
+        if not self.is_primed:
+            return
+        cfg = self._config
+        if not any(policy == "repeat" for policy in cfg.exhausted_policy.values()):
+            return
+        shares = self.effective_shares()
+        _validate_repeat_liveness(
+            cfg,
+            cursors,
+            lambda n: math.ceil(
+                shares[n] * cfg.chunk_size * self._TOKEN_LIVENESS_SAFETY
+            ),
+            lambda n: (
+                f"ceil(effective_share={shares[n]:.4g} * "
+                f"chunk_size={cfg.chunk_size} * "
+                f"safety={self._TOKEN_LIVENESS_SAFETY})"
+            ),
+        )
+
+    def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
+        """Estimate remaining samples from token-mode effective draw shares."""
+        cfg = self._config
+        shares = self.effective_shares()
+        return _average_quota_remaining_samples(
+            cfg,
+            cursors,
+            {name: shares[name] * cfg.chunk_size for name in cfg.component_order},
+        )
+
+    # -- clone / checkpoint -------------------------------------------------
+
+    def clone(self) -> "TokenAwareStrategy":
+        return TokenAwareStrategy(
+            config=self._config,
+            datasets_by_name=self._datasets_by_name,
+            dataset_ids=self._dataset_ids,
+            estimation=self._estimation,
+            deficits=self._deficits,
+            ratios=self._ratios,
+        )
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        # Preserve unprimed templates with token_ratios=None; producing lanes
+        # are primed.
+        return {
+            "token_deficits": dict(self._deficits),
+            "token_ratios": (
+                None
+                if self._ratios is None
+                else {name: ratio.to_state() for name, ratio in self._ratios.items()}
+            ),
+        }
+
+    @classmethod
+    def from_scratch(
+        cls,
+        config: _AllocationConfig,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "TokenAwareStrategy":
+        assert estimation is not None  # token mode is selected only with estimation
+        return cls(
+            config=config,
+            datasets_by_name=datasets_by_name,
+            dataset_ids=dataset_ids,
+            estimation=estimation,
+        )
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        config: _AllocationConfig,
+        ckpt: StaticMixtureStateV5,
+        *,
+        datasets_by_name: Mapping[str, Dataset],
+        dataset_ids: Mapping[str, int],
+        estimation: TokenEstimation | None,
+    ) -> "TokenAwareStrategy":
+        # token_deficits is always present; token_ratios=None means unprimed.
+        assert ckpt.token_deficits is not None
+        assert estimation is not None  # the parity guard ensures token construction
+        ratios = (
+            None
+            if ckpt.token_ratios is None
+            else {k: TokenRatio.from_state(v) for k, v in ckpt.token_ratios.items()}
+        )
+        return cls(
+            config=config,
+            datasets_by_name=datasets_by_name,
+            dataset_ids=dataset_ids,
+            estimation=estimation,
+            deficits=ckpt.token_deficits,
+            ratios=ratios,
+        )
+
+
+#: Maps the persisted ``allocation_mode`` tag to its strategy class. A new
+#: strategy declares its tag and registers here; the load path needs no other
+#: change.
+_STRATEGY_BY_MODE: dict[str, type[AllocationStrategy]] = {
+    cls.allocation_mode: cls
+    for cls in (AccumulatorStrategy, LegacyFixedStrategy, TokenAwareStrategy)
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1327,6 +1896,7 @@ class StaticMixtureWorkSource(WorkSource):
         max_repeats: int | None | Mapping[str, int | None] = None,
         stop_after_passes: int | None | _Sentinel = _STOP_AFTER_PASSES_UNSET,
         lane_assignment: Literal["modulo", "permute"] = "permute",
+        token_estimation: TokenEstimation | None = None,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -1357,6 +1927,11 @@ class StaticMixtureWorkSource(WorkSource):
             if provided
         )
 
+        # Presence of token_estimation selects the token-aware allocator;
+        # absence is the default sample-based mode. The chosen strategy is the
+        # single source of truth for the mixture unit
+        # (see AllocationStrategy.mixture_unit).
+        self._token_estimation: TokenEstimation | None = token_estimation
         self._datasets: list[Dataset] = list(datasets)
         dataset_names = [ds.name for ds in self._datasets]
 
@@ -1526,38 +2101,71 @@ class StaticMixtureWorkSource(WorkSource):
             stop_after_passes=stop_after_passes,
         )
 
-        self._validate_repeat_capacity()
+        self._strategy: AllocationStrategy = self._build_fresh_strategy()
+        # The repeat-policy liveness guard lives on the strategy: sample mode
+        # checks immediately; an unprimed token strategy no-ops until prime()
+        # supplies the ratios and re-runs it.
+        self._strategy.validate_liveness(self._cursors)
 
-        self._strategy: AllocationStrategy = AccumulatorStrategy(
-            config=self._alloc_config,
-        )
+        self._recompute_total_samples()
 
-        self.total_samples: int | float = (
-            float("inf") if _is_unbounded(self._alloc_config) else len(self)
-        )
+    def _recompute_total_samples(self) -> None:
+        """Derive ``total_samples`` from boundedness and strategy readiness.
 
-    def _validate_repeat_capacity(self) -> None:
-        """Reject a repeat-policy dataset too small to fill one chunk's quota.
-
-        The accumulator can carry up to ~1.0 of fractional remainder, so the
-        worst-case single-chunk quota is ceil(weight * chunk_size).  Without
-        this check the retry loop in _next_chunk_accumulator would spin
-        forever (rollback → same accumulators → same impossible quota).
+        length_ready is False for an unprimed token strategy (its estimate
+        needs the cost table), so total_samples stays None until prime() and
+        reading it raises instead of exposing a plausible-looking placeholder.
         """
-        cfg = self._alloc_config
-        for name in cfg.component_order:
-            if cfg.exhausted_policy[name] != "repeat":
-                continue
-            min_required = math.ceil(self._weights[name] * cfg.chunk_size)
-            cursor = self._cursors[name]
-            if cursor._total_samples < min_required:
-                raise ValueError(
-                    f"Dataset '{name}' has {cursor._total_samples} samples "
-                    f"but repeat policy requires at least {min_required} "
-                    f"(ceil(weight={self._weights[name]:.4g} * "
-                    f"chunk_size={cfg.chunk_size})). "
-                    f"Increase dataset size or decrease chunk_size."
-                )
+        if _is_unbounded(self._alloc_config):
+            self._total_samples: int | float | None = float("inf")
+        elif not self._strategy.length_ready:
+            self._total_samples = None
+        else:
+            self._total_samples = len(self)
+
+    @property
+    def total_samples(self) -> int | float:
+        """Samples this source will produce (``float("inf")`` when unbounded)."""
+        if self._total_samples is None:
+            raise RuntimeError(
+                "total_samples is unavailable before priming: the token-aware "
+                "length estimate needs the primed cost table. prime() must run "
+                "(or a checkpoint must be restored) first."
+            )
+        return self._total_samples
+
+    def _active_dataset_context(self) -> tuple[dict[str, Dataset], dict[str, int]]:
+        """Datasets and ids restricted to the active mixture components.
+
+        Threaded identically into the fresh-build and checkpoint-load strategy
+        factories.
+        """
+        active_ids = {
+            name: dataset_id
+            for name, dataset_id in self._dataset_ids.items()
+            if name in self._weights
+        }
+        datasets_by_name = {
+            name: self._datasets_by_id[dataset_id]
+            for name, dataset_id in active_ids.items()
+        }
+        return datasets_by_name, active_ids
+
+    def _build_fresh_strategy(self) -> AllocationStrategy:
+        """Construct the mode-appropriate strategy with empty carry state.
+
+        Presence of ``token_estimation`` selects the token-aware allocator;
+        absence is the default accumulator. Dispatch mirrors the load path: one
+        registry lookup, one uniform factory call.
+        """
+        mode = "token_aware" if self._token_estimation is not None else "accumulator"
+        datasets_by_name, active_ids = self._active_dataset_context()
+        return _STRATEGY_BY_MODE[mode].from_scratch(
+            self._alloc_config,
+            datasets_by_name=datasets_by_name,
+            dataset_ids=active_ids,
+            estimation=self._token_estimation,
+        )
 
     def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource:
         """Lightweight clone that avoids deepcopying large cursor buffers.
@@ -1587,12 +2195,13 @@ class StaticMixtureWorkSource(WorkSource):
         clone._perm_order = []
         clone._shuffle_block_size_spec = self._shuffle_block_size_spec
         clone._knobs_by_name = dict(self._knobs_by_name)
+        clone._token_estimation = self._token_estimation
 
         clone._strategy = self._strategy.clone()
 
         clone._cursors = {name: cur._clone() for name, cur in self._cursors.items()}
 
-        clone.total_samples = self.total_samples
+        clone._total_samples = self._total_samples
 
         clone._cloned = True
         clone._bind_lane(lane_id, canonical_replicas)
@@ -1617,6 +2226,48 @@ class StaticMixtureWorkSource(WorkSource):
         """Mapping of dataset name to the stable dataset_id used in SampleIds."""
         # We expose a copy to avoid external objects interfering with our internal state.
         return dict(self._dataset_ids)
+
+    # ------------------------------------------------------------------
+    # Token-aware priming
+    # ------------------------------------------------------------------
+
+    @property
+    def requires_token_priming(self) -> bool:
+        """True when this source still needs :meth:`prime` before producing chunks.
+
+        The pipeline driver checks this hook before engine construction (and
+        before pickling for DataLoader/MTP workers, so the primed ratios are
+        inherited instead of re-measured). Primed checkpoints restore their
+        ratios and report False; an unprimed template checkpoint restores to
+        True and must be primed before producing.
+        """
+        return self._strategy.requires_priming
+
+    def prime(
+        self,
+        *,
+        io_options: Any = None,
+        tokenize_profile: TokenizeProfile | None = None,
+        mp_context: Any = None,
+    ) -> None:
+        """Calibrate per-dataset tokens/byte ratios (token mode only; idempotent).
+
+        Must run in the driver before engine construction / per-lane cloning /
+        pickling, with the pipeline's ``io_options``, the tokenize op's profile
+        (a ``TokenizeProfile``), and the runtime ``mp_context`` (priming fans the
+        calibration out across a process pool). Restoring runs skip this entirely
+        — the checkpointed ratios win via ``load_state_dict`` (so a tokenizer
+        upgrade or data drift cannot silently shift a running mixture). A no-op
+        in sample mode, where the strategy's ``prime`` does nothing.
+        """
+        self._strategy.prime(
+            tokenize_profile=tokenize_profile,
+            io_options=io_options,
+            seed=self._seed,
+            mp_context=mp_context,
+        )
+        self._strategy.validate_liveness(self._cursors)
+        self._recompute_total_samples()
 
     # ------------------------------------------------------------------
     # Chunk production
@@ -1681,12 +2332,12 @@ class StaticMixtureWorkSource(WorkSource):
         if not components:
             return None
 
-        if not _is_unbounded(self._alloc_config):
-            self.total_samples = len(self)
+        self._recompute_total_samples()
 
         return WorkChunk(
             components=components,
             seed=self._seed,
+            target_mixture=self._strategy.target_mixture(),
         )
 
     # ------------------------------------------------------------------
@@ -1732,14 +2383,13 @@ class StaticMixtureWorkSource(WorkSource):
         }
         cfg = self._alloc_config
         strategy_state = self._strategy.checkpoint_state()
-        accumulators = strategy_state.get("accumulators")
         # seed / shuffle_shards / shuffle_within_shard are identical across
         # the per-dataset knobs by construction; pick any one as a representative.
         sample_knobs = next(iter(self._knobs_by_name.values()))
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = StaticMixtureStateV4(
+        state = StaticMixtureStateV5(
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
             chunk_size_hint=base["chunk_size_hint"],
@@ -1769,12 +2419,16 @@ class StaticMixtureWorkSource(WorkSource):
             max_repeats=dict(cfg.max_repeats),
             stop_after_passes=cfg.stop_after_passes,
             lane_assignment=self._lane_assignment,
-            accumulators=accumulators,
-            allocation_mode=strategy_state["allocation_mode"],
+            allocation_mode=self._strategy.allocation_mode,
+            # Strategies report only their own fields; other modes' fields
+            # serialize as None. The unit is implied by allocation_mode.
+            accumulators=strategy_state.get("accumulators"),
+            token_deficits=strategy_state.get("token_deficits"),
+            token_ratios=strategy_state.get("token_ratios"),
         )
         return state.to_dict()
 
-    def _reject_policy_override(self, ckpt: StaticMixtureStateV4) -> None:
+    def _reject_policy_override(self, ckpt: StaticMixtureStateV5) -> None:
         """Fail a resume whose explicit policy args contradict the checkpoint.
 
         A resume restores the policy frozen in the checkpoint, so an explicit
@@ -1807,11 +2461,27 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = StaticMixtureStateV4.load(state)
+        ckpt = StaticMixtureStateV5.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 
-        is_accumulator_ckpt = ckpt.allocation_mode == "accumulator"
+        # Mode parity: silently flipping the allocation unit mid-run would
+        # change every subsequent chunk's composition. The fresh strategy (built
+        # in __init__ from how this instance was constructed) must agree with
+        # the checkpoint on the token/samples axis.
+        strategy_cls = _STRATEGY_BY_MODE.get(ckpt.allocation_mode)
+        if strategy_cls is None:
+            raise RuntimeError(
+                f"Unknown allocation_mode {ckpt.allocation_mode!r} in checkpoint"
+            )
+        if strategy_cls.mixture_unit != self._strategy.mixture_unit:
+            raise RuntimeError(
+                f"Checkpoint allocation_mode={ckpt.allocation_mode!r} "
+                f"({strategy_cls.mixture_unit} unit) but the current instance "
+                f"was constructed for "
+                f"mixture_unit={self._strategy.mixture_unit!r}. "
+                f"These must match for deterministic continuation."
+            )
 
         self._seed = ckpt.seed
         # Replay the routing the checkpoint was produced with; pre-fix states
@@ -1852,8 +2522,12 @@ class StaticMixtureWorkSource(WorkSource):
         self._datasets_by_id.clear()
         self._knobs_by_name = {}
 
-        if not ckpt.cursor_states and is_accumulator_ckpt:
-            raise RuntimeError("Accumulator-mode checkpoints require cursor_states")
+        # Only migrated pre-v2 legacy_fixed checkpoints legitimately lack
+        # cursor_states; every current writer populates them.
+        if not ckpt.cursor_states and ckpt.allocation_mode != "legacy_fixed":
+            raise RuntimeError(
+                f"{ckpt.allocation_mode}-mode checkpoints require cursor_states"
+            )
 
         shared_seed = self._seed
         shared_shuffle_shards = bool(ckpt.knobs["shuffle_shards"])
@@ -1901,19 +2575,20 @@ class StaticMixtureWorkSource(WorkSource):
         )
         self._weights = dict(ckpt.weights)
 
-        if is_accumulator_ckpt:
-            if ckpt.accumulators is None:
-                raise RuntimeError(
-                    "Accumulator-mode checkpoint missing accumulators field"
-                )
-            self._validate_repeat_capacity()
-            self._strategy = AccumulatorStrategy(
-                config=self._alloc_config,
-                accumulators={str(k): float(v) for k, v in ckpt.accumulators.items()},
-            )
-        else:
-            self._strategy = LegacyFixedStrategy(config=self._alloc_config)
-
-        self.total_samples = (
-            float("inf") if _is_unbounded(self._alloc_config) else len(self)
+        # Rebuild the strategy from its persisted tag (strategy_cls resolved by
+        # the parity check above). from_checkpoint owns the per-mode field
+        # parsing; sample strategies ignore the token-only context.
+        datasets_by_name, active_ids = self._active_dataset_context()
+        self._strategy = strategy_cls.from_checkpoint(
+            self._alloc_config,
+            ckpt,
+            datasets_by_name=datasets_by_name,
+            dataset_ids=active_ids,
+            estimation=self._token_estimation,
         )
+        # Re-run the repeat-policy liveness guard now the strategy is rebuilt: a
+        # primed token restore and a sample restore both check; an unprimed
+        # token template no-ops until prime() supplies the ratios.
+        self._strategy.validate_liveness(self._cursors)
+
+        self._recompute_total_samples()

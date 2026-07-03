@@ -331,6 +331,20 @@ class WorkSource(ABC):
     def next_chunk(self) -> WorkChunk | None:
         raise NotImplementedError()
 
+    @property
+    def requires_token_priming(self) -> bool:
+        """Whether :meth:`prime` must run before this source produces chunks."""
+        return False
+
+    def prime(
+        self,
+        *,
+        io_options: Any = None,
+        tokenize_profile: Any = None,
+        mp_context: Any = None,
+    ) -> None:
+        """Driver-side calibration hook; no-op by default."""
+
     def state_dict(self) -> dict:
         return {
             "lane_id": self._lane,

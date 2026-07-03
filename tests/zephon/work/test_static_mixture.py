@@ -1,8 +1,10 @@
+import pickle
 import random
 
 import numpy as np
 import pytest
 
+from tests.zephon.work.test_token_estimation import make_inmem_dataset
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     MixtureSpec,
@@ -13,11 +15,13 @@ from zephon.work.static_mixture import (
     AccumulatorStrategy,
     LegacyFixedStrategy,
     QuotaAllocationStrategy,
+    TokenAwareStrategy,
     _AllocationConfig,
     _DatasetCursor,
     _DatasetKnobs,
     _resolve_block_size,
 )
+from zephon.work.token_estimation import TokenEstimation, TokenizeProfile, TokenRatio
 
 
 def make_dataset(name: str, sample_count: int) -> Dataset:
@@ -1245,6 +1249,10 @@ class _FixedQuotaStrategy(QuotaAllocationStrategy):
 
     def checkpoint_state(self) -> dict[str, object]:
         return {}
+
+    @classmethod
+    def from_checkpoint(cls, config, ckpt, **kwargs) -> "_FixedQuotaStrategy":
+        raise NotImplementedError  # produce-only test double; never restored
 
 
 def _single_shard_cursor(dataset_id: int, size: int) -> _DatasetCursor:
@@ -3671,8 +3679,8 @@ def test_modulo_chunk_stream_matches_plain_modulo_routing() -> None:
         assert _drain_chunks(ws)  # routing actually yields this lane some chunks
 
 
-def test_state_dict_always_writes_v4_with_lane_assignment() -> None:
-    """The checkpoint always carries the current schema (v4) and the routing
+def test_state_dict_always_writes_v5_with_lane_assignment() -> None:
+    """The checkpoint always carries the current schema (v5) and the routing
     tag, for both modes — there is no conditional legacy-shape write.
     """
     ds_a = make_dataset("alpha", 60)
@@ -3687,7 +3695,7 @@ def test_state_dict_always_writes_v4_with_lane_assignment() -> None:
         ).clone_for_lane(0, canonical_replicas=2)
         _drain_chunks(ws, limit=3)
         state = ws.state_dict()
-        assert state["version"] == 4
+        assert state["version"] == 5
         assert state["lane_assignment"] == mode
 
 
@@ -3839,7 +3847,7 @@ def test_permute_checkpoint_restore_matches_baseline(canonical_replicas: int) ->
         prefix = _drain_chunks(ws_save, limit=2)
         state = ws_save.state_dict()
         assert state["lane_assignment"] == "permute"
-        assert state["version"] == 4
+        assert state["version"] == 5
 
         ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
             lane, canonical_replicas=canonical_replicas
@@ -3870,3 +3878,717 @@ def test_old_checkpoint_without_lane_assignment_replays_as_modulo() -> None:
     ).clone_for_lane(0, canonical_replicas=2)
     old.load_state_dict(legacy)
     assert old._lane_assignment == "modulo"
+
+
+# Token-aware mixture (token_estimation selects token mode)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _inline_prime_census(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the calibration census in-process instead of the spawn pool.
+
+    The measurement itself is unchanged (same scan, tokenizer, and
+    scan-rebased "measured" ratios); only the per-test process-pool spawn is
+    skipped, which dominates the runtime of every priming test on CI.
+    """
+    import zephon.work.token_estimation as te
+
+    def inline_census(
+        measured_datasets, store_options, estimation, tokenize_profile, seed, mp_context
+    ):
+        te._init_prime_worker(
+            measured_datasets, store_options, estimation, tokenize_profile, seed
+        )
+        try:
+            return {
+                dataset.name: te._measure_in_worker(dataset_id)
+                for dataset_id, dataset in measured_datasets.items()
+            }
+        finally:
+            te._prime_worker.clear()
+
+    monkeypatch.setattr(te, "_run_census", inline_census)
+
+
+def make_token_dataset(
+    name: str,
+    words_per_doc: int,
+    *,
+    docs_per_shard: int = 100,
+    n_shards: int = 4,
+) -> Dataset:
+    """Dataset whose docs all have ``words_per_doc`` whitespace tokens."""
+    return make_inmem_dataset(name, docs_per_shard, words_per_doc, n_shards=n_shards)
+
+
+def make_token_ws(
+    datasets: list[Dataset],
+    mixture: dict[str, float],
+    *,
+    chunk_size: int = 256,
+    seed: int = 0,
+    primed: bool = True,
+    **kwargs,
+) -> StaticMixtureWorkSource:
+    ws = StaticMixtureWorkSource(
+        datasets,
+        mixture,
+        chunk_size=chunk_size,
+        seed=seed,
+        token_estimation=TokenEstimation(calibration_samples=16),
+        **kwargs,
+    )
+    if primed:
+        ws.prime(
+            tokenize_profile=TokenizeProfile(
+                tokenizer_id="__fallback__", field="text", special_tokens="none"
+            )
+        )
+    return ws
+
+
+def test_token_ws_with_lambda_measure_survives_std_pickle() -> None:
+    """DataLoader spawn workers receive the source via std pickle."""
+    ds = make_token_dataset("d", 5, docs_per_shard=20, n_shards=1)
+    ws = StaticMixtureWorkSource(
+        [ds],
+        {"d": 1.0},
+        chunk_size=8,
+        token_estimation=TokenEstimation(measure=lambda p: 1, calibration_samples=4),
+    )
+    restored = pickle.loads(pickle.dumps(ws))
+    assert restored.requires_token_priming
+
+
+def test_token_mode_futile_chunk_raises_instead_of_hanging() -> None:
+    """A chunk demanding more than a full pass of a repeat dataset must error."""
+    # 'small' passes the liveness guard (25 >= ceil(0.2*50*2)) yet holds fewer
+    # samples than one chunk's draws, so a dominant deficit must exhaust it.
+    small = make_token_dataset("small", 5, docs_per_shard=25, n_shards=1)
+    big = make_token_dataset("big", 5, docs_per_shard=100, n_shards=1)
+    ws = make_token_ws(
+        [small, big],
+        {"small": 0.2, "big": 0.8},
+        chunk_size=50,
+        exhausted_policy={"small": "repeat", "big": "repeat"},
+        stop_after_passes=None,
+    )
+    strategy = ws._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    # A monster document elsewhere left 'small' owed far more tokens than one
+    # of its passes repays: every reset-and-retry re-exhausts it identically.
+    strategy._deficits["small"] = 1e6
+    strategy._deficits["big"] = -1e6
+    with pytest.raises(RuntimeError, match="cannot converge"):
+        strategy.produce(ws._cursors)
+
+
+def test_token_mode_default_exhaustion_terminates() -> None:
+    """Token mode must honor the default ``stop_after_passes=1`` floor."""
+    short = make_token_dataset("short", 10, docs_per_shard=50, n_shards=4)  # 200
+    long = make_token_dataset("long", 40, docs_per_shard=50, n_shards=4)  # 200
+    ws = make_token_ws([short, long], {"short": 0.5, "long": 0.5}, chunk_size=16)
+    assert ws._alloc_config.stop_after_passes == 1
+
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    # A correct stop_after_passes=1 run drains the slowest dataset once (~60
+    # chunks here); the cap is far above that but still finite.
+    max_chunks = 3000
+    for _ in range(max_chunks):
+        if lane.next_chunk() is None:
+            break
+    else:
+        pytest.fail(
+            f"token-aware default (stop_after_passes=1) did not terminate within "
+            f"{max_chunks} chunks; produce ignores the stop_after_passes floor"
+        )
+
+
+def test_token_mode_priming_lifecycle() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = make_token_ws([ds], {"a": 1.0}, primed=False, exhausted_policy="stop")
+    assert ws._strategy.mixture_unit == "tokens"
+    assert ws.requires_token_priming
+    ws.prime(
+        tokenize_profile=TokenizeProfile(
+            tokenizer_id="__fallback__", field="text", special_tokens="none"
+        )
+    )
+    assert not ws.requires_token_priming
+    # Idempotent: a second prime is a no-op (would re-measure otherwise).
+    ws.prime()
+    assert not ws.requires_token_priming
+
+
+def test_sample_mode_never_requires_priming() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
+    assert not ws.requires_token_priming
+    ws.prime()  # no-op
+
+
+def test_token_mode_unprimed_chunk_production_raises() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = make_token_ws([ds], {"a": 1.0}, primed=False)
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="prime"):
+        lane.next_chunk()
+
+
+def test_token_mode_unprimed_len_raises() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = make_token_ws([ds], {"a": 1.0}, primed=False)
+    with pytest.raises(RuntimeError, match="prime"):
+        len(ws)
+
+
+def test_token_mode_unprimed_total_samples_raises() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = make_token_ws([ds], {"a": 1.0}, primed=False)
+    with pytest.raises(RuntimeError, match="prime"):
+        _ = ws.total_samples
+
+
+def test_token_mode_unprimed_checkpoint_serializes_none() -> None:
+    # Unprimed templates round-trip losslessly with token_ratios=None.
+    ds = make_token_dataset("a", 5)
+    ws = make_token_ws([ds], {"a": 1.0}, primed=False, exhausted_policy="stop")
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+
+    state = lane.state_dict()
+    assert state["allocation_mode"] == "token_aware"
+    assert state["token_ratios"] is None
+    assert state["token_deficits"] == {"a": 0.0}
+
+    restored = make_token_ws([ds], {"a": 1.0}, primed=False, exhausted_policy="stop")
+    restored_lane = restored.clone_for_lane(0, canonical_replicas=1)
+    restored_lane.load_state_dict(state)
+    assert restored_lane.requires_token_priming
+
+
+def test_token_mode_stamps_target_mixture() -> None:
+    short = make_token_dataset("short", 5)
+    long = make_token_dataset("long", 20)
+    ws = make_token_ws(
+        [short, long], {"short": 0.5, "long": 0.5}, exhausted_policy="stop"
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    chunk = lane.next_chunk()
+    assert chunk is not None
+    assert chunk.target_mixture == {"short": 0.5, "long": 0.5}
+    # The counted composition deliberately differs from the target.
+    assert chunk.mixture["short"] > 0.5
+
+
+def test_sample_mode_does_not_stamp_target_mixture() -> None:
+    ds = make_token_dataset("a", 5)
+    ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    chunk = lane.next_chunk()
+    assert chunk is not None
+    assert chunk.target_mixture is None
+
+
+def test_token_mode_supply_hits_token_target() -> None:
+    """The core property: token supply ~= declared token mixture."""
+    short = make_token_dataset("short", 10, docs_per_shard=200, n_shards=8)
+    long = make_token_dataset("long", 40, docs_per_shard=200, n_shards=8)
+    ws = make_token_ws(
+        [short, long],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=512,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    words = {"short": 10, "long": 40}
+    tokens = {"short": 0, "long": 0}
+    for _ in range(20):
+        chunk = lane.next_chunk()
+        assert chunk is not None
+        for name, ids in chunk.components.items():
+            tokens[name] += len(ids) * words[name]
+    total = sum(tokens.values())
+    assert tokens["short"] / total == pytest.approx(0.5, abs=0.01)
+
+
+def test_token_mode_uneven_targets() -> None:
+    short = make_token_dataset("short", 8, docs_per_shard=200, n_shards=8)
+    long = make_token_dataset("long", 32, docs_per_shard=200, n_shards=8)
+    ws = make_token_ws(
+        [short, long],
+        {"short": 0.9, "long": 0.1},
+        chunk_size=512,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    words = {"short": 8, "long": 32}
+    tokens = {"short": 0, "long": 0}
+    for _ in range(20):
+        chunk = lane.next_chunk()
+        assert chunk is not None
+        for name, ids in chunk.components.items():
+            tokens[name] += len(ids) * words[name]
+    total = sum(tokens.values())
+    assert tokens["short"] / total == pytest.approx(0.9, abs=0.01)
+
+
+def test_token_mode_anchor_equivalence_with_constant_costs() -> None:
+    """With constant per-dataset costs, long-run composition must match the
+    accumulator strategy running on the transformed weights w'_c ~ m_c/t_c."""
+    short = make_token_dataset("short", 10, docs_per_shard=200, n_shards=8)
+    long = make_token_dataset("long", 40, docs_per_shard=200, n_shards=8)
+    mixture = {"short": 0.5, "long": 0.5}
+
+    ws_token = StaticMixtureWorkSource(
+        [short, long],
+        mixture,
+        chunk_size=512,
+        token_estimation=TokenEstimation(primer=0.25),
+        exhausted_policy="repeat",
+    )
+    ws_token.prime()
+
+    strategy = ws_token._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    shares = strategy.effective_shares()
+    ws_ref = StaticMixtureWorkSource(
+        [short, long],
+        shares,
+        chunk_size=512,
+        exhausted_policy="repeat",
+    )
+
+    def drawn_counts(ws: StaticMixtureWorkSource, chunks: int) -> dict[str, int]:
+        lane = ws.clone_for_lane(0, canonical_replicas=1)
+        counts = {"short": 0, "long": 0}
+        for _ in range(chunks):
+            chunk = lane.next_chunk()
+            assert chunk is not None
+            for name, ids in chunk.components.items():
+                counts[name] += len(ids)
+        return counts
+
+    token_counts = drawn_counts(ws_token, 30)
+    ref_counts = drawn_counts(ws_ref, 30)
+    total = 30 * 512
+    for name in ("short", "long"):
+        assert token_counts[name] / total == pytest.approx(
+            ref_counts[name] / total, abs=0.005
+        )
+
+
+def test_token_mode_adapts_to_shard_level_size_changes() -> None:
+    """A dataset with alternating short/long shards: the per-shard byte signal
+    must keep the *token* supply balanced even though samples/shard varies."""
+    # Fixed-width words keep tokens/byte constant across shards, so the test
+    # isolates the per-shard *byte* signal (docs/sample) from tokens/byte
+    # heterogeneity (a documented estimation limitation).
+    text_short = " ".join("abcd" for _ in range(10))
+    text_long = " ".join("abcd" for _ in range(40))
+    mixed_shards = {}
+    for s in range(8):
+        text = text_short if s % 2 == 0 else text_long
+        mixed_shards[s] = InMemoryShard([{"text": text} for _ in range(50)])
+    mixed = Dataset.from_dict("mixed", mixed_shards)
+    uniform = make_token_dataset("uniform", 20, n_shards=8)
+
+    ws = make_token_ws(
+        [mixed, uniform],
+        {"mixed": 0.5, "uniform": 0.5},
+        chunk_size=256,
+        # In-order traversal so the mixed dataset alternates shard sizes
+        # deterministically over the run.
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    tokens = {"mixed": 0, "uniform": 0}
+    for _ in range(30):
+        chunk = lane.next_chunk()
+        assert chunk is not None
+        for name, ids in chunk.components.items():
+            for sid in ids:
+                if name == "uniform":
+                    tokens[name] += 20
+                else:
+                    tokens[name] += 10 if sid[1] % 2 == 0 else 40
+    total = sum(tokens.values())
+    assert tokens["mixed"] / total == pytest.approx(0.5, abs=0.02)
+
+
+def test_token_mode_deficits_conserved() -> None:
+    short = make_token_dataset("short", 10, docs_per_shard=200)
+    long = make_token_dataset("long", 40, docs_per_shard=200)
+    ws = make_token_ws(
+        [short, long], {"short": 0.5, "long": 0.5}, exhausted_policy="repeat"
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(5):
+        lane.next_chunk()
+    strategy = lane._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    assert sum(strategy._deficits.values()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_token_mode_stop_policy_rolls_back_cleanly() -> None:
+    """Exhaustion under 'stop' returns None and leaves cursors at the
+    pre-chunk position (snapshot restored), so a checkpoint stays clean."""
+    tiny = make_token_dataset("tiny", 10, docs_per_shard=10, n_shards=1)
+    big = make_token_dataset("big", 10, docs_per_shard=100, n_shards=4)
+    ws = make_token_ws(
+        [tiny, big], {"tiny": 0.5, "big": 0.5}, chunk_size=16, exhausted_policy="stop"
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    chunks = []
+    while True:
+        before = {name: cur.checkpoint_state() for name, cur in lane._cursors.items()}
+        chunk = lane.next_chunk()
+        if chunk is None:
+            after = {
+                name: cur.checkpoint_state() for name, cur in lane._cursors.items()
+            }
+            assert after == before
+            break
+        chunks.append(chunk)
+    assert chunks
+
+
+def test_token_mode_repeat_policy_retries_whole_chunk() -> None:
+    tiny = make_token_dataset("tiny", 10, docs_per_shard=40, n_shards=1)
+    big = make_token_dataset("big", 10, docs_per_shard=200, n_shards=2)
+    ws = make_token_ws(
+        [tiny, big],
+        {"tiny": 0.5, "big": 0.5},
+        chunk_size=32,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(10):
+        chunk = lane.next_chunk()
+        assert chunk is not None
+        assert len(chunk) == 32
+    assert lane._cursors["tiny"]._epoch >= 1
+
+
+def test_token_mode_max_repeats_terminates() -> None:
+    tiny = make_token_dataset("tiny", 10, docs_per_shard=40, n_shards=1)
+    big = make_token_dataset("big", 10, docs_per_shard=500, n_shards=2)
+    ws = make_token_ws(
+        [tiny, big],
+        {"tiny": 0.5, "big": 0.5},
+        chunk_size=32,
+        exhausted_policy="repeat",
+        max_repeats=2,
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    count = 0
+    while lane.next_chunk() is not None:
+        count += 1
+        assert count < 1000, "max_repeats cap never terminated the stream"
+    assert count > 0
+    assert lane._cursors["tiny"]._epoch == 2
+
+
+def test_token_mode_chunk_stream_is_deterministic() -> None:
+    """Two identically-configured sources produce identical chunk streams,
+    including across repeat-policy resets."""
+
+    def build():
+        tiny = make_token_dataset("tiny", 10, docs_per_shard=80, n_shards=2)
+        big = make_token_dataset("big", 30, docs_per_shard=150, n_shards=3)
+        ws = make_token_ws(
+            [tiny, big],
+            {"tiny": 0.4, "big": 0.6},
+            chunk_size=64,
+            seed=13,
+            exhausted_policy="repeat",
+            shuffle_within_shard=True,
+            shuffle_block_size=32,
+        )
+        return ws.clone_for_lane(0, canonical_replicas=1)
+
+    a, b = build(), build()
+    for _ in range(12):
+        ca, cb = a.next_chunk(), b.next_chunk()
+        assert ca is not None and cb is not None
+        assert _flatten_components(ca) == _flatten_components(cb)
+
+
+def test_token_mode_liveness_guard_rejects_tiny_repeat_dataset() -> None:
+    tiny = make_token_dataset("tiny", 2, docs_per_shard=4, n_shards=1)
+    big = make_token_dataset("big", 200, docs_per_shard=500, n_shards=2)
+    ws = StaticMixtureWorkSource(
+        [tiny, big],
+        {"tiny": 0.5, "big": 0.5},
+        chunk_size=512,
+        token_estimation=TokenEstimation(calibration_samples=8),
+        exhausted_policy="repeat",
+    )
+    with pytest.raises(ValueError, match="repeat policy requires at least"):
+        ws.prime(
+            tokenize_profile=TokenizeProfile(
+                tokenizer_id="__fallback__", field="text", special_tokens="none"
+            )
+        )
+
+
+def test_token_mode_len_uses_effective_shares() -> None:
+    # 50/50 token target, long docs 4x short. Under the default
+    # stop_after_passes=1 the stream runs until the *slowest* dataset completes
+    # one pass, projected over the emergent per-sample composition.
+    short = make_token_dataset("short", 10, docs_per_shard=100, n_shards=4)  # 400
+    long = make_token_dataset("long", 40, docs_per_shard=100, n_shards=4)  # 400
+    ws = make_token_ws([short, long], {"short": 0.5, "long": 0.5}, chunk_size=100)
+    # Effective shares: short 0.8, long 0.2 -> long is slowest: 400/0.2 = 2000
+    # samples (20 chunks of 100), not the 400/0.5 = 800 a weight-based estimate
+    # would give.
+    assert len(ws) == 2000
+    assert ws.total_samples == 2000
+
+
+def test_token_mode_checkpoint_round_trip_is_bit_identical() -> None:
+    short = make_token_dataset("short", 10, n_shards=4)
+    long = make_token_dataset("long", 40, n_shards=4)
+    ws = make_token_ws(
+        [short, long],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=64,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(7):
+        lane.next_chunk()
+    state = lane.state_dict()
+    assert state["version"] == 5
+    assert state["allocation_mode"] == "token_aware"
+    assert set(state["token_deficits"]) == {"short", "long"}
+    assert set(state["token_ratios"]) == {"short", "long"}
+
+    restored = ws.clone_for_lane(0, canonical_replicas=1)
+    restored.load_state_dict(state)
+    for _ in range(5):
+        ca, cb = lane.next_chunk(), restored.next_chunk()
+        assert ca is not None and cb is not None
+        assert _flatten_components(ca) == _flatten_components(cb)
+
+
+def test_token_mode_restore_does_not_reprime() -> None:
+    """Restored sources take ratios from the checkpoint verbatim."""
+    ds = make_token_dataset("a", 10, n_shards=2)
+    ws = StaticMixtureWorkSource(
+        [ds],
+        {"a": 1.0},
+        chunk_size=16,
+        token_estimation=TokenEstimation(primer=0.125),
+    )
+    ws.prime()
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    lane.next_chunk()
+    state = lane.state_dict()
+
+    fresh = StaticMixtureWorkSource(
+        [ds],
+        {"a": 1.0},
+        chunk_size=16,
+        token_estimation=TokenEstimation(primer=0.125),
+    ).clone_for_lane(0, canonical_replicas=1)
+    assert fresh.requires_token_priming
+    fresh.load_state_dict(state)
+    assert not fresh.requires_token_priming
+    strategy = fresh._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    assert strategy._ratios == {"a": TokenRatio(0.125, "pinned")}
+
+
+def test_token_checkpoint_into_sample_mode_errors() -> None:
+    ds = make_token_dataset("a", 10)
+    token_ws = make_token_ws([ds], {"a": 1.0}, chunk_size=16)
+    lane = token_ws.clone_for_lane(0, canonical_replicas=1)
+    state = lane.state_dict()
+
+    sample_ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
+    sample_lane = sample_ws.clone_for_lane(0, canonical_replicas=1)
+    with pytest.raises(RuntimeError, match="mixture_unit"):
+        sample_lane.load_state_dict(state)
+
+
+def test_sample_checkpoint_into_token_mode_errors() -> None:
+    ds = make_token_dataset("a", 10)
+    sample_ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
+    state = sample_ws.clone_for_lane(0, canonical_replicas=1).state_dict()
+    assert state["version"] == 5
+
+    token_lane = make_token_ws([ds], {"a": 1.0}, chunk_size=16).clone_for_lane(
+        0, canonical_replicas=1
+    )
+    with pytest.raises(RuntimeError, match="mixture_unit"):
+        token_lane.load_state_dict(state)
+
+
+def test_sample_mode_state_carries_inert_token_fields() -> None:
+    ds = make_token_dataset("a", 10)
+    ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
+    state = ws.clone_for_lane(0, canonical_replicas=1).state_dict()
+    assert state["version"] == 5
+    assert state["allocation_mode"] == "accumulator"
+    assert state["token_deficits"] is None
+    assert state["token_ratios"] is None
+
+
+def test_token_mode_pickle_round_trip_drops_cost_table() -> None:
+    import pickle
+
+    short = make_token_dataset("short", 10, docs_per_shard=200)
+    long = make_token_dataset("long", 40, docs_per_shard=200)
+    ws = make_token_ws(
+        [short, long], {"short": 0.5, "long": 0.5}, exhausted_policy="repeat"
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    first = lane.next_chunk()
+    assert first is not None
+    strategy = lane._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    assert strategy._cost_table is not None  # built by the draw above
+    assert strategy.__getstate__()["_cost_table"] is None
+
+    # A pickled twin (pre-draw state) continues identically.
+    twin_ws = pickle.loads(pickle.dumps(ws))
+    twin = twin_ws.clone_for_lane(0, canonical_replicas=1)
+    assert _flatten_components(twin.next_chunk()) == _flatten_components(first)
+
+
+def test_token_mode_lane_split_is_disjoint_and_deterministic() -> None:
+    short = make_token_dataset("short", 10, n_shards=4)
+    long = make_token_dataset("long", 40, n_shards=4)
+    ws = make_token_ws(
+        [short, long],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=64,
+        exhausted_policy="repeat",
+    )
+    lane0 = ws.clone_for_lane(0, canonical_replicas=2)
+    lane1 = ws.clone_for_lane(1, canonical_replicas=2)
+    c0 = [_flatten_components(lane0.next_chunk()) for _ in range(4)]
+    c1 = [_flatten_components(lane1.next_chunk()) for _ in range(4)]
+    # Both lanes enumerate the same global stream; plain modulo routing sends
+    # even global chunks to lane 0 and odd ones to lane 1, so together they
+    # cover the first 8 global chunks exactly once.
+    ws2 = make_token_ws(
+        [
+            make_token_dataset("short", 10, n_shards=4),
+            make_token_dataset("long", 40, n_shards=4),
+        ],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=64,
+        exhausted_policy="repeat",
+    )
+    full = ws2.clone_for_lane(0, canonical_replicas=1)
+    stream = [_flatten_components(full.next_chunk()) for _ in range(8)]
+    assert sorted(map(repr, c0 + c1)) == sorted(map(repr, stream))
+    ws3 = make_token_ws(
+        [
+            make_token_dataset("short", 10, n_shards=4),
+            make_token_dataset("long", 40, n_shards=4),
+        ],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=64,
+        exhausted_policy="repeat",
+    )
+    lane0_again = ws3.clone_for_lane(0, canonical_replicas=2)
+    assert [_flatten_components(lane0_again.next_chunk()) for _ in range(4)] == c0
+
+
+def test_next_one_matches_next_many_sequence() -> None:
+    """next_one's fast paths must enumerate exactly next_many's sequence."""
+    for knobs_kwargs in (
+        dict(shuffle_shards=False, shuffle_within_shard=False, shuffle_block_size=None),
+        dict(shuffle_shards=True, shuffle_within_shard=True, shuffle_block_size=None),
+        dict(shuffle_shards=True, shuffle_within_shard=True, shuffle_block_size=7),
+    ):
+        knobs = _DatasetKnobs(seed=5, **knobs_kwargs)
+        sizes = np.array([5, 9, 3, 12], dtype=np.int64)
+        ids = np.arange(4, dtype=np.int64)
+        a = _DatasetCursor(0, ids, sizes, knobs)
+        b = _DatasetCursor(0, ids, sizes, knobs)
+        expected = b.next_many(int(sizes.sum()))
+        got = []
+        while (sid := a.next_one()) is not None:
+            got.append(sid)
+        assert got == expected, f"divergence under {knobs_kwargs}"
+        assert a.next_one() is None
+
+
+def test_token_mode_produce_large_chunk_balance() -> None:
+    datasets = []
+    mixture = {}
+    for i in range(10):
+        rows = [{"text": "w " * 20}] * 2000
+        datasets.append(
+            Dataset.from_dict(f"d{i}", {s: InMemoryShard(rows) for s in range(4)})
+        )
+        mixture[f"d{i}"] = 0.1
+    ws = StaticMixtureWorkSource(
+        datasets,
+        mixture,
+        chunk_size=16384,
+        token_estimation=TokenEstimation(primer=0.25),
+        exhausted_policy="repeat",
+    )
+    ws.prime()
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    chunk = lane.next_chunk()
+
+    assert chunk is not None
+    assert len(chunk) == 16384
+    counts = [len(chunk.components[f"d{i}"]) for i in range(10)]
+    assert max(counts) - min(counts) <= 1
+    strategy = lane._strategy
+    assert isinstance(strategy, TokenAwareStrategy)
+    assert sum(strategy._deficits.values()) == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.timeout(60)
+def test_token_mode_alternating_exhaustion_makes_progress() -> None:
+    """Two repeat datasets can run dry within one chunk's retries.
+
+    Each retry restores the chunk-start snapshot before resetting the dry
+    cursor. The reset must be baked back into the snapshot, otherwise the
+    next retry (the *other* dataset running dry) reverts it and the pair
+    ping-pongs E -> E+1 -> E -> E+1 forever without accumulating epochs.
+    """
+    a = make_token_dataset("a", 10, docs_per_shard=40, n_shards=1)
+    b = make_token_dataset("b", 10, docs_per_shard=40, n_shards=1)
+    ws = make_token_ws(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=32,
+        exhausted_policy="repeat",
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(20):
+        chunk = lane.next_chunk()
+        assert chunk is not None
+        assert len(chunk) == 32
+    assert lane._cursors["a"]._epoch >= 3
+    assert lane._cursors["b"]._epoch >= 3
+
+
+@pytest.mark.timeout(60)
+def test_token_mode_alternating_exhaustion_respects_max_repeats() -> None:
+    """The epoch cap must terminate the stream even under alternating resets."""
+    a = make_token_dataset("a", 10, docs_per_shard=40, n_shards=1)
+    b = make_token_dataset("b", 10, docs_per_shard=40, n_shards=1)
+    ws = make_token_ws(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=32,
+        exhausted_policy="repeat",
+        max_repeats=2,
+    )
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    produced = 0
+    while lane.next_chunk() is not None:
+        produced += 1
+        assert produced < 100, "stream never terminated under max_repeats"
+    assert produced > 0
