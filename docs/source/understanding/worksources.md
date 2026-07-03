@@ -279,6 +279,77 @@ samples than its quota, those leftover samples are dropped — the same
 dataset sizes this is negligible (at most `quota - 1` samples per epoch
 boundary).
 
+### Token-aware mixtures
+
+By default the mixture is enforced in **samples**: 50/50 means half the
+sample pointers come from each dataset.  Whether that is also 50/50 in
+*tokens* depends on your corpus.  If every dataset is preprocessed into
+equal-length sequences, sample and token proportions are the same thing and
+the default is exactly right.  When samples are whole documents instead
+(raw text, or pretokenized without splitting into training sequences),
+length varies wildly across domains: one arXiv paper can span several of
+the model's sequences, while a short email fills only a fraction of one.
+Mixed 50/50 by sample, the model sees far more paper tokens than email
+tokens, so the de-facto mixture at the model diverges from the one you
+declared.  Truncating the long documents would restore the ratio, but only
+by throwing away most of their content.
+
+```{warning}
+Token-aware mixtures do not solve the problem of turning variable-length
+documents into equal-length trainable samples.  In the canonical LLM
+pipeline that is the job of packing (`tokenize` → `pack` → `shuffle`), and
+with imbalanced corpora the packing step needs thought of its own.
+Dedicated packing documentation is in the works.
+```
+
+Passing a `token_estimation` makes the declared weights **token**
+proportions instead.  The WorkSource estimates how many tokens each sample
+pointer is worth and hands out pointers such that the *tokens* arrive at the
+declared ratios:
+
+```python
+from zephon.work.token_estimation import TokenEstimation
+
+ws = StaticMixtureWorkSource(
+    datasets=[fineweb, arxiv],
+    mixture={"fineweb": 0.5, "arxiv": 0.5},   # token proportions
+    token_estimation=TokenEstimation(),
+)
+```
+
+How it works:
+
+- **Priming.**  Once per run, in the driver, the pipeline calibrates a
+  tokens/byte ratio per dataset by fetching a few samples and tokenizing
+  them with the pipeline's tokenizer configuration (truncation and special
+  tokens are accounted for analytically).  Ratios persist in checkpoints, so
+  restored runs never re-measure.  When the heuristics do not fit your data
+  (binary payloads, VLM cost units), pin the ratios or provide a `measure=`
+  callable via {py:class}`~zephon.work.token_estimation.TokenEstimation`.
+- **Per-draw allocation.**  Instead of computing fixed per-chunk quotas
+  (see [above](#chunk-quota-allocation)), the WorkSource fills each chunk
+  one sample at a time, always drawing from the component that is furthest
+  behind on tokens.  Each draw is charged the sample's estimated cost: the
+  shard's average bytes/sample from the shard catalog, times the primed
+  tokens/byte ratio.
+
+The estimation is intentionally coarse.  Shard-average resolution is enough
+to remove the systematic length difference *between* datasets; length
+variation *within* a dataset remains as noise around the target.  Operators
+between fetch and tokenize that change token mass (aggressive filters,
+dedup) are invisible to priming and show up as mixture drift; if you know
+their expected pass rates, fold them into pinned ratios.
+
+Token-aware mixtures do not require
+{py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>`,
+but the two compose.  Each chunk carries the declared token mixture as its
+`target_mixture`, so a downstream `ensure_mixture` aims at your token target
+rather than the chunk's (deliberately skewed) sample composition.  Because
+the source already delivers the target on average, a small bounded buffer
+suffices to smooth the per-document noise, and nothing needs to be dropped.
+If you add one, place it *after* `tokenize` and keep a token-unit
+`weight_by`; the pipeline checks this before any data flows.
+
 ### Lane partitioning
 
 As described in

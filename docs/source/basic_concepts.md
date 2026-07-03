@@ -289,6 +289,31 @@ tokens in each sample. You can also pass `weight_by="samples"` for
 sample-level enforcement, or provide a custom callable. This even works correctly
 when you pack samples and one sample might contain samples that originally stem from different mixing domains.
 
+Reordering can absorb a temporary imbalance, but not a structural one. If
+one dataset's documents are simply longer on average (whether they are
+depends on your corpus; datasets already split into equal-length sequences
+are not affected), its token surplus never stops growing, and
+`ensure_mixture` can only hold the target by eventually dropping samples.
+For that case, declare the mixture in **token units** at the WorkSource:
+
+```python
+from zephon.work.token_estimation import TokenEstimation
+
+ws = StaticMixtureWorkSource(
+    datasets=[fineweb, arxiv],
+    mixture={"fineweb": 0.5, "arxiv": 0.5},  # token proportions
+    token_estimation=TokenEstimation(),
+)
+```
+
+The WorkSource then hands out sample pointers so that the tokens themselves
+arrive at the declared ratios: the long-document dataset simply contributes
+fewer pointers. Downstream, `ensure_mixture` becomes a pure reordering step
+that smooths out the remaining per-document noise. The stream already
+matches the target on average. See
+[WorkSources](understanding/worksources.md#token-aware-mixtures) for how
+the token costs are estimated.
+
 ---
 
 ## Execution: Stages and Runners

@@ -48,6 +48,7 @@ from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
     Batch,
     DecodeText,
+    EnsureMixture,
     FetchOp,
     MapBatchTransform,
     MapTransform,
@@ -61,9 +62,12 @@ from zephon.ops import (
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
+from zephon.work.token_estimation import TokenizeProfile
 
 # TypeVar for stateful_transform state type
 _S = TypeVar("_S")
+
+_OpT = TypeVar("_OpT")
 
 # TypeVar for Pipeline methods that mutate the graph or cached plan state
 _PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
@@ -1273,9 +1277,81 @@ class Pipeline:
         if self._engine is None or self._engine._closed:
             self._engine = Engine(self._plan, self._options, self.ws, spec)
 
+    def _iter_ops(self, op_type: type[_OpT]) -> Iterator[tuple[int, _OpT]]:
+        for index, node in enumerate(self._graph.nodes):
+            if isinstance(node.op, op_type):
+                yield index, node.op
+
+    def _find_op(self, op_type: type[_OpT]) -> tuple[int, _OpT] | None:
+        return next(self._iter_ops(op_type), None)
+
+    def _validate_token_mixture_graph(self) -> tuple[int, TokenizeText] | None:
+        """Validate token-mode ``ensure_mixture`` placement and units.
+
+        Returns the first tokenize op so priming can reuse its profile.
+        """
+        tokenizes = list(self._iter_ops(TokenizeText))
+        tokenize = tokenizes[0] if tokenizes else None
+        if len(tokenizes) > 1:
+            warnings.warn(
+                f"token-aware mixture priming calibrates with the first of "
+                f"{len(tokenizes)} tokenize ops; if a later one determines "
+                f"delivered token counts, pin ratios via "
+                f"TokenEstimation(primer=...).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        tokenize_index = tokenize[0] if tokenize is not None else None
+        for index, op in self._iter_ops(EnsureMixture):
+            if op.weight_by == "samples":
+                raise ValueError(
+                    "token-aware mixtures require ensure_mixture to weigh in "
+                    "token units, but weight_by='samples' was configured. The "
+                    "work source deliberately emits a token-balanced (sample-"
+                    "skewed) stream; enforcing the token target in sample "
+                    "units would fight it. Use weight_by='auto' (default), a "
+                    "token field name, or a token-counting callable."
+                )
+            if tokenize_index is not None and index < tokenize_index:
+                raise ValueError(
+                    "token-aware mixtures require ensure_mixture to run "
+                    "after tokenize: before tokenization there are no token "
+                    "counts, so the operator would enforce the token target "
+                    "in sample units against a deliberately sample-skewed "
+                    "stream."
+                )
+        return tokenize
+
+    def _prime_worksource(self) -> None:
+        """Prime token-aware work sources before worker pickling.
+
+        Restores keep checkpointed ratios instead of remeasuring, so a
+        tokenizer or data change cannot silently shift the mixture.
+        """
+        if not self.ws.requires_token_priming:
+            return
+        # Restores still need graph validation even though ratios come from
+        # the checkpoint.
+        tokenize = self._validate_token_mixture_graph()
+        if self._pending_restore is not None:
+            return
+        if self._engine is not None and not self._engine._closed:
+            # After restore, the live clones already carry checkpointed ratios.
+            return
+        profile = TokenizeProfile.from_op(tokenize[1]) if tokenize is not None else None
+        self.ws.prime(
+            io_options=self._options.io_options,
+            tokenize_profile=profile,
+            mp_context=self._options.mp_context,
+        )
+
     def to_torch_dataset(self, stateful: bool = True) -> TorchIterableDatasetType:
         if _importlib_util.find_spec("torch.utils.data") is None:
             raise RuntimeError("to_torch_dataset requires 'torch' to be installed.")
+        # Restores are applied in workers, so the driver cannot know one is
+        # coming: a resume discards these ratios, costing one wasted census
+        # on cold nodes (warm nodes hit the prime cache).
+        self._prime_worksource()
         return TorchPipelineIterableDataset(self, stateful=stateful)
 
     def to_indexable_torch_dataset(self) -> TorchDatasetType:
@@ -1390,6 +1466,7 @@ class Pipeline:
         # Validation runs eagerly so the failure surfaces at iter() time, not
         # after the first next().
         self._run_auto_validation()
+        self._prime_worksource()
         return self._iter_body()
 
     def _iter_body(self) -> Iterator[Any]:
@@ -1604,6 +1681,9 @@ class Pipeline:
         # Cached state from a completed subprocess iteration.
         if self._last_state is not None:
             return self._last_state
+        # The only engine build that bypasses __iter__: prime first, or the
+        # checkpoint serializes unprimed token lanes no restore can prime.
+        self._prime_worksource()
         self._ensure()
         assert self._engine is not None
         return self._engine.state_dict()

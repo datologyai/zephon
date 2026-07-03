@@ -811,6 +811,13 @@ class EnsureMixture(DefaultSetup):
             obsolete_drain_rate=obsolete_drain_rate,
         )
 
+    @property
+    def weight_by(
+        self,
+    ) -> Callable[[SampleRecord], float] | Literal["samples", "auto"] | str:
+        """Configured sample/token weighting policy."""
+        return self._config.weight_by
+
     def setup(
         self,
         ctx: OpContext,
