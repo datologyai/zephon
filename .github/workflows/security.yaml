@@ -14,7 +14,7 @@ on:
 
 jobs:
   dependency-scan:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 10
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
