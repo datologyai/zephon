@@ -22,6 +22,12 @@ import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from zephon.utils.ipc import (
+    DEFAULT_IPC_BUFFER_BYTES,
+    DEFAULT_IPC_TRANSPORT,
+    IpcTransport,
+)
+
 if TYPE_CHECKING:
     from zephon.core.engine import RuntimeOptions
     from zephon.core.graph import Plan, Stage
@@ -47,6 +53,9 @@ class StageRuntimeSpec:
     shm_min_size: int
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
+    # See RuntimeOptions.ipc_transport / ipc_buffer_bytes; process runners only.
+    ipc_transport: IpcTransport = DEFAULT_IPC_TRANSPORT
+    ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +416,8 @@ def resolve_runtime_spec(
                 coalesce_tensors=opts.coalesce_tensors,
                 shm_min_size=opts.shm_min_size,
                 max_worker_retries=opts.max_worker_retries,
+                ipc_transport=opts.ipc_transport,
+                ipc_buffer_bytes=opts.ipc_buffer_bytes,
             )
         )
 

@@ -4,7 +4,7 @@
 """MTP mode: subprocess-based pipeline execution with seq-number ACK protocol.
 
 The Engine runs in a non-daemon subprocess for GIL isolation.  Items flow
-from the subprocess to the main process via a bounded ``mp.Queue``.
+from the subprocess to the main process via a bounded ``NamedQueue``.
 Acknowledgements flow back via a ``mp.Pipe`` as lightweight ``(tag, seq)``
 tuples — the full ``NotifyPayload`` never crosses the process boundary.
 
@@ -69,7 +69,13 @@ from zephon.core.notify import (
     _extract_notify_args,
     is_sentinel,
 )
+from zephon.runners.queue import NamedQueue, QueueFeederError
 from zephon.utils.fault_handling import setup_faulthandler
+from zephon.utils.ipc import (
+    DEFAULT_IPC_TRANSPORT,
+    DEFAULT_MTP_BUFFER_BYTES,
+    IpcTransport,
+)
 from zephon.utils.rank import rank_ctx
 
 
@@ -371,6 +377,8 @@ class MTPPipeline:
         pipeline: Any,
         *,
         buffer_size: int = 16,
+        buffer_bytes: int = DEFAULT_MTP_BUFFER_BYTES,
+        transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
         restore_ckpt: dict[str, Any] | None = None,
     ) -> None:
         import cloudpickle
@@ -383,7 +391,17 @@ class MTPPipeline:
         # below must share this context with the Process.
         ctx = _resolve_mp_context(pipeline._options.mp_context)
 
-        self._data_q: mp.Queue = ctx.Queue(maxsize=buffer_size)  # type: ignore[type-arg]
+        # NamedQueue over plain ctx.Queue: feeder serialization failures
+        # raise QueueFeederError on get() instead of silently dropping
+        # items, and the socketpair transport gives the feeder buffer_bytes
+        # of run-ahead (a pipe caps at 64 KiB).
+        self._data_q: mp.Queue = NamedQueue(  # type: ignore[type-arg]
+            "mtp-data",
+            maxsize=buffer_size,
+            ctx=ctx,
+            transport=transport,
+            buffer_bytes=buffer_bytes,
+        )
 
         # Control pipe: main_conn (main process) ↔ sub_conn (subprocess)
         self._main_conn, sub_conn = ctx.Pipe()
@@ -615,6 +633,14 @@ class MTPPipeline:
                     return
             except _queue.Empty:
                 pass
+            except QueueFeederError as exc:
+                # Raising would escape generator teardown into user code —
+                # demote to a warning; STATE_DICT may still arrive.
+                warnings.warn(
+                    f"[zephon] MTP mode: data-queue feeder error while "
+                    f"draining for final-state capture: {exc}",
+                    stacklevel=2,
+                )
 
         if self._last_state is None:
             warnings.warn(

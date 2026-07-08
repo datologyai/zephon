@@ -1535,6 +1535,8 @@ class Pipeline:
         sp = MTPPipeline(
             self,
             buffer_size=resolve_mtp_buffer(self._options),
+            buffer_bytes=self._options.mtp_buffer_bytes,
+            transport=self._options.ipc_transport,
             restore_ckpt=self._pending_restore,
         )
         self._sp = sp

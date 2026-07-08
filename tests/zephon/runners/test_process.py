@@ -915,19 +915,24 @@ def test_process_sentinel_bypass_accumulator_and_process_many() -> None:
 # ---------------------------------------------------------------------------
 
 from zephon.runners.queue import NamedQueue, QueueFeederError
+from zephon.utils.ipc import IpcTransport
 from zephon.utils.shm import is_shm_error, shm_has_free_space
 
 
+@pytest.mark.parametrize("transport", ["socketpair", "pipe"])
 class TestFeederErrorDetection:
-    """Tests for NamedQueue's feeder-error-to-sentinel mechanism."""
+    """Tests for NamedQueue's feeder-error-to-sentinel mechanism.
 
-    def _make_queue(self, maxsize: int = 0) -> NamedQueue:
+    Parametrized over both transports: the sentinel path must survive the
+    default socketpair as well as the stock pipe."""
+
+    def _make_queue(self, maxsize: int, transport: IpcTransport) -> NamedQueue:
         ctx = multiprocessing.get_context("spawn")
-        return NamedQueue("test", maxsize=maxsize, ctx=ctx)
+        return NamedQueue("test", maxsize=maxsize, ctx=ctx, transport=transport)
 
-    def test_sentinel_round_trip(self) -> None:
+    def test_sentinel_round_trip(self, transport: IpcTransport) -> None:
         """_on_queue_feeder_error should enqueue a sentinel that get() raises on."""
-        q = self._make_queue(maxsize=10)
+        q = self._make_queue(maxsize=10, transport=transport)
         try:
             # Start the feeder thread — it only starts on the first put().
             # In production, _on_queue_feeder_error is called BY the running
@@ -947,9 +952,9 @@ class TestFeederErrorDetection:
         finally:
             q.close()
 
-    def test_sentinel_contains_full_traceback(self) -> None:
+    def test_sentinel_contains_full_traceback(self, transport: IpcTransport) -> None:
         """The raised QueueFeederError should contain the full traceback."""
-        q = self._make_queue(maxsize=10)
+        q = self._make_queue(maxsize=10, transport=transport)
         try:
             q.put("_start")
             q.get(timeout=5)
@@ -969,9 +974,9 @@ class TestFeederErrorDetection:
         finally:
             q.close()
 
-    def test_normal_items_pass_through(self) -> None:
+    def test_normal_items_pass_through(self, transport: IpcTransport) -> None:
         """get() should return normal items unchanged."""
-        q = self._make_queue(maxsize=10)
+        q = self._make_queue(maxsize=10, transport=transport)
         try:
             q.put("hello")
             q.put(42)
@@ -980,9 +985,11 @@ class TestFeederErrorDetection:
         finally:
             q.close()
 
-    def test_sentinel_interleaved_with_normal_items(self) -> None:
+    def test_sentinel_interleaved_with_normal_items(
+        self, transport: IpcTransport
+    ) -> None:
         """Normal items before and after a sentinel should be returned normally."""
-        q = self._make_queue(maxsize=10)
+        q = self._make_queue(maxsize=10, transport=transport)
         try:
             q.put("before")
 
@@ -1000,10 +1007,12 @@ class TestFeederErrorDetection:
         finally:
             q.close()
 
-    def test_feeder_error_fallback_stderr(self, capsys: pytest.CaptureFixture) -> None:
+    def test_feeder_error_fallback_stderr(
+        self, capsys: pytest.CaptureFixture, transport: IpcTransport
+    ) -> None:
         """When semaphore cannot be acquired, error should be printed to stderr."""
         # Create a queue with maxsize=1, fill it, so no semaphore slot is available.
-        q = self._make_queue(maxsize=1)
+        q = self._make_queue(maxsize=1, transport=transport)
         try:
             q.put("fill")  # fills the single slot
 
@@ -1833,11 +1842,13 @@ class TestResilientWorkers:
         ),
     )
     @pytest.mark.timeout(90)
+    @pytest.mark.parametrize("ipc_transport", ["socketpair", "pipe"])
     def test_multiworker_crash_with_proc_syscall_recovery(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ipc_transport: str
     ) -> None:
         """Smoke test: parallelism>1 + crash + ``/proc/syscall``-only
-        recovery doesn't hang and produces correct output.
+        recovery doesn't hang and produces correct output, over both
+        IPC transports.
 
         Disables ``rotation`` (parallelism=1-only anyway) and
         ``timed_acquire`` so every worker death routes through the
@@ -1867,6 +1878,7 @@ class TestResilientWorkers:
                 stage_output_mode="stream_items",
                 max_worker_retries=3,
                 mp_context=_fast_spawn_ctx(),
+                ipc_transport=ipc_transport,
             )
             # 24 items lets both workers do meaningful concurrent work
             # around the time of the crash.  Det mode means we'll catch

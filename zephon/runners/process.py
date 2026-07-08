@@ -57,6 +57,11 @@ from zephon.utils import (
     dump_semaphore_registry,
 )
 from zephon.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
+from zephon.utils.ipc import (
+    DEFAULT_IPC_BUFFER_BYTES,
+    DEFAULT_IPC_TRANSPORT,
+    IpcTransport,
+)
 from zephon.utils.rank import rank_ctx
 
 # Initialize faulthandler at module load time.  Also runs when this module
@@ -704,11 +709,15 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         coalesce_tensors: bool = True,
         shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
         max_worker_retries: int = 0,
+        ipc_transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
+        ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES,
     ) -> None:
         self._coalesce_tensors = coalesce_tensors
         self._shm_min_size = shm_min_size
         self._max_worker_retries = max(0, int(max_worker_retries))
         self._queue_capacity = max(1, queue_capacity)
+        self._ipc_transport = ipc_transport
+        self._ipc_buffer_bytes = ipc_buffer_bytes
         ctx = mp_context or mp.get_context("spawn")
         self._mp_context: BaseContext = ctx
         # Resilient respawn requires spawn/forkserver: fork + threads +
@@ -796,7 +805,13 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         size = 0 if maxsize is None else maxsize
         return cast(
             _ClosableQueue[Any],
-            NamedQueue(name, maxsize=size, ctx=self._mp_context),
+            NamedQueue(
+                name,
+                maxsize=size,
+                ctx=self._mp_context,
+                transport=self._ipc_transport,
+                buffer_bytes=self._ipc_buffer_bytes,
+            ),
         )
 
     @staticmethod

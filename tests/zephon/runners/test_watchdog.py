@@ -13,30 +13,53 @@ import multiprocessing as mp
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
+
+# NOTE: keep zephon imports function-local.  Forkserver children
+# re-import this module; a module-level zephon import adds seconds of
+# child startup that the timed /proc-sampling tests race against.
 
 linux_only = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="/proc/PID/syscall is Linux-specific",
 )
 
+#: Both NamedQueue transports.  The /proc introspection must identify a
+#: live writer over either — a transport it can't resolve makes every
+#: worker look like a non-writer, and the watchdog would force-release
+#: ``_wlock`` while a live writer holds it.
+TRANSPORTS = ["pipe", "socketpair"]
+
+
+def _connection_pair(
+    transport: str, ctx: mp.context.BaseContext
+) -> tuple["mp.connection.Connection", "mp.connection.Connection"]:
+    """Return a (reader, writer) Connection pair over the given transport."""
+    from zephon.utils.ipc import socketpair_connections
+
+    if transport == "socketpair":
+        return socketpair_connections()
+    return ctx.Pipe(duplex=False)
+
 
 def _writer_loop(writer: "mp.connection.Connection") -> None:  # pragma: no cover
     """Child target: write to ``writer`` forever.
 
     Writes 4 KiB chunks with no sleep.  The reader end is intentionally
-    *not* drained in the parent, so the kernel pipe buffer fills (64 KiB
-    by default) within microseconds and subsequent ``os.write`` calls
-    block until space is available — which is never, under this test.
-    The child therefore spends nearly 100 % of its wall time inside the
-    ``write`` syscall, which is exactly the signature the watchdog's
-    ``/proc/PID/syscall`` introspection is designed to catch.
+    *not* drained in the parent, so the kernel buffer (64 KiB for a
+    pipe, ``SO_SNDBUF`` for a socketpair) fills within microseconds and
+    subsequent ``os.write`` calls block until space is available —
+    which is never, under this test.  The child therefore spends nearly
+    100 % of its wall time inside the ``write`` syscall, which is
+    exactly the signature the watchdog's ``/proc/PID/syscall``
+    introspection is designed to catch.
 
-    ``mp.Pipe()`` Connection objects are passed across process
-    boundaries via ``SCM_RIGHTS`` (so the child receives a *fresh* fd
-    number for the same underlying pipe — exactly the case our
-    inode-based lookup needs to handle).
+    Connection objects are passed across process boundaries via
+    ``SCM_RIGHTS`` (so the child receives a *fresh* fd number for the
+    same underlying kernel object — exactly the case our inode-based
+    lookup needs to handle).
     """
     try:
         fd = writer.fileno()
@@ -77,15 +100,57 @@ def test_get_pipe_write_inode_matches_fstat() -> None:
         os.close(w)
 
 
+def test_get_pipe_write_inode_matches_fstat_socketpair() -> None:
+    """Socket write ends qualify too — NamedQueue's default transport."""
+    from zephon.runners.watchdog import _get_pipe_write_inode
+    from zephon.utils.ipc import socketpair_connections
+
+    reader, writer = socketpair_connections()
+    try:
+
+        class _FakeQueue:
+            _writer = writer
+
+        inode = _get_pipe_write_inode(_FakeQueue())
+        assert inode is not None
+        assert inode == os.fstat(writer.fileno()).st_ino
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_get_pipe_write_inode_fails_closed_on_unknown_fd_type(
+    tmp_path: Path,
+) -> None:
+    """A write end that is neither a pipe nor a socket must yield None.
+
+    ``_find_worker_fds_for_inode`` can only resolve ``pipe:[inode]`` /
+    ``socket:[inode]`` symlinks, so an unrecognized fd type would make
+    every worker look like a non-writer and the recovery chain would
+    force-release ``_wlock`` under a live writer.  ``None`` instead
+    degrades to "can't introspect — leave the lock alone".
+    """
+    from zephon.runners.watchdog import _get_pipe_write_inode
+
+    with open(tmp_path / "regular_file", "wb") as f:
+
+        class _FakeQueue:
+            _writer = f
+
+        assert _get_pipe_write_inode(_FakeQueue()) is None
+
+
 @linux_only
-def test_find_worker_fds_for_inode_resolves_inherited_pipe() -> None:
+@pytest.mark.parametrize("transport", TRANSPORTS)
+def test_find_worker_fds_for_inode_resolves_inherited_writer(transport: str) -> None:
     """A child that received a Connection across SCM_RIGHTS has a
-    *different* fd number for the same pipe; the helper must still
-    resolve the worker fd by matching inodes."""
+    *different* fd number for the same kernel object; the helper must
+    still resolve the worker fd by matching inodes — over both the
+    ``pipe:[inode]`` and ``socket:[inode]`` symlink forms."""
     from zephon.runners.watchdog import _find_worker_fds_for_inode
 
     ctx = mp.get_context("forkserver")
-    reader, writer = ctx.Pipe(duplex=False)
+    reader, writer = _connection_pair(transport, ctx)
     try:
         # Inode of the parent's view of the write end.
         parent_inode = os.fstat(writer.fileno()).st_ino
@@ -125,22 +190,27 @@ def test_find_worker_fds_for_inode_resolves_inherited_pipe() -> None:
 
 
 @linux_only
-def test_pid_any_thread_in_write_to_fds_detects_active_writer() -> None:
+@pytest.mark.parametrize("transport", TRANSPORTS)
+def test_pid_any_thread_in_write_to_fds_detects_active_writer(transport: str) -> None:
     """``_pid_any_thread_in_write_to_fds`` must observe the child in a
     write syscall to one of its target fds at least once across a short
-    sample window."""
+    sample window.  Connection does raw ``os.write`` on socket fds too,
+    so both transports surface as write-family syscalls."""
     from zephon.runners.watchdog import (
         _find_worker_fds_for_inode,
         _pid_any_thread_in_write_to_fds,
     )
 
     ctx = mp.get_context("forkserver")
-    reader, writer = ctx.Pipe(duplex=False)
+    reader, writer = _connection_pair(transport, ctx)
     try:
         proc = ctx.Process(target=_writer_loop, args=(writer,), daemon=True)
         proc.start()
         try:
-            time.sleep(0.2)  # let child reach its loop
+            # Wait for the child's first chunk rather than racing its
+            # startup; poll() peeks without draining, so the buffer
+            # still fills and the child still blocks in write().
+            assert reader.poll(timeout=30.0), "child never wrote its first chunk"
             inode = os.fstat(writer.fileno()).st_ino
             assert proc.pid is not None
             child_fds: set[int] = set()
@@ -177,19 +247,23 @@ def test_pid_any_thread_in_write_to_fds_detects_active_writer() -> None:
 
 
 @linux_only
-def test_proc_syscall_no_live_writer_detects_active_writer() -> None:
+@pytest.mark.parametrize("transport", TRANSPORTS)
+def test_proc_syscall_no_live_writer_detects_active_writer(transport: str) -> None:
     """The integrated multi-sample helper should return False (live
-    writer present) for a child actively writing to the pipe inode.
+    writer present) for a child actively writing to the write-end inode.
 
     This is the integration-of-the-helpers test: any one of inode
     lookup, multi-sampling, or syscall parsing being broken would let
     this fail — i.e. ``_proc_syscall_no_live_writer`` would falsely
     return True and the watchdog would force-release a non-wedged
-    lock."""
+    lock.  The socketpair leg is the sharp edge: a lookup that only
+    understands ``pipe:[inode]`` returns an empty fd set for every live
+    worker and positively confirms "no live writer" over the default
+    transport."""
     from zephon.runners.watchdog import _proc_syscall_no_live_writer
 
     ctx = mp.get_context("forkserver")
-    reader, writer = ctx.Pipe(duplex=False)
+    reader, writer = _connection_pair(transport, ctx)
     try:
         live_proc = ctx.Process(target=_writer_loop, args=(writer,), daemon=True)
         live_proc.start()
@@ -199,7 +273,8 @@ def test_proc_syscall_no_live_writer_detects_active_writer() -> None:
         dead_proc.join(timeout=5.0)
         assert not dead_proc.is_alive(), "sentinel should have exited"
         try:
-            time.sleep(0.2)
+            # As above: wait for the first chunk, don't race startup.
+            assert reader.poll(timeout=30.0), "child never wrote its first chunk"
             inode = os.fstat(writer.fileno()).st_ino
             result = _proc_syscall_no_live_writer(
                 workers=[live_proc, dead_proc],

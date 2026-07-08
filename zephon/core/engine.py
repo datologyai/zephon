@@ -81,6 +81,12 @@ from zephon.runners.inline import InlineStageRunner
 from zephon.runners.process import ProcessStageRunner
 from zephon.runners.threads import ThreadStageRunner
 from zephon.utils.disk import check_cache_disk_space
+from zephon.utils.ipc import (
+    DEFAULT_IPC_BUFFER_BYTES,
+    DEFAULT_IPC_TRANSPORT,
+    DEFAULT_MTP_BUFFER_BYTES,
+    IpcTransport,
+)
 from zephon.utils.rank import rank_ctx
 from zephon.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
 from zephon.work import MixtureReadConfig, WorkSource
@@ -238,6 +244,14 @@ class RuntimeOptions:
     # Maximum in-flight items in the queue between ops within a stage.
     # None = auto-derived from resolved prefetch_batches (max(8, prefetch_batches)).
     op_queue_capacity: int | None = None
+    # Transport under process-runner and MTP IPC queues. "socketpair"
+    # (default) is exempt from the shared per-UID pipe budget and honors
+    # the *_buffer_bytes requests below; "pipe" is stock mp.Queue.
+    ipc_transport: IpcTransport = DEFAULT_IPC_TRANSPORT
+    # Kernel buffer request per process-runner IPC queue (socketpair only).
+    # Best-effort: Linux clamps to 2 * net.core.wmem_max (416 KiB stock),
+    # macOS to kern.ipc.maxsockbuf.
+    ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES
     mixture_config: MixtureReadConfig | None = None
     io_options: StoreOptions = field(default_factory=StoreOptions)
     # Expert knob:
@@ -275,6 +289,12 @@ class RuntimeOptions:
     # Bounded IPC queue depth for MTP mode.
     # None = auto-derived from resolved prefetch_batches (max(4, prefetch_batches // 2)).
     mtp_buffer: int | None = None
+    # Same as ipc_buffer_bytes but for the MTP data queue; larger so the
+    # subprocess feeder can serialize ahead of consumer demand instead of
+    # stalling on the subprocess GIL at every next().  Stock Linux clamps
+    # this to 2 * net.core.wmem_max (~416 KiB); raise that sysctl for the
+    # full run-ahead.
+    mtp_buffer_bytes: int = DEFAULT_MTP_BUFFER_BYTES
     # Automatically capture a checkpoint from the MTP subprocess after normal
     # iteration completion.  Set to False when multi-rank aggregation is not
     # available (e.g. no aggregate_dir, or ranks run sequentially rather than
@@ -885,6 +905,8 @@ class Engine:
                         coalesce_tensors=spec.coalesce_tensors,
                         shm_min_size=spec.shm_min_size,
                         max_worker_retries=spec.max_worker_retries,
+                        ipc_transport=spec.ipc_transport,
+                        ipc_buffer_bytes=spec.ipc_buffer_bytes,
                         **common,
                     )
                 )

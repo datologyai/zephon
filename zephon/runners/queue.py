@@ -15,8 +15,14 @@ import sys
 from dataclasses import dataclass
 from multiprocessing import queues as mp_queues
 from multiprocessing.context import BaseContext
-from typing import Any
+from typing import Any, get_args
 
+from zephon.utils.ipc import (
+    DEFAULT_IPC_BUFFER_BYTES,
+    DEFAULT_IPC_TRANSPORT,
+    IpcTransport,
+    socketpair_connections,
+)
 from zephon.utils.semaphore import SafeSemLock
 from zephon.utils.shm import is_shm_error, shm_usage_str, wait_for_shm_space
 
@@ -64,12 +70,35 @@ class NamedQueue(mp_queues.Queue):
       backoff, blocking the ``_feed`` thread to provide natural backpressure.
     * **Other errors**: enqueue a :class:`FeederError` sentinel so the
       consumer's ``get()`` raises :class:`QueueFeederError`.
+
+    ``transport="socketpair"`` (default) swaps the stock ``os.pipe()`` for an
+    AF_UNIX socketpair carrying ``buffer_bytes`` of kernel buffering (see
+    :mod:`zephon.utils.ipc` for why); ``"pipe"`` keeps stock behavior.
     """
 
-    def __init__(self, name: str, maxsize: int = 0, *, ctx: BaseContext):
+    def __init__(
+        self,
+        name: str,
+        maxsize: int = 0,
+        *,
+        ctx: BaseContext,
+        transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
+        buffer_bytes: int | None = DEFAULT_IPC_BUFFER_BYTES,
+    ) -> None:
+        if transport not in get_args(IpcTransport):
+            raise ValueError(
+                f"Unknown queue transport {transport!r}; expected 'socketpair' or 'pipe'"
+            )
         super().__init__(maxsize, ctx=ctx)
         self._ignore_epipe = True
         self._name_label = name
+
+        if transport == "socketpair":
+            self._reader.close()
+            self._writer.close()
+            self._reader, self._writer = socketpair_connections(buffer_bytes)
+            # Rebinds _send_bytes/_recv_bytes/_poll to the new pair.
+            self._reset()
 
         # Wrap all semaphores with SafeSemLock for coordinated cleanup
         # in free-threaded Python where GC finalizers run in background threads

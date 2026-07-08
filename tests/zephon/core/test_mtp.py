@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 from typing import Any
 from unittest import mock
 
@@ -13,7 +14,9 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
+from zephon.core._mtp import MTPPipeline
 from zephon.core.constants import SampleBatch, SampleRecord
+from zephon.runners.queue import NamedQueue
 
 
 def _fake_ckpt(**overrides: Any) -> dict[str, Any]:
@@ -94,6 +97,39 @@ class TestMTPEarlyBreak:
             if count >= 3:
                 break
         assert count == 3
+
+
+class TestCaptureFinalStateFeederError:
+    """``capture_final_state`` runs in generator teardown — a data-queue
+    feeder error must surface as a warning, not raise into user code."""
+
+    def test_feeder_error_warns_and_preserves_state(self) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        q = NamedQueue("mtp-data-test", maxsize=4, ctx=ctx)
+        try:
+            # Start the feeder thread, then inject a serialization
+            # failure; the FeederError sentinel makes a later get() raise
+            # QueueFeederError mid-drain.
+            q.put("item")
+            try:
+                raise TypeError("cannot pickle 'generator' object")
+            except TypeError as e:
+                q._on_queue_feeder_error(e, "obj")
+
+            sp = object.__new__(MTPPipeline)
+            sp._closed = False
+            sp._data_q = q
+            sp._main_conn = mock.Mock(**{"poll.return_value": False})
+            sp._process = mock.Mock(**{"is_alive.return_value": True})
+            prior_state = {"prior": True}
+            sp._last_state = prior_state
+
+            with pytest.warns(UserWarning, match="feeder error"):
+                sp.capture_final_state(timeout=0.5)
+
+            assert sp._last_state is prior_state
+        finally:
+            q.close()
 
 
 class TestMTPCheckpoint:

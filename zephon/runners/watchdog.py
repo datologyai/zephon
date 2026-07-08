@@ -38,7 +38,8 @@ This module implements a tiered strategy chain:
 3. **`/proc/PID/syscall` introspection** (Linux only,
    ``parallelism > 1``).  After a timed-acquire timeout, check whether
    any live worker thread is currently in a ``write``/``writev``/
-   ``pwrite``/``pwritev`` syscall to the result-queue pipe fd.  If yes,
+   ``pwrite``/``pwritev`` syscall to the result-queue transport fd
+   (pipe or socketpair, per ``NamedQueue``'s transport).  If yes,
    the lock is legitimately held by a live writer (e.g. blocked in
    ``os.write`` under pump backpressure); leave it alone.  If no, the
    lock holder must have been the dead worker; force-release once.
@@ -59,6 +60,7 @@ stream by allowing two concurrent writers).  Known limitation.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import time
 from multiprocessing.process import BaseProcess
@@ -323,20 +325,23 @@ def _unwrap_wlock(result_queue: Any) -> Any:
     return inner if inner is not None else wrapper
 
 
-# --- Linux /proc-based pipe-inode introspection ---------------------------
+# --- Linux /proc-based write-end-inode introspection -----------------------
 #
-# We match by pipe **inode** rather than by fd number because fd numbers
+# We match by **inode** rather than by fd number because fd numbers
 # are process-local: when ``mp.Queue`` is sent across processes via
-# forkserver / spawn, the receiving process gets the pipe via
+# forkserver / spawn, the receiving process gets the transport via
 # ``recv_fds(SCM_RIGHTS)``, which yields a *fresh fd number* pointing to
-# the same kernel pipe object.  The parent's fd 5 may be the worker's
+# the same kernel object.  The parent's fd 5 may be the worker's
 # fd 8.  Matching by ``arg0 == parent_fd`` would never identify the
 # worker as a live writer.
 #
-# Inodes survive fd renumbering — both ends of the same pipe see the
-# same inode.  ``/proc/PID/fd/N`` symlinks resolve to ``pipe:[INODE]``
-# for pipe fds, so we can map worker fds → inode and compare to the
-# parent's pipe inode.
+# Inodes survive fd renumbering.  ``NamedQueue``'s transport is either a
+# pipe or an AF_UNIX socketpair; ``/proc/PID/fd/N`` symlinks resolve to
+# ``pipe:[INODE]`` / ``socket:[INODE]``, so we can map worker fds → inode
+# and compare to the parent's write-end inode.  A pipe's two ends share
+# one inode; a socketpair's two endpoints have *distinct* inodes — the
+# match still works because workers hold SCM_RIGHTS dups of the parent's
+# writer endpoint, which carry the writer's inode.
 
 # Number of /proc/PID/syscall samples to take when looking for a live
 # writer.  A live worker that's actively producing should be observed
@@ -351,20 +356,29 @@ _PROC_SAMPLE_INTERVAL_S = 0.025
 
 
 def _get_pipe_write_inode(result_queue: Any) -> int | None:
-    """Return the inode of ``result_queue``'s pipe write end, or ``None``.
+    """Return the inode of ``result_queue``'s write-end fd, or ``None``.
 
     ``os.fstat(fd).st_ino`` works regardless of process-local fd
-    numbering — the pipe inode is shared across every process that has
-    a handle to the pipe.
+    numbering — the inode is shared by every dup of the same pipe or
+    socketpair endpoint.
+
+    Only pipe and socket fds qualify: those are the two ``NamedQueue``
+    transports, and the only fd types
+    :func:`_find_worker_fds_for_inode` can resolve in ``/proc/PID/fd``.
+    Any other fd type returns ``None`` — the recovery chain then leaves
+    the lock alone rather than force-releasing on a vacuous
+    "no worker holds this fd" match.
     """
     writer = getattr(result_queue, "_writer", None)
     if writer is None:
         return None
     try:
-        fd = writer.fileno()
-        return int(os.fstat(fd).st_ino)
+        st = os.fstat(writer.fileno())
     except Exception:  # noqa: BLE001 - best effort
         return None
+    if not (stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode)):
+        return None
+    return int(st.st_ino)
 
 
 def _proc_syscall_no_live_writer(
@@ -442,15 +456,17 @@ def _proc_syscall_no_live_writer(
 
 
 def _find_worker_fds_for_inode(pid: int, inode: int) -> tuple[set[int], bool]:
-    """Resolve fds in process ``pid`` that point to a pipe with ``inode``.
+    """Resolve fds in process ``pid`` that point to a pipe or socket with ``inode``.
 
     Returns ``(fds, ok)`` where ``fds`` is the set of file descriptors
-    in process ``pid`` that point to a pipe with the given inode, and
-    ``ok`` is False if we couldn't read ``/proc/PID/fd`` in a way that
-    suggests the process is alive but inaccessible.
+    in process ``pid`` that point to a pipe or socket with the given
+    inode, and ``ok`` is False if we couldn't read ``/proc/PID/fd`` in
+    a way that suggests the process is alive but inaccessible.
 
     Reads ``/proc/PID/fd/N`` symlinks; pipe fds resolve to the form
-    ``pipe:[NNNNN]``.
+    ``pipe:[NNNNN]`` and socket fds to ``socket:[NNNNN]`` — both
+    ``NamedQueue`` transports must match, else every worker looks like
+    a non-writer and the caller would falsely force-release.
 
     A FileNotFoundError on the directory means the process exited
     between ``proc.is_alive()`` and this read — we treat that as
@@ -482,10 +498,14 @@ def _find_worker_fds_for_inode(pid: int, inode: int) -> tuple[set[int], bool]:
             # silent skip would let the caller conclude "no matching
             # fd → not a writer" and force-release.  Fail closed.
             return matching, False
-        if not target.startswith("pipe:[") or not target.endswith("]"):
+        if target.endswith("]") and target.startswith("pipe:["):
+            inode_text = target[6:-1]
+        elif target.endswith("]") and target.startswith("socket:["):
+            inode_text = target[8:-1]
+        else:
             continue
         try:
-            target_inode = int(target[6:-1])
+            target_inode = int(inode_text)
         except ValueError:
             continue
         if target_inode != inode:
