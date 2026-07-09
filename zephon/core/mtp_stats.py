@@ -15,7 +15,9 @@ class MTPQueueStats:
     ``depth`` counts queued items, which may not have been pickled yet;
     ``staged_bytes`` is the already-pickled data in the kernel transport
     buffer, readable without the feeder running.  Zero staged with ``depth``
-    near ``capacity`` means the feeder is starved.
+    near ``capacity`` means the feeder is starved.  ``prefetch_depth`` counts
+    items already drained into the main-process prefetch buffer; it is
+    sampled without locking and may be slightly stale.
 
     A field is -1 when unmeasurable: ``depth`` on macOS (``sem_getvalue`` is
     unsupported there), ``staged_bytes`` once the queue is closed.
@@ -29,3 +31,6 @@ class MTPQueueStats:
 
     staged_bytes: int
     """Pickled bytes staged in the transport buffer, consumer-ready."""
+
+    prefetch_depth: int
+    """Deserialized items in the prefetch buffer (0 when ``mtp_prefetch=0``)."""

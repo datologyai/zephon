@@ -205,6 +205,7 @@ class RuntimeOptions:
             └── prefetch_batches             = max(8, 2 × max_workers)
                     ├── op_queue_capacity        = max(8, prefetch_batches)
                     ├── mtp_buffer               = max(4, prefetch_batches // 2)
+                    │       └── mtp_prefetch         = max(4, mtp_buffer // 10)
                     └── default_stage_prefetch   = max(4, prefetch_batches // 4)  [process]
                                                    max(8, prefetch_batches // 2)  [threads/inline]
 
@@ -295,6 +296,10 @@ class RuntimeOptions:
     # this to 2 * net.core.wmem_max (~416 KiB); raise that sysctl for the
     # full run-ahead.
     mtp_buffer_bytes: int = DEFAULT_MTP_BUFFER_BYTES
+    # Size (items) of the main-process buffer that a low-priority thread
+    # prefetches from the MTP data queue, hiding IPC recv + unpickle from
+    # next().  None = auto (max(4, mtp_buffer // 10)); 0 disables the thread.
+    mtp_prefetch: int | None = None
     # Automatically capture a checkpoint from the MTP subprocess after normal
     # iteration completion.  Set to False when multi-rank aggregation is not
     # available (e.g. no aggregate_dir, or ranks run sequentially rather than

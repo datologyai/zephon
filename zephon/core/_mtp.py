@@ -18,6 +18,16 @@ Protocol overview::
       ctrl_conn.recv() → (_ACK, seq)  <────  yield item to training loop
       _notify_item(engine, _pending.pop(seq), use_monotone)
 
+Prefetch thread
+---------------
+A low-priority ``_Prefetcher`` thread in the main process drains ``data_q``
+into a small local buffer so ``next()`` pops an already-deserialized item
+instead of paying the IPC recv + unpickle inline.  The protocol above is
+unchanged: the thread never ACKs, so buffered items are still un-ACK'd —
+absent from ``state_dict()``, replayed on restore — and ACKs happen at pop
+time on the training thread.  ``RuntimeOptions.mtp_prefetch``: None = auto,
+0 = disabled.
+
 Shutdown
 --------
 The subprocess only checks ``ctrl_conn`` for ``_SHUTDOWN`` messages between
@@ -49,6 +59,7 @@ from __future__ import annotations
 
 import ctypes
 import multiprocessing as mp
+import os
 import queue as _queue_mod
 import signal
 import sys
@@ -56,6 +67,7 @@ import threading
 import time
 import traceback
 import warnings
+from collections import deque
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
@@ -125,6 +137,134 @@ class _ErrorSentinel:
     """Subprocess-side exception propagation."""
 
     tb: str
+
+
+# ---------------------------------------------------------------------------
+# Prefetch thread
+# ---------------------------------------------------------------------------
+
+# Auto capacity for mtp_prefetch=None: a small slice of the IPC queue depth.
+_PREFETCH_CAPACITY_DIVISOR = 10
+_PREFETCH_MIN_CAPACITY = 4
+
+# +10 ≈ 1/10 CFS weight — training wins CPU; lower would risk GIL priority inversion.
+_PREFETCH_NICE_DELTA = 10
+
+
+def _prefetch_capacity(buffer_size: int) -> int:
+    """Local prefetch buffer size for a given IPC queue depth."""
+    return max(_PREFETCH_MIN_CAPACITY, buffer_size // _PREFETCH_CAPACITY_DIVISOR)
+
+
+def _lower_thread_priority() -> None:
+    """Best-effort renice of the calling thread (Linux threads are kernel tasks)."""
+    if sys.platform != "linux":
+        return
+    try:
+        tid = threading.get_native_id()
+        nice = os.getpriority(os.PRIO_PROCESS, tid)
+        os.setpriority(os.PRIO_PROCESS, tid, min(19, nice + _PREFETCH_NICE_DELTA))
+    except OSError:
+        pass
+
+
+class _Prefetcher:
+    """Single reader of ``data_q``: a bounded relay in front of the consumer.
+
+    With ``capacity > 0`` a drain thread pre-pops messages into a local deque
+    so ``get()`` returns already-deserialized items; with ``capacity <= 0``
+    there is no thread and ``get()`` reads ``data_q`` directly.  Both modes
+    are transparent: messages come out in order, and exceptions from
+    ``data_q.get()`` (e.g. one-shot ``QueueFeederError`` poisons) re-raise at
+    their stream position.
+
+    Never sends ACKs, so buffered messages stay checkpoint-invisible:
+    un-ACK'd, absent from ``state_dict()``, replayed on restore.
+
+    The thread parks when the buffer is full and lowers its own scheduling
+    priority so the training loop wins CPU contention (Linux only).
+    """
+
+    # data_q poll interval — bounds stop() latency, not throughput.
+    _GET_POLL_S = 0.5
+
+    def __init__(self, data_q: mp.Queue, capacity: int) -> None:  # type: ignore[type-arg]
+        self._data_q = data_q
+        self._capacity = capacity
+        self._buf: deque[Any] = deque()
+        lock = threading.Lock()
+        self._not_empty = threading.Condition(lock)
+        self._not_full = threading.Condition(lock)
+        self._stop_evt = threading.Event()
+        self._thread: threading.Thread | None = None
+        if capacity > 0:
+            self._thread = threading.Thread(
+                target=self._loop,
+                name="zephon-mtp-prefetch",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _loop(self) -> None:
+        _lower_thread_priority()
+        while not self._stop_evt.is_set():
+            with self._not_full:
+                while len(self._buf) >= self._capacity and not self._stop_evt.is_set():
+                    self._not_full.wait()
+            if self._stop_evt.is_set():
+                return
+            try:
+                msg = self._data_q.get(timeout=self._GET_POLL_S)
+            except _queue_mod.Empty:
+                continue
+            except QueueFeederError as exc:
+                # One-shot poison message — the queue stream continues past it.
+                msg, terminal = exc, False
+            except BaseException as exc:  # noqa: BLE001 — re-raised on get()
+                msg, terminal = exc, True
+            else:
+                terminal = isinstance(msg, (_StopSentinel, _ErrorSentinel))
+            with self._not_empty:
+                self._buf.append(msg)
+                self._not_empty.notify()
+            if terminal:
+                return
+
+    @property
+    def buffered(self) -> int:
+        """Buffer depth, sampled without locking — may lag by an item."""
+        return len(self._buf)
+
+    def get(self, timeout: float) -> Any:
+        """Pop the next message; raises ``queue.Empty`` on timeout."""
+        if self._thread is None:
+            return self._data_q.get(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        with self._not_empty:
+            while not self._buf:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _queue_mod.Empty
+                self._not_empty.wait(timeout=remaining)
+            msg = self._buf.popleft()
+            self._not_full.notify()
+        # The drain thread stores exceptions it hit as buffer entries so they
+        # surface here in arrival order.  Genuine data messages are (item, seq)
+        # tuples or sentinel objects, so this check cannot misfire on data.
+        if isinstance(msg, BaseException):
+            raise msg
+        return msg
+
+    def stop(self) -> None:
+        """Stop the drain thread, discarding buffered (never-ACK'd) messages."""
+        if self._thread is None:
+            return
+        self._stop_evt.set()
+        with self._not_full:
+            self._not_full.notify()
+        self._thread.join(timeout=self._GET_POLL_S + 5.0)
+        with self._not_empty:
+            self._buf.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +507,10 @@ class MTPPipeline:
         for item in sp:
             train(item)
         sp.close()
+
+    A ``_Prefetcher`` thread keeps a small local buffer ahead of the
+    consumer so ``next()`` normally returns without touching IPC
+    (``prefetch``: None = auto-size from ``buffer_size``, 0 = disabled).
     """
 
     # Shared-memory array size for per-lane inflight counts.
@@ -380,6 +524,7 @@ class MTPPipeline:
         buffer_size: int = 16,
         buffer_bytes: int = DEFAULT_MTP_BUFFER_BYTES,
         transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
+        prefetch: int | None = None,
         restore_ckpt: dict[str, Any] | None = None,
     ) -> None:
         import cloudpickle
@@ -437,13 +582,19 @@ class MTPPipeline:
         self._exhausted = False
         self._last_state: dict[str, Any] | None = None
 
+        # All data_q reads go through the prefetcher (single reader).  With
+        # capacity 0 it is a plain passthrough; otherwise a low-priority
+        # thread pre-pops messages so __iter__ never blocks on IPC.
+        capacity = _prefetch_capacity(buffer_size) if prefetch is None else prefetch
+        self._prefetch = _Prefetcher(self._data_q, capacity)
+
         # multiprocessing.util.Finalize runs inside _exit_function's
         # _run_finalizers(0) — guaranteed BEFORE non-daemon children are
         # joined, regardless of atexit registration order.
         self._finalizer = Finalize(
             self,
             MTPPipeline._static_close,
-            args=(self._process, self._main_conn, self._data_q),
+            args=(self._process, self._main_conn, self._data_q, self._prefetch),
             exitpriority=10,
         )
 
@@ -488,22 +639,26 @@ class MTPPipeline:
         process: mp.Process,
         main_conn: Connection,
         data_q: mp.Queue,  # type: ignore[type-arg]
+        prefetch: _Prefetcher,
     ) -> None:
         """Ensure subprocess is shut down — used by Finalize."""
+        prefetch.stop()
         _shutdown_process(process, main_conn, data_q)
 
     def __iter__(self) -> Iterator[StreamItem]:
-        """Yield items from the subprocess, ACKing each on dequeue."""
-        import queue as _queue
+        """Yield items from the prefetch buffer, ACKing each on dequeue.
 
+        ACKs are sent here — not in the prefetch thread — so an item is
+        marked consumed only when the training loop actually receives it.
+        """
         while True:
             # Poll with timeout so we can detect a dead subprocess
-            # instead of blocking forever on data_q.get().
+            # instead of blocking forever.
             while True:
                 try:
-                    msg = self._data_q.get(timeout=5.0)
+                    msg = self._prefetch.get(timeout=5.0)
                     break
-                except _queue.Empty:
+                except _queue_mod.Empty:
                     if not self._process.is_alive():
                         self._exhausted = True
                         exitcode = self._process.exitcode
@@ -536,6 +691,7 @@ class MTPPipeline:
             depth=depth,
             capacity=self._buffer_size,
             staged_bytes=self._data_q.staged_bytes(),
+            prefetch_depth=self._prefetch.buffered,
         )
 
     def inflight_summary(self) -> dict[int, int]:
@@ -589,10 +745,10 @@ class MTPPipeline:
     def capture_final_state(self, timeout: float = _CHECKPOINT_TIMEOUT_S) -> None:
         """Best-effort capture of engine state for post-break checkpoint.
 
-        Sends CHECKPOINT, then drains ``data_q`` **without ACKs** to
-        unblock the subprocess's put-retry loop (which calls
-        ``_drain_ctrl`` every 50 ms).  When the subprocess sees
-        CHECKPOINT it responds with STATE_DICT.
+        Sends CHECKPOINT, then drains ``data_q`` (through the prefetcher,
+        its sole reader) **without ACKs** to unblock the subprocess's
+        put-retry loop (which calls ``_drain_ctrl`` every 50 ms).  When
+        the subprocess sees CHECKPOINT it responds with STATE_DICT.
 
         The resulting state reflects only ACK'd items — items drained
         from the queue here are discarded without ACKs, so the engine
@@ -609,8 +765,6 @@ class MTPPipeline:
             self._main_conn.send((_CHECKPOINT, None))
         except (BrokenPipeError, OSError):
             return
-
-        import queue as _queue
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -629,10 +783,10 @@ class MTPPipeline:
                     return
                 # Ignore unexpected tags (e.g. stale responses).
 
-            # Drain one item from data_q (no ACK) to free queue space
-            # and unblock the subprocess's put-retry → _drain_ctrl loop.
+            # Drain one item (no ACK) to free queue space and unblock the
+            # subprocess's put-retry → _drain_ctrl loop.
             try:
-                msg = self._data_q.get(timeout=0.05)
+                msg = self._prefetch.get(timeout=0.05)
                 if isinstance(msg, (_StopSentinel, _ErrorSentinel)):
                     # Subprocess finished — wait for STATE_DICT response.
                     remaining = max(0.0, deadline - time.monotonic())
@@ -644,7 +798,7 @@ class MTPPipeline:
                         except EOFError:
                             pass
                     return
-            except _queue.Empty:
+            except _queue_mod.Empty:
                 pass
             except QueueFeederError as exc:
                 # Raising would escape generator teardown into user code —
@@ -672,4 +826,5 @@ class MTPPipeline:
         self._closed = True
         self._watchdog_stop.set()
         self._finalizer.cancel()
+        self._prefetch.stop()
         _shutdown_process(self._process, self._main_conn, self._data_q, self._exhausted)

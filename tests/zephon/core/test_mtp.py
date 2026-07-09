@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import multiprocessing
+import queue
+import threading
 import time
 from typing import Any
 from unittest import mock
@@ -15,9 +17,15 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
-from zephon.core._mtp import MTPPipeline
+from zephon.core._mtp import (
+    MTPPipeline,
+    _lower_thread_priority,
+    _prefetch_capacity,
+    _Prefetcher,
+    _StopSentinel,
+)
 from zephon.core.constants import SampleBatch, SampleRecord
-from zephon.runners.queue import NamedQueue
+from zephon.runners.queue import NamedQueue, QueueFeederError
 
 
 def _fake_ckpt(**overrides: Any) -> dict[str, Any]:
@@ -80,6 +88,11 @@ class TestMTPBasic:
             assert isinstance(sub_r, SampleRecord)
             assert inline_r.payload == sub_r.payload
 
+    def test_mtp_prefetch_disabled_matches_inline(self) -> None:
+        inline_records = list(_mk_pipe(mtp=False, n_rows=6, chunk_size=6))
+        sub_records = list(_mk_pipe(n_rows=6, chunk_size=6, mtp_prefetch=0))
+        assert [r.payload for r in sub_records] == [r.payload for r in inline_records]
+
     def test_mtp_with_batch(self) -> None:
         pipe = _mk_pipe(n_rows=6, chunk_size=6).batch(microbatch_size=2, drop_last=True)
         batches = list(pipe)
@@ -118,6 +131,8 @@ class TestMTPQueueStats:
         assert stats.capacity == 4
         # depth is -1 on macOS (sem_getvalue unsupported), bounded elsewhere.
         assert stats.depth == -1 or 0 <= stats.depth <= stats.capacity
+        # mtp_buffer=4 → auto prefetch capacity max(4, 4 // 10) = 4.
+        assert 0 <= stats.prefetch_depth <= 4
 
         # With the consumer stalled the producer runs ahead, so pickled
         # items accumulate in the transport buffer.
@@ -130,6 +145,15 @@ class TestMTPQueueStats:
 
         it.close()
         assert pipe.mtp_queue_stats() is None
+
+    def test_prefetch_depth_zero_when_disabled(self) -> None:
+        pipe = _mk_pipe(n_rows=8, chunk_size=4, mtp_prefetch=0)
+        it = iter(pipe)
+        next(it)
+        stats = pipe.mtp_queue_stats()
+        assert stats is not None
+        assert stats.prefetch_depth == 0
+        it.close()
 
 
 class TestCaptureFinalStateFeederError:
@@ -154,15 +178,138 @@ class TestCaptureFinalStateFeederError:
             sp._data_q = q
             sp._main_conn = mock.Mock(**{"poll.return_value": False})
             sp._process = mock.Mock(**{"is_alive.return_value": True})
+            sp._prefetch = _Prefetcher(q, capacity=4)
             prior_state = {"prior": True}
             sp._last_state = prior_state
 
+            # The feeder poison arrives in-band through the prefetch buffer
+            # and is demoted to a warning mid-drain.
             with pytest.warns(UserWarning, match="feeder error"):
                 sp.capture_final_state(timeout=0.5)
 
             assert sp._last_state is prior_state
         finally:
             q.close()
+
+
+class TestPrefetcher:
+    """Unit tests for the main-process prefetch thread."""
+
+    @staticmethod
+    def _named_queue() -> NamedQueue:
+        ctx = multiprocessing.get_context("spawn")
+        return NamedQueue("mtp-prefetch-test", maxsize=32, ctx=ctx)
+
+    @staticmethod
+    def _wait_buffered(p: _Prefetcher, n: int, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while len(p._buf) < n:
+            assert time.monotonic() < deadline, f"buffer never reached {n} items"
+            time.sleep(0.01)
+
+    def test_capacity_rule(self) -> None:
+        assert _prefetch_capacity(2) == 4
+        assert _prefetch_capacity(16) == 4
+        assert _prefetch_capacity(40) == 4
+        assert _prefetch_capacity(50) == 5
+        assert _prefetch_capacity(100) == 10
+
+    def test_order_and_stop_sentinel(self) -> None:
+        q = self._named_queue()
+        try:
+            for k in range(6):
+                q.put((f"item-{k}", k))
+            q.put(_StopSentinel())
+            p = _Prefetcher(q, capacity=3)
+            got = [p.get(timeout=5.0) for _ in range(6)]
+            assert got == [(f"item-{k}", k) for k in range(6)]
+            assert isinstance(p.get(timeout=5.0), _StopSentinel)
+            # Terminal sentinel ends the drain loop.
+            assert p._thread is not None
+            p._thread.join(timeout=5.0)
+            assert not p._thread.is_alive()
+        finally:
+            q.close()
+
+    def test_buffer_stays_bounded(self) -> None:
+        q = self._named_queue()
+        try:
+            for k in range(10):
+                q.put(k)
+            p = _Prefetcher(q, capacity=4)
+            self._wait_buffered(p, 4)
+            # Consumer idle — the thread must park, not keep draining.
+            time.sleep(0.3)
+            assert len(p._buf) == 4
+            assert [p.get(timeout=5.0) for _ in range(10)] == list(range(10))
+            p.stop()
+        finally:
+            q.close()
+
+    def test_get_timeout_raises_empty(self) -> None:
+        q = self._named_queue()
+        try:
+            p = _Prefetcher(q, capacity=4)
+            with pytest.raises(queue.Empty):
+                p.get(timeout=0.1)
+            p.stop()
+        finally:
+            q.close()
+
+    def test_feeder_error_raises_in_band_then_stream_continues(self) -> None:
+        q = self._named_queue()
+        try:
+            q.put("before")
+            try:
+                raise TypeError("cannot pickle 'generator' object")
+            except TypeError as e:
+                q._on_queue_feeder_error(e, "obj")
+            q.put("after")
+
+            p = _Prefetcher(q, capacity=4)
+            assert p.get(timeout=5.0) == "before"
+            with pytest.raises(QueueFeederError):
+                p.get(timeout=5.0)
+            # One-shot poison — same as reading data_q directly, the stream
+            # continues past it.
+            assert p.get(timeout=5.0) == "after"
+            p.stop()
+        finally:
+            q.close()
+
+    def test_stop_joins_thread_and_discards_buffer(self) -> None:
+        q = self._named_queue()
+        try:
+            for k in range(3):
+                q.put(k)
+            p = _Prefetcher(q, capacity=4)
+            self._wait_buffered(p, 3)
+            assert p.buffered == 3
+            p.stop()
+            assert p._thread is not None
+            assert not p._thread.is_alive()
+            assert p.buffered == 0
+        finally:
+            q.close()
+
+    def test_zero_capacity_is_direct_read(self) -> None:
+        q = self._named_queue()
+        try:
+            p = _Prefetcher(q, capacity=0)
+            assert p._thread is None
+            q.put(("item", 0))
+            assert p.get(timeout=5.0) == ("item", 0)
+            with pytest.raises(queue.Empty):
+                p.get(timeout=0.05)
+            p.stop()
+        finally:
+            q.close()
+
+    def test_lower_thread_priority_does_not_raise(self) -> None:
+        t = threading.Thread(target=_lower_thread_priority)
+        t.start()
+        t.join(timeout=5.0)
+        assert not t.is_alive()
 
 
 class TestMTPCheckpoint:
