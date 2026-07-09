@@ -63,6 +63,7 @@ from multiprocessing.util import Finalize
 from typing import Any, Iterator
 
 from zephon.core.constants import SampleRecord, StreamItem
+from zephon.core.mtp_stats import MTPQueueStats
 from zephon.core.notify import (
     NotifyArgs,
     _apply_notify_args,
@@ -395,7 +396,7 @@ class MTPPipeline:
         # raise QueueFeederError on get() instead of silently dropping
         # items, and the socketpair transport gives the feeder buffer_bytes
         # of run-ahead (a pipe caps at 64 KiB).
-        self._data_q: mp.Queue = NamedQueue(  # type: ignore[type-arg]
+        self._data_q: NamedQueue = NamedQueue(
             "mtp-data",
             maxsize=buffer_size,
             ctx=ctx,
@@ -524,6 +525,18 @@ class MTPPipeline:
             self._main_conn.send((_ACK, seq))
             if not is_sentinel(item):
                 yield item
+
+    def queue_stats(self) -> MTPQueueStats:
+        """Sample the hand-off queue occupancy."""
+        try:
+            depth = self._data_q.qsize()
+        except NotImplementedError:  # macOS: sem_getvalue is unsupported
+            depth = -1
+        return MTPQueueStats(
+            depth=depth,
+            capacity=self._buffer_size,
+            staged_bytes=self._data_q.staged_bytes(),
+        )
 
     def inflight_summary(self) -> dict[int, int]:
         """Read per-lane inflight chunk counts from shared memory.

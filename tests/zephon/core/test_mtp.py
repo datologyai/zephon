@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import time
 from typing import Any
 from unittest import mock
 
@@ -97,6 +98,38 @@ class TestMTPEarlyBreak:
             if count >= 3:
                 break
         assert count == 3
+
+
+class TestMTPQueueStats:
+    def test_none_when_inline_or_not_running(self) -> None:
+        pipe = _mk_pipe(mtp=False, n_rows=4, chunk_size=4)
+        assert pipe.mtp_queue_stats() is None
+        list(pipe)
+        assert pipe.mtp_queue_stats() is None
+
+    def test_live_stats_then_none_after_close(self) -> None:
+        pipe = _mk_pipe(n_rows=30, chunk_size=10)
+        assert pipe.mtp_queue_stats() is None
+
+        it = iter(pipe)
+        next(it)
+        stats = pipe.mtp_queue_stats()
+        assert stats is not None
+        assert stats.capacity == 4
+        # depth is -1 on macOS (sem_getvalue unsupported), bounded elsewhere.
+        assert stats.depth == -1 or 0 <= stats.depth <= stats.capacity
+
+        # With the consumer stalled the producer runs ahead, so pickled
+        # items accumulate in the transport buffer.
+        deadline = time.monotonic() + 30
+        while stats.staged_bytes == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+            stats = pipe.mtp_queue_stats()
+            assert stats is not None
+        assert stats.staged_bytes > 0
+
+        it.close()
+        assert pipe.mtp_queue_stats() is None
 
 
 class TestCaptureFinalStateFeederError:

@@ -129,6 +129,7 @@ def test_all_graph_mutating_methods_invalidate_plan() -> None:
             "metrics_snapshot",
             "validate",
             "inflight_summary",
+            "mtp_queue_stats",
             # Adapters — return a wrapper object, do not mutate the graph
             "to_torch_dataset",
             "to_indexable_torch_dataset",

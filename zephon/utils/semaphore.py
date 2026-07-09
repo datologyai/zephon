@@ -240,6 +240,13 @@ class SafeSemLock(Generic[T]):
         """Release the semaphore."""
         self._sem.release()
 
+    def get_value(self) -> int:
+        """Current semaphore value (``Queue.qsize()`` reads this)."""
+        # Pure sem_getvalue read — no cleanup coordination to protect. 3.14's
+        # qsize() calls get_value(); 3.12's uses _semlock._get_value() via the
+        # _semlock property.
+        return self._sem.get_value()
+
     def __enter__(self) -> "SafeSemLock[T]":
         self._sem.acquire()
         return self

@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import socket
 import stat
+import time
 from multiprocessing.connection import Connection
 from typing import cast
 
@@ -105,3 +106,34 @@ class TestNamedQueueTransports:
         ctx = multiprocessing.get_context("spawn")
         with pytest.raises(ValueError, match="Unknown queue transport"):
             NamedQueue("bad", ctx=ctx, transport=cast(IpcTransport, "carrier-pigeon"))
+
+
+class TestStagedBytes:
+    @pytest.mark.parametrize("transport", ["socketpair", "pipe"])
+    def test_tracks_write_and_drain(self, transport: IpcTransport) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        q = NamedQueue("staged", maxsize=8, ctx=ctx, transport=transport)
+        try:
+            assert q.staged_bytes() == 0
+
+            payload = b"x" * 1024
+            q.put(payload)
+            # The feeder thread pickles and writes asynchronously.
+            deadline = time.monotonic() + 10
+            while q.staged_bytes() == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            # Pickled payload plus length framing exceeds the raw size.
+            assert q.staged_bytes() > len(payload)
+
+            assert q.get(timeout=10) == payload
+            assert q.staged_bytes() == 0
+        finally:
+            q.close()
+            q.join_thread()
+
+    def test_closed_queue_reports_minus_one(self) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        q = NamedQueue("staged-closed", maxsize=2, ctx=ctx)
+        q.close()
+        q.join_thread()
+        assert q.staged_bytes() == -1

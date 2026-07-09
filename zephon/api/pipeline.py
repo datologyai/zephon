@@ -34,6 +34,7 @@ from zephon.core.constants import (
 from zephon.core.engine import Engine, RuntimeOptions
 from zephon.core.functional_op import _FunctionalOp
 from zephon.core.graph import Graph, Node, Plan
+from zephon.core.mtp_stats import MTPQueueStats
 from zephon.core.op_base import BaseOp
 from zephon.core.planner import Planner
 from zephon.core.runtime_spec import (
@@ -1647,6 +1648,17 @@ class Pipeline:
         except Exception:
             pass
         return self._engine.eval_one(value)
+
+    def mtp_queue_stats(self) -> MTPQueueStats | None:
+        """Return occupancy of the MTP hand-off queue (see ``MTPQueueStats``).
+
+        Returns None when no MTP subprocess is live: ``mtp_mode`` is off,
+        iteration has not started or has finished, or the daemon fallback
+        chose inline mode.  Cheap to call once per training step.
+        """
+        if self._sp is None:
+            return None
+        return self._sp.queue_stats()
 
     def inflight_summary(self) -> dict[int, int]:
         """Return per-lane inflight chunk counts: ``{lane_id: count}``.

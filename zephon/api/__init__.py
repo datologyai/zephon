@@ -5,5 +5,6 @@
 
 from zephon.api.pipeline import Pipeline
 from zephon.api.validate import Issue, ValidationError, ValidationReport
+from zephon.core.mtp_stats import MTPQueueStats
 
-__all__ = ["Issue", "Pipeline", "ValidationError", "ValidationReport"]
+__all__ = ["Issue", "MTPQueueStats", "Pipeline", "ValidationError", "ValidationReport"]

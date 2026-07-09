@@ -12,8 +12,11 @@ sized per-socket with an unprivileged ``setsockopt``.
 
 from __future__ import annotations
 
+import array
+import fcntl
 import socket
 import sys
+import termios
 from multiprocessing.connection import Connection
 from typing import Literal
 
@@ -43,6 +46,13 @@ def _warn_buffer_shortfall(granted: int, requested: int, exc: OSError | None) ->
         file=sys.stderr,
         flush=True,
     )
+
+
+def readable_bytes(fd: int) -> int:
+    """Bytes queued for reading on ``fd`` (``FIONREAD``); works for pipes and sockets."""
+    buf = array.array("i", [0])
+    fcntl.ioctl(fd, termios.FIONREAD, buf)
+    return buf[0]
 
 
 def socketpair_connections(

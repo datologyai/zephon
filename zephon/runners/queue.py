@@ -21,6 +21,7 @@ from zephon.utils.ipc import (
     DEFAULT_IPC_BUFFER_BYTES,
     DEFAULT_IPC_TRANSPORT,
     IpcTransport,
+    readable_bytes,
     socketpair_connections,
 )
 from zephon.utils.semaphore import SafeSemLock
@@ -230,6 +231,19 @@ class NamedQueue(mp_queues.Queue):
                 f"Original traceback from feeder thread:\n{item.traceback}"
             )
         return item
+
+    def staged_bytes(self) -> int:
+        """Serialized bytes sitting in the transport buffer, not yet read.
+
+        Consumable by ``get()`` without the producer's feeder thread being
+        scheduled.  Returns -1 once the queue is closed.
+        """
+        if self._closed:
+            return -1
+        try:
+            return readable_bytes(self._reader.fileno())
+        except OSError:  # close() raced us and took the fd
+            return -1
 
     # -- Thread naming & lifecycle ------------------------------------------
 
