@@ -16,7 +16,7 @@ defaults:
     working-directory: .
 jobs:
   linting:
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Single Python version for linting - no need for matrix
     env:

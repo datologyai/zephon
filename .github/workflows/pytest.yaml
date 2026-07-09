@@ -21,10 +21,10 @@ jobs:
     strategy:
       matrix:
         python_version: ["3.10", "3.12", "3.13"]
-        runner: ["depot-ubuntu-24.04-4"]
+        runner: ["ubuntu-latest"]
         include:
         - python_version: "3.14t"
-          runner: depot-ubuntu-24.04-16
+          runner: LargeGithubRunner
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -70,7 +70,7 @@ jobs:
   ray:
     name: Ray Tests
     timeout-minutes: 20
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: LargeGithubRunner
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     steps:

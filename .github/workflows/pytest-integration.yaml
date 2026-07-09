@@ -15,7 +15,7 @@ jobs:
   integration:
     name: Integration Tests
     timeout-minutes: 40
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: LargeGithubRunner
     strategy:
       matrix:
         python_version: ["3.10", "3.12", "3.13", "3.14t"]
@@ -61,7 +61,7 @@ jobs:
   ray-integration:
     name: Ray Integration Tests
     timeout-minutes: 40
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: LargeGithubRunner
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     steps:

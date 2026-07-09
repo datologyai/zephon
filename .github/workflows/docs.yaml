@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
