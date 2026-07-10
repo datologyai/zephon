@@ -853,6 +853,38 @@ def test_flat_feeds_to_training() -> None:
     np.testing.assert_array_equal(out["positions"], np.array([[0, 1, 0, 1, 0]]))
 
 
+def test_flat_loss_mask_feeds_to_training() -> None:
+    """Packed SFT windows must not supervise cross-document labels."""
+    import numpy as np
+
+    acc = _flat(12, algorithm="best_fit", pad_token_id=0)
+    doc1 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+        payload={
+            "input_ids": [11, 12, 13, 14, 15, 16],
+            "loss_mask": [0, 0, 0, 1, 1, 1],
+        },
+    )
+    doc2 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0),
+        payload={"input_ids": [21, 22, 23, 24], "loss_mask": [0, 0, 1, 1]},
+    )
+    acc.push_many([doc1, doc2])
+    record = _records(acc.flush())[0]
+    assert record.payload["loss_mask"] == [0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0]
+    assert record.meta.padding_length == 2
+
+    out = SampleBatch(records=[record]).to_training(return_labels=True)
+    assert "loss_mask" not in out
+    np.testing.assert_array_equal(
+        out["labels"],
+        np.array([[-100, -100, 14, 15, 16, -100, -100, 23, 24, -100, -100]]),
+    )
+    np.testing.assert_array_equal(
+        out["positions"], np.array([[0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 0]])
+    )
+
+
 # ---------------------------------------------------------------------------
 # Lineage: every dropped record closes its contributor offsets via a tombstone
 # ---------------------------------------------------------------------------

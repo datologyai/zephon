@@ -164,3 +164,33 @@ def mask_padding_labels(
                 row[len(row) - n :] = [replacement] * n
             masked.append(row)
         return masked
+
+
+def mask_unsupervised_labels(
+    labels: Any, masks: Any, replacement: int, framework: str | None
+) -> Any:
+    """Apply a label-aligned 0/1 supervision mask."""
+    if framework == "torch":
+        assert labels.shape == masks.shape, (
+            f"labels and masks must have the same shape: {labels.shape} != {masks.shape}"
+        )
+        return labels.masked_fill(masks == 0, replacement)
+    elif framework == "numpy":
+        import numpy as np
+
+        assert labels.shape == masks.shape, (
+            f"labels and masks must have the same shape: {labels.shape} != {masks.shape}"
+        )
+        return np.where(np.asarray(masks) != 0, labels, replacement)
+    else:
+        assert len(labels) == len(masks), (
+            f"labels and masks must have the same row count: {len(labels)} != {len(masks)}"
+        )
+        masked = []
+        for row, mask_row in zip(labels, masks):
+            assert len(row) == len(mask_row), (
+                "labels and masks rows must have the same length: "
+                + f"{len(row)} != {len(mask_row)}"
+            )
+            masked.append([lab if m else replacement for lab, m in zip(row, mask_row)])
+        return masked

@@ -4,12 +4,14 @@
 """Canonical data model shared across the core data-loading pipeline."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sized
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Iterable, Sequence, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, TypeAlias, cast
 
 from zephon.utils.length_extraction import TOKEN_FIELD_CANDIDATES, detect_length_field
 from zephon.utils.tensor_utils import (
     mask_padding_labels,
+    mask_unsupervised_labels,
     resolve_dtype,
     slice_last_dim,
     stack_sequences,
@@ -335,8 +337,8 @@ class SampleBatch:
         items: list[SampleRecord],
         tokens_field: str,
         extra_fields: Sequence[str],
-    ) -> tuple[list[Any], list[str], dict[str, list[Any]]]:
-        """Extract tokens, texts, and extra fields from dict payloads."""
+    ) -> tuple[list[Any], list[str], dict[str, list[Any]], list[Any] | None]:
+        """Extract tokens, texts, extra fields, and loss masks from dict payloads."""
         payloads: list[SamplePayloadDict] = []
         texts: list[str] = []
         for record in items:
@@ -388,12 +390,34 @@ class SampleBatch:
                     )
             extra_data["positions"] = [payload["positions"] for payload in payloads]
 
-        return token_lists, texts, extra_data
+        loss_mask_lists: list[Any] | None = None
+        if "loss_mask" in payloads[0]:
+            for i, payload in enumerate(payloads):
+                if "loss_mask" not in payload:
+                    raise ValueError(
+                        f"'loss_mask' present in some payloads but missing at index {i}"
+                    )
+                mask_val = payload["loss_mask"]
+                tokens_val = token_lists[i]
+                if not isinstance(mask_val, Sized) or not isinstance(tokens_val, Sized):
+                    raise ValueError(
+                        f"'loss_mask' and '{resolved_tokens_field}' must be "
+                        + f"sequences at index {i}"
+                    )
+                if len(mask_val) != len(tokens_val):
+                    raise ValueError(
+                        f"'loss_mask' length {len(mask_val)} does not match "
+                        + f"'{resolved_tokens_field}' length {len(tokens_val)} "
+                        + f"at index {i}"
+                    )
+            loss_mask_lists = [payload["loss_mask"] for payload in payloads]
+
+        return token_lists, texts, extra_data, loss_mask_lists
 
     def _extract_from_arrays(
         self,
         items: list[SampleRecord],
-    ) -> tuple[list[Any], list[str], dict[str, list[Any]]]:
+    ) -> tuple[list[Any], list[str], dict[str, list[Any]], list[Any] | None]:
         """Extract tokens from array payloads (numpy/torch tensors)."""
         payloads = [r.payload for r in items]
 
@@ -410,7 +434,7 @@ class SampleBatch:
                     "(numpy/torch) payloads"
                 )
 
-        return payloads, [""] * len(items), {}
+        return payloads, [""] * len(items), {}, None
 
     def to_training(
         self,
@@ -420,8 +444,20 @@ class SampleBatch:
         dtype: Any = "auto",
         extra_fields: Sequence[str] = (),
         ignore_index: int = -100,
+        rename_fields: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
+
+        A ``"loss_mask"`` payload field (a per-token supervised-vs-not mask,
+        e.g. from chat-template tokenization) is recognized automatically, like
+        ``"positions"``. With ``return_labels=True`` it is consumed, not
+        emitted: labels whose mask entry (shifted into label alignment,
+        ``mask[:, 1:]``) is 0 are set to ``ignore_index``, and the supervision
+        mask stays derivable as ``labels != ignore_index``. Listing it in
+        ``extra_fields`` together with ``return_labels`` is an error: extra
+        fields are sliced input-aligned (``[:, :-1]``), the wrong alignment for
+        a label mask. Without ``return_labels`` it is surfaced stacked and
+        unshifted, like any data field.
 
         Args:
             tokens_field: Field name containing token IDs, or "auto" to detect
@@ -441,6 +477,12 @@ class SampleBatch:
             ignore_index: Loss-ignore sentinel (default ``-100``). With
                 ``return_labels``, each record's trailing pad labels
                 (``meta.padding_length``) are set to this value.
+            rename_fields: Optional ``{emitted_key: new_key}`` mapping applied to
+                the output dict as the final step (e.g. ``{"input_ids":
+                "input"}``). Strict: every source key must be present in the
+                output and no target may collide with a key that is not itself
+                renamed. Skipped for empty batches (which emit only
+                ids/texts).
 
         Returns:
             Dictionary with:
@@ -448,26 +490,40 @@ class SampleBatch:
             - "texts": List of text strings (always list, not stacked)
             - "input_ids": Stacked token tensor (shifted if return_labels=True)
             - "labels": Shifted labels tensor (only if return_labels=True), with
-              each record's trailing pad labels set to ignore_index
+              each record's trailing pad labels and loss-masked positions set to
+              ignore_index
             - "positions": Stacked document-position tensor, present iff the
               payloads carry one (sliced to match input_ids if return_labels=True)
             - Any extra_fields as stacked tensors (shifted if return_labels=True)
 
         Raises:
             TypeError: If payloads are not dicts.
-            ValueError: If tokens_field cannot be auto-detected or is missing.
+            ValueError: If tokens_field cannot be auto-detected or is missing,
+                if a loss_mask is present in only some payloads or misaligned
+                with the token field, if "loss_mask" is listed in extra_fields
+                with return_labels=True, or if rename_fields references a
+                missing source key or produces a key collision.
         """
+        if return_labels and "loss_mask" in extra_fields:
+            raise ValueError(
+                "extra_fields cannot include 'loss_mask' with return_labels=True: "
+                + "extra fields are input-aligned, not label-aligned. Derive "
+                + "the supervision mask as labels != ignore_index, or use "
+                + "return_labels=False for the raw mask."
+            )
         items = list(self.records)
         if not items:
             return {"ids": [], "texts": []}
 
         # Extract based on payload type
         if isinstance(items[0].payload, dict):
-            token_lists, texts, extra_data = self._extract_from_dicts(
+            token_lists, texts, extra_data, loss_mask_lists = self._extract_from_dicts(
                 items, tokens_field, extra_fields
             )
         else:
-            token_lists, texts, extra_data = self._extract_from_arrays(items)
+            token_lists, texts, extra_data, loss_mask_lists = self._extract_from_arrays(
+                items
+            )
 
         # Resolve dtype
         resolved_dtype, framework = resolve_dtype(dtype)
@@ -507,6 +563,39 @@ class SampleBatch:
                 )
             else:
                 result[field_name] = field_tensor
+
+        if loss_mask_lists is not None:
+            masks = stack_sequences(loss_mask_lists, resolved_dtype, framework)
+            if return_labels:
+                # The label at position i supervises token i+1, so the mask
+                # shifts like labels (drop the first entry), not like inputs.
+                result["labels"] = mask_unsupervised_labels(
+                    result["labels"],
+                    slice_last_dim(masks, slice(1, None), framework),
+                    ignore_index,
+                    framework,
+                )
+            elif "loss_mask" not in result:
+                # extra_fields may have already emitted it explicitly.
+                result["loss_mask"] = masks
+
+        if rename_fields:
+            missing = [k for k in rename_fields if k not in result]
+            if missing:
+                raise ValueError(
+                    f"rename_fields source keys not in output: {missing}; "
+                    + f"emitted keys: {list(result)}"
+                )
+            # A target may take over a renamed-away key (swaps are fine); only
+            # unrenamed keys and duplicate targets collide.
+            targets = list(rename_fields.values())
+            unrenamed = set(result) - set(rename_fields)
+            collisions = [t for t in targets if t in unrenamed or targets.count(t) > 1]
+            if collisions:
+                raise ValueError(
+                    f"rename_fields target keys collide: {sorted(set(collisions))}"
+                )
+            result = {rename_fields.get(k, k): v for k, v in result.items()}
 
         return result
 

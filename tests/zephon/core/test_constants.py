@@ -427,6 +427,155 @@ class TestToTrainingPadMasking:
         assert out == [[1, 2, 3], [4, 5, 6]]
 
 
+class TestToTrainingLossMask:
+    def test_loss_mask_masks_labels_and_is_consumed(self) -> None:
+        # Two packed conversations + pad tail. The first token of each doc has
+        # mask 0, so the cross-document boundary label is masked by construction.
+        r0 = _rec(
+            (0, 0, 0),
+            0,
+            0,
+            {
+                "input_ids": [11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 0, 0],
+                "loss_mask": [0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0],
+            },
+            padding_length=2,
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["input_ids"] == [[11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 0]]
+        assert out["labels"] == [
+            [-100, -100, 14, 15, 16, -100, -100, 23, 24, -100, -100]
+        ]
+        assert "loss_mask" not in out
+
+    def test_loss_mask_shift_alignment(self) -> None:
+        # mask[i] gates token i as a label, i.e. output position i-1 — the mask
+        # shifts like labels ([1:]), not like inputs ([:-1]).
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 0, 1]}
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[2, -100, 4]]
+
+    def test_loss_mask_surfaced_without_labels(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 1]})
+        out = SampleBatch(records=(r0,)).to_training(dtype=None)
+        assert out["loss_mask"] == [[0, 1, 1]]
+        assert out["input_ids"] == [[1, 2, 3]]
+
+    def test_loss_mask_inconsistent_presence_raises(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2], "loss_mask": [1, 1]})
+        r1 = _rec((0, 0, 1), 0, 0, {"input_ids": [3, 4]})
+        with pytest.raises(ValueError, match="'loss_mask' present in some payloads"):
+            SampleBatch(records=(r0, r1)).to_training(dtype=None)
+
+    def test_loss_mask_length_mismatch_raises(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "loss_mask": [1, 1]})
+        with pytest.raises(ValueError, match="'loss_mask' length"):
+            SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+
+    def test_loss_mask_composes_with_pad_masking(self) -> None:
+        # A mis-set mask of 1 over the pad tail must not resurrect pad labels.
+        r0 = _rec(
+            (0, 0, 0),
+            0,
+            0,
+            {"input_ids": [1, 2, 3, 0], "loss_mask": [1, 1, 1, 1]},
+            padding_length=1,
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[2, 3, -100]]
+
+    def test_loss_mask_in_extra_fields_with_labels_raises(self) -> None:
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 1, 0]}
+        )
+        with pytest.raises(ValueError, match="input-aligned, not label-aligned"):
+            SampleBatch(records=(r0,)).to_training(
+                return_labels=True, extra_fields=["loss_mask"], dtype=None
+            )
+
+    def test_loss_mask_explicit_extra_field_without_labels_not_duplicated(
+        self,
+    ) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 1]})
+        out = SampleBatch(records=(r0,)).to_training(
+            extra_fields=["loss_mask"], dtype=None
+        )
+        assert out["loss_mask"] == [[0, 1, 1]]
+
+    def test_all_zero_mask_masks_everything(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "loss_mask": [0, 0, 0]})
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
+        assert out["labels"] == [[-100, -100]]
+
+    def test_loss_mask_torch(self) -> None:
+        torch = pytest.importorskip("torch")
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 0, 1]}
+        )
+        out = SampleBatch(records=(r0,)).to_training(
+            return_labels=True, dtype=torch.long
+        )
+        assert isinstance(out["labels"], torch.Tensor)
+        assert out["labels"].tolist() == [[2, -100, 4]]
+
+    def test_loss_mask_numpy(self) -> None:
+        np = pytest.importorskip("numpy")
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 0, 1]}
+        )
+        out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=np.int64)
+        assert out["labels"].tolist() == [[2, -100, 4]]
+
+
+class TestToTrainingRenameFields:
+    def test_rename_input_ids_to_input(self) -> None:
+        r0 = _rec(
+            (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "positions": [0, 1, 2, 3]}
+        )
+        out = SampleBatch(records=(r0,)).to_training(
+            return_labels=True, dtype=None, rename_fields={"input_ids": "input"}
+        )
+        assert out["input"] == [[1, 2, 3]]
+        assert "input_ids" not in out
+        assert out["labels"] == [[2, 3, 4]]
+        assert out["positions"] == [[0, 1, 2]]
+
+    def test_rename_missing_source_raises(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]})
+        with pytest.raises(ValueError, match="source keys not in output"):
+            SampleBatch(records=(r0,)).to_training(
+                dtype=None, rename_fields={"labels": "label"}
+            )
+
+    def test_rename_target_collision_raises(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]})
+        with pytest.raises(ValueError, match="target keys collide"):
+            SampleBatch(records=(r0,)).to_training(
+                dtype=None, rename_fields={"input_ids": "texts"}
+            )
+
+    def test_rename_duplicate_targets_raise(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]})
+        with pytest.raises(ValueError, match="target keys collide"):
+            SampleBatch(records=(r0,)).to_training(
+                dtype=None, rename_fields={"ids": "x", "texts": "x"}
+            )
+
+    def test_rename_swap_is_allowed(self) -> None:
+        r0 = _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]})
+        out = SampleBatch(records=(r0,)).to_training(
+            dtype=None, rename_fields={"ids": "texts", "texts": "ids"}
+        )
+        assert out["texts"] == [(0, 0, 0)]
+        assert out["ids"] == [""]
+
+    def test_rename_skipped_for_empty_batch(self) -> None:
+        out = SampleBatch(records=()).to_training(rename_fields={"input_ids": "input"})
+        assert out == {"ids": [], "texts": []}
+
+
 class TestToTrainingDtype:
     """Tests for dtype parameter and framework detection."""
 
