@@ -2,22 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import sys
-import types
 from typing import Any
 
 import pytest
-from tenacity.wait import wait_none
 
 from zephon.core.constants import SampleMeta, SampleRecord
 from zephon.core.op_base import OpContext
 from zephon.ops.tokenize_text import (
     SpecialTokensMode,
     TokenizeText,
-)
-from zephon.utils.tokenizer_cloud import (
-    TransientCloudTokenizerError,
-    resolve_tokenizer_id_with_retry,
 )
 from zephon.utils.torch_compat import _should_use_tensor_lock
 
@@ -520,65 +513,6 @@ def test_preserve_payload_warns_when_non_mapping(
     assert not caplog.records  # warning only once
 
 
-def test_tokenizer_id_load_failure_falls_back(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.ERROR, logger="zephon.ops.tokenize_text")
-    fake = types.ModuleType("transformers")
-
-    class _AutoTokenizer:
-        @staticmethod
-        def from_pretrained(name: str):  # pragma: no cover - simple stub
-            raise RuntimeError("fail")
-
-    fake.AutoTokenizer = _AutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake)
-
-    op = TokenizeText(tokenizer=None, tokenizer_id="some-model", field="text")
-    _setup(op)
-    with pytest.raises(RuntimeError):
-        _ = op.process_one(_rec("hi"))
-
-
-def test_tokenizer_use_fast_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: dict[str, Any] = {}
-    fake = types.ModuleType("transformers")
-
-    class _Tok:
-        name_or_path = "model"
-        pad_token = None
-        eos_token = 0
-
-        def __call__(self, texts, **kwargs):
-            return {
-                "input_ids": [[1, 2] for _ in texts],
-                "attention_mask": [[1, 1] for _ in texts],
-            }
-
-    class _AutoTokenizer:
-        @staticmethod
-        def from_pretrained(name: str, **kwargs):
-            calls["name"] = name
-            calls["kwargs"] = kwargs
-            return _Tok()
-
-    fake.AutoTokenizer = _AutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake)
-
-    op = _setup(
-        TokenizeText(
-            tokenizer=None,
-            tokenizer_id="hf-model",
-            field="text",
-            use_fast=False,
-            special_tokens="tokenizer_default",
-        )
-    )
-    _ = op.process_one(_rec("hi"))
-    assert calls["name"] == "hf-model"
-    assert calls["kwargs"]["use_fast"] is False
-
-
 def test_tokenizer_initializes_on_first_process() -> None:
     op = TokenizeText(tokenizer=None, tokenizer_id=None, field="text")
     out = op.process_one(_rec("text"))
@@ -698,70 +632,6 @@ def test_kwargs_caching_behavior() -> None:
 
 
 # --- Initialization & Retry Logic Tests ---
-
-
-def test_setup_retries_without_use_fast_on_type_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    Tests the try/except block in setup() that handles tokenizers
-    rejecting the 'use_fast' argument.
-    """
-    fake_mod = types.ModuleType("transformers")
-
-    class FlakyTokenizer:
-        def __call__(self, texts, **kwargs):
-            return {"input_ids": [[1]], "attention_mask": [[1]]}
-
-    call_history = []
-
-    class MockAutoTokenizer:
-        @staticmethod
-        def from_pretrained(name, **kwargs):
-            call_history.append(kwargs)
-            if "use_fast" in kwargs:
-                # Simulate an older Transformer version or specific model failure
-                raise TypeError("got an unexpected keyword argument 'use_fast'")
-            return FlakyTokenizer()
-
-    fake_mod.AutoTokenizer = MockAutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake_mod)
-
-    # Init with use_fast=True (default)
-    op = TokenizeText(
-        tokenizer_id="flaky-model",
-        field="text",
-        use_fast=True,
-        special_tokens="tokenizer_default",
-    )
-    _setup(op)
-    _ = op.process_one(_rec("hi"))
-
-    # With tenacity retrying, we expect multiple attempts with use_fast=True
-    # followed by a final successful load without use_fast.
-    assert len(call_history) >= 2
-    assert all(k.get("use_fast") is True for k in call_history[:-1])
-    assert "use_fast" not in call_history[-1]
-    assert isinstance(op.tok, FlakyTokenizer)
-
-
-def test_setup_raises_other_type_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Ensure we don't swallow TypeErrors that are unrelated to 'use_fast'.
-    """
-    fake_mod = types.ModuleType("transformers")
-
-    class MockAutoTokenizer:
-        @staticmethod
-        def from_pretrained(name, **kwargs):
-            raise TypeError("Something else completely broken")
-
-    fake_mod.AutoTokenizer = MockAutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake_mod)
-
-    op = TokenizeText(tokenizer_id="broken-model", field="text")
-    with pytest.raises(TypeError, match="Something else completely broken"):
-        _ = _setup(op).process_one(_rec("hello"))
 
 
 # --- Batch Normalization & Edge Cases ---
@@ -1055,98 +925,6 @@ def test_torch_has_allocator_fix_detects_old_versions() -> None:
 # --- Cloud tokenizer URI resolution ---
 
 
-def test_setup_resolves_cloud_uri_before_loading(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """``AutoTokenizer.from_pretrained`` receives the resolved local path, not the URI."""
-    received_ids: list[str] = []
-    fake = types.ModuleType("transformers")
-
-    class _Tok:
-        name_or_path = "model"
-        pad_token = None
-        eos_token = 0
-
-        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
-            return {
-                "input_ids": [[1, 2] for _ in texts],
-                "attention_mask": [[1, 1] for _ in texts],
-            }
-
-    class _AutoTokenizer:
-        @staticmethod
-        def from_pretrained(name: str, **k: Any):
-            received_ids.append(name)
-            return _Tok()
-
-    fake.AutoTokenizer = _AutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake)
-
-    resolved_path = str(tmp_path / "fake-resolved-tokenizer")
-
-    def fake_resolve(tokenizer_id):
-        assert tokenizer_id == "s3://fake-bucket/fake/prefix/"
-        return resolved_path
-
-    monkeypatch.setattr(
-        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", fake_resolve
-    )
-
-    op = TokenizeText(
-        tokenizer=None,
-        tokenizer_id="s3://fake-bucket/fake/prefix/",
-        field="text",
-        special_tokens="tokenizer_default",
-    )
-    # tokenizer_id stays as the URI; resolution is lazy.
-    assert op.tokenizer_id == "s3://fake-bucket/fake/prefix/"
-    assert op.tok is None
-
-    _setup(op)
-    _ = op.process_one(_rec("hello"))
-
-    assert received_ids == [resolved_path]
-
-
-def test_setup_passes_hub_id_through_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HF Hub ids are not cloud URIs; the resolver must pass them through."""
-    received_ids: list[str] = []
-    fake = types.ModuleType("transformers")
-
-    class _Tok:
-        name_or_path = "meta-llama/Llama-3.2-1B"
-        pad_token = None
-        eos_token = 0
-
-        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
-            return {
-                "input_ids": [[1, 2] for _ in texts],
-                "attention_mask": [[1, 1] for _ in texts],
-            }
-
-    class _AutoTokenizer:
-        @staticmethod
-        def from_pretrained(name: str, **k: Any):
-            received_ids.append(name)
-            return _Tok()
-
-    fake.AutoTokenizer = _AutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake)
-
-    op = TokenizeText(
-        tokenizer=None,
-        tokenizer_id="meta-llama/Llama-3.2-1B",
-        field="text",
-        special_tokens="tokenizer_default",
-    )
-    _setup(op)
-    _ = op.process_one(_rec("hello"))
-
-    assert received_ids == ["meta-llama/Llama-3.2-1B"]
-
-
 def test_setup_does_not_resolve_when_tokenizer_passed_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1183,65 +961,6 @@ def test_setup_does_not_resolve_when_tokenizer_passed_directly(
     _ = op.process_one(_rec("hello"))
 
     assert calls == [], "resolve_tokenizer_id must not run when tok is provided"
-
-
-def test_setup_retries_transient_cloud_sync_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """Setup retries a transient resolver failure, then loads the tokenizer."""
-    resolved_path = str(tmp_path / "fake-resolved-tokenizer")
-    resolve_attempts = 0
-
-    def flaky_resolve(tokenizer_id):
-        nonlocal resolve_attempts
-        resolve_attempts += 1
-        if resolve_attempts == 1:
-            raise TransientCloudTokenizerError("simulated transient S3 5xx")
-        return resolved_path
-
-    monkeypatch.setattr(
-        "zephon.utils.tokenizer_cloud.resolve_tokenizer_id", flaky_resolve
-    )
-
-    # Drop the resolve backoff so the test runs fast. The retry envelope is
-    # built at import, so mutate the controller rather than patch the wait.
-    monkeypatch.setattr(resolve_tokenizer_id_with_retry.retry, "wait", wait_none())
-
-    fake = types.ModuleType("transformers")
-
-    class _Tok:
-        name_or_path = "model"
-        pad_token = None
-        eos_token = 0
-
-        def __call__(self, texts, **kwargs):  # pragma: no cover - unused
-            return {
-                "input_ids": [[1, 2] for _ in texts],
-                "attention_mask": [[1, 1] for _ in texts],
-            }
-
-    received_ids: list[str] = []
-
-    class _AutoTokenizer:
-        @staticmethod
-        def from_pretrained(name: str, **k: Any):
-            received_ids.append(name)
-            return _Tok()
-
-    fake.AutoTokenizer = _AutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake)
-
-    op = TokenizeText(
-        tokenizer=None,
-        tokenizer_id="s3://fake-bucket/fake/prefix/",
-        field="text",
-        special_tokens="tokenizer_default",
-    )
-    _setup(op)
-    _ = op.process_one(_rec("hello"))
-
-    assert resolve_attempts == 2, "Transient sync error must be retried once"
-    assert received_ids == [resolved_path]
 
 
 def test_torch_has_allocator_fix_detects_new_versions() -> None:

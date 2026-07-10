@@ -439,6 +439,23 @@ def test_instantiate_tokenizer_falls_back_without_model(tokenizer_id):
     assert tok.bos_token_id == 1  # the in-process fallback stub
 
 
+def test_instantiate_tokenizer_delegates_to_shared_loader(monkeypatch):
+    calls: list[tuple[str | None, bool | None]] = []
+
+    def fake_load(tokenizer_id, *, use_fast):
+        calls.append((tokenizer_id, use_fast))
+        return fallback_tokenizer()
+
+    monkeypatch.setattr("zephon.work.token_estimation.load_hf_tokenizer", fake_load)
+    _instantiate_tokenizer(TokenizeProfile(tokenizer_id="hf-model", use_fast=False))
+    assert calls == [("hf-model", False)]
+
+
+def test_profile_from_op_captures_use_fast():
+    op = TokenizeText(tokenizer_id="__fallback__", field="text", use_fast=False)
+    assert TokenizeProfile.from_op(op).use_fast is False
+
+
 def test_count_raw_tokens_counts_whitespace_words():
     tok = fallback_tokenizer()
     profile = TokenizeProfile(special_tokens="none")

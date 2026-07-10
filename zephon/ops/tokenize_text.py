@@ -5,11 +5,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import sys
-import threading
-import traceback
 import typing
 from types import ModuleType
 from typing import (
@@ -25,14 +21,6 @@ from typing import (
     cast,
 )
 
-from tenacity import (
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
-
-from zephon.core.accumulators import Accumulator, CountingAccumulator
 from zephon.core.children import spawn_child
 from zephon.core.constants import (
     SampleMeta,
@@ -42,17 +30,14 @@ from zephon.core.constants import (
 )
 from zephon.core.op_base import DefaultSetup, OpContext
 from zephon.core.traits import OpTraits
-from zephon.utils.thread_utils import suppress_library_threads
+from zephon.ops.tokenize_base import _MISSING, TokenizeBase
 from zephon.utils.tokenizer import (
     TokenBatch,
     TokenizerLike,
     TokenizerOutput,
-    fallback_tokenizer,
 )
-from zephon.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 from zephon.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
-    _gil_disabled,
     _should_use_tensor_lock,
     _tensor_lock_ctx,
 )
@@ -69,8 +54,6 @@ SpecialTokensMode: TypeAlias = Literal[
 ]
 _VALID_SPECIAL_TOKENS_MODES: tuple[str, ...] = typing.get_args(SpecialTokensMode)
 
-_MISSING: object = object()
-
 TokenSeq: TypeAlias = Union[
     "np.ndarray", "torch.Tensor", "tf.Tensor", Sequence[int], list[int]
 ]
@@ -78,14 +61,7 @@ TokenSeq: TypeAlias = Union[
 T_TokenSeq = TypeVar("T_TokenSeq", bound=TokenSeq)
 
 
-# Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
-_IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
-# Free-threaded Python only: serializes _setup_tokenizer's check-then-set so
-# concurrent _process threads can't race into double-loading the tokenizer.
-_SETUP_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
-
-
-class TokenizeText(DefaultSetup):
+class TokenizeText(TokenizeBase):
     """Tokenize text fields using a provided or auto-resolved tokenizer."""
 
     def __init__(
@@ -190,8 +166,6 @@ class TokenizeText(DefaultSetup):
                 has none. Tokenizer not mutated; raises at ``__init__``
                 under ``tokenizer_default`` / ``none`` — see ``bos_token_id``.
         """
-        DefaultSetup.__init__(self)
-
         if special_tokens not in _VALID_SPECIAL_TOKENS_MODES:
             raise ValueError(
                 f"special_tokens must be one of {_VALID_SPECIAL_TOKENS_MODES}, "
@@ -249,8 +223,14 @@ class TokenizeText(DefaultSetup):
                 + "``bos_token`` / ``eos_token`` before passing it in."
             )
 
-        self.tok = tokenizer
-        self.tokenizer_id = tokenizer_id
+        TokenizeBase.__init__(
+            self,
+            tokenizer,
+            tokenizer_id,
+            use_fast=use_fast,
+            max_batch=max_batch,
+            max_latency_ms=max_latency_ms,
+        )
         self.field = field
         self._field_path: tuple[str, ...] = tuple(field.split(".")) if field else ()
         self.add_attention_mask = add_attention_mask
@@ -259,7 +239,6 @@ class TokenizeText(DefaultSetup):
         self.truncation = truncation
         self.return_tensors = return_tensors
         self.split_long_samples = split_long_samples
-        self.use_fast = use_fast
         self.preserve_upstream_payload = preserve_upstream_payload
         self._bos_id_override = bos_token_id
         self._eos_id_override = eos_token_id
@@ -268,17 +247,10 @@ class TokenizeText(DefaultSetup):
         # Cached after _setup_tokenizer so the padding hot path doesn't
         # getattr() the tokenizer per batch.
         self._pad_token_id_cached: int = 0
-        self._max_batch = max_batch
-        self._max_latency_ms = max_latency_ms
         self._warned_non_mapping = False
         self._warned_preserve_non_mapping = False
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
-        self._tokenizer_instantiated = False
-        # Captures any failure from the lazy ``_setup_tokenizer`` call (see
-        # the fork-hazard comment in ``setup()``) so subsequent batches
-        # re-raise the same error instead of retrying half-initialised state.
-        self._setup_error: Exception | None = None
         # On free-threaded Python + old PyTorch, we intercept return_tensors='pt'
         # to avoid HF tokenizer creating tensors (which races with our code).
         self._convert_np_to_pt = False
@@ -341,80 +313,12 @@ class TokenizeText(DefaultSetup):
             else:
                 self._cached_kwargs["return_tensors"] = self.return_tensors
 
-    def _setup_tokenizer(self) -> None:
-        lock_ctx = _SETUP_LOCK if _SETUP_LOCK is not None else contextlib.nullcontext()
-        with lock_ctx:
-            if self._setup_error is not None:
-                raise self._setup_error
-            if self._tokenizer_instantiated:
-                return
-
-            if self.tok is None:
-                import_lock_ctx = (
-                    _IMPORT_LOCK
-                    if _IMPORT_LOCK is not None
-                    else contextlib.nullcontext()
-                )
-
-                # Before importing hf tokenizers we tell it we handle the
-                # parallelism and not hf tokenizers. This avoids unforeseen
-                # effects when running multiple op instances.
-                suppress_library_threads()
-
-                if self.tokenizer_id in (None, "__fallback__"):
-                    self.tok = fallback_tokenizer()
-                else:
-                    with import_lock_ctx:
-                        from transformers import AutoTokenizer
-
-                    # Resolve before the HF retry — nesting would re-list the
-                    # bucket on every HF retry attempt.
-                    load_id = resolve_tokenizer_id_with_retry(self.tokenizer_id)
-
-                    @retry(
-                        wait=wait_random_exponential(multiplier=2, max=15),
-                        stop=stop_after_attempt(5),
-                        retry=retry_if_not_exception_type((TypeError, ValueError)),
-                        reraise=True,
-                    )
-                    def _load_with_retry(model_id: str, **k: Any) -> Any:
-                        try:
-                            tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
-                        except Exception as e:
-                            print(
-                                f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
-                                file=sys.stderr,
-                            )
-                            raise e
-                        return tokenizer
-
-                    kwargs: dict[str, Any] = {}
-                    if self.use_fast is not None:
-                        kwargs["use_fast"] = self.use_fast
-                    try:
-                        self.tok = _load_with_retry(load_id, **kwargs)
-                    except TypeError as exc:
-                        # Some tokenizers may not accept the `use_fast` kwarg;
-                        # retry without it so we surface the original failure
-                        # instead of a signature mismatch.
-                        if "use_fast" in kwargs and "use_fast" in str(exc):
-                            kwargs = dict(kwargs)
-                            kwargs.pop("use_fast", None)
-                            self.tok = _load_with_retry(load_id, **kwargs)
-
-                        else:
-                            raise
-
-            # _ensure_padding_token may set pad_token=eos_token (the HF pattern
-            # for Llama/GPT-2 et al.), so it must run before we snapshot pad id.
-            try:
-                self._resolve_special_token_ids()
-                self._ensure_padding_token()
-                self._pad_token_id_cached = self._compute_pad_token_id()
-            except Exception as exc:
-                self._setup_error = exc
-                raise
-            self._tokenizer_instantiated = True
+    def _finalize_setup(self) -> None:
+        # _ensure_padding_token may set pad_token=eos_token (the HF pattern
+        # for Llama/GPT-2 et al.), so it must run before we snapshot pad id.
+        self._resolve_special_token_ids()
+        self._ensure_padding_token()
+        self._pad_token_id_cached = self._compute_pad_token_id()
 
     def _resolve_special_token_ids(self) -> None:
         """Bind the BOS/EOS ids we will splice in. No-op in tokenizer_default mode.
@@ -466,24 +370,10 @@ class TokenizeText(DefaultSetup):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        return CountingAccumulator[SampleRecord](
-            max_batch=self._max_batch,
-            max_latency_ms=None if deterministic else self._max_latency_ms,
-        )
-
     def _lookup_field(self, payload: Mapping[str, Any]) -> Any:
         """Resolve ``self._field_path`` against a (possibly nested) mapping payload."""
-        value: Any = payload
-        for key in self._field_path:
-            if not isinstance(value, Mapping):
-                return ""
-            value = value.get(key, _MISSING)
-            if value is _MISSING:
-                return ""
-        return value
+        value = self._lookup_path(payload, self._field_path)
+        return "" if value is _MISSING else value
 
     def _extract_text(self, payload: SamplePayload) -> tuple[str, SamplePayloadDict]:
         if isinstance(payload, dict):
@@ -871,19 +761,6 @@ class TokenizeText(DefaultSetup):
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         return self._process(elems)
-
-    def configured_tokenizer_id(self) -> str | None:
-        """Return the *configured* tokenizer id for observability.
-
-        For ``tokenizer_id``-driven ops, this is the original string passed at
-        construction time (HF Hub id, local path, or cloud URI) — not the
-        local cache path that cloud URIs are resolved to. For pre-built
-        tokenizers, this is ``tok.name_or_path``.
-        """
-        if self.tokenizer_id is not None:
-            return self.tokenizer_id
-        name = getattr(self.tok, "name_or_path", None)
-        return "__fallback__" if name is None else str(name)
 
     def _ensure_padding_token(self) -> None:
         if not self.padding:

@@ -45,8 +45,7 @@ from zephon.io.options import StoreOptions
 from zephon.observability.size_estimator import content_bytes
 from zephon.ops.tokenize_text import TokenizeText
 from zephon.utils.atomic import atomic_write_bytes
-from zephon.utils.tokenizer import fallback_tokenizer
-from zephon.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
+from zephon.utils.tokenizer import load_hf_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +199,7 @@ class TokenizeProfile:
     truncation: bool = False
     split_long_samples: bool = False
     special_tokens: str = "bos_eos"
+    use_fast: bool | None = True
 
     @classmethod
     def from_op(cls, op: TokenizeText) -> "TokenizeProfile":
@@ -212,6 +212,7 @@ class TokenizeProfile:
             truncation=op.truncation,
             split_long_samples=op.split_long_samples,
             special_tokens=op.special_tokens,
+            use_fast=op.use_fast,
         )
 
     @property
@@ -441,13 +442,9 @@ def _instantiate_tokenizer(tokenize_profile: TokenizeProfile) -> Any:
     """Build the calibration tokenizer the same way ``TokenizeText`` would."""
     if tokenize_profile.tokenizer is not None:
         return tokenize_profile.tokenizer
-    if tokenize_profile.tokenizer_id in (None, "__fallback__"):
-        return fallback_tokenizer()
-    # transformers is an optional dep; imported only when loading a real model.
-    from transformers import AutoTokenizer  # type: ignore[import-not-found]
-
-    load_id = resolve_tokenizer_id_with_retry(tokenize_profile.tokenizer_id)
-    return AutoTokenizer.from_pretrained(load_id)
+    return load_hf_tokenizer(
+        tokenize_profile.tokenizer_id, use_fast=tokenize_profile.use_fast
+    )
 
 
 def _count_raw_tokens(
@@ -1065,6 +1062,7 @@ def _prime_cache_key(
                 profile.truncation,
                 profile.split_long_samples,
                 profile.special_tokens,
+                profile.use_fast,
             )
         ),
         *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
