@@ -21,7 +21,6 @@ jobs:
     # Single Python version for linting - no need for matrix
     env:
       PYTHON_VERSION: "3.12"
-      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -29,7 +28,7 @@ jobs:
         python-version: ${{ env.PYTHON_VERSION }}
     - uses: astral-sh/setup-uv@v6
       with:
-        version: "0.8.17"
+        version: "0.11.15"
     - name: Install dependencies
       run: |
         uv sync --group dev

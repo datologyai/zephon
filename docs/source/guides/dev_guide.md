@@ -113,7 +113,9 @@ uv pip install -e ".[vortex,streaming,cloud]"
 
 ## Publishing Releases
 
-Zephon is published to our internal pyx.dev registry. The project uses `setuptools-scm` for version management, which derives versions from git tags.
+Zephon is published to the private DatologyAI package index on AWS CodeArtifact
+(domain `datologyai`, repository `main`, `us-east-1`). The project uses
+`setuptools-scm` for version management, which derives versions from git tags.
 
 ### Publishing an Alpha/Internal Release
 
@@ -123,18 +125,20 @@ Zephon is published to our internal pyx.dev registry. The project uses `setuptoo
    git tag v0.1.0    # stable release
    ```
 
-2. **Build the package** (ensure no uncommitted changes for a clean version):
+2. **Mint a CodeArtifact token** (needs AWS credentials with publish access; SSO
+   works):
    ```bash
-   uv build
+   export UV_PUBLISH_USERNAME=aws
+   export UV_PUBLISH_PASSWORD=$(aws codeartifact get-authorization-token \
+     --domain datologyai --domain-owner 764487710063 --region us-east-1 \
+     --query authorizationToken --output text)
    ```
 
-3. **Publish to the internal registry**:
+3. **Build and publish** to CodeArtifact (`--index datologyai` uses the
+   `publish-url` from `pyproject.toml`):
    ```bash
-   # Dry run first to validate
-   uv publish dist/* --publish-url https://api.pyx.dev/v1/upload/datologyai/main --dry-run
-
-   # Publish for real
-   uv publish dist/* --publish-url https://api.pyx.dev/v1/upload/datologyai/main
+   uv build
+   uv publish --index datologyai dist/*
    ```
 
 4. **Push the tag**:
@@ -144,12 +148,22 @@ Zephon is published to our internal pyx.dev registry. The project uses `setuptoo
 
 ### Installing Internal Releases
 
+Reads from CodeArtifact use HTTP token auth. Mint a token (needs AWS credentials;
+SSO works) and expose it to `uv` via the named-index env vars, then install from
+the `datologyai` index:
+
 ```bash
+export UV_INDEX_DATOLOGYAI_USERNAME=aws
+export UV_INDEX_DATOLOGYAI_PASSWORD=$(aws codeartifact get-authorization-token \
+  --domain datologyai --domain-owner 764487710063 --region us-east-1 \
+  --query authorizationToken --output text)
+INDEX=datologyai=https://datologyai-764487710063.d.codeartifact.us-east-1.amazonaws.com/pypi/main/simple/
+
 # Install a specific version
-uv pip install zephon==0.0.1a1 --index https://api.pyx.dev/simple/datologyai/main
+uv pip install zephon==0.0.1a1 --index "$INDEX"
 
 # Install latest (including pre-releases)
-uv pip install zephon --pre --index https://api.pyx.dev/simple/datologyai/main
+uv pip install zephon --pre --index "$INDEX"
 ```
 
 ### Version Scheme

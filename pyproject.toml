@@ -244,11 +244,14 @@ log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
-[[tool.uv.index]]
-name = "pypi"
-url = "https://api.pyx.dev/simple/pypi"
-
+# Public packages resolve directly from public PyPI (uv's implicit default index).
+# zephon consumes no private DatologyAI packages, so the private index below is
+# `explicit` and is never consulted during resolution -- CI therefore needs no
+# CodeArtifact credentials. It exists only to publish zephon's own wheel to the
+# private CodeArtifact index (domain datologyai, repo main, us-east-1). See
+# docs/source/guides/dev_guide.md.
 [[tool.uv.index]]
 name = "datologyai"
-url = "https://api.pyx.dev/simple/datologyai/main"
-publish-url = "https://api.pyx.dev/v1/upload/datologyai/main"
+url = "https://datologyai-764487710063.d.codeartifact.us-east-1.amazonaws.com/pypi/main/simple/"
+publish-url = "https://datologyai-764487710063.d.codeartifact.us-east-1.amazonaws.com/pypi/main/"
+explicit = true
