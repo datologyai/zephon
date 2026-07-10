@@ -5560,6 +5560,7 @@ test = [
     { name = "pytest-rerunfailures" },
     { name = "pytest-timeout" },
     { name = "torchdata" },
+    { name = "transformers" },
     { name = "zephon", extra = ["ray"] },
     { name = "zstd" },
 ]
@@ -5614,6 +5615,7 @@ test = [
     { name = "pytest-rerunfailures", specifier = ">=14.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "torchdata", specifier = ">=0.11.0" },
+    { name = "transformers", specifier = ">=4.44.0" },
     { name = "zephon", extras = ["ray"] },
     { name = "zstd", specifier = ">=1.5.0" },
 ]

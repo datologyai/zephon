@@ -5,8 +5,9 @@
 
 import functools
 import importlib.util as _importlib_util
+import os
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -57,7 +58,9 @@ from zephon.ops import (
     PackSequences,
     PrefetchOp,
     ShuffleBuffer,
+    SpanSource,
     SpecialTokensMode,
+    TokenizeChat,
     TokenizeText,
 )
 from zephon.utils import buffered_iterable
@@ -847,6 +850,58 @@ class Pipeline:
         )
         node = self._graph.add(
             "tokenize", op, self._tail, placement=placement, parallelism=parallelism
+        )
+        self._tail = node
+        return self
+
+    @_mutates_graph
+    def tokenize_chat(
+        self,
+        tokenizer: Any | None = None,
+        tokenizer_id: str | None = None,
+        *,
+        field: str = "messages",
+        max_length: int | None = None,
+        chat_template: str | os.PathLike[str] | None = None,
+        apply_chat_template: bool = True,
+        span_source: SpanSource = "auto",
+        loss_on_last_turn_only: bool = False,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        tools_field: str = "tools",
+        enable_thinking_field: str = "enable_thinking",
+        mask_field_out: str = "loss_mask",
+        preserve_upstream_payload: bool = False,
+        placement: str = "auto",
+        parallelism: Optional[int] = None,
+    ) -> "Pipeline":
+        """Tokenize chat conversations into ids plus a loss mask.
+
+        See :class:`zephon.ops.TokenizeChat` for the full contract: one-shot
+        render+tokenize with assistant spans from ``{% generation %}`` tags,
+        a guarded prefix-diff fallback for untagged templates, or exact spans
+        in the no-template path (``apply_chat_template=False``).
+        """
+        op = TokenizeChat(
+            tokenizer,
+            tokenizer_id,
+            field=field,
+            max_length=max_length,
+            chat_template=chat_template,
+            apply_chat_template=apply_chat_template,
+            span_source=span_source,
+            loss_on_last_turn_only=loss_on_last_turn_only,
+            chat_template_kwargs=chat_template_kwargs,
+            tools_field=tools_field,
+            enable_thinking_field=enable_thinking_field,
+            mask_field_out=mask_field_out,
+            preserve_upstream_payload=preserve_upstream_payload,
+        )
+        node = self._graph.add(
+            "tokenize_chat",
+            op,
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
         )
         self._tail = node
         return self
