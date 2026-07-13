@@ -5,9 +5,12 @@
 
 import pytest
 
+import zephon.work.static_mixture as sm
 from zephon.api.pipeline import Pipeline
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon.work.static_mixture import StaticMixtureWorkSource
+from zephon.work.token_counting import TextTokenCountingSpec
 from zephon.work.token_estimation import TokenEstimation
 
 
@@ -49,10 +52,7 @@ def test_iteration_primes_token_worksource() -> None:
     assert records and "input_ids" in records[0].payload
 
 
-def test_priming_passes_tokenize_profile_from_tokenize_op(monkeypatch) -> None:
-    """The prime call carries the tokenize op's token-count-relevant config."""
-    import zephon.work.static_mixture as sm
-
+def test_priming_passes_counting_spec_from_tokenize_op(monkeypatch) -> None:
     captured = {}
     real = sm.prime_token_ratios
 
@@ -69,12 +69,31 @@ def test_priming_passes_tokenize_profile_from_tokenize_op(monkeypatch) -> None:
         max_length=5,
     )
     pipe._prime_worksource()
-    profile = captured["tokenize_profile"]
-    assert profile.tokenizer_id == "__fallback__"
-    assert profile.field == "text"
-    assert profile.special_tokens == "none"
-    assert profile.truncation
-    assert profile.max_length == 5
+    spec = captured["counting_spec"]
+    assert spec.tokenizer_id == "__fallback__"
+    assert spec.field == "text"
+    assert spec.special_tokens == "none"
+    assert spec.truncation
+    assert spec.max_length == 5
+
+
+def test_priming_passes_chat_counting_spec_from_chat_op(monkeypatch) -> None:
+    captured = {}
+    real = sm.prime_token_ratios
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(sm, "prime_token_ratios", capture)
+    pipe = Pipeline(make_token_ws()).tokenize_chat(
+        tokenizer_id="__fallback__", max_length=7
+    )
+    pipe._prime_worksource()
+    spec = captured["counting_spec"]
+    assert isinstance(spec, ChatTokenCountingSpec)
+    assert spec.tokenizer_id == "__fallback__"
+    assert spec.max_length == 7
 
 
 def test_prime_skipped_when_restore_pending() -> None:
@@ -117,6 +136,16 @@ def test_token_mode_rejects_ensure_mixture_before_tokenize() -> None:
         pipe._prime_worksource()
 
 
+def test_token_mode_rejects_ensure_mixture_before_chat_tokenize() -> None:
+    pipe = (
+        Pipeline(make_token_ws())
+        .ensure_mixture()
+        .tokenize_chat(tokenizer_id="__fallback__")
+    )
+    with pytest.raises(ValueError, match="after tokenize"):
+        pipe._prime_worksource()
+
+
 def test_token_mode_allows_token_weighted_ensure_mixture_after_tokenize() -> None:
     pipe = (
         Pipeline(make_token_ws())
@@ -134,6 +163,25 @@ def test_multi_tokenize_priming_warns_and_uses_first() -> None:
     )
     with pytest.warns(RuntimeWarning, match="first of 2 tokenize ops"):
         pipe._prime_worksource()
+
+
+def test_mixed_tokenize_ops_warn_and_prime_with_first(monkeypatch) -> None:
+    captured = {}
+    real = sm.prime_token_ratios
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(sm, "prime_token_ratios", capture)
+    pipe = (
+        Pipeline(make_token_ws())
+        .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+        .tokenize_chat(tokenizer_id="__fallback__")
+    )
+    with pytest.warns(RuntimeWarning, match="first of 2 tokenize ops"):
+        pipe._prime_worksource()
+    assert isinstance(captured["counting_spec"], TextTokenCountingSpec)
 
 
 def test_checkpoint_before_iteration_primes_and_restores() -> None:

@@ -41,6 +41,7 @@ from zephon.utils.torch_compat import (
     _should_use_tensor_lock,
     _tensor_lock_ctx,
 )
+from zephon.work.token_counting import TextTokenCountingSpec
 
 if TYPE_CHECKING:
     import numpy as np
@@ -369,6 +370,9 @@ class TokenizeText(TokenizeBase):
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+
+    def token_counting_spec(self) -> TextTokenCountingSpec:
+        return TextTokenCountingSpec.from_op(self)
 
     def _lookup_field(self, payload: Mapping[str, Any]) -> Any:
         """Resolve ``self._field_path`` against a (possibly nested) mapping payload."""

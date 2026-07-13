@@ -571,5 +571,5 @@ def test_worksource_requires_token_priming_defaults_false():
 
 def test_worksource_prime_is_a_noop_accepting_keyword_context():
     ws = _PlainWorkSource()
-    assert ws.prime(io_options=None, tokenize_profile=None) is None
+    assert ws.prime(io_options=None, counting_spec=None) is None
     assert ws.prime() is None

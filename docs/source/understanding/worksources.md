@@ -322,10 +322,14 @@ How it works:
 - **Priming.**  Once per run, in the driver, the pipeline calibrates a
   tokens/byte ratio per dataset by fetching a few samples and tokenizing
   them with the pipeline's tokenizer configuration (truncation and special
-  tokens are accounted for analytically).  Ratios persist in checkpoints, so
-  restored runs never re-measure.  When the heuristics do not fit your data
-  (binary payloads, VLM cost units), pin the ratios or provide a `measure=`
-  callable via {py:class}`~zephon.work.token_estimation.TokenEstimation`.
+  tokens are accounted for analytically).  Calibration uses delivered
+  *sequence* tokens, including chat-template scaffolding and unsupervised
+  turns, matching `ensure_mixture(weight_by="auto")`.  Samples dropped by
+  tokenization count as zero yield, lowering the ratio so the allocator
+  schedules more bytes.  Ratios persist in checkpoints, so restored runs
+  never re-measure.  When the heuristics do not fit your data (binary
+  payloads, VLM cost units), pin the ratios or provide a `measure=` callable
+  via {py:class}`~zephon.work.token_estimation.TokenEstimation`.
 - **Per-draw allocation.**  Instead of computing fixed per-chunk quotas
   (see [above](#chunk-quota-allocation)), the WorkSource fills each chunk
   one sample at a time, always drawing from the component that is furthest

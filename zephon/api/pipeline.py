@@ -63,10 +63,10 @@ from zephon.ops import (
     TokenizeChat,
     TokenizeText,
 )
+from zephon.ops.tokenize_base import TokenizeBase
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
-from zephon.work.token_estimation import TokenizeProfile
 
 # TypeVar for stateful_transform state type
 _S = TypeVar("_S")
@@ -1343,12 +1343,9 @@ class Pipeline:
     def _find_op(self, op_type: type[_OpT]) -> tuple[int, _OpT] | None:
         return next(self._iter_ops(op_type), None)
 
-    def _validate_token_mixture_graph(self) -> tuple[int, TokenizeText] | None:
-        """Validate token-mode ``ensure_mixture`` placement and units.
-
-        Returns the first tokenize op so priming can reuse its profile.
-        """
-        tokenizes = list(self._iter_ops(TokenizeText))
+    def _validate_token_mixture_graph(self) -> tuple[int, TokenizeBase] | None:
+        """Validate token-mode placement and return the first tokenize op."""
+        tokenizes = list(self._iter_ops(TokenizeBase))
         tokenize = tokenizes[0] if tokenizes else None
         if len(tokenizes) > 1:
             warnings.warn(
@@ -1396,10 +1393,11 @@ class Pipeline:
         if self._engine is not None and not self._engine._closed:
             # After restore, the live clones already carry checkpointed ratios.
             return
-        profile = TokenizeProfile.from_op(tokenize[1]) if tokenize is not None else None
         self.ws.prime(
             io_options=self._options.io_options,
-            tokenize_profile=profile,
+            counting_spec=(
+                tokenize[1].token_counting_spec() if tokenize is not None else None
+            ),
             mp_context=self._options.mp_context,
         )
 

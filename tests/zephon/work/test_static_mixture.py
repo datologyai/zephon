@@ -21,7 +21,11 @@ from zephon.work.static_mixture import (
     _DatasetKnobs,
     _resolve_block_size,
 )
-from zephon.work.token_estimation import TokenEstimation, TokenizeProfile, TokenRatio
+from zephon.work.token_estimation import (
+    TextTokenCountingSpec,
+    TokenEstimation,
+    TokenRatio,
+)
 
 
 def make_dataset(name: str, sample_count: int) -> Dataset:
@@ -3895,10 +3899,10 @@ def _inline_prime_census(monkeypatch: pytest.MonkeyPatch) -> None:
     import zephon.work.token_estimation as te
 
     def inline_census(
-        measured_datasets, store_options, estimation, tokenize_profile, seed, mp_context
+        measured_datasets, store_options, estimation, counting_spec, seed, mp_context
     ):
         te._init_prime_worker(
-            measured_datasets, store_options, estimation, tokenize_profile, seed
+            measured_datasets, store_options, estimation, counting_spec, seed
         )
         try:
             return {
@@ -3941,7 +3945,7 @@ def make_token_ws(
     )
     if primed:
         ws.prime(
-            tokenize_profile=TokenizeProfile(
+            counting_spec=TextTokenCountingSpec(
                 tokenizer_id="__fallback__", field="text", special_tokens="none"
             )
         )
@@ -4011,7 +4015,7 @@ def test_token_mode_priming_lifecycle() -> None:
     assert ws._strategy.mixture_unit == "tokens"
     assert ws.requires_token_priming
     ws.prime(
-        tokenize_profile=TokenizeProfile(
+        counting_spec=TextTokenCountingSpec(
             tokenizer_id="__fallback__", field="text", special_tokens="none"
         )
     )
@@ -4327,7 +4331,7 @@ def test_token_mode_liveness_guard_rejects_tiny_repeat_dataset() -> None:
     )
     with pytest.raises(ValueError, match="repeat policy requires at least"):
         ws.prime(
-            tokenize_profile=TokenizeProfile(
+            counting_spec=TextTokenCountingSpec(
                 tokenizer_id="__fallback__", field="text", special_tokens="none"
             )
         )

@@ -340,7 +340,7 @@ class WorkSource(ABC):
         self,
         *,
         io_options: Any = None,
-        tokenize_profile: Any = None,
+        counting_spec: Any = None,
         mp_context: Any = None,
     ) -> None:
         """Driver-side calibration hook; no-op by default."""

@@ -14,6 +14,7 @@ from zephon.core.constants import SampleRecord
 from zephon.core.op_base import DefaultSetup
 from zephon.utils.tokenizer import TokenizerLike, load_hf_tokenizer
 from zephon.utils.torch_compat import _gil_disabled
+from zephon.work.token_counting import TokenCountingSpec
 
 _MISSING: object = object()
 
@@ -99,6 +100,14 @@ class TokenizeBase(DefaultSetup):
             if value is _MISSING:
                 return _MISSING
         return value
+
+    def token_counting_spec(self) -> TokenCountingSpec:
+        """Return the settings needed to reproduce delivered-token counts."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement token_counting_spec(), "
+            f"so token-aware mixture priming cannot calibrate through it. "
+            f"Implement the hook or pin ratios via TokenEstimation(primer=...)."
+        )
 
     def configured_tokenizer_id(self) -> str | None:
         """Return the *configured* tokenizer id for observability.

@@ -27,11 +27,10 @@ import os
 import random
 import time
 import warnings
-from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, ClassVar, Literal, get_args
 
 import cloudpickle
 import numpy as np
@@ -43,20 +42,19 @@ from zephon.io.catalog import resolve_catalog_dir, set_catalog_dir
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 from zephon.observability.size_estimator import content_bytes
-from zephon.ops.tokenize_text import TokenizeText
 from zephon.utils.atomic import atomic_write_bytes
-from zephon.utils.tokenizer import load_hf_tokenizer
+from zephon.work.token_counting import (
+    CountPlan,
+    DeliveredTokenCounter,
+    FatalCountError,
+    TextTokenCountingSpec,
+    TokenCountingSpec,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Standard ~4 bytes/token BPE heuristic for English prose.
 DEFAULT_FALLBACK_TOKENS_PER_BYTE = 0.25
-
-#: Text keys tried in priority order when no field is configured.
-_COMMON_TEXT_KEYS = ("text", "content", "document", "body", "markdown", "raw_content")
-
-#: Token-array keys tried the same way for already-tokenized payloads.
-_COMMON_TOKEN_KEYS = ("input_ids", "tokens", "token_ids")
 
 RatioSource = Literal["measured", "pinned", "fallback"]
 
@@ -188,73 +186,6 @@ class TokenEstimation:
             object.__setattr__(self, key, value)
 
 
-@dataclass(frozen=True)
-class TokenizeProfile:
-    """The ``TokenizeText`` settings that affect delivered-token counts."""
-
-    tokenizer: Any | None = None
-    tokenizer_id: str | None = None
-    field: str | None = None
-    max_length: int | None = None
-    truncation: bool = False
-    split_long_samples: bool = False
-    special_tokens: str = "bos_eos"
-    use_fast: bool | None = True
-
-    @classmethod
-    def from_op(cls, op: TokenizeText) -> "TokenizeProfile":
-        """Capture the token-count-relevant fields of a ``TokenizeText`` op."""
-        return cls(
-            tokenizer=op.tok,
-            tokenizer_id=op.tokenizer_id,
-            field=op.field,
-            max_length=op.max_length,
-            truncation=op.truncation,
-            split_long_samples=op.split_long_samples,
-            special_tokens=op.special_tokens,
-            use_fast=op.use_fast,
-        )
-
-    @property
-    def num_specials(self) -> int:
-        prepend = 1 if self.special_tokens in ("bos_eos", "bos") else 0
-        append = 1 if self.special_tokens in ("bos_eos", "eos") else 0
-        return prepend + append
-
-    def delivered_tokens(self, raw_tokens: int) -> int:
-        """Closed-form delivered-token count from a raw content-token count.
-
-        ``raw_tokens`` excludes operator-added specials in bracket modes, and
-        is the template-included count for ``tokenizer_default`` (where HF owns
-        specials and truncates the whole sequence to ``max_length``).
-        """
-        if self.special_tokens == "tokenizer_default":
-            if self.truncation and self.max_length is not None:
-                return min(raw_tokens, self.max_length)
-            return raw_tokens
-
-        specials = self.num_specials
-        if self.split_long_samples:
-            # Splitting preserves token mass; BOS/EOS land on the first/last chunk.
-            return raw_tokens + specials
-        if self.truncation and self.max_length is not None:
-            return min(raw_tokens, self.max_length - specials) + specials
-        return raw_tokens + specials
-
-    def __getstate__(self) -> dict[str, Any]:
-        # std pickle cannot carry every live tokenizer; cloudpickle can.
-        state = dict(self.__dict__)
-        if state["tokenizer"] is not None:
-            state["tokenizer"] = cloudpickle.dumps(state["tokenizer"])
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        if isinstance(state.get("tokenizer"), bytes):
-            state = {**state, "tokenizer": cloudpickle.loads(state["tokenizer"])}
-        for key, value in state.items():
-            object.__setattr__(self, key, value)
-
-
 # ---------------------------------------------------------------------------
 # Byte sources
 # ---------------------------------------------------------------------------
@@ -336,125 +267,6 @@ class PerShardTokenCost:
     def mean_cost(self, name: str) -> float:
         """Mean estimated tokens/sample for the dataset (>= 1)."""
         return self._mean_cost[name]
-
-
-# ---------------------------------------------------------------------------
-# Text extraction (calibration)
-# ---------------------------------------------------------------------------
-
-
-def _lookup_field_path(payload: Any, path: tuple[str, ...] | None) -> Any:
-    value = payload
-    for key in path or ():  # falsy path resolves to the payload itself
-        if not isinstance(value, Mapping) or key not in value:
-            return None
-        value = value[key]
-    return value
-
-
-def _as_text(value: Any) -> str | None:
-    """Return str values directly and UTF-8 bytes as text."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        try:
-            return bytes(value).decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    return None
-
-
-def choose_text_field(payload: Any) -> str | None:
-    """Pick a likely text field from a mapping payload.
-
-    Known body keys win; otherwise choose the only or longest text-like value.
-    """
-    if not isinstance(payload, Mapping):
-        return None
-    for key in _COMMON_TEXT_KEYS:
-        if key in payload and _as_text(payload[key]) is not None:
-            return key
-    candidates = {
-        key: text
-        for key, value in payload.items()
-        if isinstance(key, str) and (text := _as_text(value)) is not None
-    }
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return next(iter(candidates))
-    return max(candidates, key=lambda k: (len(candidates[k]), k))
-
-
-def extract_text(payload: Any, path: tuple[str, ...] | None = None) -> str | None:
-    """Extract calibration text from a configured path or text-like payload."""
-    if path:
-        text = _as_text(_lookup_field_path(payload, path))
-        if text is not None:
-            return text
-    return _as_text(payload)
-
-
-def _token_array_length(value: Any) -> int | None:
-    """Return the element count for integer token arrays, else ``None``.
-
-    Handles numpy arrays, integer torch tensors (duck-typed), and int lists.
-    """
-    if isinstance(value, np.ndarray):
-        return int(value.size) if np.issubdtype(value.dtype, np.integer) else None
-    if isinstance(value, (list, tuple)):
-        head = value[0] if value else None
-        return (
-            len(value) if isinstance(head, int) and not isinstance(head, bool) else None
-        )
-    is_float = getattr(value, "is_floating_point", None)  # torch.Tensor, duck-typed
-    if callable(is_float) and hasattr(value, "numel"):
-        try:
-            if not is_float() and not getattr(value, "is_complex", lambda: False)():
-                return int(value.numel())
-        except Exception:  # noqa: BLE001 — unknown tensor-likes fall through to text
-            return None
-    return None
-
-
-def _pretokenized_field(
-    sample_payload: Any, field_path: tuple[str, ...] | None
-) -> tuple[str, ...] | None:
-    """Return the token-array field path; ``()`` means the payload itself."""
-    if field_path is not None:
-        found = _token_array_length(_lookup_field_path(sample_payload, field_path))
-        return field_path if found is not None else None
-    if _token_array_length(sample_payload) is not None:
-        return ()
-    if isinstance(sample_payload, Mapping):
-        for key in _COMMON_TOKEN_KEYS:
-            if _token_array_length(sample_payload.get(key)) is not None:
-                return (key,)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Tokenizer plumbing (calibration)
-# ---------------------------------------------------------------------------
-
-
-def _instantiate_tokenizer(tokenize_profile: TokenizeProfile) -> Any:
-    """Build the calibration tokenizer the same way ``TokenizeText`` would."""
-    if tokenize_profile.tokenizer is not None:
-        return tokenize_profile.tokenizer
-    return load_hf_tokenizer(
-        tokenize_profile.tokenizer_id, use_fast=tokenize_profile.use_fast
-    )
-
-
-def _count_raw_tokens(
-    tokenizer: Any, text: str, tokenize_profile: TokenizeProfile
-) -> int:
-    """Count tokenizer output in the units expected by ``delivered_tokens``."""
-    add_specials = tokenize_profile.special_tokens == "tokenizer_default"
-    result = tokenizer(text, add_special_tokens=add_specials)
-    input_ids = result["input_ids"] if isinstance(result, Mapping) else result.input_ids
-    return len(input_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -676,82 +488,26 @@ def _fallback(
     )
 
 
-@dataclass(frozen=True)
-class _DeliveryPlan:
-    """How one dataset's calibration tokens are counted."""
-
-    mode: Literal["measure callable", "pretokenized", "text"]
-    path: tuple[str, ...] | None
-
-    @property
-    def field_label(self) -> str:
-        return ".".join(self.path) if self.path else "payload directly"
-
-    @property
-    def description(self) -> str:
-        if self.mode == "measure callable":
-            return self.mode
-        return f"{self.mode}, field: {self.field_label}"
-
-
 # Plan from a payload prefix so one anomalous record cannot steer the dataset's
 # measurement mode; gate on measured draw mass so a plan/data mismatch is loud.
 _PLAN_SAMPLE_COUNT = 8
 _MIN_PLAN_COVERAGE = 0.5
 
 
-def _text_field_vote(
-    payload: Any, field_path: tuple[str, ...] | None
-) -> tuple[str, ...] | None:
-    """The text path this payload could be measured by; ``None`` abstains.
+@dataclass(frozen=True)
+class _MeasurePlan(CountPlan):
+    measure: Callable[[Any], int]
+    # A user measure defines the unit, so an exception invalidates calibration.
+    abort_on_error: ClassVar[bool] = True
 
-    ``()`` votes for tokenizing the payload itself (plain string/bytes rows).
-    """
-    if field_path is not None:
-        found = _as_text(_lookup_field_path(payload, field_path)) is not None
-        return field_path if found else None
-    chosen = choose_text_field(payload)
-    if chosen is not None:
-        return (chosen,)
-    return () if _as_text(payload) is not None else None
+    @property
+    def description(self) -> str:
+        return "measure callable"
 
-
-def _common_key_rank(path: tuple[str, ...]) -> int:
-    """Tie-break rank: common body keys beat heuristic picks, in list order."""
-    if len(path) == 1 and path[0] in _COMMON_TEXT_KEYS:
-        return len(_COMMON_TEXT_KEYS) - _COMMON_TEXT_KEYS.index(path[0])
-    return 0
-
-
-def _plan_delivery(
-    estimation: TokenEstimation,
-    field_path: tuple[str, ...] | None,
-    sample_payloads: list[Any],
-) -> _DeliveryPlan:
-    """Choose the token-counting strategy by vote over a payload prefix.
-
-    Undecidable payloads abstain; ties prefer pretokenized (exact counts).
-    """
-    if estimation.measure is not None:
-        return _DeliveryPlan("measure callable", None)
-    token_votes: Counter[tuple[str, ...]] = Counter()
-    text_votes: Counter[tuple[str, ...]] = Counter()
-    for payload in sample_payloads:
-        token_path = _pretokenized_field(payload, field_path)
-        if token_path is not None:
-            token_votes[token_path] += 1
-            continue
-        text_path = _text_field_vote(payload, field_path)
-        if text_path is not None:
-            text_votes[text_path] += 1
-    if token_votes and sum(token_votes.values()) >= sum(text_votes.values()):
-        return _DeliveryPlan("pretokenized", token_votes.most_common(1)[0][0])
-    if field_path is not None:
-        return _DeliveryPlan("text", field_path)
-    if not text_votes:
-        return _DeliveryPlan("text", None)
-    best = max(text_votes, key=lambda p: (text_votes[p], _common_key_rank(p)))
-    return _DeliveryPlan("text", best)
+    def count(self, payload: Any) -> int | None:
+        delivered = int(self.measure(payload))
+        # Non-positive results are unmeasurable, not zero-yield samples.
+        return delivered if delivered > 0 else None
 
 
 def _measure_dataset(
@@ -759,8 +515,7 @@ def _measure_dataset(
     dataset_id: int,
     store: Any,
     estimation: TokenEstimation,
-    tokenize_profile: TokenizeProfile | None,
-    tokenizer: Any,
+    counter: DeliveredTokenCounter | None,
     seed: int,
 ) -> _DatasetMeasurement:
     """Measure one dataset's tokens/byte ratio from calibration samples."""
@@ -799,52 +554,42 @@ def _measure_dataset(
         f"fetch returned {len(payloads)} payloads for {len(sample_ids)} ids"
     )
 
-    profile = tokenize_profile or TokenizeProfile()
-    field_path = tuple(profile.field.split(".")) if profile.field else None
-    plan = _plan_delivery(
-        estimation,
-        field_path,
-        [payloads[sid] for sid in sample_ids[:_PLAN_SAMPLE_COUNT]],
-    )
+    if estimation.measure is not None:
+        plan: CountPlan = _MeasurePlan(estimation.measure)
+    else:
+        assert counter is not None, "no measure callable, so a counter is required"
+        plan = counter.plan([payloads[sid] for sid in sample_ids[:_PLAN_SAMPLE_COUNT]])
     logger.info("calibrating %s as %s", dataset.name, plan.description)
     measured: list[tuple[int, int, int]] = []
     shards_seen: set[int] = set()
-    tokenizer_errors = 0
-    last_tokenizer_error: Exception | None = None
+    count_errors = 0
+    last_count_error: Exception | None = None
     for sid, draws in zip(sample_ids, draw_counts):
-        payload = payloads[sid]
-        if estimation.measure is not None:
-            try:
-                delivered = int(estimation.measure(payload))
-            except Exception as exc:  # noqa: BLE001 — user callable, stay best-effort
-                return _fallback(estimation, scan, f"measure callable failed: {exc}")
-        elif plan.mode == "pretokenized":
-            delivered = _token_array_length(_lookup_field_path(payload, plan.path))
-            if delivered is None:
-                continue
-        else:
-            text = extract_text(payload, plan.path)
-            if text is None:
-                continue
-            try:
-                delivered = profile.delivered_tokens(
-                    _count_raw_tokens(tokenizer, text, profile)
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad doc must not kill the prime
-                tokenizer_errors += 1
-                last_tokenizer_error = exc
-                continue
-        if delivered > 0:
+        try:
+            delivered = plan.count(payloads[sid])
+        except FatalCountError:
+            # Structural: execution rejects this row too. Surface it instead of
+            # sampling around it, even when coverage would otherwise pass.
+            raise
+        except Exception as exc:  # noqa: BLE001 — the plan chooses abort or skip
+            if plan.abort_on_error:
+                return _fallback(estimation, scan, f"{plan.description} failed: {exc}")
+            count_errors += 1
+            last_count_error = exc
+            continue
+        if delivered is not None:
+            # Zero counts are genuine measurements (e.g. chat drops): the
+            # bytes are scheduled either way, so zeros belong in the ratio.
             # Reuse the census size; PPS only ever selects records with bytes > 0.
             measured.append((delivered, scan.sizes[(sid[1], sid[2])], draws))
             shards_seen.add(sid[1])
 
-    if tokenizer_errors:
+    if count_errors:
         logger.warning(
-            "skipped %d calibration samples for %s that failed to tokenize (last: %s)",
-            tokenizer_errors,
+            "skipped %d calibration samples for %s that failed to count (last: %s)",
+            count_errors,
             dataset.name,
-            last_tokenizer_error,
+            last_count_error,
         )
     total_draws = sum(draw_counts)
     measured_draws = sum(draws for _, _, draws in measured)
@@ -853,10 +598,10 @@ def _measure_dataset(
             f"calibration plan ({plan.description}) measured"
             f" only {measured_draws}/{total_draws} draws"
         )
-        if tokenizer_errors:
+        if count_errors:
             reason += (
-                f" (tokenizer failed on {tokenizer_errors} samples,"
-                f" last: {last_tokenizer_error})"
+                f" (counting failed on {count_errors} samples,"
+                f" last: {last_count_error})"
             )
         return _fallback(estimation, scan, reason)
 
@@ -886,35 +631,31 @@ def _init_prime_worker(
     measured_datasets: Mapping[int, Dataset],
     store_options: Any,
     estimation: TokenEstimation,
-    tokenize_profile: TokenizeProfile | None,
+    counting_spec: TokenCountingSpec | None,
     seed: int,
 ) -> None:
-    """Pool initializer: attach catalogs, load the tokenizer, stash worker state."""
     set_catalog_dir(store_options)
     _prime_worker.update(
         datasets=measured_datasets,
         store=build_multi_dataset_store(measured_datasets, options=store_options),
         estimation=estimation,
-        profile=tokenize_profile,
         seed=seed,
-        tokenizer=(
+        counter=(
             None
             if estimation.measure is not None
-            else _instantiate_tokenizer(tokenize_profile or TokenizeProfile())
+            else (counting_spec or TextTokenCountingSpec()).build_counter()
         ),
     )
 
 
 def _measure_in_worker(dataset_id: int) -> _DatasetMeasurement:
-    """Measure one dataset using the worker-local store + tokenizer (pool task)."""
     w = _prime_worker
     return _measure_dataset(
         w["datasets"][dataset_id],
         dataset_id,
         w["store"],
         w["estimation"],
-        w["profile"],
-        w["tokenizer"],
+        w["counter"],
         w["seed"],
     )
 
@@ -929,7 +670,7 @@ def _run_census(
     measured_datasets: Mapping[int, Dataset],
     store_options: StoreOptions,
     estimation: TokenEstimation,
-    tokenize_profile: TokenizeProfile | None,
+    counting_spec: TokenCountingSpec | None,
     seed: int,
     mp_context: Any,
 ) -> dict[str, _DatasetMeasurement]:
@@ -958,13 +699,12 @@ def _run_census(
             max_workers=workers,
             mp_context=mp_context or mp.get_context("spawn"),
             initializer=_init_prime_worker,
-            # TokenEstimation/TokenizeProfile carry cloudpickle hooks for their
-            # callable/tokenizer fields, so plain initargs survive spawn.
+            # Cloudpickle hooks let callable/tokenizer fields survive spawn.
             initargs=(
                 measured_datasets,
                 store_options,
                 estimation,
-                tokenize_profile,
+                counting_spec,
                 seed,
             ),
         ) as pool:
@@ -976,6 +716,8 @@ def _run_census(
                 name = pending[fut]
                 try:
                     out[name] = fut.result()
+                except FatalCountError:
+                    raise
                 except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
                     logger.warning(
                         "token-aware priming: measuring %s crashed; using fallback",
@@ -985,6 +727,8 @@ def _run_census(
                     out[name] = _fallback(
                         estimation, None, f"measurement crashed: {exc}", retryable=True
                     )
+    except FatalCountError:
+        raise
     except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
         # Parent-side pool failure, e.g. census inputs that defeat pickling at
         # worker spawn: fall back for every dataset not already measured.
@@ -1012,7 +756,7 @@ def _run_census(
 # Ranks on the same node would otherwise repeat the same shard downloads and
 # tokenization. The fingerprint covers every input, so peers can safely block on
 # a file lock and reuse the byte-identical ratios written by the first rank.
-_PRIME_CACHE_VERSION = 1
+_PRIME_CACHE_VERSION = 2
 _PRIME_CACHE_SUBDIR = "token_ratios"
 
 
@@ -1040,31 +784,17 @@ def _prime_cache_key(
     names: list[str],
     by_name: Mapping[str, Dataset],
     estimation: TokenEstimation,
-    tokenize_profile: TokenizeProfile | None,
+    counting_spec: TokenCountingSpec | None,
     seed: int,
 ) -> str:
     """Fingerprint every input the measured ratios depend on."""
-    profile = tokenize_profile or TokenizeProfile()
+    # Include spec type and state so distinct live tokenizers cannot alias.
+    # Serialization failures also prevent spawn, and fallbacks are not cached.
     parts = [
         str(_PRIME_CACHE_VERSION),
         str(seed),
         _pickle_fingerprint(estimation),
-        repr(
-            (
-                profile.tokenizer_id,
-                # Live tokenizer state shapes counts; id-less instances must
-                # not alias each other.
-                None
-                if profile.tokenizer is None
-                else _pickle_fingerprint(profile.tokenizer),
-                profile.field,
-                profile.max_length,
-                profile.truncation,
-                profile.split_long_samples,
-                profile.special_tokens,
-                profile.use_fast,
-            )
-        ),
+        _pickle_fingerprint(counting_spec or TextTokenCountingSpec()),
         *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
@@ -1107,7 +837,7 @@ def prime_token_ratios(
     datasets: list[Dataset],
     dataset_ids: Mapping[str, int],
     estimation: TokenEstimation,
-    tokenize_profile: TokenizeProfile | None,
+    counting_spec: TokenCountingSpec | None,
     io_options: Any = None,
     seed: int = 0,
     mp_context: Any = None,
@@ -1157,7 +887,7 @@ def prime_token_ratios(
             # Build catalogs once so workers mmap-attach instead of repeating discovery.
             build_multi_dataset_store(measured_datasets, options=store_options)
 
-            key = _prime_cache_key(names, by_name, estimation, tokenize_profile, seed)
+            key = _prime_cache_key(names, by_name, estimation, counting_spec, seed)
             cache_path = (
                 resolve_catalog_dir(store_options) / _PRIME_CACHE_SUBDIR / f"{key}.json"
             )
@@ -1181,7 +911,7 @@ def prime_token_ratios(
                             measured_datasets,
                             store_options,
                             estimation,
-                            tokenize_profile,
+                            counting_spec,
                             seed,
                             mp_context,
                         )
@@ -1236,9 +966,12 @@ def prime_token_ratios(
 
 __all__ = [
     "DEFAULT_FALLBACK_TOKENS_PER_BYTE",
+    "CountPlan",
+    "DeliveredTokenCounter",
     "PerShardTokenCost",
+    "TextTokenCountingSpec",
+    "TokenCountingSpec",
     "TokenEstimation",
     "TokenRatio",
-    "TokenizeProfile",
     "prime_token_ratios",
 ]

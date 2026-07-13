@@ -14,37 +14,36 @@ import pytest
 from zephon.io import Dataset, InMemoryShard
 from zephon.io.stores.multi import build_multi_dataset_store
 from zephon.observability.size_estimator import content_bytes
-from zephon.ops.tokenize_text import TokenizeText
+from zephon.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon.utils.tokenizer import fallback_tokenizer
 from zephon.work import token_estimation
+from zephon.work.token_counting import (
+    CountPlan,
+    DeliveredTokenCounter,
+    TextTokenCountingSpec,
+    _TextCounter,
+)
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
     PerShardByteSize,
     PerShardTokenCost,
     TokenEstimation,
-    TokenizeProfile,
     TokenRatio,
     _calibration_shard_count,
     _CalibrationScan,
-    _count_raw_tokens,
     _dataset_content_key,
     _DatasetMeasurement,
     _fallback,
     _fetch_payloads,
     _hansen_hurwitz_ratio,
-    _instantiate_tokenizer,
     _measure_dataset,
-    _plan_delivery,
+    _MeasurePlan,
     _pps_select,
-    _pretokenized_field,
     _prime_cache_key,
     _read_prime_cache,
     _shard_bytes_cv,
-    _token_array_length,
     _write_prime_cache,
     build_byte_source,
-    choose_text_field,
-    extract_text,
     prime_token_ratios,
 )
 
@@ -162,191 +161,6 @@ def test_token_ratio_construction_validates(args):
 
 
 # ---------------------------------------------------------------------------
-# Delivered-token arithmetic
-# ---------------------------------------------------------------------------
-
-
-def test_delivered_tokens_bracket_modes_add_specials():
-    assert TokenizeProfile(special_tokens="bos_eos").delivered_tokens(100) == 102
-    assert TokenizeProfile(special_tokens="bos").delivered_tokens(100) == 101
-    assert TokenizeProfile(special_tokens="eos").delivered_tokens(100) == 101
-    assert TokenizeProfile(special_tokens="none").delivered_tokens(100) == 100
-
-
-def test_delivered_tokens_truncation_destroys_mass():
-    cfg = TokenizeProfile(special_tokens="bos_eos", truncation=True, max_length=50)
-    # Specials reserve two slots, so content truncates to 48.
-    assert cfg.delivered_tokens(100) == 50
-    assert cfg.delivered_tokens(10) == 12
-
-
-def test_delivered_tokens_split_preserves_mass():
-    cfg = TokenizeProfile(
-        special_tokens="bos_eos", split_long_samples=True, max_length=50
-    )
-    assert cfg.delivered_tokens(1000) == 1002
-
-
-def test_delivered_tokens_tokenizer_default_counts_template():
-    cfg = TokenizeProfile(special_tokens="tokenizer_default")
-    assert cfg.delivered_tokens(100) == 100
-    truncating = TokenizeProfile(
-        special_tokens="tokenizer_default", truncation=True, max_length=64
-    )
-    assert truncating.delivered_tokens(100) == 64
-
-
-@pytest.mark.parametrize(
-    "mode,prepend,append",
-    [("bos_eos", 1, 1), ("bos", 1, 0), ("eos", 0, 1), ("none", 0, 0)],
-)
-def test_num_specials_by_mode(mode, prepend, append):
-    assert TokenizeProfile(special_tokens=mode).num_specials == prepend + append
-
-
-def test_tokenize_profile_from_op_captures_count_fields():
-    tok = fallback_tokenizer()
-    op = TokenizeText(
-        tokenizer=tok,
-        field="text",
-        max_length=128,
-        truncation=True,
-        special_tokens="bos",
-    )
-    profile = TokenizeProfile.from_op(op)
-    assert profile.tokenizer is tok
-    assert profile.field == "text"
-    assert profile.max_length == 128
-    assert profile.truncation is True
-    assert profile.split_long_samples is False
-    assert profile.special_tokens == "bos"
-
-
-# ---------------------------------------------------------------------------
-# Text extraction
-# ---------------------------------------------------------------------------
-
-
-def test_extract_text_configured_field_wins():
-    payload = {"text": "body words", "title": "a much longer title than the body"}
-    assert extract_text(payload, ("text",)) == "body words"
-
-
-def test_extract_text_nested_field_path():
-    payload = {"doc": {"inner": {"text": "nested body"}}}
-    assert extract_text(payload, ("doc", "inner", "text")) == "nested body"
-
-
-def test_extract_text_configured_field_decodes_bytes():
-    payload = {"text": "raw bytes body".encode("utf-8")}
-    assert extract_text(payload, ("text",)) == "raw bytes body"
-
-
-def test_extract_text_plain_string_payload():
-    assert extract_text("just a string document") == "just a string document"
-
-
-def test_extract_text_utf8_bytes_payload():
-    assert extract_text("bytes document".encode("utf-8")) == "bytes document"
-
-
-def test_extract_text_binary_bytes_unmeasurable():
-    assert extract_text(b"\xff\xfe\x00\x01binary") is None
-
-
-def test_extract_text_missing_configured_field_unmeasurable():
-    # Extraction does not silently cross over to a different field.
-    assert extract_text({"content": "some body"}, ("text",)) is None
-
-
-def test_extract_text_non_text_payload_unmeasurable():
-    assert extract_text(12345) is None
-    assert extract_text([1, 2, 3]) is None
-    assert extract_text({"a": 1, "b": 2}) is None
-
-
-def test_choose_text_field_prefers_common_keys():
-    payload = {"id": "abc-123", "url": "https://x", "text": "short"}
-    assert choose_text_field(payload) == "text"
-
-
-def test_choose_text_field_single_candidate():
-    payload = {"n_tokens": 7, "body_field": "the only string"}
-    assert choose_text_field(payload) == "body_field"
-
-
-def test_choose_text_field_multiple_candidates_picks_longest():
-    payload = {"id": "x" * 8, "document_body": "y" * 100}
-    assert choose_text_field(payload) == "document_body"
-
-
-def test_choose_text_field_decodable_bytes_count_as_text():
-    payload = {"blob": "decodable text".encode("utf-8")}
-    assert choose_text_field(payload) == "blob"
-
-
-def test_choose_text_field_no_text_returns_none():
-    assert choose_text_field({"a": 1}) is None
-    assert choose_text_field("not a mapping") is None
-
-
-# ---------------------------------------------------------------------------
-# Pretokenized data
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("dtype", [np.int16, np.int32, np.int64, np.uint16])
-def test_token_array_length_counts_elements_regardless_of_dtype(dtype):
-    assert _token_array_length(np.arange(20, dtype=dtype)) == 20
-
-
-def test_token_array_length_rejects_non_token_arrays():
-    assert _token_array_length(np.arange(5, dtype=np.float32)) is None
-    assert _token_array_length(np.array([True, False])) is None
-    assert _token_array_length([1, 2, 3]) == 3
-    assert _token_array_length([1.0, 2.0]) is None
-    assert _token_array_length([True, False]) is None
-    assert _token_array_length("a string") is None
-    assert _token_array_length(b"\x00\x01") is None
-    assert _token_array_length([]) is None
-
-
-def test_token_array_length_duck_typed_integer_tensor():
-    # torch is optional, so the tensor branch is detected by duck typing.
-    class _IntTensor:
-        def is_floating_point(self):
-            return False
-
-        def is_complex(self):
-            return False
-
-        def numel(self):
-            return 42
-
-    class _FloatTensor:
-        def is_floating_point(self):
-            return True
-
-        def numel(self):
-            return 42
-
-    assert _token_array_length(_IntTensor()) == 42
-    assert _token_array_length(_FloatTensor()) is None
-
-
-def test_pretokenized_field_resolution_order():
-    # () means "the payload itself is the token array".
-    assert _pretokenized_field(np.arange(8, dtype=np.int32), None) == ()
-    assert _pretokenized_field({"input_ids": np.arange(12, dtype=np.int64)}, None) == (
-        "input_ids",
-    )
-    nested = {"enc": {"ids": np.arange(7, dtype=np.int32)}}
-    assert _pretokenized_field(nested, ("enc", "ids")) == ("enc", "ids")
-    assert _pretokenized_field({"text": "words go here"}, None) is None
-    assert _pretokenized_field({"text": "words"}, ("text",)) is None
-
-
-# ---------------------------------------------------------------------------
 # Byte sources
 # ---------------------------------------------------------------------------
 
@@ -424,78 +238,6 @@ def test_per_shard_token_cost_warns_without_byte_metadata():
 
 
 # ---------------------------------------------------------------------------
-# Tokenizer plumbing (calibration)
-# ---------------------------------------------------------------------------
-
-
-def test_instantiate_tokenizer_returns_passed_instance():
-    tok = fallback_tokenizer()
-    assert _instantiate_tokenizer(TokenizeProfile(tokenizer=tok)) is tok
-
-
-@pytest.mark.parametrize("tokenizer_id", [None, "__fallback__"])
-def test_instantiate_tokenizer_falls_back_without_model(tokenizer_id):
-    tok = _instantiate_tokenizer(TokenizeProfile(tokenizer_id=tokenizer_id))
-    assert tok.bos_token_id == 1  # the in-process fallback stub
-
-
-def test_instantiate_tokenizer_delegates_to_shared_loader(monkeypatch):
-    calls: list[tuple[str | None, bool | None]] = []
-
-    def fake_load(tokenizer_id, *, use_fast):
-        calls.append((tokenizer_id, use_fast))
-        return fallback_tokenizer()
-
-    monkeypatch.setattr("zephon.work.token_estimation.load_hf_tokenizer", fake_load)
-    _instantiate_tokenizer(TokenizeProfile(tokenizer_id="hf-model", use_fast=False))
-    assert calls == [("hf-model", False)]
-
-
-def test_profile_from_op_captures_use_fast():
-    op = TokenizeText(tokenizer_id="__fallback__", field="text", use_fast=False)
-    assert TokenizeProfile.from_op(op).use_fast is False
-
-
-def test_count_raw_tokens_counts_whitespace_words():
-    tok = fallback_tokenizer()
-    profile = TokenizeProfile(special_tokens="none")
-    assert _count_raw_tokens(tok, "one two three four", profile) == 4
-
-
-def test_count_raw_tokens_passes_add_special_tokens_by_mode():
-    class _SpecialsAware:
-        def __call__(self, text, add_special_tokens=False):
-            n = len(text.split())
-            return {"input_ids": list(range(n + (2 if add_special_tokens else 0)))}
-
-    tok = _SpecialsAware()
-    # Bracket modes call HF with add_special_tokens=False (raw content only).
-    assert (
-        _count_raw_tokens(tok, "a b c", TokenizeProfile(special_tokens="bos_eos")) == 3
-    )
-    # tokenizer_default lets the template add specials, so they land in the count.
-    assert (
-        _count_raw_tokens(
-            tok, "a b c", TokenizeProfile(special_tokens="tokenizer_default")
-        )
-        == 5
-    )
-
-
-def test_count_raw_tokens_reads_input_ids_attribute():
-    class _AttrResult:
-        def __init__(self, ids):
-            self.input_ids = ids
-
-    class _AttrTokenizer:
-        def __call__(self, text, add_special_tokens=False):
-            return _AttrResult(list(range(len(text.split()))))
-
-    profile = TokenizeProfile(special_tokens="none")
-    assert _count_raw_tokens(_AttrTokenizer(), "a b c d", profile) == 4
-
-
-# ---------------------------------------------------------------------------
 # Priming: sampling / estimator primitives
 # ---------------------------------------------------------------------------
 
@@ -568,66 +310,27 @@ def test_pps_select_returns_records_in_fetch_order():
 # ---------------------------------------------------------------------------
 
 
-def test_plan_delivery_prefers_measure_callable():
-    est = TokenEstimation(measure=lambda p: 1)
-    assert _plan_delivery(est, None, [{"text": "hi"}]).mode == "measure callable"
+def test_measure_plan_aborts_dataset_on_error():
+    def boom(_payload):
+        raise RuntimeError("measure boom")
+
+    ds = _uniform_dataset("d", {"text": "a b c d"}, per_shard=20)
+    store = build_multi_dataset_store({0: ds})
+    est = TokenEstimation(
+        measure=boom, calibration_samples=50, fallback_tokens_per_byte=0.3
+    )
+    m = _measure_dataset(ds, 0, store, est, None, seed=1)
+    # A user measure defines the unit, so one failure invalidates the dataset:
+    # abort straight to fallback rather than average a partial ratio.
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert "measure callable" in m.reason
+    assert "measure boom" in m.reason
 
 
-def test_plan_delivery_detects_pretokenized():
-    plan = _plan_delivery(TokenEstimation(), None, [{"input_ids": np.arange(5)}])
-    assert plan.mode == "pretokenized"
-    assert plan.path == ("input_ids",)
-
-
-def test_plan_delivery_falls_through_to_text():
-    plan = _plan_delivery(TokenEstimation(), None, [{"body": "hello world"}])
-    assert plan.mode == "text"
-    assert plan.path == ("body",)
-
-
-def test_plan_delivery_uses_configured_field_path():
-    plan = _plan_delivery(TokenEstimation(), ("doc", "text"), [{"doc": {"text": "x"}}])
-    assert plan.mode == "text"
-    assert plan.path == ("doc", "text")
-
-
-def test_plan_delivery_prefix_outvotes_anomalous_first_payload():
-    payloads = [{"url": "https://example.com/a", "id": "0"}] + [
-        {"url": "https://example.com/b", "text": "real document body"}
-    ] * 7
-    plan = _plan_delivery(TokenEstimation(), None, payloads)
-    assert plan.mode == "text"
-    assert plan.path == ("text",)
-
-
-def test_plan_delivery_prefix_detects_pretokenized_past_bad_record():
-    payloads = [{"input_ids": None}, {"input_ids": np.arange(4)}]
-    plan = _plan_delivery(TokenEstimation(), None, payloads)
-    assert plan.mode == "pretokenized"
-    assert plan.path == ("input_ids",)
-
-
-def test_plan_delivery_prefix_outvotes_anomalous_pretokenized_record():
-    payloads = [{"text": "x", "input_ids": np.arange(3)}] + [
-        {"text": "real document body"}
-    ] * 7
-    plan = _plan_delivery(TokenEstimation(), None, payloads)
-    assert plan.mode == "text"
-    assert plan.path == ("text",)
-
-
-def test_plan_delivery_majority_field_beats_minority_priority_key():
-    payloads = [{"text": "t"}] + [{"content": "long body"}] * 7
-    plan = _plan_delivery(TokenEstimation(), None, payloads)
-    assert plan.mode == "text"
-    assert plan.path == ("content",)
-
-
-def test_plan_delivery_configured_field_mode_follows_majority():
-    payloads = [{"f": np.arange(4)}] + [{"f": "words in the field"}] * 7
-    plan = _plan_delivery(TokenEstimation(), ("f",), payloads)
-    assert plan.mode == "text"
-    assert plan.path == ("f",)
+def test_measure_plan_treats_nonpositive_counts_as_unmeasurable():
+    assert _MeasurePlan(lambda p: 0).count({"x": 1}) is None
+    assert _MeasurePlan(lambda p: -3).count({"x": 1}) is None
 
 
 def test_fallback_without_scan_uses_raw_constant():
@@ -670,8 +373,24 @@ def test_prime_cache_key_stable_and_input_sensitive():
         ["a"], by_name, TokenEstimation(calibration_samples=999), None, seed=0
     )
     assert key != _prime_cache_key(
-        ["a"], by_name, est, TokenizeProfile(max_length=128), seed=0
+        ["a"], by_name, est, TextTokenCountingSpec(max_length=128), seed=0
     )
+
+
+def test_prime_cache_key_tracks_chat_config():
+    dataset = Dataset.from_dict("d", {0: InMemoryShard([{"text": "x"}])})
+    estimation = TokenEstimation()
+
+    def key(spec):
+        return _prime_cache_key(["d"], {"d": dataset}, estimation, spec, seed=0)
+
+    a = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
+    b = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=16))
+    c = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
+    d = key(TextTokenCountingSpec(tokenizer_id="t", max_length=8))
+    assert a != b
+    assert a == c
+    assert a != d
 
 
 def test_prime_cache_round_trip(tmp_path):
@@ -744,7 +463,7 @@ def test_measure_dataset_measure_callable_matches_byte_weighted_ratio():
     est = TokenEstimation(
         measure=lambda p: len(p["text"].split()), calibration_samples=200
     )
-    m = _measure_dataset(ds, 0, store, est, None, None, seed=1)
+    m = _measure_dataset(ds, 0, store, est, None, seed=1)
     assert m.ratio.source == "measured"
     assert m.ratio.tokens_per_byte == pytest.approx(4 / content_bytes(row))
 
@@ -753,14 +472,13 @@ def test_measure_dataset_text_path_tokenizes():
     row = {"text": "one two three four five"}
     ds = _uniform_dataset("d", row)
     store = build_multi_dataset_store({0: ds})
-    profile = TokenizeProfile(special_tokens="none")
+    spec = TextTokenCountingSpec(special_tokens="none")
     m = _measure_dataset(
         ds,
         0,
         store,
         TokenEstimation(calibration_samples=100),
-        profile,
-        fallback_tokenizer(),
+        _TextCounter(fallback_tokenizer(), spec),
         seed=1,
     )
     assert m.ratio.source == "measured"
@@ -771,8 +489,10 @@ def test_measure_dataset_pretokenized_counts_exactly():
     row = {"input_ids": np.arange(8, dtype=np.int64)}
     ds = _uniform_dataset("d", row, per_shard=30)
     store = build_multi_dataset_store({0: ds})
+    # Pretokenized counting never touches the tokenizer slot.
+    counter = _TextCounter(None, TextTokenCountingSpec())
     m = _measure_dataset(
-        ds, 0, store, TokenEstimation(calibration_samples=100), None, None, seed=1
+        ds, 0, store, TokenEstimation(calibration_samples=100), counter, seed=1
     )
     assert m.ratio.source == "measured"
     assert m.ratio.tokens_per_byte == pytest.approx(8 / content_bytes(row))
@@ -783,7 +503,12 @@ def test_measure_dataset_falls_back_when_unmeasurable():
     store = build_multi_dataset_store({0: ds})
     est = TokenEstimation(calibration_samples=50, fallback_tokens_per_byte=0.3)
     m = _measure_dataset(
-        ds, 0, store, est, TokenizeProfile(), fallback_tokenizer(), seed=1
+        ds,
+        0,
+        store,
+        est,
+        _TextCounter(fallback_tokenizer(), TextTokenCountingSpec()),
+        seed=1,
     )
     assert m.ratio.source == "fallback"
     assert m.reason is not None
@@ -794,12 +519,52 @@ def test_measure_dataset_measure_callable_zero_counts_names_plan():
     ds = _uniform_dataset("d", {"text": "a b c d"})
     store = build_multi_dataset_store({0: ds})
     est = TokenEstimation(measure=lambda p: 0, calibration_samples=50)
-    m = _measure_dataset(ds, 0, store, est, None, None, seed=1)
+    m = _measure_dataset(ds, 0, store, est, None, seed=1)
     assert m.ratio.source == "fallback"
     assert m.reason is not None
     assert "measure callable" in m.reason
     # No false "text" diagnosis when the callable owns counting.
     assert "field" not in m.reason
+
+
+class _FieldPlan(CountPlan):
+    @property
+    def description(self) -> str:
+        return "stub field"
+
+    def count(self, payload):
+        return payload["tokens"]
+
+
+class _FieldCounter(DeliveredTokenCounter):
+    def plan(self, sample_payloads):
+        return _FieldPlan()
+
+
+def test_measure_dataset_zero_counts_enter_ratio_and_coverage():
+    # Zero-yield samples (e.g. chat drops) consume scheduled bytes: they must
+    # depress the ratio, not trip the coverage gate.
+    rows = [{"pad": "x" * 64, "tokens": 8 * (i % 2)} for i in range(40)]
+    ds = Dataset.from_dict(
+        "d", {0: InMemoryShard(rows[:20]), 1: InMemoryShard(rows[20:])}
+    )
+    store = build_multi_dataset_store({0: ds})
+    m = _measure_dataset(
+        ds, 0, store, TokenEstimation(calibration_samples=200), _FieldCounter(), seed=1
+    )
+    assert m.ratio.source == "measured"
+    assert 0 < m.ratio.tokens_per_byte < 8 / content_bytes(rows[0])
+
+
+def test_measure_dataset_all_zero_counts_fall_back():
+    ds = _uniform_dataset("d", {"pad": "x" * 64, "tokens": 0}, per_shard=20)
+    store = build_multi_dataset_store({0: ds})
+    m = _measure_dataset(
+        ds, 0, store, TokenEstimation(calibration_samples=50), _FieldCounter(), seed=1
+    )
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None
+    assert "not positive" in m.reason
 
 
 def test_measure_dataset_falls_back_when_plan_coverage_is_low():
@@ -813,8 +578,10 @@ def test_measure_dataset_falls_back_when_plan_coverage_is_low():
         0,
         store,
         est,
-        TokenizeProfile(field="text", special_tokens="none"),
-        fallback_tokenizer(),
+        _TextCounter(
+            fallback_tokenizer(),
+            TextTokenCountingSpec(field="text", special_tokens="none"),
+        ),
         seed=1,
     )
     assert m.ratio.source == "fallback"
@@ -848,8 +615,7 @@ def test_measure_dataset_skips_docs_that_crash_the_tokenizer():
         0,
         store,
         TokenEstimation(calibration_samples=100),
-        TokenizeProfile(special_tokens="none"),
-        tok,
+        _TextCounter(tok, TextTokenCountingSpec(special_tokens="none")),
         seed=1,
     )
     assert tok.raised > 0
@@ -866,13 +632,12 @@ def test_measure_dataset_falls_back_when_tokenizer_always_crashes():
         0,
         store,
         est,
-        TokenizeProfile(special_tokens="none"),
-        _PoisonTokenizer(),
+        _TextCounter(_PoisonTokenizer(), TextTokenCountingSpec(special_tokens="none")),
         seed=1,
     )
     assert m.ratio.source == "fallback"
     assert m.reason is not None
-    assert "tokenizer failed" in m.reason
+    assert "counting failed" in m.reason
     assert "tokenizer exploded" in m.reason
     assert m.retryable is False
 
@@ -887,7 +652,7 @@ def test_prime_token_ratios_float_primer_pins_all_without_io():
         datasets=[],
         dataset_ids={"a": 0, "b": 1},
         estimation=TokenEstimation(primer=0.3),
-        tokenize_profile=None,
+        counting_spec=None,
     )
     assert set(ratios) == {"a", "b"}
     assert all(
@@ -902,7 +667,7 @@ def test_prime_token_ratios_rejects_unknown_pins():
             datasets=[],
             dataset_ids={"a": 0},
             estimation=TokenEstimation(primer={"ghost": 0.5}),
-            tokenize_profile=None,
+            counting_spec=None,
         )
 
 
@@ -912,7 +677,7 @@ def test_prime_token_ratios_missing_descriptor_falls_back():
             datasets=[],
             dataset_ids={"ghost": 0},
             estimation=TokenEstimation(primer="measure"),
-            tokenize_profile=None,
+            counting_spec=None,
         )
     assert ratios["ghost"].source == "fallback"
 
@@ -931,7 +696,7 @@ def test_prime_token_ratios_caches_census_result(tmp_path, monkeypatch):
         datasets=[ds],
         dataset_ids={"b": 0},
         estimation=TokenEstimation(primer="measure"),
-        tokenize_profile=None,
+        counting_spec=None,
     )
     first = prime_token_ratios(**kwargs)
     second = prime_token_ratios(**kwargs)
@@ -960,7 +725,7 @@ def test_prime_token_ratios_does_not_cache_transient_failure(tmp_path, monkeypat
         datasets=[ds],
         dataset_ids={"b": 0},
         estimation=TokenEstimation(primer="measure"),
-        tokenize_profile=None,
+        counting_spec=None,
     )
     with pytest.warns(RuntimeWarning):
         prime_token_ratios(**kwargs)
@@ -987,7 +752,7 @@ def test_prime_token_ratios_end_to_end_measure_callable(tmp_path, monkeypatch):
         datasets=[ds],
         dataset_ids={"web": 0},
         estimation=est,
-        tokenize_profile=None,
+        counting_spec=None,
         seed=1,
     )
     assert ratios["web"].source == "measured"
@@ -1024,7 +789,7 @@ def test_prime_token_ratios_live_tokenizer_survives_spawn(tmp_path, monkeypatch)
             calibration_shards_min=1,
             calibration_shards_max=2,
         ),
-        tokenize_profile=TokenizeProfile(tokenizer=tok, special_tokens="none"),
+        counting_spec=TextTokenCountingSpec(tokenizer=tok, special_tokens="none"),
         seed=1,
     )
     assert ratios["web"].source == "measured"
@@ -1055,16 +820,16 @@ def test_prime_cache_key_distinguishes_live_tokenizer_state():
     ds = Dataset.from_dict("b", {0: InMemoryShard([{"text": "x"}] * 4)})
     est = TokenEstimation()
 
-    def key(profile):
-        return _prime_cache_key(["b"], {"b": ds}, est, profile, seed=0)
+    def key(spec):
+        return _prime_cache_key(["b"], {"b": ds}, est, spec, seed=0)
 
-    k1 = key(TokenizeProfile(tokenizer=_CountingTokenizer(1)))
-    k3 = key(TokenizeProfile(tokenizer=_CountingTokenizer(3)))
+    k1 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(1)))
+    k3 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(3)))
     assert k1 != k3
-    assert k1 == key(TokenizeProfile(tokenizer=_CountingTokenizer(1)))
+    assert k1 == key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(1)))
     # An unpicklable live tokenizer must not alias the no-tokenizer key.
-    assert key(TokenizeProfile(tokenizer=_UnpicklableTokenizer())) != key(
-        TokenizeProfile()
+    assert key(TextTokenCountingSpec(tokenizer=_UnpicklableTokenizer())) != key(
+        TextTokenCountingSpec()
     )
 
 
@@ -1088,7 +853,7 @@ def test_prime_token_ratios_unpicklable_tokenizer_degrades_to_fallback(
                 calibration_shards_min=1,
                 calibration_shards_max=1,
             ),
-            tokenize_profile=TokenizeProfile(
+            counting_spec=TextTokenCountingSpec(
                 tokenizer=_UnpicklableTokenizer(), special_tokens="none"
             ),
             seed=1,
@@ -1096,13 +861,6 @@ def test_prime_token_ratios_unpicklable_tokenizer_degrades_to_fallback(
     assert ratios["web"].source == "fallback"
     # A crash is retryable: nothing cached, a later prime retries.
     assert not list((tmp_path / "cat").rglob("token_ratios/*.json"))
-
-
-def test_tokenize_profile_std_pickles_with_closure_tokenizer():
-    profile = TokenizeProfile(tokenizer=_ClosureTokenizer(), special_tokens="none")
-    restored = pickle.loads(pickle.dumps(profile))
-    assert restored.tokenizer is not None
-    assert restored.tokenizer("a b c")["input_ids"] == ["a", "b", "c"]
 
 
 class _ExplodesOnUnpickle:
@@ -1134,7 +892,7 @@ def test_prime_token_ratios_broken_pool_degrades_to_fallback(tmp_path, monkeypat
                 calibration_shards_min=1,
                 calibration_shards_max=1,
             ),
-            tokenize_profile=TokenizeProfile(
+            counting_spec=TextTokenCountingSpec(
                 tokenizer=_ExplodesOnUnpickle(), special_tokens="none"
             ),
             seed=1,

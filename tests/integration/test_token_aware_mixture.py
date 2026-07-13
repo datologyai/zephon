@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,14 +18,47 @@ from tests.integration.test_elastic_continuation import consume_until
 from zephon.api import Pipeline
 from zephon.core.constants import SampleRecord
 from zephon.io import Dataset
+from zephon.ops.tokenize_chat import TokenizeChat
 from zephon.work.static_mixture import StaticMixtureWorkSource
-from zephon.work.token_estimation import TokenEstimation, TokenizeProfile
+from zephon.work.token_estimation import TextTokenCountingSpec, TokenEstimation
 
 pytestmark = pytest.mark.integration
 
 #: Whitespace-token counts per document; fallback maps one word to one token.
 SHORT_WORDS = 12
 LONG_WORDS = 48
+
+CHAT_SHORT_WORDS = 4
+CHAT_LONG_WORDS = 40
+_CHAT_VOCAB_WORDS = "what is the answer yes no ? .".split()
+_CHAT_TEMPLATE = (
+    "{% for message in messages %}{% if message['role'] == 'assistant' %}"
+    "<|assistant|>{% generation %}{{ message['content'] }}<|end|>"
+    "{% endgeneration %}{% else %}<|{{ message['role'] }}|>"
+    "{{ message['content'] }}<|end|>{% endif %}{% endfor %}"
+    "{% if add_generation_prompt %}<|assistant|>{% endif %}"
+)
+
+
+@pytest.fixture(scope="module")
+def chat_tokenizer() -> Any:
+    transformers = pytest.importorskip("transformers")
+    tokenizers = pytest.importorskip("tokenizers")
+    vocab = {"[UNK]": 0, **{word: i + 1 for i, word in enumerate(_CHAT_VOCAB_WORDS)}}
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.WordLevel(vocab, unk_token="[UNK]")
+    )
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    fast = transformers.PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="[UNK]",
+        eos_token="<|end|>",
+        pad_token="<|pad|>",
+    )
+    fast.add_special_tokens(
+        {"additional_special_tokens": ["<|user|>", "<|assistant|>"]}
+    )
+    return fast
 
 
 def make_jsonl_dataset(
@@ -109,6 +144,172 @@ def test_token_mode_delivers_token_target_sample_mode_shows_skew(tmp_path) -> No
     assert sample_share[0] == pytest.approx(expected_skew, abs=0.05)
 
 
+def _chat_messages(answer_words: int) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": "what is the answer ?"},
+        {"role": "assistant", "content": " ".join(["yes"] * answer_words)},
+    ]
+
+
+def _multi_turn_chat_messages(answer_words: int) -> list[dict[str, str]]:
+    first_answer_words = answer_words // 2
+    return [
+        {"role": "user", "content": "what is the answer ?"},
+        {"role": "assistant", "content": " ".join(["yes"] * first_answer_words)},
+        {"role": "user", "content": "what is the answer ?"},
+        {
+            "role": "assistant",
+            "content": " ".join(["no"] * (answer_words - first_answer_words)),
+        },
+    ]
+
+
+def make_chat_jsonl_dataset(
+    root: Path,
+    name: str,
+    answer_words: int,
+    docs_per_shard: int,
+    n_shards: int,
+    messages_builder: Callable[[int], list[dict[str, str]]],
+) -> Dataset:
+    path = root / name
+    if not path.exists():
+        path.mkdir(parents=True)
+        messages = messages_builder(answer_words)
+        for shard_id in range(n_shards):
+            lines = [
+                json.dumps(
+                    {
+                        "messages": messages,
+                        "id": f"{name}-{shard_id}-{row_id}",
+                    }
+                )
+                for row_id in range(docs_per_shard)
+            ]
+            (path / f"shard_{shard_id:05d}.jsonl").write_text("\n".join(lines) + "\n")
+    return Dataset.from_path(name, str(path))
+
+
+def make_chat_work_source(
+    tmp_path: Path,
+    *,
+    token_aware: bool,
+    messages_builder: Callable[[int], list[dict[str, str]]] = _chat_messages,
+    seed: int = 11,
+) -> StaticMixtureWorkSource:
+    root = tmp_path / ("tokens" if token_aware else "samples")
+    short = make_chat_jsonl_dataset(
+        root,
+        "chat_short",
+        CHAT_SHORT_WORDS,
+        docs_per_shard=120,
+        n_shards=4,
+        messages_builder=messages_builder,
+    )
+    long = make_chat_jsonl_dataset(
+        root,
+        "chat_long",
+        CHAT_LONG_WORDS,
+        docs_per_shard=120,
+        n_shards=4,
+        messages_builder=messages_builder,
+    )
+    extra = (
+        {"token_estimation": TokenEstimation(calibration_samples=24)}
+        if token_aware
+        else {}
+    )
+    return StaticMixtureWorkSource(
+        [short, long],
+        {"chat_short": 0.5, "chat_long": 0.5},
+        chunk_size=64,
+        seed=seed,
+        **extra,
+    )
+
+
+def make_chat_pipe(ws: StaticMixtureWorkSource, tokenizer: Any) -> Pipeline:
+    return (
+        Pipeline(ws)
+        .tokenize_chat(
+            tokenizer,
+            chat_template=_CHAT_TEMPLATE,
+            span_source="generation_tags",
+        )
+        .ensure_mixture(max_buffer_size=256)
+        .options(flush_every_k_chunks=4)
+    )
+
+
+def _assert_chat_token_mode_delivers_target_while_sample_mode_skews(
+    tmp_path: Path,
+    chat_tokenizer: Any,
+    messages_builder: Callable[[int], list[dict[str, str]]],
+) -> None:
+    token_records = [
+        item
+        for item in make_chat_pipe(
+            make_chat_work_source(
+                tmp_path,
+                token_aware=True,
+                messages_builder=messages_builder,
+            ),
+            chat_tokenizer,
+        )
+        if isinstance(item, SampleRecord)
+    ]
+    token_share = token_share_by_dataset(token_records)
+    assert token_share[0] == pytest.approx(0.5, abs=0.03)
+    assert token_share[1] == pytest.approx(0.5, abs=0.03)
+
+    sample_records = [
+        item
+        for item in make_chat_pipe(
+            make_chat_work_source(
+                tmp_path,
+                token_aware=False,
+                messages_builder=messages_builder,
+            ),
+            chat_tokenizer,
+        )
+        if isinstance(item, SampleRecord)
+    ]
+    sample_share = token_share_by_dataset(sample_records)
+
+    reference = TokenizeChat(
+        chat_tokenizer,
+        chat_template=_CHAT_TEMPLATE,
+        span_source="generation_tags",
+    )
+    short_tokens = reference.count_delivered_tokens(
+        {"messages": messages_builder(CHAT_SHORT_WORDS)}
+    )
+    long_tokens = reference.count_delivered_tokens(
+        {"messages": messages_builder(CHAT_LONG_WORDS)}
+    )
+    expected_short_share = short_tokens / (short_tokens + long_tokens)
+    assert sample_share[0] == pytest.approx(expected_short_share, abs=0.03)
+    assert sample_share[1] == pytest.approx(1.0 - expected_short_share, abs=0.03)
+    assert abs(sample_share[0] - 0.5) > 0.15
+    assert abs(token_share[0] - 0.5) < abs(sample_share[0] - 0.5)
+
+
+def test_chat_token_mode_delivers_target_while_sample_mode_skews(
+    tmp_path: Path, chat_tokenizer: Any
+) -> None:
+    _assert_chat_token_mode_delivers_target_while_sample_mode_skews(
+        tmp_path, chat_tokenizer, _chat_messages
+    )
+
+
+def test_multi_turn_chat_token_mode_delivers_target_while_sample_mode_skews(
+    tmp_path: Path, chat_tokenizer: Any
+) -> None:
+    _assert_chat_token_mode_delivers_target_while_sample_mode_skews(
+        tmp_path, chat_tokenizer, _multi_turn_chat_messages
+    )
+
+
 def test_token_mode_is_lossless_with_bounded_buffer(tmp_path) -> None:
     """Bounded ensure_mixture should not discard token-balanced input."""
     # Single pass makes losslessness observable as unique sample IDs.
@@ -122,7 +323,7 @@ def test_token_mode_is_lossless_with_bounded_buffer(tmp_path) -> None:
         tmp_path / "twin", mixture_unit="tokens", exhausted_policy="stop"
     )
     twin.prime(
-        tokenize_profile=TokenizeProfile(
+        counting_spec=TextTokenCountingSpec(
             tokenizer_id="__fallback__", field="text", special_tokens="none"
         )
     )
@@ -301,7 +502,7 @@ def _prime_one_rank(catalog_dir: Path, root: Path, marker: Path, result: Path) -
         datasets=[short, long],
         dataset_ids={"short": 0, "long": 1},
         estimation=TokenEstimation(calibration_samples=16),
-        tokenize_profile=TokenizeProfile(
+        counting_spec=TextTokenCountingSpec(
             tokenizer_id="__fallback__", field="text", special_tokens="none"
         ),
         seed=11,

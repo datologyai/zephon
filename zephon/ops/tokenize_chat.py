@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import (
     Any,
     Literal,
@@ -25,6 +26,12 @@ from zephon.core.constants import SamplePayloadDict, SampleRecord
 from zephon.core.traits import OpTraits
 from zephon.ops.tokenize_base import _MISSING, TokenizeBase
 from zephon.utils.tokenizer import TokenizerLike
+from zephon.work.token_counting import (
+    CountPlan,
+    DeliveredTokenCounter,
+    FatalCountError,
+    TokenCountingSpec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -507,22 +514,51 @@ class TokenizeChat(TokenizeBase):
 
         return ids, mask
 
+    def _tokenize_delivery(
+        self, payload: Any, sample_id: Any
+    ) -> tuple[list[int], "np.ndarray"] | Literal["degenerate", "unsupervised"]:
+        """Apply the delivery policy shared by execution and calibration."""
+        ids, mask = self._ids_and_mask(payload, sample_id)
+        if len(ids) < 2:
+            return "degenerate"
+        if not mask.any():
+            return "unsupervised"
+        if mask[0] == 1:
+            raise ValueError(
+                f"TokenizeChat: sample {sample_id!r} starts with a "
+                + "supervised token (mask[0] == 1). Packed-window training masks "
+                + "cross-document boundary labels only because every "
+                + "conversation's first token is unsupervised; a supervised "
+                + "first token would train a cross-document prediction. Start "
+                + "conversations with system/user content (or a BOS token)."
+            )
+        return ids, mask
+
+    def count_delivered_tokens(self, payload: Any) -> int:
+        """Count sequence tokens delivered for a raw payload.
+
+        This includes template and unsupervised tokens. Dropped samples count
+        as zero so their scheduled bytes remain part of calibration.
+        """
+        result = self._tokenize_delivery(payload, "<calibration>")
+        if isinstance(result, str):
+            return 0
+        ids, _ = result
+        return len(ids)
+
     def _process_record(self, record: SampleRecord) -> list[SampleRecord]:
         if record.meta.tombstone:
             return [record]
 
-        ids, mask = self._ids_and_mask(record.payload, record.meta.sample_id)
+        result = self._tokenize_delivery(record.payload, record.meta.sample_id)
 
-        if len(ids) < 2:
-            log.debug(
-                "TokenizeChat: dropping degenerate sample %r (%d tokens)",
-                record.meta.sample_id,
-                len(ids),
-            )
-            return tombstones_for_record(record)
-
-        if not mask.any():
-            if not self._warned_unsupervised_drop:
+        if isinstance(result, str):
+            if result == "degenerate":
+                log.debug(
+                    "TokenizeChat: dropping degenerate sample %r (<2 tokens)",
+                    record.meta.sample_id,
+                )
+            elif not self._warned_unsupervised_drop:
                 self._warned_unsupervised_drop = True
                 log.warning(
                     "TokenizeChat: dropping sample %r — no supervised tokens "
@@ -537,16 +573,7 @@ class TokenizeChat(TokenizeBase):
                 )
             return tombstones_for_record(record)
 
-        if mask[0] == 1:
-            raise ValueError(
-                f"TokenizeChat: sample {record.meta.sample_id!r} starts with a "
-                + "supervised token (mask[0] == 1). Packed-window training masks "
-                + "cross-document boundary labels only because every "
-                + "conversation's first token is unsupervised; a supervised "
-                + "first token would train a cross-document prediction. Start "
-                + "conversations with system/user content (or a BOS token)."
-            )
-
+        ids, mask = result
         upstream = record.payload if isinstance(record.payload, Mapping) else None
         payload: SamplePayloadDict = (
             dict(upstream) if (self.preserve_upstream_payload and upstream) else {}
@@ -569,3 +596,89 @@ class TokenizeChat(TokenizeBase):
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+
+    def token_counting_spec(self) -> "ChatTokenCountingSpec":
+        return ChatTokenCountingSpec.from_op(self)
+
+
+# ---------------------------------------------------------------------------
+# Token-counting spec (priming calibration)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChatTokenCountingSpec(TokenCountingSpec):
+    """Serializable ``TokenizeChat`` settings that affect token counts."""
+
+    field: str = "messages"
+    max_length: int | None = None
+    chat_template: str | None = None
+    apply_chat_template: bool = True
+    span_source: SpanSource = "auto"
+    loss_on_last_turn_only: bool = False
+    chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
+    tools_field: str = "tools"
+    enable_thinking_field: str = "enable_thinking"
+    # Moves the appended/checked EOS, so it changes delivered counts.
+    eos_token: str | None = None
+
+    @classmethod
+    def from_op(cls, op: TokenizeChat) -> "ChatTokenCountingSpec":
+        return cls(
+            tokenizer=op.tok,
+            tokenizer_id=op.tokenizer_id,
+            field=op.field,
+            max_length=op.max_length,
+            chat_template=op.chat_template,
+            apply_chat_template=op.apply_chat_template,
+            span_source=op.span_source,
+            loss_on_last_turn_only=op.loss_on_last_turn_only,
+            chat_template_kwargs=tuple(sorted(op.chat_template_kwargs.items())),
+            tools_field=op.tools_field,
+            enable_thinking_field=op.enable_thinking_field,
+            eos_token=op.eos_token,
+        )
+
+    def build_counter(self) -> DeliveredTokenCounter:
+        return _ChatCounter(
+            TokenizeChat(
+                self.tokenizer,
+                self.tokenizer_id,
+                eos_token=self.eos_token,
+                field=self.field,
+                max_length=self.max_length,
+                chat_template=self.chat_template,
+                apply_chat_template=self.apply_chat_template,
+                span_source=self.span_source,
+                loss_on_last_turn_only=self.loss_on_last_turn_only,
+                chat_template_kwargs=dict(self.chat_template_kwargs),
+                tools_field=self.tools_field,
+                enable_thinking_field=self.enable_thinking_field,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class _ChatPlan(CountPlan):
+    op: TokenizeChat
+
+    @property
+    def description(self) -> str:
+        return f"chat, field: {self.op.field}"
+
+    def count(self, payload: Any) -> int | None:
+        # Errors on the shared delivery path are deterministic — the run hits
+        # them too — so mark them fatal rather than have priming sample around.
+        try:
+            return self.op.count_delivered_tokens(payload)
+        except Exception as exc:
+            raise FatalCountError(f"chat delivery failed: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class _ChatCounter(DeliveredTokenCounter):
+    op: TokenizeChat
+
+    def plan(self, sample_payloads: list[Any]) -> CountPlan:
+        # Chat payloads do not fit text/pretokenized voting; use delivery directly.
+        return _ChatPlan(self.op)

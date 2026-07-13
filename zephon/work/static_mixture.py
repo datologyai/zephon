@@ -24,8 +24,8 @@ from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 from zephon.work.token_estimation import (
     PerShardTokenCost,
+    TokenCountingSpec,
     TokenEstimation,
-    TokenizeProfile,
     TokenRatio,
     prime_token_ratios,
 )
@@ -1050,7 +1050,7 @@ class AllocationStrategy(ABC):
     def prime(
         self,
         *,
-        tokenize_profile: TokenizeProfile | None,
+        counting_spec: TokenCountingSpec | None,
         io_options: Any,
         seed: int,
         mp_context: Any = None,
@@ -1550,7 +1550,7 @@ class TokenAwareStrategy(AllocationStrategy):
     def prime(
         self,
         *,
-        tokenize_profile: TokenizeProfile | None,
+        counting_spec: TokenCountingSpec | None,
         io_options: Any,
         seed: int,
         mp_context: Any = None,
@@ -1562,7 +1562,7 @@ class TokenAwareStrategy(AllocationStrategy):
             datasets=list(self._datasets_by_name.values()),
             dataset_ids=self._dataset_ids,
             estimation=self._estimation,
-            tokenize_profile=tokenize_profile,
+            counting_spec=counting_spec,
             io_options=io_options,
             seed=seed,
             mp_context=mp_context,
@@ -2247,21 +2247,16 @@ class StaticMixtureWorkSource(WorkSource):
         self,
         *,
         io_options: Any = None,
-        tokenize_profile: TokenizeProfile | None = None,
+        counting_spec: TokenCountingSpec | None = None,
         mp_context: Any = None,
     ) -> None:
-        """Calibrate per-dataset tokens/byte ratios (token mode only; idempotent).
+        """Calibrate per-dataset tokens/byte ratios before execution.
 
-        Must run in the driver before engine construction / per-lane cloning /
-        pickling, with the pipeline's ``io_options``, the tokenize op's profile
-        (a ``TokenizeProfile``), and the runtime ``mp_context`` (priming fans the
-        calibration out across a process pool). Restoring runs skip this entirely
-        — the checkpointed ratios win via ``load_state_dict`` (so a tokenizer
-        upgrade or data drift cannot silently shift a running mixture). A no-op
-        in sample mode, where the strategy's ``prime`` does nothing.
+        This is idempotent, does nothing in sample mode, and preserves ratios
+        restored from a checkpoint.
         """
         self._strategy.prime(
-            tokenize_profile=tokenize_profile,
+            counting_spec=counting_spec,
             io_options=io_options,
             seed=self._seed,
             mp_context=mp_context,

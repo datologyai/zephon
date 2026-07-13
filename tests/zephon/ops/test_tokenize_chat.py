@@ -1,6 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,11 +10,20 @@ import numpy as np
 import pytest
 
 from zephon.core.constants import SampleMeta, SampleRecord
+from zephon.io import Dataset, InMemoryShard
+from zephon.io.stores.multi import build_multi_dataset_store
+from zephon.observability.size_estimator import content_bytes
 from zephon.ops.tokenize_chat import (
     SpanSource,
     TokenizeChat,
     _last_span_only,
     _mask_from_spans,
+)
+from zephon.work.token_counting import FatalCountError
+from zephon.work.token_estimation import (
+    TokenEstimation,
+    _measure_dataset,
+    prime_token_ratios,
 )
 
 transformers = pytest.importorskip("transformers")
@@ -596,3 +606,138 @@ def test_chat_template_file_override(fast_tokenizer: Any, tmp_path: Any) -> None
     op = TokenizeChat(fast_tokenizer, chat_template=path)
     record = _run_one(op, {"messages": CONVERSATION})
     assert _mask(record) == GOLDEN_MASK
+
+
+# ---------------------------------------------------------------------------
+# Token-counting spec (priming)
+# ---------------------------------------------------------------------------
+
+
+def test_chat_spec_counts_match_delivery(fast_tokenizer: Any) -> None:
+    # max_length truncates the render, so count-equivalence here also proves the
+    # rebuilt counter carried the op's max_length and chat_template — a config
+    # drift would make the count diverge from what delivery actually emits.
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=TAGGED_TEMPLATE,
+        span_source="generation_tags",
+        max_length=12,
+    )
+    delivered = _run_one(op, {"messages": CONVERSATION})
+    payload = delivered.payload
+    assert isinstance(payload, dict)
+    assert len(payload["input_ids"]) == 12  # the render (22 tokens) was truncated
+
+    plan = op.token_counting_spec().build_counter().plan([])
+    assert plan.count({"messages": CONVERSATION}) == len(payload["input_ids"])
+    assert plan.count({"messages": []}) == 0
+
+
+def test_chat_spec_carries_eos_override_into_calibration(
+    fast_tokenizer: Any, tmp_path: Any
+) -> None:
+    # The eos_token override moves the id the finalizer appends, so the
+    # calibration counter must rebuild against it; without this the census
+    # tokenizes with the tokenizer's default EOS and its counts drift from
+    # delivery on the tokenizer_id load path.
+    fast_tokenizer.save_pretrained(tmp_path)
+    op = TokenizeChat(
+        tokenizer_id=str(tmp_path),
+        eos_token="<|sep|>",
+        chat_template=TAGGED_TEMPLATE_NO_EOS,
+        span_source="generation_tags",
+    )
+    spec = op.token_counting_spec()
+    assert spec.eos_token == "<|sep|>"
+
+    counter = spec.build_counter()
+    assert counter.op.eos_token == "<|sep|>"
+    # Counting triggers the rebuilt op's lazy load; the override must rebind
+    # the EOS the counter tokenizes (and appends) against.
+    counter.plan([]).count({"messages": CONVERSATION[:2]})
+    assert counter.op._eos_id == fast_tokenizer.convert_tokens_to_ids("<|sep|>")
+
+
+def test_count_delivered_tokens_raises_on_supervised_first_token(
+    fast_tokenizer: Any,
+) -> None:
+    op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
+    with pytest.raises(ValueError, match="mask\\[0\\]"):
+        op.count_delivered_tokens({"messages": _messages(("assistant", "hi"))})
+
+
+def test_chat_plan_marks_delivery_error_fatal(fast_tokenizer: Any) -> None:
+    # The plan wraps the op's real delivery error so priming treats it as fatal.
+    op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
+    plan = op.token_counting_spec().build_counter().plan([])
+    with pytest.raises(FatalCountError, match="mask\\[0\\]"):
+        plan.count({"messages": _messages(("assistant", "hi"))})
+
+
+def test_census_surfaces_structural_chat_error_past_coverage_gate(
+    fast_tokenizer: Any,
+) -> None:
+    op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
+    good = {"messages": _messages(("user", "hi there"), ("assistant", "good morning"))}
+    bad = {"messages": _messages(("assistant", "hi"))}  # supervised first token
+    # One bad row in five: skipping them (the old behavior) leaves coverage far
+    # above the 50% gate, so priming would have quietly accepted a ratio. It must
+    # fail instead — _process_record crashes on these same rows at run time.
+    rows = [bad if i % 5 == 0 else good for i in range(40)]
+    ds = Dataset.from_dict(
+        "sft", {0: InMemoryShard(rows[:20]), 1: InMemoryShard(rows[20:])}
+    )
+    store = build_multi_dataset_store({0: ds})
+    counter = op.token_counting_spec().build_counter()
+    with pytest.raises(FatalCountError, match="mask\\[0\\]"):
+        _measure_dataset(
+            ds, 0, store, TokenEstimation(calibration_samples=100), counter, seed=1
+        )
+
+
+def test_prime_token_ratios_hard_fails_on_structural_chat_error(
+    fast_tokenizer: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end through the spawn pool: the structural error must propagate out
+    # of priming, not get re-swallowed into a fallback by the census catches
+    # (both the per-future and the outer pool-level handler).
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "cat"))
+    root = tmp_path / "sft"
+    root.mkdir()
+    bad = [{"role": "assistant", "content": "hi"}]  # supervised first token
+    for s in range(2):
+        lines = [json.dumps({"messages": bad, "id": f"{s}-{i}"}) for i in range(30)]
+        (root / f"shard_{s:05d}.jsonl").write_text("\n".join(lines) + "\n")
+    ds = Dataset.from_path("sft", str(root))
+    op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
+    with pytest.raises(FatalCountError):
+        prime_token_ratios(
+            datasets=[ds],
+            dataset_ids={"sft": 0},
+            estimation=TokenEstimation(
+                calibration_samples=50,
+                calibration_shards_min=1,
+                calibration_shards_max=2,
+            ),
+            counting_spec=op.token_counting_spec(),
+            seed=1,
+        )
+
+
+def test_census_zero_yield_chat_drops_depress_the_ratio(fast_tokenizer: Any) -> None:
+    op = TokenizeChat(fast_tokenizer, chat_template=TAGGED_TEMPLATE)
+    supervised = {"messages": CONVERSATION}
+    unsupervised = {"messages": _messages(("user", "no assistant turn here"))}
+    rows = [supervised if i % 2 else unsupervised for i in range(20)]
+    ds = Dataset.from_dict(
+        "sft", {0: InMemoryShard(rows[:10]), 1: InMemoryShard(rows[10:])}
+    )
+    store = build_multi_dataset_store({0: ds})
+    counter = op.token_counting_spec().build_counter()
+    m = _measure_dataset(
+        ds, 0, store, TokenEstimation(calibration_samples=100), counter, seed=1
+    )
+    # Zero-yield drops count toward coverage and lower the measured ratio.
+    assert m.ratio.source == "measured"
+    survivors_only = op.count_delivered_tokens(supervised) / content_bytes(supervised)
+    assert 0 < m.ratio.tokens_per_byte < 0.9 * survivors_only
