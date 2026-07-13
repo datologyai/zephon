@@ -27,6 +27,8 @@ from zephon.work.token_estimation import (
     TokenCountingSpec,
     TokenEstimation,
     TokenRatio,
+    _PreTokenizeReplay,
+    _UnreplayableOp,
     prime_token_ratios,
 )
 
@@ -1053,6 +1055,7 @@ class AllocationStrategy(ABC):
         counting_spec: TokenCountingSpec | None,
         io_options: Any,
         seed: int,
+        pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
         mp_context: Any = None,
     ) -> None:
         """Calibrate per-run state (no-op outside token mode; idempotent)."""
@@ -1553,6 +1556,7 @@ class TokenAwareStrategy(AllocationStrategy):
         counting_spec: TokenCountingSpec | None,
         io_options: Any,
         seed: int,
+        pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
         mp_context: Any = None,
     ) -> None:
         """Measure per-dataset tokens/byte ratios once."""
@@ -1566,6 +1570,7 @@ class TokenAwareStrategy(AllocationStrategy):
             io_options=io_options,
             seed=seed,
             mp_context=mp_context,
+            pre_tokenize_replay=pre_tokenize_replay,
         )
 
     def _ensure_cost_table(self) -> PerShardTokenCost:
@@ -2248,6 +2253,7 @@ class StaticMixtureWorkSource(WorkSource):
         *,
         io_options: Any = None,
         counting_spec: TokenCountingSpec | None = None,
+        pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
         mp_context: Any = None,
     ) -> None:
         """Calibrate per-dataset tokens/byte ratios before execution.
@@ -2259,6 +2265,7 @@ class StaticMixtureWorkSource(WorkSource):
             counting_spec=counting_spec,
             io_options=io_options,
             seed=self._seed,
+            pre_tokenize_replay=pre_tokenize_replay,
             mp_context=mp_context,
         )
         self._strategy.validate_liveness(self._cursors)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,17 @@ def _multi_turn_chat_messages(answer_words: int) -> list[dict[str, str]]:
     ]
 
 
+def _prompt_response_messages(payload: dict[str, Any]) -> dict[str, Any]:
+    prompt = payload.pop("prompt")
+    response = payload.pop("response")
+    return {
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        ]
+    }
+
+
 def make_chat_jsonl_dataset(
     root: Path,
     name: str,
@@ -187,6 +199,31 @@ def make_chat_jsonl_dataset(
                 for row_id in range(docs_per_shard)
             ]
             (path / f"shard_{shard_id:05d}.jsonl").write_text("\n".join(lines) + "\n")
+    return Dataset.from_path(name, str(path))
+
+
+def make_prompt_response_dataset(
+    root: Path,
+    name: str,
+    answer_words: int,
+    *,
+    docs_per_shard: int = 4,
+    n_shards: int = 2,
+) -> Dataset:
+    path = root / name
+    path.mkdir(parents=True)
+    for shard_id in range(n_shards):
+        lines = [
+            json.dumps(
+                {
+                    "prompt": "what is the answer ?",
+                    "response": " ".join(["yes"] * answer_words),
+                    "id": f"{name}-{shard_id}-{row_id}",
+                }
+            )
+            for row_id in range(docs_per_shard)
+        ]
+        (path / f"shard_{shard_id:05d}.jsonl").write_text("\n".join(lines) + "\n")
     return Dataset.from_path(name, str(path))
 
 
@@ -308,6 +345,43 @@ def test_multi_turn_chat_token_mode_delivers_target_while_sample_mode_skews(
     _assert_chat_token_mode_delivers_target_while_sample_mode_skews(
         tmp_path, chat_tokenizer, _multi_turn_chat_messages
     )
+
+
+def test_chat_priming_replays_pre_tokenize_map(
+    tmp_path: Path, chat_tokenizer: Any
+) -> None:
+    root = tmp_path / "prompt-response"
+    short = make_prompt_response_dataset(root, "short", CHAT_SHORT_WORDS)
+    long = make_prompt_response_dataset(root, "long", CHAT_LONG_WORDS)
+    ws = StaticMixtureWorkSource(
+        [short, long],
+        {"short": 0.5, "long": 0.5},
+        chunk_size=8,
+        exhausted_policy="stop",
+        token_estimation=TokenEstimation(
+            calibration_samples=24,
+            calibration_shards_min=2,
+            calibration_shards_max=2,
+        ),
+    )
+    pipe = (
+        Pipeline(ws)
+        .map_transform(_prompt_response_messages)
+        .tokenize_chat(
+            chat_tokenizer,
+            chat_template=_CHAT_TEMPLATE,
+            span_source="generation_tags",
+        )
+        .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        records = [item for item in pipe if isinstance(item, SampleRecord)]
+
+    assert records
+    assert all("input_ids" in record.payload for record in records)
+    assert not any("priming fell back" in str(item.message) for item in caught)
 
 
 def test_token_mode_is_lossless_with_bounded_buffer(tmp_path) -> None:

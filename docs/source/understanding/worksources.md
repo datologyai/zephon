@@ -339,10 +339,12 @@ How it works:
 
 The estimation is intentionally coarse.  Shard-average resolution is enough
 to remove the systematic length difference *between* datasets; length
-variation *within* a dataset remains as noise around the target.  Operators
-between fetch and tokenize that change token mass (aggressive filters,
-dedup) are invisible to priming and show up as mixture drift; if you know
-their expected pass rates, fold them into pinned ratios.
+variation *within* a dataset remains as noise around the target.  Per-record
+map operators between fetch and tokenize (`map_transform`, `decode_text`)
+are replayed on each calibration sample, so their rewrites and drops are
+priced into the ratios.  Other operators in that span cannot be replayed
+outside the engine, and priming refuses to measure through them — pin the
+ratios or provide a `measure=` callable instead.
 
 Token-aware mixtures do not require
 {py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>`,

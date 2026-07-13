@@ -27,7 +27,7 @@ import os
 import random
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Literal, get_args
@@ -36,7 +36,8 @@ import cloudpickle
 import numpy as np
 from filelock import FileLock
 
-from zephon.core.constants import SampleId
+from zephon.core.constants import SampleId, SampleMeta, SampleRecord
+from zephon.core.op_base import OpContext
 from zephon.io import build_multi_dataset_store
 from zephon.io.catalog import resolve_catalog_dir, set_catalog_dir
 from zephon.io.dataset import Dataset
@@ -267,6 +268,79 @@ class PerShardTokenCost:
     def mean_cost(self, name: str) -> float:
         """Mean estimated tokens/sample for the dataset (>= 1)."""
         return self._mean_cost[name]
+
+
+# ---------------------------------------------------------------------------
+# Pre-tokenize replay for calibration
+# ---------------------------------------------------------------------------
+
+
+class _PreTokenizeReplay:
+    """Replay safe per-record ops before tokenization during calibration.
+
+    Calibration fetches raw rows, so it replays these ops to count what the
+    tokenizer sees; dropped rows contribute zero tokens. The pipeline allowlist
+    excludes ops that need accumulator state or ``OpContext`` services.
+    """
+
+    def __init__(self, ops: Sequence[Any]) -> None:
+        self.ops = tuple(ops)
+        self._setup_done = False
+
+    def apply(self, payload: Any) -> list[Any]:
+        """Map one raw payload to the payloads the tokenize op would see."""
+        if not self._setup_done:
+            # Ops arrive as pre-setup cloudpickle copies, like runner workers.
+            ctx = OpContext({})
+            for op in self.ops:
+                op.setup(ctx, 0, "calibration", 0, False)
+            self._setup_done = True
+        records = [
+            SampleRecord(
+                meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+                payload=payload,
+            )
+        ]
+        for op in self.ops:
+            # Strip drop tombstones between ops: not every op tolerates them,
+            # and calibration has no chunk accounting for them to serve.
+            records = [
+                rec for rec in op.process_many(records) if not rec.meta.tombstone
+            ]
+            if not records:
+                break
+        return [rec.payload for rec in records]
+
+
+@dataclass(frozen=True)
+class _UnreplayableOp:
+    """Marks a fetch -> tokenize span that cannot be replayed for calibration.
+
+    Measuring through it would count raw rows the tokenize op never sees, so
+    priming refuses; pinned ratios and ``measure=`` are unaffected.
+    """
+
+    op_name: str
+
+
+def _count_replayed(plan: CountPlan, payloads: Sequence[Any]) -> int | None:
+    """Count the payloads produced by replaying one raw pointer."""
+    total = 0
+    for payload in payloads:
+        got = plan.count(payload)
+        if got is None:
+            return None
+        total += got
+    return total
+
+
+def _count_delivered(
+    plan: CountPlan, replay: _PreTokenizeReplay | None, payload: Any
+) -> int | None:
+    """Delivered tokens for one raw pointer, or ``None`` when unmeasurable."""
+    if replay is None:
+        return plan.count(payload)
+    return _count_replayed(plan, replay.apply(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +591,7 @@ def _measure_dataset(
     estimation: TokenEstimation,
     counter: DeliveredTokenCounter | None,
     seed: int,
+    pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> _DatasetMeasurement:
     """Measure one dataset's tokens/byte ratio from calibration samples."""
     try:
@@ -554,11 +629,25 @@ def _measure_dataset(
         f"fetch returned {len(payloads)} payloads for {len(sample_ids)} ids"
     )
 
+    replayed_prefix: dict[SampleId, list[Any]] = {}
+    replay_errors: dict[SampleId, Exception] = {}
     if estimation.measure is not None:
         plan: CountPlan = _MeasurePlan(estimation.measure)
     else:
         assert counter is not None, "no measure callable, so a counter is required"
-        plan = counter.plan([payloads[sid] for sid in sample_ids[:_PLAN_SAMPLE_COUNT]])
+        prefix_ids = sample_ids[:_PLAN_SAMPLE_COUNT]
+        prefix: list[Any] = [payloads[sid] for sid in prefix_ids]
+        if pre_tokenize_replay is not None:
+            prefix = []
+            for sid in prefix_ids:
+                try:
+                    replayed = pre_tokenize_replay.apply(payloads[sid])
+                except Exception as exc:  # noqa: BLE001 — handled during measurement
+                    replay_errors[sid] = exc
+                else:
+                    replayed_prefix[sid] = replayed
+                    prefix.extend(replayed)
+        plan = counter.plan(prefix)
     logger.info("calibrating %s as %s", dataset.name, plan.description)
     measured: list[tuple[int, int, int]] = []
     shards_seen: set[int] = set()
@@ -566,7 +655,12 @@ def _measure_dataset(
     last_count_error: Exception | None = None
     for sid, draws in zip(sample_ids, draw_counts):
         try:
-            delivered = plan.count(payloads[sid])
+            if sid in replay_errors:
+                raise replay_errors.pop(sid)
+            if sid in replayed_prefix:
+                delivered = _count_replayed(plan, replayed_prefix.pop(sid))
+            else:
+                delivered = _count_delivered(plan, pre_tokenize_replay, payloads[sid])
         except FatalCountError:
             # Structural: execution rejects this row too. Surface it instead of
             # sampling around it, even when coverage would otherwise pass.
@@ -633,6 +727,7 @@ def _init_prime_worker(
     estimation: TokenEstimation,
     counting_spec: TokenCountingSpec | None,
     seed: int,
+    pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> None:
     set_catalog_dir(store_options)
     _prime_worker.update(
@@ -640,6 +735,7 @@ def _init_prime_worker(
         store=build_multi_dataset_store(measured_datasets, options=store_options),
         estimation=estimation,
         seed=seed,
+        pre_tokenize_replay=pre_tokenize_replay,
         counter=(
             None
             if estimation.measure is not None
@@ -657,6 +753,7 @@ def _measure_in_worker(dataset_id: int) -> _DatasetMeasurement:
         w["estimation"],
         w["counter"],
         w["seed"],
+        pre_tokenize_replay=w["pre_tokenize_replay"],
     )
 
 
@@ -673,6 +770,7 @@ def _run_census(
     counting_spec: TokenCountingSpec | None,
     seed: int,
     mp_context: Any,
+    pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> dict[str, _DatasetMeasurement]:
     """Measure every dataset across the bounded process pool.
 
@@ -706,6 +804,7 @@ def _run_census(
                 estimation,
                 counting_spec,
                 seed,
+                pre_tokenize_replay,
             ),
         ) as pool:
             pending = {
@@ -786,6 +885,7 @@ def _prime_cache_key(
     estimation: TokenEstimation,
     counting_spec: TokenCountingSpec | None,
     seed: int,
+    pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> str:
     """Fingerprint every input the measured ratios depend on."""
     # Include spec type and state so distinct live tokenizers cannot alias.
@@ -795,6 +895,7 @@ def _prime_cache_key(
         str(seed),
         _pickle_fingerprint(estimation),
         _pickle_fingerprint(counting_spec or TextTokenCountingSpec()),
+        _pickle_fingerprint(pre_tokenize_replay),
         *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
@@ -841,11 +942,15 @@ def prime_token_ratios(
     io_options: Any = None,
     seed: int = 0,
     mp_context: Any = None,
+    pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
 ) -> dict[str, TokenRatio]:
     """Derive per-dataset tokens/byte ratios.
 
     Pinned ratios skip measurement. Unmeasurable datasets get the fallback ratio
     with a warning because mixed measured/fallback results can skew weights.
+    ``pre_tokenize_replay`` applies the pipeline's pre-tokenize map ops to each
+    calibration payload; an unreplayable-op marker rejects measurement outright
+    (pins and ``measure=`` still work).
     """
     by_name = {ds.name: ds for ds in datasets if ds.name in dataset_ids}
 
@@ -883,11 +988,27 @@ def prime_token_ratios(
                 fallback_reasons[name] = "dataset descriptor not found"
 
         if names:
+            if estimation.measure is not None:
+                # measure= owns raw payload -> count; skip the replay so the
+                # callable is not fed already-normalized payloads.
+                pre_tokenize_replay = None
+            elif isinstance(pre_tokenize_replay, _UnreplayableOp):
+                raise ValueError(
+                    f"token-aware mixture priming cannot calibrate through "
+                    f"this pipeline: op {pre_tokenize_replay.op_name!r} "
+                    f"between fetch and the tokenize op cannot be replayed "
+                    f"outside the engine, so calibration would count raw rows "
+                    f"the tokenize op never sees. Provide "
+                    f"TokenEstimation(measure=...) or pin ratios via "
+                    f"TokenEstimation(primer={{...}})."
+                )
             measured_datasets = {dataset_ids[name]: by_name[name] for name in names}
             # Build catalogs once so workers mmap-attach instead of repeating discovery.
             build_multi_dataset_store(measured_datasets, options=store_options)
 
-            key = _prime_cache_key(names, by_name, estimation, counting_spec, seed)
+            key = _prime_cache_key(
+                names, by_name, estimation, counting_spec, seed, pre_tokenize_replay
+            )
             cache_path = (
                 resolve_catalog_dir(store_options) / _PRIME_CACHE_SUBDIR / f"{key}.json"
             )
@@ -914,6 +1035,7 @@ def prime_token_ratios(
                             counting_spec,
                             seed,
                             mp_context,
+                            pre_tokenize_replay,
                         )
                         # Do not cache transient fallbacks; retrying later is cheaper.
                         transient = sorted(

@@ -67,11 +67,16 @@ from zephon.ops.tokenize_base import TokenizeBase
 from zephon.utils import buffered_iterable
 from zephon.utils.torch_compat import detect_loader_kind
 from zephon.work import WorkSource
+from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 
 # TypeVar for stateful_transform state type
 _S = TypeVar("_S")
 
 _OpT = TypeVar("_OpT")
+
+# Ops calibration can replay standalone: pure per-record, no accumulator
+# state, no OpContext services.
+_PRE_TOKENIZE_REPLAYABLE_OPS: tuple[type, ...] = (DecodeText, MapTransform)
 
 # TypeVar for Pipeline methods that mutate the graph or cached plan state
 _PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
@@ -1377,6 +1382,23 @@ class Pipeline:
                 )
         return tokenize
 
+    def _build_pre_tokenize_replay(
+        self, tokenize_index: int
+    ) -> _PreTokenizeReplay | _UnreplayableOp | None:
+        """Collect the fetch -> tokenize ops calibration must replay.
+
+        Calibration fetches raw store rows; ops ahead of the tokenize op
+        can change what it counts. An op outside the replayable allowlist
+        yields a marker that priming rejects if it actually measures.
+        """
+        fetch_index = self._graph.nodes.index(self._fetch_node)
+        ops: list[Any] = []
+        for node in self._graph.nodes[fetch_index + 1 : tokenize_index]:
+            if not isinstance(node.op, _PRE_TOKENIZE_REPLAYABLE_OPS):
+                return _UnreplayableOp(type(node.op).__name__)
+            ops.append(node.op)
+        return _PreTokenizeReplay(ops) if ops else None
+
     def _prime_worksource(self) -> None:
         """Prime token-aware work sources before worker pickling.
 
@@ -1397,6 +1419,11 @@ class Pipeline:
             io_options=self._options.io_options,
             counting_spec=(
                 tokenize[1].token_counting_spec() if tokenize is not None else None
+            ),
+            pre_tokenize_replay=(
+                self._build_pre_tokenize_replay(tokenize[0])
+                if tokenize is not None
+                else None
             ),
             mp_context=self._options.mp_context,
         )

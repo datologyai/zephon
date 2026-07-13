@@ -6,6 +6,7 @@
 import json
 import pickle
 from pathlib import Path
+from typing import Any
 
 import cloudpickle
 import numpy as np
@@ -14,6 +15,7 @@ import pytest
 from zephon.io import Dataset, InMemoryShard
 from zephon.io.stores.multi import build_multi_dataset_store
 from zephon.observability.size_estimator import content_bytes
+from zephon.ops.map_transform import MapTransform
 from zephon.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon.utils.tokenizer import fallback_tokenizer
 from zephon.work import token_estimation
@@ -39,9 +41,11 @@ from zephon.work.token_estimation import (
     _measure_dataset,
     _MeasurePlan,
     _pps_select,
+    _PreTokenizeReplay,
     _prime_cache_key,
     _read_prime_cache,
     _shard_bytes_cv,
+    _UnreplayableOp,
     _write_prime_cache,
     build_byte_source,
     prime_token_ratios,
@@ -374,6 +378,14 @@ def test_prime_cache_key_stable_and_input_sensitive():
     )
     assert key != _prime_cache_key(
         ["a"], by_name, est, TextTokenCountingSpec(max_length=128), seed=0
+    )
+    assert key != _prime_cache_key(
+        ["a"],
+        by_name,
+        est,
+        None,
+        seed=0,
+        pre_tokenize_replay=_PreTokenizeReplay([MapTransform(_lift_n_words)]),
     )
 
 
@@ -900,3 +912,208 @@ def test_prime_token_ratios_broken_pool_degrades_to_fallback(tmp_path, monkeypat
     assert ratios["web"].source == "fallback"
     # A crash is a transient fallback: nothing cached, a later prime retries.
     assert not list((tmp_path / "cat").rglob("token_ratios/*.json"))
+
+
+# ---------------------------------------------------------------------------
+# Pre-tokenize replay
+# ---------------------------------------------------------------------------
+
+
+def _lift_n_words(payload: dict[str, int]) -> dict[str, str]:
+    return {"text": " ".join(f"w{i}" for i in range(payload["n"]))}
+
+
+def _lift_2n_words(payload: dict[str, int]) -> dict[str, str]:
+    return {"text": " ".join(f"w{i}" for i in range(2 * payload["n"]))}
+
+
+def test_pre_tokenize_replay_applies_map_ops() -> None:
+    replay = _PreTokenizeReplay([MapTransform(_lift_n_words)])
+    assert replay.apply({"n": 3}) == [{"text": "w0 w1 w2"}]
+
+
+def test_pre_tokenize_replay_preserves_drop_semantics() -> None:
+    dropped = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=True)])
+    assert dropped.apply({"n": 1}) == []
+    kept = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=False)])
+    assert kept.apply({"n": 1}) == [{"n": 1}]
+
+
+def test_pre_tokenize_replay_survives_cloudpickle() -> None:
+    replay = cloudpickle.loads(
+        cloudpickle.dumps(_PreTokenizeReplay([MapTransform(_lift_n_words)]))
+    )
+    assert replay.apply({"n": 2}) == [{"text": "w0 w1"}]
+
+
+def _int_rows_dataset(n_rows: int = 40) -> Dataset:
+    rows = [{"n": 5} for _ in range(n_rows)]
+    return Dataset.from_dict(
+        "d",
+        {0: InMemoryShard(rows[: n_rows // 2]), 1: InMemoryShard(rows[n_rows // 2 :])},
+    )
+
+
+def _fallback_text_counter() -> DeliveredTokenCounter:
+    return TextTokenCountingSpec(
+        tokenizer=fallback_tokenizer(), special_tokens="none"
+    ).build_counter()
+
+
+def test_measure_dataset_counts_through_pre_tokenize_replay() -> None:
+    ds = _int_rows_dataset()
+    store = build_multi_dataset_store({0: ds})
+    counter = _fallback_text_counter()
+    est = TokenEstimation(calibration_samples=64)
+
+    raw = _measure_dataset(ds, 0, store, est, counter, seed=3)
+    assert raw.ratio.source == "fallback"  # int-only rows have nothing to count
+
+    lift = _PreTokenizeReplay([MapTransform(_lift_n_words)])
+    measured = _measure_dataset(
+        ds, 0, store, est, counter, seed=3, pre_tokenize_replay=lift
+    )
+    assert measured.ratio.source == "measured"
+
+    double = _PreTokenizeReplay([MapTransform(_lift_2n_words)])
+    doubled = _measure_dataset(
+        ds, 0, store, est, counter, seed=3, pre_tokenize_replay=double
+    )
+    assert doubled.ratio.tokens_per_byte == pytest.approx(
+        2 * measured.ratio.tokens_per_byte
+    )
+
+
+def _pop_n_words(payload: dict[str, int]) -> dict[str, str]:
+    n_words = payload.pop("n")
+    return {"text": " ".join(f"w{i}" for i in range(n_words))}
+
+
+def test_measure_dataset_replays_planning_payloads_once() -> None:
+    ds = _int_rows_dataset(n_rows=8)
+    store = build_multi_dataset_store({0: ds})
+    measured = _measure_dataset(
+        ds,
+        0,
+        store,
+        TokenEstimation(calibration_samples=64),
+        _fallback_text_counter(),
+        seed=3,
+        pre_tokenize_replay=_PreTokenizeReplay([MapTransform(_pop_n_words)]),
+    )
+    assert measured.ratio.source == "measured"
+
+
+def _drop_odd(payload: dict[str, int]) -> dict[str, str] | None:
+    if payload["i"] % 2:
+        return None
+    return {"text": "a b c d"}
+
+
+def test_measure_dataset_replay_drops_are_zero_yield() -> None:
+    rows = [{"i": i} for i in range(40)]
+    ds = Dataset.from_dict(
+        "d", {0: InMemoryShard(rows[:20]), 1: InMemoryShard(rows[20:])}
+    )
+    store = build_multi_dataset_store({0: ds})
+    counter = _fallback_text_counter()
+    est = TokenEstimation(calibration_samples=256)
+
+    keep_all = _measure_dataset(
+        ds,
+        0,
+        store,
+        est,
+        counter,
+        seed=5,
+        pre_tokenize_replay=_PreTokenizeReplay(
+            [MapTransform(lambda p: {"text": "a b c d"})]
+        ),
+    )
+    drop_half = _measure_dataset(
+        ds,
+        0,
+        store,
+        est,
+        counter,
+        seed=5,
+        pre_tokenize_replay=_PreTokenizeReplay([MapTransform(_drop_odd)]),
+    )
+    assert keep_all.ratio.source == "measured"
+    assert drop_half.ratio.source == "measured"
+    assert 0 < drop_half.ratio.tokens_per_byte < 0.7 * keep_all.ratio.tokens_per_byte
+
+
+def _boom(payload: dict[str, int]) -> None:
+    raise RuntimeError("boom")
+
+
+def test_measure_dataset_replay_errors_fall_back() -> None:
+    ds = _int_rows_dataset()
+    store = build_multi_dataset_store({0: ds})
+    m = _measure_dataset(
+        ds,
+        0,
+        store,
+        TokenEstimation(calibration_samples=32),
+        _fallback_text_counter(),
+        seed=7,
+        pre_tokenize_replay=_PreTokenizeReplay([MapTransform(_boom)]),
+    )
+    assert m.ratio.source == "fallback"
+    assert m.reason is not None and "boom" in m.reason
+
+
+def test_prime_token_ratios_unreplayable_op_raises_when_measuring() -> None:
+    ds = make_inmem_dataset("d", 4, 3)
+    with pytest.raises(ValueError, match="ShuffleBuffer"):
+        prime_token_ratios(
+            datasets=[ds],
+            dataset_ids={"d": 0},
+            estimation=TokenEstimation(),
+            counting_spec=None,
+            pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+        )
+
+
+def test_prime_token_ratios_unreplayable_op_ignored_when_pinned() -> None:
+    ds = make_inmem_dataset("d", 4, 3)
+    ratios = prime_token_ratios(
+        datasets=[ds],
+        dataset_ids={"d": 0},
+        estimation=TokenEstimation(primer={"d": 0.5}),
+        counting_spec=None,
+        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+    )
+    assert ratios["d"].source == "pinned"
+
+
+def test_prime_token_ratios_measure_callable_skips_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path))
+    ds = Dataset.from_dict("b", {0: InMemoryShard([{"text": "x"}] * 4)})
+    seen: dict[str, Any] = {}
+
+    def fake_census(
+        measured_datasets: Any,
+        store_options: Any,
+        estimation: Any,
+        counting_spec: Any,
+        seed: int,
+        mp_context: Any,
+        pre_tokenize_replay: Any = None,
+    ) -> dict[str, _DatasetMeasurement]:
+        seen["pre_tokenize_replay"] = pre_tokenize_replay
+        return {"b": _DatasetMeasurement(TokenRatio(0.4, "measured"))}
+
+    monkeypatch.setattr(token_estimation, "_run_census", fake_census)
+    ratios = prime_token_ratios(
+        datasets=[ds],
+        dataset_ids={"b": 0},
+        estimation=TokenEstimation(measure=len),
+        counting_spec=None,
+        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+    )
+    assert ratios["b"].source == "measured"
+    assert seen["pre_tokenize_replay"] is None

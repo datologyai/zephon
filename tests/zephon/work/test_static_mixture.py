@@ -1,5 +1,6 @@
 import pickle
 import random
+from typing import Any
 
 import numpy as np
 import pytest
@@ -3899,10 +3900,21 @@ def _inline_prime_census(monkeypatch: pytest.MonkeyPatch) -> None:
     import zephon.work.token_estimation as te
 
     def inline_census(
-        measured_datasets, store_options, estimation, counting_spec, seed, mp_context
-    ):
+        measured_datasets: dict[int, Dataset],
+        store_options: Any,
+        estimation: TokenEstimation,
+        counting_spec: Any,
+        seed: int,
+        mp_context: Any,
+        pre_tokenize_replay: Any = None,
+    ) -> dict[str, Any]:
         te._init_prime_worker(
-            measured_datasets, store_options, estimation, counting_spec, seed
+            measured_datasets,
+            store_options,
+            estimation,
+            counting_spec,
+            seed,
+            pre_tokenize_replay,
         )
         try:
             return {
