@@ -40,19 +40,35 @@ def _base(**kwargs: Any) -> _CountingBase:
 
 
 def test_lazy_setup_loads_and_finalizes_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    loads: list[tuple[str | None, bool | None]] = []
+    loads: list[tuple[str | None, bool | None, str | None]] = []
 
-    def fake_load(tokenizer_id: str | None, *, use_fast: bool | None) -> Any:
-        loads.append((tokenizer_id, use_fast))
+    def fake_load(
+        tokenizer_id: str | None, *, use_fast: bool | None, eos_token: str | None
+    ) -> Any:
+        loads.append((tokenizer_id, use_fast, eos_token))
         return SimpleNamespace(name_or_path="loaded")
 
     monkeypatch.setattr("zephon.ops.tokenize_base.load_hf_tokenizer", fake_load)
     op = _base(tokenizer_id="some-model", use_fast=False)
     op._setup_tokenizer()
     op._setup_tokenizer()
-    assert loads == [("some-model", False)]
+    assert loads == [("some-model", False, None)]
     assert op.finalize_calls == 1
     assert op._tokenizer_instantiated is True
+
+
+def test_eos_token_requires_tokenizer_id() -> None:
+    with pytest.raises(ValueError, match="eos_token"):
+        _base(eos_token="<|stop|>")
+
+
+def test_eos_token_rejects_preinstantiated_tokenizer() -> None:
+    with pytest.raises(ValueError, match="eos_token"):
+        _base(
+            tokenizer=SimpleNamespace(),
+            tokenizer_id="some-model",
+            eos_token="<|stop|>",
+        )
 
 
 def test_provided_tokenizer_skips_loader(monkeypatch: pytest.MonkeyPatch) -> None:

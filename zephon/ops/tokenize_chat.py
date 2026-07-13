@@ -110,6 +110,7 @@ class TokenizeChat(TokenizeBase):
         tokenizer: TokenizerLike | None = None,
         tokenizer_id: str | None = None,
         *,
+        eos_token: str | None = None,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
@@ -132,6 +133,12 @@ class TokenizeChat(TokenizeBase):
             tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``
                 (always loaded with ``use_fast=True`` — offset mapping and
                 assistant-token masks require a fast tokenizer).
+            eos_token: Optional EOS special-token override applied when
+                loading ``tokenizer_id``. HF looks ``eos_token_id`` up from
+                the ``eos_token`` string, so the override moves both the
+                string the no-template path appends and the id the EOS
+                finalizer checks. Only valid together with ``tokenizer_id``
+                — a pre-instantiated ``tokenizer`` already carries its EOS.
             field: Dot-separated payload path of the messages list (each
                 message a mapping with ``role`` and ``content``).
             max_length: Cap on output length in tokens, applied to the full
@@ -200,6 +207,7 @@ class TokenizeChat(TokenizeBase):
             tokenizer_id,
             # Offset mapping / assistant-token masks require a fast tokenizer.
             use_fast=True,
+            eos_token=eos_token,
             max_batch=max_batch,
             max_latency_ms=max_latency_ms,
         )

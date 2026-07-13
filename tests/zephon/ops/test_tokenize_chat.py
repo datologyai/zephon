@@ -302,6 +302,26 @@ def test_eos_finalizer_skipped_at_max_length(fast_tokenizer: Any) -> None:
     assert _mask(record) == [0, 0, 0, 0, 0, 1, 1]
 
 
+def test_eos_token_override_rebinds_string_and_id(
+    fast_tokenizer: Any, tmp_path: Any
+) -> None:
+    # Loading by id with an eos_token override must rebind both EOS forms the
+    # op derives at setup; the finalizer then appends the overridden id.
+    fast_tokenizer.save_pretrained(tmp_path)
+    op = TokenizeChat(
+        tokenizer_id=str(tmp_path),
+        eos_token="<|sep|>",
+        chat_template=TAGGED_TEMPLATE_NO_EOS,
+        span_source="generation_tags",
+    )
+    record = _run_one(op, {"messages": CONVERSATION[:2]})
+    assert op._eos_str == "<|sep|>"
+    assert op._eos_id == fast_tokenizer.convert_tokens_to_ids("<|sep|>")
+    ids = _payload(record)["input_ids"].tolist()
+    assert ids[-1] == op._eos_id
+    assert _mask(record)[-1] == 1  # the appended EOS closes an assistant turn
+
+
 # No-template path
 
 

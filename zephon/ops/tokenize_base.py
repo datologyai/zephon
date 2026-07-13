@@ -40,13 +40,21 @@ class TokenizeBase(DefaultSetup):
         tokenizer_id: str | None,
         *,
         use_fast: bool | None,
+        eos_token: str | None = None,
         max_batch: int,
         max_latency_ms: Optional[int],
     ) -> None:
         DefaultSetup.__init__(self)
+        if eos_token is not None and (tokenizer is not None or tokenizer_id is None):
+            raise ValueError(
+                "eos_token only applies when the op loads tokenizer_id; pass "
+                "tokenizer_id without a pre-instantiated tokenizer, or set "
+                "the EOS on your tokenizer instead"
+            )
         self.tok = tokenizer
         self.tokenizer_id = tokenizer_id
         self.use_fast = use_fast
+        self.eos_token = eos_token
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
         self._tokenizer_instantiated = False
@@ -61,7 +69,11 @@ class TokenizeBase(DefaultSetup):
                 return
 
             if self.tok is None:
-                self.tok = load_hf_tokenizer(self.tokenizer_id, use_fast=self.use_fast)
+                self.tok = load_hf_tokenizer(
+                    self.tokenizer_id,
+                    use_fast=self.use_fast,
+                    eos_token=self.eos_token,
+                )
 
             try:
                 self._finalize_setup()

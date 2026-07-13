@@ -101,6 +101,12 @@ def test_load_forwards_use_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["kwargs"]["use_fast"] is False
 
 
+def test_load_fallback_rejects_eos_token() -> None:
+    # Silently returning the stub would drop an explicit EOS override.
+    with pytest.raises(ValueError, match="eos_token"):
+        load_hf_tokenizer(None, eos_token="<|stop|>")
+
+
 def test_load_omits_use_fast_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, Any] = {}
 

@@ -191,14 +191,19 @@ _IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else N
 
 
 def load_hf_tokenizer(
-    tokenizer_id: str | None, *, use_fast: bool | None = True
+    tokenizer_id: str | None,
+    *,
+    use_fast: bool | None = True,
+    eos_token: str | None = None,
 ) -> TokenizerLike:
     """Load an HF tokenizer by id, with cloud resolution and retries.
 
     ``None`` / ``"__fallback__"`` return the dependency-free stub. Cloud URIs
     are resolved to a local cache path before loading. Transient load failures
     are retried with backoff; ``use_fast`` is dropped and the load retried once
-    if the tokenizer class rejects the kwarg.
+    if the tokenizer class rejects the kwarg. ``eos_token`` is forwarded to
+    ``from_pretrained`` and swaps which vocab token is EOS; HF tokenizers look
+    ``eos_token_id`` up from the ``eos_token`` string, so both follow.
     """
     # Before importing hf tokenizers we tell it we handle the parallelism and
     # not hf tokenizers. This avoids unforeseen effects when running multiple
@@ -206,6 +211,11 @@ def load_hf_tokenizer(
     suppress_library_threads()
 
     if tokenizer_id in (None, "__fallback__"):
+        if eos_token is not None:
+            raise ValueError(
+                "eos_token cannot be applied to the fallback tokenizer; "
+                "pass a real tokenizer_id"
+            )
         return fallback_tokenizer()
 
     # Deferred: tokenizer_cloud pulls the io/storage stack into this otherwise light module.
@@ -241,6 +251,8 @@ def load_hf_tokenizer(
     kwargs: dict[str, Any] = {}
     if use_fast is not None:
         kwargs["use_fast"] = use_fast
+    if eos_token is not None:
+        kwargs["eos_token"] = eos_token
     try:
         return cast(TokenizerLike, _load_with_retry(load_id, **kwargs))
     except TypeError as exc:

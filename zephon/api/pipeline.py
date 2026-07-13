@@ -860,6 +860,7 @@ class Pipeline:
         tokenizer: Any | None = None,
         tokenizer_id: str | None = None,
         *,
+        eos_token: str | None = None,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
@@ -884,6 +885,7 @@ class Pipeline:
         op = TokenizeChat(
             tokenizer,
             tokenizer_id,
+            eos_token=eos_token,
             field=field,
             max_length=max_length,
             chat_template=chat_template,
