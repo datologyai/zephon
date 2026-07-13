@@ -46,7 +46,13 @@ def is_shm_error(e: BaseException) -> bool:
         seen.add(eid)
         if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
             return True
-        if "No space left on device" in str(exc):
+        msg = str(exc)
+        if "No space left on device" in msg:
+            return True
+        # "unable to allocate shared memory(shm) ...: Success (0)" — torch
+        # 2.10/2.11 MapAllocator formats strerror(errno) although posix_fallocate
+        # reports failure via its return value, hiding the ENOSPC (fixed on main).
+        if "unable to allocate shared memory" in msg:
             return True
         if exc.__cause__ is not None:
             to_check.append(exc.__cause__)
