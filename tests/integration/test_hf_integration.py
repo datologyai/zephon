@@ -25,10 +25,31 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("huggingface_hub")
 pytest.importorskip("pyarrow")
 
+import requests  # noqa: E402
+
 from zephon.io.storage import HFBackend  # noqa: E402
 from zephon.io.storage._hf_uri import parse_hf_uri  # noqa: E402
+from zephon.io.storage.hf import _DATASETS_SERVER_PARQUET_URL  # noqa: E402
 
 _SQUAD_TRAIN_URI = "hf://rajpurkar/squad/plain_text/train"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_datasets_server() -> None:
+    """Skip the module on Datasets Server outages (5xx/unreachable); 4xx still fails loudly.
+
+    A fixture rather than an import-time check so unit-test collection makes no HTTP call.
+    """
+    try:
+        resp = requests.get(
+            _DATASETS_SERVER_PARQUET_URL,
+            params={"dataset": "rajpurkar/squad", "config": "plain_text"},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        pytest.skip(f"HF Datasets Server unreachable: {exc}")
+    if resp.status_code >= 500:
+        pytest.skip(f"HF Datasets Server unavailable (HTTP {resp.status_code})")
 
 
 def test_dataset_from_path_streams_squad() -> None:
@@ -68,8 +89,6 @@ def test_hf_actually_honors_range_reads() -> None:
     training throughput on large files. Assert the wire-level behavior
     directly.
     """
-    import requests
-
     backend = HFBackend()
     shards = backend._list_shards(parse_hf_uri(_SQUAD_TRAIN_URI))
     assert shards, "Expected at least one shard"
