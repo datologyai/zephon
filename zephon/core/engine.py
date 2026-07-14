@@ -501,10 +501,26 @@ class Engine:
         self._inflight_shm: ctypes.Array[ctypes.c_int] | None = None
         self._rr_next_idx: dict[str, int] = {}
 
-        # Component ID mapping for mixture tracking (string -> int)
-        self._component_to_id: dict[str, int] = {}
-        self._id_to_component: list[str] = []
-        self._component_lock = threading.Lock()
+        # Component ids come from the source's declared vocabulary so they are
+        # a function of config, not encounter order (which differs across
+        # resumes and topologies).
+        declared: dict[Any, Any] = dict(work.component_ids())
+        id_to_component: dict[int, str] = {}
+        for name, component_id in declared.items():
+            if (
+                not isinstance(name, str)
+                or isinstance(component_id, bool)
+                or not isinstance(component_id, int)
+                or component_id < 0
+                or component_id in id_to_component
+            ):
+                raise ValueError(
+                    "WorkSource.component_ids() must map string component names to "
+                    + f"unique non-negative ints, got {declared!r}"
+                )
+            id_to_component[component_id] = name
+        self._component_to_id: dict[str, int] = declared
+        self._id_to_component = id_to_component
         # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
         self._chunk_mixtures: dict[tuple[LaneId, ChunkId], dict[int, float]] = {}
         self._mixture_lock = threading.Lock()
@@ -1015,39 +1031,23 @@ class Engine:
             self._collector.record_pump_timing(delta)
 
     def _get_component_id(self, component_name: str) -> int:
-        """Get or assign a stable integer ID for a component name.
-
-        Used by EnsureMixture to convert user-provided explicit weights from
-        string names to integer IDs for efficient internal tracking.
-
-        Thread-safe: uses a lock to ensure consistent ID assignment across
-        concurrent lane streams.
-        """
-        # Fast path: already assigned
+        """Return the source-declared ID for a component name."""
         cid = self._component_to_id.get(component_name)
-        if cid is not None:
-            return cid
-
-        # Slow path: assign new ID under lock
-        with self._component_lock:
-            # Double-check after acquiring lock
-            cid = self._component_to_id.get(component_name)
-            if cid is not None:
-                return cid
-
-            cid = len(self._id_to_component)
-            self._component_to_id[component_name] = cid
-            self._id_to_component.append(component_name)
-            return cid
+        if cid is None:
+            raise ValueError(
+                f"Unknown mixture component {component_name!r}: not in the "
+                + "work source's component_ids() vocabulary "
+                + f"{sorted(self._component_to_id)}. The vocabulary must cover "
+                + "every component the source ever emits."
+            )
+        return cid
 
     def _get_component_name(self, component_id: int) -> str | None:
         """Look up component name by ID for human-readable warning messages.
 
         Returns None if ID is unknown.
         """
-        if 0 <= component_id < len(self._id_to_component):
-            return self._id_to_component[component_id]
-        return None
+        return self._id_to_component.get(component_id)
 
     def _get_chunk_mixture(
         self, lane_id: LaneId, chunk_id: ChunkId

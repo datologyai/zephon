@@ -1275,3 +1275,76 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
     for w_got, w_truth in zip(got_all, truth_windows):
         assert len(w_got) == len(w_truth) == GLOBAL
         assert Counter(w_got) == Counter(w_truth)
+
+
+def _consume_with_counts(
+    pipe: PublicPipeline, *, limit: int | None = None
+) -> tuple[list[tuple[str, dict[int, int]]], dict | None]:
+    from zephon.core.constants import SampleRecord
+
+    out: list[tuple[str, dict[int, int]]] = []
+    ckpt: dict | None = None
+    it = iter(pipe)
+    try:
+        for rec in it:
+            assert isinstance(rec, SampleRecord)
+            payload = rec.payload
+            assert isinstance(payload, dict)
+            text = payload["text"]
+            assert isinstance(text, str)
+            out.append((text, dict(rec.meta.component_sample_counts)))
+            if limit is not None and len(out) >= limit:
+                ckpt = pipe.checkpoint()
+                break
+    finally:
+        it.close()
+    return out, ckpt
+
+
+def _build_two_component_pipe() -> PublicPipeline:
+    # weight 0.125 at chunk_size=4 puts one "rare" sample in every other
+    # chunk, so a cut inside an odd chunk leaves a rare-free chunk at the
+    # front of the inflight window.
+    work = StaticMixtureWorkSource(
+        [make_dataset("rare", 64), make_dataset("common", 256)],
+        {"rare": 0.125, "common": 0.875},
+        chunk_size=4,
+        seed=7,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    return (
+        PublicPipeline(work)
+        .decode_text()
+        .options(deterministic=True, canonical_replicas=1, max_workers=2)
+    )
+
+
+def test_resume_preserves_component_ids() -> None:
+    """The component ids in delivered ``SampleMeta`` must survive a resume.
+
+    First-encounter interning would see "common" first on replay (the earliest
+    inflight chunk has no "rare" sample) and swap the two ids: every resumed
+    record's ``component_sample_counts`` would disagree with the uninterrupted
+    run while the payloads still match.
+    """
+    baseline, _ = _consume_with_counts(_build_two_component_pipe())
+    assert {cid for _, counts in baseline for cid in counts} == {0, 1}
+
+    cut = 6
+    prefix, ckpt = _consume_with_counts(_build_two_component_pipe(), limit=cut)
+    assert ckpt is not None
+
+    # The first replayed chunk must omit "rare"; otherwise encounter-order ids
+    # happen to remain stable.
+    lane_key = next(iter(ckpt["inflight"]))
+    by_chunk = ckpt["inflight"][lane_key]
+    earliest = by_chunk[min(by_chunk)]
+    assert "rare" not in {name for name, _ in earliest["components"]}
+
+    resumed = _build_two_component_pipe()
+    resumed.restore(ckpt)
+    suffix, _ = _consume_with_counts(resumed)
+
+    assert [t for t, _ in prefix + suffix] == [t for t, _ in baseline]
+    assert [counts for _, counts in suffix] == [counts for _, counts in baseline[cut:]]

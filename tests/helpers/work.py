@@ -82,6 +82,9 @@ class FakeIndexableWorkSource(WorkSource):
     def datasets_by_id(self) -> Mapping[int, Dataset]:  # type: ignore[override]
         return {self._dataset_id: self.dataset}
 
+    def component_ids(self) -> Mapping[str, int]:
+        return {"default": 0}
+
     def chunk_size_hint(self) -> int | None:  # type: ignore[override]
         return int(self.chunk_size)
 

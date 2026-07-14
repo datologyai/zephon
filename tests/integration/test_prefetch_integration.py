@@ -404,6 +404,9 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
         def datasets_by_id(self):
             return self._datasets_by_id
 
+        def component_ids(self) -> dict[str, int]:
+            return {"jsonl_prefetch_demo": 0}
+
         def next_chunk(self) -> WorkChunk | None:
             if self._emitted:
                 return None

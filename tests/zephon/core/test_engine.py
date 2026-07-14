@@ -6,6 +6,7 @@ import time
 import types
 import weakref
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
@@ -141,6 +142,9 @@ class _DummyWorkSource(WorkSource):
     @property
     def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
         return {}
+
+    def component_ids(self) -> dict[str, int]:
+        return {"default": 0, "short": 1, "long": 2}
 
     # Methods below satisfy the WorkSource protocol at runtime if accessed.
     def next_chunk(self) -> Any:  # pragma: no cover - not used in these tests
@@ -784,3 +788,58 @@ def test_store_chunk_mixture_prefers_target_mixture(monkeypatch, tmp_path) -> No
         assert eng._get_chunk_mixture(0, 2) == {short_id: 0.5, long_id: 0.5}
     finally:
         eng.close()
+
+
+def test_component_ids_follow_worksource_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _VocabWorkSource(_DummyWorkSource):
+        def component_ids(self) -> dict[str, int]:
+            return {"rare": 0, "common": 7}
+
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(aggregate_dir=str(tmp_path))
+    spec = resolve_runtime_spec(plan, opts)
+    eng = Engine(plan, opts, _VocabWorkSource(), spec)
+    try:
+        # Lookup order does not affect declared ids; sparse ids remain valid.
+        assert eng._get_component_id("common") == 7
+        assert eng._get_component_id("rare") == 0
+        assert eng._get_component_name(7) == "common"
+        assert eng._get_component_name(3) is None
+        with pytest.raises(ValueError, match="not in the work source's"):
+            eng._get_component_id("undeclared")
+    finally:
+        eng.close()
+
+
+@pytest.mark.parametrize(
+    "vocabulary",
+    [
+        pytest.param({"a": 0, "b": 0}, id="duplicate-id"),
+        pytest.param({"a": -1}, id="negative-id"),
+        pytest.param({"a": True}, id="bool-id"),
+        pytest.param({"a": []}, id="unhashable-id"),
+        pytest.param({1: 0}, id="non-string-name"),
+    ],
+)
+def test_component_ids_reject_invalid_vocabulary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    vocabulary: dict[Any, Any],
+) -> None:
+    class _InvalidVocab(_DummyWorkSource):
+        def component_ids(self) -> Any:
+            return vocabulary
+
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(aggregate_dir=str(tmp_path))
+    spec = resolve_runtime_spec(plan, opts)
+    with pytest.raises(ValueError, match="unique non-negative"):
+        Engine(plan, opts, _InvalidVocab(), spec)

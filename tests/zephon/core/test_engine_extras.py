@@ -32,6 +32,9 @@ class _DummyWorkSource(WorkSource):
     def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
         return {}
 
+    def component_ids(self) -> dict[str, int]:
+        return {"X": 0, "Y": 1}
+
     def next_chunk(self) -> Any:  # pragma: no cover - not used here
         return None
 

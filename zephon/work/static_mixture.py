@@ -2232,6 +2232,14 @@ class StaticMixtureWorkSource(WorkSource):
         # We expose a copy to avoid external objects interfering with our internal state.
         return dict(self._dataset_ids)
 
+    def component_ids(self) -> Mapping[str, int]:
+        """Component ids are the dataset ids: fixed at construction.
+
+        Chunk component names are dataset names, so samples end up labelled
+        with the same id that already identifies their dataset in SampleIds.
+        """
+        return dict(self._dataset_ids)
+
     # ------------------------------------------------------------------
     # Token-aware priming
     # ------------------------------------------------------------------

@@ -73,12 +73,14 @@ class WorkSource(ABC):
     @property
     def datasets_by_id(self) -> Mapping[int, Dataset]: ...
 
+    def component_ids(self) -> Mapping[str, int]: ...
+
     def clone_for_lane(self, lane_id, canonical_replicas) -> WorkSource: ...
     def state_dict(self) -> dict: ...
     def load_state_dict(self, state: dict) -> None: ...
 ```
 
-The key methods fall into three groups:
+The key methods fall into four groups:
 
 ### Chunk production
 
@@ -87,6 +89,17 @@ calls it repeatedly on each per-lane clone to pull the next
 {py:class}`~zephon.work.WorkChunk` (described in the
 [next section](#work-chunks)).  When the WorkSource is exhausted, it returns
 `None`.  Everything else in the interface exists to support this one method.
+
+### Component vocabulary
+
+{py:meth}`~zephon.work.WorkSource.component_ids` publishes the source's
+static mixture vocabulary: every component name the source will ever emit
+(including components a curriculum only activates later), mapped to a unique
+non-negative integer id.  The Engine labels every sample with these ids, so
+publishing them as a fixed function of the source's configuration is what
+keeps component ids identical across ranks, elastic topology changes, and
+checkpoint resumes.  Emitting a chunk component that was never declared is
+an error.
 
 ### Lane binding
 

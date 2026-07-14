@@ -413,6 +413,16 @@ class WorkSource(ABC):
     def datasets_by_id(self) -> Mapping[int, Dataset]:
         raise NotImplementedError()
 
+    def component_ids(self) -> Mapping[str, int]:
+        """Static component-name -> id vocabulary.
+
+        Fixed for the source's lifetime and covering every component it will
+        ever emit (curriculum stages included), so ids are a pure function of
+        config across ranks, topology changes, and resumes. Ids are unique
+        non-negative ints, not necessarily dense.
+        """
+        raise NotImplementedError()
+
     def chunk_size_hint(self) -> int | None:
         """Return fixed chunk size if constant.
 

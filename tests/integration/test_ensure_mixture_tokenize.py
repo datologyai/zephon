@@ -86,6 +86,9 @@ class _DynamicMixtureWorkSource(WorkSource):
         self._count_b = count_b
         self._count_c = count_c
 
+    def component_ids(self) -> dict[str, int]:
+        return {"A": 0, "B": 1, "C": 2}
+
     def next_chunk(self):
         """Return next chunk with different mixture per chunk."""
         from zephon.work.base import WorkChunk

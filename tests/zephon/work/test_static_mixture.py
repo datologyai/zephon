@@ -4608,3 +4608,12 @@ def test_token_mode_alternating_exhaustion_respects_max_repeats() -> None:
         produced += 1
         assert produced < 100, "stream never terminated under max_repeats"
     assert produced > 0
+
+
+def test_component_ids_are_dataset_ids() -> None:
+    a, b = make_dataset("alpha", 4), make_dataset("beta", 4)
+    work = StaticMixtureWorkSource(
+        [a, b], {"alpha": 0.5, "beta": 0.5}, chunk_size=4, seed=1
+    )
+    assert work.component_ids() == {"alpha": 0, "beta": 1}
+    assert work.component_ids() == work.dataset_ids
