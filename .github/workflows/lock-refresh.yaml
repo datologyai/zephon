@@ -1,0 +1,39 @@
+name: Lock Refresh
+
+# Monthly `uv lock --upgrade` PR. Complements Dependabot's weekly direct-
+# dependency bumps: this sweep also moves transitive pins.
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  schedule:
+  - cron: '0 6 1 * *'
+  workflow_dispatch: {}
+
+jobs:
+  lock-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Upgrade lockfile
+      run: uv lock --upgrade
+    - name: Open PR
+      uses: peter-evans/create-pull-request@v7
+      with:
+        # Default-token PRs never trigger CI (GitHub anti-recursion rule); set
+        # the LOCK_REFRESH_TOKEN secret (machine PAT / App token) to lift that.
+        token: ${{ secrets.LOCK_REFRESH_TOKEN || github.token }}
+        commit-message: "chore: refresh uv.lock to latest resolutions"
+        title: "chore: weekly uv.lock refresh"
+        body: |
+          Automated `uv lock --upgrade`: bumps every locked version, including
+          transitive dependencies, to the latest allowed by `pyproject.toml`.
+          Dev/CI environments only; user-facing install metadata is unchanged.
+        branch: chore/uv-lock-refresh
+        delete-branch: true

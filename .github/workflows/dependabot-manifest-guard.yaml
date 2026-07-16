@@ -1,0 +1,46 @@
+name: Dependabot Manifest Guard
+
+# Dependabot security PRs bump pyproject.toml floors and there is no option to
+# stop that, so revert the pyproject change and keep only the uv.lock bump.
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+    paths:
+    - "pyproject.toml"
+
+jobs:
+  revert-manifest:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.ref }}
+        # Default-token pushes don't retrigger CI; a PAT here does. Must be
+        # a DEPENDABOT secret (Dependabot-triggered runs don't see Actions ones).
+        token: ${{ secrets.LOCK_REFRESH_TOKEN || github.token }}
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Restore pyproject.toml from base
+      run: |
+        set -ex
+        git fetch origin ${{ github.event.pull_request.base.ref }}
+        git checkout origin/${{ github.event.pull_request.base.ref }} -- pyproject.toml
+    - name: Reconcile lockfile
+      run: uv lock
+    - name: Push revert if anything changed
+      run: |
+        set -ex
+        if git diff --quiet; then
+          echo "manifest already matches base; nothing to revert"
+          exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -am "chore: keep pyproject floors (lockfile-only policy)"
+        git push
