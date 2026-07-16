@@ -119,12 +119,13 @@ def _pad_field(seq: Any, pad_len: int, pad_value: int) -> Any:
     if isinstance(seq, tuple):
         return seq + (pad_value,) * pad_len
     if isinstance(seq, _np.ndarray):
-        # numpy raises OverflowError for a pad_value outside the field dtype (e.g.
-        # -1 into uint*); surface it as an actionable message.
-        try:
-            tail = _np.full(pad_len, pad_value, dtype=seq.dtype)
-        except (OverflowError, ValueError) as e:
-            raise ValueError(_pad_value_oob_msg(pad_value, seq.dtype)) from e
+        # Check the dtype range explicitly: numpy < 2.0 silently wraps an
+        # out-of-range pad_value (e.g. -1 into uint*) instead of raising.
+        if seq.dtype.kind in "iu":
+            info = _np.iinfo(seq.dtype)
+            if not info.min <= pad_value <= info.max:
+                raise ValueError(_pad_value_oob_msg(pad_value, seq.dtype))
+        tail = _np.full(pad_len, pad_value, dtype=seq.dtype)
         return _np.concatenate([seq, tail], axis=0)
     if _torch is not None and isinstance(seq, _torch.Tensor):
         try:
