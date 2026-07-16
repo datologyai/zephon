@@ -94,7 +94,9 @@ def test_hf_actually_honors_range_reads() -> None:
     assert shards, "Expected at least one shard"
     first = next(iter(shards.values()))
 
-    resp = requests.get(
+    # Use the backend's retrying session, not a bare request: HF's CDN resets
+    # connections, and 206/200 pass through untouched so the assert is intact.
+    resp = backend._get_session().get(
         first.url,
         headers={"Range": "bytes=0-63", "Accept-Encoding": "identity"},
         allow_redirects=True,
