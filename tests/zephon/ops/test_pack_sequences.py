@@ -1211,3 +1211,259 @@ def test_no_premature_flush_when_new_record_self_emits() -> None:
     ready = acc.push_many([_rec_tokens(2, [7, 8, 9, 10])])  # exact max → self-emits
     assert len(ready) == 1  # only the self-emitted bin; no partial bin evicted
     assert acc.has_pending_data()  # bin0 and bin1 still buffered
+
+
+# ---------------------------------------------------------------------------
+# Homogeneous packing (packed samples limited to one mixing domain)
+# ---------------------------------------------------------------------------
+
+
+def _crec(
+    i: int, length: int, component: int, *, lane: int = 0, chunk: int = 0
+) -> SampleRecord:
+    """Length-field record in mixing domain ``component``."""
+    meta = SampleMeta(
+        sample_id=(0, 0, i),
+        lane_id=lane,
+        chunk_id=chunk,
+        component_sample_counts={component: 1},
+    )
+    return SampleRecord(meta=meta, payload={"value": i, "length": length})
+
+
+def _crec_tokens(
+    i: int, tokens: list[int], component: int, *, lane: int = 0, chunk: int = 0
+) -> SampleRecord:
+    """Token-field record in mixing domain ``component``."""
+    meta = SampleMeta(
+        sample_id=(0, 0, i),
+        lane_id=lane,
+        chunk_id=chunk,
+        component_sample_counts={component: 1},
+    )
+    return SampleRecord(meta=meta, payload={"input_ids": list(tokens)})
+
+
+def _bin_components(rec: SampleRecord) -> set[int]:
+    """Component ids (mixing domains) in a packed sample."""
+    return set(rec.meta.component_sample_counts)
+
+
+def test_unknown_homogeneity_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown homogeneity"):
+        PackSequences(max_length=4, num_bins=4, homogeneity="nope")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
+def test_homogeneous_full_never_mixes_domains(algorithm: str) -> None:
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        algorithm=algorithm,
+        homogeneity="full",
+    )
+    # Interleaved domains, each record len 4 (two fit in one max_length=10 bin).
+    recs = [
+        _crec(0, 4, 0),
+        _crec(1, 4, 1),
+        _crec(2, 4, 0),
+        _crec(3, 4, 1),
+    ]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert all(len(_bin_components(r)) == 1 for r in out)
+    # {0: 2}/{1: 2}: each domain's two records packed together, not split apart.
+    per_domain = sorted(
+        (r.meta.component_sample_counts for r in out), key=lambda c: sorted(c)
+    )
+    assert per_domain == [{0: 2}, {1: 2}]
+
+
+def test_mixed_default_still_mixes_domains() -> None:
+    """Back-compat: the default homogeneity='none' still mixes domains in a bin."""
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        algorithm="first_fit",
+        homogeneity="none",
+    )
+    recs = [_crec(0, 4, 0), _crec(1, 4, 1), _crec(2, 4, 0), _crec(3, 4, 1)]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert any(len(_bin_components(r)) == 2 for r in out)
+
+
+def test_homogeneous_full_num_bins_is_per_domain() -> None:
+    acc = _pack(
+        10,
+        num_bins=1,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        algorithm="first_fit",
+        homogeneity="full",
+    )
+    # Two partial records, different domains. With a single shared bin one would
+    # evict the other; per-domain bins keep both buffered.
+    ready = acc.push_many([_crec(0, 4, 0), _crec(1, 4, 1)])
+    assert ready == []  # neither bin full, no eviction across domains
+    out = _records(acc.flush())
+    per_domain = sorted(
+        (r.meta.component_sample_counts for r in out), key=lambda c: sorted(c)
+    )
+    assert per_domain == [{0: 1}, {1: 1}]
+
+
+@pytest.mark.parametrize("counts", [{0: 1, 1: 1}, {}], ids=["multi", "empty"])
+def test_homogeneous_full_rejects_non_single_component(counts: dict[int, int]) -> None:
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        homogeneity="full",
+    )
+    rec = SampleRecord(
+        meta=SampleMeta(
+            sample_id=(0, 0, 0),
+            lane_id=0,
+            chunk_id=0,
+            component_sample_counts=counts,
+        ),
+        payload={"value": 0, "length": 4},
+    )
+    with pytest.raises(ValueError, match="single-component records"):
+        acc.push_many([rec])
+
+
+def test_homogeneous_full_wrap_streams_per_domain() -> None:
+    acc = _wrap(4, homogeneity="full")
+    recs = [
+        _crec_tokens(0, [1, 2, 3, 4], 0),
+        _crec_tokens(1, [5, 6, 7, 8], 1),
+        _crec_tokens(2, [9, 10, 11, 12], 0),
+    ]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert all(len(_bin_components(r)) == 1 for r in out)
+    domains = sorted(next(iter(r.meta.component_sample_counts)) for r in out)
+    assert domains == [0, 0, 1]  # two domain-0 bins, one domain-1 bin
+
+
+def test_homogeneous_full_wrap_drops_partial_tail_per_domain(caplog: Any) -> None:
+    import logging
+
+    acc = _wrap(4, homogeneity="full")
+    recs = [
+        _crec_tokens(0, [1, 2], 0),  # dom0
+        _crec_tokens(1, [7, 8, 9], 1),  # dom1: never fills a bin -> tail dropped
+        _crec_tokens(2, [3, 4], 0),  # dom0: completes a {0:2} bin with rec0
+        _crec_tokens(3, [5, 6], 0),  # dom0: leftover -> tail dropped
+    ]
+    emitted = _records(acc.push_many(recs))
+    # Exactly one full bin, single domain 0, from the two complete dom0 records.
+    assert len(emitted) == 1
+    assert _bin_components(emitted[0]) == {0}
+
+    with caplog.at_level(logging.WARNING):
+        flushed = _records(acc.flush())
+    # Both leftover tails (dom0 [5,6], dom1 [7,8,9]) drop as tombstones; no real bin.
+    assert flushed and all(r.meta.tombstone for r in flushed)
+    assert any(
+        "2 packing group(s) in 1 lane(s)" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_homogeneous_full_wrap_auto_field_is_consistent_lane_wide() -> None:
+    # tokens_field defaults to "auto"; two domains in one lane must resolve to the
+    # same auto-detected field, even though they buffer separately.
+    acc = _pack(
+        4, num_bins=1, algorithm="wrap", drop_oversized=False, homogeneity="full"
+    )
+
+    def rec(i: int, field: str, component: int) -> SampleRecord:
+        meta = SampleMeta(
+            sample_id=(0, 0, i),
+            lane_id=0,
+            chunk_id=0,
+            component_sample_counts={component: 1},
+        )
+        return SampleRecord(meta=meta, payload={field: [1, 2, 3, 4]})
+
+    acc.push_many([rec(0, "input_ids", 0)])  # lane's field -> input_ids
+    with pytest.raises(ValueError, match="inconsistent auto-detected length field"):
+        acc.push_many([rec(1, "tokens", 1)])  # different field, same lane -> rejected
+
+
+def _bin_key(rec: SampleRecord) -> tuple[int, int, int]:
+    """(lane_id, sole component id, sample count) of a single-domain packed sample."""
+    counts = rec.meta.component_sample_counts
+    assert len(counts) == 1
+    cid, n = next(iter(counts.items()))
+    return (rec.meta.lane_id, cid, n)
+
+
+def test_homogeneous_full_partitions_by_lane_and_domain() -> None:
+    """Keying uses BOTH (lane, domain), tested where records could really merge."""
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        homogeneity="full",
+    )
+    recs = [
+        _crec(0, 4, 0, lane=0),  # (lane0, dom0): opens a bin with remaining 6
+        _crec(1, 4, 0, lane=1),  # (lane1, dom0): same domain, WOULD fit lane0's bin
+        #                          by capacity, but different lane -> own bin
+        _crec(2, 4, 1, lane=0),  # (lane0, dom1): same lane, WOULD fit lane0's bin
+        #                          by capacity, but different domain -> own bin
+        _crec(3, 4, 0, lane=0),  # (lane0, dom0): same lane AND domain -> joins rec0
+    ]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert all(len(_bin_components(r)) == 1 for r in out)
+    # A lane/domain key collision would merge rec1 or rec2 into rec0's group;
+    # only exact (lane, domain) matches share one.
+    assert sorted(_bin_key(r) for r in out) == [(0, 0, 2), (0, 1, 1), (1, 0, 1)]
+
+
+def test_homogeneous_full_flush_is_lane_scoped_across_domains() -> None:
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        homogeneity="full",
+    )
+    # Two domains buffered in lane 0, one in lane 1 (all partial -> nothing emits).
+    ready = acc.push_many(
+        [_crec(0, 4, 0, lane=0), _crec(1, 4, 1, lane=0), _crec(2, 4, 0, lane=1)]
+    )
+    assert ready == []
+
+    out0 = _records(acc.flush(lane_id=0))
+    # Both lane-0 domains drained; lane 1 untouched.
+    assert sorted(_bin_key(r) for r in out0) == [(0, 0, 1), (0, 1, 1)]
+    assert acc.has_pending_data(0) is False
+    assert acc.has_pending_data(1) is True
+
+    out1 = _records(acc.flush(lane_id=1))
+    assert sorted(_bin_key(r) for r in out1) == [(1, 0, 1)]
+    assert acc.has_pending_data() is False
+
+
+def test_homogeneous_full_flush_order_is_deterministic() -> None:
+    """Flush order is fixed by (lane, domain), independent of arrival order."""
+    acc = _pack(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        homogeneity="full",
+    )
+    # Arrive out of order (2, 0, 1); each partial bin stays buffered until flush.
+    ready = acc.push_many([_crec(0, 4, 2), _crec(1, 4, 0), _crec(2, 4, 1)])
+    assert ready == []
+    out = _records(acc.flush())
+    # Emitted sorted by domain (all lane 0), not by arrival order.
+    assert [next(iter(r.meta.component_sample_counts)) for r in out] == [0, 1, 2]

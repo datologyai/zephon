@@ -1108,6 +1108,7 @@ class Pipeline:
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
+        homogeneity: Literal["none", "full"] = "none",
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -1140,6 +1141,9 @@ class Pipeline:
                 flushes bins with the smallest remaining capacity first.
             pack_payloads: How to merge the segment list. "keep_list" (default),
                 "torch_tensor", "numpy_array", or a custom callable taking list[Any].
+            homogeneity: If ``"full"``, each packed sample stays within a single
+                mixing domain (mixture component); ``"none"`` (default) mixes
+                freely. See :meth:`PackSequences.__init__`.
             placement: Placement strategy for this operator.
             parallelism: Worker count for materializing packed-bin payloads.
                 Bin assignment remains serial, so output is unchanged.
@@ -1157,6 +1161,7 @@ class Pipeline:
             shuffle_seed=shuffle_seed,
             flush_strategy=flush_strategy,
             pack_payloads=pack_payloads,
+            homogeneity=homogeneity,
         )
         node = self._graph.add(
             "pack_sequences",
@@ -1183,6 +1188,7 @@ class Pipeline:
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
+        homogeneity: Literal["none", "full"] = "none",
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -1216,6 +1222,9 @@ class Pipeline:
             shuffle_strategy: Strategy for ordering sequences before packing.
             shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
             flush_strategy: "fifo" (default) or "fullest" when num_bins is reached.
+            homogeneity: If ``"full"``, each packed sample stays within a single
+                mixing domain (mixture component); ``"none"`` (default) mixes
+                freely. See :meth:`PackSequences.__init__`.
             placement: Placement strategy for this operator.
             parallelism: Worker count for materializing packed-bin payloads.
                 Bin assignment remains serial, so output is unchanged.
@@ -1233,6 +1242,7 @@ class Pipeline:
             flush_strategy=flush_strategy,
             emit_positions=emit_positions,
             pad_token_id=pad_token_id,
+            homogeneity=homogeneity,
         )
         node = self._graph.add(
             "pack_flat", op, self._tail, placement=placement, parallelism=parallelism

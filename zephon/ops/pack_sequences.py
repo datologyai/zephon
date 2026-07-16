@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import random
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import chain
 from typing import Any, Literal, Optional, Sequence
@@ -41,7 +41,7 @@ from zephon.core.children import (
     pack_meta,
     tombstones_for_record,
 )
-from zephon.core.constants import ContributorRef, SampleRecord
+from zephon.core.constants import ComponentId, ContributorRef, LaneId, SampleRecord
 from zephon.core.op_base import DefaultSetup
 from zephon.core.traits import OpTraits
 from zephon.utils.length_extraction import (
@@ -76,6 +76,42 @@ def _integer_apportion_tokens(length: int, weights: dict[int, int]) -> dict[int,
             out[cid] = v
             acc += v
     return out
+
+
+# ----------------------------------------------------------------------
+# Homogeneous packing (per-mixing-domain packing state)
+# ----------------------------------------------------------------------
+
+# A packing group: (lane_id, domain). ``domain`` is ``None`` for mixed packing
+# (one group per lane) and the record's mixing-domain key when homogeneous
+# packing partitions a lane.
+PackKey = tuple[LaneId, Any]
+
+
+def _component_domain(record: SampleRecord) -> ComponentId:
+    """Fully homogeneous domain key: the record's sole component.
+
+    Raises unless the record carries exactly one component.
+    """
+    counts = record.meta.component_sample_counts
+    try:
+        (domain,) = counts
+    except ValueError:
+        raise ValueError(
+            "homogeneity='full' packing requires single-component records, but got "
+            f"one with components {sorted(counts)}. Place packing before any "
+            "operator that merges components."
+        ) from None
+    return domain
+
+
+def _make_pack_key(
+    domain_fn: Callable[[SampleRecord], Any] | None,
+) -> Callable[[SampleRecord], PackKey]:
+    """Record group key: ``(lane, None)`` when mixing, else ``(lane, domain)``."""
+    if domain_fn is None:
+        return lambda elem: (elem.meta.lane_id, None)
+    return lambda elem: (elem.meta.lane_id, domain_fn(elem))
 
 
 # ----------------------------------------------------------------------
@@ -447,6 +483,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         flush_strategy: Literal["fifo", "fullest"],
         serializer: _EnvelopeSerializer | _FlatSerializer,
         wrap_field: str | None = None,
+        domain_fn: Callable[[SampleRecord], Any] | None = None,
     ) -> None:
         self.max_length = max_length
         self.num_bins = num_bins
@@ -459,20 +496,24 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         self.flush_strategy = flush_strategy
         self._serializer = serializer
         self.wrap_field = wrap_field
+        self._pack_key = _make_pack_key(domain_fn)
 
         # Oversized records dropped by first/best (can't split). Tombstones are
         # emitted at drop time; this only feeds the flush-time summary warning.
         self._dropped_oversized_count = 0
         self._dropped_oversized_tokens = 0
 
-        self._bins: defaultdict[int, list[Bin]] = defaultdict(list)
+        # Bins/wrap buffers key on PackKey = (lane_id, domain). With no domain_fn
+        # every record maps to (lane_id, None), i.e. plain per-lane packing.
+        self._bins: defaultdict[PackKey, list[Bin]] = defaultdict(list)
 
-        # wrap buffer per lane: a buffered Segment's live tokens are
+        # wrap buffer per group: a buffered Segment's live tokens are
         # payload[field][start:end], and start advances as it drains into bins.
-        self._wrap_segments: defaultdict[int, deque[Segment]] = defaultdict(deque)
-        self._wrap_total: defaultdict[int, int] = defaultdict(int)
-        # First auto-detected field per lane; the wrap stream must stay on it.
-        self._wrap_lane_auto_field: dict[int, str] = {}
+        self._wrap_segments: defaultdict[PackKey, deque[Segment]] = defaultdict(deque)
+        self._wrap_total: defaultdict[PackKey, int] = defaultdict(int)
+        # Auto-detected wrap field, keyed by lane: every record in a
+        # lane must resolve to the same field, even across domains.
+        self._wrap_lane_auto_field: dict[LaneId, str] = {}
         # Token counts already charged on a split record's non-final slices (floor
         # parts); the is_last slice subtracts these so the remainder lands exactly.
         # Keyed by (lane_id, cursor key) — cursor keys alone collide across lanes.
@@ -482,13 +523,29 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     def reads_payload(self) -> bool:
         return True
 
+    def _known_keys(self) -> set[PackKey]:
+        """All packing groups that currently hold (or held) buffered state."""
+        return set(self._bins) | set(self._wrap_total) | set(self._wrap_segments)
+
+    @staticmethod
+    def _sorted_keys(keys: Iterable[PackKey]) -> list[PackKey]:
+        """Deterministic key order (set iteration is layout-dependent).
+
+        Domains are uniformly ``None`` or valued, so plain tuple sort is safe.
+        """
+        return sorted(keys)
+
     def has_pending_data(self, lane_id: int | None = None) -> bool:
         """Return True if any bins or wrap segments hold data (in ``lane_id`` if given)."""
         if lane_id is None:
             if any(bins for bins in self._bins.values()):
                 return True
             return any(total > 0 for total in self._wrap_total.values())
-        return bool(self._bins.get(lane_id)) or self._wrap_total.get(lane_id, 0) > 0
+        if any(bins for key, bins in self._bins.items() if key[0] == lane_id):
+            return True
+        return any(
+            total > 0 for key, total in self._wrap_total.items() if key[0] == lane_id
+        )
 
     def push_many(
         self, elems: Sequence[SampleRecord]
@@ -515,14 +572,14 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         ready: list[ReadyBatch[SampleRecord]] = []
 
         for elem in work_list:
-            lane_id = elem.meta.lane_id
+            key = self._pack_key(elem)
 
-            # The wrap algorithm streams tokens through a per-lane buffer and
+            # The wrap algorithm streams tokens through a per-group buffer and
             # slices into bins of exactly ``max_length``; oversized inputs
             # naturally span multiple bins so the >max_length / drop_oversized
             # branch does not apply here.
             if self.algorithm == "wrap":
-                ready.extend(([rec], 0) for rec in self._wrap_pack(lane_id, elem))
+                ready.extend(([rec], 0) for rec in self._wrap_pack(key, elem))
                 continue
 
             seq_len = self.length_fn(elem)
@@ -542,9 +599,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 )
 
             if self.algorithm == "first_fit":
-                packed = self._first_fit_pack(lane_id, elem, seq_len)
+                packed = self._first_fit_pack(key, elem, seq_len)
             elif self.algorithm == "best_fit":
-                packed = self._best_fit_pack(lane_id, elem, seq_len)
+                packed = self._best_fit_pack(key, elem, seq_len)
             else:
                 raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
@@ -558,15 +615,10 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     ) -> list[ReadyBatch[SampleRecord]]:
         """Emit any remaining partially-filled bins / wrap tails."""
         if lane_id is None:
-            # Stable lane order at upstream close (set iteration is layout-dependent).
-            lanes = sorted(
-                set(self._bins)
-                | set(self._wrap_total)
-                | set(self._wrap_segments)
-                | set(self._wrap_lane_auto_field)
-            )
+            # Stable group order at upstream close (set iteration is layout-dependent).
+            keys = self._sorted_keys(self._known_keys())
         else:
-            lanes = [lane_id]
+            keys = self._sorted_keys(k for k in self._known_keys() if k[0] == lane_id)
 
         ready: list[ReadyBatch[SampleRecord]] = []
         # Wrap mode: drop any tail that did not fill a full ``max_length``, emit
@@ -574,37 +626,45 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         # clear buffered state. ``tombstones_for_record`` only emits for
         # contributors with ``is_last_child=True`` (mirroring ReplayFilter /
         # MapTransform), so non-closing contributors are not falsely advanced.
-        tail_drop_lanes: list[tuple[int, int]] = []
+        # One entry per packing group (lane, domain) with a dropped wrap tail.
+        tail_drop_groups: list[tuple[PackKey, int]] = []
         wrap_tombstones: list[ReadyBatch[SampleRecord]] = []
-        for lid in lanes:
-            for bin_data in self._bins.pop(lid, []):
+        for key in keys:
+            lid = key[0]
+            for bin_data in self._bins.pop(key, []):
                 if bin_data.segments:
                     ready.append(([self._emit_first_best_bin(bin_data, lid)], 0))
 
-            total = self._wrap_total.pop(lid, 0)
-            segments = self._wrap_segments.pop(lid, None)
-            self._wrap_lane_auto_field.pop(lid, None)
+            total = self._wrap_total.pop(key, 0)
+            segments = self._wrap_segments.pop(key, None)
             if total > 0 and segments:
-                tail_drop_lanes.append((lid, total))
+                tail_drop_groups.append((key, total))
                 for seg in segments:
                     rec = seg.record
                     self._wrap_comp_emitted.pop((lid, rec.meta.cursor.as_key()), None)
                     wrap_tombstones.extend(([t], 0) for t in tombstones_for_record(rec))
 
-        if tail_drop_lanes:
-            dropped_tokens = sum(t for _, t in tail_drop_lanes)
+        if tail_drop_groups:
+            dropped_tokens = sum(t for _, t in tail_drop_groups)
+            dropped_lanes = len({k[0] for k, _ in tail_drop_groups})
             logger.warning(
-                "PackSequences wrap: dropping %s trailing token(s) across %d lane(s) "
-                "that did not fill a full max_length=%d bin; emitted %d tombstone(s) "
-                "to close contributor offsets.",
+                "PackSequences wrap: dropping %s trailing token(s) across %d packing "
+                "group(s) in %d lane(s) that did not fill a full max_length=%d bin; "
+                "emitted %d tombstone(s) to close contributor offsets.",
                 dropped_tokens,
-                len(tail_drop_lanes),
+                len(tail_drop_groups),
+                dropped_lanes,
                 self.max_length,
                 len(wrap_tombstones),
             )
 
+        # The auto-field cache is lane-scoped, so reset it for the flushed lanes
+        # (a lane with only empty wrap records has no key above but may hold one).
         if lane_id is None:
             self._wrap_comp_emitted.clear()
+            self._wrap_lane_auto_field.clear()
+        else:
+            self._wrap_lane_auto_field.pop(lane_id, None)
         ready.extend(wrap_tombstones)
 
         # first_fit/best_fit oversized drops: surface the count so a comparison
@@ -632,27 +692,27 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     # ------------------------------------------------------------------
 
     def _first_fit_pack(
-        self, lane_id: int, seq: SampleRecord, seq_len: int
+        self, key: PackKey, seq: SampleRecord, seq_len: int
     ) -> list[SampleRecord]:
         """Try to pack sequence using first-fit algorithm."""
-        bins = self._bins[lane_id]
+        bins = self._bins[key]
         outputs: list[SampleRecord] = []
 
         for bin_data in bins:
             if bin_data.remaining >= seq_len:
                 outputs.extend(
-                    self._add_sample_to_bin(bin_data, bins, seq, seq_len, lane_id)
+                    self._add_sample_to_bin(bin_data, bins, seq, seq_len, key)
                 )
                 return outputs
 
-        outputs.extend(self._create_bin_with_sample(bins, seq, seq_len, lane_id))
+        outputs.extend(self._create_bin_with_sample(bins, seq, seq_len, key))
         return outputs
 
     def _best_fit_pack(
-        self, lane_id: int, seq: SampleRecord, seq_len: int
+        self, key: PackKey, seq: SampleRecord, seq_len: int
     ) -> list[SampleRecord]:
         """Try to pack sequence using best-fit algorithm."""
-        bins = self._bins[lane_id]
+        bins = self._bins[key]
         outputs: list[SampleRecord] = []
 
         best_bin = None
@@ -665,12 +725,10 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 best_remaining = remaining
 
         if best_bin is not None:
-            outputs.extend(
-                self._add_sample_to_bin(best_bin, bins, seq, seq_len, lane_id)
-            )
+            outputs.extend(self._add_sample_to_bin(best_bin, bins, seq, seq_len, key))
             return outputs
 
-        outputs.extend(self._create_bin_with_sample(bins, seq, seq_len, lane_id))
+        outputs.extend(self._create_bin_with_sample(bins, seq, seq_len, key))
         return outputs
 
     def _create_bin_with_sample(
@@ -678,7 +736,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         bins: list[Bin],
         seq: SampleRecord,
         seq_len: int,
-        lane_id: int,
+        key: PackKey,
     ) -> list[SampleRecord]:
         """Create a new bin, add a sample, and emit if full."""
         new_bin = Bin(
@@ -688,8 +746,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if new_bin.remaining < self.min_sequence_length:
             # Self-emits immediately and is never retained, so no eviction needed
             # — don't flush an existing partial bin to make room it won't use.
-            return [self._emit_first_best_bin(new_bin, lane_id)]
-        outputs = self._enforce_max_bins(bins, lane_id)
+            return [self._emit_first_best_bin(new_bin, key[0])]
+        outputs = self._enforce_max_bins(bins, key)
         bins.append(new_bin)
         return outputs
 
@@ -699,7 +757,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         bins: list[Bin],
         seq: SampleRecord,
         seq_len: int,
-        lane_id: int,
+        key: PackKey,
     ) -> list[SampleRecord]:
         """Add a sample to an existing bin and emit if full."""
         bin_data.segments.append(self._whole_segment(seq, seq_len))
@@ -707,15 +765,19 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         outputs: list[SampleRecord] = []
         if bin_data.remaining < self.min_sequence_length:
             bins.remove(bin_data)
-            outputs.append(self._emit_first_best_bin(bin_data, lane_id))
+            outputs.append(self._emit_first_best_bin(bin_data, key[0]))
         return outputs
 
     def _enforce_max_bins(
         self,
         bins: list[Bin],
-        lane_id: int,
+        key: PackKey,
     ) -> list[SampleRecord]:
-        """Enforce num_bins limit by flushing bins if necessary."""
+        """Flush bins to keep at most ``num_bins`` open per packing group.
+
+        The limit is per group, so homogeneous packing keeps ``num_bins`` open
+        bins *per domain* in a lane.
+        """
         outputs: list[SampleRecord] = []
         while len(bins) >= self.num_bins and bins:
             if self.flush_strategy == "fifo":
@@ -725,7 +787,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 bin_to_flush = bins.pop(fullest_idx)
             else:
                 raise ValueError(f"Unknown flush_strategy: {self.flush_strategy}")
-            outputs.append(self._emit_first_best_bin(bin_to_flush, lane_id))
+            outputs.append(self._emit_first_best_bin(bin_to_flush, key[0]))
         return outputs
 
     @staticmethod
@@ -848,11 +910,12 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     # wrap
     # ------------------------------------------------------------------
 
-    def _resolve_wrap_field(self, record: SampleRecord, lane_id: int) -> str:
+    def _resolve_wrap_field(self, record: SampleRecord, key: PackKey) -> str:
         """Determine which payload field of ``record`` carries the sliceable sequence.
 
         Uses the explicit field name set on the operator if provided; otherwise
-        auto-detects and caches per lane so the wrap stream stays consistent.
+        auto-detects and caches per lane, so every record in a lane (across
+        domains) must resolve to the same field.
         """
         payload = record.payload
         if not isinstance(payload, dict):
@@ -877,6 +940,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 + f"Expected one of: {TOKEN_FIELD_CANDIDATES}"
             )
 
+        lane_id = key[0]
         cached = self._wrap_lane_auto_field.get(lane_id)
         if cached is None:
             self._wrap_lane_auto_field[lane_id] = detected
@@ -889,23 +953,24 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             )
         return detected
 
-    def _wrap_pack(self, lane_id: int, elem: SampleRecord) -> list[SampleRecord]:
-        """Stream ``elem`` through the per-lane wrap buffer and emit full bins.
+    def _wrap_pack(self, key: PackKey, elem: SampleRecord) -> list[SampleRecord]:
+        """Stream ``elem`` through the per-group wrap buffer and emit full bins.
 
         Tokens flow into a single FIFO buffer; whenever the buffer holds at least
         ``max_length`` tokens we slice off exactly that many and emit one record.
         Empty records carry no tokens but still emit tombstones so their
         contributor offsets close.
         """
+        lane_id = key[0]
         # Measure the resolved wrap field directly; avoids repeated auto-detection.
-        wrap_field = self._resolve_wrap_field(elem, lane_id)
+        wrap_field = self._resolve_wrap_field(elem, key)
         payload = elem.payload
         assert isinstance(payload, dict)  # guaranteed by _resolve_wrap_field
         seq_len = _get_length(payload[wrap_field], wrap_field)
         if seq_len <= 0:
             return tombstones_for_record(elem)
 
-        segments = self._wrap_segments[lane_id]
+        segments = self._wrap_segments[key]
         segments.append(
             Segment(
                 record=elem,
@@ -918,7 +983,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             )
         )
         # Keep the hot buffered-token count local across the drain.
-        total = self._wrap_total[lane_id] + seq_len
+        total = self._wrap_total[key] + seq_len
 
         outputs: list[SampleRecord] = []
         max_length = self.max_length
@@ -955,7 +1020,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
             outputs.append(self._emit_bin(bin_slices, lane_id))
 
-        self._wrap_total[lane_id] = total
+        self._wrap_total[key] = total
         return outputs
 
 
@@ -985,6 +1050,7 @@ class PackSequences(DefaultSetup):
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         emit_positions: bool = True,
         pad_token_id: int | None = None,
+        homogeneity: Literal["none", "full"] = "none",
     ) -> None:
         """Initialize the PackSequences operator.
 
@@ -1032,6 +1098,17 @@ class PackSequences(DefaultSetup):
                 padding partial first_fit/best_fit bins (aligned fields pad with
                 0). Required for those algorithms; unused for wrap. Any embeddable
                 id works — pad is masked from the loss by position, not by id.
+            homogeneity: If ``"full"``, no packed sample combines records from
+                different mixing domains (mixture components); needs
+                single-component records, so place packing before any op that
+                merges components. ``"none"`` (default) mixes freely. Packing
+                keeps per-domain state, so size ``num_bins`` for the domain count.
+
+                With ``algorithm="wrap"`` a split document is counted once, on its
+                closing bin, so interior bins carry empty
+                ``component_sample_counts``; attribute domains by
+                ``component_token_counts`` instead (e.g. a downstream
+                ``ensure_mixture(weight="tokens")``).
         """
         DefaultSetup.__init__(self)
 
@@ -1045,6 +1122,10 @@ class PackSequences(DefaultSetup):
             raise ValueError(f"Unknown algorithm: {algorithm}")
         if output not in ("envelope", "flat"):
             raise ValueError(f"Unknown output: {output!r}")
+        if homogeneity not in ("none", "full"):
+            raise ValueError(
+                f"Unknown homogeneity: {homogeneity!r} (expected 'none' or 'full')"
+            )
         if length_fn is not None and not callable(length_fn):
             raise ValueError(
                 "length_fn must be a callable or None; to select a field by name "
@@ -1093,6 +1174,13 @@ class PackSequences(DefaultSetup):
         self.flush_strategy = flush_strategy
         self.emit_positions = emit_positions
         self.pad_token_id = pad_token_id
+        self.homogeneity = homogeneity
+
+        # ``"full"`` keys packing state on the record's sole component so a packed
+        # sample never spans domains; ``"none"`` (no domain_fn) mixes freely.
+        self._domain_fn: Callable[[SampleRecord], Any] | None = (
+            _component_domain if homogeneity == "full" else None
+        )
 
         # Resolve the length function. tokens_field identifies the field (for
         # wrap slicing and flat concatenation); length_fn only measures.
@@ -1144,6 +1232,7 @@ class PackSequences(DefaultSetup):
             flush_strategy=self.flush_strategy,
             serializer=self._make_serializer(),
             wrap_field=self._wrap_field,
+            domain_fn=self._domain_fn,
         )
 
     def _resolve_pack_payloads_fn(

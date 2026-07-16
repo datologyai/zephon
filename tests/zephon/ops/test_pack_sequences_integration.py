@@ -810,6 +810,73 @@ def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Homogeneous packing (end-to-end through the engine)
+# ---------------------------------------------------------------------------
+
+
+def _multi_component_work() -> StaticMixtureWorkSource:
+    """Two datasets (mixing domains) blended 50/50 into one interleaved lane."""
+    a = _mk_token_dataset("a", [[1, 2, 3]] * 6)
+    b = _mk_token_dataset("b", [[4, 5, 6]] * 6)
+    return StaticMixtureWorkSource(
+        [a, b],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=4,
+        seed=42,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+def test_pack_homogeneous_full_end_to_end(algorithm: str) -> None:
+    """Through the real engine, homogeneity='full' keeps each packed sample to one
+    mixing domain, across every algorithm."""
+    pipeline = Pipeline(_multi_component_work())
+    pipeline.pack_flat(
+        max_length=10,
+        num_bins=8,
+        pad_token_id=0,
+        algorithm=algorithm,
+        homogeneity="full",
+        drop_oversized=False,
+    )
+    pipeline.options(
+        deterministic=True, max_workers=1, default_stage_prefetch=16, runner="threads"
+    )
+
+    records = list(pipeline)
+    assert records
+    # wrap counts only closing slices in sample counts, so use token counts.
+    if algorithm == "wrap":
+        counts = [rec.meta.component_token_counts for rec in records]
+    else:
+        counts = [rec.meta.component_sample_counts for rec in records]
+    assert all(c is not None and len(c) == 1 for c in counts)
+    # Require both datasets to reach packing, so single-domain packing is a real
+    # constraint here rather than trivially true.
+    seen = {cid for c in counts if c for cid in c}
+    assert len(seen) >= 2
+
+
+def test_pack_homogeneous_none_end_to_end_mixes() -> None:
+    """Back-compat: the default homogeneity='none' still mixes domains end-to-end."""
+    pipeline = Pipeline(_multi_component_work())
+    pipeline.pack_flat(
+        max_length=10,
+        num_bins=8,
+        pad_token_id=0,
+        homogeneity="none",
+        drop_oversized=False,
+    )
+    pipeline.options(deterministic=True, max_workers=1, runner="inline")
+
+    records = list(pipeline)
+    assert records
+    assert any(len(rec.meta.component_sample_counts) == 2 for rec in records)
+
+
+# ---------------------------------------------------------------------------
 # Parallel materialization
 # ---------------------------------------------------------------------------
 
