@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon.api import Pipeline as PublicPipeline
 from zephon.ops import PackSequences, TokenizeText
@@ -129,19 +131,45 @@ def test_pipeline_pack_sequences_is_envelope() -> None:
     assert tail_op.output == "envelope"
 
 
+def test_pipeline_pack_sequences_requires_num_bins_for_first_fit() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}])
+    ws = FakeIndexableWorkSource(ds)
+
+    with pytest.raises(ValueError, match="num_bins is required"):
+        PublicPipeline(ws).pack_sequences(max_length=8)
+
+
 def test_pipeline_pack_flat_wrap() -> None:
     """pack_flat builds the flat output; wrap needs no pad_token_id."""
     ds = make_inmem_dataset("tiny", [{"text": "x"}])
     ws = FakeIndexableWorkSource(ds)
 
-    pipe = PublicPipeline(ws).pack_flat(
-        max_length=8, num_bins=4, algorithm="wrap", drop_oversized=False
-    )
+    pipe = PublicPipeline(ws).pack_flat(max_length=8, algorithm="wrap")
 
     tail_op = pipe._tail.op  # type: ignore[attr-defined]
     assert isinstance(tail_op, PackSequences)
     assert tail_op.output == "flat"
     assert tail_op.emit_positions is True  # positions on by default
+    assert tail_op.drop_oversized is False
+
+
+def test_pipeline_best_fit_wrap_forwards_candidate_pool_options() -> None:
+    ds = make_inmem_dataset("tiny", [{"input_ids": [1, 2]}])
+    ws = FakeIndexableWorkSource(ds)
+
+    pipe = PublicPipeline(ws).pack_sequences(
+        max_length=8,
+        algorithm="best_fit_wrap",
+        candidate_pool_size=17,
+        max_candidate_age=23,
+    )
+
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, PackSequences)
+    assert tail_op.algorithm == "best_fit_wrap"
+    assert tail_op.drop_oversized is False
+    assert tail_op.candidate_pool_size == 17
+    assert tail_op.max_candidate_age == 23
 
 
 def test_pipeline_pack_flat_first_fit_forwards_pad_token_id() -> None:

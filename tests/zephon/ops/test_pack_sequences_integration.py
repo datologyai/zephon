@@ -3,7 +3,7 @@
 
 """Integration tests for PackSequences operator."""
 
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -12,7 +12,10 @@ from zephon.api.pipeline import Pipeline
 from zephon.core.constants import ContributorRef, SampleRecord
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
+from zephon.ops import PackingAlgorithm
 from zephon.work.static_mixture import StaticMixtureWorkSource
+
+_PACKING_ALGORITHMS: tuple[PackingAlgorithm, ...] = get_args(PackingAlgorithm)
 
 
 def _mk_varlen_dataset(name: str, lengths: list[int]) -> Dataset:
@@ -685,7 +688,7 @@ def test_pack_sequences_varlen_mid_stream_eviction_after_checkpoint(
 
 # ---------------------------------------------------------------------------
 # The output matrix, end to end through real runners:
-#   algorithm {first_fit, best_fit, wrap} x output {envelope, flat(+/-positions)}
+#   every registered algorithm x output {envelope, flat(+/-positions)}
 # ---------------------------------------------------------------------------
 
 _MATRIX_SEQS = [[10, 11, 12], [20, 21], [30, 31, 32, 33], [40]]
@@ -715,13 +718,17 @@ def _matrix_work() -> StaticMixtureWorkSource:
     ["inline", "threads", "process"],
     ids=["inline", "threads", "process"],
 )
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_pack_envelope_matrix_end_to_end(runner_kind: str, algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_pack_envelope_matrix_end_to_end(
+    runner_kind: str, algorithm: PackingAlgorithm
+) -> None:
     """Envelope output across the algorithm axis: each record is a list of
     per-segment dicts carrying the token field (boundaries preserved)."""
     pipeline = Pipeline(_matrix_work())
     pipeline.pack_sequences(
-        max_length=_MATRIX_MAXLEN, num_bins=8, algorithm=algorithm, drop_oversized=False
+        max_length=_MATRIX_MAXLEN,
+        num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
+        algorithm=algorithm,
     )
     pipeline.options(
         deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
@@ -741,21 +748,20 @@ def test_pack_envelope_matrix_end_to_end(runner_kind: str, algorithm: str) -> No
     ["inline", "threads", "process"],
     ids=["inline", "threads", "process"],
 )
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
 @pytest.mark.parametrize("emit_positions", [True, False], ids=["pos", "nopos"])
 def test_pack_flat_matrix_end_to_end(
-    runner_kind: str, algorithm: str, emit_positions: bool
+    runner_kind: str, algorithm: PackingAlgorithm, emit_positions: bool
 ) -> None:
     """Flat output across algorithm × positions: every record is a fixed-length
     ``{input_ids[, positions]}`` the trainer can stack directly."""
     pipeline = Pipeline(_matrix_work())
     pipeline.pack_flat(
         max_length=_MATRIX_MAXLEN,
-        num_bins=8,
+        num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
         algorithm=algorithm,
         pad_token_id=-1,
         emit_positions=emit_positions,
-        drop_oversized=False,
     )
     pipeline.options(
         deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
@@ -772,8 +778,10 @@ def test_pack_flat_matrix_end_to_end(
             assert rec.payload["positions"][0] == 0  # each bin starts a document
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_pack_flat_equals_flatten_envelope_end_to_end(
+    algorithm: PackingAlgorithm,
+) -> None:
     """flat tokens (minus pad) reconstruct the envelope's concatenated segment
     tokens for the same input and algorithm — flat is a serialization of the
     same packing, not a different one."""
@@ -782,9 +790,8 @@ def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
         p = Pipeline(_matrix_work())
         p.pack_sequences(
             max_length=_MATRIX_MAXLEN,
-            num_bins=8,
+            num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
             algorithm=algorithm,
-            drop_oversized=False,
         )
         p.options(deterministic=True, max_workers=1, runner="inline")
         return [
@@ -798,10 +805,9 @@ def test_pack_flat_equals_flatten_envelope_end_to_end(algorithm: str) -> None:
         p = Pipeline(_matrix_work())
         p.pack_flat(
             max_length=_MATRIX_MAXLEN,
-            num_bins=8,
+            num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
             algorithm=algorithm,
             pad_token_id=-1,
-            drop_oversized=False,
         )
         p.options(deterministic=True, max_workers=1, runner="inline")
         return [t for rec in p for t in rec.payload["input_ids"] if t != -1]
@@ -828,14 +834,16 @@ def _multi_component_work() -> StaticMixtureWorkSource:
     )
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize(
+    "algorithm", ["first_fit", "best_fit", "wrap", "best_fit_wrap"]
+)
 def test_pack_homogeneous_full_end_to_end(algorithm: str) -> None:
     """Through the real engine, homogeneity='full' keeps each packed sample to one
     mixing domain, across every algorithm."""
     pipeline = Pipeline(_multi_component_work())
     pipeline.pack_flat(
         max_length=10,
-        num_bins=8,
+        num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
         pad_token_id=0,
         algorithm=algorithm,
         homogeneity="full",
@@ -848,7 +856,7 @@ def test_pack_homogeneous_full_end_to_end(algorithm: str) -> None:
     records = list(pipeline)
     assert records
     # wrap counts only closing slices in sample counts, so use token counts.
-    if algorithm == "wrap":
+    if algorithm in ("wrap", "best_fit_wrap"):
         counts = [rec.meta.component_token_counts for rec in records]
     else:
         counts = [rec.meta.component_sample_counts for rec in records]
@@ -914,16 +922,14 @@ def _norm_payload(payload: Any) -> Any:
 def test_pack_parallelism_plumbed_to_node() -> None:
     """The pack_flat/pack_sequences ``parallelism`` arg reaches the graph node."""
     p = Pipeline(_matrix_work())
-    p.pack_flat(
-        max_length=4, num_bins=8, algorithm="wrap", drop_oversized=False, parallelism=4
-    )
+    p.pack_flat(max_length=4, algorithm="wrap", drop_oversized=False, parallelism=4)
     node = p._graph.nodes[-1]
     assert node.name == "pack_flat" and node.parallelism == 4
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
 @pytest.mark.parametrize("output", ["envelope", "flat"], ids=["envelope", "flat"])
-def test_pack_parallelism_invariant(algorithm: str, output: str) -> None:
+def test_pack_parallelism_invariant(algorithm: PackingAlgorithm, output: str) -> None:
     """parallelism>1 produces identical payloads, order, and lineage as
     parallelism=1: bin assignment stays serial, only materialization fans out."""
 
@@ -932,18 +938,16 @@ def test_pack_parallelism_invariant(algorithm: str, output: str) -> None:
         if output == "flat":
             p.pack_flat(
                 max_length=8,
-                num_bins=8,
+                num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
                 algorithm=algorithm,
                 pad_token_id=-1,
-                drop_oversized=False,
                 parallelism=parallelism,
             )
         else:
             p.pack_sequences(
                 max_length=8,
-                num_bins=8,
+                num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
                 algorithm=algorithm,
-                drop_oversized=False,
                 parallelism=parallelism,
             )
         p.options(deterministic=True, runner="threads", default_stage_prefetch=16)
@@ -952,3 +956,39 @@ def test_pack_parallelism_invariant(algorithm: str, output: str) -> None:
     serial = run(1)
     assert serial
     assert run(4) == serial
+
+
+def test_best_fit_wrap_checkpoint_resume_matches_baseline() -> None:
+    def make_pipeline() -> Pipeline:
+        pipeline = Pipeline(_big_token_work())
+        pipeline.pack_sequences(
+            max_length=8,
+            algorithm="best_fit_wrap",
+            candidate_pool_size=8,
+        )
+        pipeline.options(deterministic=True, runner="inline")
+        return pipeline
+
+    baseline = [
+        (record.meta.cursor.as_key(), _norm_payload(record.payload))
+        for record in make_pipeline()
+    ]
+
+    first = make_pipeline()
+    iterator = iter(first)
+    prefix = []
+    try:
+        for _ in range(10):
+            record = next(iterator)
+            prefix.append((record.meta.cursor.as_key(), _norm_payload(record.payload)))
+        checkpoint = first.checkpoint()
+    finally:
+        iterator.close()
+
+    resumed = make_pipeline()
+    resumed.restore(checkpoint)
+    suffix = [
+        (record.meta.cursor.as_key(), _norm_payload(record.payload))
+        for record in resumed
+    ]
+    assert prefix + suffix == baseline

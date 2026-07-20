@@ -4,13 +4,13 @@
 """Unit tests for the PackSequences operator.
 
 Packing is two orthogonal axes: the algorithm (``first_fit`` / ``best_fit`` /
-``wrap``) and the output serialization (``envelope`` list vs ``flat`` training
-record, with optional ``positions``). Tests are grouped accordingly, with a
-final matrix section asserting every algorithm × output combination and the
-``flat == flatten(envelope)`` relationship.
+``wrap`` / ``best_fit_wrap``) and the output serialization (``envelope`` list
+vs ``flat`` training record, with optional ``positions``). Tests are grouped
+accordingly, with a final matrix section asserting every algorithm × output
+combination and the ``flat == flatten(envelope)`` relationship.
 """
 
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -23,12 +23,15 @@ from zephon.core.constants import (
 )
 from zephon.ops.pack_sequences import (
     PackingAccumulator,
+    PackingAlgorithm,
     PackSequences,
     Segment,
     _DeferredBin,
     _EnvelopeSerializer,
     _FlatSerializer,
 )
+
+_PACKING_ALGORITHMS: tuple[PackingAlgorithm, ...] = get_args(PackingAlgorithm)
 
 
 def _rec(
@@ -88,7 +91,10 @@ def _pack(
     max_length: int, *, num_bins: int = 8, **kwargs: Any
 ) -> _MaterializingAccumulator:
     """Build an accumulator via the operator and materialize emitted bins inline."""
-    op = PackSequences(max_length=max_length, num_bins=num_bins, **kwargs)
+    algorithm = kwargs.get("algorithm", "first_fit")
+    if algorithm in ("first_fit", "best_fit"):
+        kwargs["num_bins"] = num_bins
+    op = PackSequences(max_length=max_length, **kwargs)
     acc = op.accumulator(deterministic=False, ctx={})
     assert isinstance(acc, PackingAccumulator)
     return _MaterializingAccumulator(op, acc)
@@ -128,9 +134,47 @@ def test_accumulator_config_passthrough() -> None:
     assert acc.algorithm == "first_fit"
 
 
-def test_wrap_forbids_drop_oversized() -> None:
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
+def test_whole_record_algorithms_require_num_bins(
+    algorithm: PackingAlgorithm,
+) -> None:
+    with pytest.raises(ValueError, match="num_bins is required"):
+        PackSequences(max_length=4, algorithm=algorithm)
+
+
+@pytest.mark.parametrize("algorithm", ["wrap", "best_fit_wrap"])
+def test_slicing_algorithms_reject_num_bins(algorithm: PackingAlgorithm) -> None:
+    with pytest.raises(ValueError, match="num_bins does not apply"):
+        PackSequences(max_length=4, num_bins=1, algorithm=algorithm)
+
+
+@pytest.mark.parametrize("algorithm", ["wrap", "best_fit_wrap"])
+def test_slicing_algorithms_forbid_explicit_drop_oversized(
+    algorithm: PackingAlgorithm,
+) -> None:
     with pytest.raises(ValueError, match="drop_oversized=True is not allowed"):
-        PackSequences(max_length=4, num_bins=1, algorithm="wrap", drop_oversized=True)
+        PackSequences(
+            max_length=4,
+            algorithm=algorithm,
+            drop_oversized=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        ("first_fit", True),
+        ("best_fit", True),
+        ("wrap", False),
+        ("best_fit_wrap", False),
+    ],
+)
+def test_drop_oversized_default_depends_on_algorithm(
+    algorithm: PackingAlgorithm, expected: bool
+) -> None:
+    kwargs = {"num_bins": 1} if algorithm in ("first_fit", "best_fit") else {}
+    op = PackSequences(max_length=4, algorithm=algorithm, **kwargs)
+    assert op.drop_oversized is expected
 
 
 def test_string_length_fn_rejected() -> None:
@@ -179,7 +223,6 @@ def test_process_many_materializes_deferred_bins() -> None:
     """process_many turns deferred plans into real payloads, preserving meta."""
     op = PackSequences(
         max_length=4,
-        num_bins=1,
         algorithm="wrap",
         output="flat",
         tokens_field="input_ids",
@@ -206,7 +249,6 @@ def test_process_many_is_stateless_across_instances() -> None:
 
     op = PackSequences(
         max_length=4,
-        num_bins=1,
         algorithm="wrap",
         output="flat",
         tokens_field="input_ids",
@@ -493,7 +535,6 @@ def _wrap(
 ) -> _MaterializingAccumulator:
     return _pack(
         max_length,
-        num_bins=1,
         algorithm="wrap",
         tokens_field=tokens_field,
         drop_oversized=False,
@@ -703,6 +744,243 @@ def test_wrap_component_token_remainder_matches_targets() -> None:
 
 
 # ---------------------------------------------------------------------------
+# best_fit_wrap algorithm (buffered largest-fit, one split closes each bin)
+# ---------------------------------------------------------------------------
+
+
+def _bfw(
+    max_length: int, *, candidate_pool_size: int, **kw: Any
+) -> _MaterializingAccumulator:
+    return _pack(
+        max_length,
+        algorithm="best_fit_wrap",
+        candidate_pool_size=candidate_pool_size,
+        **kw,
+    )
+
+
+def test_bfw_largest_fit_builds_exact_bins() -> None:
+    acc = _bfw(10, candidate_pool_size=3)
+    ready = acc.push_many(
+        [
+            _rec_tokens(0, [1, 2, 3]),
+            _rec_tokens(1, [11, 12, 13, 14, 15, 16, 17]),
+            _rec_tokens(2, [21, 22, 23, 24, 25]),
+        ]
+    )
+    assert len(ready) == 1
+    bin0 = _records(ready)[0]
+    assert bin0.payload["packed_samples"] == [
+        {"value": 1, "input_ids": [11, 12, 13, 14, 15, 16, 17]},
+        {"value": 0, "input_ids": [1, 2, 3]},
+    ]
+    assert bin0.meta.tags["_packing_metadata"]["packing_efficiency"] == 1.0
+    assert acc.has_pending_data()
+
+
+def test_bfw_exact_length_envelope_preserves_whole_payload() -> None:
+    acc = _bfw(4, candidate_pool_size=8)
+    ready = acc.push_many([_rec_tokens(0, [1, 2, 3, 4])])
+    assert _records(ready)[0].payload["packed_samples"] == [
+        {"value": 0, "input_ids": [1, 2, 3, 4]}
+    ]
+
+
+def test_bfw_split_closes_bin_and_remainder_places_later() -> None:
+    acc = _bfw(8, candidate_pool_size=2)
+    rec_a = _rec_tokens(0, [1, 2, 3, 4, 5])
+    rec_b = _rec_tokens(1, [11, 12, 13, 14, 15])
+    ready = acc.push_many([rec_a, rec_b])
+    assert len(ready) == 1
+    bin0 = _records(ready)[0]
+    # a places whole (oldest of the length-5 tie); b's head fills the gap.
+    assert bin0.payload["packed_samples"] == [
+        {"value": 0, "input_ids": [1, 2, 3, 4, 5]},
+        {"input_ids": [11, 12, 13]},
+    ]
+
+    def closing(rec: SampleRecord) -> set[Any]:
+        return {ref.cursor for ref in rec.meta.contributors if ref.is_last_child}
+
+    assert rec_a.meta.cursor in closing(bin0)
+    assert rec_b.meta.cursor not in closing(bin0)
+
+    ready = acc.push_many([_rec_tokens(2, [21, 22, 23, 24, 25, 26])])
+    assert len(ready) == 1
+    bin1 = _records(ready)[0]
+    assert bin1.payload["packed_samples"] == [
+        {"value": 2, "input_ids": [21, 22, 23, 24, 25, 26]},
+        {"input_ids": [14, 15]},
+    ]
+    assert rec_b.meta.cursor in closing(bin1)
+    assert not acc.has_pending_data()
+
+
+def test_bfw_tail_fill_when_cheaper() -> None:
+    """A tail cut may emit a suffix before its BOS-anchored prefix."""
+    meta = SampleMeta(
+        sample_id=(0, 0, 1),
+        lane_id=0,
+        chunk_id=0,
+        component_sample_counts={0: 1},
+        component_token_counts={0: 6},
+    )
+    rec_b = SampleRecord(meta=meta, payload={"input_ids": [11, 12, 13, 14, 15, 16]})
+    acc = _bfw(8, candidate_pool_size=1)
+    ready = acc.push_many([_rec_tokens(0, [1, 2, 3, 4, 5, 6]), rec_b])
+    assert len(ready) == 1
+    bin0 = _records(ready)[0]
+    assert [s["input_ids"] for s in bin0.payload["packed_samples"]] == [
+        [1, 2, 3, 4, 5, 6],
+        [15, 16],
+    ]
+
+    tail = acc.flush()
+    assert len(tail) == 1
+    tail_rec = _records(tail)[0]
+    assert not tail_rec.meta.tombstone
+    assert [s["input_ids"] for s in tail_rec.payload["packed_samples"]] == [
+        [11, 12, 13, 14]
+    ]
+    assert bin0.meta.component_token_counts == {0: 8}  # a's 6 + floor share 2 of b
+    assert tail_rec.meta.component_token_counts == {0: 4}  # b's exact remainder
+
+
+def test_bfw_oversized_emits_direct_full_bins() -> None:
+    acc = _bfw(4, candidate_pool_size=4)
+    ready = acc.push_many([_rec_tokens(0, list(range(10, 20)))])
+    assert len(ready) == 2
+    bin0, bin1 = _records(ready)
+    assert bin0.payload["packed_samples"] == [{"input_ids": [10, 11, 12, 13]}]
+    assert bin1.payload["packed_samples"] == [{"input_ids": [14, 15, 16, 17]}]
+    tail = acc.flush()
+    assert [s["input_ids"] for s in _records(tail)[0].payload["packed_samples"]] == [
+        [18, 19]
+    ]
+
+
+def test_bfw_flush_drains_full_bins_before_tail() -> None:
+    acc = _bfw(4, candidate_pool_size=100)
+    acc.push_many(
+        [_rec_tokens(i, [10 * i + 1, 10 * i + 2, 10 * i + 3]) for i in range(3)]
+    )
+    ready = acc.flush()
+    assert len(ready) == 3
+    contents = [
+        [s["input_ids"] for s in r.payload["packed_samples"]] for r in _records(ready)
+    ]
+    # Bin 1's gap of 1 tail-fills from rec1 (severs 1 token vs 2 via its head);
+    # bin 2's gap of 1 then head-fills the remaining [11, 12] head fragment.
+    assert contents == [
+        [[1, 2, 3], [13]],
+        [[21, 22, 23], [11]],
+        [[12]],
+    ]
+
+
+def test_bfw_flat_flush_pads_tail_instead_of_dropping() -> None:
+    import numpy as np
+
+    acc = _flat(
+        8,
+        algorithm="best_fit_wrap",
+        pad_token_id=99,
+        candidate_pool_size=4,
+    )
+    acc.push_many([_rec_tokens(0, [1, 2, 3]), _rec_tokens(1, [11, 12])])
+    assert acc.has_pending_data()
+    tail = acc.flush()
+    assert len(tail) == 1
+    rec = _records(tail)[0]
+    assert not rec.meta.tombstone
+    assert rec.payload["input_ids"] == [1, 2, 3, 11, 12, 99, 99, 99]
+    np.testing.assert_array_equal(
+        rec.payload["positions"], np.array([0, 1, 2, 0, 1, 0, 1, 2], dtype=np.int32)
+    )
+    assert rec.meta.padding_length == 3
+    assert not acc.has_pending_data()
+
+
+def test_bfw_age_guard_rescues_shadowed_item() -> None:
+    """The age guard rescues a length-4 item shadowed by exact (5, 2) pairs."""
+
+    def push_all(acc: _MaterializingAccumulator) -> list[Any]:
+        rows: list[Any] = []
+        rows += acc.push_many([_rec_tokens(0, [91, 92, 93, 94])])
+        for i in range(1, 4):
+            rows += acc.push_many([_rec_tokens(2 * i, [1, 2, 3, 4, 5])])
+            rows += acc.push_many([_rec_tokens(2 * i + 1, [11, 12])])
+        return rows
+
+    guarded = _bfw(7, candidate_pool_size=3, max_candidate_age=4)
+    rows = _records(push_all(guarded))
+    assert len(rows) == 3
+    assert rows[2].payload["packed_samples"][0] == {
+        "value": 0,
+        "input_ids": [91, 92, 93, 94],
+    }
+
+    # The default age of 8 * candidate_pool_size is not reached here.
+    unguarded = _bfw(7, candidate_pool_size=3)
+    rows = _records(push_all(unguarded))
+    assert all(
+        seg.get("value") != 0 for r in rows for seg in r.payload["packed_samples"]
+    )
+    assert unguarded.has_pending_data()
+
+
+def test_bfw_rejects_callable_length_fn() -> None:
+    with pytest.raises(ValueError, match="length_fn is only supported"):
+        PackSequences(
+            max_length=4,
+            algorithm="best_fit_wrap",
+            length_fn=lambda r: 4,
+        )
+
+
+def test_bfw_flat_requires_pad_token_id() -> None:
+    with pytest.raises(ValueError, match="pad_token_id is required"):
+        PackSequences(
+            max_length=4,
+            output="flat",
+            algorithm="best_fit_wrap",
+        )
+
+
+def test_bfw_candidate_pool_defaults_and_validation() -> None:
+    op = PackSequences(max_length=4, algorithm="best_fit_wrap")
+    assert op.candidate_pool_size == 1024
+    assert op.max_candidate_age == 8192
+
+    with pytest.raises(ValueError, match="candidate_pool_size must be positive"):
+        PackSequences(
+            max_length=4,
+            algorithm="best_fit_wrap",
+            candidate_pool_size=0,
+        )
+    with pytest.raises(ValueError, match="max_candidate_age must be positive"):
+        PackSequences(
+            max_length=4,
+            algorithm="best_fit_wrap",
+            max_candidate_age=0,
+        )
+
+
+def test_candidate_pool_params_rejected_for_other_algorithms() -> None:
+    op = PackSequences(max_length=4, num_bins=1)
+    assert op.max_candidate_age is None
+
+    with pytest.raises(ValueError, match="only applies to"):
+        PackSequences(max_length=4, num_bins=1, candidate_pool_size=8)
+    with pytest.raises(ValueError, match="only applies to"):
+        PackSequences(
+            max_length=4,
+            algorithm="wrap",
+            max_candidate_age=8,
+        )
+
+
+# ---------------------------------------------------------------------------
 # flat output (pack_flat): positions, padding, validation
 # ---------------------------------------------------------------------------
 
@@ -783,9 +1061,7 @@ def test_flat_requires_pad_token_id(algorithm: str) -> None:
 
 def test_flat_wrap_no_pad_token_id_needed() -> None:
     # wrap fills bins exactly, so no padding and no pad_token_id requirement.
-    PackSequences(
-        max_length=4, num_bins=1, output="flat", algorithm="wrap", drop_oversized=False
-    )
+    PackSequences(max_length=4, output="flat", algorithm="wrap", drop_oversized=False)
 
 
 def test_flat_rejects_callable_length_fn() -> None:
@@ -808,7 +1084,6 @@ def test_wrap_rejects_callable_length_fn() -> None:
     with pytest.raises(ValueError, match="length_fn is only supported"):
         PackSequences(
             max_length=4,
-            num_bins=1,
             algorithm="wrap",
             drop_oversized=False,
             length_fn=lambda r: len(r.payload["input_ids"]),
@@ -922,8 +1197,8 @@ _MATRIX_RECORDS = [
 ]
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_matrix_envelope_is_list(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_matrix_envelope_is_list(algorithm: PackingAlgorithm) -> None:
     acc = _pack(4, num_bins=4, algorithm=algorithm, drop_oversized=False)
     recs = [
         r
@@ -937,9 +1212,11 @@ def test_matrix_envelope_is_list(algorithm: str) -> None:
         assert rec.meta.padding_length is None  # envelope never pads
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
 @pytest.mark.parametrize("emit_positions", [True, False])
-def test_matrix_flat_uniform_shape(algorithm: str, emit_positions: bool) -> None:
+def test_matrix_flat_uniform_shape(
+    algorithm: PackingAlgorithm, emit_positions: bool
+) -> None:
     """Every algorithm emits the identical flat shape; positions is opt-out."""
     acc = _flat(4, algorithm=algorithm, pad_token_id=0, emit_positions=emit_positions)
     recs = [
@@ -956,8 +1233,8 @@ def test_matrix_flat_uniform_shape(algorithm: str, emit_positions: bool) -> None
             assert len(rec.payload["positions"]) == 4
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_matrix_flat_equals_flatten_envelope(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_matrix_flat_equals_flatten_envelope(algorithm: PackingAlgorithm) -> None:
     """flat tokens (minus pad) == concat of the envelope's per-segment token slices."""
     env = _pack(4, num_bins=4, algorithm=algorithm, drop_oversized=False)
     env_recs = [
@@ -1051,8 +1328,10 @@ def test_flat_serializer_pad_value_per_field() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_multicomponent_token_apportionment_conserves_length(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_multicomponent_token_apportionment_conserves_length(
+    algorithm: PackingAlgorithm,
+) -> None:
     """A multi-component record with NO explicit component_token_counts gets its
     length apportioned by sample share, summing to the record length exactly
     (largest-remainder) — not independent per-component rounding which would
@@ -1142,8 +1421,8 @@ def test_wrap_no_cross_lane_token_corruption() -> None:
     assert by_lane == {0: 8, 1: 8}
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit", "wrap"])
-def test_flat_rejects_int_token_field(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_flat_rejects_int_token_field(algorithm: PackingAlgorithm) -> None:
     """An int token field (precomputed length) is envelope-only; flat/wrap reject
     it with a clear message instead of a downstream 'int not subscriptable'."""
     acc = _flat(4, algorithm=algorithm, pad_token_id=0)
@@ -1187,7 +1466,6 @@ def test_flat_rejects_pack_payloads() -> None:
     with pytest.raises(ValueError, match="pack_payloads only applies"):
         PackSequences(
             max_length=4,
-            num_bins=1,
             output="flat",
             algorithm="wrap",
             drop_oversized=False,
@@ -1350,6 +1628,40 @@ def test_homogeneous_full_wrap_streams_per_domain() -> None:
     assert domains == [0, 0, 1]  # two domain-0 bins, one domain-1 bin
 
 
+def test_homogeneous_full_best_fit_wrap_buffers_per_domain() -> None:
+    acc = _bfw(6, candidate_pool_size=2, homogeneity="full")
+    recs = [
+        _crec_tokens(0, [1, 2, 3], 0),
+        _crec_tokens(1, [4, 5, 6], 1),
+        _crec_tokens(2, [7, 8, 9], 0),
+        _crec_tokens(3, [10, 11, 12], 1),
+    ]
+    out = _records(acc.push_many(recs))
+    assert [rec.meta.component_sample_counts for rec in out] == [{0: 2}, {1: 2}]
+    assert acc.has_pending_data() is False
+
+
+def test_homogeneous_full_best_fit_wrap_flushes_by_lane_and_domain() -> None:
+    acc = _bfw(6, candidate_pool_size=8, homogeneity="full")
+    ready = acc.push_many(
+        [
+            _crec_tokens(0, [1, 2], 0, lane=0),
+            _crec_tokens(1, [3, 4], 1, lane=0),
+            _crec_tokens(2, [5, 6], 0, lane=1),
+        ]
+    )
+    assert ready == []
+
+    out0 = _records(acc.flush(lane_id=0))
+    assert sorted(_bin_key(rec) for rec in out0) == [(0, 0, 1), (0, 1, 1)]
+    assert acc.has_pending_data(0) is False
+    assert acc.has_pending_data(1) is True
+
+    out1 = _records(acc.flush(lane_id=1))
+    assert [_bin_key(rec) for rec in out1] == [(1, 0, 1)]
+    assert acc.has_pending_data() is False
+
+
 def test_homogeneous_full_wrap_drops_partial_tail_per_domain(caplog: Any) -> None:
     import logging
 
@@ -1377,9 +1689,7 @@ def test_homogeneous_full_wrap_drops_partial_tail_per_domain(caplog: Any) -> Non
 def test_homogeneous_full_wrap_auto_field_is_consistent_lane_wide() -> None:
     # tokens_field defaults to "auto"; two domains in one lane must resolve to the
     # same auto-detected field, even though they buffer separately.
-    acc = _pack(
-        4, num_bins=1, algorithm="wrap", drop_oversized=False, homogeneity="full"
-    )
+    acc = _pack(4, algorithm="wrap", drop_oversized=False, homogeneity="full")
 
     def rec(i: int, field: str, component: int) -> SampleRecord:
         meta = SampleMeta(

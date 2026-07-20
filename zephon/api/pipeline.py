@@ -55,6 +55,7 @@ from zephon.ops import (
     MapBatchTransform,
     MapTransform,
     Materialize,
+    PackingAlgorithm,
     PackSequences,
     PrefetchOp,
     ShuffleBuffer,
@@ -1097,42 +1098,50 @@ class Pipeline:
     def pack_sequences(
         self,
         max_length: int,
-        num_bins: int,
         *,
-        algorithm: Literal["first_fit", "best_fit", "wrap"] = "first_fit",
+        num_bins: int | None = None,
+        algorithm: PackingAlgorithm = "first_fit",
         tokens_field: str = "auto",
         length_fn: Callable[[SampleRecord], int] | None = None,
-        drop_oversized: bool = True,
+        drop_oversized: bool | None = None,
         min_sequence_length: int = 1,
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
+        candidate_pool_size: int | None = None,
+        max_candidate_age: int | None = None,
         homogeneity: Literal["none", "full"] = "none",
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
-        """Add a sequence-packing operator that emits the lossless envelope.
+        """Add a sequence-packing operator that preserves segment boundaries.
 
         Each bin is emitted as ``{"packed_samples": [seg0, seg1, ...]}`` — an
-        ordered list of the constituent records (first_fit/best_fit) or slices
-        (wrap), preserving document boundaries. ``pack_payloads`` merges that list
+        ordered list of constituent records (first_fit/best_fit) or record slices
+        (wrap/best_fit_wrap). Each list element remains a distinct segment;
+        buffered algorithms may reorder segments, and best_fit_wrap may emit a
+        suffix before its remaining prefix. ``pack_payloads`` merges that list
         (default keeps it as-is). For flat, tensor-ready training records with
         ``positions``, use :meth:`pack_flat` instead.
 
         Args:
             max_length: Maximum length for packed bins.
-            num_bins: Number of bins to maintain per lane (first_fit/best_fit).
-            algorithm: ``"first_fit"`` (default), ``"best_fit"``, or ``"wrap"``.
+            num_bins: Number of bins to maintain per packing group. Required for
+                first_fit/best_fit and not allowed for wrapping algorithms.
+            algorithm: ``"first_fit"`` (default), ``"best_fit"``, ``"wrap"``, or
+                ``"best_fit_wrap"`` (candidate-based buffered wrapping with
+                length-based selection and at most one split per bin).
             tokens_field: Token field to slice (``"auto"`` or an explicit name);
-                consumed by wrap. first/best keep whole payloads.
+                consumed by wrap/best_fit_wrap. first/best keep whole payloads.
             length_fn: Optional callable measuring packing length, for
                 first_fit/best_fit only (e.g. a precomputed ``length`` field with
                 no token field to slice). ``None`` measures
-                ``len(payload[tokens_field])``. Not allowed with
-                ``algorithm="wrap"`` (length is the sliced field's length).
-            drop_oversized: If True, drop sequences longer than max_length. Must
-                be False with ``algorithm="wrap"``.
+                ``len(payload[tokens_field])``. Not allowed with wrap or
+                best_fit_wrap (length is the sliced field's length).
+            drop_oversized: Whether first/best should drop records longer than
+                ``max_length``. Defaults to True for first/best and False for
+                wrap/best_fit_wrap, which split instead.
             min_sequence_length: Remaining capacity below which a bin is emitted.
             shuffle_strategy: Strategy for ordering sequences before packing
                 ("random", "length", or None).
@@ -1141,6 +1150,12 @@ class Pipeline:
                 flushes bins with the smallest remaining capacity first.
             pack_payloads: How to merge the segment list. "keep_list" (default),
                 "torch_tensor", "numpy_array", or a custom callable taking list[Any].
+            candidate_pool_size: best_fit_wrap only — candidate lookahead per
+                packing group. May be exceeded until the pool contains
+                ``max_length`` tokens. Defaults to 1024.
+            max_candidate_age: best_fit_wrap only — candidate arrivals before a
+                still-buffered record is force-placed. Defaults to
+                ``8 * candidate_pool_size``.
             homogeneity: If ``"full"``, each packed sample stays within a single
                 mixing domain (mixture component); ``"none"`` (default) mixes
                 freely. See :meth:`PackSequences.__init__`.
@@ -1161,6 +1176,8 @@ class Pipeline:
             shuffle_seed=shuffle_seed,
             flush_strategy=flush_strategy,
             pack_payloads=pack_payloads,
+            candidate_pool_size=candidate_pool_size,
+            max_candidate_age=max_candidate_age,
             homogeneity=homogeneity,
         )
         node = self._graph.add(
@@ -1177,17 +1194,19 @@ class Pipeline:
     def pack_flat(
         self,
         max_length: int,
-        num_bins: int,
         *,
-        algorithm: Literal["first_fit", "best_fit", "wrap"] = "first_fit",
+        num_bins: int | None = None,
+        algorithm: PackingAlgorithm = "first_fit",
         tokens_field: str = "auto",
         pad_token_id: Optional[int] = None,
         emit_positions: bool = True,
-        drop_oversized: bool = True,
+        drop_oversized: bool | None = None,
         min_sequence_length: int = 1,
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
+        candidate_pool_size: int | None = None,
+        max_candidate_age: int | None = None,
         homogeneity: Literal["none", "full"] = "none",
         placement: str = "auto",
         parallelism: Optional[int] = None,
@@ -1196,32 +1215,45 @@ class Pipeline:
 
         Each bin is emitted flat as ``{tokens_field: concat[+pad], "positions"?}``
         — no ``packed_samples`` — so ``SampleBatch.to_training`` consumes it
-        directly (``positions`` is surfaced automatically). Every algorithm emits
-        this identical shape: wrap fills bins exactly;
-        first_fit/best_fit pad partial bins to ``max_length`` with
-        ``pad_token_id`` (the pad tail becomes its own ``positions`` document).
+        directly (``positions`` is surfaced automatically). ``wrap`` emits only
+        full bins. The other algorithms pad partial bins, including the final
+        best_fit_wrap tail, to ``max_length`` with ``pad_token_id``.
+        Buffered algorithms may reorder segments, and best_fit_wrap may emit a
+        suffix before its remaining prefix. When ``emit_positions=True``, positions
+        still reset at every emitted segment; they do not restore source order.
         Only the token field and length-aligned sliceable fields survive; scalar
         and non-aligned payload is dropped (use :meth:`pack_sequences` to keep it).
 
         Args:
             max_length: Fixed length of every emitted record.
-            num_bins: Number of bins to maintain per lane (first_fit/best_fit).
-            algorithm: ``"first_fit"`` (default), ``"best_fit"``, or ``"wrap"``.
+            num_bins: Number of bins to maintain per packing group. Required for
+                first_fit/best_fit and not allowed for wrapping algorithms.
+            algorithm: ``"first_fit"`` (default), ``"best_fit"``, ``"wrap"``, or
+                ``"best_fit_wrap"`` (candidate-based buffered wrapping with
+                length-based selection and at most one split per bin).
             tokens_field: Token field to concatenate (``"auto"`` or explicit name).
             pad_token_id: Fill value for the token field when padding partial
-                first_fit/best_fit bins (aligned fields pad with 0). Required for
+                bins (aligned fields pad with 0): every partial first_fit/
+                best_fit bin, and best_fit_wrap's flush-tail bin. Required for
                 those algorithms; unused for wrap. Any embeddable id works —
                 ``to_training`` masks the pad tail from the loss by position
                 (``meta.padding_length``), not by id.
             emit_positions: Include the ``positions`` array marking document
                 boundaries (``cumsum(positions == 0) - 1`` → doc ids). Defaults to
                 True; set False for classic concatenated blocks.
-            drop_oversized: If True, drop sequences longer than max_length. Must
-                be False with ``algorithm="wrap"``.
+            drop_oversized: Whether first/best should drop records longer than
+                ``max_length``. Defaults to True for first/best and False for
+                wrap/best_fit_wrap, which split instead.
             min_sequence_length: Remaining capacity below which a bin is emitted.
             shuffle_strategy: Strategy for ordering sequences before packing.
             shuffle_seed: Seed for random shuffling when shuffle_strategy="random".
             flush_strategy: "fifo" (default) or "fullest" when num_bins is reached.
+            candidate_pool_size: best_fit_wrap only — candidate lookahead per
+                packing group. May be exceeded until the pool contains
+                ``max_length`` tokens. Defaults to 1024.
+            max_candidate_age: best_fit_wrap only — candidate arrivals before a
+                still-buffered record is force-placed. Defaults to
+                ``8 * candidate_pool_size``.
             homogeneity: If ``"full"``, each packed sample stays within a single
                 mixing domain (mixture component); ``"none"`` (default) mixes
                 freely. See :meth:`PackSequences.__init__`.
@@ -1242,6 +1274,8 @@ class Pipeline:
             flush_strategy=flush_strategy,
             emit_positions=emit_positions,
             pad_token_id=pad_token_id,
+            candidate_pool_size=candidate_pool_size,
+            max_candidate_age=max_candidate_age,
             homogeneity=homogeneity,
         )
         node = self._graph.add(

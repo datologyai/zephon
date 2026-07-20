@@ -7,26 +7,34 @@ Packing is split into two orthogonal concerns:
 
 - **How to pack** (the algorithm): ``first_fit`` / ``best_fit`` pack whole
   records into bins; ``wrap`` slices a continuous token stream into bins of
-  exactly ``max_length``. Every algorithm produces an ordered list of
+  exactly ``max_length``; ``best_fit_wrap`` buffers candidate records and
+  builds each bin to exactly ``max_length`` — whole records by largest-fit,
+  then one split to close the bin. Every algorithm produces an ordered list of
   :class:`Segment` per bin and knows nothing about the output format.
 - **How to serialize** a finished bin (a :class:`Segment` list): the
-  :class:`_EnvelopeSerializer` keeps the lossless ``{"packed_samples": [...]}``
-  list; the :class:`_FlatSerializer` concatenates the token field into a flat,
-  fixed-length training record (with optional ``positions``).
+  :class:`_EnvelopeSerializer` keeps segment boundaries; the
+  :class:`_FlatSerializer` concatenates the token field into a fixed-length
+  training record (with optional ``positions``).
 
 This separation keeps the packing algorithms free of output-format logic and
 makes ``flat`` a clean serialization of the same bin the envelope preserves.
+Buffered wrapping likewise separates windowing and lane lifecycle from the
+candidate-selection strategy, allowing length- or content-based selection to
+reuse the same exact-fill mechanics.
 """
 
 from __future__ import annotations
 
 import logging
 import random
+from bisect import bisect_left
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import partial
 from itertools import chain
-from typing import Any, Literal, Optional, Sequence
+from operator import attrgetter
+from typing import Any, Literal, Optional, Protocol, Sequence, TypeAlias, get_args
 
 import numpy as _np
 
@@ -54,6 +62,11 @@ from zephon.utils.seeding import batch_seed
 from zephon.utils.torch_compat import _tensor_lock_ctx
 
 logger = logging.getLogger(__name__)
+
+PackingAlgorithm: TypeAlias = Literal["first_fit", "best_fit", "wrap", "best_fit_wrap"]
+_PACKING_ALGORITHMS: tuple[PackingAlgorithm, ...] = get_args(PackingAlgorithm)
+_SLICING_ALGORITHMS: frozenset[PackingAlgorithm] = frozenset({"wrap", "best_fit_wrap"})
+_BUFFERED_WRAP_ALGORITHMS: frozenset[PackingAlgorithm] = frozenset({"best_fit_wrap"})
 
 
 def _integer_apportion_tokens(length: int, weights: dict[int, int]) -> dict[int, int]:
@@ -317,8 +330,11 @@ class Segment:
     end: int
     seq_len: int  # full record length (for proportional token apportionment)
     field: str | None = None  # token field (slice / positions anchor)
-    is_last: bool = False  # consumes the record's final token (closes contributors)
-    is_slice: bool = False  # True = wrap (extract sliced fields), False = whole record
+    # The record's last-emitted segment (closes contributors); after a tail
+    # split it need not contain the record's final token.
+    is_last: bool = False
+    # Slices omit non-sequence payload fields in envelope output.
+    is_slice: bool = False
 
     @property
     def length(self) -> int:
@@ -332,16 +348,179 @@ class _DeferredBin:
     segments: list[Segment]
 
 
+@dataclass(slots=True)
+class _BestFitWrapCandidate:
+    sort_key: tuple[int, int]
+    segment: Segment
+    live: bool = True
+
+    @property
+    def length(self) -> int:
+        return self.sort_key[0]
+
+    @property
+    def arrival_index(self) -> int:
+        return self.sort_key[1]
+
+
+_BEST_FIT_WRAP_CANDIDATE_SORT_KEY = attrgetter("sort_key")
+
+
+class _BufferedWrapState(Protocol):
+    total_length: int
+
+    def __len__(self) -> int: ...
+
+    def add(self, segment: Segment) -> None: ...
+
+    def build_bin(self, max_length: int) -> list[Segment]: ...
+
+    def drain(self) -> list[Segment]: ...
+
+
+class _BestFitWrapState:
+    """Candidate pool and length-based selection state for one lane.
+
+    Items are sorted by ``(length, arrival)`` for deterministic predecessor
+    lookup. A separate arrival queue drives the starvation guard.
+    """
+
+    def __init__(self, max_candidate_age: int) -> None:
+        self.max_candidate_age = max_candidate_age
+        self._items: list[_BestFitWrapCandidate] = []
+        self._arrivals: deque[_BestFitWrapCandidate] = deque()
+        self.total_length = 0
+        self.arrival_index = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def _insert(self, item: _BestFitWrapCandidate) -> None:
+        i = bisect_left(
+            self._items, item.sort_key, key=_BEST_FIT_WRAP_CANDIDATE_SORT_KEY
+        )
+        self._items.insert(i, item)
+
+    def _remove(self, item: _BestFitWrapCandidate) -> None:
+        i = bisect_left(
+            self._items, item.sort_key, key=_BEST_FIT_WRAP_CANDIDATE_SORT_KEY
+        )
+        assert i < len(self._items) and self._items[i] is item
+        self._items.pop(i)
+
+    def add(self, segment: Segment) -> None:
+        self.arrival_index += 1
+        item = _BestFitWrapCandidate(
+            sort_key=(segment.length, self.arrival_index), segment=segment
+        )
+        self._insert(item)
+        self._arrivals.append(item)
+        self.total_length += item.length
+
+    def _oldest(self) -> _BestFitWrapCandidate | None:
+        arrivals = self._arrivals
+        while arrivals and not arrivals[0].live:
+            arrivals.popleft()
+        return arrivals[0] if arrivals else None
+
+    def _largest_fitting(self, gap: int) -> _BestFitWrapCandidate | None:
+        i = bisect_left(
+            self._items, (gap + 1, 0), key=_BEST_FIT_WRAP_CANDIDATE_SORT_KEY
+        )
+        if i == 0:
+            return None
+        length = self._items[i - 1].length
+        i = bisect_left(self._items, (length, 0), key=_BEST_FIT_WRAP_CANDIDATE_SORT_KEY)
+        return self._items[i]
+
+    def _take(self, item: _BestFitWrapCandidate) -> Segment:
+        self._remove(item)
+        item.live = False
+        self.total_length -= item.length
+        item.segment.is_last = True
+        return item.segment
+
+    def _split(
+        self, item: _BestFitWrapCandidate, count: int, *, from_tail: bool
+    ) -> Segment:
+        seg = item.segment
+        if from_tail:
+            placed = Segment(
+                record=seg.record,
+                start=seg.end - count,
+                end=seg.end,
+                seq_len=seg.seq_len,
+                field=seg.field,
+                is_slice=True,
+            )
+            seg.end -= count
+        else:
+            placed = Segment(
+                record=seg.record,
+                start=seg.start,
+                end=seg.start + count,
+                seq_len=seg.seq_len,
+                field=seg.field,
+                is_slice=True,
+            )
+            seg.start += count
+        seg.is_slice = True
+        self._remove(item)
+        item.sort_key = (item.length - count, item.arrival_index)
+        self._insert(item)
+        self.total_length -= count
+        return placed
+
+    def build_bin(self, max_length: int) -> list[Segment]:
+        """Build an exact bin; the caller guarantees sufficient buffered tokens."""
+        segments: list[Segment] = []
+        gap = max_length
+        # Length selection can shadow an item indefinitely behind better fits.
+        while gap > 0:
+            oldest = self._oldest()
+            assert oldest is not None
+            age = self.arrival_index - oldest.arrival_index
+            if age <= self.max_candidate_age or oldest.length > gap:
+                break
+            gap -= oldest.length
+            segments.append(self._take(oldest))
+        while gap > 0:
+            item = self._largest_fitting(gap)
+            if item is not None:
+                gap -= item.length
+                segments.append(self._take(item))
+                continue
+            # A cut is forced. Choose the end that severs fewer tokens from the
+            # document prefix; an existing suffix fragment can only split forward.
+            victim = self._items[0]
+            from_tail = victim.segment.start == 0 and gap < victim.length - gap
+            segments.append(self._split(victim, gap, from_tail=from_tail))
+            gap = 0
+        return segments
+
+    def drain(self) -> list[Segment]:
+        tail: list[Segment] = []
+        for item in self._arrivals:
+            if item.live:
+                item.live = False
+                item.segment.is_last = True
+                tail.append(item.segment)
+        self._items.clear()
+        self._arrivals.clear()
+        self.total_length = 0
+        return tail
+
+
 # ----------------------------------------------------------------------
 # Serializers (output format only; algorithm-agnostic)
 # ----------------------------------------------------------------------
 
 
 class _EnvelopeSerializer:
-    """Serialize a bin as the lossless ``{"packed_samples": [...]}`` envelope.
+    """Serialize a bin as the structured ``{"packed_samples": [...]}`` envelope.
 
-    Whole-record segments contribute their full payload; slice segments (wrap)
-    contribute the sliced sliceable-fields dict. The resulting list is passed
+    Whole-record segments contribute their full payload; slice segments
+    contribute the sliced, length-aligned fields. The resulting list is passed
     through ``pack_payloads_fn`` (default identity → the list).
     """
 
@@ -357,7 +536,7 @@ class _EnvelopeSerializer:
                 payload = seg.record.payload
                 if not isinstance(payload, dict):
                     raise TypeError(
-                        "algorithm='wrap' requires dict payloads to slice; got "
+                        "slicing algorithms require dict payloads; got "
                         f"payload type {type(payload).__name__}"
                     )
                 assert seg.field is not None
@@ -370,7 +549,7 @@ class _EnvelopeSerializer:
         return {"packed_samples": self._pack_payloads_fn(entries)}
 
     def padding_length(self, total_length: int) -> int | None:
-        """Envelope packs are lossless and never pad."""
+        """Envelope output never pads."""
         return None
 
 
@@ -399,8 +578,8 @@ class _FlatSerializer:
     def build_payload(self, segments: list[Segment]) -> dict[str, Any]:
         if not segments:
             raise ValueError("cannot serialize an empty bin")
-        # wrap segments carry the lane-resolved field; whole-record segments
-        # (first/best) leave it None, so resolve from the tokens_field config.
+        # Slicing algorithms carry the lane-resolved field. Whole-record
+        # algorithms resolve it from configuration.
         token_field = segments[0].field or _resolve_token_field(
             segments[0].record.payload, self.tokens_field
         )
@@ -464,18 +643,18 @@ class _FlatSerializer:
 class PackingAccumulator(Accumulator[SampleRecord]):
     """Accumulator that packs variable-length sequences into bins.
 
-    Runs on the pump thread and maintains per-lane bins. Bin assignment is
-    deterministic regardless of parallelism. The chosen ``serializer`` turns each
-    finished bin (a :class:`Segment` list) into the output record; the algorithm
-    itself never touches the output format.
+    Runs on the pump thread and maintains bins per packing group. Bin assignment
+    is deterministic regardless of parallelism. The chosen ``serializer`` turns
+    each finished bin (a :class:`Segment` list) into the output record; the
+    algorithm itself never touches the output format.
     """
 
     def __init__(
         self,
         max_length: int,
-        num_bins: int,
+        num_bins: int | None,
         length_fn: Callable[[SampleRecord], int],
-        algorithm: Literal["first_fit", "best_fit", "wrap"],
+        algorithm: PackingAlgorithm,
         drop_oversized: bool,
         min_sequence_length: int,
         shuffle_strategy: Literal["random", "length", None],
@@ -483,6 +662,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         flush_strategy: Literal["fifo", "fullest"],
         serializer: _EnvelopeSerializer | _FlatSerializer,
         wrap_field: str | None = None,
+        candidate_pool_size: int = 0,
+        buffered_wrap_state_factory: Callable[[], _BufferedWrapState] | None = None,
         domain_fn: Callable[[SampleRecord], Any] | None = None,
     ) -> None:
         self.max_length = max_length
@@ -496,6 +677,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         self.flush_strategy = flush_strategy
         self._serializer = serializer
         self.wrap_field = wrap_field
+        self.candidate_pool_size = candidate_pool_size
         self._pack_key = _make_pack_key(domain_fn)
 
         # Oversized records dropped by first/best (can't split). Tombstones are
@@ -506,6 +688,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         # Bins/wrap buffers key on PackKey = (lane_id, domain). With no domain_fn
         # every record maps to (lane_id, None), i.e. plain per-lane packing.
         self._bins: defaultdict[PackKey, list[Bin]] = defaultdict(list)
+
+        self._buffered_wrap_state_by_key: defaultdict[PackKey, _BufferedWrapState]
+        self._buffered_wrap_state_by_key = defaultdict(buffered_wrap_state_factory)
 
         # wrap buffer per group: a buffered Segment's live tokens are
         # payload[field][start:end], and start advances as it drains into bins.
@@ -525,7 +710,12 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
     def _known_keys(self) -> set[PackKey]:
         """All packing groups that currently hold (or held) buffered state."""
-        return set(self._bins) | set(self._wrap_total) | set(self._wrap_segments)
+        return (
+            set(self._bins)
+            | set(self._buffered_wrap_state_by_key)
+            | set(self._wrap_total)
+            | set(self._wrap_segments)
+        )
 
     @staticmethod
     def _sorted_keys(keys: Iterable[PackKey]) -> list[PackKey]:
@@ -536,12 +726,23 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         return sorted(keys)
 
     def has_pending_data(self, lane_id: int | None = None) -> bool:
-        """Return True if any bins or wrap segments hold data (in ``lane_id`` if given)."""
+        """Return True if any bins or buffered segments hold data (in ``lane_id`` if given)."""
         if lane_id is None:
             if any(bins for bins in self._bins.values()):
                 return True
+            if any(
+                state.total_length > 0
+                for state in self._buffered_wrap_state_by_key.values()
+            ):
+                return True
             return any(total > 0 for total in self._wrap_total.values())
         if any(bins for key, bins in self._bins.items() if key[0] == lane_id):
+            return True
+        if any(
+            state.total_length > 0
+            for key, state in self._buffered_wrap_state_by_key.items()
+            if key[0] == lane_id
+        ):
             return True
         return any(
             total > 0 for key, total in self._wrap_total.items() if key[0] == lane_id
@@ -582,6 +783,10 @@ class PackingAccumulator(Accumulator[SampleRecord]):
                 ready.extend(([rec], 0) for rec in self._wrap_pack(key, elem))
                 continue
 
+            if self.algorithm in _BUFFERED_WRAP_ALGORITHMS:
+                ready.extend(([rec], 0) for rec in self._buffered_wrap_pack(key, elem))
+                continue
+
             seq_len = self.length_fn(elem)
 
             # Handle oversized sequences. first_fit/best_fit cannot split a
@@ -613,7 +818,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     def flush(
         self, *, reset: bool = False, lane_id: int | None = None
     ) -> list[ReadyBatch[SampleRecord]]:
-        """Emit any remaining partially-filled bins / wrap tails."""
+        """Emit any remaining partially-filled bins / buffered tails."""
         if lane_id is None:
             # Stable group order at upstream close (set iteration is layout-dependent).
             keys = self._sorted_keys(self._known_keys())
@@ -634,6 +839,16 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             for bin_data in self._bins.pop(key, []):
                 if bin_data.segments:
                     ready.append(([self._emit_first_best_bin(bin_data, lid)], 0))
+
+            state = self._buffered_wrap_state_by_key.pop(key, None)
+            if state is not None:
+                while state.total_length >= self.max_length:
+                    ready.append(
+                        ([self._emit_bin(state.build_bin(self.max_length), lid)], 0)
+                    )
+                tail = state.drain()
+                if tail:
+                    ready.append(([self._emit_bin(tail, lid)], 0))
 
             total = self._wrap_total.pop(key, 0)
             segments = self._wrap_segments.pop(key, None)
@@ -779,7 +994,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         bins *per domain* in a lane.
         """
         outputs: list[SampleRecord] = []
-        while len(bins) >= self.num_bins and bins:
+        num_bins = self.num_bins
+        assert num_bins is not None
+        while len(bins) >= num_bins and bins:
             if self.flush_strategy == "fifo":
                 bin_to_flush = bins.pop(0)
             elif self.flush_strategy == "fullest":
@@ -920,22 +1137,22 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         payload = record.payload
         if not isinstance(payload, dict):
             raise TypeError(
-                "algorithm='wrap' requires dict payloads to slice; got payload "
-                + f"type {type(payload).__name__}"
+                f"algorithm={self.algorithm!r} requires dict payloads to slice; "
+                + f"got payload type {type(payload).__name__}"
             )
 
         if self.wrap_field is not None:
             if self.wrap_field not in payload:
                 raise ValueError(
-                    f"algorithm='wrap': field {self.wrap_field!r} not found "
-                    + f"in payload (keys: {list(payload.keys())})"
+                    f"algorithm={self.algorithm!r}: field {self.wrap_field!r} not "
+                    + f"found in payload (keys: {list(payload.keys())})"
                 )
             return self.wrap_field
 
         detected = detect_length_field(payload)
         if detected is None:
             raise ValueError(
-                "algorithm='wrap': cannot auto-detect length field. "
+                f"algorithm={self.algorithm!r}: cannot auto-detect length field. "
                 + f"Payload keys: {list(payload.keys())}. "
                 + f"Expected one of: {TOKEN_FIELD_CANDIDATES}"
             )
@@ -946,8 +1163,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             self._wrap_lane_auto_field[lane_id] = detected
         elif cached != detected:
             raise ValueError(
-                "algorithm='wrap': inconsistent auto-detected length field "
-                f"for lane {lane_id}: stream started with {cached!r} but this "
+                f"algorithm={self.algorithm!r}: inconsistent auto-detected length "
+                f"field for lane {lane_id}: stream started with {cached!r} but this "
                 f"record uses {detected!r}. Set tokens_field to an explicit field "
                 "or use homogeneous payloads."
             )
@@ -1023,6 +1240,75 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         self._wrap_total[key] = total
         return outputs
 
+    # ------------------------------------------------------------------
+    # Buffered wrapping
+    # ------------------------------------------------------------------
+
+    def _emit_full_windows_and_tail(
+        self,
+        elem: SampleRecord,
+        field: str,
+        seq_len: int,
+        lane_id: int,
+    ) -> tuple[list[SampleRecord], Segment | None]:
+        """Emit unselectable full windows and return the candidate tail."""
+        outputs: list[SampleRecord] = []
+        start = 0
+        while seq_len - start >= self.max_length:
+            end = start + self.max_length
+            outputs.append(
+                self._emit_bin(
+                    [
+                        Segment(
+                            record=elem,
+                            start=start,
+                            end=end,
+                            seq_len=seq_len,
+                            field=field,
+                            is_last=end == seq_len,
+                            is_slice=start > 0 or end < seq_len,
+                        )
+                    ],
+                    lane_id,
+                )
+            )
+            start = end
+        if start == seq_len:
+            return outputs, None
+        return outputs, Segment(
+            record=elem,
+            start=start,
+            end=seq_len,
+            seq_len=seq_len,
+            field=field,
+            is_slice=start > 0,
+        )
+
+    def _buffered_wrap_pack(
+        self, key: PackKey, elem: SampleRecord
+    ) -> list[SampleRecord]:
+        field = self._resolve_wrap_field(elem, key)
+        payload = elem.payload
+        assert isinstance(payload, dict)  # guaranteed by _resolve_wrap_field
+        seq_len = _get_length(payload[field], field)
+        if seq_len <= 0:
+            return tombstones_for_record(elem)
+
+        lane_id = key[0]
+        outputs, tail = self._emit_full_windows_and_tail(elem, field, seq_len, lane_id)
+        if tail is None:
+            return outputs
+
+        state = self._buffered_wrap_state_by_key[key]
+        state.add(tail)
+        # Sufficient total length guarantees the state can close a bin.
+        while (
+            len(state) >= self.candidate_pool_size
+            and state.total_length >= self.max_length
+        ):
+            outputs.append(self._emit_bin(state.build_bin(self.max_length), lane_id))
+        return outputs
+
 
 class PackSequences(DefaultSetup):
     """Pack variable-length sequences into bins.
@@ -1036,13 +1322,13 @@ class PackSequences(DefaultSetup):
     def __init__(
         self,
         max_length: int,
-        num_bins: int,
-        length_fn: Callable[[SampleRecord], int] | None = None,
-        algorithm: Literal["first_fit", "best_fit", "wrap"] = "first_fit",
         *,
+        num_bins: int | None = None,
+        length_fn: Callable[[SampleRecord], int] | None = None,
+        algorithm: PackingAlgorithm = "first_fit",
         output: Literal["envelope", "flat"] = "envelope",
         tokens_field: str = "auto",
-        drop_oversized: bool = True,
+        drop_oversized: bool | None = None,
         min_sequence_length: int = 1,
         shuffle_strategy: Literal["random", "length", None] = None,
         shuffle_seed: Optional[int] = None,
@@ -1050,39 +1336,48 @@ class PackSequences(DefaultSetup):
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         emit_positions: bool = True,
         pad_token_id: int | None = None,
+        candidate_pool_size: int | None = None,
+        max_candidate_age: int | None = None,
         homogeneity: Literal["none", "full"] = "none",
     ) -> None:
         """Initialize the PackSequences operator.
 
         Args:
             max_length: Maximum length for packed bins.
-            num_bins: Number of bins to maintain per lane (first_fit/best_fit).
+            num_bins: Number of bins to maintain per packing group. Required for
+                first_fit/best_fit and not allowed for wrapping algorithms.
             length_fn: Optional callable measuring a record's packing length —
                 for ``output="envelope"`` with first_fit/best_fit only. Those
                 pack whole records, so the length can be anything (e.g. a
                 precomputed ``length`` field, with no token field to slice).
                 ``None`` (default) measures ``len(payload[tokens_field])``. Not
-                allowed with ``output="flat"`` or ``algorithm="wrap"``: those
-                slice/concatenate ``tokens_field``, so the packing length is
-                necessarily ``len(payload[tokens_field])`` and a separate
-                ``length_fn`` could only disagree with it — set ``tokens_field``
-                instead. Note this length also seeds per-component token
-                apportionment, so for token-weighted mixtures it should reflect
-                the true token count; it may be called more than once per record,
-                so keep it cheap.
-            algorithm: ``"first_fit"`` (default), ``"best_fit"``, or ``"wrap"``.
-                wrap slices records to fill bins exactly; first/best pack whole
-                records (and, in flat output, pad partial bins).
-            output: ``"envelope"`` emits ``{"packed_samples": [...]}`` (lossless
-                ordered list; ``pack_payloads`` applies). ``"flat"`` emits a
+                allowed with ``output="flat"`` or a slicing algorithm
+                (wrap/best_fit_wrap): those slice/concatenate ``tokens_field``,
+                so the packing length is necessarily
+                ``len(payload[tokens_field])`` and a separate ``length_fn``
+                could only disagree with it — set ``tokens_field`` instead. Note
+                this length also seeds per-component token apportionment, so for
+                token-weighted mixtures it should reflect the true token count;
+                it may be called more than once per record, so keep it cheap.
+            algorithm: ``"first_fit"`` (default), ``"best_fit"``, ``"wrap"``, or
+                ``"best_fit_wrap"``. wrap slices a FIFO token stream to fill
+                bins exactly. best_fit_wrap introduces candidate-based buffered
+                wrapping: shared window/flush mechanics surround a length-based
+                selection strategy that fills each bin with at most one split.
+                first/best pack whole records and pad partial flat-output bins.
+            output: ``"envelope"`` emits an ordered ``{"packed_samples": [...]}``
+                list to which ``pack_payloads`` applies. ``"flat"`` emits a
                 fixed-length training record ``{tokens_field: concat[+pad],
                 "positions"?}`` that ``to_training`` consumes directly. flat keeps
                 only the token field and length-aligned sliceable fields; scalar
-                and non-aligned payload is dropped (envelope preserves everything).
+                and non-aligned payload is dropped. Envelope output retains these
+                fields on whole records, but slices contain aligned fields only.
             tokens_field: Token field to slice/concatenate. ``"auto"`` detects
                 from common candidates; or an explicit field name.
-            drop_oversized: If True, drop sequences longer than max_length
-                (first/best emit a tombstone per drop). Must be False for wrap.
+            drop_oversized: Whether first/best should drop records longer than
+                ``max_length``. Defaults to True for first/best and False for
+                wrap/best_fit_wrap, which always split. Explicit True is invalid
+                for a slicing algorithm.
             min_sequence_length: Minimum remaining capacity below which a bin is
                 emitted (first_fit/best_fit). With 0, an exactly-full bin is not
                 auto-emitted until num_bins pressure or flush — keep it >=1 for
@@ -1095,17 +1390,25 @@ class PackSequences(DefaultSetup):
             emit_positions: Flat output only — include the ``positions`` array
                 (document boundaries). Defaults to True.
             pad_token_id: Flat output only — fill value for the token field when
-                padding partial first_fit/best_fit bins (aligned fields pad with
-                0). Required for those algorithms; unused for wrap. Any embeddable
+                padding partial bins (aligned fields pad with 0): every partial
+                first_fit/best_fit bin, and best_fit_wrap's flush-tail bin.
+                Required for those algorithms; unused for wrap. Any embeddable
                 id works — pad is masked from the loss by position, not by id.
+            candidate_pool_size: best_fit_wrap only — candidate lookahead per
+                packing group. Larger values improve selection at the cost of
+                memory and latency. The pool may exceed this size until it
+                contains ``max_length`` tokens. Defaults to 1024.
+            max_candidate_age: best_fit_wrap only — candidate arrivals before a
+                still-buffered record is force-placed at the next bin's start.
+                Defaults to ``8 * candidate_pool_size``.
             homogeneity: If ``"full"``, no packed sample combines records from
                 different mixing domains (mixture components); needs
                 single-component records, so place packing before any op that
                 merges components. ``"none"`` (default) mixes freely. Packing
                 keeps per-domain state, so size ``num_bins`` for the domain count.
 
-                With ``algorithm="wrap"`` a split document is counted once, on its
-                closing bin, so interior bins carry empty
+                With a slicing algorithm, a split document is counted once, on
+                its closing bin, so interior bins may carry empty
                 ``component_sample_counts``; attribute domains by
                 ``component_token_counts`` instead (e.g. a downstream
                 ``ensure_mixture(weight="tokens")``).
@@ -1116,10 +1419,17 @@ class PackSequences(DefaultSetup):
             raise ValueError("max_length must be positive")
         if min_sequence_length < 0:
             raise ValueError("min_sequence_length must be non-negative")
-        if num_bins <= 0:
-            raise ValueError("num_bins must be positive")
-        if algorithm not in ("first_fit", "best_fit", "wrap"):
+        if algorithm not in _PACKING_ALGORITHMS:
             raise ValueError(f"Unknown algorithm: {algorithm}")
+        if algorithm in _SLICING_ALGORITHMS:
+            if num_bins is not None:
+                raise ValueError(
+                    f"num_bins does not apply to algorithm={algorithm!r}; omit it."
+                )
+        elif num_bins is None:
+            raise ValueError(f"num_bins is required for algorithm={algorithm!r}")
+        elif num_bins <= 0:
+            raise ValueError("num_bins must be positive")
         if output not in ("envelope", "flat"):
             raise ValueError(f"Unknown output: {output!r}")
         if homogeneity not in ("none", "full"):
@@ -1131,21 +1441,26 @@ class PackSequences(DefaultSetup):
                 "length_fn must be a callable or None; to select a field by name "
                 "use tokens_field=..."
             )
-        # In flat/wrap the packing length is the sliced/concatenated field's
+        # When slicing, the packing length is the sliced/concatenated field's
         # length, so a custom measure could only disagree with it.
-        if callable(length_fn) and (output == "flat" or algorithm == "wrap"):
+        if callable(length_fn) and (
+            output == "flat" or algorithm in _SLICING_ALGORITHMS
+        ):
             raise ValueError(
                 "length_fn is only supported for output='envelope' with "
                 "first_fit/best_fit (whole-record packing by an arbitrary "
-                "length). With output='flat' or algorithm='wrap' the length is "
-                "len(payload[tokens_field]); set tokens_field and leave length_fn unset."
+                "length). With output='flat' or a slicing algorithm "
+                "(wrap/best_fit_wrap) the length is len(payload[tokens_field]); "
+                "set tokens_field and leave length_fn unset."
             )
 
-        if algorithm == "wrap" and drop_oversized:
+        slices_records = algorithm in _SLICING_ALGORITHMS
+        if drop_oversized is None:
+            drop_oversized = not slices_records
+        elif slices_records and drop_oversized:
             raise ValueError(
-                "drop_oversized=True is not allowed with algorithm='wrap'; wrap "
-                "slices oversized inputs across multiple bins, so the concept of "
-                "'oversized' does not apply."
+                f"drop_oversized=True is not allowed with algorithm={algorithm!r}; "
+                "this algorithm splits long records instead."
             )
 
         # Flat first/best pads partial bins to max_length, so it needs a pad id.
@@ -1162,6 +1477,31 @@ class PackSequences(DefaultSetup):
         if output == "flat" and pack_payloads != "keep_list":
             raise ValueError("pack_payloads only applies to output='envelope'.")
 
+        if algorithm in _BUFFERED_WRAP_ALGORITHMS:
+            candidate_pool_size = (
+                1024 if candidate_pool_size is None else candidate_pool_size
+            )
+            if candidate_pool_size <= 0:
+                raise ValueError("candidate_pool_size must be positive")
+        elif candidate_pool_size is not None:
+            raise ValueError(
+                "candidate_pool_size only applies to buffered wrapping algorithms."
+            )
+
+        if algorithm == "best_fit_wrap":
+            assert candidate_pool_size is not None
+            max_candidate_age = (
+                8 * candidate_pool_size
+                if max_candidate_age is None
+                else max_candidate_age
+            )
+            if max_candidate_age <= 0:
+                raise ValueError("max_candidate_age must be positive")
+        elif max_candidate_age is not None:
+            raise ValueError(
+                "max_candidate_age only applies to algorithm='best_fit_wrap'."
+            )
+
         self.max_length = max_length
         self.algorithm = algorithm
         self.output = output
@@ -1174,6 +1514,10 @@ class PackSequences(DefaultSetup):
         self.flush_strategy = flush_strategy
         self.emit_positions = emit_positions
         self.pad_token_id = pad_token_id
+        self.candidate_pool_size = (
+            candidate_pool_size if candidate_pool_size is not None else 0
+        )
+        self.max_candidate_age = max_candidate_age
         self.homogeneity = homogeneity
 
         # ``"full"`` keys packing state on the record's sole component so a packed
@@ -1220,6 +1564,14 @@ class PackSequences(DefaultSetup):
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
+        buffered_wrap_state_factory: Callable[[], _BufferedWrapState] | None = None
+        if self.algorithm == "best_fit_wrap":
+            assert self.max_candidate_age is not None
+            buffered_wrap_state_factory = partial(
+                _BestFitWrapState,
+                max_candidate_age=self.max_candidate_age,
+            )
+
         return PackingAccumulator(
             max_length=self.max_length,
             num_bins=self.num_bins,
@@ -1232,6 +1584,8 @@ class PackSequences(DefaultSetup):
             flush_strategy=self.flush_strategy,
             serializer=self._make_serializer(),
             wrap_field=self._wrap_field,
+            candidate_pool_size=self.candidate_pool_size,
+            buffered_wrap_state_factory=buffered_wrap_state_factory,
             domain_fn=self._domain_fn,
         )
 

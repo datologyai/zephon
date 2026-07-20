@@ -10,7 +10,7 @@ from zephon.ops.ensure_mixture import EnsureMixture
 from zephon.ops.fetch import FetchOp
 from zephon.ops.map_transform import MapBatchTransform, MapTransform
 from zephon.ops.materialize import Materialize
-from zephon.ops.pack_sequences import PackSequences
+from zephon.ops.pack_sequences import PackingAlgorithm, PackSequences
 from zephon.ops.prefetch import PrefetchOp
 from zephon.ops.shuffle_buffer import ShuffleBuffer
 from zephon.ops.stateful_transform import StatefulTransformOp
@@ -27,6 +27,7 @@ __all__ = [
     "MapTransform",
     "Materialize",
     "PackSequences",
+    "PackingAlgorithm",
     "PrefetchOp",
     "ShuffleBuffer",
     "SpanSource",
