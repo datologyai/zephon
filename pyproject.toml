@@ -108,8 +108,9 @@ Documentation = "https://zephon.readthedocs.io"
 Repository = "https://github.com/datologyai/zephon"
 Issues = "https://github.com/datologyai/zephon/issues"
 
-[tool.setuptools]
-packages = ["zephon"]
+[tool.setuptools.packages.find]
+# ``zephon*`` (not ``zephon``) so every nested subpackage ships as a declared package.
+include = ["zephon*"]
 
 [tool.setuptools.package-data]
 zephon = ["py.typed"]
@@ -228,6 +229,7 @@ markers = [
     "world_size(val)",
     "remote",
     "integration: marks tests as integration (use --run-integration to run)",
+    "packaging: builds + installs the distributions (use --run-packaging to run)",
     "requires_ray: tests that spin up a Ray cluster (run on LargeGithubRunner only in CI)",
 ]
 filterwarnings = [

@@ -87,6 +87,28 @@ jobs:
       run: |
         set -ex
         uv run --python 3.10 --no-sync pytest -m "not integration and not requires_ray" --maxfail=10
+  packaging:
+    name: Packaging Tests
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    env:
+      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # setuptools-scm derives the version from git history/tags.
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Setup
+      run: uv sync --python 3.12 --group dev
+    - name: Run Packaging Tests
+      run: uv run --python 3.12 pytest --run-packaging tests/packaging -ra
+
   ray:
     name: Ray Tests
     timeout-minutes: 20

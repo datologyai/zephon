@@ -5,13 +5,14 @@ PY ?= $(UV) run
 PYTEST ?= pytest
 EXTRA_ARGS ?=
 
-.PHONY: help setup test integration lint format docs
+.PHONY: help setup test integration packaging lint format docs
 
 help:
 	@echo "Targets:"
 	@echo "  setup        - Create dev/test environment via uv"
 	@echo "  test         - Run pytest ($(EXTRA_ARGS) optional)"
 	@echo "  integration  - Run integration tests"
+	@echo "  packaging    - Build the wheel/sdist and smoke-test the artifacts"
 	@echo "  lint         - Check formatting, linting, and types"
 	@echo "  format       - Format code and fix lint issues"
 	@echo "  docs         - Build HTML documentation"
@@ -24,6 +25,9 @@ test:
 
 integration:
 	$(PY) $(PYTEST) --run-integration tests/integration $(EXTRA_ARGS)
+
+packaging:
+	$(PY) $(PYTEST) --run-packaging tests/packaging $(EXTRA_ARGS)
 
 lint:
 	./linting/lint.sh --check

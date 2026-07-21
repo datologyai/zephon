@@ -42,6 +42,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Run tests marked as integration",
     )
     parser.addoption(
+        "--run-packaging",
+        action="store_true",
+        default=False,
+        help="Run tests marked as packaging (build + clean-venv install)",
+    )
+    parser.addoption(
         "--repro-iters",
         action="store",
         type=int,
@@ -60,14 +66,21 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    if config.getoption("--run-integration"):
-        return
-    skip_integration = pytest.mark.skip(
-        reason="use --run-integration to run integration tests"
+    skip_integration = (
+        None
+        if config.getoption("--run-integration")
+        else pytest.mark.skip(reason="use --run-integration to run integration tests")
+    )
+    skip_packaging = (
+        None
+        if config.getoption("--run-packaging")
+        else pytest.mark.skip(reason="use --run-packaging to run packaging tests")
     )
     for item in items:
-        if "integration" in item.keywords:
+        if skip_integration is not None and "integration" in item.keywords:
             item.add_marker(skip_integration)
+        if skip_packaging is not None and "packaging" in item.keywords:
+            item.add_marker(skip_packaging)
 
 
 @pytest.fixture(scope="session")
