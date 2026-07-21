@@ -1,8 +1,11 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import json
 import logging
+import sys
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,6 +21,7 @@ from zephon.ops.tokenize_chat import (
     TokenizeChat,
     _last_span_only,
     _mask_from_spans,
+    _thread_salted_template,
 )
 from zephon.work.token_counting import FatalCountError
 from zephon.work.token_estimation import (
@@ -741,3 +745,106 @@ def test_census_zero_yield_chat_drops_depress_the_ratio(fast_tokenizer: Any) -> 
     assert m.ratio.source == "measured"
     survivors_only = op.count_delivered_tokens(supervised) / content_bytes(supervised)
     assert 0 < m.ratio.tokens_per_byte < 0.9 * survivors_only
+
+
+# ---------------------------------------------------------------------------
+# Thread safety: transformers' process-wide compiled-template cache
+# ---------------------------------------------------------------------------
+
+
+def _multi_turn(n_pairs: int = 12) -> list[dict[str, Any]]:
+    pair = (("user", "what is 2 + 2 ?"), ("assistant", "the answer is 4"))
+    return _messages(*(pair * n_pairs))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "",
+        " done",
+        " done   ",
+        " done\n",
+        " done\n   ",
+        " done\n\t",
+        " done\r\n",
+        " done\r",
+        " done\n\n",
+    ],
+    ids=[
+        "tag-end",
+        "text-end",
+        "spaces-same-line",
+        "trailing-newline",
+        "newline-spaces",
+        "newline-tab",
+        "crlf",
+        "cr",
+        "double-newline",
+    ],
+)
+def test_thread_salt_render_is_byte_identical(fast_tokenizer: Any, tail: str) -> None:
+    # Whitespace tails probe lstrip_blocks and jinja's trailing-newline strip,
+    # which a naive template suffix would disturb.
+    template = TAGGED_TEMPLATE + tail
+    base = fast_tokenizer.apply_chat_template(
+        CONVERSATION, chat_template=template, tokenize=False
+    )
+    rendered = fast_tokenizer.apply_chat_template(
+        CONVERSATION, chat_template=_thread_salted_template(template), tokenize=False
+    )
+    assert rendered == base
+
+
+def test_concurrent_masked_renders_share_no_tracker_state(fast_tokenizer: Any) -> None:
+    """Deepcopied ops rendering one template in parallel must not collide.
+
+    transformers compiles a chat template into one process-wide cached object,
+    so without the per-thread salt overlapping assistant-mask renders raise
+    "AssistantTracker should not be reused before closed" — or complete with
+    corrupted all-zero masks that silently drop the sample.
+    """
+    n_threads, iterations = 4, 60
+    messages = _multi_turn()
+    proto = TokenizeChat(
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, span_source="generation_tags"
+    )
+    reference = _payload(_run_one(copy.deepcopy(proto), {"messages": messages}))
+
+    # The thread runner deepcopies the op proto per worker.
+    ops = [copy.deepcopy(proto) for _ in range(n_threads)]
+    barrier = threading.Barrier(n_threads)
+    failures: list[BaseException] = []
+    outputs: list[SampleRecord] = []
+    lock = threading.Lock()
+
+    def worker(op: TokenizeChat) -> None:
+        barrier.wait()
+        for i in range(iterations):
+            rec = _rec({"messages": messages}, sample_id=(0, 0, i))
+            try:
+                (out,) = op.process_many([rec])
+            except BaseException as exc:  # noqa: BLE001
+                with lock:
+                    failures.append(exc)
+                return
+            with lock:
+                outputs.append(out)
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-5)  # frequent handoffs land mid-render
+    try:
+        threads = [threading.Thread(target=worker, args=(op,)) for op in ops]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+
+    assert not failures, failures[:3]
+    assert len(outputs) == n_threads * iterations
+    for out in outputs:
+        payload = _payload(out)
+        assert np.array_equal(payload["input_ids"], reference["input_ids"])
+        assert np.array_equal(payload["loss_mask"], reference["loss_mask"])
+        assert int(payload["loss_mask"].sum()) > 0

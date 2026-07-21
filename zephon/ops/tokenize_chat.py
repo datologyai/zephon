@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -88,6 +89,22 @@ def _last_span_only(mask: "np.ndarray") -> "np.ndarray":
     out = np.zeros_like(mask)
     out[start:end] = 1
     return out
+
+
+def _thread_salted_template(template: str) -> str:
+    """Return ``template`` plus a per-thread no-op salt expression.
+
+    HF caches compiled chat templates process-wide by template text, and masked
+    renders mutate AssistantTracker state on the cached object; the salt gives
+    each thread its own template. An expression tag survives ``lstrip_blocks``
+    untouched, and jinja's trailing-newline strip is replicated here, so the
+    salted render is byte-identical.
+    """
+    for newline in ("\r\n", "\r", "\n"):
+        if template.endswith(newline):
+            template = template[: -len(newline)]
+            break
+    return template + f'{{{{ "zephon-render-slot-{threading.get_ident()}" and "" }}}}'
 
 
 class TokenizeChat(TokenizeBase):
@@ -375,12 +392,13 @@ class TokenizeChat(TokenizeBase):
         self, messages: list[Mapping[str, Any]], render_kwargs: dict[str, Any]
     ) -> tuple[list[int], "np.ndarray"]:
         tok = cast(Any, self.tok)
+        assert self._template_str is not None
         call_kwargs: dict[str, Any] = {
             "tokenize": True,
             "return_dict": True,
             "return_assistant_tokens_mask": True,
             "add_generation_prompt": False,
-            "chat_template": self._template_str,
+            "chat_template": _thread_salted_template(self._template_str),
             **render_kwargs,
         }
         if self.max_length is not None:
