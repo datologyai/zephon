@@ -21,6 +21,7 @@ from zephon.core.constants import (
     SampleMeta,
     SampleRecord,
 )
+from zephon.ops.grouping import DomainGroups
 from zephon.ops.pack_sequences import (
     PackingAccumulator,
     PackingAlgorithm,
@@ -1777,3 +1778,235 @@ def test_homogeneous_full_flush_order_is_deterministic() -> None:
     out = _records(acc.flush())
     # Emitted sorted by domain (all lane 0), not by arrival order.
     assert [next(iter(r.meta.component_sample_counts)) for r in out] == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Grouped homogeneous packing (packed samples limited to one group of domains)
+# ---------------------------------------------------------------------------
+
+# Component-id -> component-name registry standing in for the engine's service.
+_ID_TO_NAME = {0: "python", 1: "java", 2: "c4", 3: "wiki"}
+_GROUPS = {"code": ["python", "java"], "web": ["c4"]}  # wiki is ungrouped
+
+
+def _pack_group(
+    max_length: int,
+    *,
+    num_bins: int | None = 8,
+    id_to_name: dict[int, str],
+    groups: dict[str, list[str]],
+    **kwargs: Any,
+) -> _MaterializingAccumulator:
+    """Build a grouped-homogeneous accumulator with a component-id registry."""
+    # num_bins is required for first/best and rejected by wrapping algorithms.
+    if num_bins is not None:
+        kwargs["num_bins"] = num_bins
+    op = PackSequences(
+        max_length=max_length,
+        homogeneity="group",
+        groups=DomainGroups(groups),
+        **kwargs,
+    )
+    name_to_id = {name: cid for cid, name in id_to_name.items()}
+    ctx = {"get_component_id": lambda name: name_to_id[name]}
+    acc = op.accumulator(deterministic=False, ctx=ctx)
+    assert isinstance(acc, PackingAccumulator)
+    return _MaterializingAccumulator(op, acc)
+
+
+def _packing_domain(rec: SampleRecord, id_to_name: dict[int, str]) -> set[str]:
+    """The set of packing-domain groups a bin drew from (should be size 1)."""
+
+    def group_of(name: str) -> str:
+        for g, members in _GROUPS.items():
+            if name in members:
+                return g
+        return name  # ungrouped singleton
+
+    return {group_of(id_to_name[cid]) for cid in rec.meta.component_sample_counts}
+
+
+def test_group_requires_groups() -> None:
+    with pytest.raises(ValueError, match="requires groups"):
+        PackSequences(max_length=4, num_bins=4, homogeneity="group")
+
+
+def test_groups_rejected_without_group_mode() -> None:
+    with pytest.raises(ValueError, match="only valid with homogeneity='group'"):
+        PackSequences(
+            max_length=4, num_bins=4, groups=DomainGroups({"code": ["python"]})
+        )
+
+
+def test_group_requires_component_id_service() -> None:
+    op = PackSequences(
+        max_length=4,
+        num_bins=4,
+        homogeneity="group",
+        groups=DomainGroups({"code": ["python"]}),
+    )
+    with pytest.raises(ValueError, match="get_component_id"):
+        op.accumulator(deterministic=False, ctx={})
+
+
+def test_group_unknown_member_rejected_at_setup() -> None:
+    # Member names resolve to ids at accumulator setup, so a misspelled member is
+    # rejected eagerly (get_component_id raises) rather than silently self-grouping.
+    op = PackSequences(
+        max_length=4,
+        num_bins=4,
+        homogeneity="group",
+        groups=DomainGroups({"code": ["python", "ghost"]}),
+    )
+
+    def get_component_id(name: str) -> int:
+        ids = {"python": 0}
+        if name not in ids:
+            raise ValueError(f"Unknown mixture component {name!r}")
+        return ids[name]
+
+    with pytest.raises(ValueError, match="Unknown mixture component 'ghost'"):
+        op.accumulator(deterministic=False, ctx={"get_component_id": get_component_id})
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
+def test_group_never_crosses_group_boundary(algorithm: str) -> None:
+    acc = _pack_group(
+        8,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        algorithm=algorithm,
+        id_to_name=_ID_TO_NAME,
+        groups=_GROUPS,
+    )
+    # Interleave code (python/java), web (c4), and ungrouped wiki. len 4 into
+    # max_length 8 -> 2 per bin, so within a domain records pair up; a lane-only
+    # key would instead pair across domains.
+    recs = [_crec(i, 4, cid) for i, cid in enumerate([0, 2, 1, 3, 2, 0, 1])]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    # Never across a group boundary...
+    assert all(len(_packing_domain(r, _ID_TO_NAME)) == 1 for r in out)
+    # ...but within-group mixing (python+java) does happen for this algorithm.
+    assert any(_bin_components(r) == {0, 1} for r in out)
+    # Ungrouped-vs-grouped singletons: web (c4) and wiki keep their own bins.
+    assert any(_bin_components(r) == {2} for r in out)
+    assert any(_bin_components(r) == {3} for r in out)
+
+
+def test_group_wrap_streams_per_group() -> None:
+    acc = _pack_group(
+        4,
+        num_bins=None,  # wrap rejects num_bins
+        algorithm="wrap",
+        drop_oversized=False,
+        id_to_name=_ID_TO_NAME,
+        groups=_GROUPS,
+    )
+    # Interleave web (c4) between the two code records: a single shared buffer
+    # would splice c4 into the code bin (crossing groups); per-group buffers keep
+    # python+java together and c4 in its own bin.
+    recs = [
+        _crec_tokens(0, [1, 2], 0),  # python (code)
+        _crec_tokens(1, [5, 6, 7, 8], 2),  # c4 (web) -> fills a web bin
+        _crec_tokens(2, [3, 4], 1),  # java (code) -> completes the code bin
+    ]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert all(len(_packing_domain(r, _ID_TO_NAME)) == 1 for r in out)
+    # The code bin mixed python+java within the group.
+    assert any(_bin_components(r) == {0, 1} for r in out)
+
+
+def test_group_name_colliding_with_component_name_does_not_merge() -> None:
+    id_to_name = {0: "c4", 1: "web"}  # cid 0 -> grouped; cid 1 -> ungrouped component
+    acc = _pack_group(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        id_to_name=id_to_name,
+        groups={"web": ["c4"]},  # group name collides with the cid-1 component name
+    )
+    out = _records(acc.push_many([_crec(0, 4, 0), _crec(1, 4, 1)])) + _records(
+        acc.flush()
+    )
+    # Two separate single-component bins; a string-key collision would merge them
+    # into one {0: 1, 1: 1} bin.
+    assert len(out) == 2
+    assert all(len(_bin_components(r)) == 1 for r in out)
+    assert sorted(_bin_components(r).pop() for r in out) == [0, 1]
+
+
+def _group_bin_key(rec: SampleRecord) -> tuple[int, str]:
+    """(lane_id, sole packing-domain group) of a single-domain group bin."""
+    doms = _packing_domain(rec, _ID_TO_NAME)
+    assert len(doms) == 1
+    return (rec.meta.lane_id, next(iter(doms)))
+
+
+def test_group_partitions_by_lane_and_group() -> None:
+    acc = _pack_group(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        id_to_name=_ID_TO_NAME,
+        groups=_GROUPS,
+    )
+    recs = [
+        _crec(0, 4, 0, lane=0),  # python (code), lane 0
+        _crec(1, 4, 1, lane=0),  # java   (code), lane 0 -> joins the lane-0 code bin
+        _crec(2, 4, 0, lane=1),  # python (code), lane 1 -> separate (different lane)
+        _crec(3, 4, 2, lane=0),  # c4     (web),  lane 0 -> separate (different group)
+    ]
+    out = _records(acc.push_many(recs)) + _records(acc.flush())
+    assert all(len(_packing_domain(r, _ID_TO_NAME)) == 1 for r in out)
+    # Three bins: lane-0 code (python+java mixed), lane-1 code, lane-0 web.
+    assert sorted(_group_bin_key(r) for r in out) == [
+        (0, "code"),
+        (0, "web"),
+        (1, "code"),
+    ]
+    # The lane-0 code bin mixed both components; lane-1 code did NOT merge into it
+    # (a lane collision would instead yield one code bin with {0: 2, 1: 1}).
+    lane0_code = next(r for r in out if _group_bin_key(r) == (0, "code"))
+    assert _bin_components(lane0_code) == {0, 1}
+
+
+def test_group_num_bins_is_per_group() -> None:
+    acc = _pack_group(
+        10,
+        num_bins=1,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        algorithm="first_fit",
+        id_to_name=_ID_TO_NAME,
+        groups=_GROUPS,
+    )
+    # python (code) and c4 (web): different groups, both partial -> no eviction.
+    ready = acc.push_many([_crec(0, 4, 0), _crec(2, 4, 2)])
+    assert ready == []
+    out = _records(acc.flush())
+    assert sorted(_group_bin_key(r) for r in out) == [(0, "code"), (0, "web")]
+
+
+def test_group_flush_order_is_deterministic() -> None:
+    """Flush order is fixed by the sorted keys, independent of arrival order."""
+    acc = _pack_group(
+        10,
+        num_bins=8,
+        length_fn=_simple_length_fn,
+        drop_oversized=False,
+        id_to_name=_ID_TO_NAME,
+        groups=_GROUPS,
+    )
+    # Arrive as web, wiki, code; each partial bin buffers until flush.
+    ready = acc.push_many([_crec(0, 4, 2), _crec(1, 4, 3), _crec(2, 4, 0)])
+    assert ready == []
+    out = _records(acc.flush())
+    # Sorted by tagged key: ("component", 3=wiki) < ("group", "code") < ("group", "web").
+    assert [next(iter(_packing_domain(r, _ID_TO_NAME))) for r in out] == [
+        "wiki",
+        "code",
+        "web",
+    ]

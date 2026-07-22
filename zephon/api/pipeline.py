@@ -7,7 +7,7 @@ import functools
 import importlib.util as _importlib_util
 import os
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -50,6 +50,7 @@ from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.ops import (
     Batch,
     DecodeText,
+    DomainGroups,
     EnsureMixture,
     FetchOp,
     MapBatchTransform,
@@ -1094,6 +1095,44 @@ class Pipeline:
         self._tail = node
         return self
 
+    def _resolve_pack_groups(
+        self,
+        homogeneity: Literal["none", "group", "full"],
+        groups: DomainGroups | Mapping[str, Sequence[str]] | None,
+    ) -> DomainGroups | None:
+        """Coerce/validate the packing ``groups`` argument.
+
+        Rejects a homogeneity/groups mismatch, requires groups in group mode, and
+        validates members against the source's component vocabulary — the same
+        names packing resolves records to at runtime.
+        """
+        if groups is not None and homogeneity != "group":
+            raise ValueError(
+                f"groups is only valid with homogeneity='group', not {homogeneity!r}."
+            )
+        if groups is None:
+            if homogeneity == "group":
+                raise ValueError(
+                    "homogeneity='group' requires groups (pass groups=...)."
+                )
+            return None
+        spec = groups if isinstance(groups, DomainGroups) else DomainGroups(groups)
+        # component_ids() is the vocabulary packing resolves members against at
+        # runtime; ``dataset_ids`` is a StaticMixture-only property.
+        components = self.ws.component_ids()
+        spec.validate_against(components)
+        # Ungrouped components pack as their own singleton domains by design;
+        # warn so an accidentally-omitted member isn't silently self-grouped.
+        ungrouped = sorted(set(components) - set(spec.to_member_map()))
+        if ungrouped:
+            warnings.warn(
+                f"homogeneity='group': components {ungrouped} are in no group and "
+                "will pack as their own singleton domains; add them to a group if "
+                "that was unintended.",
+                stacklevel=4,  # warn -> _resolve_pack_groups -> pack_* -> @_mutates_graph -> caller
+            )
+        return spec
+
     @_mutates_graph
     def pack_sequences(
         self,
@@ -1111,7 +1150,8 @@ class Pipeline:
         pack_payloads: str | Callable[[list[Any]], Any] = "keep_list",
         candidate_pool_size: int | None = None,
         max_candidate_age: int | None = None,
-        homogeneity: Literal["none", "full"] = "none",
+        homogeneity: Literal["none", "group", "full"] = "none",
+        groups: DomainGroups | Mapping[str, Sequence[str]] | None = None,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -1157,8 +1197,14 @@ class Pipeline:
                 still-buffered record is force-placed. Defaults to
                 ``8 * candidate_pool_size``.
             homogeneity: If ``"full"``, each packed sample stays within a single
-                mixing domain (mixture component); ``"none"`` (default) mixes
+                mixing domain (mixture component); ``"group"`` keeps it within a
+                single ``groups`` group of domains; ``"none"`` (default) mixes
                 freely. See :meth:`PackSequences.__init__`.
+            groups: Required for ``homogeneity="group"`` — a
+                :class:`zephon.ops.DomainGroups` or ``{group: [component, ...]}``
+                mapping naming which mixing domains may share a packed sample.
+                Members are mixture-component names (the source's
+                ``component_ids``), validated against them at build time.
             placement: Placement strategy for this operator.
             parallelism: Worker count for materializing packed-bin payloads.
                 Bin assignment remains serial, so output is unchanged.
@@ -1179,6 +1225,7 @@ class Pipeline:
             candidate_pool_size=candidate_pool_size,
             max_candidate_age=max_candidate_age,
             homogeneity=homogeneity,
+            groups=self._resolve_pack_groups(homogeneity, groups),
         )
         node = self._graph.add(
             "pack_sequences",
@@ -1207,7 +1254,8 @@ class Pipeline:
         flush_strategy: Literal["fifo", "fullest"] = "fifo",
         candidate_pool_size: int | None = None,
         max_candidate_age: int | None = None,
-        homogeneity: Literal["none", "full"] = "none",
+        homogeneity: Literal["none", "group", "full"] = "none",
+        groups: DomainGroups | Mapping[str, Sequence[str]] | None = None,
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -1255,8 +1303,14 @@ class Pipeline:
                 still-buffered record is force-placed. Defaults to
                 ``8 * candidate_pool_size``.
             homogeneity: If ``"full"``, each packed sample stays within a single
-                mixing domain (mixture component); ``"none"`` (default) mixes
+                mixing domain (mixture component); ``"group"`` keeps it within a
+                single ``groups`` group of domains; ``"none"`` (default) mixes
                 freely. See :meth:`PackSequences.__init__`.
+            groups: Required for ``homogeneity="group"`` — a
+                :class:`zephon.ops.DomainGroups` or ``{group: [component, ...]}``
+                mapping naming which mixing domains may share a packed sample.
+                Members are mixture-component names (the source's
+                ``component_ids``), validated against them at build time.
             placement: Placement strategy for this operator.
             parallelism: Worker count for materializing packed-bin payloads.
                 Bin assignment remains serial, so output is unchanged.
@@ -1277,6 +1331,7 @@ class Pipeline:
             candidate_pool_size=candidate_pool_size,
             max_candidate_age=max_candidate_age,
             homogeneity=homogeneity,
+            groups=self._resolve_pack_groups(homogeneity, groups),
         )
         node = self._graph.add(
             "pack_flat", op, self._tail, placement=placement, parallelism=parallelism

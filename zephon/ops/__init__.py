@@ -8,6 +8,7 @@ from zephon.ops.batch import Batch
 from zephon.ops.decode_text import DecodeText
 from zephon.ops.ensure_mixture import EnsureMixture
 from zephon.ops.fetch import FetchOp
+from zephon.ops.grouping import DomainGroups
 from zephon.ops.map_transform import MapBatchTransform, MapTransform
 from zephon.ops.materialize import Materialize
 from zephon.ops.pack_sequences import PackingAlgorithm, PackSequences
@@ -21,6 +22,7 @@ __all__ = [
     "AssertLineageOrder",
     "Batch",
     "DecodeText",
+    "DomainGroups",
     "EnsureMixture",
     "FetchOp",
     "MapBatchTransform",

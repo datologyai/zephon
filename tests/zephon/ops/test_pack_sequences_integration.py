@@ -884,6 +884,125 @@ def test_pack_homogeneous_none_end_to_end_mixes() -> None:
     assert any(len(rec.meta.component_sample_counts) == 2 for rec in records)
 
 
+def test_group_unknown_component_name_raises_at_build() -> None:
+    pipeline = Pipeline(_multi_component_work())  # datasets "a", "b"
+    with pytest.raises(ValueError, match="not in the mixture"):
+        pipeline.pack_flat(
+            max_length=10,
+            num_bins=8,
+            pad_token_id=0,
+            homogeneity="group",
+            groups={"g": ["a", "nope"]},  # "nope" is not a dataset in the mixture
+            drop_oversized=False,
+        )
+
+
+def test_group_mode_mismatch_reports_precise_error() -> None:
+    pipeline = Pipeline(_multi_component_work())
+    with pytest.raises(ValueError, match="only valid with homogeneity='group'"):
+        pipeline.pack_flat(
+            max_length=10,
+            num_bins=8,
+            pad_token_id=0,
+            homogeneity="full",
+            groups={"g": ["typo"]},  # bogus member must not mask the mode error
+            drop_oversized=False,
+        )
+
+
+def test_group_two_groups_mapping_rejected_by_pipeline() -> None:
+    pipeline = Pipeline(_multi_component_work())
+    with pytest.raises(ValueError, match="multiple groups"):
+        pipeline.pack_flat(
+            max_length=10,
+            num_bins=8,
+            pad_token_id=0,
+            homogeneity="group",
+            groups={"g1": ["a"], "g2": ["a"]},  # "a" in two groups
+            drop_oversized=False,
+        )
+
+
+def test_group_mode_without_groups_raises_at_build() -> None:
+    pipeline = Pipeline(_multi_component_work())
+    with pytest.raises(ValueError, match="requires groups"):
+        pipeline.pack_flat(
+            max_length=10,
+            num_bins=8,
+            pad_token_id=0,
+            homogeneity="group",
+            drop_oversized=False,
+        )
+
+
+def test_group_incomplete_grouping_warns_at_build() -> None:
+    pipeline = Pipeline(_multi_component_work())  # components "a", "b"
+    with pytest.warns(UserWarning, match="in no group"):
+        pipeline.pack_flat(
+            max_length=10,
+            num_bins=8,
+            pad_token_id=0,
+            homogeneity="group",
+            groups={"g": ["a"]},  # "b" omitted -> silent singleton without the warning
+            drop_oversized=False,
+        )
+
+
+def _grouped_component_work() -> StaticMixtureWorkSource:
+    """Three datasets with disjoint token ranges (a->1xx, b->2xx, c->3xx) so a
+    bin's datasets are readable from its tokens."""
+    a = _mk_token_dataset("a", [[100, 101, 102]] * 8)
+    b = _mk_token_dataset("b", [[200, 201, 202]] * 8)
+    c = _mk_token_dataset("c", [[300, 301, 302]] * 8)
+    return StaticMixtureWorkSource(
+        [a, b, c],
+        {"a": 1.0, "b": 1.0, "c": 1.0},
+        chunk_size=6,
+        seed=13,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+
+@pytest.mark.parametrize("runner_kind", ["inline", "threads", "process"])
+def test_pack_homogeneous_group_end_to_end(runner_kind: str) -> None:
+    """End-to-end: each packed sample stays within one group, with real
+    ``get_component_id`` resolution. Parametrized over runners so the process
+    path exercises cloudpickling the op's ``DomainGroups``; per-algorithm group
+    packing is covered by the unit tests."""
+    pipeline = Pipeline(_grouped_component_work())
+    pipeline.pack_flat(
+        max_length=12,
+        num_bins=8,
+        pad_token_id=0,
+        algorithm="first_fit",
+        homogeneity="group",
+        groups={"code": ["a", "b"]},  # c is ungrouped -> its own singleton domain
+        drop_oversized=False,
+    )
+    pipeline.options(
+        deterministic=True,
+        max_workers=1,
+        default_stage_prefetch=16,
+        runner=runner_kind,
+    )
+
+    def bin_datasets(rec: SampleRecord) -> set[int]:
+        ids = rec.payload["input_ids"]
+        ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+        # token // 100: 1=a, 2=b (both in group "code"), 3=c (ungrouped). Pad is 0.
+        return {int(t) // 100 for t in ids if t != 0}
+
+    per_bin = [bin_datasets(r) for r in pipeline]
+    assert per_bin
+    # No bin crosses the group boundary: within {a,b} OR c-only.
+    assert all(cs <= {1, 2} or cs <= {3} for cs in per_bin)
+    # Grouping widens beyond fully-homogeneous: some bin mixes a and b.
+    assert any(cs == {1, 2} for cs in per_bin)
+    # All three datasets reached packing, so the constraint is non-trivial.
+    assert set().union(*per_bin) == {1, 2, 3}
+
+
 # ---------------------------------------------------------------------------
 # Parallel materialization
 # ---------------------------------------------------------------------------

@@ -34,7 +34,19 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import chain
 from operator import attrgetter
-from typing import Any, Literal, Optional, Protocol, Sequence, TypeAlias, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    TypeAlias,
+    get_args,
+)
+
+if TYPE_CHECKING:
+    from zephon.ops.grouping import DomainGroups
 
 import numpy as _np
 
@@ -95,9 +107,8 @@ def _integer_apportion_tokens(length: int, weights: dict[int, int]) -> dict[int,
 # Homogeneous packing (per-mixing-domain packing state)
 # ----------------------------------------------------------------------
 
-# A packing group: (lane_id, domain). ``domain`` is ``None`` for mixed packing
-# (one group per lane) and the record's mixing-domain key when homogeneous
-# packing partitions a lane.
+# Packing group key. ``domain`` is ``None`` (mixed), a component id (``"full"``),
+# or a ``("group", name)`` / ``("component", id)`` tuple (``"group"``).
 PackKey = tuple[LaneId, Any]
 
 
@@ -111,20 +122,11 @@ def _component_domain(record: SampleRecord) -> ComponentId:
         (domain,) = counts
     except ValueError:
         raise ValueError(
-            "homogeneity='full' packing requires single-component records, but got "
-            f"one with components {sorted(counts)}. Place packing before any "
-            "operator that merges components."
+            "homogeneous packing requires single-component records, but got one "
+            f"with components {sorted(counts)}. Place packing before any operator "
+            "that merges components."
         ) from None
     return domain
-
-
-def _make_pack_key(
-    domain_fn: Callable[[SampleRecord], Any] | None,
-) -> Callable[[SampleRecord], PackKey]:
-    """Record group key: ``(lane, None)`` when mixing, else ``(lane, domain)``."""
-    if domain_fn is None:
-        return lambda elem: (elem.meta.lane_id, None)
-    return lambda elem: (elem.meta.lane_id, domain_fn(elem))
 
 
 # ----------------------------------------------------------------------
@@ -678,7 +680,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         self._serializer = serializer
         self.wrap_field = wrap_field
         self.candidate_pool_size = candidate_pool_size
-        self._pack_key = _make_pack_key(domain_fn)
+        self._domain_fn = domain_fn
 
         # Oversized records dropped by first/best (can't split). Tombstones are
         # emitted at drop time; this only feeds the flush-time summary warning.
@@ -721,7 +723,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
     def _sorted_keys(keys: Iterable[PackKey]) -> list[PackKey]:
         """Deterministic key order (set iteration is layout-dependent).
 
-        Domains are uniformly ``None`` or valued, so plain tuple sort is safe.
+        A key is ``(lane_id, domain)``. Within one accumulator the domain is
+        uniformly ``None``, a component id, or a ``(tag, name_or_id)`` tuple whose
+        ``tag`` string sorts first — so a plain sort never compares mixed types.
         """
         return sorted(keys)
 
@@ -773,7 +777,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         ready: list[ReadyBatch[SampleRecord]] = []
 
         for elem in work_list:
-            key = self._pack_key(elem)
+            domain = None if self._domain_fn is None else self._domain_fn(elem)
+            key = (elem.meta.lane_id, domain)
 
             # The wrap algorithm streams tokens through a per-group buffer and
             # slices into bins of exactly ``max_length``; oversized inputs
@@ -1338,7 +1343,8 @@ class PackSequences(DefaultSetup):
         pad_token_id: int | None = None,
         candidate_pool_size: int | None = None,
         max_candidate_age: int | None = None,
-        homogeneity: Literal["none", "full"] = "none",
+        homogeneity: Literal["none", "group", "full"] = "none",
+        groups: DomainGroups | None = None,
     ) -> None:
         """Initialize the PackSequences operator.
 
@@ -1401,17 +1407,19 @@ class PackSequences(DefaultSetup):
             max_candidate_age: best_fit_wrap only — candidate arrivals before a
                 still-buffered record is force-placed at the next bin's start.
                 Defaults to ``8 * candidate_pool_size``.
-            homogeneity: If ``"full"``, no packed sample combines records from
-                different mixing domains (mixture components); needs
-                single-component records, so place packing before any op that
-                merges components. ``"none"`` (default) mixes freely. Packing
-                keeps per-domain state, so size ``num_bins`` for the domain count.
-
-                With a slicing algorithm, a split document is counted once, on
-                its closing bin, so interior bins may carry empty
-                ``component_sample_counts``; attribute domains by
-                ``component_token_counts`` instead (e.g. a downstream
+            homogeneity: What a packed sample may mix. ``"none"`` (default) mixes
+                mixing domains (mixture components) freely; ``"full"`` keeps each
+                to a single domain; ``"group"`` keeps it to one ``groups`` group
+                (ungrouped components are singletons). Homogeneous modes need
+                single-component records (place packing before any op that merges
+                components); state is per-domain, so size ``num_bins`` accordingly.
+                With a slicing algorithm a split document is counted once (on its
+                closing bin), so interior bins have empty ``component_sample_counts``
+                — attribute domains via ``component_token_counts`` (e.g.
                 ``ensure_mixture(weight="tokens")``).
+            groups: Required for ``homogeneity="group"`` — a
+                :class:`zephon.ops.DomainGroups` naming which mixing domains may
+                share a packed sample.
         """
         DefaultSetup.__init__(self)
 
@@ -1432,9 +1440,19 @@ class PackSequences(DefaultSetup):
             raise ValueError("num_bins must be positive")
         if output not in ("envelope", "flat"):
             raise ValueError(f"Unknown output: {output!r}")
-        if homogeneity not in ("none", "full"):
+        if homogeneity not in ("none", "group", "full"):
             raise ValueError(
-                f"Unknown homogeneity: {homogeneity!r} (expected 'none' or 'full')"
+                f"Unknown homogeneity: {homogeneity!r} "
+                "(expected 'none', 'group', or 'full')"
+            )
+        if homogeneity == "group":
+            if groups is None:
+                raise ValueError(
+                    "homogeneity='group' requires groups (pass groups=...)."
+                )
+        elif groups is not None:
+            raise ValueError(
+                f"groups is only valid with homogeneity='group', not {homogeneity!r}."
             )
         if length_fn is not None and not callable(length_fn):
             raise ValueError(
@@ -1519,12 +1537,9 @@ class PackSequences(DefaultSetup):
         )
         self.max_candidate_age = max_candidate_age
         self.homogeneity = homogeneity
-
-        # ``"full"`` keys packing state on the record's sole component so a packed
-        # sample never spans domains; ``"none"`` (no domain_fn) mixes freely.
-        self._domain_fn: Callable[[SampleRecord], Any] | None = (
-            _component_domain if homogeneity == "full" else None
-        )
+        # Built lazily in ``accumulator`` because ``"group"`` needs the runtime
+        # ``get_component_id`` ctx service to resolve member names to ids.
+        self._groups = groups
 
         # Resolve the length function. tokens_field identifies the field (for
         # wrap slicing and flat concatenation); length_fn only measures.
@@ -1561,6 +1576,37 @@ class PackSequences(DefaultSetup):
             )
         return _EnvelopeSerializer(self._pack_payloads_fn)
 
+    def _build_domain_fn(
+        self, ctx: dict[str, Any]
+    ) -> Callable[[SampleRecord], Any] | None:
+        """Per-record domain function (``None`` for heterogeneous packing)."""
+        if self.homogeneity == "none":
+            return None
+        if self.homogeneity == "full":
+            return _component_domain
+        assert self._groups is not None  # __init__ requires groups in group mode
+        get_component_id = ctx.get("get_component_id")
+        if get_component_id is None:
+            raise ValueError(
+                "homogeneity='group' packing requires the runtime "
+                "'get_component_id' service in the operator context to resolve "
+                "group members to component ids."
+            )
+        # Resolve member names to ids once at setup: keeps the hot path a plain id
+        # lookup, and get_component_id rejects an unknown member eagerly here.
+        component_to_group = {
+            get_component_id(name): group
+            for name, group in self._groups.to_member_map().items()
+        }
+
+        def group_domain(record: SampleRecord) -> tuple[str, str | int]:
+            cid = _component_domain(record)
+            group = component_to_group.get(cid)
+            # Tag ungrouped components with their id so a group name can't collide.
+            return ("group", group) if group is not None else ("component", cid)
+
+        return group_domain
+
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[SampleRecord]:
@@ -1586,7 +1632,7 @@ class PackSequences(DefaultSetup):
             wrap_field=self._wrap_field,
             candidate_pool_size=self.candidate_pool_size,
             buffered_wrap_state_factory=buffered_wrap_state_factory,
-            domain_fn=self._domain_fn,
+            domain_fn=self._build_domain_fn(ctx),
         )
 
     def _resolve_pack_payloads_fn(
