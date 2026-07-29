@@ -58,6 +58,7 @@ from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
 from zephon.options import RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SamplePayload, SampleRecord, StreamItem
+from zephon.validation import ValidationError, preflight_tokenizers
 from zephon.work import WorkSource
 from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 
@@ -1588,6 +1589,25 @@ class Pipeline:
         report = _validate_pipeline(self)
         if strict and not report.ok:
             raise _ValidationError(report)
+        return report
+
+    def preflight_tokenizers(self, *, strict: bool = True) -> "ValidationReport":
+        """Load and validate every tokenizer configured on the pipeline.
+
+        Each tokenizer operator is probed through a deep copy, leaving the
+        pipeline's operator state unchanged. This may download tokenizer files.
+
+        Args:
+            strict: If True, raise :class:`ValidationError` when any tokenizer
+                fails to initialize.
+
+        Returns:
+            A :class:`ValidationReport` containing one
+            ``TOKENIZER_PREFLIGHT_FAILED`` error per failure.
+        """
+        report = preflight_tokenizers(self)
+        if strict and not report.ok:
+            raise ValidationError(report)
         return report
 
     def _run_auto_validation(self) -> None:

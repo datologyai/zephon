@@ -20,6 +20,7 @@ from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.validation import (
     ValidationError,
     ValidationReport,
+    preflight_tokenizers,
 )
 
 
@@ -1603,3 +1604,146 @@ def test_accumulator_probes_use_user_supplied_validation_samples() -> None:
     assert "ACC_PUSH_OR_FLUSH_RAISED" not in codes
     assert "OP_REJECTS_GENERIC_PAYLOAD" not in codes
     assert report.ok, report.format()
+
+
+class _FastTok:
+    name_or_path = "fake-model"
+    is_fast = True
+    pad_token = None
+    eos_token = "</s>"
+    eos_token_id = 0
+
+    def __call__(self, texts: list[str], **kwargs: Any) -> dict[str, Any]:
+        return {
+            "input_ids": [[1, 2] for _ in texts],
+            "attention_mask": [[1, 1] for _ in texts],
+        }
+
+
+class _NoBosTok(_FastTok):
+    bos_token_id = None
+
+
+def _tokenize_ops(pipe: PublicPipeline) -> list[Any]:
+    from zephon._internal.ops.tokenize_base import TokenizeBase
+
+    return [n.op for n in pipe._graph.nodes if isinstance(n.op, TokenizeBase)]
+
+
+def test_preflight_no_tokenize_ops_returns_empty_report() -> None:
+    report = preflight_tokenizers(_empty_pipeline().decode_text())
+    assert report.ok
+    assert report.issues == []
+
+
+def test_preflight_bad_tokenizer_reports_error_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no repo named 'definitely-not-a-model'")
+
+    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    pipe = _empty_pipeline().tokenize(
+        tokenizer_id="definitely-not-a-model",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+
+    report = preflight_tokenizers(pipe)
+    assert not report.ok
+    (issue,) = report.issues
+    assert issue.severity == "error"
+    assert issue.code == "TOKENIZER_PREFLIGHT_FAILED"
+    assert "definitely-not-a-model" in issue.message
+    assert "no repo" in issue.message
+
+
+def test_preflight_uncopyable_op_becomes_issue_not_crash() -> None:
+    class _Uncopyable:
+        def __deepcopy__(self, memo: dict[int, Any]) -> "_Uncopyable":
+            raise TypeError("cannot deepcopy this tokenizer")
+
+        name_or_path = "uncopyable"
+
+    pipe = _empty_pipeline().tokenize(
+        tokenizer=_Uncopyable(),
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+    report = preflight_tokenizers(pipe)
+    (issue,) = report.issues
+    assert issue.code == "TOKENIZER_PREFLIGHT_FAILED"
+    assert "cannot deepcopy" in issue.message
+    assert "uncopyable" in issue.message
+
+
+def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loads: list[str | None] = []
+
+    def _fake_load(tokenizer_id: str | None, **kwargs: Any) -> Any:
+        loads.append(tokenizer_id)
+        return _FastTok()
+
+    monkeypatch.setattr(
+        "zephon._internal.ops.tokenize_base.load_hf_tokenizer", _fake_load
+    )
+    pipe = _empty_pipeline().tokenize(
+        tokenizer_id="fake-model",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+
+    report = preflight_tokenizers(pipe)
+    assert report.ok, report.format()
+    assert loads == ["fake-model"]
+
+    # Preflight must not load or cache state on the pipeline-owned operator.
+    (op,) = _tokenize_ops(pipe)
+    assert op.tok is None
+    assert op._tokenizer_instantiated is False
+    assert op._setup_error is None
+
+
+def test_preflight_finalize_failure_is_not_cached_on_pipeline_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Finalization failures are cached, unlike loader failures.
+    monkeypatch.setattr(
+        "zephon._internal.ops.tokenize_base.load_hf_tokenizer",
+        lambda *a, **k: _NoBosTok(),
+    )
+    pipe = _empty_pipeline().tokenize(tokenizer_id="fake-model", field="text")
+
+    report = preflight_tokenizers(pipe)
+    (issue,) = report.issues
+    assert issue.code == "TOKENIZER_PREFLIGHT_FAILED"
+    assert "BOS" in issue.message
+
+    (op,) = _tokenize_ops(pipe)
+    assert op._setup_error is None
+    assert op._tokenizer_instantiated is False
+
+
+def test_preflight_aggregates_issues_in_graph_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("down")
+
+    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    pipe = (
+        _empty_pipeline()
+        .tokenize(
+            tokenizer_id="text-model",
+            field="text",
+            special_tokens="tokenizer_default",
+        )
+        .tokenize_chat(tokenizer_id="chat-model")
+    )
+
+    report = preflight_tokenizers(pipe)
+    assert [i.code for i in report.issues] == ["TOKENIZER_PREFLIGHT_FAILED"] * 2
+    assert "text-model" in report.issues[0].message
+    assert "chat-model" in report.issues[1].message

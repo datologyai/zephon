@@ -35,6 +35,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from zephon._internal.ops.tokenize_base import TokenizeBase
 from zephon.ops.accumulators import Accumulator
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 _DOC_LINK = (
     "https://datologyai.github.io/zephon/understanding/accumulators_operators.html"
 )
+_PREFLIGHT_DOC_LINK = "https://datologyai.github.io/zephon/api/zephon_api.html"
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,7 @@ class ValidationReport:
     def format(self) -> str:
         """Human-readable multi-line summary suitable for raising."""
         if not self.issues:
-            return "ValidationReport: ok (no user ops to validate or all checks passed)"
+            return "ValidationReport: ok (nothing to check or all checks passed)"
         lines = [
             f"ValidationReport: {len(self.errors)} error(s), {len(self.warnings)} warning(s)"
         ]
@@ -95,7 +97,11 @@ class ValidationReport:
 
 
 class ValidationError(RuntimeError):
-    """Raised when ``Pipeline.validate(strict=True)`` finds at least one error."""
+    """Raised when a strict-mode validation entry point finds at least one error.
+
+    Raisers: ``Pipeline.validate(strict=True)``, strict auto-validation, and
+    ``Pipeline.preflight_tokenizers(strict=True)``.
+    """
 
     def __init__(self, report: ValidationReport) -> None:
         super().__init__(report.format())
@@ -1597,6 +1603,40 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
                     name,
                     "acc-flush-lane-scoped",
                     lambda: _check_acc_flush_is_lane_scoped(factory, name, samples),
+                )
+            )
+    return report
+
+
+def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
+    """Return tokenizer initialization failures for a pipeline.
+
+    Each tokenizer operator is deep-copied before its lazy initialization runs,
+    leaving pipeline-owned operators unchanged. This may download tokenizer
+    files.
+
+    Args:
+        pipeline: Pipeline to inspect.
+
+    Returns:
+        A :class:`ValidationReport` containing one
+        ``TOKENIZER_PREFLIGHT_FAILED`` error per failure.
+    """
+    report = ValidationReport()
+    for index, op in pipeline._iter_ops(TokenizeBase):
+        op_name = pipeline._graph.nodes[index].name
+        tokenizer_id = op.configured_tokenizer_id()
+        try:
+            probe = copy.deepcopy(op)
+            probe._setup_tokenizer()
+        except Exception as exc:
+            report.issues.append(
+                Issue(
+                    severity="error",
+                    code="TOKENIZER_PREFLIGHT_FAILED",
+                    op_name=op_name,
+                    message=f"tokenizer setup failed for {tokenizer_id!r}: {exc}",
+                    doc_link=_PREFLIGHT_DOC_LINK,
                 )
             )
     return report

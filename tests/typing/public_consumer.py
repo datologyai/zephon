@@ -45,6 +45,10 @@ def report(pipe: Pipeline) -> ValidationReport:
     return pipe.validate()
 
 
+def preflight(pipe: Pipeline) -> ValidationReport:
+    return pipe.preflight_tokenizers(strict=False)
+
+
 def make_index(dataset_dir: str) -> str:
     return str(build_index("parquet", dataset_dir))
 

@@ -659,3 +659,40 @@ def test_legacy_shuffle_pack_v2_pattern_via_kwargs_add_op() -> None:
         f"expected at least one full window of size {window_size}, "
         f"got invocation sizes {invocation_sizes}"
     )
+
+
+def test_preflight_tokenizers_strict_default_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zephon.validation import ValidationError
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("unreachable hub")
+
+    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    pipe = _empty_pipeline().tokenize(
+        tokenizer_id="unreachable",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+
+    with pytest.raises(ValidationError, match="TOKENIZER_PREFLIGHT_FAILED"):
+        pipe.preflight_tokenizers()
+
+
+def test_preflight_tokenizers_lenient_returns_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("unreachable hub")
+
+    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    pipe = _empty_pipeline().tokenize(
+        tokenizer_id="unreachable",
+        field="text",
+        special_tokens="tokenizer_default",
+    )
+
+    report = pipe.preflight_tokenizers(strict=False)
+    assert not report.ok
+    assert report.issues[0].code == "TOKENIZER_PREFLIGHT_FAILED"
