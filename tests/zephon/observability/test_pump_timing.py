@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from zephon.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import (
     PumpTimingDelta,
@@ -95,32 +94,3 @@ def test_summary_clone_is_independent() -> None:
     # The clone should not reflect the post-clone apply.
     rec = clone.to_records()[0]
     assert rec["input_wait_ns"] == 1_000
-
-
-def test_collector_records_pump_timing() -> None:
-    config = CollectorConfig(
-        tracking_mode=ExecutionTrackingMode.NODES,
-        sink=None,
-        report_interval_s=5.0,
-        plan_id="plan-1",
-    )
-    collector = PipelineCollector(config)
-    collector.record_pump_timing(_delta())
-    collector.record_pump_timing(_delta(input_wait_ns=42))
-    snapshot = collector.snapshot_pump_timing()
-    rec = snapshot.to_records()[0]
-    assert rec["input_wait_ns"] == 1_042
-    assert rec["plan_id"] == "plan-1"
-
-
-def test_collector_pump_timing_no_op_when_tracking_off() -> None:
-    config = CollectorConfig(
-        tracking_mode=ExecutionTrackingMode.OFF,
-        sink=None,
-        report_interval_s=5.0,
-        plan_id=None,
-    )
-    collector = PipelineCollector(config)
-    collector.record_pump_timing(_delta())
-    snapshot = collector.snapshot_pump_timing()
-    assert snapshot.to_records() == []

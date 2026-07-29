@@ -384,7 +384,7 @@ def test_workchunk_state_dict_preserves_none_seed():
 def test_workchunk_state_dict_uses_typed_schema_version():
     """state_dict always writes the current schema version: a plain chunk
     carries ``target_mixture: None``, a stamped chunk carries the target."""
-    from zephon.core.checkpoint import WORK_CHUNK_VERSION
+    from zephon._internal.checkpoint import WORK_CHUNK_VERSION
 
     chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=1)
     state = chunk.state_dict()

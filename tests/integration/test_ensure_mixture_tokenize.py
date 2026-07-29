@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from zephon.api import Pipeline
-from zephon.core.constants import SampleRecord
+from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleRecord
 from zephon.work.base import WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 

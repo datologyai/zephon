@@ -52,7 +52,7 @@ Zephon pipelines have three main components:
 Here's a minimal example using in-memory data:
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -137,7 +137,7 @@ Done! You processed 3 samples in 2 batch(es).
 For real workloads, you'll typically read from files. Here's an example with JSONL:
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

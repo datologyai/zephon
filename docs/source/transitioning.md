@@ -33,7 +33,7 @@ Zephon takes a **stream-processing** approach to data loading.  Data flows
 through an operator graph where each step can independently transform,
 filter, split, or merge samples.  The "what to train on" question (the
 {py:class}`~zephon.work.WorkSource`) is decoupled from the "how to
-process it" question (the {py:class}`~zephon.api.Pipeline`'s operator
+process it" question (the {py:class}`~zephon.Pipeline`'s operator
 chain).  This separation makes it natural to support dynamic, N:M
 processing patterns, while preserving the ideas that Streaming got right:
 high throughput reads from cloud storage, deterministic shuffling, and elastic resumption
@@ -153,7 +153,7 @@ things across the two systems:
 
 When Streaming says "4 workers per rank," it means 4 complete pipeline
 clones running in parallel.  When Zephon's
-{py:meth}`~zephon.api.Pipeline.explain` output shows `fetch@p4`, it means
+{py:meth}`~zephon.Pipeline.explain` output shows `fetch@p4`, it means
 the fetch operator specifically has 4 concurrent executors inside its
 stage. Other operators in the same or different stages may have
 different parallelism.  Zephon does not use the term "worker" in its
@@ -197,7 +197,7 @@ interleaving (unlike Streaming's canonical-node partition ---
 see the [example below](#example-hidden-cross-shard-interleaving)).
 
 Additionally, Zephon supports **in-pipeline shuffling** via
-{py:meth}`Pipeline.shuffle() <zephon.api.Pipeline.shuffle>`, a
+{py:meth}`Pipeline.shuffle() <zephon.Pipeline.shuffle>`, a
 deterministic buffer-based shuffle that can be placed anywhere in the
 operator chain.  This matters after operators that change sample
 boundaries: for instance, after tokenization splits long documents into

@@ -9,7 +9,7 @@ from tests.integration.test_elastic_continuation import (
     consume_until,
     make_dataset,
 )
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

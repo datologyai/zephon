@@ -98,7 +98,7 @@ On `load_state_dict()`:
   - A single packed record may close multiple offsets across chunks; the engine will evict chunks once all offsets are closed.
   - Example (see `PackSequences._create_packed_record` for the canonical implementation):
     ```python
-    from zephon.core.children import pack_meta
+    from zephon.ops.children import pack_meta
     contributors = []
     for sample in samples:
         contributors.extend(sample.meta.contribution_refs())

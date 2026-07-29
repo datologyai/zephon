@@ -9,14 +9,14 @@ from pathlib import Path
 
 import numpy as np
 
-from zephon.io.catalog import DatasetHeader, ShardCatalogHandle
-from zephon.io.formats import ensure_builtin_formats
-from zephon.io.formats.base import FormatHandler, get_format
-from zephon.io.index import find_and_load_index
-from zephon.io.index.index_types import IndexData
+from zephon._internal.io.catalog import DatasetHeader, ShardCatalogHandle
+from zephon._internal.io.formats import ensure_builtin_formats
+from zephon._internal.io.formats.base import FormatHandler, get_format
+from zephon._internal.io.index import find_and_load_index
+from zephon._internal.io.index.index_types import IndexData
+from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
 from zephon.io.memory import InMemoryShard
-from zephon.io.protocols import RandomAccessShard
-from zephon.io.storage import RouterStorageBackend, StorageBackend
 
 
 @dataclass(frozen=True)
@@ -28,8 +28,10 @@ class Dataset:
     - ``name``: a user-facing identifier used in mixtures
     - ``backend``: opaque metadata that lets FetchOp build a reader later
     - ``path``: original filesystem path if file-backed, otherwise ``None``
-    - ``catalog_handle``: the few-KB handle to the node-local shard catalog
-      (file-backed datasets only); this is what travels in ctx, not ``shard_meta``.
+
+    File-backed datasets also carry a few-KB handle to the node-local shard
+    catalog (set by ``from_path``); this is what travels in ctx, not
+    ``shard_meta``.
 
     Shard counts are not stored as a mapping; read them via :meth:`ids` /
     :meth:`counts` / :meth:`total` / :meth:`max_count` / :meth:`shard_count`.
@@ -46,7 +48,11 @@ class Dataset:
     name: str
     backend: Mapping[str, object]
     path: str | None = None
-    catalog_handle: ShardCatalogHandle | None = field(default=None, compare=False)
+    # Node-local shard-catalog handle (file-backed datasets only); set by
+    # from_path(), not a constructor argument.
+    _catalog_handle: ShardCatalogHandle | None = field(
+        default=None, compare=False, init=False
+    )
     # _ids/_counts are constructor-seeded discovery output, not a cache: at
     # planning time the catalog doesn't exist yet (preflight builds it once per
     # node, later), so they are the only copy the driver can read. Pickling
@@ -65,16 +71,16 @@ class Dataset:
         """Return the sorted shard ids as an ``int64`` array."""
         if self._ids is not None:
             return self._ids
-        if self.catalog_handle is not None:
-            return self.catalog_handle.attach().ids()
+        if self._catalog_handle is not None:
+            return self._catalog_handle.attach().ids()
         return _inmem_ids_counts(self._inmem_shards())[0]
 
     def counts(self) -> np.ndarray:
         """Return per-shard sample counts (``int64``), aligned with :meth:`ids`."""
         if self._counts is not None:
             return self._counts
-        if self.catalog_handle is not None:
-            return self.catalog_handle.attach().num_rows()
+        if self._catalog_handle is not None:
+            return self._catalog_handle.attach().num_rows()
         return _inmem_ids_counts(self._inmem_shards())[1]
 
     def raw_bytes(self) -> np.ndarray:
@@ -83,8 +89,8 @@ class Dataset:
         File-backed datasets read the catalog's on-disk shard sizes; in-memory
         shards size their resident payloads lazily (:attr:`InMemoryShard.raw_bytes`).
         """
-        if self.catalog_handle is not None:
-            return self.catalog_handle.ensure_attached().raw_bytes()
+        if self._catalog_handle is not None:
+            return self._catalog_handle.ensure_attached().raw_bytes()
         shards = self._inmem_shards()
         return np.array([shards[i].raw_bytes for i in sorted(shards)], dtype=np.int64)
 
@@ -109,7 +115,7 @@ class Dataset:
             "name": self.name,
             "backend": self.backend,
             "path": self.path,
-            "catalog_handle": self.catalog_handle,
+            "_catalog_handle": self._catalog_handle,
         }
 
     def __deepcopy__(self, memo: dict) -> "Dataset":
@@ -140,9 +146,9 @@ class Dataset:
 
         Special URI schemes:
         - ``"hf://org/name[@rev]/[config/]split"`` is served through the
-          :class:`zephon.io.storage.hf.HFBackend`, which streams parquet
+          :class:`zephon._internal.io.storage.hf.HFBackend`, which streams parquet
           shards just-in-time via the HuggingFace Datasets Server. See
-          :func:`zephon.io.storage._hf_uri.parse_hf_uri` for the URI grammar.
+          :func:`zephon._internal.io.storage._hf_uri.parse_hf_uri` for the URI grammar.
 
         Returns:
             Dataset: a descriptor populated with shard counts and a catalog
@@ -185,14 +191,16 @@ class Dataset:
         backend = {"kind": kind, "path": root_str}
         header = DatasetHeader(name=name, root=root_str, format=kind, path=root_str)
         handle = ShardCatalogHandle(dataset=header)
-        return cls(
+        dataset = cls(
             name=name,
             backend=backend,
             path=root_str,
-            catalog_handle=handle,
             _ids=ids,
             _counts=counts,
         )
+        # Non-init private field: set on the frozen instance post-construction.
+        object.__setattr__(dataset, "_catalog_handle", handle)
+        return dataset
 
     @classmethod
     def from_dict(cls, name: str, shards: Mapping[int, InMemoryShard]) -> "Dataset":

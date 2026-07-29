@@ -16,10 +16,10 @@ from typing import Any
 import pytest
 
 from tests.integration.test_elastic_continuation import consume_until
-from zephon.api import Pipeline
-from zephon.core.constants import SampleRecord
+from zephon import Pipeline
+from zephon._internal.ops.tokenize_chat import TokenizeChat
 from zephon.io import Dataset
-from zephon.ops.tokenize_chat import TokenizeChat
+from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 from zephon.work.token_estimation import TextTokenCountingSpec, TokenEstimation
 
@@ -557,7 +557,7 @@ def _prime_one_rank(catalog_dir: Path, root: Path, marker: Path, result: Path) -
     """Prime one spawned rank and record if it performed the census."""
     os.environ["ZEPHON_CATALOG_DIR"] = str(catalog_dir)
     import zephon.work.token_estimation as te
-    from zephon.io.catalog import set_catalog_dir
+    from zephon._internal.io.catalog import set_catalog_dir
 
     set_catalog_dir(None)  # Pick up the process env override.
 

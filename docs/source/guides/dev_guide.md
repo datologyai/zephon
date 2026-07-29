@@ -39,7 +39,7 @@ make test
 make integration
 
 # Pass extra args (e.g., verbose, specific file)
-make test EXTRA_ARGS="-v tests/zephon/api/"
+make test EXTRA_ARGS="-v tests/zephon/test_pipeline.py"
 ```
 
 ## Code Quality

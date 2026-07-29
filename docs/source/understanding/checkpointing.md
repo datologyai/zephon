@@ -24,13 +24,13 @@ for batch in pipeline:
     ...
 ```
 
-{py:meth}`~zephon.api.Pipeline.checkpoint` returns a plain Python dict
+{py:meth}`~zephon.Pipeline.checkpoint` returns a plain Python dict
 (JSON-serializable) that captures the full pipeline state: which chunks are
 in flight, how far each lane has progressed, and where each lane's
 WorkSource state sits.  You are responsible for persisting this dict
 alongside your model checkpoint (e.g., write it to disk as JSON, or embed
 it in your training framework's checkpoint payload).
-{py:meth}`~zephon.api.Pipeline.restore` validates the checkpoint structure
+{py:meth}`~zephon.Pipeline.restore` validates the checkpoint structure
 eagerly — a malformed dict raises immediately — but applies the state
 lazily when you start iterating, not at the `restore()` call itself.
 
@@ -104,7 +104,7 @@ for all ranks to write their local state before merging.  If some ranks
 call `checkpoint()` and others do not, the leader will time out and raise a
 `RuntimeError` listing which lanes are missing.  The timeout is
 configurable via `aggregate_timeout_s` in
-{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>`.
+{py:meth}`Pipeline.options() <zephon.Pipeline.options>`.
 
 ### Elastic Resumption
 
@@ -349,7 +349,7 @@ setting it to 0 is an error, since without flush sentinels the
 accumulator's state would depend on the full input history and safe
 eviction would be impossible.  The default is 8, which is a reasonable
 balance for most workloads.  You can tune it via
-{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>`.  Monotone pipelines do not need flush sentinels.  If you explicitly set a
+{py:meth}`Pipeline.options() <zephon.Pipeline.options>`.  Monotone pipelines do not need flush sentinels.  If you explicitly set a
 positive value for a monotone pipeline, the engine emits a warning but
 still injects sentinels unnecessarily.  That can perturb batch boundaries
 and Batch stalling behavior without improving replay safety.  Remove the
@@ -526,7 +526,7 @@ The ReplayFilter is an operator that Zephon **automatically inserts** into
 every pipeline during compilation. You never add it yourself.  If the
 pipeline contains a `batch` operator, the ReplayFilter is placed
 immediately before it; otherwise it is appended as the tail operator.  You
-can see it in the {py:meth}`~zephon.api.Pipeline.explain` output.  Its
+can see it in the {py:meth}`~zephon.Pipeline.explain` output.  Its
 name is derived from the adjacent operator — for example,
 `batch_replay_filter` when placed before a `batch` operator:
 
@@ -560,7 +560,7 @@ tracking would never close offsets for replayed records, and their chunks
 could never be evicted.
 
 At checkpoint time, the Engine records the **replay cursor** per lane, i.e., a
-{py:class}`~zephon.core.constants.SampleCursor` identifying the most
+{py:class}`~zephon.types.SampleCursor` identifying the most
 recently delivered record.  A SampleCursor is a tuple of
 `(chunk_id, chunk_offset, lineage, sample_id)` that uniquely and
 deterministically identifies every record within a lane.  Because the

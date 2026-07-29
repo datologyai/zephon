@@ -9,7 +9,7 @@ from queue import Empty
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -23,7 +23,7 @@ def make_dataset(name: str, sample_count: int) -> Dataset:
 
 def _extract_texts(item) -> list[str]:
     """Return a flat list of 'text' payloads from a SampleRecord or SampleBatch."""
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
         payload = item.payload
@@ -52,7 +52,7 @@ def consume_until(
     If a limit is provided, capture a checkpoint at the cut.
     Returns (collection, checkpoint_or_None).
     """
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     out: list = []
     ckpt: dict | None = None
@@ -1280,7 +1280,7 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
 def _consume_with_counts(
     pipe: PublicPipeline, *, limit: int | None = None
 ) -> tuple[list[tuple[str, dict[int, int]]], dict | None]:
-    from zephon.core.constants import SampleRecord
+    from zephon.types import SampleRecord
 
     out: list[tuple[str, dict[int, int]]] = []
     ckpt: dict | None = None

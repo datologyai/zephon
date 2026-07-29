@@ -16,7 +16,7 @@ Quick Example
 
 .. code-block:: python
 
-   from zephon.api import Pipeline
+   from zephon import Pipeline
    from zephon.io import Dataset, InMemoryShard
    from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -82,14 +82,12 @@ Quick Example
    :caption: API Reference
 
    api/zephon_api
+   api/zephon_types
    api/zephon_io
    api/zephon_work
-   api/zephon_core
    api/zephon_ops
-   api/zephon_runners
    api/zephon_observability
-   api/zephon_io_index
-   api/zephon_utils
+   api/zephon_build_index
 
 
 Indices and Tables

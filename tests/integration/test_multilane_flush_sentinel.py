@@ -32,8 +32,8 @@ from typing import Any
 import pytest
 
 from tests._helpers import mk_dataset
-from zephon.api.pipeline import Pipeline
-from zephon.core.constants import SampleBatch, SampleRecord
+from zephon.pipeline import Pipeline
+from zephon.types import SampleBatch, SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

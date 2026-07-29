@@ -45,7 +45,7 @@ pip install "zephon[litdata] @ git+ssh://git@github.com/datologyai/zephon.git"
 ### Your First Pipeline
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -85,7 +85,7 @@ for batch in pipeline:
 Point `Dataset.from_path()` at a directory and Zephon auto-detects the format:
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

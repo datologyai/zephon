@@ -9,13 +9,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
-from zephon.core.checkpoint import (
+from zephon._internal.checkpoint import (
     WORK_CHUNK_VERSION,
     WorkChunkStateV2,
 )
-from zephon.core.constants import SampleId
+from zephon._internal.utils.swrr import swrr_iterate
 from zephon.io.dataset import Dataset
-from zephon.utils.swrr import swrr_iterate
+from zephon.types import SampleId
 from zephon.work.mixture import MixtureSpec
 
 MixtureComponent = str

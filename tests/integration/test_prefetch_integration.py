@@ -14,16 +14,16 @@ from unittest.mock import patch
 
 import pytest
 
-from zephon.api import Pipeline
+from zephon import Pipeline
+from zephon._internal.observability.collector import PipelineCollector
+from zephon._internal.ops.fetch import FetchOp
+from zephon._internal.ops.prefetch import PrefetchOp
 from zephon.io.dataset import Dataset
 from zephon.observability import (
     ExecutionTrackingMode,
     FetchTimingDelta,
     PrefetchTimingDelta,
 )
-from zephon.observability.collector import PipelineCollector
-from zephon.ops.fetch import FetchOp
-from zephon.ops.prefetch import PrefetchOp
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 
@@ -41,7 +41,7 @@ def capture_metrics():
     fetch_deltas: list[FetchTimingDelta] = []
     prefetch_deltas: list[PrefetchTimingDelta] = []
 
-    from zephon.observability.collector import PipelineCollector
+    from zephon._internal.observability.collector import PipelineCollector
 
     original_record_fetch = PipelineCollector.record_fetch
     original_record_prefetch = PipelineCollector.record_prefetch

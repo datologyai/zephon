@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from zephon.api import Pipeline
-from zephon.core.constants import SampleRecord
+from zephon import Pipeline
 from zephon.io.dataset import Dataset
+from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

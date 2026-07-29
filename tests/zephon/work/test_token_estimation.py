@@ -12,19 +12,19 @@ import cloudpickle
 import numpy as np
 import pytest
 
-from zephon.io import Dataset, InMemoryShard
-from zephon.io.stores.multi import build_multi_dataset_store
-from zephon.observability.size_estimator import content_bytes
-from zephon.ops.map_transform import MapTransform
-from zephon.ops.tokenize_chat import ChatTokenCountingSpec
-from zephon.utils.tokenizer import fallback_tokenizer
-from zephon.work import token_estimation
-from zephon.work.token_counting import (
+from zephon._internal.io.stores.multi import build_multi_dataset_store
+from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.ops.map_transform import MapTransform
+from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
+from zephon._internal.token_counting import (
     CountPlan,
     DeliveredTokenCounter,
     TextTokenCountingSpec,
     _TextCounter,
 )
+from zephon._internal.utils.tokenizer import fallback_tokenizer
+from zephon.io import Dataset, InMemoryShard
+from zephon.work import token_estimation
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
     PerShardByteSize,

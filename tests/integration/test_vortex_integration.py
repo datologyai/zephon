@@ -10,7 +10,7 @@ import pytest
 vortex = pytest.importorskip("vortex.io", reason="vortex-data not installed")
 import vortex
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io.dataset import Dataset
 from zephon.work.base import MixtureReadConfig, MixtureReadMode
 from zephon.work.static_mixture import StaticMixtureWorkSource
@@ -66,7 +66,7 @@ def _prepare_datasets(
 
 
 def _project_items(pipe: PublicPipeline) -> list[tuple[str, int]]:
-    from zephon.core.constants import SampleRecord
+    from zephon.types import SampleRecord
 
     id_to_name: dict[int, str] = {
         i: ds.name for i, ds in pipe.ws.datasets_by_id.items()

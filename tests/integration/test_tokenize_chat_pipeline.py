@@ -14,10 +14,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zephon.api import Pipeline
-from zephon.core.constants import SampleMeta, SampleRecord
+from zephon import Pipeline
+from zephon._internal.ops.tokenize_chat import TokenizeChat
 from zephon.io import Dataset, InMemoryShard
-from zephon.ops.tokenize_chat import TokenizeChat
+from zephon.types import SampleMeta, SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

@@ -8,7 +8,7 @@ It looks ahead in the sample stream, identifies which shards will be accessed so
 Add prefetch to your pipeline before decode operations:
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.work import StaticMixtureWorkSource
 
 pipeline = (

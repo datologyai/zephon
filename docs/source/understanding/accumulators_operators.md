@@ -13,7 +13,7 @@ what role accumulators play in making all of this work.
 An **operator** is a unit of data transformation in a Zephon pipeline.
 Tokenizing text, packing sequences, batching samples, shuffling: each of
 these is an operator.  Operators are the building blocks you compose via the
-{py:class}`~zephon.api.Pipeline` builder to describe *how* your data is
+{py:class}`~zephon.Pipeline` builder to describe *how* your data is
 processed:
 
 ```python
@@ -41,8 +41,8 @@ are:
   flag is passed by the runner and controls whether time-based flushing is
   allowed (see [CountingAccumulator](#built-in-accumulators) below).
 - **`process_many(elems)`**: the workhorse.  Takes a list of stream
-  elements (a micro-batch) — {py:class}`~zephon.core.SampleRecord`
-  instances, or {py:class}`~zephon.core.constants.SampleBatch` objects
+  elements (a micro-batch) — {py:class}`~zephon.types.SampleRecord`
+  instances, or {py:class}`~zephon.types.SampleBatch` objects
   downstream of `.batch()` — transforms them, and returns a list of the **same element
   types**.  To transform a sample, rebuild its `.payload` while preserving
   its `.meta` (which carries the sample's identity, lineage, and ordering
@@ -73,14 +73,14 @@ each call is independent, and results can be reordered back into the
 original input order without loss of correctness.
 
 Not every operator splits its work evenly between accumulator and workers.
-For operators like {py:class}`~zephon.ops.TokenizeText` or
-{py:class}`~zephon.ops.FetchOp`, the accumulator merely groups elements
+For operators like ``TokenizeText`` or
+``FetchOp``, the accumulator merely groups elements
 into fixed-size micro-batches and the real work (tokenization, disk I/O)
 happens in `process_many` across parallel workers.  But for operators whose
 core logic is inherently stateful and serial, such as
-{py:class}`~zephon.ops.PackSequences`,
-{py:class}`~zephon.ops.EnsureMixture`, and
-{py:class}`~zephon.ops.ShuffleBuffer`, the accumulator does the heavy
+``PackSequences``,
+``EnsureMixture``, and
+``ShuffleBuffer``, the accumulator does the heavy
 lifting.  In the current implementation their `process_many` is a trivial
 passthrough (`return list(elems)`), though in principle some of their work
 (e.g., payload assembly for packing) is stateless and could be moved to
@@ -122,7 +122,7 @@ details.
 ```{note}
 Micro-batches in this section refer to the internal batches of elements
 dispatched to operator workers, not the training batches (the output
-of the {py:meth}`~zephon.api.Pipeline.batch` operator) that the model trains
+of the {py:meth}`~zephon.Pipeline.batch` operator) that the model trains
 on.
 ```
 
@@ -240,7 +240,7 @@ this diversity through a simple interface:
     replay — each lane's next epoch starts from clean state; flushing every
     lane at one lane's boundary corrupts the others and breaks replay.
     The only built-in operator that intentionally stalls instead of
-    flushing is {py:class}`~zephon.ops.Batch` with `drop_last=True`.
+    flushing is ``Batch`` with `drop_last=True`.
     Other operators must flush to a fresh state at the sentinel.  See
     [Flush sentinels and accumulator stalling](#flush-sentinels-and-accumulator-stalling)
     below.
@@ -268,7 +268,7 @@ exactly one micro-batch containing the input elements.  No buffering, no
 state.
 
 Used by operators that are pure pass-throughs or need no grouping, such as
-the internal {py:class}`~zephon.ops.ReplayFilter`.
+the internal ``ReplayFilter``.
 
 #### CountingAccumulator
 
@@ -277,10 +277,10 @@ reaches a configured `max_batch` size.  On `flush`, it emits any remaining
 elements.
 
 This is the most common accumulator.  It is used by
-{py:class}`~zephon.ops.FetchOp`,
-{py:class}`~zephon.ops.TokenizeText`,
-{py:class}`~zephon.ops.MapTransform`,
-{py:class}`~zephon.ops.ShuffleBuffer`, and several other operators.  The
+``FetchOp``,
+``TokenizeText``,
+``MapTransform``,
+``ShuffleBuffer``, and several other operators.  The
 batch size is tuned per operator: `FetchOp` uses 64, `DecodeText` uses 128,
 and `ShuffleBuffer` uses the full `buffer_size` so the entire buffer is
 shuffled as one micro-batch.
@@ -294,15 +294,15 @@ only on element counts, never on wall-clock timing.
 
 #### Batch (via CountingAccumulator)
 
-The {py:class}`~zephon.ops.Batch` operator uses a
-{py:class}`~zephon.core.accumulators.CountingAccumulator` with
+The ``Batch`` operator uses a
+{py:class}`~zephon.ops.CountingAccumulator` with
 ``key_fn=lane_of`` and ``drop_last`` support.  Maintains per-lane
 buffers and emits a micro-batch when a lane's buffer reaches
 ``microbatch_size`` records.
 
 #### PackingAccumulator
 
-Used by {py:class}`~zephon.ops.PackSequences`.  Maintains per-lane bins for
+Used by ``PackSequences``.  Maintains per-lane bins for
 variable-length sequence packing.  A micro-batch is emitted when a bin's
 remaining capacity falls below `min_sequence_length` (the bin is "full
 enough") or when the number of open bins exceeds the limit.  Supports
@@ -310,9 +310,9 @@ first-fit and best-fit algorithms.
 
 #### EnsureMixtureAccumulator
 
-Used by {py:class}`~zephon.ops.EnsureMixture`.  Maintains per-lane buffers
+Used by ``EnsureMixture``.  Maintains per-lane buffers
 grouped by mixture component and uses Smooth Weighted Round Robin
-({py:class}`~zephon.utils.swrr.SmoothWeightedRoundRobin`) to emit
+(``SmoothWeightedRoundRobin``) to emit
 samples in the order that best tracks the target mixture ratios.
 Buffering is adaptive: samples are emitted immediately when the desired
 component is available, and buffered otherwise.
@@ -356,7 +356,7 @@ for more on this guarantee.
 ## Example: deterministic packing
 
 Sequence packing illustrates the accumulator pattern well.  The
-{py:class}`~zephon.ops.PackSequences` operator packs variable-length
+``PackSequences`` operator packs variable-length
 tokenized sequences into bins.
 
 The packer must decide which incoming sequence goes into which bin.  This
@@ -402,7 +402,7 @@ flush sentinels solve this by periodically resetting the accumulator.
 
 ## Example: data-derived seeds in the shuffle buffer
 
-The {py:class}`~zephon.ops.ShuffleBuffer` needs randomness, but using a
+The ``ShuffleBuffer`` needs randomness, but using a
 plain incrementing RNG would tie the permutation to micro-batch boundaries.
 Since those boundaries can shift across restarts (because of checkpoint
 replay boundaries), this would break determinism.
@@ -468,7 +468,7 @@ state.
 ### Stalling: `stall_on_epoch_boundary`
 
 Stalling is intentionally narrow in the current design.  Zephon only
-supports it for {py:class}`~zephon.ops.Batch` with `drop_last=True`.
+supports it for ``Batch`` with `drop_last=True`.
 
 Why the restriction exists:
 
@@ -519,11 +519,11 @@ Zephon supports user-defined transformations through three Pipeline methods:
 
 | Pipeline method | Operator | What it does |
 |---|---|---|
-| `.map_transform(fn)` | {py:class}`~zephon.ops.MapTransform` | Apply a function to each sample's payload |
-| `.map_batch(fn)` | {py:class}`~zephon.ops.MapBatchTransform` | Apply a function to each training batch (after `.batch()`) |
-| `.stateful_transform(...)` | {py:class}`~zephon.ops.StatefulTransformOp` | User-managed state in the accumulator |
+| `.map_transform(fn)` | ``MapTransform`` | Apply a function to each sample's payload |
+| `.map_batch(fn)` | ``MapBatchTransform`` | Apply a function to each training batch (after `.batch()`) |
+| `.stateful_transform(...)` | ``StatefulTransformOp`` | User-managed state in the accumulator |
 
-{py:meth}`~zephon.api.Pipeline.map_transform` is the primary UDF
+{py:meth}`~zephon.Pipeline.map_transform` is the primary UDF
 mechanism.  Your function receives a sample's payload dict and returns a
 (possibly modified) dict, or `None` to filter the sample out:
 
@@ -544,11 +544,11 @@ The function runs inside `process_many` on worker threads (or processes),
 so it should be stateless and thread-safe.  The `MapTransform` operator
 wraps it with a `CountingAccumulator` for micro-batching.
 
-{py:meth}`~zephon.api.Pipeline.map_batch` is similar but operates on
+{py:meth}`~zephon.Pipeline.map_batch` is similar but operates on
 `SampleBatch` objects after the batch operator.  This is useful for
 post-batch processing like tensor collation or padding.
 
-{py:meth}`~zephon.api.Pipeline.stateful_transform` is the most flexible
+{py:meth}`~zephon.Pipeline.stateful_transform` is the most flexible
 option.  It lets you provide custom state management functions that run
 serially in the accumulator, with an optional parallel
 `transform_fn` for the workers.  State is partitioned **per lane** — each
@@ -583,7 +583,7 @@ pipeline = (
 )
 ```
 
-See the {py:meth}`~zephon.api.Pipeline.stateful_transform` API reference
+See the {py:meth}`~zephon.Pipeline.stateful_transform` API reference
 for the full set of parameters.
 
 ## Fully custom operators
@@ -592,21 +592,21 @@ When `map_transform` / `map_batch` / `stateful_transform` aren't enough —
 for instance, you need a custom accumulator paired with a custom
 worker-side `process_many`, parallel workers over a non-default batching
 discipline, or full control over operator traits — use
-{py:meth}`~zephon.api.Pipeline.add_op`.  It accepts two forms.
+{py:meth}`~zephon.Pipeline.add_op`.  It accepts two forms.
 
 ### Instance form: `add_op(op)` with a `BaseOp` subclass
 
-Subclass {py:class}`~zephon.core.BaseOp` when your op needs the full
+Subclass {py:class}`~zephon.ops.BaseOp` when your op needs the full
 lifecycle: configuration in `__init__`, per-worker resource construction
 in `setup` (with access to the runner's
-{py:class}`~zephon.core.OpContext`), per-op traits via `traits`, and a
+{py:class}`~zephon.ops.OpContext`), per-op traits via `traits`, and a
 custom accumulator.  The framework deep-copies the instance per parallel
 worker and runs `setup` on each copy, so `self.*` attributes are
 isolated per worker on every runner — the same lifecycle built-in
 operators use.
 
 ```python
-from zephon.core import BaseOp, CountingAccumulator, OpContext, OpTraits
+from zephon.ops import BaseOp, CountingAccumulator, OpContext, OpTraits
 
 class Tokenize(BaseOp):
     def __init__(self, tokenizer_name: str, max_batch: int = 64):
@@ -639,7 +639,7 @@ pipeline.add_op(Tokenize("gpt2", max_batch=64))
 ```
 
 Traits come from `op.traits()`; pass them via your
-{py:class}`~zephon.core.OpTraits` rather than as kwargs on `add_op`.
+{py:class}`~zephon.ops.OpTraits` rather than as kwargs on `add_op`.
 The optional `name` kwarg controls the node name in plan graphs and
 metrics (defaults to the class name); `placement` works the same way
 as in the kwargs form.
@@ -651,7 +651,7 @@ is picklable config captured in a closure.  The framework builds an
 internal `BaseOp` subclass from the kwargs.
 
 ```python
-from zephon.core import CountingAccumulator
+from zephon.ops import CountingAccumulator
 
 eos = " <eos>"  # picklable config captured in the closure
 
@@ -681,11 +681,11 @@ which case each upstream micro-batch is forwarded as one ready batch.
 The remaining kwargs (`parallelism`, `placement`, `indexable`,
 `batch_shape_sensitive`, `requires_serial_state`,
 `stall_on_epoch_boundary`) map 1:1 to
-{py:class}`~zephon.core.OpTraits` and follow the semantics described in
+{py:class}`~zephon.ops.OpTraits` and follow the semantics described in
 [The operator contract](#the-operator-contract) and
 [Stalling: `stall_on_epoch_boundary`](#stalling-stall_on_epoch_boundary)
 above.  See the
-{py:meth}`~zephon.api.Pipeline.add_op` API reference for the full kwarg
+{py:meth}`~zephon.Pipeline.add_op` API reference for the full kwarg
 list and signature variants of the `accumulator` factory.
 
 Two invariants the kwargs callables must honor — the same ones the
@@ -705,17 +705,17 @@ built-in operators honor:
   instance form's `setup` hook is for — reach for the class-based path
   when closures aren't enough.
 
-The {py:class}`~zephon.core.Op` protocol, `BaseOp`,
-{py:class}`~zephon.core.OpContext`, {py:class}`~zephon.core.OpTraits`,
-{py:class}`~zephon.core.CountingAccumulator`, and
-{py:class}`~zephon.core.PassthroughAccumulator` are all exported from
-{py:mod}`zephon.core`.
+The ``Op`` protocol, `BaseOp`,
+{py:class}`~zephon.ops.OpContext`, {py:class}`~zephon.ops.OpTraits`,
+{py:class}`~zephon.ops.CountingAccumulator`, and
+{py:class}`~zephon.ops.PassthroughAccumulator` are all exported from
+{py:mod}`zephon.ops`.
 
 ### Helping the validator: `validation_samples`
 
 When `Pipeline.__iter__` runs the validation harness (controlled by
 `RuntimeOptions.auto_validation`, default `"strict"`), it probes each
-user op with synthetic {py:class}`~zephon.core.SampleRecord` instances
+user op with synthetic {py:class}`~zephon.types.SampleRecord` instances
 whose payload is a generic `{'text': str, 'value': int}` dict.  The
 harness never invokes `setup()`, so runtime probes (determinism,
 cross-call state, statelessness, sample identity) run against an

@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from zephon.core.constants import SampleId
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
 
 

@@ -39,7 +39,7 @@ SRC = REPO_ROOT / "zephon"
 # import resolves to the installed wheel, never the source tree.
 _SMOKE_SCRIPT = """
 import zephon
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

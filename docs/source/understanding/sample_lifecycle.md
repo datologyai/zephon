@@ -22,10 +22,10 @@ For how checkpoints capture and restore pipeline state, see
 As described in [Basic Concepts](../basic_concepts.md#from-pointers-to-data),
 a sample starts as a pointer, i.e., a `(dataset_id, shard_id, sample_idx)`
 triple produced by the WorkSource.  The built-in
-{py:class}`~zephon.ops.FetchOp` loads the actual data from disk/cache
-and wraps it in a {py:class}`~zephon.core.SampleRecord`, which is a container that
+``FetchOp`` loads the actual data from disk/cache
+and wraps it in a {py:class}`~zephon.types.SampleRecord`, which is a container that
 pairs a **payload** (typically a Python dict of fields) with internal
-tracking **metadata** ({py:class}`~zephon.core.constants.SampleMeta`).
+tracking **metadata** ({py:class}`~zephon.types.SampleMeta`).
 
 Everything before FetchOp operates on pointers; everything after it operates
 on data.  The rest of this page is about what happens after that transition.
@@ -33,7 +33,7 @@ on data.  The rest of this page is about what happens after that transition.
 ### The Identity of a Record
 
 Every record flowing through the pipeline carries a
-{py:class}`~zephon.core.constants.SampleCursor`, a frozen tuple of four
+{py:class}`~zephon.types.SampleCursor`, a frozen tuple of four
 components that uniquely identifies it within its lane:
 
 ```
@@ -135,7 +135,7 @@ The key invariant for fan-out is:
 > (or tombstone) must eventually signal "I am the last one."
 
 This signal is the `is_last_child` flag on a
-{py:class}`~zephon.core.constants.ContributorRef`.  It tells the engine that
+{py:class}`~zephon.types.ContributorRef`.  It tells the engine that
 no more records will arrive for that base offset, so the corresponding chunk
 slot can be marked as closed.  The helpers described in
 [Part II](#the-helper-toolkit) handle this bookkeeping.
@@ -144,11 +144,11 @@ slot can be marked as closed.  The helpers described in
 
 The opposite direction is equally important.  Two operators perform fan-in:
 
-**Packing** ({py:meth}`~zephon.api.Pipeline.pack_sequences`) combines
+**Packing** ({py:meth}`~zephon.Pipeline.pack_sequences`) combines
 fragments from *different* base offsets into a single packed record.  A
 packed record gets a fresh cursor (its **primary cursor**, typically derived
 from the first contributor) but carries a list of
-{py:class}`~zephon.core.constants.ContributorRef` entries that remember
+{py:class}`~zephon.types.ContributorRef` entries that remember
 which base offsets went into it.  This is what lets the engine track
 per-offset completion even when offsets are mixed across records.
 
@@ -169,13 +169,13 @@ Packing also tracks **component heritage**: how many samples from each
 mixture component (dataset) ended up in the packed record, via
 `component_sample_counts` and optionally `component_token_counts` on the
 metadata.  This is what allows
-{py:meth}`~zephon.api.Pipeline.ensure_mixture` to correctly measure and
+{py:meth}`~zephon.Pipeline.ensure_mixture` to correctly measure and
 correct mixture ratios even after packing reshuffles which samples end up
 together.
 
-**Batching** ({py:meth}`~zephon.api.Pipeline.batch`) collects individual
+**Batching** ({py:meth}`~zephon.Pipeline.batch`) collects individual
 `SampleRecord` objects into a
-{py:class}`~zephon.core.constants.SampleBatch`.  Unlike packing, batching
+{py:class}`~zephon.types.SampleBatch`.  Unlike packing, batching
 does not merge payloads or create new cursors.  Each record inside the batch
 retains its own cursor and metadata.  The batch is a grouping convenience
 for the training loop.
@@ -301,7 +301,7 @@ Zephon internals.
 
 ### The Helper Toolkit
 
-Zephon provides three builder functions in `zephon.core.children` that
+Zephon provides three builder functions in `zephon.ops.children` that
 handle the fiddly parts of metadata construction:
 
 #### `spawn_child(parent, child_idx, *, is_last_child=False, tags=None)`
@@ -310,7 +310,7 @@ Creates metadata for a child record derived from a parent.  Use this
 whenever a single input produces multiple outputs (any true fan-out):
 
 ```python
-from zephon.core.children import spawn_child
+from zephon.ops.children import spawn_child
 
 # Splitting one document into three sequences:
 for i, sequence in enumerate(sequences):
@@ -342,7 +342,7 @@ offsets the packed record closes.  See
 Creates a tombstone that closes a base offset without carrying any payload:
 
 ```python
-from zephon.core.children import tombstone_meta
+from zephon.ops.children import tombstone_meta
 
 # We decided to drop this record, but it was the last child for its offset.
 for ref in dropped_record.meta.contribution_refs():
@@ -357,7 +357,7 @@ for ref in dropped_record.meta.contribution_refs():
 ### Writing a 1:1 Transform
 
 The simplest and most common case.  Use
-{py:meth}`~zephon.api.Pipeline.map_transform`:
+{py:meth}`~zephon.Pipeline.map_transform`:
 
 ```python
 pipeline.map_transform(lambda p: {"tokens": tokenize(p["text"])})
@@ -379,7 +379,7 @@ pipeline.map_transform(
 ```
 
 This automatic handling is implemented in
-{py:class}`~zephon.ops.MapTransform`, which iterates
+``MapTransform``, which iterates
 `contribution_refs()` on the dropped record and emits a tombstone for each
 ref with `is_last_child=True`.
 
@@ -410,7 +410,7 @@ A packer consumes multiple input records and produces one output:
   `ensure_mixture` can still measure mixture ratios correctly after
   packing.
 - Set `preserves_cursor_order=False` in your
-  {py:class}`~zephon.core.traits.OpTraits`, since packing reorders records
+  {py:class}`~zephon.ops.OpTraits`, since packing reorders records
   across chunk boundaries, which disables the fast monotone eviction path
   and switches to per-offset tracking.
 
@@ -432,7 +432,7 @@ keep the stateful transform focused on buffering/reordering.
 
 ### Traits That Affect the Pipeline
 
-{py:class}`~zephon.core.traits.OpTraits` controls how the planner wires
+{py:class}`~zephon.ops.OpTraits` controls how the planner wires
 your operator into the pipeline:
 
 | Trait | Default | What it means |

@@ -31,10 +31,10 @@ from pathlib import Path
 
 import pytest
 
-import zephon.utils.shm as _shm_mod
-from zephon.api import Pipeline
-from zephon.core.constants import SamplePayload, SampleRecord
+import zephon._internal.utils.shm as _shm_mod
+from zephon import Pipeline
 from zephon.io import Dataset
+from zephon.types import SamplePayload, SampleRecord
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

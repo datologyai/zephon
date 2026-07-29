@@ -36,21 +36,21 @@ import cloudpickle
 import numpy as np
 from filelock import FileLock
 
-from zephon.core.constants import SampleId, SampleMeta, SampleRecord
-from zephon.core.op_base import OpContext
-from zephon.io import build_multi_dataset_store
-from zephon.io.catalog import resolve_catalog_dir, set_catalog_dir
-from zephon.io.dataset import Dataset
-from zephon.io.options import StoreOptions
-from zephon.observability.size_estimator import content_bytes
-from zephon.utils.atomic import atomic_write_bytes
-from zephon.work.token_counting import (
+from zephon._internal.io.catalog import resolve_catalog_dir, set_catalog_dir
+from zephon._internal.io.stores import build_multi_dataset_store
+from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.token_counting import (
     CountPlan,
     DeliveredTokenCounter,
     FatalCountError,
     TextTokenCountingSpec,
     TokenCountingSpec,
 )
+from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon.io.dataset import Dataset
+from zephon.io.options import StoreOptions
+from zephon.ops.base import OpContext
+from zephon.types import SampleId, SampleMeta, SampleRecord
 
 logger = logging.getLogger(__name__)
 
@@ -861,7 +861,7 @@ _PRIME_CACHE_SUBDIR = "token_ratios"
 
 def _dataset_content_key(dataset: Dataset) -> str:
     """Stable content identity for a dataset's census inputs."""
-    handle = dataset.catalog_handle
+    handle = dataset._catalog_handle
     if handle is not None and handle.fingerprint is not None:
         return handle.fingerprint
     return hashlib.sha256(
@@ -1088,11 +1088,7 @@ def prime_token_ratios(
 
 __all__ = [
     "DEFAULT_FALLBACK_TOKENS_PER_BYTE",
-    "CountPlan",
-    "DeliveredTokenCounter",
     "PerShardTokenCost",
-    "TextTokenCountingSpec",
-    "TokenCountingSpec",
     "TokenEstimation",
     "TokenRatio",
     "prime_token_ratios",

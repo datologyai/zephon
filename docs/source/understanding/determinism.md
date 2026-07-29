@@ -27,7 +27,7 @@ get exactly the same global sample order, provided the pipeline
 configuration (seed, operators, mixture weights, etc.) stays the same.
 
 Determinism is enabled by default and can be turned off via
-{py:meth}`Pipeline.options(deterministic=False) <zephon.api.Pipeline.options>`.
+{py:meth}`Pipeline.options(deterministic=False) <zephon.Pipeline.options>`.
 When disabled, runners gain more scheduling flexibility (forwarding results in
 completion order rather than input order), which can reduce latency at the
 cost of reproducibility.
@@ -49,7 +49,7 @@ stateless `process_many` calls.  This ensures, for example, that packing
 decisions do not depend on how work is distributed across workers.
 
 A related pattern is **data-derived pseudo-randomness**: operators like
-{py:class}`~zephon.ops.ShuffleBuffer` derive their RNG seed from the identity
+``ShuffleBuffer`` derive their RNG seed from the identity
 of the elements in each batch (dataset, shard, sample offset, lineage) rather
 than from an incrementing counter.  The same set of elements always produces
 the same permutation, regardless of restart boundaries or batch grouping.
@@ -125,7 +125,7 @@ details.
 ```
 
 The number of lanes is controlled by `canonical_replicas` in
-{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>`.  If you do not
+{py:meth}`Pipeline.options() <zephon.Pipeline.options>`.  If you do not
 set `canonical_replicas`, it defaults to `dp_degree`, i.e., one lane per GPU,
 no elastic determinism.  To enable it, set `canonical_replicas` higher than
 `dp_degree`:

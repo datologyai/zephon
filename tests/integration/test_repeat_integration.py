@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
-from zephon.core.constants import SampleRecord
+from zephon import Pipeline as PublicPipeline
 from zephon.io.dataset import Dataset
+from zephon.types import SampleRecord
 from zephon.work.base import MixtureReadConfig, MixtureReadMode
 from zephon.work.static_mixture import StaticMixtureWorkSource
 

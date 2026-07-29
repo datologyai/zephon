@@ -6,7 +6,7 @@
 from collections import Counter
 from pathlib import Path
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

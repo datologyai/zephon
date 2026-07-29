@@ -23,7 +23,7 @@ try:
 except Exception:  # pragma: no cover
     StatefulDataLoader = None  # type: ignore[assignment]
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -39,7 +39,7 @@ def make_dataset(name: str, sample_count: int) -> Dataset:
 
 def _extract_texts(item) -> list[str]:
     """Return flat list of 'text' payloads from a SampleRecord or SampleBatch."""
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
         payload = item.payload
@@ -306,7 +306,7 @@ def test_microbatch_shape_invariance_across_workers(num_workers: int) -> None:
     """
     from collections import Counter
 
-    from zephon.core.constants import SampleBatch
+    from zephon.types import SampleBatch
 
     total = 224
     batch_size = 8

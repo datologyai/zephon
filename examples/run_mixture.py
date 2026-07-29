@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

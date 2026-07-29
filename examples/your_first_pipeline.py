@@ -14,7 +14,7 @@ character-level tokenizer for demos that does not need HuggingFace.
 Run with: uv run python examples/your_first_pipeline.py
 """
 
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

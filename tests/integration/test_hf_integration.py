@@ -27,9 +27,9 @@ pytest.importorskip("pyarrow")
 
 import requests  # noqa: E402
 
-from zephon.io.storage import HFBackend  # noqa: E402
-from zephon.io.storage._hf_uri import parse_hf_uri  # noqa: E402
-from zephon.io.storage.hf import _DATASETS_SERVER_PARQUET_URL  # noqa: E402
+from zephon._internal.io.storage import HFBackend  # noqa: E402
+from zephon._internal.io.storage._hf_uri import parse_hf_uri  # noqa: E402
+from zephon._internal.io.storage.hf import _DATASETS_SERVER_PARQUET_URL  # noqa: E402
 
 _SQUAD_TRAIN_URI = "hf://rajpurkar/squad/plain_text/train"
 
@@ -122,7 +122,7 @@ def test_minimal_pipeline_consumes_squad(tmp_path: Path) -> None:
     manager downloading shards just-in-time via ``http_get``, parquet
     random access — against real HF.
     """
-    from zephon.api import Pipeline as PublicPipeline
+    from zephon import Pipeline as PublicPipeline
     from zephon.io import Dataset
     from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

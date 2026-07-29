@@ -154,7 +154,7 @@ Keep this in mind when configuring parallelism and prefetch depths.  If you
 set `fetch_parallelism=8` and run 8 pipelines on one node, that is 64 fetch
 threads competing for CPU cores and network bandwidth.  In practice, you will
 want to scale per-pipeline parallelism down as the number of pipelines per
-node goes up.  Use {py:meth}`~zephon.api.Pipeline.explain` to inspect the
+node goes up.  Use {py:meth}`~zephon.Pipeline.explain` to inspect the
 actual thread/process counts before launching at scale.
 
 ## How data distribution works
@@ -249,7 +249,7 @@ Here is a sketch of how Zephon is wired up in a DP=2, TP=2 job (4 GPUs):
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

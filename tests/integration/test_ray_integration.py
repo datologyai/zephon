@@ -3,8 +3,8 @@
 
 """End-to-end integration tests for the Ray-backed stage runner.
 
-These exercise :class:`zephon.runners.ray.RemoteStageRunner` through the
-public :class:`zephon.api.Pipeline` API (rather than constructing the
+These exercise :class:`zephon._internal.runners.ray.RemoteStageRunner` through the
+public :class:`zephon.Pipeline` API (rather than constructing the
 runner directly) to validate that a Pipeline configured to use the Ray
 runner produces the same output as an equivalent non-Ray Pipeline.
 
@@ -67,7 +67,7 @@ def _make_jsonl_dataset(tmp_path: Path, num_samples: int):
 
 def _build_pipeline(dataset, runner: str):
     """Build a multi-op pipeline with the given runner set via options()."""
-    from zephon.api import Pipeline as PublicPipeline
+    from zephon import Pipeline as PublicPipeline
     from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
     work_source = StaticMixtureWorkSource(

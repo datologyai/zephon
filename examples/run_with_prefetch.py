@@ -14,7 +14,7 @@ shards to the local cache before they're needed by FetchOp.
 from collections import Counter
 from pathlib import Path
 
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 

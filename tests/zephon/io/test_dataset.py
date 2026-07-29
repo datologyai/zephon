@@ -110,7 +110,7 @@ def test_from_path_dataset_pickle_is_small(tmp_path: Path) -> None:
     restored = pickle.loads(blob)
     assert "shards" not in restored.backend  # no per-shard graph travels
     assert restored._ids is None  # count arrays dropped
-    assert restored.catalog_handle is not None
+    assert restored._catalog_handle is not None
 
 
 def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
@@ -128,8 +128,8 @@ def test_dataset_from_path_detects_jsonl(tmp_path: Path) -> None:
     assert ds.backend["kind"] == "jsonl"
     # from_path is count-only: no per-shard metadata graph, just the handle.
     assert "shards" not in ds.backend
-    assert ds.catalog_handle is not None
-    assert ds.catalog_handle.fingerprint is None  # baked later by the Engine
+    assert ds._catalog_handle is not None
+    assert ds._catalog_handle.fingerprint is None  # baked later by the Engine
     # The array fast path is ordered, aligned, and consistent with the counts.
     assert ds.ids().tolist() == [0, 1]
     assert ds.counts().tolist() == [3, 2]

@@ -326,7 +326,7 @@ Add a new type in `constants.py`:
 
 ```python
 from dataclasses import dataclass
-from zephon.core.constants import SampleCursor
+from zephon.types import SampleCursor
 
 @dataclass(frozen=True, slots=True)
 class FragmentRef:

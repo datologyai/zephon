@@ -1,40 +1,37 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Built-in operator implementations bundled with Zephon."""
+"""Operator authoring kit: the contracts you subclass or pass to ``add_op()``.
 
-from zephon.ops.assert_lineage import AssertLineageOrder
-from zephon.ops.batch import Batch
-from zephon.ops.decode_text import DecodeText
-from zephon.ops.ensure_mixture import EnsureMixture
-from zephon.ops.fetch import FetchOp
+Built-in operators are configured via the ``Pipeline`` builder methods
+(``.shuffle()``, ``.batch()``, ``.tokenize()``, ...).
+"""
+
+from zephon.ops.accumulators import (
+    Accumulator,
+    CountingAccumulator,
+    PassthroughAccumulator,
+    ReadyBatch,
+)
+from zephon.ops.base import BaseOp, OpContext
+from zephon.ops.children import pack_meta, spawn_child, tombstone_meta
+from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
 from zephon.ops.grouping import DomainGroups
-from zephon.ops.map_transform import MapBatchTransform, MapTransform
-from zephon.ops.materialize import Materialize
-from zephon.ops.pack_sequences import PackingAlgorithm, PackSequences
-from zephon.ops.prefetch import PrefetchOp
-from zephon.ops.shuffle_buffer import ShuffleBuffer
-from zephon.ops.stateful_transform import StatefulTransformOp
-from zephon.ops.tokenize_chat import SpanSource, TokenizeChat
-from zephon.ops.tokenize_text import SpecialTokensMode, TokenizeText
+from zephon.ops.traits import OpTraits
 
 __all__ = [
-    "AssertLineageOrder",
-    "Batch",
-    "DecodeText",
+    "Accumulator",
+    "BaseOp",
+    "CountingAccumulator",
     "DomainGroups",
-    "EnsureMixture",
-    "FetchOp",
-    "MapBatchTransform",
-    "MapTransform",
-    "Materialize",
-    "PackSequences",
+    "OpContext",
+    "OpTraits",
     "PackingAlgorithm",
-    "PrefetchOp",
-    "ShuffleBuffer",
+    "PassthroughAccumulator",
+    "ReadyBatch",
     "SpanSource",
     "SpecialTokensMode",
-    "StatefulTransformOp",
-    "TokenizeChat",
-    "TokenizeText",
+    "pack_meta",
+    "spawn_child",
+    "tombstone_meta",
 ]

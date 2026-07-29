@@ -7,12 +7,12 @@ from typing import Sequence
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
-from zephon.core.accumulators import Accumulator, ReadyBatch
-from zephon.core.constants import SampleRecord
-from zephon.core.op_base import DefaultSetup, Op
-from zephon.core.traits import OpTraits
+from zephon import Pipeline as PublicPipeline
+from zephon._internal.op_base import DefaultSetup, Op
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.traits import OpTraits
+from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

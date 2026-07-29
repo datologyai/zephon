@@ -12,6 +12,7 @@ from zephon.work.base import (
 )
 from zephon.work.mixture import MixtureSpec
 from zephon.work.static_mixture import StaticMixtureWorkSource
+from zephon.work.token_estimation import TokenEstimation
 
 __all__ = [
     "ComponentOrder",
@@ -21,4 +22,5 @@ __all__ = [
     "WorkSource",
     "MixtureSpec",
     "StaticMixtureWorkSource",
+    "TokenEstimation",
 ]

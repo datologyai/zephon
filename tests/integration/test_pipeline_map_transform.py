@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -412,7 +412,7 @@ def test_pipeline_map_batch_after_batch(tmp_path: Path) -> None:
     )
     jsonl_dataset = Dataset.from_path("demo", str(tmp_path))
 
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     def transform_batch(batch: SampleBatch) -> SampleBatch:
         new_records = []

@@ -106,7 +106,7 @@ def _isolated_shard_catalogs(
     also propagates to spawned worker processes in integration tests. Tests
     that manage the dir themselves (tests/zephon/io/catalog) simply override.
     """
-    from zephon.io.catalog import clear_registry, set_catalog_dir
+    from zephon._internal.io.catalog import clear_registry, set_catalog_dir
 
     catalog_dir = tmp_path_factory.mktemp("shard-catalogs")
     monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(catalog_dir))

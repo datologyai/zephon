@@ -61,7 +61,7 @@ ws = StaticMixtureWorkSource(
 
 A {py:class}`~zephon.io.Dataset` describes where the data lives (e.g., local path, distributed file system, S3, GCS) and its
 format (JSONL, Parquet, MDS, etc.). A {py:class}`~zephon.work.MixtureSpec` sets the target
-proportions (**mixture**). In the example above, based upon this information, the implementation of the {py:class}`~zephon.work.StaticMixtureWorkSource` generates the chunks, respecting the mixture weights via {py:class}`Smooth Weighted Round Robin <zephon.utils.swrr.SmoothWeightedRoundRobin>`. For example, a chunk of size 100 would contain 70 pointers to samples in FineWeb, and 30 pointers to samples in DCLM.
+proportions (**mixture**). In the example above, based upon this information, the implementation of the {py:class}`~zephon.work.StaticMixtureWorkSource` generates the chunks, respecting the mixture weights via Smooth Weighted Round Robin. For example, a chunk of size 100 would contain 70 pointers to samples in FineWeb, and 30 pointers to samples in DCLM.
 
 This separation of *what to train on* from *how to process it* is one of
 Zephon's central design principles. In the future, we can introduce, for example, more declarative work sources with custom DSLs, or work sources that yield data based on active curricula.
@@ -113,9 +113,9 @@ pipeline, such as tokenization splitting a long document into multiple
 sequences, or sequence packing merging short samples, can alter the
 effective ordering and mixture ratios of what eventually reaches the training
 loop. Zephon provides pipeline-level tools like
-{py:meth}`Pipeline.shuffle() <zephon.api.Pipeline.shuffle>` (a buffer-based
+{py:meth}`Pipeline.shuffle() <zephon.Pipeline.shuffle>` (a buffer-based
 shuffle step) and
-{py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>` to
+{py:meth}`Pipeline.ensure_mixture() <zephon.Pipeline.ensure_mixture>` to
 address exactly this interplay. Users should be aware that WorkSource-level
 shuffling sets the *initial* ordering, but downstream processing may require
 additional shuffling or mixture correction to maintain the desired guarantees
@@ -137,11 +137,11 @@ aspect is minimal and the pipeline is essentially just a data feeder.
 ```
 
 In Zephon, you describe this sequence of processing steps using a
-{py:class}`~zephon.api.Pipeline`. The Pipeline provides a builder-style API:
+{py:class}`~zephon.Pipeline`. The Pipeline provides a builder-style API:
 each method call adds another step to the chain.
 
 ```python
-from zephon.api import Pipeline
+from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -179,18 +179,18 @@ Each processing step in the chain is called an **operator**. You typically
 instantiate operator classes yourself; the Pipeline builder creates and wires
 them for you. Some of the key built-in operators are:
 
-- {py:meth}`~zephon.api.Pipeline.tokenize` --- tokenize text using any
+- {py:meth}`~zephon.Pipeline.tokenize` --- tokenize text using any
   HuggingFace-compatible tokenizer
-- {py:meth}`~zephon.api.Pipeline.batch` --- collect samples into
+- {py:meth}`~zephon.Pipeline.batch` --- collect samples into
   fixed-size training batches
-- {py:meth}`~zephon.api.Pipeline.ensure_mixture` --- correct mixture ratios
+- {py:meth}`~zephon.Pipeline.ensure_mixture` --- correct mixture ratios
   after processing steps that change sample sizes (explained
   [below](#keeping-mixtures-on-track))
-- {py:meth}`~zephon.api.Pipeline.shuffle` --- deterministic buffer-based
+- {py:meth}`~zephon.Pipeline.shuffle` --- deterministic buffer-based
   shuffle within the pipeline
-- {py:meth}`~zephon.api.Pipeline.map_transform` --- apply an arbitrary
+- {py:meth}`~zephon.Pipeline.map_transform` --- apply an arbitrary
   Python function to each sample
-- {py:meth}`~zephon.api.Pipeline.pack_sequences` --- bin-pack short
+- {py:meth}`~zephon.Pipeline.pack_sequences` --- bin-pack short
   tokenized sequences into full-length samples
 
 ```{note}
@@ -209,14 +209,14 @@ these operators, see [Sample Lifecycle](understanding/sample_lifecycle.md).
 
 The WorkSource produces lightweight pointers, but at some point Zephon needs
 to read the actual data. This happens automatically: every Pipeline starts
-with a built-in {py:class}`~zephon.ops.FetchOp` that you never add yourself.
+with a built-in ``FetchOp`` that you never add yourself.
 When the pipeline runs, FetchOp takes each pointer, opens the corresponding
 shard file, and loads the sample's raw payload into a
-{py:class}`~zephon.core.SampleRecord`. All subsequent operators work on this
+{py:class}`~zephon.types.SampleRecord`. All subsequent operators work on this
 loaded data.
 
 When loading from remote storage (S3, GCS, maybe even on a slow DFS), you can optionally insert a
-{py:class}`~zephon.ops.PrefetchOp` that looks ahead in the pointer stream and
+``PrefetchOp`` that looks ahead in the pointer stream and
 downloads shards to a local cache before they are needed. This reduces fetch
 latency without changing the data in any way. It is purely a performance
 optimization.
@@ -236,7 +236,7 @@ For local storage, prefetch is unnecessary and can be omitted. See the
 ### What a sample looks like inside the pipeline
 
 Once FetchOp has loaded a sample, it becomes a
-{py:class}`~zephon.core.SampleRecord`. This is a container that pairs a **payload**
+{py:class}`~zephon.types.SampleRecord`. This is a container that pairs a **payload**
 with internal tracking metadata. The payload is typically a Python dict whose
 keys are called **fields**:
 
@@ -269,9 +269,9 @@ come from FineWeb, 30% from DCLM. But tokenization changes the game. One
 FineWeb sample might produce 500 integer tokens while one DCLM document might produce
 2,000. After tokenization, the *token-level* ratio (which eventually ends up at the model) drifts away from 70/30.
 
-{py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>` fixes this. It observes
-the actual token counts flowing through and reorders samples using {py:class}`Smooth
-Weighted Round Robin (SWRR) <zephon.utils.swrr.SmoothWeightedRoundRobin>` to bring the token-level mixture back to target.
+{py:meth}`Pipeline.ensure_mixture() <zephon.Pipeline.ensure_mixture>` fixes this. It observes
+the actual token counts flowing through and reorders samples using Smooth
+Weighted Round Robin (SWRR) to bring the token-level mixture back to target.
 
 ```python
 pipeline = (
@@ -328,8 +328,8 @@ Before the pipeline runs, Zephon **compiles** it: the Pipeline's operator
 graph is optimized and translated into a sequence of stages, each annotated with a runner
 type and worker counts. This compilation step applies deterministic rules
 based on operator properties and any overrides you provide via
-{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>`. You can inspect the compiled plan with
-{py:meth}`~zephon.api.Pipeline.explain` (shown
+{py:meth}`Pipeline.options() <zephon.Pipeline.options>`. You can inspect the compiled plan with
+{py:meth}`~zephon.Pipeline.explain` (shown
 [below](#inspecting-your-pipeline)).
 
 Three runner types are currently available:
@@ -344,7 +344,7 @@ By default, most operators run in the **thread runner**. The main exception
 is `batch`: when it is the last operator in a stage (the common case), it is
 placed in its own **inline** stage, since batching is lightweight and benefits
 from avoiding threading overhead. If you add post-batch operators (e.g.,
-{py:meth}`~zephon.api.Pipeline.map_batch`), the batch stage switches to
+{py:meth}`~zephon.Pipeline.map_batch`), the batch stage switches to
 threads to avoid any potential serialization of tensors. You can
 override the runner for any stage via `Pipeline.options(per_stage_runner=...)`.
 
@@ -375,7 +375,7 @@ Stages connect through bounded queues. When a downstream queue fills up,
 upstream producers block automatically. This **backpressure** prevents
 the pipeline from accumulating unbounded work in memory. At the pipeline
 output, you can set `prefetch_batches` in
-{py:meth}`Pipeline.options() <zephon.api.Pipeline.options>` to pre-fill a
+{py:meth}`Pipeline.options() <zephon.Pipeline.options>` to pre-fill a
 buffer of fully-processed batches ahead of the training loop. As long as
 this buffer stays non-empty, the GPU never stalls waiting for data.
 
@@ -383,7 +383,7 @@ this buffer stays non-empty, the GPU never stalls waiting for data.
 
 ## The Engine
 
-The {py:class}`~zephon.core.Engine` is the runtime that ties everything
+The ``Engine`` is the runtime that ties everything
 together. When you iterate over a Pipeline, the Engine:
 
 1. Requests work chunks from the WorkSource
@@ -463,7 +463,7 @@ orchestrates all of this, feeding pointers in and delivering batches out.
 
 ## Inspecting Your Pipeline
 
-Call {py:meth}`~zephon.api.Pipeline.explain` to see how Zephon compiled your
+Call {py:meth}`~zephon.Pipeline.explain` to see how Zephon compiled your
 pipeline without running it. This shows stages, runner assignments, operator
 parallelism, and buffer depths:
 

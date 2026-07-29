@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from tests.zephon.runners._helpers import _ctx_services, _make_stage, _mk_records
-from zephon.observability.collector import CollectorConfig, PipelineCollector
+from tests.zephon._internal.runners._helpers import (
+    _ctx_services,
+    _make_stage,
+    _mk_records,
+)
+from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
+from zephon._internal.runners.threads import ThreadStageRunner
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
-from zephon.runners.threads import ThreadStageRunner
 
 
 def _noop_metrics(_: NodeMetricsDelta) -> None:

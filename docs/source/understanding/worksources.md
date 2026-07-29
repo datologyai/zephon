@@ -29,7 +29,7 @@ The WorkSource expresses the curriculum as a stream of
 `(dataset_id, shard_id, sample_idx)` triple.  No I/O happens here; the
 WorkSource only decides *which* samples to train on.  Actual data loading
 starts later, when the pipeline's built-in
-{py:class}`~zephon.ops.FetchOp` resolves those pointers into data.
+``FetchOp`` resolves those pointers into data.
 
 ```
 WorkSource                              Pipeline
@@ -52,8 +52,8 @@ tokenization with splitting turns one document into a variable number of
 sequences, packing merges short samples, and filtering drops some entirely.
 After these steps, the token-level mixture ratio may no longer match the
 WorkSource's target.  Zephon provides pipeline-level tools like
-{py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>` and
-{py:meth}`Pipeline.shuffle() <zephon.api.Pipeline.shuffle>` to correct for
+{py:meth}`Pipeline.ensure_mixture() <zephon.Pipeline.ensure_mixture>` and
+{py:meth}`Pipeline.shuffle() <zephon.Pipeline.shuffle>` to correct for
 this drift.  See
 [Keeping Mixtures on Track](../basic_concepts.md#keeping-mixtures-on-track)
 for details.
@@ -158,8 +158,8 @@ WorkChunk(
 ```
 
 When the Engine iterates over a chunk, the chunk's default iteration order
-uses {py:class}`Smooth Weighted Round Robin
-(SWRR) <zephon.utils.swrr.SmoothWeightedRoundRobin>`.
+uses Smooth Weighted Round Robin
+(SWRR).
 SWRR tracks a per-component deficit and always emits from the most
 underrepresented component next, ensuring that the per-component ratio is
 maintained not just across the chunk as a whole but approximately within any
@@ -360,7 +360,7 @@ outside the engine, and priming refuses to measure through them — pin the
 ratios or provide a `measure=` callable instead.
 
 Token-aware mixtures do not require
-{py:meth}`Pipeline.ensure_mixture() <zephon.api.Pipeline.ensure_mixture>`,
+{py:meth}`Pipeline.ensure_mixture() <zephon.Pipeline.ensure_mixture>`,
 but the two compose.  Each chunk carries the declared token mixture as its
 `target_mixture`, so a downstream `ensure_mixture` aims at your token target
 rather than the chunk's (deliberately skewed) sample composition.  Because

@@ -14,12 +14,12 @@ from typing import Any, ClassVar, Literal
 
 import numpy as np
 
-from zephon.core.checkpoint import (
+from zephon._internal.checkpoint import (
     CursorStateV1,
     StaticMixtureStateV5,
 )
-from zephon.core.constants import SampleId
 from zephon.io.dataset import Dataset
+from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 from zephon.work.token_estimation import (

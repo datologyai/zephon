@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -44,7 +44,7 @@ def make_dataset(name: str, sample_count: int) -> Dataset:
 
 def _extract_texts(item: Any) -> list[str]:
     """Extract text payloads from a SampleRecord or SampleBatch."""
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
         payload = item.payload

@@ -39,9 +39,9 @@ from typing import Any
 
 import pytest
 
-from zephon.api import Pipeline as PublicPipeline
-from zephon.core.constants import SampleRecord
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration

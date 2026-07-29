@@ -9,7 +9,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from zephon.api import Pipeline as PublicPipeline
+from zephon import Pipeline as PublicPipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -29,7 +29,7 @@ def _make_dataset(name: str, n: int) -> Dataset:
 
 
 def _extract_elem(item) -> tuple[int, list[str]]:
-    from zephon.core.constants import SampleBatch, SampleRecord
+    from zephon.types import SampleBatch, SampleRecord
 
     if isinstance(item, SampleRecord):
         payload = item.payload
