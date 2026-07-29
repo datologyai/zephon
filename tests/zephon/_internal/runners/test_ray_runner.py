@@ -26,11 +26,11 @@ from tests.zephon._internal.runners._helpers import (
     _mk_records,
 )
 from zephon._internal.graph import Node, Stage
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon._internal.ops.batch import Batch
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -73,11 +73,11 @@ def _make_runner(
 
 
 @dataclass
-class _IdentityOp(DefaultSetup, Op[Any, Any]):
+class _IdentityOp(BaseOp):
     name: str = "identity"
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -99,7 +99,7 @@ class _IdentityOp(DefaultSetup, Op[Any, Any]):
         return list(elems)
 
 
-class _ValueMappingOp(DefaultSetup, Op[Any, Any]):
+class _ValueMappingOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=True,
@@ -133,7 +133,7 @@ class _AddValueOp(_ValueMappingOp):
     delta: int = 0
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def _map(self, value: int) -> int:
         return value + self.delta
@@ -144,16 +144,16 @@ class _MultiplyValueOp(_ValueMappingOp):
     factor: int = 1
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def _map(self, value: int) -> int:
         return value * self.factor
 
 
 @dataclass
-class _CrashOp(DefaultSetup, Op[Any, Any]):
+class _CrashOp(BaseOp):
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -173,11 +173,11 @@ class _CrashOp(DefaultSetup, Op[Any, Any]):
 
 
 @dataclass
-class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _LambdaOp(BaseOp):
     transform: Any = None
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self.transform = lambda x: x * 2
 
     def traits(self) -> OpTraits:
@@ -206,11 +206,11 @@ class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
 
 
 @dataclass
-class _ClosureOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _ClosureOp(BaseOp):
     multiplier: int = 3
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self.transform = lambda x: x * self.multiplier
 
     def traits(self) -> OpTraits:

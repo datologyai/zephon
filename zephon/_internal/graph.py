@@ -7,10 +7,10 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Generic, Optional, TypeVar
 
-from zephon._internal.op_base import Op
+from zephon.ops.base import BaseOp
 
 # TypeVar for operator type, enabling typed Node[OpT] where OpT is the specific op
-OpT = TypeVar("OpT", bound=Op[Any, Any])
+OpT = TypeVar("OpT", bound=BaseOp)
 
 
 @dataclass
@@ -92,11 +92,8 @@ class Plan:
             )
         raise TypeError(f"non-freezable value for identity: {type(value)!r}")
 
-    def _op_identity(self, op: Any) -> tuple[Any, ...]:
+    def _op_identity(self, op: BaseOp) -> tuple[Any, ...]:
         """Return an operator signature capturing class, config, and traits."""
-        cls = op.__class__
-        fqcn = f"{cls.__module__}.{cls.__qualname__}"
-
         config_items: list[tuple[str, Any]] = []
         for key, val in sorted(getattr(op, "__dict__", {}).items()):
             if key.startswith("_"):
@@ -117,7 +114,7 @@ class Plan:
             traits_payload = ()
 
         return (
-            fqcn,
+            op.plan_identity(),
             tuple(config_items),
             traits_payload,
         )

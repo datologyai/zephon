@@ -10,17 +10,16 @@ from zephon._internal.io.protocols import MultiDatasetShardStore
 from zephon._internal.io.stores import build_multi_dataset_store
 from zephon._internal.io.stores.resilient import SampleLoadStats
 from zephon._internal.observability.stopwatch import Stopwatch
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.stream import EngineSample
 from zephon.io.options import StoreOptions
 from zephon.observability.stats import FetchTimingDelta
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleMeta, SamplePayload, SampleRecord
 
 
-class FetchOp(DefaultSetup):
+class FetchOp(BaseOp):
     """Load sample payloads from a `MultiDatasetShardStore`."""
 
     def __init__(
@@ -28,7 +27,7 @@ class FetchOp(DefaultSetup):
         max_batch: int = 64,
         max_latency_ms: Optional[int] = 5,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self._store: MultiDatasetShardStore | None = None
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
@@ -36,15 +35,8 @@ class FetchOp(DefaultSetup):
         self._seen_shards: set[tuple[int, int]] = set()
         self._timer = Stopwatch(False)
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
 
         datasets_by_id = ctx.get("datasets_by_id")
         if not datasets_by_id:
@@ -58,7 +50,7 @@ class FetchOp(DefaultSetup):
         self._store = build_multi_dataset_store(datasets_by_id, options=store_options)
         self._emit_fetch_metrics = ctx.get("emit_fetch_metrics")
         self._seen_shards.clear()
-        self._timer = Stopwatch(collect_stats)
+        self._timer = Stopwatch(ctx.stage_info.collect_stats)
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
@@ -201,7 +193,7 @@ class FetchOp(DefaultSetup):
                 out[pos] = SampleRecord(meta=meta, payload=row)
             self._seen_shards.add(shard_key)
 
-            if self.collect_stats:
+            if self.stage_info.collect_stats:
                 for stats in sample_stats:
                     resolve_ns += stats.resolve_ns
                     open_ns += stats.open_ns
@@ -213,7 +205,7 @@ class FetchOp(DefaultSetup):
 
                 metrics_deltas.append(
                     FetchTimingDelta(
-                        stage_index=self.stage_index,
+                        stage_index=self.stage_info.stage_index,
                         shard_id=shard_id,
                         samples=len(items),
                         group_ns=0,  # populated below (rough estimations per group instead of actual measurement tho)

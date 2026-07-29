@@ -13,7 +13,6 @@ from typing import Any, Callable, Generic, Sequence, TypeVar
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.stopwatch import Stopwatch
-from zephon._internal.op_base import Op
 from zephon._internal.stream import (
     Microbatch,
     RunnerStageIn,
@@ -23,7 +22,7 @@ from zephon._internal.stream import (
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import Accumulator
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
 
 
@@ -50,9 +49,7 @@ class BaseOperatorState:
     stage_name: str = ""
     op_index: int = 0
     collect_stats: bool = False
-    instances: list[Op[RunnerStreamIn, StreamItem]] = field(
-        init=False, default_factory=list
-    )
+    instances: list[BaseOp] = field(init=False, default_factory=list)
     parallelism: int = field(init=False)
     accumulator_impl: Accumulator[RunnerStreamIn] = field(init=False)
     _preserves_cursor_order: bool = field(init=False)
@@ -104,17 +101,16 @@ class BaseOperatorState:
 
         base_ctx = dict(self.ctx_proto)
         base_ctx.setdefault("deterministic", self.deterministic)
+        stage_info = StageInfo(
+            stage_index=self.stage_index,
+            stage_name=self.stage_name,
+            op_index=self.op_index,
+            collect_stats=self.collect_stats,
+        )
 
         for _ in range(self.parallelism):
             instance = copy.deepcopy(self.node.op)
-            ctx = OpContext(dict(base_ctx))
-            instance.setup(
-                ctx,
-                self.stage_index,
-                self.stage_name,
-                self.op_index,
-                self.collect_stats,
-            )
+            instance.setup(OpContext(dict(base_ctx), stage_info))
             self.instances.append(instance)
 
         # Get accumulator from operator

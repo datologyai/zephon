@@ -13,7 +13,7 @@ from zephon.ops.accumulators import (
     PassthroughAccumulator,
     ReadyBatch,
 )
-from zephon.ops.base import BaseOp, OpContext
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.ops.children import pack_meta, spawn_child, tombstone_meta
 from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
 from zephon.ops.grouping import DomainGroups
@@ -31,6 +31,7 @@ __all__ = [
     "ReadyBatch",
     "SpanSource",
     "SpecialTokensMode",
+    "StageInfo",
     "pack_meta",
     "spawn_child",
     "tombstone_meta",

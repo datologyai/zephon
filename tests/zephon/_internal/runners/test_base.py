@@ -11,11 +11,11 @@ import pytest
 
 from tests.zephon._internal.runners._helpers import _ctx_services
 from zephon._internal.graph import Node, Stage
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.runners.inline import InlineStageRunner
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -467,11 +467,11 @@ class _FlushTrackingAccumulator(Accumulator[SampleRecord]):
         return True
 
 
-class _StallTrackingOp(DefaultSetup):
+class _StallTrackingOp(BaseOp):
     """Minimal op that uses _FlushTrackingAccumulator and configurable traits."""
 
     def __init__(self, *, stall_on_epoch_boundary: bool = False) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self._stall = stall_on_epoch_boundary
 
     def traits(self) -> OpTraits:
@@ -513,7 +513,7 @@ class _BrokenFlushAccumulator(Accumulator[SampleRecord]):
         return bool(self._buffer)
 
 
-class _BrokenFlushOp(DefaultSetup):
+class _BrokenFlushOp(BaseOp):
     """Op whose accumulator leaves data behind after mid-stream flush."""
 
     def traits(self) -> OpTraits:
@@ -593,11 +593,11 @@ def test_batch_drop_last_uses_stall_trait() -> None:
     assert Batch(3, drop_last=False).traits().stall_on_epoch_boundary is False
 
 
-class _NonMonotoneFlushOp(DefaultSetup):
+class _NonMonotoneFlushOp(BaseOp):
     """Non-stalling, non-monotone op for testing downstream sentinel ordering."""
 
     def __init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(

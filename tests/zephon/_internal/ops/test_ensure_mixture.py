@@ -755,7 +755,7 @@ class TestEnsureMixtureOperator:
         )
 
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         # Explicit mixture override should be stored by name
         assert op._config.mixture_override == {"code": 0.3, "text": 0.7}
@@ -779,7 +779,7 @@ class TestEnsureMixtureOperator:
                 "get_component_name": mock_component_name,
             }
         )
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         # Setup should complete without error (services are used via accumulator, not stored)
         assert op._config is not None
@@ -820,7 +820,7 @@ class TestEnsureMixtureOperator:
         """Test that process_one passes through records."""
         op = EnsureMixture(mixture_override={"a": 1.0})
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         rec = _rec(0)
         result = op.process_one(rec)
@@ -832,7 +832,7 @@ class TestEnsureMixtureOperator:
         """Test that process_many passes through records."""
         op = EnsureMixture(mixture_override={"a": 1.0})
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         records = [_rec(i) for i in range(5)]
         result = op.process_many(records)
@@ -845,7 +845,7 @@ class TestEnsureMixtureOperator:
         """Test sample-based weighting."""
         op = EnsureMixture(weight_by="samples", mixture_override={"a": 1.0})
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         # All samples should have weight 1
         rec_no_tokens = _rec(0)
@@ -858,7 +858,7 @@ class TestEnsureMixtureOperator:
         """Test weight_by='auto' with auto-detection of token field."""
         op = EnsureMixture(weight_by="auto", mixture_override={"a": 1.0})
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         # Record with input_ids should use token length
         rec_with_tokens = _rec(0, tokens=50)
@@ -868,7 +868,7 @@ class TestEnsureMixtureOperator:
         """Test that weight_by='auto' raises when no token field found."""
         op = EnsureMixture(weight_by="auto", mixture_override={"a": 1.0})
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         # Record without tokens should raise ValueError
         rec_no_tokens = _rec(1)
@@ -883,7 +883,7 @@ class TestEnsureMixtureOperator:
             mixture_override={"a": 1.0},
         )
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         rec = SampleRecord(
             meta=SampleMeta(
@@ -906,7 +906,7 @@ class TestEnsureMixtureOperator:
             mixture_override={"a": 1.0},
         )
         ctx = OpContext({})
-        op.setup(ctx, 0, "test", 0, False)
+        op.setup(ctx)
 
         rec1 = _rec(0, weight=10)
         rec2 = _rec(1, weight=5)

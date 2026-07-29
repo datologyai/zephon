@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from zephon._internal.ops.tokenize_base import _MISSING, TokenizeBase
+from zephon.ops.traits import OpTraits
 
 
 class _CountingBase(TokenizeBase):
@@ -25,6 +26,12 @@ class _CountingBase(TokenizeBase):
         self.finalize_calls += 1
         if self.fail_finalize:
             raise ValueError("finalize boom")
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return elems
 
 
 def _base(**kwargs: Any) -> _CountingBase:

@@ -9,11 +9,11 @@ import contextlib
 import threading
 from typing import Any, Mapping, Optional
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.token_counting import TokenCountingSpec
 from zephon._internal.utils.tokenizer import TokenizerLike, load_hf_tokenizer
 from zephon._internal.utils.torch_compat import _gil_disabled
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
+from zephon.ops.base import BaseOp
 from zephon.types import SampleRecord
 
 _MISSING: object = object()
@@ -23,7 +23,7 @@ _MISSING: object = object()
 _SETUP_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
 
 
-class TokenizeBase(DefaultSetup):
+class TokenizeBase(BaseOp):
     """Lazy-tokenizer scaffolding shared by the tokenize-op family.
 
     Owns the deferred tokenizer load (never in ``setup()`` — HF tokenizers
@@ -45,7 +45,7 @@ class TokenizeBase(DefaultSetup):
         max_batch: int,
         max_latency_ms: Optional[int],
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         if eos_token is not None and (tokenizer is not None or tokenizer_id is None):
             raise ValueError(
                 "eos_token only applies when the op loads tokenizer_id; pass "

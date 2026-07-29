@@ -56,13 +56,13 @@ are:
 
 Two additional methods complete the contract:
 
-- **`setup(ctx, ...)`**: called once before the operator processes any
-  data.  The runner passes an `OpContext` that provides runtime services
-  such as access to dataset stores, metrics callbacks, and replay state.
-- **`process_one(elem)`**: transforms a single element.  The default
-  implementation of `process_many` calls `process_one` per element, so
-  operators can override either method depending on whether they benefit
-  from batch-level optimizations.
+- **`setup(ctx)`**: called once before the operator processes any data. The
+  runner passes an `OpContext` with runtime services and the operator's plan
+  placement in `ctx.stage_info`.
+- **`process_one(elem)`**: transforms a single element. The default
+  implementation calls `process_many` with a single-element list, so operators
+  should override `process_one` only when they need a distinct scalar fast
+  path.
 
 The critical invariant is that **`process_many` must be stateless across
 calls**.  It must not rely on anything from a previous invocation.  Any
@@ -618,8 +618,8 @@ class Tokenize(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True, parallelism=4)
 
-    def setup(self, ctx: OpContext, stage_index, stage_name, op_index, collect_stats):
-        super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext):
+        super().setup(ctx)
         # Per-worker init: build heavy / non-picklable resources here (the repo
         # convention — keeps __init__ picklable for the process and Ray
         # runners), and read services from ctx.
@@ -705,7 +705,7 @@ built-in operators honor:
   instance form's `setup` hook is for — reach for the class-based path
   when closures aren't enough.
 
-The ``Op`` protocol, `BaseOp`,
+{py:class}`~zephon.ops.BaseOp`, {py:class}`~zephon.ops.StageInfo`,
 {py:class}`~zephon.ops.OpContext`, {py:class}`~zephon.ops.OpTraits`,
 {py:class}`~zephon.ops.CountingAccumulator`, and
 {py:class}`~zephon.ops.PassthroughAccumulator` are all exported from

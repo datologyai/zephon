@@ -9,7 +9,7 @@ import pytest
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.stream import EngineSample
 from zephon.io import Dataset
-from zephon.ops.base import OpContext
+from zephon.ops.base import OpContext, StageInfo
 
 
 def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
@@ -25,11 +25,15 @@ def _setup_op(
         **ctx_data,
     }
     op.setup(
-        OpContext(ctx),
-        stage_index=0,
-        stage_name="stage0",
-        op_index=0,
-        collect_stats=collect_stats,
+        OpContext(
+            ctx,
+            StageInfo(
+                stage_index=0,
+                stage_name="stage0",
+                op_index=0,
+                collect_stats=collect_stats,
+            ),
+        )
     )
     return op
 
@@ -105,11 +109,15 @@ def test_fetch_op_setup_requires_datasets() -> None:
     op = FetchOp()
     with pytest.raises(RuntimeError):
         op.setup(
-            OpContext({"record_node_metrics": _noop, "emit_fetch_metrics": _noop}),
-            stage_index=0,
-            stage_name="stage0",
-            op_index=0,
-            collect_stats=False,
+            OpContext(
+                {"record_node_metrics": _noop, "emit_fetch_metrics": _noop},
+                StageInfo(
+                    stage_index=0,
+                    stage_name="stage0",
+                    op_index=0,
+                    collect_stats=False,
+                ),
+            )
         )
 
 

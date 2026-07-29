@@ -12,11 +12,10 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.utils.length_extraction import extract_length
 from zephon._internal.utils.swrr import SmoothWeightedRoundRobin
 from zephon.ops.accumulators import Accumulator, ReadyBatch
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
 from zephon.types import ChunkId, ComponentId, LaneId, SampleRecord
@@ -708,7 +707,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 )
 
 
-class EnsureMixture(DefaultSetup):
+class EnsureMixture(BaseOp):
     """Enforce mixture ratios using adaptive Smooth Weighted Round Robin.
 
     This operator reorders samples to match target mixture proportions using
@@ -783,7 +782,7 @@ class EnsureMixture(DefaultSetup):
         mixture_override: Mapping[str, float] | None = None,
         parallelism: int = 1,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
         if max_buffer_size is not None and max_buffer_size <= 0:
             raise ValueError("max_buffer_size must be positive (or None for unbounded)")
@@ -819,16 +818,9 @@ class EnsureMixture(DefaultSetup):
         """Configured sample/token weighting policy."""
         return self._config.weight_by
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
+    def setup(self, ctx: OpContext) -> None:
         """Initialize operator with context from engine."""
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+        super().setup(ctx)
         self._populate_config_from_ctx(ctx._services)
 
     def traits(self) -> OpTraits:

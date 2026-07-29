@@ -9,7 +9,7 @@ from zephon._internal.ops.stateful_transform import (
     StatefulTransformAccumulator,
     StatefulTransformOp,
 )
-from zephon.ops.base import OpContext
+from zephon.ops.base import OpContext, StageInfo
 from zephon.types import SampleMeta, SampleRecord
 
 
@@ -27,11 +27,15 @@ def _setup(
     if ctx_data:
         ctx.update(ctx_data)
     op.setup(
-        OpContext(ctx),
-        stage_index=0,
-        stage_name="stage0",
-        op_index=0,
-        collect_stats=collect_stats,
+        OpContext(
+            ctx,
+            StageInfo(
+                stage_index=0,
+                stage_name="stage0",
+                op_index=0,
+                collect_stats=collect_stats,
+            ),
+        )
     )
     return op
 

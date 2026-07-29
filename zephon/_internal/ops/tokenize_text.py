@@ -20,7 +20,6 @@ from typing import (
     cast,
 )
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.ops.tokenize_base import _MISSING, TokenizeBase
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon._internal.utils.tokenizer import (
@@ -249,15 +248,8 @@ class TokenizeText(TokenizeBase):
         # to avoid HF tokenizer creating tensors (which races with our code).
         self._convert_np_to_pt = False
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
         # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
         # hf tokenizers don't like if we fork after creating the object
 

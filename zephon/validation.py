@@ -885,7 +885,7 @@ def _check_op_sample_identity(
       have a distinct ``child(i)`` index so cursors stay unique.
 
     These invariants protect the engine's eviction and replay machinery
-    (see ``zephon/core/engine.py`` and ``op_base.py:32-36``).
+    (see the fan-out contract in :class:`zephon.ops.BaseOp`).
 
     Outputs may be a mix of ``SampleRecord`` and ``SampleBatch`` (e.g.
     when the op is downstream of ``Pipeline.batch``); we flatten via

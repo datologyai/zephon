@@ -6,9 +6,8 @@
 import logging
 from typing import Any, Callable, Optional
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SamplePayload, SampleRecord
@@ -16,7 +15,7 @@ from zephon.types import SampleBatch, SamplePayload, SampleRecord
 log = logging.getLogger(__name__)
 
 
-class _BaseMapTransform(DefaultSetup):
+class _BaseMapTransform(BaseOp):
     """Shared base for map-style transformation operators.
 
     Subclasses specialise ``process_one`` for either individual samples
@@ -31,7 +30,7 @@ class _BaseMapTransform(DefaultSetup):
         max_batch: int = 64,
         max_latency_ms: Optional[int] = 3,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
         if not callable(transform_fn):
             raise TypeError("transform_fn must be callable")
@@ -39,16 +38,6 @@ class _BaseMapTransform(DefaultSetup):
         self.drop_none = drop_none
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
-
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)

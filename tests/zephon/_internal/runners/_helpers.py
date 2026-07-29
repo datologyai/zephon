@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Iterable
 
+from zephon.ops.base import BaseOp
+from zephon.ops.traits import OpTraits
 from zephon.types import SampleMeta, SampleRecord
 
 if TYPE_CHECKING:
@@ -90,3 +92,27 @@ def _make_stage(
         placement=placement,
         break_reason="test",
     )
+
+
+class _StageInfoProbe(BaseOp):
+    def __init__(self, key: str = "stage_info") -> None:
+        super().__init__()
+        self._key = key
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        info = self.stage_info
+        stamp = (info.stage_index, info.stage_name, info.op_index, info.collect_stats)
+        return [
+            SampleRecord(meta=e.meta, payload={**e.payload, self._key: stamp})
+            for e in elems
+        ]
+
+
+def _probe_stage(*keys: str) -> "Stage":
+    from zephon._internal.graph import Node, Stage
+
+    nodes = [Node(name=key, op=_StageInfoProbe(key=key)) for key in keys]
+    return Stage(name="probe_stage", nodes=nodes, placement="auto", break_reason="test")

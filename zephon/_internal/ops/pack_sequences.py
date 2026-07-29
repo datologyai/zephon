@@ -55,7 +55,6 @@ try:
 except ImportError:  # pragma: no cover - torch absent only in slim envs.
     _torch = None  # type: ignore[assignment]
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.utils.length_extraction import (
     TOKEN_FIELD_CANDIDATES,
     _get_length,
@@ -65,6 +64,7 @@ from zephon._internal.utils.length_extraction import (
 from zephon._internal.utils.seeding import batch_seed
 from zephon._internal.utils.torch_compat import _tensor_lock_ctx
 from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.base import BaseOp
 from zephon.ops.children import (
     pack_meta,
     tombstones_for_record,
@@ -1314,7 +1314,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         return outputs
 
 
-class PackSequences(DefaultSetup):
+class PackSequences(BaseOp):
     """Pack variable-length sequences into bins.
 
     Bin assignment is deterministic regardless of parallelism. The ``output``
@@ -1420,7 +1420,7 @@ class PackSequences(DefaultSetup):
                 :class:`zephon.ops.DomainGroups` naming which mixing domains may
                 share a packed sample.
         """
-        DefaultSetup.__init__(self)
+        super().__init__()
 
         if max_length <= 0:
             raise ValueError("max_length must be positive")

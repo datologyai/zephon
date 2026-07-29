@@ -9,16 +9,15 @@ of the pipeline when no batching is used.
 
 from typing import Any
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.replay import ReplayConfigService
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
 from zephon.types import LaneId, SampleCursor, SampleRecord
 
 
-class ReplayFilter(DefaultSetup):
+class ReplayFilter(BaseOp):
     """Per-lane pre-batch dropper configured lazily via the OpContext.
 
     Drops records until the checkpointed per-lane cursor reappears (inclusive),
@@ -27,7 +26,7 @@ class ReplayFilter(DefaultSetup):
     """
 
     def __init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
         self._service: ReplayConfigService | None = None
         self._targets: dict[LaneId, SampleCursor | None] = {}
@@ -35,15 +34,8 @@ class ReplayFilter(DefaultSetup):
         self._disabled: bool = True
         self._initialized = False
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
 
         service = ctx.get("replay_state_service")
         if service is None:

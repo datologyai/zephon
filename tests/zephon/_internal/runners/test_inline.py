@@ -5,11 +5,13 @@ from tests.zephon._internal.runners._helpers import (
     _extract_values,
     _mk_record,
     _mk_records,
+    _probe_stage,
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.inline import InlineStageRunner
+from zephon.observability.config import ExecutionTrackingMode
 from zephon.types import SampleMeta, SampleRecord
 
 
@@ -131,3 +133,36 @@ def test_inline_sentinel_bypass_accumulator_and_process_many() -> None:
     batches_out = [item for item in out if isinstance(item, SampleBatch)]
     total_regular = sum(len(b.records) for b in batches_out)
     assert total_regular == 6
+
+
+def test_inline_runner_provides_stage_info_per_op() -> None:
+    runner = InlineStageRunner(
+        _probe_stage("first", "second"),
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_index=3,
+        stage_output_mode="stream_items",
+    )
+    try:
+        (out,) = list(runner.run(iter(_mk_records([7]))))
+    finally:
+        runner.close()
+    assert out.payload["first"] == (3, "probe_stage", 0, False)
+    assert out.payload["second"] == (3, "probe_stage", 1, False)
+
+
+def test_inline_runner_collect_stats_flag_reaches_ops() -> None:
+    runner = InlineStageRunner(
+        _probe_stage("probe"),
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        tracking_mode=ExecutionTrackingMode.NODES,
+        stage_output_mode="stream_items",
+    )
+    try:
+        (out,) = list(runner.run(iter(_mk_records([7]))))
+    finally:
+        runner.close()
+    assert out.payload["probe"] == (0, "probe_stage", 0, True)

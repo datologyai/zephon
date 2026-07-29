@@ -440,7 +440,7 @@ def test_prefetch_setup_with_inmem_datasets(mock_datasets):
 
     # Setup should succeed even with in-memory datasets
     # (they're just skipped for prefetch)
-    op.setup(ctx, stage_index=0, stage_name="prefetch", op_index=0, collect_stats=False)
+    op.setup(ctx)
 
     # Should have no locators for in-memory datasets
     assert len(op._locators) == 0, (

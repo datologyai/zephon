@@ -1,7 +1,6 @@
 import pytest
 
 from zephon._internal.graph import Graph
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.ops.map_transform import MapBatchTransform, MapTransform
@@ -9,6 +8,7 @@ from zephon._internal.ops.materialize import Materialize
 from zephon._internal.ops.replay_filter import ReplayFilter
 from zephon._internal.planner import Planner
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 
 
@@ -99,9 +99,9 @@ def test_planner_batch_terminal_stays_inline() -> None:
     assert plan.stages[1].runner_hint == "inline"
 
 
-class _OrderedOp(DefaultSetup, Op[int, int]):
+class _OrderedOp(BaseOp):
     def __init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
@@ -111,6 +111,9 @@ class _OrderedOp(DefaultSetup, Op[int, int]):
 
     def process_one(self, elem: int) -> list[int]:
         return [elem]
+
+    def process_many(self, elems: list[int]) -> list[int]:
+        return [out for e in elems for out in self.process_one(e)]
 
 
 class _ReorderingOp(_OrderedOp):

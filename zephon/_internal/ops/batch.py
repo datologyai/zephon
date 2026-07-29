@@ -6,8 +6,8 @@
 from collections.abc import Iterable
 from typing import Any
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleRecord
 
@@ -47,7 +47,7 @@ class BatchAccumulator(CountingAccumulator[SampleRecord]):
         return True
 
 
-class Batch(DefaultSetup):
+class Batch(BaseOp):
     """Collect sample records into mini-batches, one lane per batch.
 
     Uses a lane-keyed CountingAccumulator to group records into lane-pure
@@ -65,7 +65,7 @@ class Batch(DefaultSetup):
         drop_last: bool = True,
         parallelism: int = 1,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
         if microbatch_size <= 0:
             raise ValueError("microbatch_size must be positive")
@@ -89,9 +89,6 @@ class Batch(DefaultSetup):
         return BatchAccumulator(
             max_batch=self.microbatch_size, drop_last=self.drop_last
         )
-
-    def process_one(self, elem: SampleRecord) -> list[SampleBatch | SampleRecord]:
-        return self.process_many([elem])
 
     def process_many(
         self, elems: list[SampleRecord]

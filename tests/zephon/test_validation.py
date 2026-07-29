@@ -1204,15 +1204,8 @@ class _SubclassWithDefensiveSetupGuard(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True)
 
-    def setup(
-        self,
-        ctx: Any,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: Any) -> None:
+        super().setup(ctx)
         self._tokenizer = object()
 
     def process_many(self, elems: list[Any]) -> list[Any]:

@@ -1,7 +1,7 @@
 import pytest
 
 from zephon._internal.ops.assert_lineage import AssertLineageOrder
-from zephon.ops.base import OpContext
+from zephon.ops.base import OpContext, StageInfo
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 
@@ -11,11 +11,15 @@ def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
 
 def _setup(op: AssertLineageOrder) -> AssertLineageOrder:
     op.setup(
-        OpContext({"record_node_metrics": _noop}),
-        stage_index=0,
-        stage_name="stage0",
-        op_index=0,
-        collect_stats=False,
+        OpContext(
+            {"record_node_metrics": _noop},
+            StageInfo(
+                stage_index=0,
+                stage_name="stage0",
+                op_index=0,
+                collect_stats=False,
+            ),
+        )
     )
     return op
 

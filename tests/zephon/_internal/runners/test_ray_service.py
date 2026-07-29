@@ -103,13 +103,48 @@ class TestRaySingleOpActor:
         assert result.consumed_elements == 3
         assert result.proc_ns > 0
 
+    def test_actor_setup_provides_stage_info(self) -> None:
+        from zephon._internal.runners.concurrent import RunnerResult
+        from zephon.ops.base import BaseOp
+        from zephon.ops.traits import OpTraits
+        from zephon.types import SampleRecord
+
+        class StageInfoProbe(BaseOp):
+            def traits(self) -> OpTraits:
+                return OpTraits(preserves_cursor_order=True)
+
+            def process_many(self, elems):
+                info = self.stage_info
+                stamp = (
+                    info.stage_index,
+                    info.stage_name,
+                    info.op_index,
+                    info.collect_stats,
+                )
+                return [
+                    SampleRecord(
+                        meta=e.meta, payload={**e.payload, "stage_info": stamp}
+                    )
+                    for e in elems
+                ]
+
+        actor = _spawn_actor(StageInfoProbe(), op_name="probe_op")
+        try:
+            result = ray.get(actor.process.remote(_mk_records([1]), 0))
+            assert isinstance(result, RunnerResult)
+            assert result.error is None
+            (rec,) = result.payload
+            assert rec.payload["stage_info"] == (0, "test_stage", 0, False)
+        finally:
+            ray.kill(actor)
+
     def test_error_returns_runner_result_with_error(self) -> None:
         """Errors are wrapped in RunnerResult.error (not raised)."""
-        from zephon._internal.op_base import DefaultSetup
         from zephon._internal.runners.concurrent import RunnerResult
+        from zephon.ops.base import BaseOp
         from zephon.ops.traits import OpTraits
 
-        class FailOp(DefaultSetup):
+        class FailOp(BaseOp):
             def traits(self) -> OpTraits:
                 return OpTraits(indexable=True, preserves_cursor_order=True)
 
@@ -132,11 +167,11 @@ class TestRaySingleOpActor:
 
     def test_attribute_error_in_process_many_not_masked(self) -> None:
         """AttributeError raised inside process_many is surfaced as an error."""
-        from zephon._internal.op_base import DefaultSetup
         from zephon._internal.runners.concurrent import RunnerResult
+        from zephon.ops.base import BaseOp
         from zephon.ops.traits import OpTraits
 
-        class BrokenProcessManyOp(DefaultSetup):
+        class BrokenProcessManyOp(BaseOp):
             def traits(self) -> OpTraits:
                 return OpTraits(indexable=True, preserves_cursor_order=True)
 

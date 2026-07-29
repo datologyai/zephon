@@ -96,8 +96,7 @@ from zephon._internal.utils.shm_coalesce import (
     coalesce_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
-from zephon.ops.base import OpContext
-from zephon.types import StreamItem
+from zephon.ops.base import OpContext, StageInfo
 
 Q = TypeVar("Q")
 
@@ -352,14 +351,13 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         # tokenizers, transform functions, etc.) stays alive for the entire
         # worker lifetime as an unused local variable.
         del op_proto
-        ctx = OpContext(dict(config.ctx_services))
-        op_instance.setup(
-            ctx,
-            config.stage_index,
-            config.stage_name,
-            config.op_index,
-            config.collect_stats,
+        stage_info = StageInfo(
+            stage_index=config.stage_index,
+            stage_name=config.stage_name,
+            op_index=config.op_index,
+            collect_stats=config.collect_stats,
         )
+        op_instance.setup(OpContext(dict(config.ctx_services), stage_info))
         total_ns = time.perf_counter_ns() - startup_t0
         setup_ns = total_ns - deser_ns
         wall_ns = time.time_ns() - config.spawn_wall_ns if config.spawn_wall_ns else 0
@@ -396,15 +394,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 batch = command.batch
                 resolve_lazy_payloads(batch)
                 start_ns = time.perf_counter_ns() if command.collect_metrics else 0
-                try:
-                    outputs = op_instance.process_many(batch)
-                except (NotImplementedError, AttributeError):
-                    outputs = None
-                if outputs is None:
-                    out: list[StreamItem] = []
-                    for element in batch:
-                        out.extend(op_instance.process_one(element))
-                    outputs = out
+                outputs = op_instance.process_many(batch)
                 proc_ns = (
                     time.perf_counter_ns() - start_ns if command.collect_metrics else 0
                 )
@@ -574,11 +564,10 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     * For each operator, :meth:`_launch_workers` creates a pool of worker
       processes. Each worker:
 
-      - owns a deep-copied :class:`Op` instance,
+      - owns a deep-copied :class:`~zephon.ops.BaseOp` instance,
       - receives :class:`_WorkerCommand` messages from ``task_queue``
         (kinds: ``"batch"``, ``"stop"``),
-      - runs ``process_many`` / ``process_one`` on its local
-        operator instance, and
+      - runs ``process_many`` on its local operator instance, and
       - pushes :class:`RunnerResult` objects onto the shared ``result_queue``.
 
     * In the multi-operator case, the usual pump threads in

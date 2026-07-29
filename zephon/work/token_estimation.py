@@ -49,7 +49,7 @@ from zephon._internal.token_counting import (
 from zephon._internal.utils.atomic import atomic_write_bytes
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
-from zephon.ops.base import OpContext
+from zephon.ops.base import OpContext, StageInfo
 from zephon.types import SampleId, SampleMeta, SampleRecord
 
 logger = logging.getLogger(__name__)
@@ -291,9 +291,11 @@ class _PreTokenizeReplay:
         """Map one raw payload to the payloads the tokenize op would see."""
         if not self._setup_done:
             # Ops arrive as pre-setup cloudpickle copies, like runner workers.
-            ctx = OpContext({})
+            ctx = OpContext(
+                {}, StageInfo(stage_index=0, stage_name="calibration", op_index=0)
+            )
             for op in self.ops:
-                op.setup(ctx, 0, "calibration", 0, False)
+                op.setup(ctx)
             self._setup_done = True
         records = [
             SampleRecord(

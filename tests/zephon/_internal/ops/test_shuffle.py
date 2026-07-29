@@ -53,8 +53,8 @@ def test_shuffle_buffer_is_deterministic() -> None:
     op1 = ShuffleBuffer(buffer_size=3, seed=123, algorithm="block")
     op2 = ShuffleBuffer(buffer_size=3, seed=123, algorithm="block")
     ctx = OpContext({"record_node_metrics": lambda *args, **kwargs: None})
-    op1.setup(ctx, 0, "s", 0, False)
-    op2.setup(ctx, 0, "s", 0, False)
+    op1.setup(ctx)
+    op2.setup(ctx)
 
     out1 = op1.process_many(recs1)
     out2 = op2.process_many(recs2)
@@ -67,7 +67,7 @@ def test_shuffle_buffer_flushes_tail() -> None:
     recs = _records(2)
     op = ShuffleBuffer(buffer_size=4, seed=7, algorithm="block")
     ctx = OpContext({"record_node_metrics": lambda *args, **kwargs: None})
-    op.setup(ctx, 0, "s", 0, False)
+    op.setup(ctx)
 
     # buffer smaller than window → no immediate output from process_many
     shuffled = op.process_many(recs)
@@ -82,7 +82,7 @@ def test_shuffle_buffer_keeps_closer_after_non_closer_for_same_base() -> None:
 
     op = ShuffleBuffer(buffer_size=2, seed=99, algorithm="block")
     ctx = OpContext({"record_node_metrics": lambda *args, **kwargs: None})
-    op.setup(ctx, 0, "s", 0, False)
+    op.setup(ctx)
 
     out = op.process_many(recs)
     # The closing contributor must be on the last occurrence for the base offset.

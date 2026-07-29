@@ -7,11 +7,11 @@ import pytest
 
 from tests.zephon._internal.runners._helpers import _ctx_services
 from zephon._internal.graph import Node, Stage
-from zephon._internal.op_base import Op
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.threads import ThreadStageRunner
 from zephon.ops.accumulators.counting import CountingAccumulator
+from zephon.ops.base import BaseOp
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 
@@ -187,7 +187,7 @@ def _collect_batches(runner: ThreadStageRunner, records: list[SampleRecord]) -> 
     return list(runner.run(iter(records)))
 
 
-def _fit_to_ops_workers(*ops: Op) -> int:
+def _fit_to_ops_workers(*ops: BaseOp) -> int:
     """Compute max_workers as sum of operator parallelisms (fit_to_ops mode)."""
     return sum(op.traits().parallelism for op in ops)
 

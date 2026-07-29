@@ -12,7 +12,6 @@ from typing import Any, Literal, Sequence
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
-from zephon._internal.op_base import Op
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
     RunnerResult,
@@ -25,15 +24,13 @@ from zephon._internal.runners.queue_drain import (
 )
 from zephon._internal.stream import RunnerStreamIn
 from zephon.observability.config import ExecutionTrackingMode
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import StreamItem
 
 
 @dataclass
 class _ThreadOperatorState(QueueDrainOperatorState):
-    _instance_queue: queue.Queue[Op[RunnerStreamIn, StreamItem]] = field(
-        init=False, repr=False
-    )
+    _instance_queue: queue.Queue[BaseOp] = field(init=False, repr=False)
     input_queue: _QueueLike[Sequence[RunnerStreamIn] | StopToken] = field(init=False)
     result_queue: _QueueLike[RunnerResult] = field(init=False)
 
@@ -81,17 +78,17 @@ class _ThreadOperatorState(QueueDrainOperatorState):
         result_capacity = max(1, self.queue_capacity * self.parallelism)
         self.result_queue = queue.Queue[RunnerResult](maxsize=result_capacity)
 
-    def acquire_instance(self) -> Op[RunnerStreamIn, StreamItem]:
+    def acquire_instance(self) -> BaseOp:
         return self._instance_queue.get()
 
-    def try_acquire_instance(self) -> Op[RunnerStreamIn, StreamItem] | None:
+    def try_acquire_instance(self) -> BaseOp | None:
         """Non-blocking acquire; returns None when the instance pool is empty."""
         try:
             return self._instance_queue.get_nowait()
         except queue.Empty:
             return None
 
-    def release_instance(self, instance: Op[RunnerStreamIn, StreamItem]) -> None:
+    def release_instance(self, instance: BaseOp) -> None:
         self._instance_queue.put(instance)
 
     def adjust_parallelism(self, new_level: int) -> None:
@@ -102,21 +99,20 @@ class _ThreadOperatorState(QueueDrainOperatorState):
             add = desired - self.parallelism
             for _ in range(add):
                 instance = copy.deepcopy(self.node.op)
-                ctx = OpContext(dict(self.ctx_proto))
-                instance.setup(
-                    ctx,
-                    self.stage_index,
-                    self.stage_name,
-                    self.op_index,
-                    self.collect_stats,
+                stage_info = StageInfo(
+                    stage_index=self.stage_index,
+                    stage_name=self.stage_name,
+                    op_index=self.op_index,
+                    collect_stats=self.collect_stats,
                 )
+                instance.setup(OpContext(dict(self.ctx_proto), stage_info))
                 self.instances.append(instance)
                 self._instance_queue.put(instance)
             self.parallelism = desired
             return
 
         remove = self.parallelism - desired
-        removed: list[Op[RunnerStreamIn, StreamItem]] = []
+        removed: list[BaseOp] = []
         try:
             for _ in range(remove):
                 inst = self._instance_queue.get_nowait()
@@ -166,14 +162,15 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         shared deterministic/non-deterministic logic in the base class.
 
     * This subclass maintains a per-operator ``_instance_queue`` with concrete
-      :class:`Op` instances.  When a batch is scheduled, a worker thread:
+      :class:`~zephon.ops.BaseOp` instances.  When a batch is scheduled, a
+      worker thread:
       - acquires an instance from ``_instance_queue``,
-      - runs ``process_many`` (or ``process_one``) on that instance,
+      - runs ``process_many`` on that instance,
       - returns the instance to the pool, and
       - enqueues a :class:`RunnerResult` into the operator's ``result_queue``.
 
-      This allows operators to keep local state inside an instance while still
-      enabling parallel execution up to the configured ``parallelism``.
+      Instance pooling isolates resources created in ``setup``, while
+      ``process_many`` remains stateless across calls.
 
     Determinism and buffering
     -------------------------
@@ -381,15 +378,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
                 items: list[RunnerStreamIn],
             ) -> tuple[list[StreamItem], int]:
                 start_ns = self._node_sw.start()
-                try:
-                    outputs = instance.process_many(items)
-                except (NotImplementedError, AttributeError):
-                    outputs = None
-                if outputs is None:
-                    out: list[StreamItem] = []
-                    for element in items:
-                        out.extend(instance.process_one(element))
-                    outputs = out
+                outputs = instance.process_many(items)
                 return outputs, self._node_sw.elapsed(start_ns)
 
             state.inflight.increment()

@@ -5,13 +5,13 @@
 
 from typing import Any
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import StreamItem
 
 
-class Materialize(DefaultSetup):
+class Materialize(BaseOp):
     """Force evaluation of upstream iterables without altering records."""
 
     def traits(self) -> OpTraits:

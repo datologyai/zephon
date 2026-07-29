@@ -5,8 +5,8 @@
 
 from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord
 
@@ -17,8 +17,8 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
     """Accumulator that wraps user-provided state management functions.
 
     This accumulator runs on the pump thread (serial) and allows users to
-    implement custom buffering and batching logic without understanding the
-    full Op protocol complexity.
+    implement custom buffering and batching logic without writing a complete
+    ``BaseOp`` subclass.
 
     State is partitioned by lane, like every other stateful accumulator: each
     lane gets its own ``init_state()`` instance and ``push_fn`` sees one lane's
@@ -141,11 +141,11 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
         return lane_id in self._pending
 
 
-class StatefulTransformOp(DefaultSetup, Generic[S]):
+class StatefulTransformOp(BaseOp, Generic[S]):
     """Operator that wraps user-provided stateful transformation logic.
 
     This provides a higher-level API for implementing custom accumulators
-    without requiring users to understand the full Op protocol. Users only
+    without requiring users to write a complete ``BaseOp`` subclass. Users only
     need to provide:
 
     - init_state: Factory that creates initial state
@@ -197,7 +197,7 @@ class StatefulTransformOp(DefaultSetup, Generic[S]):
         indexable: bool = False,
         preserves_cursor_order: bool = True,
     ):
-        DefaultSetup.__init__(self)
+        super().__init__()
         if not callable(init_state):
             raise TypeError("init_state must be callable")
         if not callable(push_fn):

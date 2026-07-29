@@ -12,10 +12,10 @@ from typing import Any, Literal, TypeAlias, TypeVar
 
 import numpy as np
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.stream import lane_of
 from zephon._internal.utils.seeding import batch_seed
 from zephon.ops.accumulators import Accumulator, CountingAccumulator, ReadyBatch
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import ContributorRef, LaneId, SampleMeta, SampleRecord
 
@@ -531,7 +531,7 @@ class WarmupBlockAccumulator(Accumulator[SampleRecord]):
         return ready
 
 
-class ShuffleBuffer(DefaultSetup):
+class ShuffleBuffer(BaseOp):
     """Deterministically shuffle records with block or streaming buffering.
 
     ``streaming`` uses a per-lane reservoir accumulator. ``block`` preserves the
@@ -557,7 +557,7 @@ class ShuffleBuffer(DefaultSetup):
             )
         if warmup_growth <= 1.0:
             raise ValueError("warmup_growth must be > 1.0")
-        DefaultSetup.__init__(self)
+        super().__init__()
         self.buffer_size: int = int(buffer_size)
         self.seed = int(seed)
         self.algorithm: ShuffleAlgorithm = algorithm
@@ -581,9 +581,6 @@ class ShuffleBuffer(DefaultSetup):
                 buffer_size=self.buffer_size, growth=self.warmup_growth
             )
         return CountingAccumulator[SampleRecord](max_batch=self.buffer_size)
-
-    def process_one(self, elem: SampleRecord) -> list[SampleRecord]:
-        return self.process_many([elem])
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         if not elems:

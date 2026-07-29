@@ -28,7 +28,6 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon._internal.ops.ensure_mixture import EnsureMixture
 from zephon.io import Dataset
 from zephon.ops import (
@@ -39,6 +38,7 @@ from zephon.ops import (
     OpTraits,
     PassthroughAccumulator,
     ReadyBatch,
+    StageInfo,
 )
 from zephon.types import SampleRecord
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
@@ -137,9 +137,8 @@ def test_ensure_mixture_accepts_unbounded_buffer(tmp_path: Path) -> None:
 def test_public_namespace_exports_authoring_types() -> None:
     """Every authoring type a custom op references stays importable."""
     for sym in (
-        Op,
         OpContext,
-        DefaultSetup,
+        StageInfo,
         BaseOp,
         OpTraits,
         Accumulator,
@@ -375,15 +374,8 @@ def test_add_op_with_baseop_instance_invokes_setup_per_worker() -> None:
         def traits(self) -> OpTraits:
             return OpTraits(preserves_cursor_order=True)
 
-        def setup(
-            self,
-            ctx: Any,
-            stage_index: int,
-            stage_name: str,
-            op_index: int,
-            collect_stats: bool,
-        ) -> None:
-            super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+        def setup(self, ctx: Any) -> None:
+            super().setup(ctx)
             setup_calls["n"] += 1
             setup_calls["ctx_seen"] = ctx is not None
             self._tokenizer = "ready"

@@ -11,17 +11,16 @@ from zephon._internal.io.catalog import set_catalog_dir
 from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.stores.multi import build_resolver_with_locators
 from zephon._internal.io.types import ShardLocator
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.stream import EngineSample
 from zephon._internal.utils.rank import rank_ctx
 from zephon.io.options import StoreOptions
 from zephon.observability.stats import PrefetchTimingDelta
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 
 
-class PrefetchOp(DefaultSetup):
+class PrefetchOp(BaseOp):
     """Prefetch shards to local cache by looking ahead in the sample stream.
 
     This operator maintains a large buffer of samples, inspects their shard IDs,
@@ -55,7 +54,7 @@ class PrefetchOp(DefaultSetup):
         self,
         buffer_size: int = 1024,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive")
 
@@ -68,15 +67,8 @@ class PrefetchOp(DefaultSetup):
         # Callback for emitting metrics
         self._emit_prefetch_metrics: Callable[[PrefetchTimingDelta], None] | None = None
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        DefaultSetup.setup(self, ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
 
         # Get dataset configurations
         datasets_by_id = ctx.get("datasets_by_id")
@@ -114,9 +106,6 @@ class PrefetchOp(DefaultSetup):
             max_latency_ms=None if deterministic else 10,
         )
 
-    def process_one(self, elem: EngineSample) -> list[EngineSample]:
-        return self.process_many([elem])
-
     def process_many(self, elems: list[EngineSample]) -> list[EngineSample]:
         """Process a batch of samples, prefetching all unique shards.
 
@@ -144,9 +133,9 @@ class PrefetchOp(DefaultSetup):
                 prefetch_failed += 1
 
         # Emit metrics if callback is configured
-        if self._emit_prefetch_metrics is not None and self.collect_stats:
+        if self._emit_prefetch_metrics is not None and self.stage_info.collect_stats:
             delta = PrefetchTimingDelta(
-                stage_index=self.stage_index,
+                stage_index=self.stage_info.stage_index,
                 batch_size=len(elems),
                 prefetch_requests=prefetch_succeeded + prefetch_failed,
                 prefetch_succeeded=prefetch_succeeded,

@@ -60,6 +60,7 @@ EXPECTED_ALL = {
         "ReadyBatch",
         "SpanSource",
         "SpecialTokensMode",
+        "StageInfo",
         "pack_meta",
         "spawn_child",
         "tombstone_meta",

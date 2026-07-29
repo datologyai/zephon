@@ -21,7 +21,7 @@ from zephon import (
 from zephon.build_index import build_index
 from zephon.io import CacheOptions, StoreOptions
 from zephon.observability import ExecutionTrackingMode, MTPQueueStats
-from zephon.ops import BaseOp, OpTraits
+from zephon.ops import BaseOp, OpContext, OpTraits, StageInfo
 from zephon.options import IpcTransport, RuntimeOptions
 from zephon.types import SampleId
 from zephon.validation import ValidationReport
@@ -52,6 +52,11 @@ def make_index(dataset_dir: str) -> str:
 class IdentityOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True)
+
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        info: StageInfo = ctx.stage_info
+        _ = (info.stage_index, info.stage_name, info.op_index, info.collect_stats)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         for e in elems:

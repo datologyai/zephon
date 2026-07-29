@@ -11,13 +11,13 @@ local index within its shard so that delays are deterministic and bounded.
 import time
 from typing import Any, Optional
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord, StreamItem
 
 
-class DelayById(DefaultSetup):
+class DelayById(BaseOp):
     """Sleep a small, deterministic amount based on the sample's local id."""
 
     def __init__(
@@ -27,7 +27,7 @@ class DelayById(DefaultSetup):
         max_batch: int = 32,
         max_latency_ms: Optional[int] = 2,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self.max_delay_ms = float(max_delay_ms)
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
@@ -42,9 +42,6 @@ class DelayById(DefaultSetup):
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
         )
-
-    def process_one(self, elem: StreamItem) -> list[StreamItem]:
-        return self.process_many([elem])
 
     def process_many(self, elems: list[StreamItem]) -> list[StreamItem]:
         out: list[StreamItem] = []

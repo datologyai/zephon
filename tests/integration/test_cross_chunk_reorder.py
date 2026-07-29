@@ -8,9 +8,9 @@ from typing import Sequence
 import pytest
 
 from zephon import Pipeline as PublicPipeline
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon.io import Dataset, InMemoryShard
 from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
@@ -50,11 +50,11 @@ class _DeferringAccumulator(Accumulator[SampleRecord]):
         return [([elem], 0)]
 
 
-class _DeferFirstOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _DeferFirstOp(BaseOp):
     """Buffer the first element via accumulator; emit it only at flush, reordering chunk_ids."""
 
     def __init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(

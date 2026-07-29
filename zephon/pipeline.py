@@ -425,7 +425,7 @@ class Pipeline:
     ) -> "Pipeline":
         """Add a stateful transformation with custom accumulation logic.
 
-        This is a higher-level alternative to implementing the full Op protocol.
+        This is a higher-level alternative to subclassing ``BaseOp`` directly.
         State management runs on the pump thread (serial); the optional transform
         runs in parallel workers for expensive computation.
 
@@ -702,8 +702,8 @@ class Pipeline:
                     self._tokenizer = None
                 def traits(self):
                     return OpTraits(preserves_cursor_order=True, parallelism=4)
-                def setup(self, ctx, stage_index, stage_name, op_index, collect_stats):
-                    super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+                def setup(self, ctx):
+                    super().setup(ctx)
                     self._tokenizer = load_tokenizer(self._name)
                 def process_many(self, elems):
                     return [self._tokenizer.encode(e) for e in elems]

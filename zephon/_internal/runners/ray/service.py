@@ -20,10 +20,9 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from zephon._internal.graph import Node
 from zephon._internal.observability.size_estimator import estimate_bytes
-from zephon._internal.op_base import Op
 from zephon._internal.runners.concurrent import RunnerResult, WorkerErrorInfo
 from zephon._internal.utils.thread_utils import suppress_library_threads
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +57,18 @@ class RaySingleOpActor:
         """Initialize the actor with a single operator instance."""
         suppress_library_threads()
 
-        self._op: Op[Any, Any] = cloudpickle.loads(op_bytes)
+        self._op: BaseOp = cloudpickle.loads(op_bytes)
         self._op_index = op_index
         self._op_name = op_name
         self._collect_stats = collect_stats
 
-        ctx = OpContext(dict(ctx_services))
-        self._op.setup(
-            ctx,
-            stage_index,
-            stage_name,
-            op_index,
-            collect_stats,
+        stage_info = StageInfo(
+            stage_index=stage_index,
+            stage_name=stage_name,
+            op_index=op_index,
+            collect_stats=collect_stats,
         )
+        self._op.setup(OpContext(dict(ctx_services), stage_info))
 
     def get_node_id(self) -> str:
         """Return the Ray node id this actor is running on.

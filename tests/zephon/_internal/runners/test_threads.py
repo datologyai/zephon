@@ -8,9 +8,9 @@ from tests.zephon._internal.runners._helpers import (
     _extract_values,
     _mk_record,
     _mk_records,
+    _probe_stage,
 )
 from zephon._internal.graph import Node, Stage
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.ops.pack_sequences import PackSequences
@@ -19,6 +19,7 @@ from zephon._internal.runners.threads import ThreadStageRunner
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
+from zephon.ops.base import BaseOp, StageInfo
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -149,13 +150,13 @@ def test_passthrough_stage_forwards_stream() -> None:
 
 
 @dataclass
-class _IdentityOp(DefaultSetup, Op[Any, Any]):
+class _IdentityOp(BaseOp):
     """Simple identity operator used for observability tests."""
 
     name: str = "identity"
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -554,3 +555,26 @@ def test_thread_sentinel_does_not_deadlock_on_full_result_queue() -> None:
         "on the pump thread while result_queue was full.  The pump thread is "
         "the only consumer of result_queue, so it blocked on itself."
     )
+
+
+def test_thread_runner_initial_and_grown_instances_share_stage_info() -> None:
+    runner = ThreadStageRunner(
+        _probe_stage("probe"),
+        ctx_services=_ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_index=5,
+        stage_output_mode="stream_items",
+    )
+    try:
+        expected = StageInfo(
+            stage_index=5, stage_name="probe_stage", op_index=0, collect_stats=False
+        )
+        state = runner.ops[0]
+        assert [inst.stage_info for inst in state.instances] == [expected]
+
+        # Pool growth uses a separate setup path and must preserve placement.
+        state.adjust_parallelism(2)
+        assert [inst.stage_info for inst in state.instances] == [expected, expected]
+    finally:
+        runner.close()

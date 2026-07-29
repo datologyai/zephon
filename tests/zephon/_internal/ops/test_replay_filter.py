@@ -30,7 +30,7 @@ def _filter(service: ReplayConfigService) -> ReplayFilter:
             "record_node_metrics": _noop,
         }
     )
-    op.setup(ctx, stage_index=0, stage_name="stage0", op_index=0, collect_stats=False)
+    op.setup(ctx)
     return op
 
 

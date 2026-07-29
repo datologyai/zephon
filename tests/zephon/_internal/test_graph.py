@@ -1,6 +1,7 @@
 from zephon._internal.graph import Graph
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.planner import Planner
+from zephon.ops.base import BaseOp
 
 
 def test_graph_add_defaults_and_ordering() -> None:
@@ -54,3 +55,29 @@ def test_plan_identifier_changes_for_different_plans() -> None:
     assert baseline_fp != different_op_fp
     assert baseline_fp != different_stage_fp
     assert len({baseline_id, different_op_id, different_stage_id}) == 3
+
+
+def _single_op_fingerprint(op: BaseOp) -> str:
+    graph = Graph()
+    graph.add("op", op)
+    return Planner().make_plan(graph).fingerprint()
+
+
+def test_plan_identifier_ignores_zephon_module_moves() -> None:
+    moved_delay_type = type(
+        "DelayById",
+        (DelayById,),
+        {"__module__": "zephon._internal.moved"},
+    )
+
+    assert DelayById.plan_identity() == "zephon.builtin.DelayById"
+    assert _single_op_fingerprint(moved_delay_type()) == _single_op_fingerprint(
+        DelayById()
+    )
+
+
+def test_plan_identifier_distinguishes_custom_modules() -> None:
+    first_type = type("CustomDelay", (DelayById,), {"__module__": "first"})
+    second_type = type("CustomDelay", (DelayById,), {"__module__": "second"})
+
+    assert _single_op_fingerprint(first_type()) != _single_op_fingerprint(second_type())

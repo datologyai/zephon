@@ -5,14 +5,14 @@
 
 from typing import Any, Optional, Sequence
 
-from zephon._internal.op_base import DefaultSetup
 from zephon._internal.stream import is_bytes_like
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
+from zephon.ops.base import BaseOp
 from zephon.ops.traits import OpTraits
 from zephon.types import SamplePayload, SamplePayloadDict, SampleRecord
 
 
-class DecodeText(DefaultSetup):
+class DecodeText(BaseOp):
     """Decode configured payload fields into normalised text."""
 
     def __init__(
@@ -26,7 +26,7 @@ class DecodeText(DefaultSetup):
         max_batch: int = 128,
         max_latency_ms: Optional[int] = 2,
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self.fields = tuple(fields)
         self.encoding = encoding
         self.errors = errors

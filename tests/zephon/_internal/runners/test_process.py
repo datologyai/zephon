@@ -19,9 +19,9 @@ from tests.zephon._internal.runners._helpers import (
     _extract_values,
     _mk_record,
     _mk_records,
+    _probe_stage,
 )
 from zephon._internal.graph import Node, Stage
-from zephon._internal.op_base import DefaultSetup, Op
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.concurrent import WorkerCrashed
 from zephon._internal.runners.process import ProcessStageRunner
@@ -32,7 +32,7 @@ from zephon.ops.accumulators import (
     CountingAccumulator,
     PassthroughAccumulator,
 )
-from zephon.ops.base import OpContext
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord, StreamItem
 
@@ -117,11 +117,11 @@ def test_process_passthrough_stage_forwards_stream() -> None:
 
 
 @dataclass
-class _IdentityOp(DefaultSetup, Op[Any, Any]):
+class _IdentityOp(BaseOp):
     name: str = "identity"
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -143,7 +143,7 @@ class _IdentityOp(DefaultSetup, Op[Any, Any]):
         return list(elems)
 
 
-class _ValueMappingOp(DefaultSetup, Op[Any, Any]):
+class _ValueMappingOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=True,
@@ -177,7 +177,7 @@ class _AddValueOp(_ValueMappingOp):
     delta: int = 0
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def _map(self, value: int) -> int:
         return value + self.delta
@@ -188,16 +188,16 @@ class _MultiplyValueOp(_ValueMappingOp):
     factor: int = 1
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def _map(self, value: int) -> int:
         return value * self.factor
 
 
 @dataclass
-class _TensorizeValueOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _TensorizeValueOp(BaseOp):
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -222,9 +222,9 @@ class _TensorizeValueOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
 
 
 @dataclass
-class _EncodeLargeBytesOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _EncodeLargeBytesOp(BaseOp):
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -250,11 +250,11 @@ class _EncodeLargeBytesOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
 
 
 @dataclass
-class _DecodeAndAnnotateBatchOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _DecodeAndAnnotateBatchOp(BaseOp):
     max_batch: int = 3
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -284,9 +284,9 @@ class _DecodeAndAnnotateBatchOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
 
 
 @dataclass
-class _ServiceOp(DefaultSetup, Op[Any, Any]):
+class _ServiceOp(BaseOp):
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self._hook: Any = None
 
     def traits(self) -> OpTraits:
@@ -302,21 +302,17 @@ class _ServiceOp(DefaultSetup, Op[Any, Any]):
     ) -> Accumulator[Any]:
         return PassthroughAccumulator[Any]()
 
-    def setup(
-        self,
-        ctx: OpContext,
-        stage_index: int,
-        stage_name: str,
-        op_index: int,
-        collect_stats: bool,
-    ) -> None:
-        super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
         self._hook = ctx.get("custom_service")
 
     def process_one(self, elem: Any) -> list[Any]:
         if callable(self._hook):
             self._hook(elem.payload["value"])
         return [elem]
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        return [out for e in elems for out in self.process_one(e)]
 
 
 def test_process_runner_proxies_context_services() -> None:
@@ -527,13 +523,13 @@ def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None
 
 
 @dataclass
-class _BatchTensorizeOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _BatchTensorizeOp(BaseOp):
     """Tensorize with batching so multiple records land in one microbatch."""
 
     max_batch: int = 8
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -621,9 +617,9 @@ def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() 
 
 
 @dataclass
-class _CrashOp(DefaultSetup, Op[Any, Any]):
+class _CrashOp(BaseOp):
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
 
     def traits(self) -> OpTraits:
         return OpTraits(
@@ -663,7 +659,7 @@ def test_process_runner_bubbles_worker_exceptions() -> None:
 
 
 @dataclass
-class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _LambdaOp(BaseOp):
     """Operator that uses a lambda function internally.
 
     This mimics what PackSequences does with its length_fn field.
@@ -672,7 +668,7 @@ class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
     transform: Any = None  # Will be set to a lambda in __post_init__
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         # Use a lambda to transform the value, just like PackSequences uses lambda for length_fn
         self.transform = lambda x: x * 2
 
@@ -693,6 +689,9 @@ class _LambdaOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
         payload = dict(elem.payload)
         payload["value"] = self.transform(int(payload["value"]))
         return [SampleRecord(meta=elem.meta, payload=payload)]
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [out for e in elems for out in self.process_one(e)]
 
 
 def test_process_runner_serializes_operator_with_lambda() -> None:
@@ -723,13 +722,13 @@ def test_process_runner_serializes_operator_with_lambda() -> None:
 
 
 @dataclass
-class _ClosureOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
+class _ClosureOp(BaseOp):
     """Operator that uses a closure (lambda capturing outer variable)."""
 
     multiplier: int = 3
 
     def __post_init__(self) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         # Create a closure that captures self.multiplier
         self.transform = lambda x: x * self.multiplier
 
@@ -750,6 +749,9 @@ class _ClosureOp(DefaultSetup, Op[SampleRecord, SampleRecord]):
         payload = dict(elem.payload)
         payload["value"] = self.transform(int(payload["value"]))
         return [SampleRecord(meta=elem.meta, payload=payload)]
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [out for e in elems for out in self.process_one(e)]
 
 
 def test_process_runner_serializes_operator_with_closure() -> None:
@@ -1489,7 +1491,7 @@ class TestShmBackpressureE2E:
 # ---------------------------------------------------------------------------
 
 
-class _CrashOnValue(DefaultSetup, Op[Any, Any]):
+class _CrashOnValue(BaseOp):
     """Worker-side op that segfaults when it sees any of *crash_values*.
 
     Uses a filesystem marker to communicate "I have already crashed" between
@@ -1504,7 +1506,7 @@ class _CrashOnValue(DefaultSetup, Op[Any, Any]):
         marker_dir: str,
         mode: str = "first_only",
     ) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self._crash_values = list(crash_values)
         self._marker_dir = marker_dir
         self._mode = mode
@@ -1542,7 +1544,7 @@ class _CrashOnValue(DefaultSetup, Op[Any, Any]):
         return out
 
 
-class _CrashNTimes(DefaultSetup, Op[Any, Any]):
+class _CrashNTimes(BaseOp):
     """Crash the first N times the op sees *crash_value*; succeed thereafter.
 
     Uses filesystem markers (one per attempt) to count crashes across
@@ -1552,7 +1554,7 @@ class _CrashNTimes(DefaultSetup, Op[Any, Any]):
     """
 
     def __init__(self, crash_value: int, *, fail_count: int, marker_dir: str) -> None:
-        DefaultSetup.__init__(self)
+        super().__init__()
         self._crash_value = crash_value
         self._fail_count = fail_count
         self._marker_dir = marker_dir
@@ -2067,3 +2069,16 @@ class TestResilientWorkers:
         data = [1, 2, 3, 4, 5]
         out = _run_flat(runner, data)
         assert out == [v + 10 for v in data]
+
+
+def test_process_worker_receives_stage_info() -> None:
+    runner = ProcessStageRunner(
+        _probe_stage("probe"),
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_index=2,
+        stage_output_mode="stream_items",
+    )
+    (out,) = list(runner.run(iter(_mk_records([7]))))
+    assert out.payload["probe"] == (2, "probe_stage", 0, False)

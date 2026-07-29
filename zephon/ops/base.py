@@ -1,29 +1,53 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Operator authoring contracts: :class:`BaseOp` and :class:`OpContext`."""
+"""Public operator authoring contracts."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Optional
 
-from zephon._internal.op_base import DefaultSetup
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord
 
 
-class OpContext:
-    """Container exposing runner-provided services to operator instances."""
+@dataclass(frozen=True)
+class StageInfo:
+    """Placement metadata passed through :attr:`OpContext.stage_info`.
 
-    def __init__(self, services: dict[str, Any]):
+    Default values indicate that setup has not run. ``stage_index`` and
+    ``stage_name`` identify the stage, ``op_index`` identifies the operator
+    within it, and ``collect_stats`` enables per-operator metrics.
+    """
+
+    stage_index: int = -1
+    stage_name: str = ""
+    op_index: int = -1
+    collect_stats: bool = False
+
+
+class OpContext:
+    """Container exposing runner-provided services to operator instances.
+
+    Plan metadata lives on the context so setup overrides keep a stable
+    signature.
+    """
+
+    def __init__(
+        self,
+        services: dict[str, Any],
+        stage_info: StageInfo | None = None,
+    ) -> None:
         self._services = services
+        self.stage_info = stage_info if stage_info is not None else StageInfo()
 
     def get(self, key: str, default: Any | None = None) -> Any:
         """Fetch a service by name, returning ``default`` when unavailable."""
         return self._services.get(key, default)
 
 
-class BaseOp(DefaultSetup, ABC):
+class BaseOp(ABC):
     """Base class for operators — both built-in and user-authored.
 
     Attach a subclass to a pipeline via the instance form of
@@ -47,6 +71,10 @@ class BaseOp(DefaultSetup, ABC):
     accumulator, not on the op instance.  This is the invariant that
     lets the runtime fan ``process_many`` out across parallel workers
     deterministically.
+
+    Fan-out operators must preserve ``SampleMeta.sample_id`` and derive child
+    lineage with helpers from :mod:`zephon.ops.children`. This preserves
+    deterministic ordering and replay.
 
     Lifecycle: ``__init__`` vs ``setup``
     ------------------------------------
@@ -76,8 +104,8 @@ class BaseOp(DefaultSetup, ABC):
             def traits(self) -> OpTraits:
                 return OpTraits(preserves_cursor_order=True)
 
-            def setup(self, ctx, stage_index, stage_name, op_index, collect_stats):
-                super().setup(ctx, stage_index, stage_name, op_index, collect_stats)
+            def setup(self, ctx):
+                super().setup(ctx)
                 self._tokenizer = load_tokenizer(self._tokenizer_name)
 
             def process_many(self, elems):
@@ -90,10 +118,8 @@ class BaseOp(DefaultSetup, ABC):
 
     Defaults supplied:
 
-    - ``setup`` — inherits `DefaultSetup`, which records stage metadata on
-      the instance (``stage_index``, ``stage_name``, etc.). Override to
-      construct per-worker resources, and call ``super().setup(...)`` to
-      preserve the stage metadata bookkeeping.
+    - ``setup`` records ``ctx.stage_info`` as ``self.stage_info``. Overrides
+      should call ``super().setup(ctx)`` before initializing worker resources.
     - ``accumulator`` — returns `PassthroughAccumulator` so each upstream
       micro-batch is forwarded as one ready batch. Override to enable
       size-based per-lane batching via `CountingAccumulator` or any custom
@@ -114,12 +140,42 @@ class BaseOp(DefaultSetup, ABC):
     and ``traits`` raises ``TypeError`` at construction time.
     """
 
+    def __init__(self) -> None:
+        self.stage_info = StageInfo()
+
+    @classmethod
+    def plan_identity(cls) -> str:
+        """Return the stable operator identity used in plan fingerprints."""
+        if cls.__module__.startswith("zephon._internal."):
+            return f"zephon.builtin.{cls.__qualname__}"
+        return f"{cls.__module__}.{cls.__qualname__}"
+
+    def setup(self, ctx: OpContext) -> None:
+        """Record plan metadata before worker processing begins.
+
+        The runner calls this once per worker after copying or deserializing the
+        operator. Overrides should call ``super().setup(ctx)``.
+        """
+        self.stage_info = ctx.stage_info
+
     @abstractmethod
     def traits(self) -> OpTraits: ...
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
     ) -> Accumulator[Any]:
+        """Create the accumulator that defines worker batch boundaries.
+
+        The accumulator runs serially and owns state shared across
+        ``process_many`` calls.
+
+        Args:
+            deterministic: Whether to disable behavior such as timed flushing.
+            ctx: Runtime services available to the accumulator.
+
+        Returns:
+            A new accumulator.
+        """
         return PassthroughAccumulator[Any]()
 
     def process_one(self, elem: Any) -> list[Any]:

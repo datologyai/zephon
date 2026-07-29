@@ -10,7 +10,6 @@ from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
-from zephon._internal.op_base import Op
 from zephon._internal.runners.base import BaseOperatorState, StageRunnerBase
 from zephon._internal.stream import (
     Microbatch,
@@ -21,13 +20,14 @@ from zephon._internal.stream import (
 from zephon._internal.utils import buffered_iterable
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
+from zephon.ops.base import BaseOp
 
 
 @dataclass
 class _InlineOperatorState(BaseOperatorState):
     rr_cursor: int = field(init=False, default=0)
 
-    def acquire_instance(self) -> Op[RunnerStreamIn, Any]:
+    def acquire_instance(self) -> BaseOp:
         instance = self.instances[self.rr_cursor]
         self.rr_cursor = (self.rr_cursor + 1) % len(self.instances)
         return instance
@@ -139,13 +139,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
 
         start_ns = self._node_sw.start()
         try:
-            try:
-                outputs: Microbatch = instance.process_many(batch)
-            except (NotImplementedError, AttributeError):
-                out: Microbatch = []
-                for element in batch:
-                    out.extend(instance.process_one(element))
-                outputs = out
+            outputs: Microbatch = instance.process_many(batch)
         finally:
             proc_ns = self._node_sw.elapsed(start_ns)
 

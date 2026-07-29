@@ -422,7 +422,7 @@ There are two paths, with very different tombstone responsibilities:
 |---|---|
 | `map_transform(fn, drop_none=True)` | **Automatic.** Framework emits tombstones for you. |
 | `stateful_transform(push=..., ...)` | **Manual.** You must emit tombstones for dropped closing contributors. |
-| Custom `Op` with `process_one` / `process_many` | **Manual.** Same as stateful_transform. |
+| Custom `BaseOp` with `process_one` / `process_many` | **Manual.** Same as stateful_transform. |
 
 For `stateful_transform`, if your `push` or `transform` function drops
 records, you must currently iterate the dropped record's `contribution_refs()` and
