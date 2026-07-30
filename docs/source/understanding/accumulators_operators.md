@@ -437,8 +437,8 @@ what "fully reset" means, and the stalling mechanism.
 
 The runner calls `flush(reset=True, lane_id=lane)` on **every** accumulator
 when a flush sentinel arrives — scoped to the sentinel's lane — unless the
-operator sets `stall_on_epoch_boundary=True`
-(see [below](#stalling-stall_on_epoch_boundary)).
+operator is `Batch(drop_last=True)`
+(see [below](#stalling-at-epoch-boundaries)).
 For history-dependent accumulators (`preserves_cursor_order=False`) this
 flush is critical — it resets state so the next epoch can replay
 independently.  For order-preserving accumulators, the flush is harmless
@@ -465,7 +465,7 @@ mixture corrector, the lane's SWRR deficit weights are reset.  This guarantee
 is what allows each lane's next epoch to replay independently from a clean
 state.
 
-### Stalling: `stall_on_epoch_boundary`
+### Stalling at epoch boundaries
 
 Stalling is intentionally narrow in the current design.  Zephon only
 supports it for ``Batch`` with `drop_last=True`.
@@ -481,8 +481,9 @@ Why the restriction exists:
   capsule.
 
 So a non-Batch operator that wants to stall would need additional
-replay-specific state to make restore exact.  The runtime rejects that
-configuration today.
+replay-specific state to make restore exact.  Stalling is therefore not
+an operator trait: the runner derives it from the op instance, for
+`Batch(drop_last=True)` specifically.
 
 `Batch(drop_last=True)` is the special case that still works:
 
@@ -679,12 +680,9 @@ strategy, and getting it wrong corrupts checkpoint semantics silently.
 The accumulator factory defaults to a `PassthroughAccumulator`, in
 which case each upstream micro-batch is forwarded as one ready batch.
 The remaining kwargs (`parallelism`, `placement`, `indexable`,
-`batch_shape_sensitive`, `requires_serial_state`,
-`stall_on_epoch_boundary`) map 1:1 to
+`batch_shape_sensitive`, `requires_serial_state`) map 1:1 to
 {py:class}`~zephon.ops.OpTraits` and follow the semantics described in
-[The operator contract](#the-operator-contract) and
-[Stalling: `stall_on_epoch_boundary`](#stalling-stall_on_epoch_boundary)
-above.  See the
+[The operator contract](#the-operator-contract) above.  See the
 {py:meth}`~zephon.Pipeline.add_op` API reference for the full kwarg
 list and signature variants of the `accumulator` factory.
 

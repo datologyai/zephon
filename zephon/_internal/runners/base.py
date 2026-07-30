@@ -13,6 +13,7 @@ from typing import Any, Callable, Generic, Sequence, TypeVar
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.stopwatch import Stopwatch
+from zephon._internal.ops.batch import Batch
 from zephon._internal.stream import (
     Microbatch,
     RunnerStageIn,
@@ -62,7 +63,13 @@ class BaseOperatorState:
     def __post_init__(self) -> None:
         traits = self.node.op.traits()
         self._preserves_cursor_order = bool(traits.preserves_cursor_order)
-        self._stall_on_epoch_boundary = bool(traits.stall_on_epoch_boundary)
+        # Batch(drop_last=True) may carry a partial batch across an epoch boundary:
+        # checkpoints are cut only after complete batches, and ReplayFilter removes
+        # records already delivered before replay reaches Batch. Other operators would
+        # need extra replay state; if we add that, make _stall_on_epoch_boundary an
+        # explicit operator property again.
+        op = self.node.op
+        self._stall_on_epoch_boundary = isinstance(op, Batch) and op.drop_last
         self.parallelism = max(1, self.node.parallelism or traits.parallelism or 1)
         # Enforce parallelism=1 for operators that require serial state in deterministic mode
         if (
@@ -74,29 +81,6 @@ class BaseOperatorState:
             raise RuntimeError(
                 f"{op_name} operator must run with parallelism=1 in deterministic mode "
                 + "because it requires serial state (requires_serial_state=True)"
-            )
-        # Stalling at epoch boundaries is currently only supported for the
-        # built-in Batch(drop_last=True) operator.  Its replay story relies on
-        # Batch-specific properties: it only emits complete batches and the
-        # planner inserts ReplayFilter immediately before Batch.
-        if self._stall_on_epoch_boundary:
-            from zephon._internal.ops.batch import Batch
-
-            if isinstance(self.node.op, Batch):
-                pass
-            else:
-                op_name = type(self.node.op).__name__
-                raise RuntimeError(
-                    f"{op_name}: stall_on_epoch_boundary=True is only supported "
-                    "for Batch(drop_last=True). Other stalled operators need "
-                    "replay capsule support (not yet implemented)."
-                )
-
-        if self._stall_on_epoch_boundary and not self._preserves_cursor_order:
-            op_name = type(self.node.op).__name__
-            raise RuntimeError(
-                f"{op_name}: stall_on_epoch_boundary=True requires "
-                "preserves_cursor_order=True."
             )
 
         base_ctx = dict(self.ctx_proto)
@@ -215,15 +199,10 @@ class BaseOperatorState:
         downstream stateful operators see the epoch boundary before the
         data, breaking deterministic replay.
 
-        Operators that set ``stall_on_epoch_boundary=True`` in their
-        traits opt out of the immediate mid-stream flush. When the
-        accumulator has pending data, the flush is skipped and the
-        sentinel is **stalled** — held in ``_stalled_sentinels`` until
-        the accumulator can reach a replay-safe reset point. In the
-        current built-ins, this path is only supported for
-        ``Batch(drop_last=True)``.
+        ``Batch(drop_last=True)`` is the exception: if it has pending data at an
+        epoch boundary, it keeps the buffer and stalls the sentinel instead of flushing.
 
-        Operators without the trait must fully flush at epoch boundaries.
+        Every other operator must fully flush at epoch boundaries.
         If ``flush(reset=True)`` returns while ``has_pending_data()``
         is still True, the flush contract has been violated and the runner
         raises. This keeps unsupported delayed-reset behavior from slipping

@@ -307,7 +307,7 @@ operator boundary the runner intercepts it:
   harmless (a no-op or trivial drain).  The only built-in operator that
   intentionally stalls instead of flushing is `Batch(drop_last=True)`; all
   non-monotonic built-ins flush to a fresh state at the sentinel (see
-  [Accumulator stalling](accumulators_operators.md#stalling-stall_on_epoch_boundary)).
+  [Accumulator stalling](accumulators_operators.md#stalling-at-epoch-boundaries)).
 
 The sentinel divides the source stream into **epochs** — windows of K
 chunks between consecutive flush points.  Within an epoch, the

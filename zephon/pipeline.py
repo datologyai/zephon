@@ -559,7 +559,6 @@ class Pipeline:
         indexable: bool = False,
         batch_shape_sensitive: bool = False,
         requires_serial_state: bool = False,
-        stall_on_epoch_boundary: bool = False,
     ) -> "Pipeline": ...
 
     @_mutates_graph
@@ -579,7 +578,6 @@ class Pipeline:
         indexable: Optional[bool] = None,
         batch_shape_sensitive: Optional[bool] = None,
         requires_serial_state: Optional[bool] = None,
-        stall_on_epoch_boundary: Optional[bool] = None,
     ) -> "Pipeline":
         """Append a custom operator — two forms.
 
@@ -683,12 +681,6 @@ class Pipeline:
                 across parallel worker instances. In deterministic mode
                 the planner pins ``parallelism=1`` for ops with this
                 trait.
-            stall_on_epoch_boundary: Set True to preserve the
-                accumulator's buffer across epoch sentinels instead of
-                flushing immediately. Built-in support is narrow today
-                (``Batch(drop_last=True)``); leave False unless you've
-                read the trait docstring and understand the
-                replay-capsule implications.
 
         Returns:
             Self for method chaining.
@@ -734,7 +726,6 @@ class Pipeline:
                     ("indexable", indexable),
                     ("batch_shape_sensitive", batch_shape_sensitive),
                     ("requires_serial_state", requires_serial_state),
-                    ("stall_on_epoch_boundary", stall_on_epoch_boundary),
                 )
                 if val is not None
             ]
@@ -791,11 +782,6 @@ class Pipeline:
                 ),
                 requires_serial_state=(
                     False if requires_serial_state is None else requires_serial_state
-                ),
-                stall_on_epoch_boundary=(
-                    False
-                    if stall_on_epoch_boundary is None
-                    else stall_on_epoch_boundary
                 ),
             ),
         )

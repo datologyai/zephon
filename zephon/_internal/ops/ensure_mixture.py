@@ -830,7 +830,6 @@ class EnsureMixture(BaseOp):
             batch_shape_sensitive=False,
             requires_serial_state=False,
             parallelism=self._parallelism,
-            stall_on_epoch_boundary=False,
         )
 
     def accumulator(

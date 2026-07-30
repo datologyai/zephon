@@ -125,7 +125,7 @@ On `load_state_dict()`:
 - **Flush contract** (for operators with `preserves_cursor_order=False`):
   - `flush(reset=True, lane_id=lane)` must emit and **fully reset** that lane's state so it is indistinguishable from a freshly constructed instance, leaving other lanes untouched. Sentinels are per-lane; this is called at each lane's epoch boundary to guarantee clean replay.
   - `flush()` (default `reset=False`) is called at end of stream. Semantics are operator-defined (e.g., `Batch` with `drop_last=True` discards partial batches).
-  - The only supported intentional stalling case is `Batch(drop_last=True)`. For general operators, relying on `stall_on_epoch_boundary=True` is not supported today because replay after eviction would need extra cross-boundary state beyond the current checkpoint payload.
+  - The only intentional stalling case is `Batch(drop_last=True)`, derived by the runner rather than declared as a trait. General operators cannot stall because replay after eviction would need extra cross-boundary state beyond the current checkpoint payload.
   - For non-Batch operators, `has_pending_data(lane)` must be `False` after `flush(reset=True, lane_id=lane)`. If pending data remains, Zephon treats that as a contract violation and raises.
 - **Shuffle/cross-chunk buffering**:
   - Reordering is allowed; replay remains correct. Still respect the contributor/tombstone contract so eviction can safely remove chunks whose offsets are fully closed.

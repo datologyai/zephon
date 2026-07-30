@@ -1379,12 +1379,12 @@ def test_validation_samples_kwarg_rejected_with_baseop_instance_form() -> None:
 
 def test_trait_kwargs_rejected_with_baseop_instance_form() -> None:
     """Trait kwargs (parallelism, indexable, batch_shape_sensitive,
-    requires_serial_state, stall_on_epoch_boundary) belong on the op's
-    ``traits()`` for the instance form.  Passing them as kwargs alongside
-    a BaseOp instance previously was silently dropped — the engine would
-    use the op's own traits, leaving the user thinking their kwarg took
-    effect.  The instance form must reject these explicitly.  Probed with
-    ``parallelism`` as a representative — all five share the same
+    requires_serial_state) belong on the op's ``traits()`` for the
+    instance form.  Passing them as kwargs alongside a BaseOp instance
+    previously was silently dropped — the engine would use the op's own
+    traits, leaving the user thinking their kwarg took effect.  The
+    instance form must reject these explicitly.  Probed with
+    ``parallelism`` as a representative — all four share the same
     mismatched-list code path."""
 
     class _Trivial(BaseOp):

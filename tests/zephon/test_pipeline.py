@@ -8,8 +8,7 @@ Covers options/cache behavior plus the custom-op authoring surface:
       subclass (``__init__`` / ``setup`` / ``traits`` / ``accumulator``).
     - Kwargs form: ``add_op(name, *, process_many=..., ...)`` for stateless
       transforms, including the advanced trait kwargs
-      (``batch_shape_sensitive``, ``requires_serial_state``,
-      ``stall_on_epoch_boundary``).
+      (``batch_shape_sensitive``, ``requires_serial_state``).
 
 Also includes a port of the legacy_shuffle_pack v2 pattern (the per-lane
 ``CountingAccumulator`` op Maxi calls out in the docstring at
@@ -570,14 +569,13 @@ def test_add_op_process_one_override_used() -> None:
 
 
 def test_add_op_passes_advanced_traits_through() -> None:
-    """The three advanced OpTraits kwargs must flow into the op's traits()."""
+    """The advanced OpTraits kwargs must flow into the op's traits()."""
     pipe = _empty_pipeline().add_op(
         "advanced",
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
         batch_shape_sensitive=True,
         requires_serial_state=True,
-        stall_on_epoch_boundary=True,
     )
 
     # The op we just appended is the new tail; pull it back out and inspect.
@@ -585,7 +583,6 @@ def test_add_op_passes_advanced_traits_through() -> None:
     traits = node.op.traits()
     assert traits.batch_shape_sensitive is True
     assert traits.requires_serial_state is True
-    assert traits.stall_on_epoch_boundary is True
 
 
 def test_add_op_advanced_traits_default_false() -> None:
@@ -598,7 +595,6 @@ def test_add_op_advanced_traits_default_false() -> None:
     traits = pipe._tail.op.traits()
     assert traits.batch_shape_sensitive is False
     assert traits.requires_serial_state is False
-    assert traits.stall_on_epoch_boundary is False
 
 
 # ---------------------------------------------------------------------------

@@ -422,7 +422,7 @@ def test_each_lane_sentinel_flushes_independently() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stall_on_epoch_boundary trait
+# Epoch-boundary stalling (Batch(drop_last=True) only)
 # ---------------------------------------------------------------------------
 
 
@@ -468,17 +468,10 @@ class _FlushTrackingAccumulator(Accumulator[SampleRecord]):
 
 
 class _StallTrackingOp(BaseOp):
-    """Minimal op that uses _FlushTrackingAccumulator and configurable traits."""
-
-    def __init__(self, *, stall_on_epoch_boundary: bool = False) -> None:
-        super().__init__()
-        self._stall = stall_on_epoch_boundary
+    """Minimal op that uses _FlushTrackingAccumulator."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(
-            preserves_cursor_order=True,
-            stall_on_epoch_boundary=self._stall,
-        )
+        return OpTraits(preserves_cursor_order=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
@@ -531,8 +524,8 @@ class _BrokenFlushOp(BaseOp):
         return elems
 
 
-def _make_tracking_runner(*, stall_on_epoch_boundary: bool) -> InlineStageRunner:
-    op = _StallTrackingOp(stall_on_epoch_boundary=stall_on_epoch_boundary)
+def _make_tracking_runner() -> InlineStageRunner:
+    op = _StallTrackingOp()
     node = Node(name="stall_test", op=op)
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
     return InlineStageRunner(
@@ -546,7 +539,7 @@ def _make_tracking_runner(*, stall_on_epoch_boundary: bool) -> InlineStageRunner
 
 def test_nonstalling_accumulator_flushes_on_epoch_boundary() -> None:
     """Non-stalling accumulators still flush and pass the sentinel through."""
-    runner = _make_tracking_runner(stall_on_epoch_boundary=False)
+    runner = _make_tracking_runner()
     state = runner.ops[0]
     acc = state.accumulator_impl
     assert isinstance(acc, _FlushTrackingAccumulator)
@@ -581,16 +574,24 @@ def test_epoch_boundary_flush_raises_if_pending_data_remains() -> None:
         runner.ops[0].enqueue([_rec(0, chunk_id=1), _flush_sentinel(boundary_cid=2)])
 
 
-def test_only_batch_supports_stall_on_epoch_boundary() -> None:
-    """Non-Batch operators that request stalling are rejected."""
-    with pytest.raises(RuntimeError, match="only supported for Batch"):
-        _make_tracking_runner(stall_on_epoch_boundary=True)
+def test_runner_derives_stalling_from_batch_drop_last() -> None:
+    """Only Batch(drop_last=True) stalls; everything else flushes."""
 
+    def _stalls(op: BaseOp) -> bool:
+        node = Node(name="probe", op=op)
+        stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+        runner = InlineStageRunner(
+            stage,
+            ctx_services=_ctx_services(),
+            max_workers=1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+        )
+        return runner.ops[0]._stall_on_epoch_boundary
 
-def test_batch_drop_last_uses_stall_trait() -> None:
-    """Batch(drop_last=True) declares stall_on_epoch_boundary=True."""
-    assert Batch(3, drop_last=True).traits().stall_on_epoch_boundary is True
-    assert Batch(3, drop_last=False).traits().stall_on_epoch_boundary is False
+    assert _stalls(Batch(3, drop_last=True)) is True
+    assert _stalls(Batch(3, drop_last=False)) is False
+    assert _stalls(_StallTrackingOp()) is False
 
 
 class _NonMonotoneFlushOp(BaseOp):
@@ -600,10 +601,7 @@ class _NonMonotoneFlushOp(BaseOp):
         super().__init__()
 
     def traits(self) -> OpTraits:
-        return OpTraits(
-            preserves_cursor_order=False,
-            stall_on_epoch_boundary=False,
-        )
+        return OpTraits(preserves_cursor_order=False)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

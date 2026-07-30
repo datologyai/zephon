@@ -1232,12 +1232,6 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
                 )
 
 
-def test_stall_trait_default_is_false() -> None:
-    """EnsureMixture defaults to stall_on_epoch_boundary=False (flush)."""
-    op = EnsureMixture()
-    assert op.traits().stall_on_epoch_boundary is False
-
-
 # ---------------------------------------------------------------------------
 # Strict (unbounded) buffering: max_buffer_size=None + discard-on-flush
 # ---------------------------------------------------------------------------
