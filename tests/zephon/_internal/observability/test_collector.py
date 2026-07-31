@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon.observability.config import (
     ExecutionTrackingMode,
     MetricsSinkConfig,
     MetricsSinkMode,
 )
-from zephon.observability.stats import NodeMetricsDelta, PumpTimingDelta
+from zephon.observability.stats import (
+    FetchTimingDelta,
+    NodeMetricsDelta,
+    PrefetchTimingDelta,
+    PumpTimingDelta,
+)
 
 
 def _make_delta(**overrides: Any) -> NodeMetricsDelta:
@@ -52,6 +59,33 @@ def _pump_delta(**overrides: Any) -> PumpTimingDelta:
     )
     base.update(overrides)
     return PumpTimingDelta(**base)
+
+
+def _fetch_delta() -> FetchTimingDelta:
+    return FetchTimingDelta(
+        stage_index=0,
+        dataset_id=1,
+        shard_id=2,
+        samples=3,
+        group_ns=10,
+        resolve_ns=1,
+        open_ns=2,
+        read_ns=3,
+        close_ns=4,
+        retries=0,
+        cache_hits=1,
+        cache_misses=0,
+    )
+
+
+def _prefetch_delta() -> PrefetchTimingDelta:
+    return PrefetchTimingDelta(
+        stage_index=0,
+        batch_size=3,
+        prefetch_requests=2,
+        prefetch_succeeded=1,
+        prefetch_failed=1,
+    )
 
 
 def test_pipeline_collector_snapshot_isolated() -> None:
@@ -99,3 +133,38 @@ def test_collector_pump_timing_no_op_when_tracking_off() -> None:
     collector.record_pump_timing(_pump_delta())
     snapshot = collector.snapshot_pump_timing()
     assert snapshot.to_records() == []
+
+
+@pytest.mark.parametrize(
+    ("tracking_mode", "has_samples"),
+    [
+        (ExecutionTrackingMode.OFF, False),
+        (ExecutionTrackingMode.STAGES, False),
+        (ExecutionTrackingMode.NODES, True),
+    ],
+)
+def test_fetch_and_prefetch_require_node_tracking(
+    tracking_mode: ExecutionTrackingMode, has_samples: bool
+) -> None:
+    collector = PipelineCollector(CollectorConfig(tracking_mode=tracking_mode))
+    collector.record_fetch(_fetch_delta())
+    collector.record_prefetch(_prefetch_delta())
+
+    assert collector.snapshot_fetch().has_samples() is has_samples
+    assert collector.snapshot_prefetch().has_samples() is has_samples
+
+
+def test_fetch_and_prefetch_snapshots_are_isolated() -> None:
+    collector = PipelineCollector(
+        CollectorConfig(tracking_mode=ExecutionTrackingMode.NODES)
+    )
+    collector.record_fetch(_fetch_delta())
+    collector.record_prefetch(_prefetch_delta())
+    fetch_snapshot = collector.snapshot_fetch()
+    prefetch_snapshot = collector.snapshot_prefetch()
+
+    collector.record_fetch(_fetch_delta())
+    collector.record_prefetch(_prefetch_delta())
+
+    assert fetch_snapshot.stages[0].totals.samples == 3
+    assert prefetch_snapshot.stages[0].samples == 3

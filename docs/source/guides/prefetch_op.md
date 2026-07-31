@@ -207,43 +207,43 @@ pipeline.prefetch(
 
 ### Metrics Collection
 
-The prefetch operator emits metrics via the `emit_prefetch_metrics` callback:
+Enable node-level execution tracking, then read the prefetch timing snapshot
+from the pipeline (see `zephon.observability.PrefetchTimingSummary`):
 
 ```python
-from zephon.observability.stats import PrefetchTimingDelta
+from zephon.observability import ExecutionTrackingMode
 
-prefetch_deltas = []
+pipeline = pipeline.options(execution_tracking=ExecutionTrackingMode.NODES)
 
-pipeline = pipeline.options(
-    emit_prefetch_metrics=prefetch_deltas.append
-)
+for batch in pipeline:
+    ...  # train / consume
 
-# After running pipeline
-for delta in prefetch_deltas:
-    print(f"Batch {delta.batch_size} samples")
-    print(f"  Prefetch requests: {delta.prefetch_requests}")
-    print(f"  Succeeded: {delta.prefetch_succeeded}")
-    print(f"  Failed: {delta.prefetch_failed}")
+prefetch = pipeline.prefetch_timing_snapshot()
+for stage_index, totals in prefetch.stages.items():
+    print(f"Stage {stage_index}:")
+    print(f"  Prefetch requests: {totals.prefetch_requests}")
+    print(f"  Succeeded: {totals.prefetch_succeeded}")
+    print(f"  Failed: {totals.prefetch_failed}")
 ```
+
+Snapshots may also be taken mid-run (e.g. from a monitoring thread); they
+return a consistent clone of the counters accumulated so far, and `None`
+when `execution_tracking` is off.
+
+MTP snapshots are not yet available while observability support is still in
+development.
 
 ### Cache Performance
 
-Monitor cache hit/miss rates via `emit_fetch_metrics`:
+Monitor cache hit/miss rates via the fetch timing snapshot. Per-stage breakdowns
+in `FetchStageSummary.shard_totals` are keyed by `(dataset_id, shard_id)`:
 
 ```python
-from zephon.observability.stats import FetchTimingDelta
-
-fetch_deltas = []
-
-pipeline = pipeline.options(
-    emit_fetch_metrics=fetch_deltas.append
-)
-
-# Calculate cache hit rate
-total_hits = sum(d.cache_hits for d in fetch_deltas)
-total_misses = sum(d.cache_misses for d in fetch_deltas)
-hit_rate = total_hits / (total_hits + total_misses)
-print(f"Cache hit rate: {hit_rate * 100:.1f}%")
+fetch = pipeline.fetch_timing_snapshot()
+for stage in fetch.iter_stages():
+    totals = stage.totals
+    print(f"Cache hit rate: {totals.cache_hit_ratio * 100:.1f}%")
+    print(f"  Hits: {totals.cache_hits}, misses: {totals.cache_misses}")
 ```
 
 ## Complete Example

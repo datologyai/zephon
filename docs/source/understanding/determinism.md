@@ -237,7 +237,7 @@ For non-monotonic pipelines (those with packing, shuffling, or mixture
 correction), the checkpoint additionally stores **epoch boundary positions**
 and **inflight chunk state** so that flush sentinels can be re-injected at
 the correct points during replay.  See
-[Checkpointing](checkpointing.md#epoch-based-eviction) for the full model.
+[Checkpointing](checkpointing.md#epoch-based-eviction-packing-and-shuffling) for the full model.
 
 Checkpoints should be taken between global training steps, at which point
 every lane has contributed exactly once per round-robin cycle.  All lanes

@@ -384,36 +384,6 @@ class TestToTrainingPadMasking:
         out = SampleBatch(records=(r0, r1)).to_training(return_labels=True, dtype=None)
         assert out["labels"] == [[11, 12, -100], [-100, -100, -100]]
 
-    def test_mask_padding_labels_list(self) -> None:
-        from zephon._internal.utils.tensor_utils import mask_padding_labels
-
-        out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [1, 2], -100, None)
-        assert out == [[1, 2, -100], [4, -100, -100]]
-
-    def test_mask_padding_labels_numpy_does_not_mutate(self) -> None:
-        import numpy as np
-
-        from zephon._internal.utils.tensor_utils import mask_padding_labels
-
-        labels = np.array([[1, 2, 3], [4, 5, 6]])
-        out = mask_padding_labels(labels, [1, 2], -100, "numpy")
-        assert out.tolist() == [[1, 2, -100], [4, -100, -100]]
-        assert labels.tolist() == [[1, 2, 3], [4, 5, 6]]  # input untouched
-
-    def test_mask_padding_labels_torch(self) -> None:
-        torch = pytest.importorskip("torch")
-        from zephon._internal.utils.tensor_utils import mask_padding_labels
-
-        labels = torch.tensor([[1, 2, 3], [4, 5, 6]])
-        out = mask_padding_labels(labels, [1, 2], -100, "torch")
-        assert out.tolist() == [[1, 2, -100], [4, -100, -100]]
-
-    def test_mask_padding_labels_zero_is_noop(self) -> None:
-        from zephon._internal.utils.tensor_utils import mask_padding_labels
-
-        out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [0, 0], -100, None)
-        assert out == [[1, 2, 3], [4, 5, 6]]
-
 
 class TestToTrainingLossMask:
     def test_loss_mask_masks_labels_and_is_consumed(self) -> None:

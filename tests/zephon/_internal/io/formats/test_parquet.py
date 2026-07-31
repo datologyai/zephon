@@ -15,7 +15,7 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tests._helpers import catalog_locators
+from tests._catalog_helpers import catalog_locators
 from tests.helpers.storage import _install_obstore_stubs
 from zephon._internal.io.catalog import extra_codec
 from zephon._internal.io.formats.parquet import (
@@ -1342,7 +1342,7 @@ class TestParquetExtraCodec:
         """
         import numpy as np
 
-        from tests._helpers import catalog_set_from_locators
+        from tests._catalog_helpers import catalog_set_from_locators
 
         codec = _ParquetExtraCodec()
         extra = {"custom": 1}

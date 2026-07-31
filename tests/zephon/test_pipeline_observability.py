@@ -58,3 +58,15 @@ def test_pipeline_metrics_snapshot_contains_stage_data(
     assert any(rec["produced_elements"] > 0 for rec in records)
     summary.compute_wait_ratios()
     assert all("wait_ratio" in rec for rec in summary.to_records())
+
+
+def test_timing_snapshots_are_unavailable_without_an_inline_engine() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "row"}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds, chunk_size=1))
+
+    assert pipe.fetch_timing_snapshot() is None
+    assert pipe.prefetch_timing_snapshot() is None
+
+    pipe._sp = object()
+    assert pipe.fetch_timing_snapshot() is None
+    assert pipe.prefetch_timing_snapshot() is None

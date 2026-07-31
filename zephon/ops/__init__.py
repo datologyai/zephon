@@ -14,7 +14,12 @@ from zephon.ops.accumulators import (
     ReadyBatch,
 )
 from zephon.ops.base import BaseOp, OpContext, StageInfo
-from zephon.ops.children import pack_meta, spawn_child, tombstone_meta
+from zephon.ops.children import (
+    pack_meta,
+    spawn_child,
+    tombstone_meta,
+    tombstones_for_record,
+)
 from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
 from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
@@ -35,4 +40,5 @@ __all__ = [
     "pack_meta",
     "spawn_child",
     "tombstone_meta",
+    "tombstones_for_record",
 ]

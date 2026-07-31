@@ -81,7 +81,7 @@ Quick Example
    :maxdepth: 2
    :caption: API Reference
 
-   api/zephon_api
+   api/zephon_pipeline
    api/zephon_types
    api/zephon_io
    api/zephon_work

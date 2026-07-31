@@ -20,8 +20,13 @@ from zephon import (
 )
 from zephon.build_index import build_index
 from zephon.io import CacheOptions, StoreOptions
-from zephon.observability import ExecutionTrackingMode, MTPQueueStats
-from zephon.ops import BaseOp, OpContext, OpTraits, StageInfo
+from zephon.observability import (
+    ExecutionTrackingMode,
+    FetchTimingSummary,
+    MTPQueueStats,
+    PrefetchTimingSummary,
+)
+from zephon.ops import BaseOp, DomainGroups, OpContext, OpTraits, StageInfo
 from zephon.options import IpcTransport, RuntimeOptions
 from zephon.types import SampleId
 from zephon.validation import ValidationReport
@@ -41,6 +46,21 @@ def inspect_stats(pipe: Pipeline) -> MTPQueueStats | None:
     return pipe.mtp_queue_stats()
 
 
+def inspect_timing(pipe: Pipeline) -> None:
+    fetch: FetchTimingSummary | None = pipe.fetch_timing_snapshot()
+    if fetch is not None:
+        for stage in fetch.iter_stages():
+            for shard_key, totals in stage.shard_totals.items():
+                key: tuple[int, int] = shard_key
+                samples: int = totals.samples
+                _ = (key, samples)
+
+    prefetch: PrefetchTimingSummary | None = pipe.prefetch_timing_snapshot()
+    if prefetch is not None:
+        success_rate: float = prefetch.success_rate
+        _ = success_rate
+
+
 def report(pipe: Pipeline) -> ValidationReport:
     return pipe.validate()
 
@@ -51,6 +71,13 @@ def preflight(pipe: Pipeline) -> ValidationReport:
 
 def make_index(dataset_dir: str) -> str:
     return str(build_index("parquet", dataset_dir))
+
+
+def pack_grouped(pipe: Pipeline) -> Pipeline:
+    groups = DomainGroups({"code": ["python", "java"]})
+    members: dict[str, str] = groups.to_member_map()
+    _ = members
+    return pipe.pack_sequences(max_length=8, homogeneity="group", groups=groups)
 
 
 class IdentityOp(BaseOp):

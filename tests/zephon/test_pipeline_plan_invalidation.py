@@ -127,6 +127,8 @@ def test_all_graph_mutating_methods_invalidate_plan() -> None:
             "checkpoint",
             "restore",
             "metrics_snapshot",
+            "fetch_timing_snapshot",
+            "prefetch_timing_snapshot",
             "validate",
             "preflight_tokenizers",
             "inflight_summary",

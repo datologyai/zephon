@@ -31,3 +31,6 @@ class PassthroughAccumulator(Accumulator[T]):
     ) -> list[ReadyBatch[T]]:
         """No buffered state to flush."""
         return []
+
+
+__all__ = ["PassthroughAccumulator"]

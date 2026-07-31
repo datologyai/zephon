@@ -64,8 +64,5 @@ def dump_semaphore_registry() -> None:
 
 
 __all__ = [
-    "_semaphore_registry",
-    "_register_semaphore",
-    "_mark_semaphore_cleaned",
     "dump_semaphore_registry",
 ]

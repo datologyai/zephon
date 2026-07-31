@@ -372,7 +372,7 @@ If you add one, place it *after* `tokenize` and keep a token-unit
 ### Lane partitioning
 
 As described in
-[Distributed Training](distributed_training.md#compute-everywhere-discard-locally),
+[Distributed Training](distributed_training.md#2-compute-everywhere-discard-locally),
 the {py:class}`~zephon.work.StaticMixtureWorkSource` uses a
 *compute-everywhere-then-discard* strategy for lane assignment.  Every lane
 enumerates the same global chunk sequence deterministically, then keeps

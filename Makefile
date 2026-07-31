@@ -45,7 +45,8 @@ docs:
 typecheck-public:
 	$(PY) pyright tests/typing
 
-# Public-API type-completeness / leak gate. Run against the installed wheel
-# (see tests/packaging); editable installs report "no py.typed found".
+# Public-API type-completeness / leak gate. Builds the wheel and runs
+# pyright --verifytypes against a clean install (editable installs report
+# "no py.typed found"), asserting no unreviewed incomplete symbols.
 verifytypes:
-	$(PY) pyright --verifytypes zephon --ignoreexternal
+	$(PY) $(PYTEST) --run-packaging tests/packaging -k verifytypes $(EXTRA_ARGS)

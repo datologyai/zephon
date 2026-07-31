@@ -214,5 +214,5 @@ for batch in pipeline:
 ## Next Steps
 
 - Check out the [Understanding Zephon](understanding/worksources.md) section to learn more about Zephon's concepts and what's happening behind the scenes
-- See the [API Reference](api/zephon_api) for detailed documentation
+- See the [API Reference](api/zephon_pipeline) for detailed documentation
 - Check out [Examples](examples/index) for more complete examples

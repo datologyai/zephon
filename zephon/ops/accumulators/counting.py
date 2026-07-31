@@ -138,3 +138,6 @@ class CountingAccumulator(Accumulator[T]):
         wait_ns = now_ns - first if first is not None else 0
         self._buffers[key] = []
         return (buf, wait_ns)
+
+
+__all__ = ["CountingAccumulator"]

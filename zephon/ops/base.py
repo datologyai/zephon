@@ -14,7 +14,7 @@ from zephon.types import SampleRecord
 
 @dataclass(frozen=True)
 class StageInfo:
-    """Placement metadata passed through :attr:`OpContext.stage_info`.
+    """Plan metadata passed through :attr:`OpContext.stage_info`.
 
     Default values indicate that setup has not run. ``stage_index`` and
     ``stage_name`` identify the stage, ``op_index`` identifies the operator
@@ -40,7 +40,9 @@ class OpContext:
         stage_info: StageInfo | None = None,
     ) -> None:
         self._services = services
-        self.stage_info = stage_info if stage_info is not None else StageInfo()
+        self.stage_info: StageInfo = (
+            stage_info if stage_info is not None else StageInfo()
+        )
 
     def get(self, key: str, default: Any | None = None) -> Any:
         """Fetch a service by name, returning ``default`` when unavailable."""
@@ -93,7 +95,7 @@ class BaseOp(ABC):
     ``setup`` never need to survive pickling.
 
     The convention in this repo is to construct tokenizers (and similar
-    heavy resources) in ``setup``, not ``__init__``:
+    heavy resources) in ``setup``, not ``__init__``::
 
         class MyOp(BaseOp):
             def __init__(self, tokenizer_name: str):
@@ -141,7 +143,7 @@ class BaseOp(ABC):
     """
 
     def __init__(self) -> None:
-        self.stage_info = StageInfo()
+        self.stage_info: StageInfo = StageInfo()
 
     @classmethod
     def plan_identity(cls) -> str:
@@ -218,3 +220,6 @@ class BaseOp(ABC):
         build.
         """
         return None
+
+
+__all__ = ["BaseOp", "OpContext", "StageInfo"]

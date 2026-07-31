@@ -7,7 +7,8 @@ import pytest
 pytest.importorskip("streaming")
 from streaming import MDSWriter
 
-from tests._helpers import catalog_locators, counts_dict
+from tests._catalog_helpers import catalog_locators
+from tests._helpers import counts_dict
 from zephon._internal.io.catalog import extra_codec
 from zephon._internal.io.formats import ensure_builtin_formats
 from zephon._internal.io.formats.base import get_format

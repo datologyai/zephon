@@ -11,9 +11,19 @@ interleaving order from the source stream.
 
 from __future__ import annotations
 
-from zephon._internal.stream import EngineSample
 from zephon.ops.accumulators.counting import CountingAccumulator
-from zephon.types import SampleMeta, SampleRecord
+from zephon.types import (
+    ChunkId,
+    ChunkOffset,
+    ComponentId,
+    LaneId,
+    SampleId,
+    SampleMeta,
+    SampleRecord,
+)
+
+# Mirrors the engine wire tuple; lane_id is index 1.
+EngineSample = tuple[SampleId, LaneId, ChunkId, ChunkOffset, ComponentId]
 
 
 def _rec(lane_id: int, offset: int) -> SampleRecord:

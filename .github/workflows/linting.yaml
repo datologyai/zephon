@@ -41,3 +41,6 @@ jobs:
     - name: Run pyright type check
       run: |
         uv run pyright
+    - name: Type-check the public-API consumer fixture
+      run: |
+        uv run pyright tests/typing

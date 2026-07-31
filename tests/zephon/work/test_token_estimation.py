@@ -27,10 +27,10 @@ from zephon.io import Dataset, InMemoryShard
 from zephon.work import token_estimation
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
-    PerShardByteSize,
     PerShardTokenCost,
     TokenEstimation,
     TokenRatio,
+    _build_byte_source,
     _calibration_shard_count,
     _CalibrationScan,
     _dataset_content_key,
@@ -40,6 +40,7 @@ from zephon.work.token_estimation import (
     _hansen_hurwitz_ratio,
     _measure_dataset,
     _MeasurePlan,
+    _PerShardByteSize,
     _pps_select,
     _PreTokenizeReplay,
     _prime_cache_key,
@@ -47,7 +48,6 @@ from zephon.work.token_estimation import (
     _shard_bytes_cv,
     _UnreplayableOp,
     _write_prime_cache,
-    build_byte_source,
     prime_token_ratios,
 )
 
@@ -174,7 +174,7 @@ def test_inmem_byte_source_per_shard_average():
     ds = Dataset.from_dict(
         "mixed", {0: InMemoryShard([short] * 10), 1: InMemoryShard([long] * 10)}
     )
-    source = build_byte_source(ds)
+    source = _build_byte_source(ds)
     assert source is not None
     assert source.shard_avg_bytes[0] == pytest.approx(content_bytes(short))
     assert source.shard_avg_bytes[1] == pytest.approx(content_bytes(long))
@@ -186,7 +186,7 @@ def test_inmem_byte_source_per_shard_average():
 
 def test_catalog_byte_source_from_jsonl(tmp_path):
     ds = make_jsonl_dataset(tmp_path, "web", docs_per_shard=20, words_per_doc=10)
-    source = build_byte_source(ds)
+    source = _build_byte_source(ds)
     assert source is not None
     sizes = [source.shard_avg_bytes[int(sid)] for sid in ds.ids()]
     assert all(s > 0 for s in sizes)
@@ -196,11 +196,11 @@ def test_catalog_byte_source_from_jsonl(tmp_path):
 
 def test_byte_source_handles_empty_dataset_gracefully():
     empty = Dataset.from_dict("empty", {0: InMemoryShard([])})
-    assert build_byte_source(empty) is None
+    assert _build_byte_source(empty) is None
 
 
 def test_byte_source_direct_construction_floors_mean():
-    source = PerShardByteSize({5: 100.0}, mean_bytes=0.0)
+    source = _PerShardByteSize({5: 100.0}, mean_bytes=0.0)
     assert source.shard_avg_bytes == {5: 100.0}
     assert source.mean_bytes == 1.0
 

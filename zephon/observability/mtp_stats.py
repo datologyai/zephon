@@ -34,3 +34,6 @@ class MTPQueueStats:
 
     prefetch_depth: int
     """Deserialized items in the prefetch buffer (0 when ``mtp_prefetch=0``)."""
+
+
+__all__ = ["MTPQueueStats"]

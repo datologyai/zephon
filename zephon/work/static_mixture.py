@@ -1850,6 +1850,7 @@ class StaticMixtureWorkSource(WorkSource):
     - optional block-based cross-shard shuffle (``shuffle_block_size``)
 
     ``shuffle_block_size`` accepts:
+
     - ``None`` (default) — cross-shard block shuffle disabled
     - a positive ``int`` — explicit block size
     - ``"auto"`` — ``8 * max_shard`` across all datasets in the mix
@@ -2287,6 +2288,7 @@ class StaticMixtureWorkSource(WorkSource):
         """Return the next chunk for a given canonical lane and worker.
 
         This implementation follows a compute-everywhere-then-discard strategy:
+
         - Enumerate the global chunk stream deterministically using the existing
           chunking logic.
         - Assign each global chunk index ``g`` to a lane via :meth:`_lane_for_chunk`.
@@ -2602,3 +2604,6 @@ class StaticMixtureWorkSource(WorkSource):
         self._strategy.validate_liveness(self._cursors)
 
         self._recompute_total_samples()
+
+
+__all__ = ["ShuffleBlockSpec", "StaticMixtureWorkSource"]

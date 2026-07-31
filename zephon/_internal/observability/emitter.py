@@ -324,12 +324,14 @@ class MetricsReporter:
     ) -> None:
         plan_id = summary.plan_id or "unknown"
         for record in records:
+            dataset_id = record["dataset_id"]
             shard_id = record["shard_id"]
             payload = {
                 "event": "zephon.fetch_metrics",
                 "plan_id": plan_id,
                 "stage": record["stage"],
                 "stage_name": record.get("stage_name"),
+                "dataset_id": dataset_id,
                 "shard_id": shard_id,
                 "samples": record["samples"],
                 "groups": record["groups"],
@@ -356,9 +358,11 @@ class MetricsReporter:
                 logger.info(json.dumps(payload))
             else:
                 stage_name = payload["stage_name"] or "unknown"
-                shard_label = (
-                    f"shard={int(shard_id)}" if shard_id is not None else "stage"
-                )
+                shard_label = "stage"
+                if dataset_id is not None and shard_id is not None:
+                    shard_label = (
+                        f"dataset={int(dataset_id)} shard={int(shard_id)} stage"
+                    )
                 logger.info(
                     "[zephon][fetch] plan=%s %s=%s/%s samples=%d avg_resolve=%s avg_read=%s avg_close=%s retries=%d cache_hit_ratio=%s reopens=%d",
                     plan_id,

@@ -563,5 +563,5 @@ This page gave you the conceptual map. To go deeper:
   pipeline state for fault-tolerant training
 - [Prefetch Operator Guide](guides/prefetch_op.md) --- optimizing remote
   storage performance
-- [API Reference](api/zephon_api) --- full reference for the Pipeline
+- [API Reference](api/zephon_pipeline) --- full reference for the Pipeline
   class and all operators

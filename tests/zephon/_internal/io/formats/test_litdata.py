@@ -7,7 +7,8 @@ import pytest
 pytest.importorskip("litdata")
 from litdata.streaming.writer import BinaryWriter
 
-from tests._helpers import catalog_locators, counts_dict
+from tests._catalog_helpers import catalog_locators
+from tests._helpers import counts_dict
 from tests.helpers.storage import _install_obstore_stubs
 from zephon._internal.io.formats import ensure_builtin_formats
 from zephon._internal.io.formats.base import get_format

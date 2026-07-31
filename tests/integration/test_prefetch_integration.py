@@ -21,44 +21,30 @@ from zephon._internal.ops.prefetch import PrefetchOp
 from zephon.io.dataset import Dataset
 from zephon.observability import (
     ExecutionTrackingMode,
-    FetchTimingDelta,
-    PrefetchTimingDelta,
+    FetchTimingTotals,
+    PrefetchTimingTotals,
 )
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 
-@pytest.fixture
-def capture_metrics():
-    """Fixture to capture fetch and prefetch metrics from the pipeline.
+def _fetch_stats(pipe: Pipeline) -> tuple[FetchTimingTotals, set[tuple[int, int]]]:
+    summary = pipe.fetch_timing_snapshot()
+    assert summary is not None, "requires execution_tracking and a live engine"
+    totals = FetchTimingTotals()
+    shard_keys: set[tuple[int, int]] = set()
+    for stage in summary.iter_stages():
+        totals.merge(stage.totals)
+        shard_keys.update(stage.shard_totals)
+    return totals, shard_keys
 
-    Patches PipelineCollector to intercept record_fetch and record_prefetch calls,
-    collecting deltas in lists.
 
-    Yields:
-        Tuple of (fetch_deltas, prefetch_deltas) lists that accumulate metrics
-        during pipeline execution.
-    """
-    fetch_deltas: list[FetchTimingDelta] = []
-    prefetch_deltas: list[PrefetchTimingDelta] = []
-
-    from zephon._internal.observability.collector import PipelineCollector
-
-    original_record_fetch = PipelineCollector.record_fetch
-    original_record_prefetch = PipelineCollector.record_prefetch
-
-    def patched_record_fetch(self, delta):
-        fetch_deltas.append(delta)
-        return original_record_fetch(self, delta)
-
-    def patched_record_prefetch(self, delta):
-        prefetch_deltas.append(delta)
-        return original_record_prefetch(self, delta)
-
-    with (
-        patch.object(PipelineCollector, "record_fetch", patched_record_fetch),
-        patch.object(PipelineCollector, "record_prefetch", patched_record_prefetch),
-    ):
-        yield fetch_deltas, prefetch_deltas
+def _prefetch_totals(pipe: Pipeline) -> PrefetchTimingTotals:
+    summary = pipe.prefetch_timing_snapshot()
+    assert summary is not None, "requires execution_tracking and a live engine"
+    totals = PrefetchTimingTotals()
+    for stage_totals in summary.stages.values():
+        totals.merge(stage_totals)
+    return totals
 
 
 @pytest.mark.integration
@@ -95,7 +81,7 @@ def test_dataset_structure():
 
 
 @pytest.mark.integration
-def test_prefetch_with_sufficient_cache(tmp_path, capture_metrics):
+def test_prefetch_with_sufficient_cache(tmp_path):
     """Test prefetch with sufficient cache - verify 100% cache hit rate.
 
     Setup:
@@ -113,8 +99,6 @@ def test_prefetch_with_sufficient_cache(tmp_path, capture_metrics):
     This demonstrates blocking prefetch effectiveness: with sufficient cache space,
     fetch sees guaranteed cache hits because prefetch completed downloads first.
     """
-    fetch_deltas, prefetch_deltas = capture_metrics
-
     # Use the consolidated prefetch demo dataset
     dataset_path = (
         Path(__file__).parent.parent.parent
@@ -163,7 +147,7 @@ def test_prefetch_with_sufficient_cache(tmp_path, capture_metrics):
             }
         },
         execution_tracking=ExecutionTrackingMode.NODES,
-        # Metrics patches live in this process; need inline mode.
+        # Snapshot access requires an in-process engine.
         mtp_mode=False,
     )
 
@@ -176,49 +160,42 @@ def test_prefetch_with_sufficient_cache(tmp_path, capture_metrics):
 
     assert sample_count == 80, f"Expected 80 samples, got {sample_count}"
 
-    # Aggregate fetch statistics from deltas
-    print(f"DEBUG: Received {len(fetch_deltas)} fetch deltas")
-    print(f"DEBUG: Received {len(prefetch_deltas)} prefetch deltas")
+    # Aggregate fetch statistics from the public timing snapshots
+    fetch_totals, unique_shards = _fetch_stats(pipe)
+    prefetch_totals = _prefetch_totals(pipe)
+    print(
+        f"DEBUG: Cache hits: {fetch_totals.cache_hits}/{fetch_totals.groups} fetch "
+        f"groups, {len(unique_shards)} unique shards"
+    )
 
-    if fetch_deltas:
-        for i, d in enumerate(fetch_deltas):
-            print(
-                f"DEBUG: Fetch delta {i}: samples={d.samples}, hits={d.cache_hits}, misses={d.cache_misses}"
-            )
-
-    total_cache_hits = sum(d.cache_hits for d in fetch_deltas)
-    total_cache_misses = sum(d.cache_misses for d in fetch_deltas)
-    total_samples = sum(d.samples for d in fetch_deltas)
-
-    assert total_samples == 80, f"Expected 80 samples fetched, got {total_samples}"
+    assert fetch_totals.samples == 80, (
+        f"Expected 80 samples fetched, got {fetch_totals.samples}"
+    )
 
     # Check prefetch statistics
-    total_prefetch_requests = sum(d.prefetch_requests for d in prefetch_deltas)
-    assert total_prefetch_requests == 4, (
-        f"Expected 4 prefetch requests, got {total_prefetch_requests}"
+    assert prefetch_totals.prefetch_requests == 4, (
+        f"Expected 4 prefetch requests, got {prefetch_totals.prefetch_requests}"
     )
 
     # With blocking prefetch and sufficient cache, expect 100% cache hit rate
     # Prefetch downloads ALL shards within prefetch_distance BEFORE returning samples to fetch
-    # Count unique shards accessed (a shard may appear in multiple fetch deltas/batches)
-    unique_shards = {d.shard_id for d in fetch_deltas}
-    print(
-        f"DEBUG: Cache hits: {total_cache_hits}/{len(fetch_deltas)} fetch deltas, {len(unique_shards)} unique shards"
-    )
+    # Count unique shards accessed (a shard may appear in multiple fetch groups/batches)
     assert len(unique_shards) == 4, (
         f"Expected 4 unique shards accessed, got {len(unique_shards)}"
     )
-    # Every fetch delta should be a cache hit (prefetch downloaded everything)
-    assert total_cache_misses == 0, (
-        f"Expected 0 cache misses with blocking prefetch and sufficient cache, got {total_cache_misses}"
+    # Every fetch group should be a cache hit (prefetch downloaded everything)
+    assert fetch_totals.cache_misses == 0, (
+        f"Expected 0 cache misses with blocking prefetch and sufficient cache, "
+        f"got {fetch_totals.cache_misses}"
     )
-    assert total_cache_hits == len(fetch_deltas), (
-        f"Expected all {len(fetch_deltas)} fetch deltas to be cache hits, got {total_cache_hits}"
+    assert fetch_totals.cache_hits == fetch_totals.groups, (
+        f"Expected all {fetch_totals.groups} fetch groups to be cache hits, "
+        f"got {fetch_totals.cache_hits}"
     )
 
 
 @pytest.mark.integration
-def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics):
+def test_sequential_shard_prefetch_insufficient_cache(tmp_path):
     """Test sequential shard reads with insufficient cache - verify deterministic cache eviction.
 
     Setup:
@@ -244,8 +221,6 @@ def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics)
     sequential prefetch downloads (max_concurrent=1), we get deterministic cache
     eviction behavior that reliably demonstrates cache insufficiency.
     """
-    fetch_deltas, prefetch_deltas = capture_metrics
-
     # Use the consolidated dataset (will only access shards 0 and 1)
     dataset_path = (
         Path(__file__).parent.parent.parent
@@ -299,7 +274,7 @@ def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics)
             }
         },
         execution_tracking=ExecutionTrackingMode.NODES,
-        # Metrics patches live in this process; need inline mode.
+        # Snapshot access requires an in-process engine.
         mtp_mode=False,
     )
 
@@ -315,20 +290,13 @@ def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics)
     assert sample_count == 80, f"Expected 80 samples, got {sample_count}"
 
     # With blocking prefetch and severely insufficient cache, expect constant thrashing
-    total_cache_hits = sum(d.cache_hits for d in fetch_deltas)
-    total_cache_misses = sum(d.cache_misses for d in fetch_deltas)
-    total_accesses = total_cache_hits + total_cache_misses
-
-    # Count unique shards accessed
-    unique_shards = {d.shard_id for d in fetch_deltas}
+    fetch_totals, unique_shards = _fetch_stats(pipe)
+    total_accesses = fetch_totals.cache_hits + fetch_totals.cache_misses
 
     print(
-        f"DEBUG: Cache performance - hits: {total_cache_hits}/{total_accesses} accesses, {len(unique_shards)} unique shards (insufficient cache)"
+        f"DEBUG: Cache performance - hits: {fetch_totals.cache_hits}/{total_accesses} "
+        f"accesses, {len(unique_shards)} unique shards (insufficient cache)"
     )
-    for i, delta in enumerate(fetch_deltas):
-        print(
-            f"  Delta {i}: shard={delta.shard_id}, samples={delta.samples}, hits={delta.cache_hits}, misses={delta.cache_misses}"
-        )
 
     # With insufficient cache (2000 bytes for 2 shards, but 4 shards total):
     # - Prefetch downloads all 4 shards sequentially (buffer_size=80, max_concurrent=1)
@@ -340,16 +308,18 @@ def test_sequential_shard_prefetch_insufficient_cache(tmp_path, capture_metrics)
     assert len(unique_shards) == 4, (
         f"Expected 4 unique shards accessed, got {len(unique_shards)}"
     )
-    assert total_cache_misses == 4, (
-        f"Expected exactly 4 cache misses (one per unique shard), got {total_cache_misses}"
+    assert fetch_totals.cache_misses == 4, (
+        f"Expected exactly 4 cache misses (one per unique shard), "
+        f"got {fetch_totals.cache_misses}"
     )
-    assert total_cache_hits == 1, (
-        f"Expected exactly 1 cache hit (shard 3 reuse across batches), got {total_cache_hits}"
+    assert fetch_totals.cache_hits == 1, (
+        f"Expected exactly 1 cache hit (shard 3 reuse across batches), "
+        f"got {fetch_totals.cache_hits}"
     )
 
 
 @pytest.mark.integration
-def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics):
+def test_alternating_shard_prefetch_insufficient_cache(tmp_path):
     """Test alternating shard access with insufficient cache - pathological case with 100% miss rate.
 
     Setup:
@@ -433,7 +403,6 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
             raise NotImplementedError()
 
     work_source = AlternatingWorkSource(dataset, chunk_size=40)
-    fetch_deltas, prefetch_deltas = capture_metrics
 
     # Build pipeline with prefetch
     # CRITICAL: buffer_size=1 forces prefetch to process 1 sample at a time (alternation)
@@ -526,21 +495,14 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
     assert sample_count == 40, f"Expected 40 samples (20 per shard), got {sample_count}"
 
     # Analyze cache performance
-    total_cache_hits = sum(d.cache_hits for d in fetch_deltas)
-    total_cache_misses = sum(d.cache_misses for d in fetch_deltas)
-    total_accesses = total_cache_hits + total_cache_misses
+    fetch_totals, shard_ids_accessed = _fetch_stats(pipe)
+    total_accesses = fetch_totals.cache_hits + fetch_totals.cache_misses
 
     print(
-        f"\nDEBUG: Pathological alternating case - hits: {total_cache_hits}/{total_accesses} accesses"
+        f"\nDEBUG: Pathological alternating case - hits: "
+        f"{fetch_totals.cache_hits}/{total_accesses} accesses"
     )
-    print(f"DEBUG: Number of fetch deltas: {len(fetch_deltas)}")
-
-    # Show all fetch deltas to understand the access pattern
-    for i, delta in enumerate(fetch_deltas):
-        print(
-            f"  Delta {i}: shard={delta.shard_id}, samples={delta.samples}, "
-            f"hits={delta.cache_hits}, misses={delta.cache_misses}"
-        )
+    print(f"DEBUG: Number of fetch groups: {fetch_totals.groups}")
 
     # With pathological scenario + 1:1 alternation via mock.patch coordination:
     # Pattern: prefetch → fetch → prefetch → fetch → ...
@@ -553,12 +515,10 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
     # - Tight coordination creates near-maximum thrashing: 95-100% miss rate
     # - Result: 40 accesses (forced by alternation), 2 hits (first two samples), 38 misses (95% miss rate)
 
-    miss_rate = total_cache_misses / total_accesses if total_accesses > 0 else 0
+    miss_rate = fetch_totals.cache_misses / total_accesses if total_accesses > 0 else 0
     print(f"DEBUG: Miss rate: {miss_rate * 100:.1f}%")
-    print(f"DEBUG: Total fetch deltas (sample fetches): {len(fetch_deltas)}")
 
     # Assert exact expected behavior for pathological case with 1:1 coordination
-    shard_ids_accessed = {d.shard_id for d in fetch_deltas}
     assert len(shard_ids_accessed) == 2, (
         f"Expected both shards to be accessed, got {shard_ids_accessed}"
     )
@@ -575,17 +535,19 @@ def test_alternating_shard_prefetch_insufficient_cache(tmp_path, capture_metrics
     # 4. Pattern repeats with 100% misses throughout
     #
     # This is maximum cache thrashing - the 2:2 pattern ensures every fetch sees an evicted shard
-    assert len(fetch_deltas) == 40, (
-        f"Expected exactly 40 fetch deltas (one per sample), got {len(fetch_deltas)}"
+    assert fetch_totals.groups == 40, (
+        f"Expected exactly 40 fetch groups (one per sample), got {fetch_totals.groups}"
     )
     assert total_accesses == 40, (
         f"Expected exactly 40 shard accesses (forced by coordination), got {total_accesses}"
     )
-    assert total_cache_hits == 0, (
-        f"Expected 0 cache hits (100% miss rate with 2:2 pattern), got {total_cache_hits}"
+    assert fetch_totals.cache_hits == 0, (
+        f"Expected 0 cache hits (100% miss rate with 2:2 pattern), "
+        f"got {fetch_totals.cache_hits}"
     )
-    assert total_cache_misses == 40, (
-        f"Expected 40 cache misses (pathological case with 2:2 pattern), got {total_cache_misses}"
+    assert fetch_totals.cache_misses == 40, (
+        f"Expected 40 cache misses (pathological case with 2:2 pattern), "
+        f"got {fetch_totals.cache_misses}"
     )
     assert miss_rate == 1.0, (
         f"Expected 100% miss rate (pathological case with 2:2 pattern), got {miss_rate * 100:.1f}%"
@@ -635,8 +597,13 @@ def test_backpressure_callback_simple(tmp_path):
 
     pipe = Pipeline(work_source)
     pipe = pipe.options(
-        cache_root=str(cache_root),
-        cache_limit_bytes=10000000,
+        io_options={
+            "cache": {
+                "enabled": True,
+                "root": str(cache_root),
+                "limit_bytes": 10000000,
+            }
+        },
         op_queue_capacity=4,  # Queue capacity to trigger backpressure
         default_stage_prefetch=4,
         max_workers=20,

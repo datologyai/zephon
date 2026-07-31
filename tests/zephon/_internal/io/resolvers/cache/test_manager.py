@@ -11,7 +11,7 @@ from typing import IO, Any, Mapping
 import pytest
 
 import zephon._internal.io.resolvers.cache.manager as manager_mod
-from tests._helpers import catalog_set_from_locators
+from tests._catalog_helpers import catalog_set_from_locators
 from zephon._internal.io.resolvers.cache import (
     CacheInUseError,
     CacheManager,

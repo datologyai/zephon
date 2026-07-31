@@ -164,11 +164,13 @@ class SampleMeta:
     captures tokens per component, e.g., ``{0: 300, 1: 200}``.
 
     This design supports ensure_mixture tracking per-component contributions:
+
     - ``weight="samples"``: use ``component_sample_counts`` directly
     - ``weight="tokens"``: use ``component_token_counts`` if set, else distribute
       total token count proportionally by ``component_sample_counts``
 
     The separation allows packing before or after tokenization:
+
     - Pack before tokenize: only sample counts known at pack time
     - Pack after tokenize: both sample and token counts computed at pack time
     """

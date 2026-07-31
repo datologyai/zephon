@@ -95,3 +95,6 @@ class DomainGroups:
                 "DomainGroups references components not in the mixture: "
                 f"{unknown}. Known components: {sorted(known)}"
             )
+
+
+__all__ = ["DomainGroups"]

@@ -13,10 +13,11 @@ This note describes the shipped behavior: how samples flow through Zephon, how w
 - **Packed record**: A record whose payload combines contributors from multiple base offsets. Its `meta.cursor` is the record identity for replay; `meta.contributors` lists every `ContributorRef` included, with `is_last_child` set where that packed record completes a base offset.
 - **Tombstone**: A record whose only purpose is to close a base offset when no real payload is emitted. `tombstone_meta(ref, lane_id)` marks `meta.tombstone` (via the `_tombstone` tag) and provides a closing `ContributorRef`. The pipeline notifies the engine about it but does not deliver it to the training consumer.
 
-Helper builders (in `zephon/core/children.py`):
-- `spawn_child(parent, child_idx, is_last_child=False, tags=None)` – deterministic fan‑out that sets both lineage and contributor metadata. If the parent already has contributors (e.g., packed input), they are propagated; `is_last_child=True` marks all inherited contributors as closing.
-- `pack_meta(primary_cursor, contributors, lane_id, tags=None)` – packed outputs.
+Helper builders (in `zephon.ops.children`):
+- `spawn_child(parent, child_idx, *, is_last_child=False, tags=None)` – deterministic fan‑out that sets both lineage and contributor metadata. If the parent already has contributors (e.g., packed input), they are propagated; `is_last_child=True` marks all inherited contributors as closing.
+- `pack_meta(primary_cursor, contributors, *, lane_id, component_sample_counts, component_token_counts=None, tags=None)` – packed outputs.
 - `tombstone_meta(ref, lane_id)` – close an offset without payload.
+- `tombstones_for_record(record)` – the tombstone records a dropped record owes (one per closing contributor).
 
 ## End-to-end lifecycle
 1. **WorkSource → chunks**: Each lane owns a `WorkSource`. `_lane_stream` replays restored inflight chunks in ascending `chunk_id`, then fetches fresh chunks, assigning monotonically increasing ids per lane. Within a chunk, record order is whatever the `WorkChunk` deterministically provides.
@@ -121,7 +122,7 @@ On `load_state_dict()`:
 - **Map-style transforms**:
   - If you only mutate payloads and keep a 1:1 mapping, reuse the incoming `SampleMeta`. The default `contribution_refs()` handles eviction/replay correctly.
   - `MapTransform` with `drop_none=True` automatically emits tombstones for every closing contributor in a dropped item (both `SampleRecord` and `SampleBatch`). No manual tombstone handling is needed when using the `Pipeline.map_transform()` API.
-  - Custom operators that conditionally drop records must emit tombstones for every closing contributor (`is_last_child=True`) in the dropped item's `contribution_refs()`. See `MapTransform._tombstones_for()` for reference.
+  - Custom operators that conditionally drop records must emit tombstones for every closing contributor (`is_last_child=True`) in the dropped item's `contribution_refs()` — `zephon.ops.children.tombstones_for_record` builds exactly these.
 - **Flush contract** (for operators with `preserves_cursor_order=False`):
   - `flush(reset=True, lane_id=lane)` must emit and **fully reset** that lane's state so it is indistinguishable from a freshly constructed instance, leaving other lanes untouched. Sentinels are per-lane; this is called at each lane's epoch boundary to guarantee clean replay.
   - `flush()` (default `reset=False`) is called at end of stream. Semantics are operator-defined (e.g., `Batch` with `drop_last=True` discards partial batches).

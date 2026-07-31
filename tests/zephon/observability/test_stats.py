@@ -4,7 +4,14 @@ import math
 from typing import Any
 
 from zephon.observability.config import ExecutionTrackingMode
-from zephon.observability.stats import NodeMetricsDelta, PipelineSummary
+from zephon.observability.stats import (
+    FetchTimingDelta,
+    FetchTimingSummary,
+    NodeMetricsDelta,
+    PipelineSummary,
+    PrefetchTimingDelta,
+    PrefetchTimingSummary,
+)
 
 
 def _make_delta(**overrides: Any) -> NodeMetricsDelta:
@@ -67,3 +74,74 @@ def test_summary_merge_and_snapshot() -> None:
     assert len(records) == 2
     names = {rec["name"] for rec in records}
     assert names == {"opA", "opB"}
+
+
+def _fetch_delta(dataset_id: int, shard_id: int, samples: int) -> FetchTimingDelta:
+    return FetchTimingDelta(
+        stage_index=2,
+        dataset_id=dataset_id,
+        shard_id=shard_id,
+        samples=samples,
+        group_ns=10,
+        resolve_ns=1,
+        open_ns=2,
+        read_ns=3,
+        close_ns=4,
+        retries=0,
+        cache_hits=1,
+        cache_misses=0,
+    )
+
+
+def test_fetch_summary_keeps_dataset_and_shard_identity() -> None:
+    summary = FetchTimingSummary(tracking_mode=ExecutionTrackingMode.NODES)
+    summary.apply(_fetch_delta(dataset_id=0, shard_id=7, samples=2))
+    summary.apply(_fetch_delta(dataset_id=1, shard_id=7, samples=3))
+
+    stage = summary.stages[2]
+    assert stage.totals.samples == 5
+    assert set(stage.shard_totals) == {(0, 7), (1, 7)}
+
+    shard_records = {
+        (record["dataset_id"], record["shard_id"]): record
+        for record in summary.to_records()
+        if record["dataset_id"] is not None
+    }
+    assert shard_records[(0, 7)]["samples"] == 2
+    assert shard_records[(1, 7)]["samples"] == 3
+
+
+def test_fetch_summary_clone_is_isolated() -> None:
+    summary = FetchTimingSummary(tracking_mode=ExecutionTrackingMode.NODES)
+    summary.apply(_fetch_delta(dataset_id=0, shard_id=1, samples=2))
+    clone = summary.clone()
+
+    summary.apply(_fetch_delta(dataset_id=0, shard_id=1, samples=3))
+
+    assert clone.stages[2].totals.samples == 2
+    assert clone.stages[2].shard_totals[(0, 1)].samples == 2
+
+
+def test_prefetch_success_rate_aggregates_stages() -> None:
+    summary = PrefetchTimingSummary(tracking_mode=ExecutionTrackingMode.NODES)
+    summary.apply(
+        PrefetchTimingDelta(
+            stage_index=0,
+            batch_size=4,
+            prefetch_requests=4,
+            prefetch_succeeded=3,
+            prefetch_failed=1,
+        )
+    )
+    summary.apply(
+        PrefetchTimingDelta(
+            stage_index=1,
+            batch_size=6,
+            prefetch_requests=6,
+            prefetch_succeeded=2,
+            prefetch_failed=4,
+        )
+    )
+
+    assert summary.success_rate == 0.5
+    assert PrefetchTimingSummary().success_rate == 0.0

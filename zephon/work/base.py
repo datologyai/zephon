@@ -346,14 +346,14 @@ class WorkSource(ABC):
     ) -> None:
         """Driver-side calibration hook; no-op by default."""
 
-    def state_dict(self) -> dict:
+    def state_dict(self) -> dict[str, Any]:
         return {
             "lane_id": self._lane,
             "canonical_replicas": self._canon,
             "chunk_size_hint": self.chunk_size_hint(),
         }
 
-    def load_state_dict(self, state: dict) -> None:
+    def load_state_dict(self, state: dict[str, Any]) -> None:
         self._verify_base_state(int(state["lane_id"]), int(state["canonical_replicas"]))
 
     def _verify_base_state(self, lane_id: int, canonical_replicas: int) -> None:
@@ -429,3 +429,15 @@ class WorkSource(ABC):
         Used for deterministic resume validation. Default None.
         """
         return None
+
+
+__all__ = [
+    "ComponentOrder",
+    "MixtureComponent",
+    "MixtureReadConfig",
+    "MixtureReadMode",
+    "SamplesPerComponent",
+    "SourcedSampleId",
+    "WorkChunk",
+    "WorkSource",
+]

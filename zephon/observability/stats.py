@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field, fields
-from typing import Iterator, Mapping, MutableMapping
+from typing import Any, Iterator, Mapping, MutableMapping
 
 from .config import ExecutionTrackingMode
 
@@ -87,7 +87,7 @@ class NodeSummary:
             return 0.0
         return self.processed_ns / max(self.produced_elements, 1)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "stage": self.stage_index,
             "op": self.op_index,
@@ -201,6 +201,7 @@ class FetchTimingDelta:
     """Incremental fetch metrics emitted per shard group."""
 
     stage_index: int
+    dataset_id: int
     shard_id: int
     samples: int
     group_ns: int
@@ -311,34 +312,37 @@ class FetchTimingTotals:
 
 @dataclass(slots=True)
 class FetchStageSummary:
-    """Aggregated fetch timings for a single pipeline stage."""
+    """Stage fetch timings keyed by ``(dataset_id, shard_id)``."""
 
     index: int
     totals: FetchTimingTotals = field(default_factory=FetchTimingTotals)
-    shard_totals: MutableMapping[int, FetchTimingTotals] = field(default_factory=dict)
+    shard_totals: MutableMapping[tuple[int, int], FetchTimingTotals] = field(
+        default_factory=dict
+    )
 
     def apply(self, delta: FetchTimingDelta) -> None:
         self.totals.apply(delta)
-        shard = self.shard_totals.get(delta.shard_id)
+        shard_key = (delta.dataset_id, delta.shard_id)
+        shard = self.shard_totals.get(shard_key)
         if shard is None:
             shard = FetchTimingTotals()
-            self.shard_totals[delta.shard_id] = shard
+            self.shard_totals[shard_key] = shard
         shard.apply(delta)
 
     def merge(self, other: "FetchStageSummary") -> None:
         self.totals.merge(other.totals)
-        for shard_id, totals in other.shard_totals.items():
-            existing = self.shard_totals.get(shard_id)
+        for shard_key, totals in other.shard_totals.items():
+            existing = self.shard_totals.get(shard_key)
             if existing is None:
-                self.shard_totals[shard_id] = totals.copy()
+                self.shard_totals[shard_key] = totals.copy()
             else:
                 existing.merge(totals)
 
     def copy(self) -> "FetchStageSummary":
         clone = FetchStageSummary(index=self.index)
         clone.totals = self.totals.copy()
-        for shard_id, totals in self.shard_totals.items():
-            clone.shard_totals[shard_id] = totals.copy()
+        for shard_key, totals in self.shard_totals.items():
+            clone.shard_totals[shard_key] = totals.copy()
         return clone
 
     def _build_record(
@@ -347,14 +351,16 @@ class FetchStageSummary:
         plan_id: str | None,
         stage_name: str | None,
         tracking_mode: ExecutionTrackingMode,
+        dataset_id: int | None,
         shard_id: int | None,
         totals: FetchTimingTotals,
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {
             "plan_id": plan_id,
             "tracking_mode": tracking_mode.value,
             "stage": self.index,
             "stage_name": stage_name,
+            "dataset_id": dataset_id,
             "shard_id": shard_id,
             "samples": totals.samples,
             "groups": totals.groups,
@@ -382,23 +388,25 @@ class FetchStageSummary:
         stage_name: str | None,
         tracking_mode: ExecutionTrackingMode,
         include_shards: bool = True,
-    ) -> list[dict]:
-        records: list[dict] = [
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = [
             self._build_record(
                 plan_id=plan_id,
                 stage_name=stage_name,
                 tracking_mode=tracking_mode,
+                dataset_id=None,
                 shard_id=None,
                 totals=self.totals,
             )
         ]
         if include_shards:
-            for shard_id, totals in sorted(self.shard_totals.items()):
+            for (dataset_id, shard_id), totals in sorted(self.shard_totals.items()):
                 records.append(
                     self._build_record(
                         plan_id=plan_id,
                         stage_name=stage_name,
                         tracking_mode=tracking_mode,
+                        dataset_id=dataset_id,
                         shard_id=shard_id,
                         totals=totals,
                     )
@@ -443,8 +451,8 @@ class FetchTimingSummary:
         stage_names: Mapping[int, str] | None = None,
         *,
         include_shards: bool = True,
-    ) -> list[dict]:
-        records: list[dict] = []
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
         for stage in self.iter_stages():
             name = stage_names.get(stage.index) if stage_names else None
             records.extend(
@@ -559,10 +567,11 @@ class PrefetchTimingSummary:
 
     @property
     def success_rate(self) -> float:
-        total = self.prefetch_requests
+        total = sum(totals.prefetch_requests for totals in self.stages.values())
         if total <= 0:
             return 0.0
-        return self.prefetch_succeeded / total
+        succeeded = sum(totals.prefetch_succeeded for totals in self.stages.values())
+        return succeeded / total
 
 
 @dataclass(slots=True)
@@ -730,7 +739,7 @@ class PumpTimingNodeTotals(PumpCounts):
     def apply(self, delta: PumpTimingDelta) -> None:
         self.add_from(delta)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         record: dict = {
             "stage": self.stage_index,
             "op": self.op_index,
@@ -836,8 +845,8 @@ class PumpTimingSummary:
             clone.stages[stage.index] = stage.copy()
         return clone
 
-    def to_records(self) -> list[dict]:
-        records: list[dict] = []
+    def to_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
         for stage in self.iter_stages():
             for node in stage.iter_nodes():
                 record = node.to_dict()
@@ -886,8 +895,8 @@ class PipelineSummary:
         for _, stage in sorted(self.stages.items()):
             yield stage
 
-    def to_records(self) -> list[dict]:
-        records: list[dict] = []
+    def to_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
         for stage in self.iter_stages():
             for node in stage.iter_nodes():
                 record = node.to_dict()
@@ -949,3 +958,18 @@ def pretty_format_bytes(value: int) -> str:
 def pretty_format_ratio(value: float) -> str:
     """Format a ratio (0-1) as a percentage string."""
     return f"{value * 100:.2f}%"
+
+
+__all__ = [
+    "FetchStageSummary",
+    "FetchTimingDelta",
+    "FetchTimingSummary",
+    "FetchTimingTotals",
+    "NodeMetricsDelta",
+    "NodeSummary",
+    "PipelineSummary",
+    "PrefetchTimingDelta",
+    "PrefetchTimingSummary",
+    "PrefetchTimingTotals",
+    "StageSummary",
+]

@@ -4,7 +4,8 @@ from unittest import mock
 
 import pytest
 
-from tests._helpers import catalog_locators, counts_dict
+from tests._catalog_helpers import catalog_locators
+from tests._helpers import counts_dict
 from zephon._internal.io.formats.vortex import VortexFormat, VortexShard
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardFile, LocalShardRef

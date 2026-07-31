@@ -6,6 +6,7 @@ import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -25,6 +26,7 @@ class Dataset:
 
     Instances are created via ``from_path`` (file-backed) or ``from_dict``
     (in-memory/testing). They always provide:
+
     - ``name``: a user-facing identifier used in mixtures
     - ``backend``: opaque metadata that lets FetchOp build a reader later
     - ``path``: original filesystem path if file-backed, otherwise ``None``
@@ -37,9 +39,10 @@ class Dataset:
     :meth:`counts` / :meth:`total` / :meth:`max_count` / :meth:`shard_count`.
 
     Backend kinds used by the internal store builder:
-    - "litdata"/"mds"/"jsonl"/"parquet"/"vortex": {"kind", "path"} (no per-shard
-      ``shards`` graph — that lives in the catalog now)
-    - "inmem": {"shards": dict[int, InMemoryShard]}
+
+    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``: ``kind`` and
+      ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)
+    - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)
 
     Note: this class does not expose any method to fetch rows; IO is delegated
     to an internal shard store owned by the FetchOp.
@@ -118,7 +121,7 @@ class Dataset:
             "_catalog_handle": self._catalog_handle,
         }
 
-    def __deepcopy__(self, memo: dict) -> "Dataset":
+    def __deepcopy__(self, memo: dict[int, Any]) -> "Dataset":
         # Share, don't copy: a base-WorkSource deepcopy-clone must not duplicate
         # the (immutable) handle and count arrays.
         memo[id(self)] = self
@@ -140,15 +143,18 @@ class Dataset:
             fmt: Optional explicit format. When ``None``, auto-detects.
 
         Supported formats:
-        - ``"litdata"`` directories containing ``index.json`` structured with ``config`` and ``chunks``
-        - ``"mds"`` directories containing ``index.json`` structured with ``shards``
-        - ``"jsonl"`` directories where ``*.jsonl`` files act as shards
+
+        - ``litdata`` directories containing ``index.json`` structured with
+          ``config`` and ``chunks``
+        - ``mds`` directories containing ``index.json`` structured with
+          ``shards``
+        - ``jsonl`` directories where ``*.jsonl`` files act as shards
 
         Special URI schemes:
-        - ``"hf://org/name[@rev]/[config/]split"`` is served through the
-          :class:`zephon._internal.io.storage.hf.HFBackend`, which streams parquet
-          shards just-in-time via the HuggingFace Datasets Server. See
-          :func:`zephon._internal.io.storage._hf_uri.parse_hf_uri` for the URI grammar.
+
+        - ``hf://org/name[@rev]/[config/]split`` is served through the
+          HuggingFace backend, which streams parquet shards just-in-time via
+          the HuggingFace Datasets Server.
 
         Returns:
             Dataset: a descriptor populated with shard counts and a catalog

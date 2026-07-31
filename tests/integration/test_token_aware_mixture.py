@@ -555,11 +555,9 @@ def test_token_mode_default_exhaustion_is_finite(tmp_path) -> None:
 
 def _prime_one_rank(catalog_dir: Path, root: Path, marker: Path, result: Path) -> None:
     """Prime one spawned rank and record if it performed the census."""
+    # Import after this assignment so the child resolves the requested catalog.
     os.environ["ZEPHON_CATALOG_DIR"] = str(catalog_dir)
     import zephon.work.token_estimation as te
-    from zephon._internal.io.catalog import set_catalog_dir
-
-    set_catalog_dir(None)  # Pick up the process env override.
 
     real_census = te._run_census
 

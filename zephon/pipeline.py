@@ -51,6 +51,11 @@ from zephon._internal.utils.torch_compat import detect_loader_kind
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.observability.mtp_stats import MTPQueueStats
+from zephon.observability.stats import (
+    FetchTimingSummary,
+    PipelineSummary,
+    PrefetchTimingSummary,
+)
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
@@ -85,21 +90,18 @@ class _DatasetProto(Protocol):
     def __getitem__(self, index: int) -> Any: ...
 
 
-# ---------- Public type aliases (unified across branches) ----------
+# Type checkers expose Torch types; runtime without Torch uses protocols.
 if TYPE_CHECKING:
-    try:
-        from torch.utils.data import Dataset as _TDataset
-        from torch.utils.data import IterableDataset as _TIterable
-    except Exception:
-        _TIterable = _IterableDatasetProto
-        _TDataset = _DatasetProto
-    TorchIterableDatasetType: TypeAlias = _TIterable  # type: ignore[assignment]
-    TorchDatasetType: TypeAlias = _TDataset  # type: ignore[assignment]
+    from torch.utils.data import Dataset as _TorchDataset
+    from torch.utils.data import IterableDataset as _TorchIterableDataset
+
+    _TorchIterableDatasetType: TypeAlias = _TorchIterableDataset[Any]
+    _TorchDatasetType: TypeAlias = _TorchDataset[Any]
 
     from zephon.validation import ValidationReport
 else:
-    TorchIterableDatasetType: TypeAlias = _IterableDatasetProto
-    TorchDatasetType: TypeAlias = _DatasetProto
+    _TorchIterableDatasetType: TypeAlias = _IterableDatasetProto
+    _TorchDatasetType: TypeAlias = _DatasetProto
 
 # ---------- Runtime base (used for inheritance / isinstance) ----------
 _RTIterableDatasetBase: type[Any]
@@ -110,15 +112,16 @@ except Exception:
     _RTIterableDatasetBase = object  # type: ignore[assignment]
 
 
-class TorchPipelineIterableDataset(_RTIterableDatasetBase):
+class _TorchPipelineIterableDataset(_RTIterableDatasetBase):
     """Adapter that just yields from the Zephon Pipeline; no sharding here."""
 
     def __init__(self, pipeline: "Pipeline", *, stateful: bool = False) -> None:
         self._pipeline = pipeline
         self._stateful = stateful
-        self._pending_ckpt: dict | None = None  # only used when stateful=True
+        # Only used when stateful=True.
+        self._pending_ckpt: dict[str, Any] | None = None
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         # Defer engine construction & (if stateful) applying checkpoint until we’re in the worker.
         if self._stateful and self._pending_ckpt is not None:
             # restore() will internally _ensure() and apply the checkpoint.
@@ -133,7 +136,7 @@ class TorchPipelineIterableDataset(_RTIterableDatasetBase):
         # Worker partitioning handled by Engine/WorkSource internally.
         yield from self._pipeline
 
-    def state_dict(self):
+    def state_dict(self) -> dict[str, Any]:
         if not self._stateful:
             raise AttributeError(
                 "This dataset is not stateful. Pass stateful=True in to_torch_dataset()."
@@ -155,7 +158,7 @@ class TorchPipelineIterableDataset(_RTIterableDatasetBase):
         # If iteration hasn’t begun in this process, return whatever pending state we have (or None).
         return {"engine": self._pending_ckpt}
 
-    def load_state_dict(self, sd: dict[Any, Any]):
+    def load_state_dict(self, sd: dict[str, Any]) -> None:
         if not self._stateful:
             raise AttributeError(
                 "This dataset is not stateful. Pass stateful=True in to_torch_dataset()."
@@ -431,6 +434,7 @@ class Pipeline:
         runs in parallel workers for expensive computation.
 
         Execution model:
+
         - push/flush: Run on pump thread (serial) for state management
         - transform: Runs in parallel workers for expensive per-item processing
 
@@ -440,6 +444,7 @@ class Pipeline:
         and your callbacks see one lane at a time, so an epoch-boundary flush
         resets only that lane (required for deterministic replay when one engine
         owns several lanes).  The per-lane lifecycle:
+
         1. A lane's state is lazily initialized on its first record via init_state()
         2. push(state, items) is called with one lane's records -> (new_state, outputs)
         3. If should_flush returns True, that lane's flush runs and its state resets
@@ -603,20 +608,17 @@ class Pipeline:
         callables.  See the "Accumulators and Operators" page in the
         documentation for the operator/accumulator split.
 
-        Args (instance form):
-            op: The :class:`BaseOp` instance to attach.
+        Args:
+            op: Instance form. The :class:`BaseOp` instance to attach.
             name: Operator name used in plan graphs, metrics, and logs.
-                Defaults to the class name of ``op``.
+                The instance form defaults to the class name of ``op``.
             placement: Placement hint passed to the planner (``"auto"``,
                 ``"local"``, or a runner-specific tag).
-
-        Args (kwargs form):
-            name: Operator name used in plan graphs, metrics, and logs.
-            process_many: Required. Callable applied to each ready batch
+            process_many: Kwargs form, required. Callable applied to each ready batch
                 from the accumulator. Receives a list of upstream items,
                 returns the list of downstream items. Runs in parallel
                 workers when ``parallelism > 1``.
-            accumulator: Optional factory returning a fresh `Accumulator`
+            accumulator: Kwargs form. Optional factory returning a fresh `Accumulator`
                 instance. The framework calls the factory once at runner
                 setup and again on ``reset_buffers`` between runs, so a
                 factory (rather than an instance) is required for
@@ -640,10 +642,11 @@ class Pipeline:
 
                 Defaults to a `PassthroughAccumulator` factory — each
                 upstream micro-batch becomes one ready batch as-is.
-            process_one: Optional fast path for single-element processing.
+            process_one: Kwargs form. Optional fast path for single-element
+                processing.
                 If omitted, the framework wraps each element in a list and
                 routes it through ``process_many``.
-            validation_samples: Optional factory returning a list of
+            validation_samples: Kwargs form. Optional factory returning a list of
                 :class:`~zephon.types.SampleRecord` instances for the
                 validation harness.  Override when ``process_many``
                 requires payload fields beyond the validator's synthetic
@@ -654,12 +657,10 @@ class Pipeline:
                 and the validator falls back to synthetic records.
                 Include at least two distinct ``lane_id`` values so the
                 cross-call-state probe stays meaningful.
-            parallelism: Number of worker invocations to run in parallel
-                for this op.  Default 1 (serial).  Increase when
+            parallelism: Kwargs form. Number of worker invocations to run in
+                parallel for this op.  Default 1 (serial).  Increase when
                 ``process_many`` is CPU/GPU-bound.
-            placement: Placement hint passed to the planner (``"auto"``,
-                ``"local"``, or a runner-specific tag).
-            preserves_cursor_order: Required. True when ``process_many``
+            preserves_cursor_order: Kwargs form, required. True when ``process_many``
                 emits records whose ``chunk_id`` order matches their
                 inputs (1:1 maps, payload transforms, non-reordering
                 filters). False when the op reorders, shuffles, or
@@ -667,16 +668,16 @@ class Pipeline:
                 based on this trait — getting it wrong corrupts
                 checkpoint semantics silently. See the Checkpointing
                 page in the documentation.
-            indexable: Whether the op preserves indexability through the
+            indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
-            batch_shape_sensitive: Set True when ``process_many``'s output
+            batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
                 this disables latency-based accumulator flushing for
                 stages containing this op, preserving strong determinism
                 at the cost of some throughput.
-            requires_serial_state: Set True when the op's accumulator
+            requires_serial_state: Kwargs form. Set True when the op's accumulator
                 holds cross-invocation state that cannot be sharded
                 across parallel worker instances. In deterministic mode
                 the planner pins ``parallelism=1`` for ops with this
@@ -987,10 +988,11 @@ class Pipeline:
                 components (those no longer in the current mixture target). Default is
                 0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample.
             weight_by: How to compute sample weights. Options:
-                - "auto" (default): Auto-detect token field from common names
+
+                - ``auto`` (default): Auto-detect token field from common names
                   (input_ids, tokens, token_ids, ids). Raises if not found.
-                - "samples": Each sample has weight 1.
-                - Explicit field name (e.g., "input_ids"): Use that field's length.
+                - ``samples``: Each sample has weight 1.
+                - Explicit field name (e.g., ``input_ids``): Use that field's length.
                 - Callable: Custom function taking SampleRecord, returning float.
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
@@ -1003,26 +1005,28 @@ class Pipeline:
             Self for method chaining.
 
         Examples:
-            # Token-level (default) - place after tokenize
-            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture()
+            ::
 
-            # Sample-level enforcement (after filter)
-            pipeline.fetch().filter(...).ensure_mixture(weight_by="samples")
+                # Token-level (default) - place after tokenize
+                pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture()
 
-            # With explicit token field
-            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
-                weight_by="input_ids"
-            )
+                # Sample-level enforcement (after filter)
+                pipeline.fetch().filter(...).ensure_mixture(weight_by="samples")
 
-            # With warnings for drift (warn if >5% deviation)
-            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
-                warn_tolerance=0.05
-            )
+                # With explicit token field
+                pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
+                    weight_by="input_ids"
+                )
 
-            # Explicit mixture target (override chunk mixture)
-            pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
-                mixture={"English": 0.7, "German": 0.3}
-            )
+                # With warnings for drift (warn if >5% deviation)
+                pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
+                    warn_tolerance=0.05
+                )
+
+                # Explicit mixture target (override chunk mixture)
+                pipeline.fetch().tokenize(tokenizer_id="gpt2", field="text").ensure_mixture(
+                    mixture={"English": 0.7, "German": 0.3}
+                )
         """
         from zephon._internal.ops.ensure_mixture import EnsureMixture
 
@@ -1504,16 +1508,16 @@ class Pipeline:
             mp_context=self._options.mp_context,
         )
 
-    def to_torch_dataset(self, stateful: bool = True) -> TorchIterableDatasetType:
+    def to_torch_dataset(self, stateful: bool = True) -> _TorchIterableDatasetType:
         if _importlib_util.find_spec("torch.utils.data") is None:
             raise RuntimeError("to_torch_dataset requires 'torch' to be installed.")
         # Restores are applied in workers, so the driver cannot know one is
         # coming: a resume discards these ratios, costing one wasted census
         # on cold nodes (warm nodes hit the prime cache).
         self._prime_worksource()
-        return TorchPipelineIterableDataset(self, stateful=stateful)
+        return _TorchPipelineIterableDataset(self, stateful=stateful)
 
-    def to_indexable_torch_dataset(self) -> TorchDatasetType:
+    def to_indexable_torch_dataset(self) -> _TorchDatasetType:
         if not self.is_indexable:
             raise RuntimeError(
                 "Pipeline is not indexable; cannot build a Map-style Dataset."
@@ -1851,10 +1855,28 @@ class Pipeline:
             return self._engine.inflight_summary()
         return {}
 
-    def metrics_snapshot(self) -> Any:
-        """Return a clone of the current pipeline metrics summary, or None."""
+    def metrics_snapshot(self) -> PipelineSummary | None:
+        """Return node metrics, or ``None`` unless inline tracking is active."""
         if self._engine is not None:
             return self._engine.metrics_snapshot()
+        return None
+
+    def fetch_timing_snapshot(self) -> FetchTimingSummary | None:
+        """Return fetch timings for the inline engine, or ``None`` if absent.
+
+        Data is collected only in ``ExecutionTrackingMode.NODES``.
+        """
+        if self._engine is not None:
+            return self._engine.fetch_timing_snapshot()
+        return None
+
+    def prefetch_timing_snapshot(self) -> PrefetchTimingSummary | None:
+        """Return prefetch timings for the inline engine, or ``None`` if absent.
+
+        Data is collected only in ``ExecutionTrackingMode.NODES``.
+        """
+        if self._engine is not None:
+            return self._engine.prefetch_timing_snapshot()
         return None
 
     def checkpoint(self) -> dict[str, Any]:
@@ -1891,7 +1913,7 @@ class Pipeline:
         # lightweight and avoids eagerly building an Engine.
         self._pending_restore = ckpt
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         """
         Pickle guard for DataLoader/StatefulDataLoader worker bootstrap.
 
@@ -1909,10 +1931,12 @@ class Pipeline:
 
         Strategy
         --------
-        - Strip all process-local runtime from the pickled representation:
-            * `_engine` : the live runtime (threads, queues, locks)
-            * `_plan`   : the derived execution plan (rebuildable from the graph)
-          These are set to None in the pickled state.
+        - Strip all process-local runtime from the pickled representation,
+          setting it to None in the pickled state:
+
+          * `_engine` : the live runtime (threads, queues, locks)
+          * `_plan`   : the derived execution plan (rebuildable from the graph)
+
         - Keep only pure data/config: graph, options, work source. Workers will rebuild the
           plan/engine lazily upon first iteration.
 
@@ -1943,7 +1967,7 @@ class Pipeline:
         # lose the stashed checkpoint.
         return d
 
-    def __setstate__(self, state: dict[Any, Any]):
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """
         Unpickle guard that complements __getstate__.
 

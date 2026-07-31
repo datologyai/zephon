@@ -256,7 +256,7 @@ correction), the engine also injects **flush sentinels** every
 `flush_every_k_chunks` chunks to create epoch boundaries — points where
 history-dependent accumulators reset to clean state so that earlier chunks
 can be safely evicted.  See
-[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction) for the
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction-packing-and-shuffling) for the
 full model.
 
 At checkpoint time, only the remaining inflight chunks (plus epoch
@@ -301,7 +301,7 @@ Zephon internals.
 
 ### The Helper Toolkit
 
-Zephon provides three builder functions in `zephon.ops.children` that
+Zephon provides four builder functions in `zephon.ops.children` that
 handle the fiddly parts of metadata construction:
 
 #### `spawn_child(parent, child_idx, *, is_last_child=False, tags=None)`
@@ -352,6 +352,18 @@ for ref in dropped_record.meta.contribution_refs():
             payload=None,
         )
         yield tombstone
+```
+
+#### `tombstones_for_record(record)`
+
+Wraps the loop above: returns the tombstone records a dropped record
+owes (one per `contribution_refs()` entry with `is_last_child=True`,
+empty when none are owed).
+
+```python
+from zephon.ops.children import tombstones_for_record
+
+yield from tombstones_for_record(dropped_record)
 ```
 
 ### Writing a 1:1 Transform
@@ -425,8 +437,8 @@ There are two paths, with very different tombstone responsibilities:
 | Custom `BaseOp` with `process_one` / `process_many` | **Manual.** Same as stateful_transform. |
 
 For `stateful_transform`, if your `push` or `transform` function drops
-records, you must currently iterate the dropped record's `contribution_refs()` and
-emit a tombstone for each ref with `is_last_child=True`.  Alternatively,
+records, emit the tombstones it owes via
+`zephon.ops.children.tombstones_for_record`.  Alternatively,
 move filtering into a preceding `map_transform` with `drop_none=True` and
 keep the stateful transform focused on buffering/reordering.
 
@@ -437,7 +449,7 @@ your operator into the pipeline:
 
 | Trait | Default | What it means |
 |---|---|---|
-| `preserves_cursor_order` | Required | Records emerge in the same chunk/offset order they entered.  Set to `False` for shuffling, packing, or any cross-chunk buffering.  This switches the engine from monotone to [epoch-based eviction](checkpointing.md#epoch-based-eviction). |
+| `preserves_cursor_order` | Required | Records emerge in the same chunk/offset order they entered.  Set to `False` for shuffling, packing, or any cross-chunk buffering.  This switches the engine from monotone to [epoch-based eviction](checkpointing.md#epoch-based-eviction-packing-and-shuffling). |
 | `requires_serial_state` | `False` | The operator maintains cross-invocation state (e.g., shuffle buffers).  Raises `RuntimeError` if `parallelism != 1` in deterministic mode. |
 | `batch_shape_sensitive` | `False` | Outputs depend on how inputs are grouped into micro-batches.  Disables latency-flush in deterministic mode. |
 

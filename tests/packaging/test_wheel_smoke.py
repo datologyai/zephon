@@ -13,16 +13,13 @@ building a wheel and a venv is slow.
 """
 
 import os
-import shutil
-import subprocess
 import sys
 import zipfile
-from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 
-UV = shutil.which("uv")
+from tests.packaging.conftest import REPO_ROOT, UV, _run
 
 pytestmark = [
     pytest.mark.packaging,
@@ -31,7 +28,6 @@ pytestmark = [
     ),
 ]
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPO_ROOT / "zephon"
 
 # Minimal end-to-end pipeline exercising work source -> engine -> output using
@@ -55,22 +51,6 @@ print("SMOKE OK")
 """
 
 
-def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"command failed ({proc.returncode}): {' '.join(map(str, cmd))}\n"
-            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
-        )
-    return proc
-
-
-def _exactly_one(paths: Iterable[Path]) -> Path:
-    matches = list(paths)
-    assert len(matches) == 1, f"expected exactly one artifact, got {matches}"
-    return matches[0]
-
-
 def _source_packages() -> set[str]:
     """Dotted names of every ``zephon`` package on disk (dir with __init__.py)."""
     return {
@@ -87,33 +67,6 @@ def _wheel_packages(wheel: Path) -> set[str]:
         for n in names
         if n.endswith("/__init__.py")
     }
-
-
-@pytest.fixture(scope="session")
-def dist_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    out = tmp_path_factory.mktemp("dist")
-    _run([UV, "build", "--out-dir", str(out)], cwd=str(REPO_ROOT))
-    return out
-
-
-@pytest.fixture(scope="session")
-def direct_wheel(dist_dir: Path) -> Path:
-    return _exactly_one(dist_dir.glob("*.whl"))
-
-
-@pytest.fixture(scope="session")
-def sdist_wheel(dist_dir: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Wheel built from the sdist -- no git checkout, so packaging config alone
-    (not the setuptools-scm git-file sweep) has to carry every subpackage."""
-    sdist = _exactly_one(dist_dir.glob("*.tar.gz"))
-    out = tmp_path_factory.mktemp("sdist-wheel")
-    _run([UV, "build", "--wheel", str(sdist), "--out-dir", str(out)])
-    return _exactly_one(out.glob("*.whl"))
-
-
-@pytest.fixture(params=["direct_wheel", "sdist_wheel"])
-def wheel(request: pytest.FixtureRequest) -> Path:
-    return request.getfixturevalue(request.param)
 
 
 def test_wheel_ships_every_subpackage(wheel: Path) -> None:

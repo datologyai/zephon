@@ -70,6 +70,12 @@ from zephon._internal.utils.disk import check_cache_disk_space
 from zephon._internal.utils.rank import rank_ctx
 from zephon._internal.world import World
 from zephon.observability import ExecutionTrackingMode
+from zephon.observability.stats import (
+    FetchTimingSummary,
+    PipelineSummary,
+    PrefetchTimingSummary,
+    PumpTimingSummary,
+)
 from zephon.options import DEFAULT_RUN_ID, RuntimeOptions
 from zephon.types import (
     ChunkId,
@@ -833,13 +839,25 @@ class Engine:
                 continue
         return result
 
-    def metrics_snapshot(self):
+    def metrics_snapshot(self) -> PipelineSummary | None:
         """Return a clone of the current pipeline metrics summary when enabled."""
         if self._collector is None:
             return None
         return self._collector.snapshot()
 
-    def pump_metrics_snapshot(self):
+    def fetch_timing_snapshot(self) -> FetchTimingSummary | None:
+        """Return a clone of the current fetch-timing summary when enabled."""
+        if self._collector is None:
+            return None
+        return self._collector.snapshot_fetch()
+
+    def prefetch_timing_snapshot(self) -> PrefetchTimingSummary | None:
+        """Return a clone of the current prefetch-timing summary when enabled."""
+        if self._collector is None:
+            return None
+        return self._collector.snapshot_prefetch()
+
+    def pump_metrics_snapshot(self) -> PumpTimingSummary | None:
         """Return a clone of the current pump-timing summary when enabled."""
         if self._collector is None:
             return None

@@ -52,10 +52,10 @@ from zephon.io.options import StoreOptions
 from zephon.ops.base import OpContext, StageInfo
 from zephon.types import SampleId, SampleMeta, SampleRecord
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 #: Standard ~4 bytes/token BPE heuristic for English prose.
-DEFAULT_FALLBACK_TOKENS_PER_BYTE = 0.25
+DEFAULT_FALLBACK_TOKENS_PER_BYTE: float = 0.25
 
 RatioSource = Literal["measured", "pinned", "fallback"]
 
@@ -91,34 +91,38 @@ class TokenEstimation:
     Passing an instance of this to a work source is what selects the
     token-aware allocation mode; leaving it ``None`` keeps sample-based mixing.
 
-    Attributes:
-        primer: How per-dataset tokens/byte ratios are obtained.
+    ``primer`` — how per-dataset tokens/byte ratios are obtained:
 
-            * ``"measure"`` (default): calibration fetch + tokenize at prime
-              time, deterministic in ``(seed, datasets, tokenize config)``.
-            * a ``{dataset_name: tokens_per_byte}`` mapping: pins the listed
-              datasets and *measures the rest* (partial pins merge over
-              measured values).
-            * a single ``float``: one global tokens/byte for every dataset,
-              no measurement (and no tokenizer needed).
-        measure: Escape hatch replacing text extraction + tokenization
-            entirely: a callable mapping a fetched payload to its delivered
-            token count (weird schemas, VLM cost units). Only consulted when
-            a dataset is actually measured.
-        calibration_samples: Records measured per dataset (size-proportional
-            draws for catalog-backed datasets, scattered offsets otherwise).
-        calibration_shards_min: Shards scanned per dataset when its shards
-            are homogeneous. The count is chosen per dataset from the
-            catalog's per-shard bytes/row spread (free metadata): census
-            error scales as CV/sqrt(shards), so heterogeneous datasets
-            automatically scan up to ``calibration_shards_max`` while uniform
-            ones stay at the minimum. Each scanned shard costs a download +
-            decode at prime time.
-        calibration_shards_max: Upper bound for the adaptive shard count
-            (also used when there is no catalog to read the spread from).
-        fallback_tokens_per_byte: Ratio used when a dataset cannot be
-            measured (no text found, measurement failed, or ``primer`` is a
-            float). See :data:`DEFAULT_FALLBACK_TOKENS_PER_BYTE`.
+    * ``measure`` (default): calibration fetch + tokenize at prime
+      time, deterministic in ``(seed, datasets, tokenize config)``.
+    * a ``{dataset_name: tokens_per_byte}`` mapping: pins the listed
+      datasets and *measures the rest* (partial pins merge over
+      measured values).
+    * a single ``float``: one global tokens/byte for every dataset,
+      no measurement (and no tokenizer needed).
+
+    ``measure`` — escape hatch replacing text extraction + tokenization
+    entirely: a callable mapping a fetched payload to its delivered token
+    count (weird schemas, VLM cost units). Only consulted when a dataset is
+    actually measured.
+
+    ``calibration_samples`` — records measured per dataset
+    (size-proportional draws for catalog-backed datasets, scattered offsets
+    otherwise).
+
+    ``calibration_shards_min`` — shards scanned per dataset when its shards
+    are homogeneous. The count is chosen per dataset from the catalog's
+    per-shard bytes/row spread (free metadata): census error scales as
+    CV/sqrt(shards), so heterogeneous datasets automatically scan up to
+    ``calibration_shards_max`` while uniform ones stay at the minimum. Each
+    scanned shard costs a download + decode at prime time.
+
+    ``calibration_shards_max`` — upper bound for the adaptive shard count
+    (also used when there is no catalog to read the spread from).
+
+    ``fallback_tokens_per_byte`` — ratio used when a dataset cannot be
+    measured (no text found, measurement failed, or ``primer`` is a float).
+    See :data:`DEFAULT_FALLBACK_TOKENS_PER_BYTE`.
     """
 
     primer: Literal["measure"] | Mapping[str, float] | float = "measure"
@@ -192,7 +196,7 @@ class TokenEstimation:
 # ---------------------------------------------------------------------------
 
 
-class PerShardByteSize:
+class _PerShardByteSize:
     """Per-shard average bytes/sample for one dataset.
 
     ``mean_bytes`` is the dataset-wide fallback for shards absent from
@@ -204,7 +208,7 @@ class PerShardByteSize:
         self.mean_bytes = max(1.0, float(mean_bytes))
 
 
-def build_byte_source(dataset: Dataset) -> PerShardByteSize | None:
+def _build_byte_source(dataset: Dataset) -> _PerShardByteSize | None:
     """Build per-shard byte sizes from Dataset byte accessors."""
     ids = dataset.ids()
     rows = dataset.counts()
@@ -218,7 +222,7 @@ def build_byte_source(dataset: Dataset) -> PerShardByteSize | None:
         for sid, n, b in zip(ids.tolist(), rows.tolist(), raw.tolist())
         if n > 0 and b > 0
     }
-    return PerShardByteSize(shard_avg, total_bytes / total_rows)
+    return _PerShardByteSize(shard_avg, total_bytes / total_rows)
 
 
 class PerShardTokenCost:
@@ -237,7 +241,7 @@ class PerShardTokenCost:
         missing: list[str] = []
         for name, dataset in datasets.items():
             ratio = ratios[name].tokens_per_byte
-            source = build_byte_source(dataset)
+            source = _build_byte_source(dataset)
             if source is None:
                 missing.append(name)
                 self._cost_by_shard[name] = {}
@@ -284,7 +288,7 @@ class _PreTokenizeReplay:
     """
 
     def __init__(self, ops: Sequence[Any]) -> None:
-        self.ops = tuple(ops)
+        self.ops: tuple[Any, ...] = tuple(ops)
         self._setup_done = False
 
     def apply(self, payload: Any) -> list[Any]:
@@ -467,7 +471,7 @@ def _scan_calibration_shards(
 
     cv = _shard_bytes_cv(rows, raw)
     n_shards = min(_calibration_shard_count(cv, shards_min, shards_max), int(ids.size))
-    logger.info(
+    _logger.info(
         "calibration for %s: shard bytes/row CV %.1f%% -> scanning %d shards",
         dataset.name,
         100 * cv,
@@ -650,7 +654,7 @@ def _measure_dataset(
                     replayed_prefix[sid] = replayed
                     prefix.extend(replayed)
         plan = counter.plan(prefix)
-    logger.info("calibrating %s as %s", dataset.name, plan.description)
+    _logger.info("calibrating %s as %s", dataset.name, plan.description)
     measured: list[tuple[int, int, int]] = []
     shards_seen: set[int] = set()
     count_errors = 0
@@ -681,7 +685,7 @@ def _measure_dataset(
             shards_seen.add(sid[1])
 
     if count_errors:
-        logger.warning(
+        _logger.warning(
             "skipped %d calibration samples for %s that failed to count (last: %s)",
             count_errors,
             dataset.name,
@@ -705,7 +709,7 @@ def _measure_dataset(
     ratio = _hansen_hurwitz_ratio(measured) * scan.payload_total / scan.raw_total
     if not math.isfinite(ratio) or ratio <= 0:
         return _fallback(estimation, scan, f"measured ratio {ratio!r} is not positive")
-    logger.info(
+    _logger.info(
         "primed %s: %.5f tokens/byte over %d samples in %d shards",
         dataset.name,
         ratio,
@@ -782,7 +786,7 @@ def _run_census(
         measured_datasets.items(), key=lambda kv: _scan_cost(kv[1]), reverse=True
     )
     workers = min(MAX_PRIME_PROCS, len(order), os.cpu_count() or 1)
-    logger.info(
+    _logger.info(
         "token-aware priming: measuring %d dataset(s) across %d process(es) "
         "(%d samples, %d-%d scanned shards each) — downloads/decodes calibration "
         "shards and runs the tokenizer; expect minutes, longer on cold caches",
@@ -820,7 +824,7 @@ def _run_census(
                 except FatalCountError:
                     raise
                 except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
-                    logger.warning(
+                    _logger.warning(
                         "token-aware priming: measuring %s crashed; using fallback",
                         name,
                         exc_info=True,
@@ -833,7 +837,7 @@ def _run_census(
     except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
         # Parent-side pool failure, e.g. census inputs that defeat pickling at
         # worker spawn: fall back for every dataset not already measured.
-        logger.warning(
+        _logger.warning(
             "token-aware priming: census pool failed; using fallback",
             exc_info=True,
         )
@@ -844,7 +848,7 @@ def _run_census(
                     estimation, None, f"census pool failed: {exc}", retryable=True
                 ),
             )
-    logger.info(
+    _logger.info(
         "token-aware priming: measured %d dataset(s) in %.1fs total",
         len(order),
         time.perf_counter() - t_all,
@@ -1016,7 +1020,7 @@ def prime_token_ratios(
             )
             measured = _read_prime_cache(cache_path, key)
             if measured is not None:
-                logger.info(
+                _logger.info(
                     "token-aware priming: reusing node-local ratios for %d dataset(s)",
                     len(names),
                 )
@@ -1044,7 +1048,7 @@ def prime_token_ratios(
                             n for n, m in measured.items() if m.retryable
                         )
                         if transient:
-                            logger.warning(
+                            _logger.warning(
                                 "token-aware priming: transient failure measuring "
                                 "%s; not caching so a later prime retries",
                                 transient,
@@ -1052,7 +1056,7 @@ def prime_token_ratios(
                         else:
                             _write_prime_cache(cache_path, key, measured)
                     else:
-                        logger.info(
+                        _logger.info(
                             "token-aware priming: reusing ratios primed by a peer "
                             "on this node"
                         )
@@ -1079,7 +1083,7 @@ def prime_token_ratios(
         )
 
     for name, ratio in ratios.items():
-        logger.info(
+        _logger.info(
             "token-aware priming: dataset %s -> %.6f tokens/byte (%s)",
             name,
             ratio.tokens_per_byte,

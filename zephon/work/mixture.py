@@ -69,3 +69,6 @@ class MixtureSpec:
             raise ValueError("MixtureSpec weights must sum to more than zero")
 
         return {name: value / total for name, value in normalized.items()}
+
+
+__all__ = ["MixtureSpec"]

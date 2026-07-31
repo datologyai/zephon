@@ -35,7 +35,7 @@ operator does from *how* it is parallelized is central to Zephon's design.
 Every operator satisfies a small contract.  The three most important methods
 are:
 
-- **`accumulator(deterministic, ctx)`**: returns an
+- **`accumulator(*, deterministic, ctx)`**: returns an
   [accumulator](#accumulators) that decides how incoming elements are grouped
   into [micro-batches](#micro-batches) for processing.  The `deterministic`
   flag is passed by the runner and controls whether time-based flushing is
@@ -57,8 +57,8 @@ are:
 Two additional methods complete the contract:
 
 - **`setup(ctx)`**: called once before the operator processes any data. The
-  runner passes an `OpContext` with runtime services and the operator's plan
-  placement in `ctx.stage_info`.
+  runner passes an `OpContext` with runtime services and plan metadata in
+  `ctx.stage_info`.
 - **`process_one(elem)`**: transforms a single element. The default
   implementation calls `process_many` with a single-element list, so operators
   should override `process_one` only when they need a distinct scalar fast
@@ -294,9 +294,10 @@ only on element counts, never on wall-clock timing.
 
 #### Batch (via CountingAccumulator)
 
-The ``Batch`` operator uses a
-{py:class}`~zephon.ops.CountingAccumulator` with
-``key_fn=lane_of`` and ``drop_last`` support.  Maintains per-lane
+The ``Batch`` operator uses a lane-keyed
+{py:class}`~zephon.ops.CountingAccumulator` subclass
+(``BatchAccumulator``) with ``drop_last`` support — per-lane buffering
+is built into ``CountingAccumulator``.  Maintains per-lane
 buffers and emits a micro-batch when a lane's buffer reaches
 ``microbatch_size`` records.
 
@@ -395,7 +396,7 @@ remaining capacity depends on the full sequence of inputs the packer has
 seen, not just the samples currently in the bins.  This has important
 implications for checkpointing — evicting a chunk whose samples shaped
 the current bin state would break replay.  See
-[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction) for how
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction-packing-and-shuffling) for how
 flush sentinels solve this by periodically resetting the accumulator.
 
 ---
@@ -428,7 +429,7 @@ checkpoint eviction.  Every `flush_every_k_chunks` chunks per lane, the
 engine injects a sentinel that triggers `flush(reset=True, lane_id=lane)` on
 each history-dependent accumulator, scoped to that sentinel's lane.  For the
 full motivation and eviction model, see
-[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction).
+[Epoch-Based Eviction](checkpointing.md#epoch-based-eviction-packing-and-shuffling).
 
 This section covers the accumulator side: which accumulators are flushed,
 what "fully reset" means, and the stalling mechanism.
@@ -642,8 +643,7 @@ pipeline.add_op(Tokenize("gpt2", max_batch=64))
 Traits come from `op.traits()`; pass them via your
 {py:class}`~zephon.ops.OpTraits` rather than as kwargs on `add_op`.
 The optional `name` kwarg controls the node name in plan graphs and
-metrics (defaults to the class name); `placement` works the same way
-as in the kwargs form.
+metrics (defaults to the class name).
 
 ### Kwargs form: `add_op(name, *, process_many=…, …)`
 
@@ -679,10 +679,10 @@ strategy, and getting it wrong corrupts checkpoint semantics silently.
 
 The accumulator factory defaults to a `PassthroughAccumulator`, in
 which case each upstream micro-batch is forwarded as one ready batch.
-The remaining kwargs (`parallelism`, `placement`, `indexable`,
+The remaining trait kwargs (`parallelism`, `indexable`,
 `batch_shape_sensitive`, `requires_serial_state`) map 1:1 to
 {py:class}`~zephon.ops.OpTraits` and follow the semantics described in
-[The operator contract](#the-operator-contract) above.  See the
+[The operator contract](#the-operator-contract) above. See the
 {py:meth}`~zephon.Pipeline.add_op` API reference for the full kwarg
 list and signature variants of the `accumulator` factory.
 
@@ -749,7 +749,7 @@ build:
 def custom_records():
     return [
         SampleRecord(
-            meta=SampleMeta(sample_id=(lane, i), lane_id=lane,
+            meta=SampleMeta(sample_id=(0, lane, i), lane_id=lane,
                             chunk_id=i // 2, chunk_offset=i),
             payload={"tokens": [1, 2, 3]},
         )

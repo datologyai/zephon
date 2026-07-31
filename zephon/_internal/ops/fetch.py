@@ -206,6 +206,7 @@ class FetchOp(BaseOp):
                 metrics_deltas.append(
                     FetchTimingDelta(
                         stage_index=self.stage_info.stage_index,
+                        dataset_id=dataset_id,
                         shard_id=shard_id,
                         samples=len(items),
                         group_ns=0,  # populated below (rough estimations per group instead of actual measurement tho)

@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests._helpers import attach_catalog, catalog_locators, counts_dict
+from tests._catalog_helpers import attach_catalog, catalog_locators
+from tests._helpers import counts_dict
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 

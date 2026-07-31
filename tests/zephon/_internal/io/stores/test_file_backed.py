@@ -6,7 +6,7 @@ from typing import Mapping
 
 import pytest
 
-from tests._helpers import catalog_set_from_locators
+from tests._catalog_helpers import catalog_set_from_locators
 from zephon._internal.io.catalog import ShardCatalog
 from zephon._internal.io.formats.base import FormatHandler, get_format
 from zephon._internal.io.protocols import RandomAccessShard

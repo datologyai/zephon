@@ -4,11 +4,12 @@
 """Unit tests for the node-local shard catalog: zero-copy views and lifecycle.
 
 The view tests (``ShardCatalog`` / ``CatalogSet``) build catalogs from synthetic
-locators via :func:`tests._helpers.catalog_set_from_locators` (``pack_locators``
--> on-disk artifact -> ``mmap``), exercising the same columnarize/synthesize path
-the production node-local build uses. The build/finalize/attach tests drive the
-full lifecycle (``build_catalog`` -> source-key-locked ``finalize`` ->
-registry/file/rebuild ``attach``) over real on-disk datasets.
+locators via :func:`tests._catalog_helpers.catalog_set_from_locators`
+(``pack_locators`` -> on-disk artifact -> ``mmap``), exercising the same
+columnarize/synthesize path the production node-local build uses. The
+build/finalize/attach tests drive the full lifecycle (``build_catalog`` ->
+source-key-locked ``finalize`` -> registry/file/rebuild ``attach``) over real
+on-disk datasets.
 """
 
 import json
@@ -23,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests._helpers import catalog_set_from_locators
+from tests._catalog_helpers import catalog_set_from_locators
 from zephon._internal.io import formats as formats_mod
 from zephon._internal.io.catalog import (
     CATALOG_CACHE_SUBDIR,
