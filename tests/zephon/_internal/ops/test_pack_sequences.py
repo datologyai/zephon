@@ -653,6 +653,51 @@ def test_wrap_numpy_arrays_preserve_dtype() -> None:
     assert slices[0]["input_ids"].dtype == np.uint32
 
 
+def test_wrap_single_token_numpy_doc_measured_by_length_not_value() -> None:
+    """A one-token numpy doc packs by its length (1), not its token's value.
+
+    Regression: _get_length consulted .item() before .shape, and numpy allows
+    .item() on any size-1 array, so np.array([42]) measured as length 42 —
+    wrap then emitted phantom bins with empty token arrays and stranded the
+    following document's tokens in the buffer.
+    """
+    acc = _wrap(4)
+    ready = acc.push_many(
+        [
+            _rec_tokens(0, [42], as_numpy=True),
+            _rec_tokens(1, [1, 2, 3], as_numpy=True),
+        ]
+    )
+    assert len(ready) == 1
+    slices = _records(ready)[0].payload["packed_samples"]
+    assert [s["input_ids"].tolist() for s in slices] == [[42], [1, 2, 3]]
+    assert not acc.has_pending_data()
+
+
+def test_wrap_torch_tensor_docs_pack_by_length() -> None:
+    """torch-tensor docs pack by axis-0 length.
+
+    Regression: multi-element Tensor.item() raises RuntimeError, which
+    _get_length did not catch, so any torch-tensor document crashed wrap
+    packing; a single-token tensor was measured as its token's value.
+    """
+    torch = pytest.importorskip("torch")
+    rec0 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+        payload={"input_ids": torch.tensor([42])},
+    )
+    rec1 = SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0),
+        payload={"input_ids": torch.tensor([1, 2, 3])},
+    )
+    acc = _wrap(4)
+    ready = acc.push_many([rec0, rec1])
+    assert len(ready) == 1
+    slices = _records(ready)[0].payload["packed_samples"]
+    assert [s["input_ids"].tolist() for s in slices] == [[42], [1, 2, 3]]
+    assert not acc.has_pending_data()
+
+
 def test_wrap_aligned_secondary_fields() -> None:
     acc = _wrap(4)
     rec0 = SampleRecord(

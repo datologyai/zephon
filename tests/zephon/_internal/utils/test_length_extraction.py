@@ -377,14 +377,19 @@ class TestGetLength:
         """Test extraction via len() for string."""
         assert _get_length("hello", "field") == 5
 
-    def test_prefers_item_over_shape_when_item_works(self) -> None:
-        """Test that .item() is tried before .shape."""
-        # MockTensorWithItem has both; .item() should be used
+    def test_zero_dim_tensor_uses_item(self) -> None:
+        """Test that a 0-d tensor (empty .shape) falls through to .item()."""
+        # MockTensorWithItem has shape=() and .item(); the value is a
+        # precomputed length, not a sequence.
         obj = MockTensorWithItem(99)
         assert _get_length(obj, "field") == 99
 
-    def test_falls_back_to_shape_when_item_fails(self) -> None:
-        """Test fallback to .shape when .item() fails."""
+    def test_shape_takes_precedence_over_item(self) -> None:
+        """Test that a non-empty .shape wins over .item().
+
+        numpy/torch allow .item() on any size-1 array, so consulting .item()
+        first would report a single-token array's element value as its length.
+        """
         obj = MockFailingItemWithShape((42,))
         assert _get_length(obj, "field") == 42
 
@@ -413,6 +418,70 @@ class TestGetLength:
     def test_single_element_shape(self) -> None:
         """Test tensor with 1D shape."""
         assert _get_length(MockTensor((100,)), "field") == 100
+
+
+# ---------------------------------------------------------------------------
+# Tests for _get_length() with real numpy / torch values
+# ---------------------------------------------------------------------------
+
+
+class TestGetLengthRealArrays:
+    """Regressions with real numpy/torch values (mocks can't expose these).
+
+    numpy and torch permit .item() on any size-1 array — not just 0-d
+    scalars — so .shape must be consulted first or a single-token array
+    reports its element's value as its length.
+    """
+
+    def test_numpy_single_element_array(self) -> None:
+        """A one-token array has length 1, not its element's value."""
+        np = pytest.importorskip("numpy")
+        assert _get_length(np.array([42]), "field") == 1
+
+    def test_numpy_multi_element_array(self) -> None:
+        np = pytest.importorskip("numpy")
+        assert _get_length(np.array([1, 2, 3]), "field") == 3
+
+    def test_numpy_empty_array(self) -> None:
+        np = pytest.importorskip("numpy")
+        assert _get_length(np.array([], dtype=np.int64), "field") == 0
+
+    def test_numpy_2d_single_row(self) -> None:
+        """Axis-0 length for 2-D arrays, even when the array has one element."""
+        np = pytest.importorskip("numpy")
+        assert _get_length(np.array([[7, 8]]), "field") == 1
+        assert _get_length(np.array([[7]]), "field") == 1
+
+    def test_numpy_zero_dim_scalar_is_precomputed_length(self) -> None:
+        """0-d values carry a precomputed length; .item() applies."""
+        np = pytest.importorskip("numpy")
+        assert _get_length(np.array(7), "field") == 7
+        assert _get_length(np.int64(7), "field") == 7
+
+    def test_torch_single_element_tensor(self) -> None:
+        """A one-token tensor has length 1, not its element's value."""
+        torch = pytest.importorskip("torch")
+        assert _get_length(torch.tensor([42]), "field") == 1
+
+    def test_torch_multi_element_tensor(self) -> None:
+        """Multi-element tensors report shape[0] (.item() raises RuntimeError,
+        which previously escaped and crashed length extraction)."""
+        torch = pytest.importorskip("torch")
+        assert _get_length(torch.tensor([1, 2, 3]), "field") == 3
+
+    def test_torch_empty_tensor(self) -> None:
+        torch = pytest.importorskip("torch")
+        assert _get_length(torch.tensor([], dtype=torch.long), "field") == 0
+
+    def test_torch_zero_dim_scalar_is_precomputed_length(self) -> None:
+        torch = pytest.importorskip("torch")
+        assert _get_length(torch.tensor(7), "field") == 7
+
+    def test_extract_length_numpy_single_token_record(self) -> None:
+        """End-to-end: a single-token numpy payload measures as length 1."""
+        np = pytest.importorskip("numpy")
+        record = _make_record({"input_ids": np.array([42])})
+        assert extract_length(record) == 1
 
 
 # ---------------------------------------------------------------------------

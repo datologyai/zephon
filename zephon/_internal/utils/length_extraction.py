@@ -91,8 +91,8 @@ def _get_length(value: Any, field: str) -> int:
 
     Supports:
     - int: returned directly
-    - Scalar tensor with .item(): converted to int
-    - Tensor with .shape: uses shape[0]
+    - Tensor with a non-empty .shape: uses shape[0]
+    - Scalar tensor with .item() (0-d or shapeless): converted to int
     - Sized (list, tuple, etc.): uses len()
 
     Args:
@@ -108,21 +108,26 @@ def _get_length(value: Any, field: str) -> int:
     if isinstance(value, int):
         return value
 
-    # Scalar tensor (.item())
-    if hasattr(value, "item") and callable(value.item):
-        try:
-            return int(value.item())
-        # numpy raises ValueError for non-scalar arrays; fall through to shape.
-        except (TypeError, AttributeError, ValueError):
-            pass
-
-    # Tensor shape
+    # Tensor shape (axis-0 length). Must be consulted before .item(): numpy
+    # and torch allow .item() on any size-1 array — not just 0-d scalars — so
+    # a single-token array would otherwise report its element's value as the
+    # length. 0-d scalars (empty shape) fall through to .item() below.
     shape = getattr(value, "shape", None)
     if shape is not None:
         try:
             if len(shape) > 0:
                 return int(shape[0])
         except (TypeError, AttributeError, IndexError):
+            pass
+
+    # Scalar tensor (.item()): a 0-d or shapeless value holding a precomputed
+    # length.
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return int(value.item())
+        # numpy raises ValueError and torch RuntimeError for non-scalar
+        # values; fall through to len().
+        except (TypeError, AttributeError, ValueError, RuntimeError):
             pass
 
     # Sequence length
