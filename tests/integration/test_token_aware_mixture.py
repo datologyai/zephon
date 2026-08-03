@@ -18,10 +18,11 @@ import pytest
 from tests.integration.test_elastic_continuation import consume_until
 from zephon import Pipeline
 from zephon._internal.ops.tokenize_chat import TokenizeChat
+from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset
 from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
-from zephon.work.token_estimation import TextTokenCountingSpec, TokenEstimation
+from zephon.work.token_estimation import TokenEstimation
 
 pytestmark = pytest.mark.integration
 

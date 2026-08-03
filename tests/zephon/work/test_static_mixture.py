@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from tests.zephon.work.test_token_estimation import make_inmem_dataset
+from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     MixtureSpec,
@@ -23,7 +24,6 @@ from zephon.work.static_mixture import (
     _resolve_block_size,
 )
 from zephon.work.token_estimation import (
-    TextTokenCountingSpec,
     TokenEstimation,
     TokenRatio,
 )

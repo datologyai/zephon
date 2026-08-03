@@ -15,16 +15,18 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 
 from zephon._internal.checkpoint import (
-    CursorStateV1,
-    StaticMixtureStateV5,
+    CursorStateV1 as _CursorStateV1,
 )
+from zephon._internal.checkpoint import (
+    StaticMixtureStateV5 as _StaticMixtureStateV5,
+)
+from zephon._internal.token_counting import TokenCountingSpec as _TokenCountingSpec
 from zephon.io.dataset import Dataset
 from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
 from zephon.work.mixture import MixtureSpec
 from zephon.work.token_estimation import (
     PerShardTokenCost,
-    TokenCountingSpec,
     TokenEstimation,
     TokenRatio,
     _PreTokenizeReplay,
@@ -882,7 +884,7 @@ class _DatasetCursor:
     def checkpoint_state(self) -> dict[str, Any]:
         """Return cursor state needed for deterministic continuation."""
         snapshot = self._snapshot_state()
-        state = CursorStateV1(
+        state = _CursorStateV1(
             position=snapshot.position,
             epoch=snapshot.epoch,
             block_rng_snapshot=snapshot.block_rng_snapshot,
@@ -923,7 +925,7 @@ class _DatasetCursor:
         reshuffle: bool,
     ) -> None:
         """Restore cursor state from a serialized checkpoint payload."""
-        cur = CursorStateV1.load(state)
+        cur = _CursorStateV1.load(state)
         self._seek_epoch(cur.epoch, reshuffle=reshuffle)
         self._seek_to_position(cur.position, block_rng_snapshot=cur.block_rng_snapshot)
 
@@ -985,7 +987,7 @@ class AllocationStrategy(ABC):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV5,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1052,7 +1054,7 @@ class AllocationStrategy(ABC):
     def prime(
         self,
         *,
-        counting_spec: TokenCountingSpec | None,
+        counting_spec: _TokenCountingSpec | None,
         io_options: Any,
         seed: int,
         pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
@@ -1318,7 +1320,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV5,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1478,7 +1480,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV5,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -1553,7 +1555,7 @@ class TokenAwareStrategy(AllocationStrategy):
     def prime(
         self,
         *,
-        counting_spec: TokenCountingSpec | None,
+        counting_spec: _TokenCountingSpec | None,
         io_options: Any,
         seed: int,
         pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
@@ -1792,7 +1794,7 @@ class TokenAwareStrategy(AllocationStrategy):
     def from_checkpoint(
         cls,
         config: _AllocationConfig,
-        ckpt: StaticMixtureStateV5,
+        ckpt: _StaticMixtureStateV5,
         *,
         datasets_by_name: Mapping[str, Dataset],
         dataset_ids: Mapping[str, int],
@@ -2261,7 +2263,7 @@ class StaticMixtureWorkSource(WorkSource):
         self,
         *,
         io_options: Any = None,
-        counting_spec: TokenCountingSpec | None = None,
+        counting_spec: _TokenCountingSpec | None = None,
         pre_tokenize_replay: _PreTokenizeReplay | _UnreplayableOp | None = None,
         mp_context: Any = None,
     ) -> None:
@@ -2401,7 +2403,7 @@ class StaticMixtureWorkSource(WorkSource):
         cursor_block_sizes = {
             name: self._knobs_by_name[name].shuffle_block_size for name in self._cursors
         }
-        state = StaticMixtureStateV5(
+        state = _StaticMixtureStateV5(
             lane_id=base["lane_id"],
             canonical_replicas=base["canonical_replicas"],
             chunk_size_hint=base["chunk_size_hint"],
@@ -2440,7 +2442,7 @@ class StaticMixtureWorkSource(WorkSource):
         )
         return state.to_dict()
 
-    def _reject_policy_override(self, ckpt: StaticMixtureStateV5) -> None:
+    def _reject_policy_override(self, ckpt: _StaticMixtureStateV5) -> None:
         """Fail a resume whose explicit policy args contradict the checkpoint.
 
         A resume restores the policy frozen in the checkpoint, so an explicit
@@ -2473,7 +2475,7 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        ckpt = StaticMixtureStateV5.load(state)
+        ckpt = _StaticMixtureStateV5.load(state)
 
         self._verify_base_state(int(ckpt.lane_id), int(ckpt.canonical_replicas))
 

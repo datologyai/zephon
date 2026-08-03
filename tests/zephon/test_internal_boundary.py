@@ -59,9 +59,13 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_tokenize_chat_pipeline.py": frozenset(
         {"zephon._internal.ops.tokenize_chat:TokenizeChat"}
     ),
-    # The internal tokenizer provides an independent token-count oracle.
+    # The internal tokenizer provides an independent token-count oracle; the
+    # counting spec is internal and has no public re-export.
     "tests/integration/test_token_aware_mixture.py": frozenset(
-        {"zephon._internal.ops.tokenize_chat:TokenizeChat"}
+        {
+            "zephon._internal.ops.tokenize_chat:TokenizeChat",
+            "zephon._internal.token_counting:TextTokenCountingSpec",
+        }
     ),
     # Pump timing exists only at the runner-to-collector boundary.
     "tests/integration/test_pump_timing_end_to_end.py": frozenset(
@@ -103,6 +107,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Probe coverage requires enumerating internal tokenizer ops.
     "tests/zephon/test_validation.py": frozenset(
         {"zephon._internal.ops.tokenize_base:TokenizeBase"}
+    ),
+    # Token-mode coverage needs the internal counting spec.
+    "tests/zephon/work/test_static_mixture.py": frozenset(
+        {"zephon._internal.token_counting:TextTokenCountingSpec"}
     ),
     # Pin WorkChunk state to the internal checkpoint schema version.
     "tests/zephon/work/test_base.py": frozenset(

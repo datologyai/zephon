@@ -12,7 +12,7 @@ import importlib
 import sys
 from pathlib import Path
 
-from zephon._internal.io.index.index_builder import create_index
+from zephon._internal.io.index.index_builder import create_index as _create_index
 
 # A format's index module registers its builder on import but pulls an optional
 # dep (pyarrow / vortex), so import it on demand to keep this module dep-free.
@@ -37,7 +37,7 @@ def build_index(
     module = _FORMAT_INDEX_MODULES.get(format_name)
     if module is not None:
         importlib.import_module(module)
-    return create_index(
+    return _create_index(
         format_name, dataset_dir, output_path=output_path, progress=progress
     )
 

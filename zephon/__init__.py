@@ -15,16 +15,20 @@ machinery lives under ``zephon._internal`` and is not public API.
 # This module auto-activates if ZEPHON_SEMAPHORE_LEAK_DEBUG=1
 import zephon.debug.semaphore_tracker  # noqa: F401  # type: ignore[reportUnusedImport]  # isort: skip
 
-from zephon._internal.utils.litdata_compat import install_litdata_patch
-from zephon._internal.utils.torchdata_compat import install_torchdata_patch
+from zephon._internal.utils.litdata_compat import (
+    install_litdata_patch as _install_litdata_patch,
+)
+from zephon._internal.utils.torchdata_compat import (
+    install_torchdata_patch as _install_torchdata_patch,
+)
 from zephon._version import __version__  # noqa: F401
 from zephon.io import Dataset, InMemoryShard
 from zephon.pipeline import Pipeline
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.work import MixtureSpec, StaticMixtureWorkSource, WorkSource
 
-install_torchdata_patch()  # noop if users never install torchdata
-install_litdata_patch()  # noop if users never install litdata
+_install_torchdata_patch()  # noop if users never install torchdata
+_install_litdata_patch()  # noop if users never install litdata
 
 __all__ = [
     "Dataset",

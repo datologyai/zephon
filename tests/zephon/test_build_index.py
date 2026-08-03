@@ -21,7 +21,7 @@ def test_build_index_delegates(monkeypatch):
         seen.update(fmt=fmt, dir=dataset_dir, out=output_path, progress=progress)
         return Path("/idx/index.json")
 
-    monkeypatch.setattr(bi, "create_index", fake_create_index)
+    monkeypatch.setattr(bi, "_create_index", fake_create_index)
 
     result = bi.build_index("parquet", "/data")
 

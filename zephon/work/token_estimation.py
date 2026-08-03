@@ -36,17 +36,34 @@ import cloudpickle
 import numpy as np
 from filelock import FileLock
 
-from zephon._internal.io.catalog import resolve_catalog_dir, set_catalog_dir
-from zephon._internal.io.stores import build_multi_dataset_store
-from zephon._internal.observability.size_estimator import content_bytes
-from zephon._internal.token_counting import (
-    CountPlan,
-    DeliveredTokenCounter,
-    FatalCountError,
-    TextTokenCountingSpec,
-    TokenCountingSpec,
+from zephon._internal.io.catalog import (
+    resolve_catalog_dir as _resolve_catalog_dir,
 )
-from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon._internal.io.catalog import (
+    set_catalog_dir as _set_catalog_dir,
+)
+from zephon._internal.io.stores import (
+    build_multi_dataset_store as _build_multi_dataset_store,
+)
+from zephon._internal.observability.size_estimator import (
+    content_bytes as _content_bytes,
+)
+from zephon._internal.token_counting import (
+    CountPlan as _CountPlan,
+)
+from zephon._internal.token_counting import (
+    DeliveredTokenCounter as _DeliveredTokenCounter,
+)
+from zephon._internal.token_counting import (
+    FatalCountError as _FatalCountError,
+)
+from zephon._internal.token_counting import (
+    TextTokenCountingSpec as _TextTokenCountingSpec,
+)
+from zephon._internal.token_counting import (
+    TokenCountingSpec as _TokenCountingSpec,
+)
+from zephon._internal.utils.atomic import atomic_write_bytes as _atomic_write_bytes
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 from zephon.ops.base import OpContext, StageInfo
@@ -329,7 +346,7 @@ class _UnreplayableOp:
     op_name: str
 
 
-def _count_replayed(plan: CountPlan, payloads: Sequence[Any]) -> int | None:
+def _count_replayed(plan: _CountPlan, payloads: Sequence[Any]) -> int | None:
     """Count the payloads produced by replaying one raw pointer."""
     total = 0
     for payload in payloads:
@@ -341,7 +358,7 @@ def _count_replayed(plan: CountPlan, payloads: Sequence[Any]) -> int | None:
 
 
 def _count_delivered(
-    plan: CountPlan, replay: _PreTokenizeReplay | None, payload: Any
+    plan: _CountPlan, replay: _PreTokenizeReplay | None, payload: Any
 ) -> int | None:
     """Delivered tokens for one raw pointer, or ``None`` when unmeasurable."""
     if replay is None:
@@ -443,7 +460,7 @@ def _census_shard(
         got = shard.getsamples(chunk)
         batch = got[0] if isinstance(got, tuple) else got
         for offset, payload in zip(chunk, batch):
-            size = content_bytes(payload)
+            size = _content_bytes(payload)
             sizes[(shard_id, offset)] = size
             size_sum += size
     return sizes, size_sum / len(offsets)
@@ -575,7 +592,7 @@ _MIN_PLAN_COVERAGE = 0.5
 
 
 @dataclass(frozen=True)
-class _MeasurePlan(CountPlan):
+class _MeasurePlan(_CountPlan):
     measure: Callable[[Any], int]
     # A user measure defines the unit, so an exception invalidates calibration.
     abort_on_error: ClassVar[bool] = True
@@ -595,7 +612,7 @@ def _measure_dataset(
     dataset_id: int,
     store: Any,
     estimation: TokenEstimation,
-    counter: DeliveredTokenCounter | None,
+    counter: _DeliveredTokenCounter | None,
     seed: int,
     pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> _DatasetMeasurement:
@@ -638,7 +655,7 @@ def _measure_dataset(
     replayed_prefix: dict[SampleId, list[Any]] = {}
     replay_errors: dict[SampleId, Exception] = {}
     if estimation.measure is not None:
-        plan: CountPlan = _MeasurePlan(estimation.measure)
+        plan: _CountPlan = _MeasurePlan(estimation.measure)
     else:
         assert counter is not None, "no measure callable, so a counter is required"
         prefix_ids = sample_ids[:_PLAN_SAMPLE_COUNT]
@@ -667,7 +684,7 @@ def _measure_dataset(
                 delivered = _count_replayed(plan, replayed_prefix.pop(sid))
             else:
                 delivered = _count_delivered(plan, pre_tokenize_replay, payloads[sid])
-        except FatalCountError:
+        except _FatalCountError:
             # Structural: execution rejects this row too. Surface it instead of
             # sampling around it, even when coverage would otherwise pass.
             raise
@@ -731,21 +748,21 @@ def _init_prime_worker(
     measured_datasets: Mapping[int, Dataset],
     store_options: Any,
     estimation: TokenEstimation,
-    counting_spec: TokenCountingSpec | None,
+    counting_spec: _TokenCountingSpec | None,
     seed: int,
     pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> None:
-    set_catalog_dir(store_options)
+    _set_catalog_dir(store_options)
     _prime_worker.update(
         datasets=measured_datasets,
-        store=build_multi_dataset_store(measured_datasets, options=store_options),
+        store=_build_multi_dataset_store(measured_datasets, options=store_options),
         estimation=estimation,
         seed=seed,
         pre_tokenize_replay=pre_tokenize_replay,
         counter=(
             None
             if estimation.measure is not None
-            else (counting_spec or TextTokenCountingSpec()).build_counter()
+            else (counting_spec or _TextTokenCountingSpec()).build_counter()
         ),
     )
 
@@ -773,7 +790,7 @@ def _run_census(
     measured_datasets: Mapping[int, Dataset],
     store_options: StoreOptions,
     estimation: TokenEstimation,
-    counting_spec: TokenCountingSpec | None,
+    counting_spec: _TokenCountingSpec | None,
     seed: int,
     mp_context: Any,
     pre_tokenize_replay: _PreTokenizeReplay | None = None,
@@ -821,7 +838,7 @@ def _run_census(
                 name = pending[fut]
                 try:
                     out[name] = fut.result()
-                except FatalCountError:
+                except _FatalCountError:
                     raise
                 except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
                     _logger.warning(
@@ -832,7 +849,7 @@ def _run_census(
                     out[name] = _fallback(
                         estimation, None, f"measurement crashed: {exc}", retryable=True
                     )
-    except FatalCountError:
+    except _FatalCountError:
         raise
     except Exception as exc:  # noqa: BLE001 — priming is best-effort by contract
         # Parent-side pool failure, e.g. census inputs that defeat pickling at
@@ -889,7 +906,7 @@ def _prime_cache_key(
     names: list[str],
     by_name: Mapping[str, Dataset],
     estimation: TokenEstimation,
-    counting_spec: TokenCountingSpec | None,
+    counting_spec: _TokenCountingSpec | None,
     seed: int,
     pre_tokenize_replay: _PreTokenizeReplay | None = None,
 ) -> str:
@@ -900,7 +917,7 @@ def _prime_cache_key(
         str(_PRIME_CACHE_VERSION),
         str(seed),
         _pickle_fingerprint(estimation),
-        _pickle_fingerprint(counting_spec or TextTokenCountingSpec()),
+        _pickle_fingerprint(counting_spec or _TextTokenCountingSpec()),
         _pickle_fingerprint(pre_tokenize_replay),
         *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
     ]
@@ -936,7 +953,7 @@ def _write_prime_cache(
             name: [*m.ratio.to_state(), m.reason] for name, m in measured.items()
         },
     }
-    atomic_write_bytes(path, json.dumps(doc).encode("utf-8"), fsync=True)
+    _atomic_write_bytes(path, json.dumps(doc).encode("utf-8"), fsync=True)
 
 
 def prime_token_ratios(
@@ -944,7 +961,7 @@ def prime_token_ratios(
     datasets: list[Dataset],
     dataset_ids: Mapping[str, int],
     estimation: TokenEstimation,
-    counting_spec: TokenCountingSpec | None,
+    counting_spec: _TokenCountingSpec | None,
     io_options: Any = None,
     seed: int = 0,
     mp_context: Any = None,
@@ -981,7 +998,7 @@ def prime_token_ratios(
     fallback_reasons: dict[str, str] = {}
     if to_measure:
         store_options = StoreOptions.from_any(io_options)
-        set_catalog_dir(store_options)
+        _set_catalog_dir(store_options)
 
         names: list[str] = []
         for name in to_measure:
@@ -1010,13 +1027,15 @@ def prime_token_ratios(
                 )
             measured_datasets = {dataset_ids[name]: by_name[name] for name in names}
             # Build catalogs once so workers mmap-attach instead of repeating discovery.
-            build_multi_dataset_store(measured_datasets, options=store_options)
+            _build_multi_dataset_store(measured_datasets, options=store_options)
 
             key = _prime_cache_key(
                 names, by_name, estimation, counting_spec, seed, pre_tokenize_replay
             )
             cache_path = (
-                resolve_catalog_dir(store_options) / _PRIME_CACHE_SUBDIR / f"{key}.json"
+                _resolve_catalog_dir(store_options)
+                / _PRIME_CACHE_SUBDIR
+                / f"{key}.json"
             )
             measured = _read_prime_cache(cache_path, key)
             if measured is not None:

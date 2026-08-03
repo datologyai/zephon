@@ -10,13 +10,30 @@ from typing import Any
 
 import numpy as np
 
-from zephon._internal.io.catalog import DatasetHeader, ShardCatalogHandle
-from zephon._internal.io.formats import ensure_builtin_formats
-from zephon._internal.io.formats.base import FormatHandler, get_format
-from zephon._internal.io.index import find_and_load_index
-from zephon._internal.io.index.index_types import IndexData
-from zephon._internal.io.protocols import RandomAccessShard
-from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
+from zephon._internal.io.catalog import (
+    DatasetHeader as _DatasetHeader,
+)
+from zephon._internal.io.catalog import (
+    ShardCatalogHandle as _ShardCatalogHandle,
+)
+from zephon._internal.io.formats import (
+    ensure_builtin_formats as _ensure_builtin_formats,
+)
+from zephon._internal.io.formats.base import (
+    FormatHandler as _FormatHandler,
+)
+from zephon._internal.io.formats.base import (
+    get_format as _get_format,
+)
+from zephon._internal.io.index import find_and_load_index as _find_and_load_index
+from zephon._internal.io.index.index_types import IndexData as _IndexData
+from zephon._internal.io.protocols import RandomAccessShard as _RandomAccessShard
+from zephon._internal.io.storage import (
+    RouterStorageBackend as _RouterStorageBackend,
+)
+from zephon._internal.io.storage import (
+    StorageBackend as _StorageBackend,
+)
 from zephon.io.memory import InMemoryShard
 
 
@@ -53,7 +70,7 @@ class Dataset:
     path: str | None = None
     # Node-local shard-catalog handle (file-backed datasets only); set by
     # from_path(), not a constructor argument.
-    _catalog_handle: ShardCatalogHandle | None = field(
+    _catalog_handle: _ShardCatalogHandle | None = field(
         default=None, compare=False, init=False
     )
     # _ids/_counts are constructor-seeded discovery output, not a cache: at
@@ -179,15 +196,15 @@ class Dataset:
         else:
             root_str = path.rstrip("/") or path
 
-        storage = RouterStorageBackend()
+        storage = _RouterStorageBackend()
         kind = fmt
         if kind is None:
             kind = _auto_detect_format(storage, root_str, root_path)
         if kind is None:
             raise ValueError(f"Unsupported dataset format at path: {root_str}")
 
-        ensure_builtin_formats(required={kind})
-        handler = get_format(kind)
+        _ensure_builtin_formats(required={kind})
+        handler = _get_format(kind)
         ids, counts = _discover_counts(handler, root_str, storage)
         # ids()/counts() hand these arrays out shared (the work-source cursor
         # gathers from them in place); freeze them so an in-place edit fails loud.
@@ -195,8 +212,8 @@ class Dataset:
         counts.setflags(write=False)
 
         backend = {"kind": kind, "path": root_str}
-        header = DatasetHeader(name=name, root=root_str, format=kind, path=root_str)
-        handle = ShardCatalogHandle(dataset=header)
+        header = _DatasetHeader(name=name, root=root_str, format=kind, path=root_str)
+        handle = _ShardCatalogHandle(dataset=header)
         dataset = cls(
             name=name,
             backend=backend,
@@ -218,7 +235,7 @@ class Dataset:
 
 
 def _inmem_ids_counts(
-    shards: Mapping[int, RandomAccessShard],
+    shards: Mapping[int, _RandomAccessShard],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Derive aligned ``(ids, counts)`` from resident in-memory shards."""
     ids = np.array(sorted(int(k) for k in shards), dtype=np.int64)
@@ -230,7 +247,7 @@ def _inmem_ids_counts(
 
 
 def _discover_counts(
-    handler: FormatHandler, path: str, storage: StorageBackend
+    handler: _FormatHandler, path: str, storage: _StorageBackend
 ) -> tuple[np.ndarray, np.ndarray]:
     """Obtain ``(ids, counts)`` without materializing per-shard ``shard_meta``.
 
@@ -247,9 +264,9 @@ __all__ = ["Dataset"]
 
 
 def _auto_detect_format(
-    storage: RouterStorageBackend, root_str: str, root_path: Path | None
+    storage: _RouterStorageBackend, root_str: str, root_path: Path | None
 ) -> str | None:
-    result = find_and_load_index(root_str, storage)
+    result = _find_and_load_index(root_str, storage)
     if result is not None:
         return _classify_index_payload(result)
 
@@ -270,7 +287,7 @@ def _auto_detect_format(
     return None
 
 
-def _classify_index_payload(data: IndexData) -> str:
+def _classify_index_payload(data: _IndexData) -> str:
     if isinstance(data, dict):
         if "chunks" in data and "config" in data:
             return "litdata"

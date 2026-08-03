@@ -2,7 +2,9 @@
 
 from functools import cached_property
 
-from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.observability.size_estimator import (
+    content_bytes as _content_bytes,
+)
 
 #: Rows sampled per shard when sizing payloads (keeps raw_bytes cheap regardless
 #: of shard size).
@@ -28,7 +30,7 @@ class InMemoryShard:
         if n == 0:
             return 0
         step = max(1, n // _BYTE_SAMPLES)
-        sampled = [content_bytes(self._rows[i]) for i in range(0, n, step)]
+        sampled = [_content_bytes(self._rows[i]) for i in range(0, n, step)]
         return int(sum(sampled) / len(sampled) * n)
 
     def close(self) -> None:

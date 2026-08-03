@@ -35,7 +35,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from zephon._internal.ops.tokenize_base import TokenizeBase
+from zephon._internal.ops.tokenize_base import TokenizeBase as _TokenizeBase
 from zephon.ops.accumulators import Accumulator
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -1384,7 +1384,7 @@ def _is_user_op(op: Any) -> bool:
     live in ``zephon._internal.ops`` and are skipped — they have their
     own dedicated test coverage.
     """
-    from zephon.pipeline import _FunctionalOp
+    from zephon._internal.functional_op import _FunctionalOp
 
     if isinstance(op, _FunctionalOp):
         return True
@@ -1452,7 +1452,7 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
     every user op.
     """
     # Local import to avoid the pipeline → validate → pipeline circular at module load.
-    from zephon.pipeline import _FunctionalOp
+    from zephon._internal.functional_op import _FunctionalOp
 
     report = ValidationReport()
     for node in pipeline._graph.nodes:
@@ -1623,7 +1623,7 @@ def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
         ``TOKENIZER_PREFLIGHT_FAILED`` error per failure.
     """
     report = ValidationReport()
-    for index, op in pipeline._iter_ops(TokenizeBase):
+    for index, op in pipeline._iter_ops(_TokenizeBase):
         op_name = pipeline._graph.nodes[index].name
         tokenizer_id = op.configured_tokenizer_id()
         try:

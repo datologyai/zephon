@@ -10,10 +10,12 @@ from enum import Enum
 from typing import Any, Iterator, Mapping, MutableMapping, Sequence
 
 from zephon._internal.checkpoint import (
-    WORK_CHUNK_VERSION,
-    WorkChunkStateV2,
+    WORK_CHUNK_VERSION as _WORK_CHUNK_VERSION,
 )
-from zephon._internal.utils.swrr import swrr_iterate
+from zephon._internal.checkpoint import (
+    WorkChunkStateV2 as _WorkChunkStateV2,
+)
+from zephon._internal.utils.swrr import swrr_iterate as _swrr_iterate
 from zephon.io.dataset import Dataset
 from zephon.types import SampleId
 from zephon.work.mixture import MixtureSpec
@@ -252,7 +254,7 @@ class WorkChunk:
         Delegates to swrr_iterate() which provides deterministic, proportional
         emission matching target weights over time.
         """
-        yield from swrr_iterate(
+        yield from _swrr_iterate(
             components={b.name: b.items for b in buckets},
             weights={b.name: b.weight for b in buckets},
             order=[b.name for b in buckets],
@@ -265,8 +267,8 @@ class WorkChunk:
             items = self.components.get(name, [])
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        state = WorkChunkStateV2(
-            version=WORK_CHUNK_VERSION,
+        state = _WorkChunkStateV2(
+            version=_WORK_CHUNK_VERSION,
             seed=None if self.seed is None else int(self.seed),
             components=comps_serial,
             component_order=list(self._component_order),
@@ -282,7 +284,7 @@ class WorkChunk:
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        ckpt = WorkChunkStateV2.load(payload)
+        ckpt = _WorkChunkStateV2.load(payload)
 
         comps: dict[str, list[SampleId]] = {}
         for name, items in ckpt.components:

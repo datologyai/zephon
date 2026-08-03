@@ -15,12 +15,17 @@ import time
 from collections.abc import Sequence
 from typing import TypeVar
 
-from zephon._internal.stream import RunnerStreamIn, lane_of
+from zephon._internal.stream import (
+    RunnerStreamIn as _RunnerStreamIn,
+)
+from zephon._internal.stream import (
+    lane_of as _lane_of,
+)
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch
 
 # Bounded to RunnerStreamIn: the accumulator only batches pipeline elements,
 # which is exactly what lane_of can key by (SampleRecord/SampleBatch/EngineSample).
-T = TypeVar("T", bound=RunnerStreamIn)
+T = TypeVar("T", bound=_RunnerStreamIn)
 
 
 class CountingAccumulator(Accumulator[T]):
@@ -72,7 +77,7 @@ class CountingAccumulator(Accumulator[T]):
         ready: list[ReadyBatch[T]] = []
         bufs = self._buffers
         max_batch = self._max_batch
-        lane_fn = lane_of
+        lane_fn = _lane_of
         for elem in elems:
             k = lane_fn(elem)
             buf = bufs.get(k)
@@ -90,7 +95,7 @@ class CountingAccumulator(Accumulator[T]):
         ready: list[ReadyBatch[T]] = []
         now_ns = time.perf_counter_ns()
         max_latency_ns = self._max_latency_ms * 1_000_000  # type: ignore[operator]
-        lane_fn = lane_of
+        lane_fn = _lane_of
         for elem in elems:
             k = lane_fn(elem)
             buf = self._buffers.get(k)

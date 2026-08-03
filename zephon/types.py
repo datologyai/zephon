@@ -8,15 +8,25 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, TypeAlias, cast
 
 from zephon._internal.utils.length_extraction import (
-    TOKEN_FIELD_CANDIDATES,
-    detect_length_field,
+    TOKEN_FIELD_CANDIDATES as _TOKEN_FIELD_CANDIDATES,
+)
+from zephon._internal.utils.length_extraction import (
+    detect_length_field as _detect_length_field,
 )
 from zephon._internal.utils.tensor_utils import (
-    mask_padding_labels,
-    mask_unsupervised_labels,
-    resolve_dtype,
-    slice_last_dim,
-    stack_sequences,
+    mask_padding_labels as _mask_padding_labels,
+)
+from zephon._internal.utils.tensor_utils import (
+    mask_unsupervised_labels as _mask_unsupervised_labels,
+)
+from zephon._internal.utils.tensor_utils import (
+    resolve_dtype as _resolve_dtype,
+)
+from zephon._internal.utils.tensor_utils import (
+    slice_last_dim as _slice_last_dim,
+)
+from zephon._internal.utils.tensor_utils import (
+    stack_sequences as _stack_sequences,
 )
 
 if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type checker.
@@ -346,12 +356,12 @@ class SampleBatch:
         # Resolve tokens_field if "auto"
         resolved_tokens_field = tokens_field
         if tokens_field == "auto":
-            resolved_tokens_field = detect_length_field(payloads[0])
+            resolved_tokens_field = _detect_length_field(payloads[0])
             if resolved_tokens_field is None:
                 raise ValueError(
                     f"Cannot auto-detect tokens field. Payload keys: "
                     + f"{list(payloads[0].keys())}. Expected one of: "
-                    + f"{', '.join(TOKEN_FIELD_CANDIDATES)}"
+                    + f"{', '.join(_TOKEN_FIELD_CANDIDATES)}"
                 )
 
         # Validate tokens_field exists in all payloads
@@ -521,7 +531,7 @@ class SampleBatch:
             )
 
         # Resolve dtype
-        resolved_dtype, framework = resolve_dtype(dtype)
+        resolved_dtype, framework = _resolve_dtype(dtype)
 
         # Build base result
         result: dict[str, Any] = {
@@ -530,17 +540,17 @@ class SampleBatch:
         }
 
         # Stack tokens
-        tokens = stack_sequences(token_lists, resolved_dtype, framework)
+        tokens = _stack_sequences(token_lists, resolved_dtype, framework)
 
         if return_labels:
             # Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]
-            result["input_ids"] = slice_last_dim(tokens, slice(None, -1), framework)
-            labels = slice_last_dim(tokens, slice(1, None), framework)
+            result["input_ids"] = _slice_last_dim(tokens, slice(None, -1), framework)
+            labels = _slice_last_dim(tokens, slice(1, None), framework)
             # After the shift, a record's trailing padding_length labels are
             # exactly its right-pad tokens; mask by position, not by id.
             pad_lengths = [r.meta.padding_length or 0 for r in items]
             if any(pad_lengths):
-                labels = mask_padding_labels(
+                labels = _mask_padding_labels(
                     labels, pad_lengths, ignore_index, framework
                 )
             result["labels"] = labels
@@ -549,24 +559,24 @@ class SampleBatch:
 
         # Handle extra fields
         for field_name, field_lists in extra_data.items():
-            field_tensor = stack_sequences(field_lists, resolved_dtype, framework)
+            field_tensor = _stack_sequences(field_lists, resolved_dtype, framework)
 
             if return_labels:
                 # Shift extra fields to match input_ids shape
-                result[field_name] = slice_last_dim(
+                result[field_name] = _slice_last_dim(
                     field_tensor, slice(None, -1), framework
                 )
             else:
                 result[field_name] = field_tensor
 
         if loss_mask_lists is not None:
-            masks = stack_sequences(loss_mask_lists, resolved_dtype, framework)
+            masks = _stack_sequences(loss_mask_lists, resolved_dtype, framework)
             if return_labels:
                 # The label at position i supervises token i+1, so the mask
                 # shifts like labels (drop the first entry), not like inputs.
-                result["labels"] = mask_unsupervised_labels(
+                result["labels"] = _mask_unsupervised_labels(
                     result["labels"],
-                    slice_last_dim(masks, slice(1, None), framework),
+                    _slice_last_dim(masks, slice(1, None), framework),
                     ignore_index,
                     framework,
                 )
