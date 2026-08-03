@@ -51,11 +51,13 @@ from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 # 1. Define your data
 shards = {
-    0: InMemoryShard([
-        {"text": "Hello world"},
-        {"text": "Zephon is fast"},
-        {"text": "Data loading made easy"},
-    ])
+    0: InMemoryShard(
+        [
+            {"text": "Hello world"},
+            {"text": "Zephon is fast"},
+            {"text": "Data loading made easy"},
+        ]
+    )
 }
 ds = Dataset.from_dict("demo", shards)
 
@@ -100,10 +102,15 @@ ws = StaticMixtureWorkSource(
 
 pipeline = (
     Pipeline(ws)
-    .prefetch(buffer_size=2048)                         # warm cache from S3/GCS
-    .tokenize(tokenizer_id="gpt2", field="text", max_length=2048,
-              split_long_samples=True, parallelism=8)
-    .ensure_mixture()                                    # correct token-level ratios
+    .prefetch(buffer_size=2048)  # warm cache from S3/GCS
+    .tokenize(
+        tokenizer_id="gpt2",
+        field="text",
+        max_length=2048,
+        split_long_samples=True,
+        parallelism=8,
+    )
+    .ensure_mixture()  # correct token-level ratios
     .batch(microbatch_size=8)
 )
 
@@ -115,7 +122,7 @@ for batch in pipeline:
 
 ```python
 fineweb = Dataset.from_path("fineweb", "/data/fineweb")
-dclm    = Dataset.from_path("dclm",    "/data/dclm")
+dclm = Dataset.from_path("dclm", "/data/dclm")
 
 ws = StaticMixtureWorkSource(
     datasets=[fineweb, dclm],

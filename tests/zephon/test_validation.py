@@ -1037,7 +1037,7 @@ def test_writes_to_self_runs_even_when_op_rejects_generic_payload() -> None:
 def _uses_random_random(elems: list[Any]) -> list[Any]:
     import random
 
-    random.random()  # noqa: returns a fresh draw — non-deterministic
+    random.random()  # noqa: S311 - returns a fresh draw — non-deterministic
     return list(elems)
 
 
