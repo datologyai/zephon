@@ -220,13 +220,16 @@ Zephon takes a different approach: the
 work chunks on demand, one at a time, without ever materialising the full
 sequence.  This has several consequences:
 
-- **Infinite and dynamically growing datasets** work naturally — there is no
-  requirement that the total number of samples be known at construction time.
+- A {py:class}`~zephon.work.WorkSource` does not have to produce a finite
+  stream. The built-in {py:class}`~zephon.work.StaticMixtureWorkSource` can
+  repeat catalogued datasets for a fixed number of passes or indefinitely.
+  A dynamically growing source would require a custom `WorkSource`.
 - **Changing the number of ranks** mid-training does not require recomputing a
   global permutation.  The lane abstraction handles re-mapping (see
   [Elastic Determinism](determinism.md)).
-- **Memory overhead stays constant** regardless of dataset size — no rank ever
-  holds a full index in memory.
+- **Memory avoids scaling with the total sample count.** The static source keeps
+  shard metadata and lazily creates within-shard permutations; block shuffling
+  adds a bounded buffer controlled by `shuffle_block_size`.
 
 The trade-off is that certain operations that assume a known length (like
 "skip to 73 % of the epoch") are not directly expressible.  Instead, Zephon

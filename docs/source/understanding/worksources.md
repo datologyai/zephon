@@ -128,8 +128,9 @@ and lane ID), so the essential mutable state is just a per-dataset position
 integer and a global chunk counter.  The checkpoint also carries
 configuration fields (seed, knobs, weights) for validation on restore.
 Restore time is independent of how far into training you are: the
-cursors are rebuilt deterministically from the datasets and knobs, then
-advanced to the saved position.
+cursors seek directly to the saved shard position. When block shuffling is
+enabled, a checkpointed RNG snapshot bounds the shuffle replay needed to
+reconstruct the active buffer.
 
 A hypothetical future WorkSource that makes online decisions (e.g., adjusting
 mixture weights based on training signals) would need to serialize whatever
@@ -211,11 +212,12 @@ fairly.
 ### Per-dataset cursors
 
 Internally, the WorkSource maintains a **cursor** per dataset: a position
-into a pre-computed, deterministic sequence of all sample pointers for that
-dataset.  The sequence is built once at construction time from the dataset's
-shard index and the shuffle knobs (shard order, within-shard permutation,
-block shuffle).  After construction, producing the next batch of pointers
-is a simple array slice with no RNG calls or shard metadata lookups.
+in a deterministic traversal derived from the dataset's shard index and the
+shuffle knobs. The cursor streams one shard at a time and creates within-shard
+offset permutations lazily instead of materializing every sample pointer.
+With block shuffle enabled, it fills and shuffles a bounded buffer as needed.
+Memory therefore scales with shard metadata, the largest active shard, and the
+configured shuffle buffer rather than with the total number of samples.
 
 When a chunk is requested, the WorkSource pulls `quota[component]` pointers
 from each cursor and assembles them into a work chunk.  What happens when a

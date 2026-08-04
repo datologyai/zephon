@@ -8,35 +8,40 @@ Using [uv](https://github.com/astral-sh/uv) (recommended):
 
 ```bash
 uv pip install zephon
-```
 
-Or using pip:
-
-```bash
-pip install zephon
+# Hugging Face tokenizer support used by the example below
+uv pip install transformers
 ```
 
 For cloud storage support:
 
 ```bash
 uv pip install "zephon[cloud]"
-# or: pip install "zephon[cloud]"
 ```
 
 For specific data formats:
 
 ```bash
 # Parquet files
-pip install "zephon[parquet]"
+uv pip install "zephon[parquet]"
 
 # MosaicML Streaming/MDS format
-pip install "zephon[streaming]"
+uv pip install "zephon[streaming]"
 
 # LitData format
-pip install "zephon[litdata]"
+uv pip install "zephon[litdata]"
 
 # Vortex format (Python 3.11+ only)
-pip install "zephon[vortex]"
+uv pip install "zephon[vortex]"
+```
+
+To run the checked-in examples or contribute to Zephon, install from a source
+checkout instead:
+
+```bash
+git clone https://github.com/datologyai/zephon.git
+cd zephon
+uv sync --group dev --group test
 ```
 
 ## Basic Concepts
@@ -44,131 +49,58 @@ pip install "zephon[vortex]"
 Zephon pipelines have three main components:
 
 1. **Dataset**: Defines where your data lives and how to read it
-2. **WorkSource**: Controls how samples are distributed across workers
+2. **WorkSource**: Declares the curriculum: datasets, proportions, and ordering
 3. **Pipeline**: Chains together operators to transform your data
 
 ## Your First Pipeline
 
-Here's a minimal example using in-memory data:
-
-```python
-from zephon import Pipeline
-from zephon.io import Dataset, InMemoryShard
-from zephon.work import MixtureSpec, StaticMixtureWorkSource
-
-# 1. Create some sample data
-shards = {
-    0: InMemoryShard([
-        {"text": "Hello world"},
-        {"text": "Zephon is fast"},
-        {"text": "Data loading made easy"},
-    ])
-}
-
-# 2. Create a dataset from the shards
-ds = Dataset.from_dict("demo", shards)
-
-# 3. Create a work source that controls sample distribution
-ws = StaticMixtureWorkSource(
-    datasets=[ds],
-    mixture=MixtureSpec({"demo": 1.0}),
-    chunk_size=1,
-    seed=42,
-)
-
-# 4. Build the pipeline
-pipeline = (
-    Pipeline(ws)
-    .decode_text()  # Extract text from samples
-    .tokenize(
-        tokenizer_id="__fallback__",
-        field="text",
-        parallelism=1,
-        preserve_upstream_payload=True,  # Keep "text" field for display
-    )
-    .batch(
-        microbatch_size=2, drop_last=False
-    )  # Group into batches; keep last partial batch
-)
-
-# 5. Iterate over batches
-batch_count = 0
-for batch_num, batch in enumerate(pipeline):
-    training_batch = batch.to_training(dtype=None)  # Use Python lists (not numpy/torch) to avoid requiring torch
-    texts = training_batch["texts"]
-    batch_count += 1
-    print(f"   Batch {batch_num}: {texts}")
-```
-
-You can run that first pipeline with the following commands:
-```shell
-cd zephon
-uv run python examples/your_first_pipeline.py
-
-...
-
-============================================================
-Your First Zephon Pipeline
-============================================================
-
-1. Creating sample data (3 records in a single shard)...
-   Shard 0 contains 3 samples
-
-2. Creating a Dataset from the shards...
-   Dataset 'demo' has 3 total samples
-
-3. Creating a StaticMixtureWorkSource...
-   Work source configured with mixture={'demo': 1.0}, chunk_size=1, seed=42
-
-4. Building the pipeline (decode_text -> tokenize -> batch with microbatch_size=2)...
-   Pipeline ready. decode_text() extracts the 'text' field; tokenize() adds input_ids; batch() groups 2 samples.
-
-5. Iterating over batches:
-------------------------------------------------------------
-   Batch 0: ['Hello world', 'Zephon is fast']
-   Batch 1: ['Data loading made easy']
-------------------------------------------------------------
-
-Done! You processed 3 samples in 2 batch(es).
-```
-
-## Reading from Files
-
-For real workloads, you'll typically read from files. Here's an example with JSONL:
+Here's a representative text-training pipeline. Replace the path with a
+directory containing your JSONL shards:
 
 ```python
 from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
-# Point to your JSONL directory (auto-detects format)
-ds = Dataset.from_path(
-    name="my_data",
-    path="data/train/",  # Directory containing *.jsonl files
-)
+# 1. Discover the dataset's shards
+dataset = Dataset.from_path("train", "data/train/")
 
+# 2. Declare the sample mixture and ordering
 ws = StaticMixtureWorkSource(
-    datasets=[ds],
-    mixture=MixtureSpec({"my_data": 1.0}),
-    chunk_size=64,
+    datasets=[dataset],
+    mixture=MixtureSpec({"train": 1.0}),
     seed=42,
 )
 
+# 3. Decode, tokenize, and batch for training
 pipeline = (
     Pipeline(ws)
     .decode_text()
-    .tokenize(tokenizer_id="gpt2", field="text")
-    .batch(microbatch_size=8)
+    .tokenize(
+        tokenizer_id="gpt2",
+        field="text",
+        padding=True,
+        parallelism=1,
+        preserve_upstream_payload=True,  # Keep "text" field for display
+    )
+    .batch(microbatch_size=2, drop_last=False)
 )
 
 for batch in pipeline:
-    # Use batch for training
-    pass
+    training_batch = batch.to_training()
+    print(training_batch["texts"])
+    train_step(training_batch)
 ```
 
-## Adding Tokenization
+From a source checkout, run the tested version of this example with:
 
-Zephon includes built-in tokenization support:
+```shell
+uv run python examples/your_first_pipeline.py
+```
+
+## Adjusting Tokenization
+
+Tokenization can be tuned per workload:
 
 ```python
 pipeline = (

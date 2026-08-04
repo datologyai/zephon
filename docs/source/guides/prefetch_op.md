@@ -24,7 +24,9 @@ The prefetch operator is automatically inserted before the implicit fetch operat
 
 ## The Problem: FetchOp Blocking on Downloads
 
-Zephon pipelines run operators concurrently (Fetch → Decode → Tokenize run concurrently in different stages).
+Zephon pipelines overlap work across operators and stages. The planner may fuse
+Fetch, Decode, and Tokenize into one stage or split them across stages; use
+`pipeline.explain()` to inspect the compiled plan for a particular pipeline.
 However, **within the FetchOp stage**, downloads can still block processing.
 
 Example: Processing 3 batches. Download time = 100ms per batch of shards. Full pipeline processing time (Fetch + Decode + Tokenize) = 100ms per batch.

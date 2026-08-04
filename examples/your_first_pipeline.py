@@ -4,88 +4,81 @@
 
 """Your First Pipeline - Run this after reading the Quick Start guide.
 
-This script mirrors the "Your First Pipeline" section in docs/source/quickstart.md
-with extra print statements to help you understand what happens at each step.
-
-We add tokenization because batch.to_training() requires tokenized payloads
-(input_ids) for the training format. The __fallback__ tokenizer is a simple
-character-level tokenizer for demos that does not need HuggingFace.
+This script uses checked-in JSONL shards and a real Hugging Face tokenizer when
+Transformers is installed. Otherwise, it warns and uses Zephon's built-in
+fallback tokenizer so the example remains runnable with the base installation.
 
 Run with: uv run python examples/your_first_pipeline.py
 """
 
+import warnings
+from importlib.util import find_spec
+from pathlib import Path
+
 from zephon import Pipeline
-from zephon.io import Dataset, InMemoryShard
+from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
 
-def main() -> None:
-    """Run the Your First Pipeline demo."""
-    print("=" * 60)
-    print("Your First Zephon Pipeline")
-    print("=" * 60)
+def default_tokenizer_id() -> str:
+    """Choose GPT-2 when Transformers is installed, otherwise the fallback."""
+    if find_spec("transformers") is not None:
+        return "gpt2"
 
-    # 1. Create some sample data
-    print("\n1. Creating sample data (3 records in a single shard)...")
-    shards = {
-        0: InMemoryShard(
-            [
-                {"text": "Hello world"},
-                {"text": "Zephon is fast"},
-                {"text": "Data loading made easy"},
-            ]
-        )
-    }
-    print(f"   Shard 0 contains {len(shards[0])} samples")
+    warnings.warn(
+        "Transformers is not installed; using Zephon's built-in fallback "
+        "tokenizer. Install transformers to run this example with GPT-2.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return "__fallback__"
 
-    # 2. Create a dataset from the shards
-    print("\n2. Creating a Dataset from the shards...")
-    ds = Dataset.from_dict("demo", shards)
-    print(f"   Dataset '{ds.name}' has {len(ds)} total samples")
 
-    # 3. Create a work source that controls sample distribution
-    print("\n3. Creating a StaticMixtureWorkSource...")
+def build_pipeline(tokenizer_id: str | None = None) -> Pipeline:
+    """Build the file-backed text pipeline shown in the Quick Start."""
+    if tokenizer_id is None:
+        tokenizer_id = default_tokenizer_id()
+
+    root = Path(__file__).parent / "data" / "jsonl_demo"
+    dataset = Dataset.from_path("jsonl_demo", str(root))
+
     ws = StaticMixtureWorkSource(
-        datasets=[ds],
-        mixture=MixtureSpec({"demo": 1.0}),
-        chunk_size=1,
+        datasets=[dataset],
+        mixture=MixtureSpec({"jsonl_demo": 1.0}),
+        chunk_size=1,  # The checked-in demo has only five samples
         seed=42,
     )
-    print("   Work source configured with mixture={'demo': 1.0}, chunk_size=1, seed=42")
 
-    # 4. Build the pipeline
-    print(
-        "\n4. Building the pipeline (decode_text -> tokenize -> batch with microbatch_size=2)..."
-    )
     pipeline = (
         Pipeline(ws)
-        .decode_text()  # Extract text from samples
+        .decode_text()
         .tokenize(
-            tokenizer_id="__fallback__",
+            tokenizer_id=tokenizer_id,
             field="text",
+            padding=True,
             parallelism=1,
             preserve_upstream_payload=True,  # Keep "text" field for display
         )
-        .batch(
-            microbatch_size=2, drop_last=False
-        )  # Group into batches; keep last partial batch
-    )
-    print(
-        "   Pipeline ready. decode_text() extracts the 'text' field; "
-        "tokenize() adds input_ids; batch() groups 2 samples."
+        .batch(microbatch_size=2, drop_last=False)
     )
 
-    # 5. Iterate over batches
-    print("\n5. Iterating over batches:")
-    print("-" * 60)
-    batch_count = 0
-    for batch_num, batch in enumerate(pipeline):
-        training_batch = batch.to_training(dtype=None)  # Use lists for variable-length
+    return pipeline
+
+
+def main(tokenizer_id: str | None = None) -> None:
+    """Run the Your First Pipeline demo."""
+    print("Your First Zephon Pipeline")
+    pipeline = build_pipeline(tokenizer_id)
+
+    print("PLAN:\n" + pipeline.explain())
+    for batch_number, batch in enumerate(pipeline):
+        training_batch = batch.to_training()
+        shape = tuple(training_batch["input_ids"].shape)
         texts = training_batch["texts"]
-        batch_count += 1
-        print(f"   Batch {batch_num}: {texts}")
-    print("-" * 60)
-    print(f"\nDone! You processed 3 samples in {batch_count} batch(es).")
+        print(
+            f"Batch {batch_number}: {len(training_batch['ids'])} samples, "
+            f"shape={shape}, texts={texts}"
+        )
 
 
 if __name__ == "__main__":

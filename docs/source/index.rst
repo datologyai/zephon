@@ -17,31 +17,36 @@ Quick Example
 .. code-block:: python
 
    from zephon import Pipeline
-   from zephon.io import Dataset, InMemoryShard
+   from zephon.io import Dataset
    from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
-   # Create a dataset
-   shards = {0: InMemoryShard([{"text": "Hello world"}])}
-   ds = Dataset.from_dict("my_dataset", shards)
+   # Discover a directory of JSONL shards
+   ds = Dataset.from_path("train", "/data/train/")
 
    # Build a work source
    ws = StaticMixtureWorkSource(
        [ds],
-       mixture=MixtureSpec({"my_dataset": 1.0}),
-       chunk_size=64,
+       mixture=MixtureSpec({"train": 1.0}),
+       chunk_size=16384,
        seed=42,
    )
 
    # Create and run a pipeline
    pipeline = (
        Pipeline(ws)
-       .decode_text()  # optional: extracts 'text' field from samples
-       .tokenize(tokenizer_id="gpt2")
+       .decode_text()
+       .tokenize(
+           tokenizer_id="gpt2",
+           field="text",
+           max_length=2048,
+           truncation=True,
+           padding="max_length",
+       )
        .batch(microbatch_size=8)
    )
 
    for batch in pipeline:
-       print(batch.to_training())
+       train_step(batch.to_training())
 
 
 .. toctree::

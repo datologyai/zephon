@@ -176,8 +176,8 @@ for batch in pipeline:
 
 Note that the pipeline does not do anything until you start iterating over it.
 Each processing step in the chain is called an **operator**. You typically
-instantiate operator classes yourself; the Pipeline builder creates and wires
-them for you. Some of the key built-in operators are:
+do not instantiate built-in operator classes yourself; the Pipeline builder
+creates and wires them for you. Some of the key built-in operators are:
 
 - {py:meth}`~zephon.Pipeline.tokenize` --- tokenize text using any
   HuggingFace-compatible tokenizer
@@ -193,11 +193,11 @@ them for you. Some of the key built-in operators are:
 - {py:meth}`~zephon.Pipeline.pack_sequences` --- bin-pack short
   tokenized sequences into full-length samples
 
-```{note}
-The design about custom operators is currently still a bit in flux. We might add
-an API/interface to allow fully custom operators beyond map transformations down
-the line.
-```
+For custom processing, use `map_transform`, `map_batch`, or
+`stateful_transform`. Advanced users can attach a custom
+{py:class}`~zephon.ops.BaseOp` with {py:meth}`~zephon.Pipeline.add_op`.
+See [Accumulators and Operators](understanding/accumulators_operators.md) for
+the operator contract and state-management rules.
 
 Operators can have different input-output relationships: most transform one
 sample into one output (**1:1**), but tokenization can split a long document
@@ -215,7 +215,8 @@ shard file, and loads the sample's raw payload into a
 {py:class}`~zephon.types.SampleRecord`. All subsequent operators work on this
 loaded data.
 
-When loading from remote storage (S3, GCS, maybe even on a slow DFS), you can optionally insert a
+When loading from remote storage (like object storage or maybe even a slow
+DFS), you can optionally insert a
 ``PrefetchOp`` that looks ahead in the pointer stream and
 downloads shards to a local cache before they are needed. This reduces fetch
 latency without changing the data in any way. It is purely a performance
@@ -332,7 +333,7 @@ based on operator properties and any overrides you provide via
 {py:meth}`~zephon.Pipeline.explain` (shown
 [below](#inspecting-your-pipeline)).
 
-Three runner types are currently available:
+Three stable local runner types are currently available:
 
 | Runner | How it works | Best for |
 |---|---|---|
@@ -349,10 +350,19 @@ threads to avoid any potential serialization of tensors. You can
 override the runner for any stage via `Pipeline.options(per_stage_runner=...)`.
 
 ```{note}
-The default of threads is to ensure quick iteration and prototyping. 
-Unless you are using GIL-free Python, you probably want to use the process-based runner. We will elaborate on the runners and their tradeoffs in a future version of this documentation.
-The API on how to assign runners to stage and set stage breaks is also still a bit in flux.
+Threads are the default because they have low setup and communication overhead.
+Processes can improve CPU-bound Python operators on builds with the GIL, but
+they add serialization and IPC costs; free-threaded Python can make threads a
+better fit for CPU-bound work as well. Inspect the actual stage layout with
+`explain()` and benchmark representative data before overriding runners.
+`per_stage_runner` is an advanced option because stage indices refer to the
+compiled plan and may change when the pipeline changes.
 ```
+
+Zephon also contains an experimental Ray-backed remote runner. It is available
+for research and prototyping, but its public configuration and production
+multi-node failure behavior are not yet stable, so it is not part of the
+default onboarding path.
 
 Each operator within a stage has a configurable **parallelism**, i.e., the
 number of concurrent workers that execute it. For example, `fetch` and

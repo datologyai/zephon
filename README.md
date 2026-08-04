@@ -17,11 +17,11 @@ Zephon is a high-performance data loading library that separates **what** you tr
 
 - 🔁 **Elastic determinism** -- checkpoint on 8 GPUs, resume on 4 (or 32). The global sample order is preserved across topology changes. Execution parameters (parallelism, runner type, micro-batch size) are pure performance knobs that never change data order.
 - ⚡ **Online processing** -- tokenize, pack sequences, filter, and mix datasets on the fly. No separate preprocessing step needed.
-- 📂 **Format-agnostic** -- JSONL, Parquet, MosaicML Streaming/MDS, LitData, and Vortex out of the box, with automatic format detection.
+- 📂 **Format-agnostic** -- automatic format detection for JSONL, Parquet, MosaicML Streaming/MDS, LitData, and Vortex.
 - ☁️ **Cloud-native** -- stream from S3, GCS, or Azure with optional prefetching that warms a local cache ahead of consumption. Local and HPC distributed filesystems work out of the box as well.
 - 🔗 **Composable pipeline API** -- fluent builder with built-in operators for tokenization, batching, shuffling, sequence packing, and mixture enforcement.
 - 💾 **Deterministic checkpointing** -- save and restore full pipeline state for fault-tolerant training with chunk-level granularity.
-- 🧩 **Pluggable runners** -- swap the execution substrate without changing your pipeline. Run stages in threads (future-proof for free-threaded Python), processes, or — coming soon — Ray for disaggregated preprocessing.
+- 🧩 **Pluggable runners** -- run stages inline, in threads, in processes, or on Ray (experimental).
 - 🔥 **Framework-agnostic** -- your data pipeline shouldn't be coupled to your training framework. Zephon pipelines are plain Python iterables that work with PyTorch, JAX, TensorFlow, or anything else, with first-class integrations for `torch.DataLoader` and `torchdata.StatefulDataLoader`.
 
 ---
@@ -31,41 +31,34 @@ Zephon is a high-performance data loading library that separates **what** you tr
 ### Installation
 
 ```bash
-pip install "zephon @ git+ssh://git@github.com/datologyai/zephon.git"
+uv pip install zephon
+
+# Hugging Face tokenizer support used by the example below
+uv pip install transformers
 
 # With cloud storage support (S3, GCS, Azure)
-pip install "zephon[cloud] @ git+ssh://git@github.com/datologyai/zephon.git"
+uv pip install "zephon[cloud]"
 
 # Format-specific extras
-pip install "zephon[parquet] @ git+ssh://git@github.com/datologyai/zephon.git"
-pip install "zephon[streaming] @ git+ssh://git@github.com/datologyai/zephon.git"
-pip install "zephon[litdata] @ git+ssh://git@github.com/datologyai/zephon.git"
+uv pip install "zephon[parquet]"
+uv pip install "zephon[streaming]"
+uv pip install "zephon[litdata]"
 ```
 
 ### Your First Pipeline
 
 ```python
 from zephon import Pipeline
-from zephon.io import Dataset, InMemoryShard
+from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
-# 1. Define your data
-shards = {
-    0: InMemoryShard(
-        [
-            {"text": "Hello world"},
-            {"text": "Zephon is fast"},
-            {"text": "Data loading made easy"},
-        ]
-    )
-}
-ds = Dataset.from_dict("demo", shards)
+# 1. Point Zephon at your training data
+dataset = Dataset.from_path("train", "/data/train/")
 
 # 2. Declare what to train on
 ws = StaticMixtureWorkSource(
-    datasets=[ds],
-    mixture=MixtureSpec({"demo": 1.0}),
-    chunk_size=1,
+    datasets=[dataset],
+    mixture=MixtureSpec({"train": 1.0}),
     seed=42,
 )
 
@@ -73,49 +66,21 @@ ws = StaticMixtureWorkSource(
 pipeline = (
     Pipeline(ws)
     .decode_text()
-    .tokenize(tokenizer_id="gpt2", field="text", parallelism=4)
-    .batch(microbatch_size=8)
+    .tokenize(
+        tokenizer_id="gpt2",
+        field="text",
+        padding=True,
+        parallelism=1,
+        preserve_upstream_payload=True,  # Keep "text" field for display
+    )
+    .batch(microbatch_size=2, drop_last=False)
 )
 
 # 4. Iterate
 for batch in pipeline:
-    train_step(batch.to_training())
-```
-
-### Reading from Files
-
-Point `Dataset.from_path()` at a directory and Zephon auto-detects the format:
-
-```python
-from zephon import Pipeline
-from zephon.io import Dataset
-from zephon.work import MixtureSpec, StaticMixtureWorkSource
-
-ds = Dataset.from_path("fineweb", "/data/fineweb/")  # JSONL, Parquet, MDS, ...
-
-ws = StaticMixtureWorkSource(
-    datasets=[ds],
-    mixture=MixtureSpec({"fineweb": 1.0}),
-    chunk_size=16384,
-    seed=42,
-)
-
-pipeline = (
-    Pipeline(ws)
-    .prefetch(buffer_size=2048)  # warm cache from S3/GCS
-    .tokenize(
-        tokenizer_id="gpt2",
-        field="text",
-        max_length=2048,
-        split_long_samples=True,
-        parallelism=8,
-    )
-    .ensure_mixture()  # correct token-level ratios
-    .batch(microbatch_size=8)
-)
-
-for batch in pipeline:
-    train_step(batch.to_training())
+    training_batch = batch.to_training()
+    print(training_batch["texts"])
+    train_step(training_batch)
 ```
 
 ### Mixing Datasets
@@ -181,7 +146,7 @@ Full documentation is available at [datologyai.github.io/zephon](https://datolog
 - [Basic Concepts](https://datologyai.github.io/zephon/basic_concepts.html) -- WorkSources, Pipelines, Operators, Runners, and the Engine
 - [Elastic Determinism](https://datologyai.github.io/zephon/understanding/determinism.html) -- reproducibility guarantees across GPU counts
 - [Checkpointing](https://datologyai.github.io/zephon/understanding/checkpointing.html) -- fault-tolerant training with mid-epoch resumption
-- [API Reference](https://datologyai.github.io/zephon/api/zephon_api.html) -- full Pipeline and operator reference
+- [API Reference](https://datologyai.github.io/zephon/api/zephon_pipeline.html) -- full Pipeline and operator reference
 
 ## 📄 License
 

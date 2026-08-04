@@ -4,6 +4,15 @@ This section contains complete, runnable examples demonstrating Zephon's feature
 
 ## Basic Examples
 
+### Your First Pipeline
+
+The file-backed tokenization and batching example used by the Quick Start guide:
+
+```{literalinclude} ../../../examples/your_first_pipeline.py
+:language: python
+:caption: examples/your_first_pipeline.py
+```
+
 ### Basic Pipeline
 
 A minimal example showing pipeline construction and iteration:
@@ -47,6 +56,9 @@ Using prefetch for remote data with reduced latency:
 All examples can be run directly with `uv`:
 
 ```bash
+# Quick Start pipeline
+uv run python examples/your_first_pipeline.py
+
 # Basic pipeline
 uv run python examples/run_basic.py
 

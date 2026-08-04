@@ -74,18 +74,23 @@ uv run python examples/run_mixture.py    # Dataset mixture
 
 ```
 zephon/
-├── api/          # User-facing Pipeline builder
-├── core/         # Engine, graph, planner, constants
-├── io/           # Datasets, storage backends, formats
-├── ops/          # Operators (batch, tokenize, shuffle, etc.)
-├── runners/      # Stage execution (inline, threads, process)
-├── work/         # WorkSource and chunk management
-└── observability/# Metrics and stats
+├── pipeline.py   # Public Pipeline entry point
+├── options.py    # Public runtime configuration
+├── io/           # Public datasets, storage options, and indexing APIs
+├── ops/          # Public operator-authoring contracts
+├── work/         # Public WorkSource and mixture APIs
+├── observability/# Public metrics and execution tracking APIs
+└── _internal/    # Private graph, planner, engine, runners, and built-in ops
 
 tests/
 ├── integration/  # End-to-end tests (use make integration)
 └── zephon/       # Unit tests mirroring source structure
 ```
+
+Consumer code must use the public modules shown above. Extend a pipeline with
+`Pipeline.map_transform()`, `Pipeline.add_op()`, or a custom public `BaseOp`
+rather than importing or modifying the private graph, planner, engine, or
+runner modules.
 
 ## Optional Format Dependencies
 
