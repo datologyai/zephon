@@ -13,7 +13,6 @@ from zephon._internal.io.formats.base import get_format
 from zephon._internal.io.memory import InMemoryDatasetStore
 from zephon._internal.io.protocols import (
     DatasetShardView,
-    MultiDatasetShardStore,
     RandomAccessShard,
 )
 from zephon._internal.io.resolvers import CacheManager, DirectResolver, ShardResolver
@@ -221,7 +220,7 @@ def build_multi_dataset_store(
     *,
     storage: StorageBackend | None = None,
     options: StoreOptions | None = None,
-) -> MultiDatasetShardStore:
+) -> DatasetStoreRegistry:
     """Construct a registry-backed multi-dataset store mixing inmem and file-backed.
 
     Creates a single resolver (cache-backed or direct) and a per-dataset view
@@ -231,7 +230,9 @@ def build_multi_dataset_store(
     catalog_set = build_catalog_set(datasets)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
 
-    registry = DatasetStoreRegistry()
+    registry = DatasetStoreRegistry(
+        on_close=resolver.close if isinstance(resolver, CacheManager) else None
+    )
     for dataset_id, dataset in datasets.items():
         backend = dataset.backend
         kind = backend.get("kind") if isinstance(backend, dict) else None

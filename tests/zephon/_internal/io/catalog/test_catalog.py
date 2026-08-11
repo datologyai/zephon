@@ -605,3 +605,25 @@ def test_resolve_catalog_dir_falls_back_to_tmp(
     # No cache, no env override (``None`` mirrors the no-Engine direct/test path).
     monkeypatch.delenv("ZEPHON_CATALOG_DIR", raising=False)
     assert resolve_catalog_dir(None) == handle_mod._default_tmp_dir()
+
+
+def test_dataset_inspector_does_not_reconfigure_catalog_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zephon.debug import DatasetInspector
+    from zephon.io import Dataset
+
+    configured = tmp_path / "configured-catalog"
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(configured))
+    set_catalog_dir(StoreOptions())
+
+    root = tmp_path / "dataset"
+    root.mkdir()
+    (root / "part-000.jsonl").write_text('{"text": "first"}\n', encoding="utf-8")
+    dataset = Dataset.from_path("tiny", str(root), fmt="jsonl")
+
+    monkeypatch.setenv("ZEPHON_CATALOG_DIR", str(tmp_path / "different-catalog"))
+    with DatasetInspector(dataset) as inspector:
+        assert inspector.read(0, 0) == {"text": "first"}
+
+    assert handle_mod._catalog_dir() == configured

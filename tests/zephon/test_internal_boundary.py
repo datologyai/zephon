@@ -79,6 +79,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
     ),
+    # Inspector lifecycle coverage verifies its internal cache owner is closed.
+    "tests/zephon/debug/test_inspector.py": frozenset(
+        {"zephon._internal.io.resolvers:CacheManager"}
+    ),
     # Op classes and traits are not exposed by the fluent API.
     "tests/zephon/test_pipeline_builder.py": frozenset(
         {

@@ -18,6 +18,7 @@ import zephon
 EXPECTED_PUBLIC_MODULES = {
     "zephon.build_index",
     "zephon.debug",
+    "zephon.debug.inspector",
     "zephon.debug.semaphore_registry",
     "zephon.debug.semaphore_tracker",
     "zephon.io",
@@ -152,6 +153,7 @@ EXPECTED_ALL = {
         "preflight_tokenizers",
     ],
     "zephon.debug": [
+        "DatasetInspector",
         "dump_semaphore_leak_report",
         "dump_semaphore_registry",
         "install_debug_hooks",
@@ -163,6 +165,9 @@ EXPECTED_ALL = {
         "RegistrationInfo",
         "dump_semaphore_leak_report",
         "install_debug_hooks",
+    ],
+    "zephon.debug.inspector": [
+        "DatasetInspector",
     ],
     "zephon.io.dataset": [
         "Dataset",

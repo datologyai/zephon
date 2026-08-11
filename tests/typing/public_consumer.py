@@ -19,6 +19,7 @@ from zephon import (
     WorkSource,
 )
 from zephon.build_index import build_index
+from zephon.debug import DatasetInspector
 from zephon.io import CacheOptions, StoreOptions
 from zephon.observability import (
     ExecutionTrackingMode,
@@ -40,6 +41,15 @@ def build_pipeline() -> Pipeline:
     store: StoreOptions = opts.io_options
     _ = (store, CacheOptions(), ExecutionTrackingMode.OFF, opts)
     return Pipeline(ws).options(max_workers=4, ipc_transport=transport)
+
+
+def inspect_dataset() -> None:
+    dataset = Dataset.from_dict("d", {0: InMemoryShard([{"text": "x"}])})
+    inspector: DatasetInspector = DatasetInspector(dataset)
+    with inspector:
+        row = inspector.read(shard_id=0, sample_index=0)
+        rows = inspector.read_many(shard_id=0, sample_indices=[0])
+        _ = (row, rows)
 
 
 def inspect_stats(pipe: Pipeline) -> MTPQueueStats | None:
