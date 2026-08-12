@@ -983,7 +983,9 @@ class CacheManager(ShardResolver):
                 time.sleep(min(1.0 * (attempt + 1), 5.0))
 
     def _decompress_stream(self, src: Path, dst_tmp: Path, compression: str) -> None:
-        algo = (compression or "").lower()
+        # LitData/MDS store write-time level as ``algo:level`` (e.g. ``zstd:7``).
+        # Decompression only needs the algorithm name.
+        algo = (compression or "").lower().split(":", 1)[0]
         dst_tmp.parent.mkdir(parents=True, exist_ok=True)
         opener: Opener
         if algo in {"gz", "gzip"}:

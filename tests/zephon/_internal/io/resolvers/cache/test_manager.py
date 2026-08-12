@@ -170,6 +170,39 @@ def test_resolve_with_gzip_decompression_and_keep_zip(tmp_path: Path) -> None:
         mgr2.close()
 
 
+def test_resolve_with_zstd_level_suffix_compression(tmp_path: Path) -> None:
+    """LitData encodes write level as ``zstd:N``; cache resolve must accept it."""
+    zstd = pytest.importorskip("zstd")
+
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    raw_name = "chunk.bin"
+    zip_name = raw_name + ".zstd:7"
+    payload = b"litdata zstd level suffix payload\n" * 20
+    _make_file(remote / zip_name, zstd.compress(payload, 7))
+
+    storage = LocalFSBackend(root=remote)
+    loc = _locator(
+        dataset="lit",
+        shard_id=7,
+        root=str(remote),
+        raw_name=raw_name,
+        raw_bytes=len(payload),
+        zip_name=zip_name,
+        zip_bytes=(remote / zip_name).stat().st_size,
+        compression="zstd:7",
+    )
+
+    mgr = _make_manager(cache_root, storage, [loc], keep_zip=False)
+    try:
+        ref = mgr.resolve(loc)
+        assert ref.raw.path.is_file()
+        assert ref.raw.path.read_bytes() == payload
+        assert ref.compression == "zstd:7"
+    finally:
+        mgr.close()
+
+
 def test_validate_hash_mismatch_raises_and_removes_file(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"
