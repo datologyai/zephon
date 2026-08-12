@@ -9,8 +9,10 @@ SpecialTokensMode: TypeAlias = Literal[
     "bos_eos", "bos", "eos", "none", "tokenizer_default"
 ]
 
+MissingFieldMode: TypeAlias = Literal["error", "empty"]
+
 SpanSource: TypeAlias = Literal["auto", "generation_tags", "prefix_diff"]
 
 PackingAlgorithm: TypeAlias = Literal["first_fit", "best_fit", "wrap", "best_fit_wrap"]
 
-__all__ = ["PackingAlgorithm", "SpanSource", "SpecialTokensMode"]
+__all__ = ["MissingFieldMode", "PackingAlgorithm", "SpanSource", "SpecialTokensMode"]

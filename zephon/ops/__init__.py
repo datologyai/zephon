@@ -20,7 +20,12 @@ from zephon.ops.children import (
     tombstone_meta,
     tombstones_for_record,
 )
-from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
+from zephon.ops.config import (
+    MissingFieldMode,
+    PackingAlgorithm,
+    SpanSource,
+    SpecialTokensMode,
+)
 from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
 
@@ -29,6 +34,7 @@ __all__ = [
     "BaseOp",
     "CountingAccumulator",
     "DomainGroups",
+    "MissingFieldMode",
     "OpContext",
     "OpTraits",
     "PackingAlgorithm",

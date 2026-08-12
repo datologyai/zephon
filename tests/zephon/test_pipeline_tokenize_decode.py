@@ -110,6 +110,29 @@ def test_pipeline_tokenize_forwards_special_tokens_params() -> None:
     assert op._bos_id_override == 42
 
 
+def test_pipeline_tokenize_forwards_missing_field_policy() -> None:
+    from zephon._internal.ops.tokenize_text import TokenizeText
+
+    ds = make_inmem_dataset("tiny", [{"text": "hello"}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds)).tokenize(
+        tokenizer_id="__fallback__", field="text", missing_field="empty"
+    )
+    op = pipe._tail.op
+    assert isinstance(op, TokenizeText)
+    assert op.missing_field == "empty"
+
+
+def test_pipeline_tokenize_signature_uses_missing_field_mode_literal() -> None:
+    import inspect
+
+    from zephon.ops.config import MissingFieldMode
+    from zephon.pipeline import Pipeline
+
+    parameter = inspect.signature(Pipeline.tokenize).parameters["missing_field"]
+    assert parameter.annotation is MissingFieldMode
+    assert parameter.default == "error"
+
+
 def test_pipeline_tokenize_signature_uses_special_tokens_mode_literal() -> None:
     """The Literal alias on ``Pipeline.tokenize`` lets SDK users see the
     five valid mode strings in autocomplete and have static checkers narrow

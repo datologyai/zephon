@@ -69,6 +69,7 @@ EXPECTED_ALL = {
         "BaseOp",
         "CountingAccumulator",
         "DomainGroups",
+        "MissingFieldMode",
         "OpContext",
         "OpTraits",
         "PackingAlgorithm",
@@ -229,6 +230,7 @@ EXPECTED_ALL = {
         "tombstones_for_record",
     ],
     "zephon.ops.config": [
+        "MissingFieldMode",
         "PackingAlgorithm",
         "SpanSource",
         "SpecialTokensMode",

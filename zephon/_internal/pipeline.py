@@ -58,7 +58,12 @@ from zephon.observability.stats import (
 )
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
-from zephon.ops.config import PackingAlgorithm, SpanSource, SpecialTokensMode
+from zephon.ops.config import (
+    MissingFieldMode,
+    PackingAlgorithm,
+    SpanSource,
+    SpecialTokensMode,
+)
 from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
 from zephon.options import RuntimeOptions
@@ -803,6 +808,7 @@ class Pipeline:
         tokenizer_id: str | None = None,
         *,
         field: str,
+        missing_field: MissingFieldMode = "error",
         add_attention_mask: bool = True,
         max_length: int | None = None,
         padding: bool | str = False,
@@ -821,6 +827,7 @@ class Pipeline:
             tokenizer,
             tokenizer_id,
             field=field,
+            missing_field=missing_field,
             add_attention_mask=add_attention_mask,
             max_length=max_length,
             padding=padding,

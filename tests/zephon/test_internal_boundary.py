@@ -129,6 +129,7 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.tokenize_chat:ChatTokenCountingSpec",
             "zephon._internal.token_counting:CountPlan",
             "zephon._internal.token_counting:DeliveredTokenCounter",
+            "zephon._internal.token_counting:FatalCountError",
             "zephon._internal.token_counting:TextTokenCountingSpec",
             "zephon._internal.token_counting:_TextCounter",
             "zephon._internal.utils.tokenizer:fallback_tokenizer",

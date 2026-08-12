@@ -16,6 +16,7 @@ import cloudpickle
 import numpy as np
 
 from zephon._internal.utils.tokenizer import load_hf_tokenizer
+from zephon.ops.config import MissingFieldMode
 
 if TYPE_CHECKING:
     from zephon._internal.ops.tokenize_text import TokenizeText
@@ -25,6 +26,8 @@ _COMMON_TEXT_KEYS = ("text", "content", "document", "body", "markdown", "raw_con
 
 #: Token-array keys tried the same way for already-tokenized payloads.
 _COMMON_TOKEN_KEYS = ("input_ids", "tokens", "token_ids")
+
+_MISSING_FIELD: object = object()
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +39,7 @@ def _lookup_field_path(payload: Any, path: tuple[str, ...] | None) -> Any:
     value = payload
     for key in path or ():  # falsy path resolves to the payload itself
         if not isinstance(value, Mapping) or key not in value:
-            return None
+            return _MISSING_FIELD
         value = value[key]
     return value
 
@@ -220,6 +223,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
     """Token-counting settings for ``TokenizeText`` and default calibration."""
 
     field: str | None = None
+    missing_field: MissingFieldMode = "error"
     max_length: int | None = None
     truncation: bool = False
     split_long_samples: bool = False
@@ -240,6 +244,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
             tokenizer=op.tok,
             tokenizer_id=op.tokenizer_id,
             field=op.field,
+            missing_field=op.missing_field,
             max_length=op.max_length,
             truncation=op.truncation,
             split_long_samples=op.split_long_samples,
@@ -304,7 +309,21 @@ class _TextPlan(CountPlan):
         return f"text, field: {_field_label(self.path)}"
 
     def count(self, payload: Any) -> int | None:
-        text = extract_text(payload, self.path)
+        if self.path is not None and isinstance(payload, Mapping):
+            value = _lookup_field_path(payload, self.path)
+            if value is _MISSING_FIELD:
+                if self.spec.missing_field == "error":
+                    raise FatalCountError(
+                        "TokenizeText calibration payload has no resolvable "
+                        + f"{self.spec.field!r} field"
+                    )
+                text = ""
+            else:
+                text = _as_text(value)
+        else:
+            # TokenizeText treats non-mapping payloads as direct text values even
+            # when ``field`` is configured, so calibration mirrors that behavior.
+            text = extract_text(payload, self.path)
         if text is None:
             return None
         delivered = self.spec.delivered_tokens(

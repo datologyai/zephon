@@ -8,6 +8,7 @@ import pytest
 
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.token_counting import (
+    FatalCountError,
     TextTokenCountingSpec,
     _count_raw_tokens,
     _pretokenized_field,
@@ -70,6 +71,7 @@ def test_text_spec_from_op_captures_count_fields():
     op = TokenizeText(
         tokenizer=tok,
         field="text",
+        missing_field="empty",
         max_length=128,
         truncation=True,
         special_tokens="bos",
@@ -77,6 +79,7 @@ def test_text_spec_from_op_captures_count_fields():
     spec = TextTokenCountingSpec.from_op(op)
     assert spec.tokenizer is tok
     assert spec.field == "text"
+    assert spec.missing_field == "empty"
     assert spec.max_length == 128
     assert spec.truncation is True
     assert spec.split_long_samples is False
@@ -319,6 +322,23 @@ def test_plan_delivery_uses_configured_field_path():
     plan = _plan([{"doc": {"text": "x"}}], field="doc.text")
     assert isinstance(plan, _TextPlan)
     assert plan.path == ("doc", "text")
+
+
+def test_text_plan_missing_configured_field_is_fatal_by_default():
+    plan = _plan([{"input_ids": np.arange(5)}], field="text")
+    with pytest.raises(FatalCountError, match="no resolvable 'text' field"):
+        plan.count({"input_ids": np.arange(5)})
+
+
+def test_text_plan_missing_configured_field_empty_opt_in_counts_specials():
+    spec = TextTokenCountingSpec(field="text", missing_field="empty")
+    plan = _TextCounter(fallback_tokenizer(), spec).plan([{"input_ids": [1, 2]}])
+    assert plan.count({"input_ids": [1, 2]}) == 2
+
+
+def test_text_plan_configured_field_keeps_direct_string_payload_support():
+    plan = _plan(["hello world"], field="text")
+    assert plan.count("hello world") == 4
 
 
 def test_plan_delivery_prefix_outvotes_anomalous_first_payload():

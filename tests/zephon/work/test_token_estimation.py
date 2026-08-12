@@ -19,6 +19,7 @@ from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon._internal.token_counting import (
     CountPlan,
     DeliveredTokenCounter,
+    FatalCountError,
     TextTokenCountingSpec,
     _TextCounter,
 )
@@ -592,7 +593,9 @@ def test_measure_dataset_falls_back_when_plan_coverage_is_low():
         est,
         _TextCounter(
             fallback_tokenizer(),
-            TextTokenCountingSpec(field="text", special_tokens="none"),
+            TextTokenCountingSpec(
+                field="text", missing_field="empty", special_tokens="none"
+            ),
         ),
         seed=1,
     )
@@ -601,6 +604,23 @@ def test_measure_dataset_falls_back_when_plan_coverage_is_low():
     assert "measured only" in m.reason
     assert "(text, field: text)" in m.reason
     assert m.retryable is False
+
+
+def test_measure_dataset_missing_required_text_field_is_fatal():
+    row = {"input_ids": np.arange(8, dtype=np.int64)}
+    ds = _uniform_dataset("d", row, per_shard=20)
+    store = build_multi_dataset_store({0: ds})
+    counter = _TextCounter(fallback_tokenizer(), TextTokenCountingSpec(field="text"))
+
+    with pytest.raises(FatalCountError, match="no resolvable 'text' field"):
+        _measure_dataset(
+            ds,
+            0,
+            store,
+            TokenEstimation(calibration_samples=50),
+            counter,
+            seed=1,
+        )
 
 
 class _PoisonTokenizer:

@@ -45,6 +45,11 @@ def _rec(text: Any, *, field: str = "text") -> SampleRecord:
     return SampleRecord(meta=meta, payload={field: text})
 
 
+def _raw_rec(payload: Any) -> SampleRecord:
+    meta = SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0)
+    return SampleRecord(meta=meta, payload=payload)
+
+
 def _payload_dict(record: SampleRecord) -> dict[str, Any]:
     payload = record.payload
     assert isinstance(payload, dict)
@@ -58,8 +63,7 @@ def test_tokenize_fallback_process_one_and_many() -> None:
     payload = _payload_dict(out1)
     assert "input_ids" in payload and "attention_mask" in payload
     # many
-    r2 = _rec("more words")
-    bulk = op.process_many([r1, r2])
+    bulk = op.process_many([_rec("hello again"), _rec("more words")])
     assert len(bulk) == 2
     for rec in bulk:
         payload = _payload_dict(rec)
@@ -67,21 +71,51 @@ def test_tokenize_fallback_process_one_and_many() -> None:
         assert "attention_mask" in payload
 
 
-def test_tokenize_custom_field_and_missing_field() -> None:
+def test_tokenize_missing_field_raises_by_default() -> None:
     op = _setup(
         TokenizeText(
             tokenizer=None,
             tokenizer_id="__fallback__",
             field="title",
-            special_tokens="tokenizer_default",
         )
     )
     r = _rec("ignored", field="text")  # text present, but tokenizer uses "title"
-    out = op.process_one(r)[0]
-    # When field is missing, fallback tokenizer sees empty string
+    with pytest.raises(ValueError) as exc_info:
+        op.process_one(r)
+    message = str(exc_info.value)
+    assert "sample (0, 0, 0)" in message
+    assert "'title' field" in message
+    assert "'text'" in message
+
+
+def test_tokenize_missing_field_empty_opt_in() -> None:
+    op = _setup(
+        TokenizeText(
+            tokenizer=None,
+            tokenizer_id="__fallback__",
+            field="title",
+            missing_field="empty",
+        )
+    )
+    out = op.process_one(_rec("ignored", field="text"))[0]
     payload = _payload_dict(out)
-    assert payload.get("input_ids", []) == []
-    assert payload.get("attention_mask", []) == []
+    # ``empty`` substitutes empty text; the default brackets still apply.
+    assert payload["input_ids"] == [1, 2]
+    assert payload["attention_mask"] == [1, 1]
+
+
+def test_tokenize_missing_field_empty_opt_in_without_specials() -> None:
+    op = _setup(
+        TokenizeText(
+            tokenizer_id="__fallback__",
+            field="title",
+            missing_field="empty",
+            special_tokens="none",
+        )
+    )
+    payload = _payload_dict(op.process_one(_rec("ignored", field="text"))[0])
+    assert payload["input_ids"] == []
+    assert payload["attention_mask"] == []
 
 
 def test_tokenize_nested_field_dot_path() -> None:
@@ -105,8 +139,7 @@ def test_tokenize_nested_field_dot_path() -> None:
     assert len(payload.get("input_ids", [])) == 2
 
 
-def test_tokenize_nested_field_missing_intermediate() -> None:
-    """Missing intermediate key resolves to empty string, not an error."""
+def test_tokenize_nested_field_missing_intermediate_raises() -> None:
     op = _setup(
         TokenizeText(
             tokenizer=None,
@@ -116,13 +149,11 @@ def test_tokenize_nested_field_missing_intermediate() -> None:
         )
     )
     # ``text`` is absent entirely
-    out = op.process_one(_rec("ignored", field="other"))[0]
-    payload = _payload_dict(out)
-    assert payload.get("input_ids", []) == []
+    with pytest.raises(ValueError, match="'text.content' field"):
+        op.process_one(_rec("ignored", field="other"))
 
 
-def test_tokenize_nested_field_intermediate_not_mapping() -> None:
-    """Intermediate non-mapping value resolves to empty string."""
+def test_tokenize_nested_field_intermediate_not_mapping_raises() -> None:
     op = _setup(
         TokenizeText(
             tokenizer=None,
@@ -132,9 +163,29 @@ def test_tokenize_nested_field_intermediate_not_mapping() -> None:
         )
     )
     # ``text`` exists but is a scalar, not a mapping
-    out = op.process_one(_rec("scalar text"))[0]
-    payload = _payload_dict(out)
-    assert payload.get("input_ids", []) == []
+    with pytest.raises(ValueError, match="'text.content' field"):
+        op.process_one(_rec("scalar text"))
+
+
+def test_missing_field_validates_full_batch_before_record_mutation() -> None:
+    op = _setup(TokenizeText(tokenizer_id="__fallback__", field="text"))
+    valid = _rec("keep me")
+    missing = _rec([101, 102], field="input_ids")
+
+    with pytest.raises(ValueError, match="'text' field"):
+        op.process_many([valid, missing])
+
+    assert valid.payload == {"text": "keep me"}
+    assert missing.payload == {"input_ids": [101, 102]}
+
+
+def test_invalid_missing_field_mode_raises_in_init() -> None:
+    with pytest.raises(ValueError, match="missing_field must be one of"):
+        TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            missing_field="skip",  # type: ignore[arg-type]
+        )
 
 
 def test_tokenize_disable_attention_mask() -> None:
@@ -481,14 +532,14 @@ def test_tokenizes_non_mapping_payload_with_warning(
 ) -> None:
     caplog.set_level(logging.WARNING, logger="zephon._internal.ops.tokenize_text")
     op = _setup(TokenizeText(tokenizer=None, tokenizer_id="__fallback__", field="text"))
-    rec = _rec("hello world")
-    rec = SampleRecord(meta=rec.meta, payload="plain string")
+    rec = _raw_rec("plain string")
     out = op.process_one(rec)[0]
     payload = _payload_dict(out)
     assert payload["input_ids"]
     assert any("expected mapping payloads" in r.message for r in caplog.records)
     caplog.clear()
-    _ = op.process_one(rec)
+    fresh = _raw_rec("another string")
+    _ = op.process_one(fresh)
     assert not caplog.records  # warning only once
 
 
@@ -504,15 +555,18 @@ def test_preserve_payload_warns_when_non_mapping(
             preserve_upstream_payload=True,
         )
     )
-    rec = SampleRecord(meta=_rec("hi").meta, payload="raw string")
+    rec = _raw_rec("raw string")
     out = op.process_one(rec)[0]
     payload = _payload_dict(out)
     assert "text" not in payload
     assert "input_ids" in payload
     assert any("preserve_upstream_payload" in r.message for r in caplog.records)
     caplog.clear()
-    _ = op.process_one(rec)
-    assert not caplog.records  # warning only once
+    fresh = _raw_rec("another raw string")
+    _ = op.process_one(fresh)
+    assert not any(
+        "preserve_upstream_payload" in record.message for record in caplog.records
+    )  # preserve warning only once
 
 
 def test_tokenizer_initializes_on_first_process() -> None:

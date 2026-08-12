@@ -34,9 +34,15 @@ from zephon._internal.utils.torch_compat import (
 )
 from zephon.ops.base import OpContext
 from zephon.ops.children import spawn_child
-from zephon.ops.config import SpecialTokensMode
+from zephon.ops.config import MissingFieldMode, SpecialTokensMode
 from zephon.ops.traits import OpTraits
-from zephon.types import SampleMeta, SamplePayload, SamplePayloadDict, SampleRecord
+from zephon.types import (
+    SampleId,
+    SampleMeta,
+    SamplePayload,
+    SamplePayloadDict,
+    SampleRecord,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -46,6 +52,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _VALID_SPECIAL_TOKENS_MODES: tuple[str, ...] = typing.get_args(SpecialTokensMode)
+_VALID_MISSING_FIELD_MODES: tuple[str, ...] = typing.get_args(MissingFieldMode)
 
 TokenSeq: TypeAlias = Union[
     "np.ndarray", "torch.Tensor", "tf.Tensor", Sequence[int], list[int]
@@ -63,6 +70,7 @@ class TokenizeText(TokenizeBase):
         tokenizer_id: str | None = None,
         *,
         field: str,
+        missing_field: MissingFieldMode = "error",
         add_attention_mask: bool = True,
         max_length: int | None = None,
         padding: bool | str = False,
@@ -85,6 +93,11 @@ class TokenizeText(TokenizeBase):
             tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
                 ``"__fallback__"`` selects a small in-process stub for tests.
             field: Dot-separated payload path of the text to tokenize.
+            missing_field: How to handle mapping payloads where ``field`` cannot be
+                resolved. ``"error"`` (default) raises before tokenization;
+                ``"empty"`` explicitly substitutes empty text. Special-token and
+                padding settings still apply to the substituted empty text, so the
+                default ``special_tokens="bos_eos"`` emits a BOS/EOS-only sequence.
             add_attention_mask: Emit ``attention_mask`` alongside ``input_ids``.
             max_length: Per-record cap on output length, in tokens *including* any
                 BOS/EOS added by ``special_tokens``. Only enforced as a hard
@@ -165,6 +178,12 @@ class TokenizeText(TokenizeBase):
                 + f"got {special_tokens!r}"
             )
 
+        if missing_field not in _VALID_MISSING_FIELD_MODES:
+            raise ValueError(
+                f"missing_field must be one of {_VALID_MISSING_FIELD_MODES}, "
+                + f"got {missing_field!r}"
+            )
+
         # HF accepts ``"do_not_pad"`` as a no-pad string; collapse to ``False``
         # so downstream ``if self.padding`` checks don't have to handle both.
         if padding == "do_not_pad":
@@ -225,6 +244,7 @@ class TokenizeText(TokenizeBase):
             max_latency_ms=max_latency_ms,
         )
         self.field = field
+        self.missing_field: MissingFieldMode = missing_field
         self._field_path: tuple[str, ...] = tuple(field.split(".")) if field else ()
         self.add_attention_mask = add_attention_mask
         self.max_length = max_length
@@ -359,15 +379,29 @@ class TokenizeText(TokenizeBase):
     def token_counting_spec(self) -> TextTokenCountingSpec:
         return TextTokenCountingSpec.from_op(self)
 
-    def _lookup_field(self, payload: Mapping[str, Any]) -> Any:
-        """Resolve ``self._field_path`` against a (possibly nested) mapping payload."""
+    def _lookup_field(self, payload: Mapping[str, Any], sample_id: SampleId) -> Any:
+        """Resolve ``self._field_path`` and enforce the missing-field policy."""
         value = self._lookup_path(payload, self._field_path)
-        return "" if value is _MISSING else value
+        if value is not _MISSING:
+            return value
+        if self.missing_field == "empty":
+            return ""
 
-    def _extract_text(self, payload: SamplePayload) -> tuple[str, SamplePayloadDict]:
+        available = sorted(repr(key) for key in payload)
+        shown = ", ".join(available[:8]) or "<none>"
+        if len(available) > 8:
+            shown += f", ... ({len(available)} total)"
+        raise ValueError(
+            f"TokenizeText: payload of sample {sample_id!r} has no resolvable "
+            + f"{self.field!r} field; available top-level fields: {shown}"
+        )
+
+    def _extract_text(
+        self, payload: SamplePayload, sample_id: SampleId
+    ) -> tuple[str, SamplePayloadDict]:
         if isinstance(payload, dict):
             # Safe cast: we expect the user to provide string fields as configured
-            text_value = cast(str, self._lookup_field(payload))
+            text_value = cast(str, self._lookup_field(payload, sample_id))
             if self.preserve_upstream_payload:
                 return text_value, payload
             # Fresh dict: drop upstream keys entirely
@@ -664,7 +698,7 @@ class TokenizeText(TokenizeBase):
         payloads: list[SamplePayloadDict] = []
 
         for elem in elems:
-            text, payload = self._extract_text(elem.payload)
+            text, payload = self._extract_text(elem.payload, elem.meta.sample_id)
             texts.append(text)
             metas.append(elem.meta)
             payloads.append(payload)
