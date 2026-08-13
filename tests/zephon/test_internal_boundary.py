@@ -47,6 +47,17 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.storage.hf:_DATASETS_SERVER_PARQUET_URL",
         }
     ),
+    # OFD locking has no public seam; integration coverage exercises OS behavior.
+    "tests/integration/test_ofd_locking.py": frozenset(
+        {
+            "zephon._internal.io:ofd_lock",
+            "zephon._internal.io.ofd_lock:OFDLockFile",
+            "zephon._internal.io.ofd_lock:OFDLockMode",
+            "zephon._internal.io.ofd_lock:OFDLockUnavailable",
+            "zephon._internal.io.ofd_lock:ofd_backend_info",
+            "zephon._internal.io.ofd_lock:probe_ofd_support",
+        }
+    ),
     # Internal patches make cache interleavings deterministic; metrics stay public.
     "tests/integration/test_prefetch_integration.py": frozenset(
         {
