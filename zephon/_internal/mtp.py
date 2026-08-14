@@ -116,6 +116,7 @@ _ACK = 0
 _CHECKPOINT = 1
 _SHUTDOWN = 2
 _STATE_DICT = 3
+_CHECKPOINT_ERROR = 4
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,10 @@ class _ErrorSentinel:
     """Subprocess-side exception propagation."""
 
     tb: str
+
+
+class _CheckpointFailureReported(Exception):
+    """Checkpoint failed after its traceback was sent on the control pipe."""
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +372,10 @@ def _mtp_worker(
             # Wait for remaining ACKs + commands until SHUTDOWN
             _wait_for_shutdown(ctrl_conn, pending, engine)
 
+    except _CheckpointFailureReported:
+        # The checkpoint caller already has the traceback.  Exit without also
+        # enqueueing an error on data_q, which the blocked caller is not reading.
+        pass
     except Exception:
         tb = traceback.format_exc()
         try:
@@ -397,8 +406,19 @@ def _handle_ctrl_msg(
         if notify is not None:
             _apply_notify_args(engine, notify)
     elif tag == _CHECKPOINT:
-        state = engine.state_dict()
-        ctrl_conn.send((_STATE_DICT, state))
+        try:
+            state = engine.state_dict()
+            ctrl_conn.send((_STATE_DICT, state))
+        except Exception:
+            # The caller is blocked in checkpoint(), not consuming data_q, so
+            # report the failure on the control pipe and then terminate.  A
+            # failed checkpoint may have partially mutated aggregation state;
+            # continuing this worker would be unsafe.
+            tb = traceback.format_exc()
+            try:
+                ctrl_conn.send((_CHECKPOINT_ERROR, tb))
+            finally:
+                raise _CheckpointFailureReported from None
     elif tag == _SHUTDOWN:
         return True
     return False
@@ -725,16 +745,31 @@ class MTPPipeline:
                 "*before* breaking out of the iteration loop to guarantee "
                 "a checkpoint is available."
             )
-        self._main_conn.send((_CHECKPOINT, None))
+        try:
+            self._main_conn.send((_CHECKPOINT, None))
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            exitcode = self._process.exitcode
+            self.close()
+            raise RuntimeError(
+                f"Failed to request MTP checkpoint because the subprocess control channel is closed (exit code {exitcode})"
+            ) from exc
         if not self._main_conn.poll(timeout):
+            self.close()
             raise RuntimeError(
                 f"Checkpoint timed out after {timeout}s; subprocess may be stuck or dead"
             )
         try:
             tag, val = self._main_conn.recv()
         except EOFError:
-            raise RuntimeError("Subprocess exited before responding to checkpoint")
+            self.close()
+            raise RuntimeError(
+                "Subprocess exited before responding to checkpoint"
+            ) from None
+        if tag == _CHECKPOINT_ERROR:
+            self.close()
+            raise RuntimeError(f"MTP checkpoint failed in subprocess:\n{val}")
         if tag != _STATE_DICT:
+            self.close()
             raise RuntimeError(f"Expected _STATE_DICT response, got tag={tag}")
         self._last_state = val
         return val
@@ -777,8 +812,12 @@ class MTPPipeline:
                     return
                 if tag == _STATE_DICT:
                     self._last_state = val
-                    return
-                # Ignore unexpected tags (e.g. stale responses).
+                elif tag == _CHECKPOINT_ERROR:
+                    warnings.warn(
+                        f"[zephon] MTP mode: checkpoint failed while capturing final state:\n{val}",
+                        stacklevel=2,
+                    )
+                return
 
             # Drain one item (no ACK) to free queue space and unblock the
             # subprocess's put-retry → _drain_ctrl loop.
@@ -792,6 +831,11 @@ class MTPPipeline:
                             tag, val = self._main_conn.recv()
                             if tag == _STATE_DICT:
                                 self._last_state = val
+                            elif tag == _CHECKPOINT_ERROR:
+                                warnings.warn(
+                                    f"[zephon] MTP mode: checkpoint failed while capturing final state:\n{val}",
+                                    stacklevel=2,
+                                )
                         except EOFError:
                             pass
                     return

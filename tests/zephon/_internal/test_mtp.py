@@ -18,6 +18,8 @@ import pytest
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon._internal.mtp import (
+    _CHECKPOINT,
+    _CHECKPOINT_ERROR,
     MTPPipeline,
     _lower_thread_priority,
     _prefetch_capacity,
@@ -26,6 +28,20 @@ from zephon._internal.mtp import (
 )
 from zephon._internal.runners.queue import NamedQueue, QueueFeederError
 from zephon.types import SampleBatch, SampleRecord
+
+
+class _CheckpointFailingWorkSource(FakeIndexableWorkSource):
+    """Work source whose first child-process checkpoint fails."""
+
+    _checkpoint_has_failed = False
+
+    def state_dict(self) -> dict[str, Any]:
+        # Engine checkpoints both lane clones and the root source.  A class
+        # flag makes exactly one call fail across those instances in the child.
+        if not type(self)._checkpoint_has_failed:
+            type(self)._checkpoint_has_failed = True
+            raise RuntimeError("deliberate MTP checkpoint failure")
+        return super().state_dict()
 
 
 def _fake_ckpt(**overrides: Any) -> dict[str, Any]:
@@ -156,9 +172,8 @@ class TestMTPQueueStats:
         it.close()
 
 
-class TestCaptureFinalStateFeederError:
-    """``capture_final_state`` runs in generator teardown — a data-queue
-    feeder error must surface as a warning, not raise into user code."""
+class TestCaptureFinalStateErrors:
+    """Final-state capture reports failures without raising during teardown."""
 
     def test_feeder_error_warns_and_preserves_state(self) -> None:
         ctx = multiprocessing.get_context("spawn")
@@ -190,6 +205,25 @@ class TestCaptureFinalStateFeederError:
             assert sp._last_state is prior_state
         finally:
             q.close()
+
+    def test_checkpoint_error_warns_and_preserves_state(self) -> None:
+        sp = object.__new__(MTPPipeline)
+        sp._closed = False
+        prior_state = {"prior": True}
+        sp._last_state = prior_state
+        sp._process = mock.Mock(**{"is_alive.return_value": True}, exitcode=None)
+        sp._prefetch = mock.Mock()
+        sp._main_conn = mock.Mock()
+        sp._main_conn.poll.return_value = True
+        sp._main_conn.recv.return_value = (
+            _CHECKPOINT_ERROR,
+            "remote traceback\nRuntimeError: exploded",
+        )
+
+        with pytest.warns(UserWarning, match="checkpoint failed"):
+            sp.capture_final_state(timeout=0.5)
+
+        assert sp._last_state is prior_state
 
 
 class TestPrefetcher:
@@ -325,6 +359,72 @@ class TestMTPCheckpoint:
             assert isinstance(ckpt, dict)
         finally:
             it.close()
+
+    def test_failure_propagates_traceback_and_terminates_worker(self) -> None:
+        rows = [{"text": f"row-{i}"} for i in range(5)]
+        ws = _CheckpointFailingWorkSource(
+            make_inmem_dataset("test", rows), chunk_size=5
+        )
+        pipe = (
+            PublicPipeline(ws)
+            .decode_text()
+            .options(
+                deterministic=True,
+                max_workers=1,
+                default_stage_prefetch=0,
+                prefetch_batches=0,
+                mtp_mode=True,
+                mtp_buffer=4,
+            )
+        )
+        it = iter(pipe)
+        try:
+            next(it)
+            sp = pipe._sp
+            assert sp is not None
+            with pytest.raises(
+                RuntimeError,
+                match="MTP checkpoint failed in subprocess",
+            ) as exc_info:
+                pipe.checkpoint()
+            assert "deliberate MTP checkpoint failure" in str(exc_info.value)
+            assert "Traceback (most recent call last)" in str(exc_info.value)
+            assert sp._closed
+            assert not sp._process.is_alive()
+        finally:
+            it.close()
+
+    def test_checkpoint_timeout_closes_worker(self) -> None:
+        sp = object.__new__(MTPPipeline)
+        sp._closed = False
+        sp._last_state = None
+        sp._process = mock.Mock(exitcode=None)
+        sp._main_conn = mock.Mock()
+        sp._main_conn.poll.return_value = False
+        sp.close = mock.Mock()
+
+        with pytest.raises(RuntimeError, match="Checkpoint timed out"):
+            sp.checkpoint(timeout=0.01)
+
+        sp._main_conn.send.assert_called_once_with((_CHECKPOINT, None))
+        sp.close.assert_called_once_with()
+
+    def test_checkpoint_error_response_raises_remote_traceback(self) -> None:
+        sp = object.__new__(MTPPipeline)
+        sp._closed = False
+        sp._last_state = None
+        sp._process = mock.Mock(exitcode=None)
+        sp._main_conn = mock.Mock()
+        sp._main_conn.poll.return_value = True
+        sp._main_conn.recv.return_value = (
+            _CHECKPOINT_ERROR,
+            "remote traceback\nRuntimeError: exploded",
+        )
+        sp.close = mock.Mock()
+
+        with pytest.raises(RuntimeError, match="RuntimeError: exploded"):
+            sp.checkpoint(timeout=0.5)
+        sp.close.assert_called_once_with()
 
     def test_restore_stashes_checkpoint(self) -> None:
         """In MTP mode, restore() stashes the checkpoint for later."""
