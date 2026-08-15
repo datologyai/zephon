@@ -3,13 +3,33 @@ name: Integration Tests
 permissions:
   contents: read
 
+# Integration collects only `-m integration`; no such test reads docs/ or a
+# top-level .md, so docs-only changes cannot affect this suite.
 on:
   push:
     branches:
       - main
       - release/*
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
   pull_request:
+    # Base-branch filter: stack-internal PRs (base = another feature branch)
+    # keep unit/lint signal but skip this 4-version matrix until they retarget
+    # main. Use workflow_dispatch to run one on demand.
+    branches:
+      - main
+      - release/*
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
   workflow_dispatch: {}
+
+# PR pushes cancel the superseded run; push/dispatch runs fall back to
+# run_id so they are always their own group and never cancel each other.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.head_ref || github.run_id }}"
+  cancel-in-progress: true
 
 jobs:
   integration:
