@@ -27,13 +27,13 @@ from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 import numpy as np
 
 from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra_codec
+from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
 from zephon._internal.io.formats.base import FormatHandler, register_format
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
-from zephon._internal.utils.thread_utils import cap_arrow_threads
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
@@ -41,89 +41,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Lazy import of PyArrow to avoid hard dependency
-_pa = None
-_pq = None
 _PARQUET_FOOTER_PREFETCH_BYTES = 64 * 1024
 
 
 def _ensure_pyarrow():
-    """Lazy import of PyArrow with helpful error message.
+    """Lazy import PyArrow's Parquet module through the shared loader."""
+    pa = require_pyarrow()
+    import pyarrow.parquet as pq
 
-    Caps PyArrow's CPU/IO thread pools on first import so a process that reads
-    Parquet does not oversubscribe cores across parallel fetch lanes, even if
-    it never called ``suppress_library_threads`` (e.g. the local runners).
-    """
-    global _pa, _pq
-    if _pa is None:
-        try:
-            import pyarrow as pa
-            import pyarrow.parquet as pq
-
-            _pa = pa
-            _pq = pq
-        except ImportError as exc:
-            raise ImportError(
-                "pyarrow is required for Parquet format support. "
-                "Install with: pip install zephon[parquet]"
-            ) from exc
-        cap_arrow_threads()
-    return _pa, _pq
-
-
-_CachedRG = dict[str, np.ndarray]
-
-
-def _arrow_table_to_numpy(table: Any) -> tuple[_CachedRG, int]:
-    """Convert an Arrow table to a dict of numpy arrays, zero-copy when possible.
-
-    Returns ``(columns, decoded_bytes)``. ``decoded_bytes`` uses Arrow's
-    ``table.nbytes`` because numpy object-dtype ``nbytes`` only counts the
-    pointer table, not the underlying payload.
-    """
-    pa, _ = _ensure_pyarrow()
-    decoded_bytes = table.nbytes
-    result: _CachedRG = {}
-    for name in table.column_names:
-        col = table.column(name)
-        arr = col.chunk(0) if col.num_chunks == 1 else col.combine_chunks()
-        col_type = arr.type
-
-        if isinstance(col_type, pa.lib.FixedSizeListType):
-            flat = arr.values.to_numpy(zero_copy_only=False)
-            result[name] = flat.reshape(len(arr), col_type.list_size)
-        elif isinstance(col_type, pa.lib.ListType):
-            offsets = arr.offsets.to_numpy(zero_copy_only=False)
-            values = arr.values.to_numpy(zero_copy_only=False)
-            rows = np.empty(len(arr), dtype=object)
-            for i in range(len(arr)):
-                rows[i] = values[offsets[i] : offsets[i + 1]]
-            result[name] = rows
-        else:
-            try:
-                result[name] = arr.to_numpy(zero_copy_only=False)
-            except Exception:
-                result[name] = np.array(arr.to_pylist(), dtype=object)
-    return result, decoded_bytes
-
-
-def _extract_row(columns: _CachedRG, idx: int) -> dict[str, object]:
-    """Materialize one record from the per-column arrays of a taken sub-table.
-
-    ``columns`` is decoded from a freshly ``take``-n sub-table (never the cache,
-    which holds only immutable Arrow buffers), so struct dicts and strings are
-    newly built and already independent. Variable-length list cells are numpy
-    views into the taken values buffer; copying them hands each record an
-    independent, writable array and avoids pinning that shared buffer.
-    Fixed-size-list rows and numeric scalars are returned as-is.
-    """
-    out: dict[str, object] = {}
-    for name, arr in columns.items():
-        val = arr[idx]
-        if arr.dtype == object and isinstance(val, np.ndarray):
-            val = val.copy()
-        out[name] = val
-    return out
+    return pa, pq
 
 
 _DEFAULT_RG_CACHE_BYTES = 2 * 1024**3  # 2 GiB
@@ -356,7 +282,8 @@ class ParquetShard(RandomAccessShard):
         if cached is not None:
             return cached
 
-        pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
+        _, pq = _ensure_pyarrow()
+        pq_file = pq.ParquetFile(self._path, metadata=self._metadata)
         table = pq_file.read_row_group(rg_id, use_threads=False)
         del pq_file
 
@@ -371,13 +298,11 @@ class ParquetShard(RandomAccessShard):
         ``take`` (C++, GIL-released) gathers just the requested rows into a
         small private sub-table before decode, so per-record numpy/Python
         materialisation is proportional to rows accessed, not row-group size.
-        Reusing ``_arrow_table_to_numpy`` keeps types identical to a full
-        decode: numpy scalars for primitives, object-arrays-of-numpy for lists,
+        The shared Arrow materializer keeps types identical to a full decode:
+        numpy scalars for primitives, object-arrays-of-numpy for lists, and
         dicts for structs.
         """
-        sub = table.take(_pa.array(local_indices, type=_pa.int64()))
-        columns, _ = _arrow_table_to_numpy(sub)
-        return [_extract_row(columns, j) for j in range(len(local_indices))]
+        return take_and_materialize(table, local_indices)
 
     def __getitem__(self, index: int) -> dict[str, object]:
         """Single record random access.
@@ -430,7 +355,8 @@ class ParquetShard(RandomAccessShard):
                 missing_rg_ids.append(rg_id)
 
         if missing_rg_ids:
-            pq_file = _pq.ParquetFile(self._path, metadata=self._metadata)
+            _, pq = _ensure_pyarrow()
+            pq_file = pq.ParquetFile(self._path, metadata=self._metadata)
             for rg_id in missing_rg_ids:
                 table = pq_file.read_row_group(rg_id, use_threads=False)
                 tables[rg_id] = table
@@ -509,7 +435,7 @@ class ParquetFormat(FormatHandler):
         - A tiny read of just 8 bytes (which can be inefficient on some backends).
         - A second read in the common case.
         """
-        assert _pa is not None and _pq is not None
+        pa, pq = _ensure_pyarrow()
 
         if size < 8:
             raise ValueError(f"File too small to be a valid Parquet file: {path}")
@@ -540,7 +466,7 @@ class ParquetFormat(FormatHandler):
             # 3. Use the prefetched bytes.
             footer = footer[-footer_size:]
 
-        return _pq.read_metadata(_pa.BufferReader(footer))
+        return pq.read_metadata(pa.BufferReader(footer))
 
     def discover(
         self, path: str, storage: StorageBackend

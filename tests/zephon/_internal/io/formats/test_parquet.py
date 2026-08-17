@@ -22,8 +22,6 @@ from zephon._internal.io.formats.parquet import (
     _THRASH_MIN_READS_AFTER_FILL,
     ParquetFormat,
     ParquetShard,
-    _arrow_table_to_numpy,
-    _extract_row,
     _ParquetExtraCodec,
     _RowGroupCache,
 )
@@ -478,110 +476,42 @@ class TestParquetMetadataCaching:
         assert calls == 1
 
 
-class TestArrowToNumpy:
-    """Tests for _arrow_table_to_numpy conversion with various Arrow types."""
+def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
+    import numpy as np
 
-    def test_scalar_columns(self):
-        """Scalar int/float columns produce 1-D numpy arrays."""
-        table = pa.table({"x": pa.array([1, 2, 3]), "y": pa.array([1.5, 2.5, 3.5])})
-        result, decoded_bytes = _arrow_table_to_numpy(table)
+    n_rows = 100
+    list_size = 8
+    flat = list(range(n_rows * list_size))
+    inner = pa.array(flat, type=pa.uint32())
+    fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=list_size)
+    table = pa.table({"id": pa.array(range(n_rows)), "tokens": fsl})
 
-        assert set(result.keys()) == {"x", "y"}
-        import numpy as np
+    path = tmp_path / "fsl.parquet"
+    pq.write_table(table, str(path), row_group_size=50)
 
-        np.testing.assert_array_equal(result["x"], [1, 2, 3])
-        np.testing.assert_array_equal(result["y"], [1.5, 2.5, 3.5])
-        assert result["x"].shape == (3,)
-        assert decoded_bytes == int(table.nbytes)
+    metadata = pq.read_metadata(str(path))
+    row_groups = [
+        {
+            "num_rows": metadata.row_group(i).num_rows,
+            "total_byte_size": metadata.row_group(i).total_byte_size,
+        }
+        for i in range(metadata.num_row_groups)
+    ]
 
-    def test_fixed_size_list_column(self):
-        """fixed_size_list<uint32>[N] is reshaped to (n_rows, N)."""
-        import numpy as np
+    shard = ParquetShard(path, row_groups, rg_cache=_RowGroupCache())
 
-        inner = pa.array([10, 20, 30, 40, 50, 60], type=pa.uint32())
-        fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=3)
-        table = pa.table({"tokens": fsl})
-        result, _ = _arrow_table_to_numpy(table)
+    row = shard[0]
+    assert row["id"] == 0
+    np.testing.assert_array_equal(row["tokens"], list(range(list_size)))
 
-        assert result["tokens"].shape == (2, 3)
-        np.testing.assert_array_equal(result["tokens"][0], [10, 20, 30])
-        np.testing.assert_array_equal(result["tokens"][1], [40, 50, 60])
-
-    def test_variable_length_list_column(self):
-        """Variable-length list columns produce an object array of numpy arrays."""
-        import numpy as np
-
-        list_arr = pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int64()))
-        table = pa.table({"ragged": list_arr})
-        result, _ = _arrow_table_to_numpy(table)
-
-        assert result["ragged"].dtype == object
-        assert len(result["ragged"]) == 3
-        np.testing.assert_array_equal(result["ragged"][0], [1, 2])
-        np.testing.assert_array_equal(result["ragged"][1], [3, 4, 5])
-        np.testing.assert_array_equal(result["ragged"][2], [6])
-
-    def test_string_column_fallback(self):
-        """String columns fall back to object dtype numpy array."""
-
-        table = pa.table({"s": pa.array(["hello", "world"])})
-        result, _ = _arrow_table_to_numpy(table)
-
-        assert len(result["s"]) == 2
-        assert result["s"][0] == "hello"
-
-    def test_extract_row_from_mixed_table(self):
-        """_extract_row returns a dict with correct per-column values."""
-        import numpy as np
-
-        inner = pa.array(list(range(12)), type=pa.uint32())
-        fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=4)
-        table = pa.table({"id": pa.array([10, 20, 30]), "tokens": fsl})
-        columns, _ = _arrow_table_to_numpy(table)
-
-        row = _extract_row(columns, 1)
-        assert row["id"] == 20
-        np.testing.assert_array_equal(row["tokens"], [4, 5, 6, 7])
-
-    def test_roundtrip_through_parquet_with_fixed_size_list(self, tmp_path):
-        """End-to-end: write parquet with fixed_size_list, read via ParquetShard."""
-        import numpy as np
-
-        n_rows = 100
-        list_size = 8
-        flat = list(range(n_rows * list_size))
-        inner = pa.array(flat, type=pa.uint32())
-        fsl = pa.FixedSizeListArray.from_arrays(inner, list_size=list_size)
-        table = pa.table({"id": pa.array(range(n_rows)), "tokens": fsl})
-
-        path = tmp_path / "fsl.parquet"
-        pq.write_table(table, str(path), row_group_size=50)
-
-        metadata = pq.read_metadata(str(path))
-        row_groups = [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-
-        shard = ParquetShard(path, row_groups, rg_cache=_RowGroupCache())
-
-        # Single access
-        row = shard[0]
-        assert row["id"] == 0
-        np.testing.assert_array_equal(row["tokens"], list(range(list_size)))
-
-        # Bulk access across row groups
-        rows = shard.getsamples([0, 49, 50, 99])
-        assert rows[0]["id"] == 0
-        assert rows[1]["id"] == 49
-        assert rows[2]["id"] == 50
-        assert rows[3]["id"] == 99
-        np.testing.assert_array_equal(
-            rows[2]["tokens"], list(range(50 * list_size, 51 * list_size))
-        )
+    rows = shard.getsamples([0, 49, 50, 99])
+    assert rows[0]["id"] == 0
+    assert rows[1]["id"] == 49
+    assert rows[2]["id"] == 50
+    assert rows[3]["id"] == 99
+    np.testing.assert_array_equal(
+        rows[2]["tokens"], list(range(50 * list_size, 51 * list_size))
+    )
 
 
 class TestRowGroupCache:
