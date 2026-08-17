@@ -305,7 +305,8 @@ def _probe_ofd_support_guarded(
 def _open_regular_file(
     path: str | os.PathLike[str],
 ) -> tuple[int, os.stat_result]:
-    flags = os.O_RDWR | os.O_NOFOLLOW
+    flags = os.O_RDWR
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     try:
         file_stat = os.fstat(fd)
@@ -315,6 +316,53 @@ def _open_regular_file(
         os.close(fd)
         raise
     return fd, file_stat
+
+
+def _create_regular_file(
+    path: str | os.PathLike[str],
+    *,
+    identity: bytes,
+) -> tuple[int, os.stat_result]:
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    file_stat: os.stat_result | None = None
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise OFDLockUnavailable(f"OFD lock path is not a regular file: {path}")
+        os.fchmod(fd, 0o600)
+        remaining = memoryview(identity)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("Unable to write OFD lock identity")
+            remaining = remaining[written:]
+        os.fsync(fd)
+        return fd, file_stat
+    except BaseException:
+        os.close(fd)
+        if file_stat is not None:
+            try:
+                current = os.stat(path, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (
+                    file_stat.st_dev,
+                    file_stat.st_ino,
+                ):
+                    os.unlink(path)
+            except OSError:
+                pass
+        raise
+
+
+def _validate_file_identity(
+    fd: int,
+    path: str | os.PathLike[str],
+    expected: bytes,
+) -> None:
+    observed = os.pread(fd, len(expected) + 1, 0)
+    if observed != expected:
+        raise OFDLockUnavailable(f"OFD lock identity changed at {path}")
 
 
 class OFDLease:
@@ -450,11 +498,17 @@ class OFDLockFile:
     represents each resource. The operating system tracks active locks outside
     the file's contents.
 
-    All cooperating processes must open the same stable lock file. Entering the
+    All cooperating processes must open the same stable lock file. Use
+    :meth:`create` when the caller has established that it is safe to create a
+    new anchor; the normal constructor only opens an existing one. Entering the
     ``OFDLockFile`` context only arranges to close that file afterward; it does
     not lock a resource. :meth:`acquire` performs the actual lock operation and
-    returns an already-active :class:`OFDLease`, or ``None`` on timeout.
-    Entering the lease context does not acquire it again; it guarantees release.
+    returns an already-active :class:`OFDLease`, or ``None`` on timeout. Entering
+    the lease context does not acquire it again; it guarantees release.
+
+    A creator may store an opaque identity in the anchor and require that value
+    when reopening it. The identity does not participate in locking; it lets an
+    owner detect path replacement across separate process lifetimes.
 
     Example:
         Suppose two counters live in a database or data file. A separate, empty
@@ -473,21 +527,72 @@ class OFDLockFile:
                     increment_first_counter()
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = Path(path)
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        expected_identity: bytes | None = None,
+    ) -> None:
+        lock_path = Path(path)
+        self.path = lock_path
         self._anchor_fd = -1
-        self._backend = _select_backend()
+        backend = _select_backend()
+        self._backend = backend
+        self._creator_pid = os.getpid()
+        self._identity = (-1, -1)
         with _FORK_GUARD:
-            fd, anchor_stat = _open_regular_file(self.path)
+            fd, anchor_stat = _open_regular_file(lock_path)
             try:
-                self._creator_pid = os.getpid()
-                self._identity = (anchor_stat.st_dev, anchor_stat.st_ino)
-                self._anchor_fd = fd
-                _LIVE_FILES.add(self)
+                if expected_identity is not None:
+                    _validate_file_identity(fd, lock_path, expected_identity)
+                self._adopt_anchor(lock_path, fd, anchor_stat, backend)
             except BaseException:
-                self._anchor_fd = -1
                 os.close(fd)
                 raise
+
+    @classmethod
+    def create(
+        cls,
+        path: str | os.PathLike[str],
+        *,
+        identity: bytes = b"",
+    ) -> OFDLockFile:
+        """Exclusively create, initialize, and adopt a private lock anchor.
+
+        The caller decides whether creating this path is safe. This method never
+        opens an existing path and returns with the exact newly-created inode as
+        the live anchor, avoiding a create-close-reopen identity gap.
+        """
+        lock_path = Path(path)
+        backend = _select_backend()
+        with _FORK_GUARD:
+            fd, anchor_stat = _create_regular_file(lock_path, identity=identity)
+            self = cls.__new__(cls)
+            try:
+                self._adopt_anchor(lock_path, fd, anchor_stat, backend)
+            except BaseException:
+                os.close(fd)
+                raise
+            return self
+
+    def _adopt_anchor(
+        self,
+        path: Path,
+        fd: int,
+        anchor_stat: os.stat_result,
+        backend: _NativeOFDBackend,
+    ) -> None:
+        self.path = path
+        self._anchor_fd = -1
+        self._backend = backend
+        self._creator_pid = os.getpid()
+        self._identity = (anchor_stat.st_dev, anchor_stat.st_ino)
+        try:
+            _LIVE_FILES.add(self)
+        except BaseException:
+            self._anchor_fd = -1
+            raise
+        self._anchor_fd = fd
 
     @property
     def backend_info(self) -> OFDBackendInfo:

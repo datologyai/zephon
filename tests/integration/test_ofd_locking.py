@@ -53,6 +53,53 @@ def test_probe_checks_actual_filesystem(tmp_path: Path) -> None:
     assert not list(tmp_path.iterdir())
 
 
+def test_create_exclusively_builds_and_adopts_identity_bound_anchor(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "locks.ofd"
+    identity = b"cache-namespace-id"
+
+    with OFDLockFile.create(path, identity=identity) as created:
+        assert path.read_bytes() == identity
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert not os.get_inheritable(created._anchor_fd)
+        with OFDLockFile(path, expected_identity=identity) as reopened:
+            held = created.try_acquire(start=0, mode=OFDLockMode.EXCLUSIVE)
+            assert held is not None
+            assert reopened.try_acquire(start=0, mode=OFDLockMode.SHARED) is None
+            held.close()
+
+    with pytest.raises(FileExistsError):
+        OFDLockFile.create(path, identity=identity)
+    with pytest.raises(OFDLockUnavailable, match="identity changed"):
+        OFDLockFile(path, expected_identity=b"different")
+
+
+def test_create_never_follows_or_replaces_a_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_bytes(b"untouched")
+    path = tmp_path / "locks.ofd"
+    path.symlink_to(target)
+
+    with pytest.raises(FileExistsError):
+        OFDLockFile.create(path, identity=b"identity")
+
+    assert target.read_bytes() == b"untouched"
+
+
+def test_create_adopts_the_created_descriptor_without_reopening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ofd_lock_module,
+        "_open_regular_file",
+        lambda path: pytest.fail(f"unexpected reopen of {path}"),
+    )
+
+    OFDLockFile.create(tmp_path / "locks.ofd", identity=b"identity").close()
+
+
 def test_anchor_open_waits_for_fork_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
