@@ -66,7 +66,7 @@ class ShardCatalog:
         self._loaded = loaded
         self._header = loaded.header
         self._cols = loaded.columns
-        self._format: str = self._header["format"]
+        self.format: str = self._header["format"]
         self._root: str = self._header["root"]
         self._dense: bool = self._header["dense"]
         self._present: dict = dict(self._header.get("present", {}))
@@ -84,8 +84,8 @@ class ShardCatalog:
         # is a module cycle).
         from zephon._internal.io.formats import ensure_builtin_formats
 
-        ensure_builtin_formats(required={self._format}, missing_ok=True)
-        self._codec = get_extra_codec(self._format)
+        ensure_builtin_formats(required={self.format}, missing_ok=True)
+        self._codec = get_extra_codec(self.format)
         header_blob = None
         if self._present.get("extra_header"):
             header_blob = self._cols["extra_header_blob"].tobytes()
@@ -129,6 +129,12 @@ class ShardCatalog:
     def raw_bytes(self) -> np.ndarray:
         """Per-shard raw file sizes in bytes, aligned with :meth:`ids`."""
         return self._raw_bytes
+
+    def extra_int_column(self, name: str) -> np.ndarray | None:
+        """Return a codec-owned int64 column without decoding shard extras."""
+        if name not in self._extra_int_columns:
+            return None
+        return self._cols[f"extra_int_{name}"]
 
     def total(self) -> int:
         return int(self._num_rows.sum())
@@ -227,7 +233,7 @@ class ShardCatalog:
         return ShardLocator(
             dataset=dataset_name,
             shard_id=int(self._shard_id[slot]),
-            format=self._format,
+            format=self.format,
             root=self._root,
             raw=raw,
             zip=zip_file,
