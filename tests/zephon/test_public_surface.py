@@ -97,6 +97,7 @@ EXPECTED_ALL = {
         "CacheOptions",
         "Dataset",
         "InMemoryShard",
+        "ParquetRGCacheOptions",
         "StoreOptions",
     ],
     "zephon.types": [
@@ -178,6 +179,7 @@ EXPECTED_ALL = {
     ],
     "zephon.io.options": [
         "CacheOptions",
+        "ParquetRGCacheOptions",
         "StoreOptions",
         "parse_size_bytes",
     ],

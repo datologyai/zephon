@@ -3,7 +3,9 @@
 
 """Configuration helpers for IO store construction."""
 
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass, field, fields
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,53 @@ _SIZE_SUFFIXES = {
     "kb": 1024**1,
     "b": 1024**0,
 }
+_PARQUET_RG_CACHE_MIN_BYTES = 4 * 1024**3
+_OPTION_DEFAULT = "zephon_default"
+
+
+class _NotSupplied(Enum):
+    TOKEN = 0
+
+
+_NOT_SUPPLIED = _NotSupplied.TOKEN
+
+
+def _option(default: object) -> Any:
+    return field(default=_NOT_SUPPLIED, metadata={_OPTION_DEFAULT: default})
+
+
+def _normalize_options(options: Any) -> None:
+    provided = set()
+    for option in fields(options):
+        if _OPTION_DEFAULT not in option.metadata:
+            continue
+        value = getattr(options, option.name)
+        if value is not _NOT_SUPPLIED:
+            provided.add(option.name)
+        if value is _NOT_SUPPLIED or value is None:
+            setattr(options, option.name, option.metadata[_OPTION_DEFAULT])
+    options._provided_fields = frozenset(provided)
+
+
+def _merged_options(base: Any, override: Any) -> dict[str, Any]:
+    merged = {}
+    for option in fields(base):
+        if _OPTION_DEFAULT not in option.metadata:
+            continue
+        if option.name in override._provided_fields:
+            merged[option.name] = getattr(override, option.name)
+        elif option.name in base._provided_fields:
+            merged[option.name] = getattr(base, option.name)
+    return merged
+
+
+def _default_options(option_type: Any) -> Any:
+    values = {
+        option.name: None
+        for option in fields(option_type)
+        if _OPTION_DEFAULT in option.metadata
+    }
+    return option_type(**values)
 
 
 def parse_size_bytes(value: str | int | None) -> int | None:
@@ -42,28 +91,34 @@ def parse_size_bytes(value: str | int | None) -> int | None:
 class CacheOptions:
     """User-configurable knobs that control cache behaviour."""
 
-    enabled: bool = False
-    root: str | Path = Path("~/.cache/zephon").expanduser()
+    enabled: bool = _option(False)
+    root: str | Path = _option(Path("~/.cache/zephon").expanduser())
     # Bound on the on-disk shard cache only, not in-memory cache.
-    limit_bytes: int | None = None
-    # Bound on the in-memory parquet row-group decode cache (per process).
-    # Independent of ``enabled``/``limit_bytes`` (the on-disk cache); ``None``
-    # keeps the format default (the ZEPHON_PARQUET_RG_CACHE_BYTES env var).
-    rg_cache_bytes: int | None = None
-    keep_zip: bool = False
-    validate_hash: str | None = None
-    download_retry: int = 12
-    download_timeout: float = 180.0
-    open_retry_attempts: int = 5
-    open_retry_initial_backoff: float = 0.1
-    open_retry_max_backoff: float = 2.0
-    min_slack_bytes: int = 512 * 1024  # 512 KiB minimum slack
-    max_slack_bytes: int = 64 * 1024 * 1024  # 64 MiB maximum slack
+    limit_bytes: int | None = _option(None)
+    # Deprecated alias migrated by StoreOptions to parquet_rg_cache.limit_bytes.
+    rg_cache_bytes: int | None = _option(None)
+    keep_zip: bool = _option(False)
+    validate_hash: str | None = _option(None)
+    download_retry: int = _option(12)
+    download_timeout: float = _option(180.0)
+    open_retry_attempts: int = _option(5)
+    open_retry_initial_backoff: float = _option(0.1)
+    open_retry_max_backoff: float = _option(2.0)
+    min_slack_bytes: int = _option(512 * 1024)  # 512 KiB minimum slack
+    max_slack_bytes: int = _option(64 * 1024 * 1024)  # 64 MiB maximum slack
+    _provided_fields: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
         if obj is None or obj is False:
-            return cls()
+            return _default_options(cls)
         if isinstance(obj, CacheOptions):
             return obj
         if isinstance(obj, dict):
@@ -76,9 +131,72 @@ class CacheOptions:
         raise TypeError(f"Cannot interpret cache options from {obj!r}")
 
     def merge(self, other: "CacheOptions") -> "CacheOptions":
-        """Return a new options object with ``other`` overriding ``self``."""
-        merged = {**self.__dict__, **other.__dict__}
-        return CacheOptions(**merged)
+        """Overlay fields supplied by ``other`` onto ``self``."""
+        return CacheOptions(**_merged_options(self, other))
+
+
+@dataclass
+class ParquetRGCacheOptions:
+    """Node-shared decoded Parquet row-group cache configuration.
+
+    ``enabled=None`` enables the cache with the shard cache or an explicit
+    ``root``. An omitted root uses the shard cache's reserved
+    ``.parquet-rg-cache`` child. An omitted limit uses the deprecated shard
+    option when present, otherwise the larger of 4 GiB and 10% of the shard
+    cache limit. These defaults resolve when the store is built so option merges
+    retain the distinction between omitted and explicit values. Explicit
+    ``None`` resets a previously supplied field to its automatic default.
+    """
+
+    enabled: bool | None = _option(None)
+    root: str | Path | None = _option(None)
+    limit_bytes: int | None = _option(None)
+    min_free_bytes: int = _option(1 * 1024**3)
+    _provided_fields: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
+        if (
+            self.enabled is not False
+            and self.limit_bytes is not None
+            and self.limit_bytes <= 0
+        ):
+            raise ValueError("parquet_rg_cache.limit_bytes must be positive")
+        if self.min_free_bytes < 0:
+            raise ValueError("parquet_rg_cache.min_free_bytes cannot be negative")
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "ParquetRGCacheOptions":
+        """Normalize a decoded row-group cache configuration."""
+        if obj is None:
+            return _default_options(cls)
+        if obj is False:
+            return cls(enabled=False)
+        if obj is True:
+            return cls(enabled=True)
+        if isinstance(obj, ParquetRGCacheOptions):
+            return obj
+        if isinstance(obj, dict):
+            data = dict(obj)
+            for field_name in ("limit_bytes", "min_free_bytes"):
+                value = data.get(field_name)
+                if isinstance(value, str):
+                    parsed = parse_size_bytes(value)
+                    if parsed is None:
+                        raise ValueError(
+                            f"parquet_rg_cache.{field_name} must not be empty"
+                        )
+                    data[field_name] = parsed
+            return cls(**data)
+        raise TypeError(f"Cannot interpret Parquet RG cache options from {obj!r}")
+
+    def merge(self, other: "ParquetRGCacheOptions") -> "ParquetRGCacheOptions":
+        """Overlay fields supplied by ``other`` onto ``self``."""
+        return ParquetRGCacheOptions(**_merged_options(self, other))
 
 
 @dataclass
@@ -86,21 +204,92 @@ class StoreOptions:
     """Top-level IO store options passed to FetchOp."""
 
     cache: CacheOptions = field(default_factory=CacheOptions)
+    parquet_rg_cache: ParquetRGCacheOptions = field(
+        default_factory=ParquetRGCacheOptions
+    )
+
+    def __post_init__(self) -> None:
+        legacy_limit = self.cache.rg_cache_bytes
+        if legacy_limit is not None:
+            warnings.warn(
+                "cache.rg_cache_bytes is deprecated; use "
+                + "parquet_rg_cache.limit_bytes",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+    def resolved_parquet_rg_cache(self) -> ParquetRGCacheOptions:
+        """Resolve decoded-cache defaults against the shard-cache options."""
+        configured = self.parquet_rg_cache
+        if (
+            configured.enabled is True
+            and not self.cache.enabled
+            and configured.root is None
+        ):
+            raise ValueError(
+                "parquet_rg_cache.enabled=True requires parquet_rg_cache.root "
+                + "when cache.enabled=False"
+            )
+        legacy_limit = self.cache.rg_cache_bytes
+        limit = configured.limit_bytes
+        enabled = (
+            configured.enabled
+            if configured.enabled is not None
+            else self.cache.enabled or configured.root is not None
+        )
+        if limit is None:
+            if legacy_limit is not None:
+                enabled = enabled and legacy_limit > 0
+                limit = (
+                    legacy_limit if legacy_limit > 0 else _PARQUET_RG_CACHE_MIN_BYTES
+                )
+            else:
+                shard_limit = self.cache.limit_bytes if self.cache.enabled else None
+                limit = max(
+                    _PARQUET_RG_CACHE_MIN_BYTES,
+                    shard_limit // 10 if shard_limit is not None else 0,
+                )
+        return ParquetRGCacheOptions(
+            enabled=enabled,
+            root=configured.root,
+            limit_bytes=limit,
+            min_free_bytes=configured.min_free_bytes,
+        )
 
     @classmethod
     def from_any(cls, obj: Any) -> "StoreOptions":
         if obj is None:
-            return cls()
+            return cls(
+                cache=CacheOptions.from_any(None),
+                parquet_rg_cache=ParquetRGCacheOptions.from_any(None),
+            )
         if isinstance(obj, StoreOptions):
             return obj
         if isinstance(obj, dict):
-            cache_cfg = obj.get("cache")
-            return cls(cache=CacheOptions.from_any(cache_cfg))
+            cache = (
+                CacheOptions.from_any(obj["cache"])
+                if "cache" in obj
+                else CacheOptions()
+            )
+            parquet_rg_cache = (
+                ParquetRGCacheOptions.from_any(obj["parquet_rg_cache"])
+                if "parquet_rg_cache" in obj
+                else ParquetRGCacheOptions()
+            )
+            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache)
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 
     def merge(self, other: "StoreOptions") -> "StoreOptions":
         """Return a new options object with ``other`` overriding ``self``."""
-        return StoreOptions(cache=self.cache.merge(other.cache))
+        return StoreOptions(
+            cache=self.cache.merge(other.cache),
+            parquet_rg_cache=self.parquet_rg_cache.merge(other.parquet_rg_cache),
+        )
 
 
-__all__ = ["CacheOptions", "StoreOptions", "parse_size_bytes"]
+__all__ = [
+    "CacheOptions",
+    "ParquetRGCacheOptions",
+    "StoreOptions",
+    "parse_size_bytes",
+]

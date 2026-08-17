@@ -952,7 +952,9 @@ class TestRowGroupCacheRuntimeResize:
         from zephon.io.options import CacheOptions, StoreOptions
 
         fmt = ParquetFormat()
-        fmt.apply_store_options(StoreOptions(cache=CacheOptions(rg_cache_bytes=12345)))
+        with pytest.warns(DeprecationWarning, match="rg_cache_bytes is deprecated"):
+            options = StoreOptions(cache=CacheOptions(rg_cache_bytes=12345))
+        fmt.apply_store_options(options)
         assert fmt._rg_cache.max_bytes == 12345
 
     def test_apply_store_options_none_keeps_default(self):
@@ -960,7 +962,7 @@ class TestRowGroupCacheRuntimeResize:
 
         fmt = ParquetFormat()
         default = fmt._rg_cache.max_bytes
-        fmt.apply_store_options(StoreOptions())  # rg_cache_bytes is None
+        fmt.apply_store_options(StoreOptions())
         assert fmt._rg_cache.max_bytes == default
 
     def test_cache_options_parses_human_size(self):

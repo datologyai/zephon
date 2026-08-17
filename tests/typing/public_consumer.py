@@ -20,7 +20,7 @@ from zephon import (
 )
 from zephon.build_index import build_index
 from zephon.debug import DatasetInspector
-from zephon.io import CacheOptions, StoreOptions
+from zephon.io import CacheOptions, ParquetRGCacheOptions, StoreOptions
 from zephon.observability import (
     ExecutionTrackingMode,
     FetchTimingSummary,
@@ -39,7 +39,13 @@ def build_pipeline() -> Pipeline:
     transport: IpcTransport = "socketpair"
     opts = RuntimeOptions(max_workers=4, ipc_transport=transport)
     store: StoreOptions = opts.io_options
-    _ = (store, CacheOptions(), ExecutionTrackingMode.OFF, opts)
+    _ = (
+        store,
+        CacheOptions(),
+        ParquetRGCacheOptions(),
+        ExecutionTrackingMode.OFF,
+        opts,
+    )
     return Pipeline(ws).options(max_workers=4, ipc_transport=transport)
 
 

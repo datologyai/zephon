@@ -8,11 +8,12 @@ Configure store behavior via ``Pipeline.options(io_options=StoreOptions(...))``.
 
 from zephon.io.dataset import Dataset
 from zephon.io.memory import InMemoryShard
-from zephon.io.options import CacheOptions, StoreOptions
+from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
 
 __all__ = [
     "CacheOptions",
     "Dataset",
     "InMemoryShard",
+    "ParquetRGCacheOptions",
     "StoreOptions",
 ]
