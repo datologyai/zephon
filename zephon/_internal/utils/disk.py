@@ -1,18 +1,20 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Disk-capacity preflight for the on-disk shard cache.
+"""Disk-capacity preflight for Zephon's on-disk caches.
 
 Stdlib-only (like :mod:`zephon._internal.utils.shm`) so it imports anywhere.
 
 No cgroup handling (unlike shm): cgroup v2 has no disk-space controller, and
-container space limits (XFS project quotas) already show through ``statvfs``.
+container space limits (XFS project quotas) already show through the filesystem.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 # fraction of the device's total capacity free for other writers.
 _CACHE_HEADROOM_FRACTION = 0.05
 
-# Escape hatch for filesystems where statvfs succeeds but misreports
+# Escape hatch for filesystems where the free-space query succeeds but misreports
 # (e.g. NFS/Lustre quotas, thin provisioning).
 _DISABLE_ENV = "ZEPHON_DISABLE_CACHE_SPACE_CHECK"
 
@@ -56,28 +58,46 @@ class InsufficientCacheSpaceError(RuntimeError):
             "(bytes already under the cache root)\n"
             f"  usable (free+cache) : {usable / _GiB:.1f}GiB\n"
             f"  device total        : {device_total / _GiB:.1f}GiB\n"
-            f"Reduce cache.limit_bytes to at most {usable / _GiB:.1f}GiB, free "
+            f"Reduce the configured cache limits to at most {usable / _GiB:.1f}GiB, free "
             "space on the device, or move cache.root to a larger device. Set "
             f"{_DISABLE_ENV}=1 to bypass this check (e.g. on filesystems that "
             "misreport free space)."
         )
 
 
+def _existing_ancestor(path: Path) -> tuple[Path, os.stat_result]:
+    probe = path
+    while True:
+        try:
+            return probe, probe.stat()
+        except FileNotFoundError:
+            if probe == probe.parent:
+                raise
+            probe = probe.parent
+
+
+def device_id(path: Path) -> int | None:
+    """Return the device containing *path*, probing its nearest existing ancestor."""
+    try:
+        _ancestor, info = _existing_ancestor(path)
+        return info.st_dev
+    except OSError:
+        return None
+
+
 def device_space(path: Path) -> tuple[int, int] | None:
     """Return ``(device_total_bytes, free_bytes)`` for the device holding *path*.
 
-    Statvfs the nearest existing ancestor — the cache root may not exist yet,
+    Inspect the nearest existing ancestor — the cache root may not exist yet,
     and the ancestor's filesystem is where its bytes would land. Free is
     ``f_bavail`` (non-root-reserved). ``None`` on ``OSError``.
     """
-    probe = path
     try:
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
-        st = os.statvfs(probe)
+        ancestor, _info = _existing_ancestor(path)
+        usage = shutil.disk_usage(ancestor)
     except OSError:
         return None
-    return st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+    return usage.total, usage.free
 
 
 def dir_usage_bytes(path: Path) -> int:
@@ -102,7 +122,7 @@ def check_cache_disk_space(
     root: Path,
     limit_bytes: int | None,
     *,
-    existing_bytes: int | None = None,
+    existing_bytes: int | Callable[[], int] | None = None,
     warn_fraction: float | None = _CACHE_HEADROOM_FRACTION,
 ) -> None:
     """Validate that the configured cache limit fits on the device holding *root*.
@@ -121,9 +141,9 @@ def check_cache_disk_space(
     Args:
         root: Cache root directory (may not exist yet).
         limit_bytes: Configured on-disk cache limit; ``None`` skips the check.
-        existing_bytes: Bytes already under the cache root, when the caller
-            already has the tally (e.g. CacheManager after reconcile). Skips
-            the ``os.walk``; ``None`` walks the tree to compute it.
+        existing_bytes: Bytes already under the cache root, or a lazy function
+            computing them when the caller needs a multi-root tally. A concrete
+            value skips the ``os.walk``; ``None`` walks ``root`` when needed.
         warn_fraction: Device-total fraction below which the headroom warning
             fires. ``None`` disables the warning branch (per-worker callers,
             so only the engine preflight warns once per rank).
@@ -154,7 +174,12 @@ def check_cache_disk_space(
     if free - limit_bytes >= headroom_needed:
         return
 
-    existing = existing_bytes if existing_bytes is not None else dir_usage_bytes(root)
+    if callable(existing_bytes):
+        existing = existing_bytes()
+    else:
+        existing = (
+            existing_bytes if existing_bytes is not None else dir_usage_bytes(root)
+        )
     usable = free + existing
     if limit_bytes > usable:
         raise InsufficientCacheSpaceError(
@@ -180,9 +205,72 @@ def check_cache_disk_space(
         )
 
 
+def check_cache_disk_budgets(
+    budgets: Iterable[tuple[Path, int]],
+) -> None:
+    """Validate cache budgets together when their roots share a filesystem.
+
+    Limits on one device are additive. Existing bytes under disjoint roots are
+    also additive, while nested roots are walked only once through their
+    outermost root.
+    """
+    resolved = []
+    for root, limit_bytes in budgets:
+        canonical_root = Path(root).expanduser().resolve()
+        resolved.append((canonical_root, limit_bytes, device_id(canonical_root)))
+    groups: list[list[tuple[Path, int, int | None]]] = []
+    for budget in resolved:
+        root, _limit_bytes, device = budget
+        matching = [
+            index
+            for index, group in enumerate(groups)
+            if any(
+                root == other_root
+                or root in other_root.parents
+                or other_root in root.parents
+                or (device is not None and device == other_device)
+                for other_root, _other_limit, other_device in group
+            )
+        ]
+        if not matching:
+            groups.append([budget])
+            continue
+        merged = []
+        for index in matching:
+            merged.extend(groups[index])
+        merged.append(budget)
+        for index in reversed(matching):
+            groups.pop(index)
+        groups.append(merged)
+
+    for group in groups:
+        if len(group) == 1:
+            root, limit_bytes, _device = group[0]
+            check_cache_disk_space(root, limit_bytes)
+            continue
+
+        roots = list(dict.fromkeys(root for root, _limit, _device in group))
+        outer_roots = [
+            root
+            for root in roots
+            if not any(other != root and other in root.parents for other in roots)
+        ]
+
+        def existing_bytes() -> int:
+            return sum(dir_usage_bytes(root) for root in outer_roots)
+
+        check_cache_disk_space(
+            outer_roots[0],
+            sum(limit_bytes for _root, limit_bytes, _device in group),
+            existing_bytes=existing_bytes,
+        )
+
+
 __all__ = [
     "InsufficientCacheSpaceError",
+    "check_cache_disk_budgets",
     "check_cache_disk_space",
+    "device_id",
     "device_space",
     "dir_usage_bytes",
 ]

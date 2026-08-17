@@ -12,22 +12,24 @@ from zephon._internal.io.stores.multi import (
     build_resolver_with_locators,
     finalize_dataset_catalogs,
     has_cacheable_dataset,
+    validate_store_cache_disk_space,
 )
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
 from zephon._internal.utils.disk import InsufficientCacheSpaceError
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
-from zephon.io.options import CacheOptions, StoreOptions
+from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
 
 GiB = 1024**3
 
 
-def _mk_jsonl_dataset(tmp_path: Path) -> Dataset:
+def _mk_jsonl_dataset(tmp_path: Path, *, name: str = "demo") -> Dataset:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     f0 = tmp_path / "s0.jsonl"
     f1 = tmp_path / "s1.jsonl"
     f0.write_text('{"a": 1}\n{"a": 2}\n', encoding="utf-8")
     f1.write_text('{"a": 3}\n', encoding="utf-8")
-    return Dataset.from_path("demo", str(tmp_path))
+    return Dataset.from_path(name, str(tmp_path))
 
 
 def test_build_multi_dataset_store_inmem_only() -> None:
@@ -170,9 +172,68 @@ def test_inmem_only_skips_disk_check(
     assert reused is True
 
 
+def test_store_preflight_combines_derived_rg_limit_on_shared_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "zephon._internal.utils.disk.device_space", lambda path: (100 * GiB, 10 * GiB)
+    )
+    dataset = Dataset(name="pq", backend={"kind": "parquet"}, path="/data")
+    options = StoreOptions(
+        cache=CacheOptions(
+            enabled=True,
+            root=tmp_path / "cache",
+            limit_bytes=8 * GiB,
+        )
+    )
+
+    assert options.resolved_parquet_rg_cache().limit_bytes == 4 * GiB
+    with pytest.raises(InsufficientCacheSpaceError):
+        validate_store_cache_disk_space({0: dataset}, options)
+
+
+def test_decoded_only_preflight_never_probes_raw_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probed: list[Path] = []
+    monkeypatch.setattr(
+        "zephon._internal.utils.disk.device_id",
+        lambda path: probed.append(Path(path)) or 1,
+    )
+    monkeypatch.setattr(
+        "zephon._internal.utils.disk.device_space", lambda path: (100 * GiB, 10 * GiB)
+    )
+    dataset = Dataset(name="pq", backend={"kind": "parquet"}, path="/data")
+    options = StoreOptions(
+        parquet_rg_cache=ParquetRGCacheOptions(
+            enabled=True,
+            root=tmp_path / "decoded",
+            limit_bytes=4 * GiB,
+        )
+    )
+
+    validate_store_cache_disk_space({0: dataset}, options)
+    assert probed == [options.parquet_rg_cache.root]
+
+
 def test_has_cacheable_dataset(tmp_path: Path) -> None:
     inmem = Dataset.from_dict("mem", {0: InMemoryShard([{"x": 1}])})
     file_backed = _mk_jsonl_dataset(tmp_path)
     assert has_cacheable_dataset({}) is False
     assert has_cacheable_dataset({0: inmem}) is False
     assert has_cacheable_dataset({0: inmem, 1: file_backed}) is True
+
+
+def test_jsonl_store_ignores_parquet_cache_root(tmp_path: Path) -> None:
+    ds = _mk_jsonl_dataset(tmp_path / "dataset")
+    raw_root = tmp_path / "raw-cache"
+    # Overlap validation is intentionally Parquet-only: JSONL never opens the
+    # decoded row-group cache.
+    store = build_multi_dataset_store(
+        {0: ds},
+        options=StoreOptions(
+            cache=CacheOptions(enabled=True, root=raw_root),
+            parquet_rg_cache=ParquetRGCacheOptions(root=raw_root / "custom-child"),
+        ),
+    )
+    store.close()

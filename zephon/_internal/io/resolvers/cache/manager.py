@@ -28,6 +28,7 @@ from zephon._internal.io.resolvers.cache.errors import (
     PermanentSourceMissing,
     ShardNotReady,
 )
+from zephon._internal.io.resolvers.cache.layout import PARQUET_RG_CACHE_SUBDIR
 from zephon._internal.io.resolvers.cache.shared_state import (
     CacheSharedState,
     _ShardState,
@@ -619,17 +620,20 @@ class CacheManager(ShardResolver):
         return True
 
     def _wipe_cache_root_locked(self) -> None:
-        """Remove everything under ``root`` except the lock files and the catalog.
+        """Remove raw-cache state while preserving shared support namespaces.
 
         Must be called under ``_reset_lock``. Preserves ``.reset.lock`` so the
         lock stays valid through the wipe, and ``.catalog`` so the node-local
         shard catalog (built once per node, content-addressed, unrelated to the
-        cache session) survives cache resets instead of forcing a rebuild.
+        cache session) survives cache resets instead of forcing a rebuild. The
+        reserved decoded-RG namespace is likewise independent of raw-shard LRU
+        state and is never proactively invalidated by a raw reset/eviction.
         """
         preserve = {
             self._reset_lock_path,
             self._root / _CACHE_LOCK_FILENAME,
             self._root / CATALOG_CACHE_SUBDIR,
+            self._root / PARQUET_RG_CACHE_SUBDIR,
         }
         for child in list(self._root.iterdir()):
             if child in preserve:

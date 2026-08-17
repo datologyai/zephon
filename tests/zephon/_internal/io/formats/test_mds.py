@@ -55,7 +55,7 @@ def test_mds_reader_handles_streaming_variants(
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
     view = FileBackedDatasetShardView(
         dataset=dataset,
-        handler=handler,
+        opener=handler,
         resolver=resolver,
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -359,7 +359,7 @@ def test_mds_reader_handles_root_index_with_subdir_basenames(tmp_path):
     resolver = DirectResolver(LocalFSBackend(root=Path(dataset.path)))
     view = FileBackedDatasetShardView(
         dataset=dataset,
-        handler=handler,
+        opener=handler,
         resolver=resolver,
         retry_attempts=1,
         retry_initial_backoff=0.0,

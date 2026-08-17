@@ -111,7 +111,7 @@ def test_file_backed_dataset_view_caches_shards(tmp_path) -> None:
 
     view = FileBackedDatasetShardView(
         dataset=ds,
-        handler=handler,
+        opener=handler,
         resolver=resolver,
         retry_attempts=2,
         retry_initial_backoff=0.0,
@@ -141,7 +141,7 @@ def test_file_backed_dataset_view_retries_on_eviction(tmp_path) -> None:
 
     view = FileBackedDatasetShardView(
         dataset=ds,
-        handler=handler,
+        opener=handler,
         resolver=resolver,
         retry_attempts=3,
         retry_initial_backoff=0.0,
@@ -164,7 +164,7 @@ def test_file_backed_dataset_view_invalid_shard_raises(tmp_path) -> None:
     resolver = _FakeResolver(local=local)
     view = FileBackedDatasetShardView(
         dataset=ds,
-        handler=handler,
+        opener=handler,
         resolver=resolver,
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -187,7 +187,7 @@ def test_file_backed_dataset_view_attaches_from_handle(tmp_path) -> None:
     local = LocalShardRef(raw=LocalShardFile(path=tmp_path / "s0.jsonl", bytes=1))
     view = FileBackedDatasetShardView(
         dataset=ds,
-        handler=get_format("jsonl"),
+        opener=get_format("jsonl"),
         resolver=_FakeResolver(local=local),
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -207,7 +207,7 @@ def test_file_backed_dataset_view_requires_handle(tmp_path) -> None:
     with pytest.raises(ValueError, match="no shard catalog handle"):
         FileBackedDatasetShardView(
             dataset=ds,
-            handler=_FakeHandler(rows=[{"x": 1}]),
+            opener=_FakeHandler(rows=[{"x": 1}]),
             resolver=_FakeResolver(local=local),
             retry_attempts=1,
             retry_initial_backoff=0.0,

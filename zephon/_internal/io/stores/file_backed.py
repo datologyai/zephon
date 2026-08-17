@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from zephon._internal.io.catalog import ShardCatalog
-from zephon._internal.io.formats.base import FormatHandler
+from zephon._internal.io.formats.base import ShardOpener
 from zephon._internal.io.protocols import DatasetShardView, RandomAccessShard
 from zephon._internal.io.resolvers import ShardResolver
 from zephon._internal.io.stores.resilient import ResilientShard
@@ -12,7 +12,7 @@ from zephon.io.dataset import Dataset
 
 
 class FileBackedDatasetShardView(DatasetShardView):
-    """Dataset shard view backed by a format handler and the node-local catalog.
+    """Dataset shard view backed by a shard opener and node-local catalog.
 
     Lengths come from the catalog's ``num_rows`` column and locators are
     synthesized per ``open`` via ``locator_at`` (no resident locator dict). The
@@ -23,7 +23,7 @@ class FileBackedDatasetShardView(DatasetShardView):
         self,
         *,
         dataset: Dataset,
-        handler: FormatHandler,
+        opener: ShardOpener,
         resolver: ShardResolver,
         retry_attempts: int,
         retry_initial_backoff: float,
@@ -31,7 +31,7 @@ class FileBackedDatasetShardView(DatasetShardView):
         catalog: ShardCatalog | None = None,
     ) -> None:
         self._name = dataset.name
-        self._handler = handler
+        self._opener = opener
         self._resolver = resolver
 
         if catalog is None:
@@ -70,7 +70,7 @@ class FileBackedDatasetShardView(DatasetShardView):
         shard = ResilientShard(
             locator=locator,
             resolver=self._resolver,
-            handler=self._handler,
+            opener=self._opener,
             length=length,
             retry_attempts=self._retry_attempts,
             retry_initial_backoff=self._retry_initial_backoff,

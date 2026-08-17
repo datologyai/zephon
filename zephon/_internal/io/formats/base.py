@@ -13,11 +13,22 @@ from zephon._internal.io.types import LocalShardRef, ShardLocator
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
-    from zephon.io.options import StoreOptions
 
 
-class FormatHandler(Protocol):
-    """Format-specific logic for constructing shard locators and readers."""
+class ShardOpener(Protocol):
+    """Create readable shards from resolved local references.
+
+    Stateless format handlers can serve directly. Stateful formats may instead
+    use a store-scoped opener carrying resources such as a decoded cache.
+    """
+
+    def open_shard(
+        self, locator: ShardLocator, local_ref: LocalShardRef
+    ) -> RandomAccessShard: ...
+
+
+class FormatHandler(ShardOpener, Protocol):
+    """Format-specific discovery and shard-reading behavior."""
 
     kind: str
 
@@ -53,19 +64,6 @@ class FormatHandler(Protocol):
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]: ...
 
-    def open_shard(
-        self, locator: ShardLocator, local_ref: LocalShardRef
-    ) -> RandomAccessShard: ...
-
-    def apply_store_options(self, options: "StoreOptions") -> None:
-        """Apply runtime store options to this (process-global) handler.
-
-        Default is a no-op. Formats with process-wide runtime state — e.g. an
-        in-memory decode cache — override this to honour ``StoreOptions`` set on
-        the pipeline. Called once per dataset when the shard store is built.
-        """
-        del options
-
 
 _REGISTRY: dict[str, FormatHandler] = {}
 
@@ -83,4 +81,4 @@ def get_format(kind: str) -> FormatHandler:
         raise KeyError(f"Format handler not registered for kind '{kind}'") from exc
 
 
-__all__ = ["FormatHandler", "get_format", "register_format"]
+__all__ = ["FormatHandler", "ShardOpener", "get_format", "register_format"]

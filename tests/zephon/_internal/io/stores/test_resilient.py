@@ -89,7 +89,7 @@ def test_resilient_shard_bounds_checks_without_resolve(tmp_path) -> None:
     shard = ResilientShard(
         locator=loc,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=2,
         retry_attempts=2,
         retry_initial_backoff=0.0,
@@ -118,7 +118,7 @@ def test_resilient_shard_retries_on_eviction_and_touches(tmp_path) -> None:
     shard = ResilientShard(
         locator=loc,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=2,
         retry_attempts=3,
         retry_initial_backoff=0.0,
@@ -140,7 +140,7 @@ def test_resilient_shard_propagates_indexerror_when_length_unknown(tmp_path) -> 
     shard = ResilientShard(
         locator=loc,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=0,  # unknown -> boundary not checked up-front
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -163,7 +163,7 @@ def test_resilient_shard_records_load_stats(tmp_path) -> None:
     shard = ResilientShard(
         locator=loc,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=1,
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -204,7 +204,7 @@ def test_resilient_getsamples_batch_single_open(tmp_path) -> None:
     shard = ResilientShard(
         locator=locator,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=3,
         retry_attempts=1,
         retry_initial_backoff=0.0,
@@ -234,7 +234,7 @@ def test_resilient_getsamples_single_item_delegates(tmp_path) -> None:
     shard = ResilientShard(
         locator=locator,
         resolver=resolver,
-        handler=handler,
+        opener=handler,
         length=2,
         retry_attempts=1,
         retry_initial_backoff=0.0,

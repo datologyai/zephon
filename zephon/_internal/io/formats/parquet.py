@@ -19,16 +19,22 @@ import os
 import struct
 import threading
 from collections import OrderedDict, defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
+from typing import TYPE_CHECKING, Any, Mapping, cast
 
 import numpy as np
 
 from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra_codec
 from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
-from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.base import (
+    FormatHandler,
+    register_format,
+)
+from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
+from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
@@ -37,7 +43,6 @@ from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
-    from zephon.io.options import StoreOptions
 
 logger = logging.getLogger(__name__)
 
@@ -52,196 +57,30 @@ def _ensure_pyarrow():
     return pa, pq
 
 
-_DEFAULT_RG_CACHE_BYTES = 2 * 1024**3  # 2 GiB
-
-# Thrash detection. A "reload" is reading a row group we previously evicted —
-# direct evidence the shuffle working set exceeds the cache. We remember the
-# last _GHOST_CAPACITY evicted keys to recognise reloads. Thrash is only
-# *possible* once the cache has FILLED (the first eviction), so detection is
-# armed at fill and warns when reloads exceed _THRASH_RATE of the reads since
-# then, over at least _THRASH_MIN_READS_AFTER_FILL reads. Gating on reads since
-# fill (not a fixed count from process start) is deliberate: thrashing throttles
-# reads, so a fixed warmup can take many minutes of wall-clock to reach — long
-# after the slow first batch it explains. Anchoring at fill fires the warning
-# within a couple hundred reads of thrash onset.
-_GHOST_CAPACITY = 8192
-_THRASH_MIN_READS_AFTER_FILL = 256
-_THRASH_RATE = 0.10
-
-
-class _CacheEntry(NamedTuple):
-    table: Any  # pyarrow.Table
-    byte_size: int
-
-
-class _RowGroupCache:
-    """Thread-safe LRU of Arrow row-group tables.
-
-    Keyed by ``(file_path, row_group_id)``. Stores the packed, immutable Arrow
-    table; per-record numpy/Python materialisation is deferred to the rows
-    actually accessed (via ``take``), so a given byte budget holds far more row
-    groups than object arrays of Python dicts/strings would. ``byte_size`` is
-    the table's ``nbytes`` — the exact buffer footprint of what is stored, with
-    no object-pointer undercount.
-
-    Evicts LRU entries when ``used_bytes`` exceeds ``max_bytes``. Set
-    ``max_bytes=0`` to disable: ``put`` becomes a no-op and ``get`` always
-    returns ``None``. Counts hits/misses/evictions/reloads and warns once when
-    reloads show the cache is too small (see module thrash constants).
-    """
-
-    def __init__(self, max_bytes: int = _DEFAULT_RG_CACHE_BYTES) -> None:
-        self._cache: OrderedDict[tuple[str, int], _CacheEntry] = OrderedDict()
-        self._lock = threading.Lock()
-        self._max_bytes = max_bytes
-        self._used_bytes = 0
-        self._hits = 0
-        self._misses = 0
-        self._evictions = 0
-        self._reloads = 0
-        self._ghost: OrderedDict[tuple[str, int], None] = OrderedDict()
-        self._thrash_warned = False
-        # Reads (hits+misses) when the cache first filled, i.e. the first
-        # eviction; -1 until then. Thrash detection is armed from this point.
-        self._reads_at_fill = -1
-
-    def get(self, path: str, rg_id: int) -> Any:
-        key = (path, rg_id)
-        with self._lock:
-            entry = self._cache.get(key)
-            if entry is None:
-                self._misses += 1
-                return None
-            self._hits += 1
-            self._cache.move_to_end(key)
-            return entry.table
-
-    def put(self, path: str, rg_id: int, table: Any, byte_size: int) -> None:
-        if self._max_bytes == 0:
-            return
-        key = (path, rg_id)
-        warn_payload: tuple[int, int] | None = None
-        with self._lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-                return
-            if key in self._ghost:
-                del self._ghost[key]
-                self._reloads += 1
-                warn_payload = self._maybe_flag_thrash()
-            self._cache[key] = _CacheEntry(table, byte_size)
-            self._used_bytes += byte_size
-            self._evict_to_fit()
-        if warn_payload is not None:
-            self._emit_thrash_warning(*warn_payload)
-
-    def set_max_bytes(self, max_bytes: int) -> None:
-        """Update the byte cap at runtime, evicting LRU entries to fit."""
-        with self._lock:
-            self._max_bytes = max_bytes
-            if max_bytes == 0:
-                self._cache.clear()
-                self._used_bytes = 0
-                return
-            self._evict_to_fit()
-
-    def _evict_to_fit(self) -> None:
-        """Evict LRU entries until under cap. Caller must hold the lock."""
-        while self._used_bytes > self._max_bytes and len(self._cache) > 1:
-            if self._reads_at_fill < 0:
-                # First eviction => the cache is full; arm thrash detection here.
-                self._reads_at_fill = self._hits + self._misses
-            ev_key, evicted = self._cache.popitem(last=False)
-            self._used_bytes -= evicted.byte_size
-            self._evictions += 1
-            self._ghost[ev_key] = None
-            if len(self._ghost) > _GHOST_CAPACITY:
-                self._ghost.popitem(last=False)
-
-    def _maybe_flag_thrash(self) -> tuple[int, int] | None:
-        """Return warning payload once thrash crosses threshold. Lock held.
-
-        Armed only after the cache has filled (``_reads_at_fill`` set on the
-        first eviction); warns when the reload rate over the reads since fill
-        crosses ``_THRASH_RATE``. Reloads can only happen post-fill, so the
-        cumulative ``_reloads`` is effectively the post-fill reload count.
-        """
-        if self._thrash_warned or self._reads_at_fill < 0:
-            return None
-        reads_since_fill = (self._hits + self._misses) - self._reads_at_fill
-        if reads_since_fill >= _THRASH_MIN_READS_AFTER_FILL and (
-            self._reloads >= reads_since_fill * _THRASH_RATE
-        ):
-            self._thrash_warned = True
-            return self._reloads, self._max_bytes
-        return None
-
-    @staticmethod
-    def _emit_thrash_warning(reloads: int, max_bytes: int) -> None:
-        logger.warning(
-            "Parquet row-group cache is thrashing: %d row groups re-decoded "
-            "after eviction (cache cap %.2f GiB). The shuffle working set "
-            "exceeds the cache; raise it via io_options cache.rg_cache_bytes or "
-            "ZEPHON_PARQUET_RG_CACHE_BYTES to cut redundant decode work.",
-            reloads,
-            max_bytes / 1024**3,
-        )
-
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._used_bytes = 0
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._cache)
-
-    @property
-    def used_bytes(self) -> int:
-        with self._lock:
-            return self._used_bytes
-
-    @property
-    def max_bytes(self) -> int:
-        with self._lock:
-            return self._max_bytes
-
-    def stats(self) -> dict[str, int]:
-        """Snapshot of cache counters for observability and tests."""
-        with self._lock:
-            return {
-                "hits": self._hits,
-                "misses": self._misses,
-                "evictions": self._evictions,
-                "reloads": self._reloads,
-                "entries": len(self._cache),
-                "used_bytes": self._used_bytes,
-                "max_bytes": self._max_bytes,
-            }
-
-
 class ParquetShard(RandomAccessShard):
-    """Random access shard backed by a Parquet file.
+    """Read selected rows from one local Parquet file.
 
-    Optimized for training workloads with:
-    - Binary search row group lookup
-    - Bulk read optimization (group by row group)
-    - Shared row group cache across open/close cycles
+    It maps record numbers to row groups and decodes them directly, unless a
+    ``ParquetShardOpener`` supplied a ``ParquetRGCache`` and matching slot base.
     """
 
     def __init__(
         self,
         path: Path,
         row_groups: list[dict],
-        rg_cache: _RowGroupCache,
-        metadata: Any | None = None,
+        decoded_cache: ParquetRGCache | None = None,
+        rg_slot_start: int | None = None,
+        metadata_loader: Callable[[], Any] | None = None,
     ) -> None:
         _ensure_pyarrow()
 
         self._path = path
         self._row_groups = row_groups
-        self._metadata = metadata
-        self._rg_cache = rg_cache
+        self._metadata_loader = metadata_loader
+        self._decoded_cache = decoded_cache
+        self._rg_slot_start = rg_slot_start
+        if (decoded_cache is None) != (rg_slot_start is None):
+            raise ValueError("Decoded RG cache and slot base must be provided together")
 
         self._rg_boundaries = self._build_cumulative_index(row_groups)
         self._length = self._rg_boundaries[-1] if self._rg_boundaries else 0
@@ -275,35 +114,6 @@ class ParquetShard(RandomAccessShard):
         local_idx = index - self._rg_boundaries[rg_id]
         return rg_id, local_idx
 
-    def _read_row_group_table(self, rg_id: int) -> Any:
-        """Return the cached Arrow table for ``rg_id``, reading it on a miss."""
-        path_key = str(self._path)
-        cached = self._rg_cache.get(path_key, rg_id)
-        if cached is not None:
-            return cached
-
-        _, pq = _ensure_pyarrow()
-        pq_file = pq.ParquetFile(self._path, metadata=self._metadata)
-        table = pq_file.read_row_group(rg_id, use_threads=False)
-        del pq_file
-
-        self._rg_cache.put(path_key, rg_id, table, table.nbytes)
-        return table
-
-    def _rows_from_table(
-        self, table: Any, local_indices: list[int]
-    ) -> list[dict[str, object]]:
-        """Materialise records for ``local_indices`` from a row-group table.
-
-        ``take`` (C++, GIL-released) gathers just the requested rows into a
-        small private sub-table before decode, so per-record numpy/Python
-        materialisation is proportional to rows accessed, not row-group size.
-        The shared Arrow materializer keeps types identical to a full decode:
-        numpy scalars for primitives, object-arrays-of-numpy for lists, and
-        dicts for structs.
-        """
-        return take_and_materialize(table, local_indices)
-
     def __getitem__(self, index: int) -> dict[str, object]:
         """Single record random access.
 
@@ -319,19 +129,10 @@ class ParquetShard(RandomAccessShard):
         if index < 0 or index >= self._length:
             raise IndexError(index)
 
-        rg_id, local_idx = self._locate_row_group(index)
-        table = self._read_row_group_table(rg_id)
-        return self._rows_from_table(table, [local_idx])[0]
+        return self.getsamples([index])[0]
 
     def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
-        """Bulk read: groups by row group, single file open for cache misses.
-
-        Holds the (compact, immutable) Arrow tables for the requested row groups
-        in a call-local dict so correctness is independent of cache retention
-        (e.g. ``ZEPHON_PARQUET_RG_CACHE_BYTES=0`` or concurrent eviction by
-        other shards). Each row group is decoded to numpy only for the rows
-        requested from it, via ``take``.
-        """
+        """Bulk read one RG at a time, restoring original ordering/duplicates."""
         if not indices:
             return []
 
@@ -344,33 +145,37 @@ class ParquetShard(RandomAccessShard):
             rg_id, local_idx = self._locate_row_group(idx)
             rg_groups[rg_id].append((orig_pos, local_idx))
 
-        path_key = str(self._path)
-        tables: dict[int, Any] = {}
-        missing_rg_ids: list[int] = []
-        for rg_id in rg_groups:
-            cached = self._rg_cache.get(path_key, rg_id)
-            if cached is not None:
-                tables[rg_id] = cached
-            else:
-                missing_rg_ids.append(rg_id)
+        pq_file: Any | None = None
 
-        if missing_rg_ids:
-            _, pq = _ensure_pyarrow()
-            pq_file = pq.ParquetFile(self._path, metadata=self._metadata)
-            for rg_id in missing_rg_ids:
-                table = pq_file.read_row_group(rg_id, use_threads=False)
-                tables[rg_id] = table
-                self._rg_cache.put(path_key, rg_id, table, table.nbytes)
-            del pq_file
+        def decode(rg_id: int) -> Any:
+            nonlocal pq_file
+            if pq_file is None:
+                _, pq = _ensure_pyarrow()
+                metadata = (
+                    self._metadata_loader()
+                    if self._metadata_loader is not None
+                    else None
+                )
+                pq_file = pq.ParquetFile(self._path, metadata=metadata)
+            return pq_file.read_row_group(rg_id, use_threads=False)
 
         results: list[dict[str, object] | None] = [None] * len(indices)
         for rg_id, items in rg_groups.items():
             local_indices = [local_idx for _, local_idx in items]
-            rows = self._rows_from_table(tables[rg_id], local_indices)
+            if self._decoded_cache is None:
+                rows = take_and_materialize(decode(rg_id), local_indices)
+            else:
+                assert self._rg_slot_start is not None
+                rows = self._decoded_cache.get_or_decode(
+                    slot=self._rg_slot_start + rg_id,
+                    local_indices=local_indices,
+                    decode=lambda rg_id=rg_id: decode(rg_id),
+                )
             for (orig_pos, _), row in zip(items, rows):
                 results[orig_pos] = row
 
-        return results  # type: ignore[return-value]
+        assert all(row is not None for row in results)
+        return cast(list[dict[str, object]], results)
 
     def __len__(self) -> int:
         """Return total number of records in shard."""
@@ -378,6 +183,17 @@ class ParquetShard(RandomAccessShard):
 
     def close(self) -> None:
         pass
+
+
+def _row_groups_from_ref(
+    locator: ShardLocator,
+    local_ref: LocalShardRef,
+) -> list[dict]:
+    extra = local_ref.extra or {}
+    row_groups = extra.get("row_groups", [])
+    if not isinstance(row_groups, list) or not row_groups:
+        raise ValueError(f"Missing row_groups metadata for shard {locator.shard_id}")
+    return row_groups
 
 
 class ParquetFormat(FormatHandler):
@@ -389,31 +205,6 @@ class ParquetFormat(FormatHandler):
     """
 
     kind = "parquet"
-    _METADATA_CACHE_MAX_SIZE = 256
-
-    def __init__(self) -> None:
-        self._metadata_cache: OrderedDict[str, Any] = OrderedDict()
-        self._metadata_lock = threading.Lock()
-        # ``ZEPHON_PARQUET_RG_CACHE_BYTES`` caps in-RAM decoded row groups
-        # (default 2 GiB; ``0`` disables). This is independent of the on-disk
-        # shard cache (``CacheOptions.limit_bytes``); a process's resident set
-        # can include both plus downstream operator state.
-        max_bytes = int(
-            os.environ.get("ZEPHON_PARQUET_RG_CACHE_BYTES", _DEFAULT_RG_CACHE_BYTES)
-        )
-        self._rg_cache = _RowGroupCache(max_bytes=max_bytes)
-
-    def apply_store_options(self, options: "StoreOptions") -> None:
-        """Apply runtime store options to this shared handler.
-
-        ``cache.rg_cache_bytes`` (when set) overrides the in-memory row-group
-        cache cap for this process, so it is a runtime knob rather than only the
-        import-time ``ZEPHON_PARQUET_RG_CACHE_BYTES`` env var. Called per worker
-        at store-build time.
-        """
-        rg_bytes = options.cache.rg_cache_bytes
-        if rg_bytes is not None:
-            self._rg_cache.set_max_bytes(rg_bytes)
 
     def _read_metadata_only(
         self, path: str, storage: StorageBackend, *, size: int
@@ -706,43 +497,80 @@ class ParquetFormat(FormatHandler):
             local_ref: Local file reference after caching/download
 
         Returns:
-            ParquetShard instance with cached metadata
+            Direct-decoding ParquetShard instance.
         """
-        # Extract metadata from local_ref.extra
-        extra = local_ref.extra or {}
-        row_groups = extra.get("row_groups", [])
+        return ParquetShard(
+            path=local_ref.raw.path,
+            row_groups=_row_groups_from_ref(locator, local_ref),
+        )
 
-        if not row_groups:
-            raise ValueError(
-                f"Missing row_groups metadata for shard {locator.shard_id}"
+
+class ParquetShardOpener:
+    """Open every Parquet dataset in one store with its cache context.
+
+    It maps each locator to ``ParquetRGIndex`` slots, supplies the store's
+    ``ParquetRGCache``, and keeps a small metadata cache shared by that store's
+    Parquet shards. The cache and index are owned by the surrounding store.
+    """
+
+    _METADATA_CACHE_MAX_SIZE = 256
+
+    def __init__(
+        self,
+        *,
+        decoded_cache: ParquetRGCache | None,
+        index: ParquetRGIndex | None,
+    ) -> None:
+        if (decoded_cache is None) != (index is None):
+            raise ValueError("Decoded RG cache and index must be provided together")
+        self._decoded_cache = decoded_cache
+        self._index = index
+        self._metadata_cache: OrderedDict[Path, Any] = OrderedDict()
+        self._metadata_lock = threading.Lock()
+
+    def open_shard(
+        self,
+        locator: ShardLocator,
+        local_ref: LocalShardRef,
+    ) -> RandomAccessShard:
+        row_groups = _row_groups_from_ref(locator, local_ref)
+        slot_start: int | None = None
+        if self._decoded_cache is not None:
+            assert self._index is not None
+            slot_start = self._index.slot_of(
+                locator.dataset,
+                locator.shard_id,
+                0,
             )
-
-        metadata = self._get_cached_metadata(local_ref.raw.path)
-
+            if slot_start is None:
+                raise ValueError(
+                    f"Missing decoded RG slot for {locator.dataset!r} "
+                    + f"shard {locator.shard_id}"
+                )
         return ParquetShard(
             path=local_ref.raw.path,
             row_groups=row_groups,
-            metadata=metadata,
-            rg_cache=self._rg_cache,
+            decoded_cache=self._decoded_cache,
+            rg_slot_start=slot_start,
+            metadata_loader=lambda: self._get_cached_metadata(local_ref.raw.path),
         )
 
     def _get_cached_metadata(self, path: Path) -> Any:
-        cache_key = str(path)
         with self._metadata_lock:
-            metadata = self._metadata_cache.get(cache_key)
+            metadata = self._metadata_cache.get(path)
             if metadata is not None:
-                self._metadata_cache.move_to_end(cache_key)
+                self._metadata_cache.move_to_end(path)
                 return metadata
 
         _, pq = _ensure_pyarrow()
         metadata = pq.read_metadata(path)
 
         with self._metadata_lock:
-            existing = self._metadata_cache.get(cache_key)
+            existing = self._metadata_cache.get(path)
             if existing is not None:
-                self._metadata_cache.move_to_end(cache_key)
+                self._metadata_cache.move_to_end(path)
                 return existing
-            self._metadata_cache[cache_key] = metadata
+            self._metadata_cache[path] = metadata
             while len(self._metadata_cache) > self._METADATA_CACHE_MAX_SIZE:
                 self._metadata_cache.popitem(last=False)
             return metadata

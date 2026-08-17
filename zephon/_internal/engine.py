@@ -56,6 +56,7 @@ from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.stores.multi import (
     finalize_dataset_catalogs,
     has_cacheable_dataset,
+    validate_store_cache_disk_space,
 )
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
@@ -66,7 +67,6 @@ from zephon._internal.runners.process import ProcessStageRunner
 from zephon._internal.runners.threads import ThreadStageRunner
 from zephon._internal.runtime_spec import RuntimeSpec
 from zephon._internal.stream import EngineSample, LanePtr, RunnerStageOut
-from zephon._internal.utils.disk import check_cache_disk_space
 from zephon._internal.utils.rank import rank_ctx
 from zephon._internal.world import World
 from zephon.observability import ExecutionTrackingMode
@@ -270,11 +270,8 @@ class Engine:
             "datasets_by_id": work.datasets_by_id,
             "io_options": opts.io_options,
         }
-        cache_opts = opts.io_options.cache
-        if cache_opts.enabled and has_cacheable_dataset(work.datasets_by_id):
-            check_cache_disk_space(
-                Path(cache_opts.root).expanduser(), cache_opts.limit_bytes
-            )
+        if has_cacheable_dataset(work.datasets_by_id):
+            validate_store_cache_disk_space(work.datasets_by_id, opts.io_options)
         # Mixture query service for EnsureMixture operator
         base_ctx["get_chunk_mixture"] = self._get_chunk_mixture
         base_ctx["get_component_name"] = self._get_component_name

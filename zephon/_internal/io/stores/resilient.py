@@ -9,7 +9,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from zephon._internal.io.formats.base import FormatHandler
+from zephon._internal.io.formats.base import ShardOpener
 from zephon._internal.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.types import LocalShardRef, ShardLocator
@@ -26,7 +26,7 @@ class ResilientShard(RandomAccessShard):
         *,
         locator: ShardLocator,
         resolver: ShardResolver,
-        handler: FormatHandler,
+        opener: ShardOpener,
         length: int,
         retry_attempts: int,
         retry_initial_backoff: float,
@@ -34,7 +34,7 @@ class ResilientShard(RandomAccessShard):
     ) -> None:
         self._locator = locator
         self._resolver = resolver
-        self._handler = handler
+        self._opener = opener
         self._length = max(0, int(length))
         attempts = max(1, int(retry_attempts))
         initial_backoff = max(0.0, float(retry_initial_backoff))
@@ -101,7 +101,7 @@ class ResilientShard(RandomAccessShard):
             open_start = self.timer.start()
             try:
                 # _local_ref is non-None here.
-                shard = self._handler.open_shard(self._locator, self._local_ref)  # type: ignore[arg-type]
+                shard = self._opener.open_shard(self._locator, self._local_ref)  # type: ignore[arg-type]
             except _RESILIENT_RETRY_EXCEPTIONS:
                 stats.open_ns += self.timer.elapsed(open_start)
                 if self._resolve(stats):
@@ -198,7 +198,7 @@ class ResilientShard(RandomAccessShard):
                 cache_misses += 1
 
             open_start = self.timer.start()
-            shard = self._handler.open_shard(self._locator, local_ref)
+            shard = self._opener.open_shard(self._locator, local_ref)
             open_ns_total += self.timer.elapsed(open_start)
 
             try:

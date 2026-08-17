@@ -566,6 +566,27 @@ def test_first_init_wipe_preserves_catalog_subdir(tmp_path: Path) -> None:
         mgr.close()
 
 
+def test_first_init_wipe_preserves_decoded_rg_namespace(tmp_path: Path) -> None:
+    """Raw cache reset never couples itself to decoded-RG eviction."""
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    raw_name = "persist.bin"
+    data = b"persist test"
+    _make_file(remote / raw_name, data)
+    decoded_marker = cache_root / ".parquet-rg-cache" / "owned-generation"
+    _make_file(decoded_marker, b"decoded-cache-owned")
+    _make_file(cache_root / "demo" / "leftover.bin", b"old raw run")
+
+    storage = LocalFSBackend(root=remote)
+    loc = _locator("demo", 40, str(remote), raw_name=raw_name, raw_bytes=len(data))
+    mgr = _make_manager(cache_root, storage, [loc])
+    try:
+        assert not (cache_root / "demo" / "leftover.bin").exists()
+        assert decoded_marker.read_bytes() == b"decoded-cache-owned"
+    finally:
+        mgr.close()
+
+
 def test_fresh_reset_wipes_on_new_run_persist_state_false(tmp_path: Path) -> None:
     """persist_state=False + no live owners: wipe between runs."""
     remote = tmp_path / "remote"

@@ -226,7 +226,9 @@ def test_engine_cache_preflight_skipped_without_file_backed_datasets(
 ) -> None:
     monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
     check = Mock()
-    monkeypatch.setattr("zephon._internal.engine.check_cache_disk_space", check)
+    monkeypatch.setattr(
+        "zephon._internal.engine.validate_store_cache_disk_space", check
+    )
     plan, opts, spec = _cache_preflight_engine_args(tmp_path, 50 * _GiB)
     Engine(plan, opts, _DummyWorkSource(), spec)
     check.assert_not_called()

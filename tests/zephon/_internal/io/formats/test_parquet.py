@@ -19,11 +19,10 @@ from tests._catalog_helpers import catalog_locators
 from tests.helpers.storage import _install_obstore_stubs
 from zephon._internal.io.catalog import extra_codec
 from zephon._internal.io.formats.parquet import (
-    _THRASH_MIN_READS_AFTER_FILL,
     ParquetFormat,
     ParquetShard,
+    ParquetShardOpener,
     _ParquetExtraCodec,
-    _RowGroupCache,
 )
 from zephon._internal.io.index.parquet_index import ParquetIndexBuilder
 from zephon._internal.io.storage import LocalFSBackend
@@ -304,7 +303,7 @@ class TestParquetShard:
     def test_shard_random_access(self, shard_file, shard_metadata):
         """Test single-record random access."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         assert len(shard) == 10000
 
@@ -329,7 +328,7 @@ class TestParquetShard:
     def test_shard_row_group_boundaries(self, shard_file, shard_metadata):
         """Test accessing rows at row group boundaries."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         # First row of each row group (row_group_size = 2000)
         for rg_idx in range(5):
@@ -346,7 +345,7 @@ class TestParquetShard:
     def test_shard_out_of_bounds(self, shard_file, shard_metadata):
         """Test accessing out-of-bounds indices."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         with pytest.raises(IndexError):
             _ = shard[-1]
@@ -360,7 +359,7 @@ class TestParquetShard:
     def test_shard_getsamples_bulk(self, shard_file, shard_metadata):
         """Test bulk read with getsamples()."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         # Bulk read spanning multiple row groups
         indices = [0, 100, 2000, 2001, 5000, 7500, 9999]
@@ -375,7 +374,7 @@ class TestParquetShard:
     def test_shard_getsamples_order_preservation(self, shard_file, shard_metadata):
         """Test that getsamples() preserves input order."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         # Random order
         indices = [9999, 0, 5000, 100, 7500]
@@ -388,7 +387,7 @@ class TestParquetShard:
     def test_shard_getsamples_duplicates(self, shard_file, shard_metadata):
         """Test that getsamples() handles duplicate indices."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         # Include duplicates
         indices = [100, 100, 200, 100, 300]
@@ -405,7 +404,7 @@ class TestParquetShard:
     def test_shard_getsamples_empty(self, shard_file, shard_metadata):
         """Test getsamples() with empty list."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         rows = shard.getsamples([])
         assert rows == []
@@ -413,7 +412,7 @@ class TestParquetShard:
     def test_shard_getsamples_out_of_bounds(self, shard_file, shard_metadata):
         """Test getsamples() with out-of-bounds indices."""
         row_groups = shard_metadata
-        shard = ParquetShard(shard_file, row_groups, rg_cache=_RowGroupCache())
+        shard = ParquetShard(shard_file, row_groups)
 
         with pytest.raises(IndexError):
             shard.getsamples([0, 100, 10000])
@@ -422,56 +421,87 @@ class TestParquetShard:
             shard.getsamples([0, -1, 100])
 
 
-class TestParquetMetadataCaching:
-    """Tests for cached metadata reuse during shard opens."""
+def _metadata_lifecycle_refs(
+    tmp_path: Path,
+) -> tuple[LocalShardRef, ShardLocator]:
+    shard_path = tmp_path / "cached.parquet"
+    create_test_parquet_file(shard_path, num_rows=200, row_group_size=20)
+    metadata = pq.read_metadata(str(shard_path))
+    row_groups = [
+        {
+            "num_rows": metadata.row_group(i).num_rows,
+            "total_byte_size": metadata.row_group(i).total_byte_size,
+        }
+        for i in range(metadata.num_row_groups)
+    ]
+    local_ref = LocalShardRef(
+        raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
+        extra={"row_groups": row_groups},
+    )
+    locator = ShardLocator(
+        dataset="test",
+        shard_id=0,
+        format="parquet",
+        root=str(tmp_path),
+        raw=ShardFile(
+            basename=shard_path.name,
+            bytes=shard_path.stat().st_size,
+            hashes={},
+        ),
+        extra={"row_groups": row_groups},
+    )
+    return local_ref, locator
 
-    def test_open_shard_reuses_cached_metadata(self, tmp_path: Path) -> None:
-        shard_path = tmp_path / "cached.parquet"
-        create_test_parquet_file(shard_path, num_rows=200, row_group_size=20)
 
-        metadata = pq.read_metadata(str(shard_path))
-        row_groups = [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
+class TestParquetMetadataLifecycle:
+    """Tests for lazy metadata access during shard opens."""
+
+    def test_open_shard_does_not_read_parquet_metadata(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        local_ref, locator = _metadata_lifecycle_refs(tmp_path)
         format_handler = ParquetFormat()
-        local_ref = LocalShardRef(
-            raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
-            extra={"row_groups": row_groups},
-        )
-        locator = ShardLocator(
-            dataset="test",
-            shard_id=0,
-            format="parquet",
-            root=str(tmp_path),
-            raw=ShardFile(
-                basename=shard_path.name,
-                bytes=shard_path.stat().st_size,
-                hashes={},
-            ),
-            extra={"row_groups": row_groups},
-        )
-
         calls = 0
-        real_read_metadata = pq.read_metadata
+        read_metadata = pq.read_metadata
 
         def counting_read_metadata(path_arg):
             nonlocal calls
             calls += 1
-            return real_read_metadata(path_arg)
+            return read_metadata(path_arg)
 
-        original = pq.read_metadata
-        pq.read_metadata = counting_read_metadata
-        try:
-            shard1 = format_handler.open_shard(locator, local_ref)
-            shard1.close()
-            shard2 = format_handler.open_shard(locator, local_ref)
-            shard2.close()
-        finally:
-            pq.read_metadata = original
+        monkeypatch.setattr(pq, "read_metadata", counting_read_metadata)
+        shard1 = format_handler.open_shard(locator, local_ref)
+        shard1.close()
+        shard2 = format_handler.open_shard(locator, local_ref)
+        shard2.close()
+
+        assert calls == 0
+
+    def test_parquet_misses_reuse_lazily_loaded_metadata(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        local_ref, locator = _metadata_lifecycle_refs(tmp_path)
+        opener = ParquetShardOpener(
+            decoded_cache=None,
+            index=None,
+        )
+        calls = 0
+        read_metadata = pq.read_metadata
+
+        def counting_read_metadata(path_arg):
+            nonlocal calls
+            calls += 1
+            return read_metadata(path_arg)
+
+        monkeypatch.setattr(pq, "read_metadata", counting_read_metadata)
+        first = opener.open_shard(locator, local_ref)
+        first.getsamples([0])
+        second = opener.open_shard(locator, local_ref)
+        second.getsamples([1])
 
         assert calls == 1
 
@@ -498,7 +528,7 @@ def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
         for i in range(metadata.num_row_groups)
     ]
 
-    shard = ParquetShard(path, row_groups, rg_cache=_RowGroupCache())
+    shard = ParquetShard(path, row_groups)
 
     row = shard[0]
     assert row["id"] == 0
@@ -512,557 +542,6 @@ def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
     np.testing.assert_array_equal(
         rows[2]["tokens"], list(range(50 * list_size, 51 * list_size))
     )
-
-
-class TestRowGroupCache:
-    """Tests for row group caching and file descriptor management."""
-
-    @pytest.fixture
-    def shard_file(self, tmp_path):
-        """Create a single Parquet file with 5 row groups."""
-        shard_path = tmp_path / "test_cache.parquet"
-        create_test_parquet_file(shard_path, num_rows=10000, row_group_size=2000)
-        return shard_path
-
-    @pytest.fixture
-    def shard_metadata(self, shard_file):
-        metadata = pq.read_metadata(str(shard_file))
-        return [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-
-    def test_cache_hit_avoids_file_open(self, shard_file, shard_metadata):
-        """Reading the same row group twice should only open the file once."""
-        cache = _RowGroupCache()
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-        open_calls = 0
-        real_parquet_file = pq.ParquetFile
-
-        def counting_open(*args, **kwargs):
-            nonlocal open_calls
-            open_calls += 1
-            return real_parquet_file(*args, **kwargs)
-
-        original = pq.ParquetFile
-        pq.ParquetFile = counting_open
-        try:
-            # First read: cache miss, opens file
-            _ = shard[0]
-            assert open_calls == 1
-
-            # Second read from same row group: cache hit, no file open
-            _ = shard[1]
-            assert open_calls == 1
-
-            # Read from different row group: cache miss, opens file again
-            _ = shard[2000]
-            assert open_calls == 2
-
-            # Re-read from first row group: still cached
-            _ = shard[100]
-            assert open_calls == 2
-        finally:
-            pq.ParquetFile = original
-
-    def test_lru_eviction(self, shard_file, shard_metadata):
-        """Cache should evict LRU entries when RAM cap is exceeded."""
-        # Read one row group to measure its size, then set cap to fit exactly one.
-        probe = _RowGroupCache()
-        probe_shard = ParquetShard(shard_file, shard_metadata, rg_cache=probe)
-        _ = probe_shard[0]
-        one_rg_bytes = probe.used_bytes
-        assert one_rg_bytes > 0
-
-        # Cap = just over one row group so a second evicts the first.
-        cache = _RowGroupCache(max_bytes=one_rg_bytes + 1)
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-        _ = shard[0]  # rg 0 — fits
-        assert len(cache) == 1
-
-        _ = shard[2000]  # rg 1 — exceeds cap, rg 0 evicted
-        assert len(cache) == 1
-        assert cache.get(str(shard_file), 0) is None
-        assert cache.get(str(shard_file), 1) is not None
-
-    def test_shared_cache_across_shard_instances(self, shard_file, shard_metadata):
-        """Cache should persist data across ParquetShard open/close cycles."""
-        cache = _RowGroupCache()
-
-        open_calls = 0
-        real_parquet_file = pq.ParquetFile
-
-        def counting_open(*args, **kwargs):
-            nonlocal open_calls
-            open_calls += 1
-            return real_parquet_file(*args, **kwargs)
-
-        original = pq.ParquetFile
-        pq.ParquetFile = counting_open
-        try:
-            # First shard instance reads row group 0
-            shard1 = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-            _ = shard1[0]
-            shard1.close()
-            assert open_calls == 1
-
-            # Second shard instance reads same row group: cache hit
-            shard2 = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-            _ = shard2[0]
-            shard2.close()
-            assert open_calls == 1  # no additional file open
-        finally:
-            pq.ParquetFile = original
-
-    def test_no_persistent_file_descriptor(self, shard_file, shard_metadata):
-        """ParquetShard should not hold any persistent file handle."""
-        cache = _RowGroupCache()
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-        # No _pq_file attribute should exist
-        assert not hasattr(shard, "_pq_file")
-
-        # Read some data
-        _ = shard[0]
-        _ = shard.getsamples([0, 2000, 4000])
-
-        # Still no persistent file handle
-        assert not hasattr(shard, "_pq_file")
-
-    def test_getsamples_uses_cache(self, shard_file, shard_metadata):
-        """getsamples should use the cache for repeated row group access."""
-        cache = _RowGroupCache()
-
-        open_calls = 0
-        real_parquet_file = pq.ParquetFile
-
-        def counting_open(*args, **kwargs):
-            nonlocal open_calls
-            open_calls += 1
-            return real_parquet_file(*args, **kwargs)
-
-        original = pq.ParquetFile
-        pq.ParquetFile = counting_open
-        try:
-            shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-            # First getsamples: opens file for each row group accessed
-            _ = shard.getsamples([0, 2000, 4000])
-            first_calls = open_calls
-
-            # Second getsamples with same row groups: all cache hits
-            _ = shard.getsamples([1, 2001, 4001])
-            assert open_calls == first_calls  # no additional opens
-        finally:
-            pq.ParquetFile = original
-
-    def test_format_handler_injects_shared_cache(self, tmp_path):
-        """ParquetFormat.open_shard should inject its shared cache."""
-        shard_path = tmp_path / "shared.parquet"
-        create_test_parquet_file(shard_path, num_rows=200, row_group_size=20)
-
-        metadata = pq.read_metadata(str(shard_path))
-        row_groups = [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-
-        format_handler = ParquetFormat()
-        local_ref = LocalShardRef(
-            raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
-            extra={"row_groups": row_groups},
-        )
-        locator = ShardLocator(
-            dataset="test",
-            shard_id=0,
-            format="parquet",
-            root=str(tmp_path),
-            raw=ShardFile(
-                basename=shard_path.name,
-                bytes=shard_path.stat().st_size,
-                hashes={},
-            ),
-            extra={"row_groups": row_groups},
-        )
-
-        shard1 = format_handler.open_shard(locator, local_ref)
-        shard2 = format_handler.open_shard(locator, local_ref)
-
-        # Both shards should share the same cache instance
-        assert shard1._rg_cache is shard2._rg_cache
-        assert shard1._rg_cache is format_handler._rg_cache
-
-    def test_low_memory_mode(self, shard_file, shard_metadata):
-        """max_bytes=0 disables caching: every read opens the file."""
-        cache = _RowGroupCache(max_bytes=0)
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-        open_calls = 0
-        real_parquet_file = pq.ParquetFile
-
-        def counting_open(*args, **kwargs):
-            nonlocal open_calls
-            open_calls += 1
-            return real_parquet_file(*args, **kwargs)
-
-        original = pq.ParquetFile
-        pq.ParquetFile = counting_open
-        try:
-            _ = shard[0]
-            _ = shard[1]  # same row group, but not cached
-            assert open_calls == 2
-            assert len(cache) == 0
-        finally:
-            pq.ParquetFile = original
-
-    def test_ram_cap_eviction(self, shard_file, shard_metadata):
-        """used_bytes tracks actual numpy buffer sizes."""
-        cache = _RowGroupCache()
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-
-        _ = shard[0]
-        assert cache.used_bytes > 0
-
-        before = cache.used_bytes
-        _ = shard[2000]  # second row group
-        assert cache.used_bytes > before
-
-
-def _create_struct_parquet_file(
-    path: Path, num_rows: int, row_group_size: int, content_bytes: int
-) -> int:
-    """Create a Parquet file whose ``text`` column is a struct with a heavy
-    ``content`` field, mimicking the IngestedDocument shape that triggered
-    the byte-accounting bug. Returns the table's Arrow ``nbytes`` so callers
-    can size cache caps relative to the actual decoded payload.
-    """
-    payload = "x" * content_bytes
-    table = pa.table(
-        {
-            "id": pa.array(range(num_rows), type=pa.int64()),
-            "text": pa.array(
-                [{"content": payload, "hash": f"h{i}"} for i in range(num_rows)],
-                type=pa.struct([("content", pa.string()), ("hash", pa.string())]),
-            ),
-        }
-    )
-    pq.write_table(table, str(path), row_group_size=row_group_size)
-    return int(table.nbytes)
-
-
-class TestRowGroupCacheAccounting:
-    """Regression tests for parquet row-group LRU cache fixes."""
-
-    def _struct_shard(self, tmp_path, *, num_rows, row_group_size, content_bytes):
-        path = tmp_path / "struct.parquet"
-        decoded = _create_struct_parquet_file(
-            path,
-            num_rows=num_rows,
-            row_group_size=row_group_size,
-            content_bytes=content_bytes,
-        )
-        metadata = pq.read_metadata(str(path))
-        shard_meta = [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-        return path, shard_meta, decoded
-
-    def test_used_bytes_counts_struct_payload(self, tmp_path):
-        """Cache ``used_bytes`` must reflect struct-column payload
-        bytes, not just the numpy object-pointer table.
-
-        Before the fix, an object-dtype numpy array reported
-        ``nbytes == len(arr) * 8``, so a 100-row row group with 100 KiB of
-        text per row (~10 MiB decoded) was booked as ~800 bytes. After the
-        fix we use Arrow ``table.nbytes`` which counts the underlying
-        buffer bytes.
-        """
-        path, shard_meta, decoded_bytes = self._struct_shard(
-            tmp_path, num_rows=100, row_group_size=100, content_bytes=100 * 1024
-        )
-        # Sanity check: the single row group really is ~10 MiB on the wire.
-        assert decoded_bytes >= 9_500_000, decoded_bytes
-
-        cache = _RowGroupCache()
-        shard = ParquetShard(path, shard_meta, rg_cache=cache)
-        _ = shard[0]
-
-        # Pre-fix this would be ~1 KiB. Post-fix it must be within an order
-        # of magnitude of the Arrow decoded size.
-        assert cache.used_bytes >= 5_000_000, (
-            f"used_bytes={cache.used_bytes} too small for a "
-            f"~10 MiB struct row group; accounting still broken"
-        )
-
-    def test_lru_eviction_with_struct_columns(self, tmp_path):
-        """eviction cap actually fires for struct-dtype
-        row groups. Pre-fix the cap was meaningless for these workloads
-        because ``used_bytes`` under-counted by ~1000x.
-        """
-        # 5 row groups of ~5 MiB each; cap ≈ 7 MiB so a second insert
-        # always evicts the previous one.
-        path, shard_meta, _ = self._struct_shard(
-            tmp_path, num_rows=250, row_group_size=50, content_bytes=100 * 1024
-        )
-        cache = _RowGroupCache(max_bytes=7 * 1024 * 1024)
-        shard = ParquetShard(path, shard_meta, rg_cache=cache)
-
-        _ = shard[0]
-        assert len(cache) == 1
-        first_used = cache.used_bytes
-
-        _ = shard[50]  # next row group
-        _ = shard[100]
-        _ = shard[150]
-        # Cap is below 2x one row group, so eviction must keep us at 1 entry.
-        assert len(cache) == 1, (
-            f"expected cap to evict down to 1 entry, got len={len(cache)}, "
-            f"used_bytes={cache.used_bytes}, first_used={first_used}"
-        )
-        # And the most recently inserted row group is still there.
-        assert cache.get(str(path), 3) is not None
-
-    def test_getsamples_without_row_group_cache(self, tmp_path):
-        """When max_bytes=0, put is a no-op. getsamples must still work without it."""
-        path, shard_meta, _ = self._struct_shard(
-            tmp_path, num_rows=200, row_group_size=50, content_bytes=4 * 1024
-        )
-        cache = _RowGroupCache(max_bytes=0)
-        shard = ParquetShard(path, shard_meta, rg_cache=cache)
-
-        # Indices spanning multiple row groups, in non-monotonic order.
-        results = shard.getsamples([0, 51, 199, 100, 1, 150])
-        assert len(results) == 6
-        assert results[0]["id"] == 0
-        assert results[1]["id"] == 51
-        assert results[2]["id"] == 199
-        assert results[3]["id"] == 100
-        assert results[4]["id"] == 1
-        assert results[5]["id"] == 150
-        # Cache must still be empty (max_bytes=0 ⇒ put is a no-op).
-        assert len(cache) == 0
-        assert cache.used_bytes == 0
-
-    def test_put_same_key_does_not_double_count(self, tmp_path):
-        """Re-``put``ing the same ``(path, rg_id)`` must not double-count
-        ``used_bytes``. Guards the dedup branch in ``_RowGroupCache.put``.
-        """
-        path, shard_meta, _ = self._struct_shard(
-            tmp_path, num_rows=50, row_group_size=50, content_bytes=1024
-        )
-        cache = _RowGroupCache()
-        shard = ParquetShard(path, shard_meta, rg_cache=cache)
-
-        _ = shard[0]
-        used_after_first = cache.used_bytes
-        len_after_first = len(cache)
-        assert used_after_first > 0
-
-        # Re-insert the same row group directly. Without the dedup branch
-        # this would double the booked usage and add a second entry.
-        path_key = str(path)
-        cached = cache.get(path_key, 0)
-        assert cached is not None
-        cache.put(path_key, 0, cached, used_after_first)
-
-        assert cache.used_bytes == used_after_first
-        assert len(cache) == len_after_first
-
-    def test_extract_row_returns_independent_dict(self, tmp_path):
-        """Mutating a returned struct value must not corrupt the
-        cached row group. Pre-fix the returned dict was the same Python
-        object that lived in the cache's numpy object array, so any
-        downstream mutation (or downstream-held reference outliving cache
-        eviction) created a "shadow set" of pinned dicts.
-        """
-        path, shard_meta, _ = self._struct_shard(
-            tmp_path, num_rows=50, row_group_size=50, content_bytes=512
-        )
-        cache = _RowGroupCache()
-        shard = ParquetShard(path, shard_meta, rg_cache=cache)
-
-        first = shard[0]
-        original_content = first["text"]["content"]
-
-        # Mutating the returned dict's nested struct field must NOT affect
-        # the cache's view of the row.
-        first["text"]["content"] = "MUTATED"
-        first["text"]["hash"] = "MUTATED"
-
-        second = shard[0]  # served from cache
-        assert second["text"]["content"] == original_content
-        assert second["text"]["hash"] != "MUTATED"
-        # And the two reads are not the same Python object identity.
-        assert first["text"] is not second["text"]
-
-
-class TestRowGroupCacheRuntimeResize:
-    """Runtime cache-size knob: set_max_bytes / ParquetFormat.apply_store_options."""
-
-    @pytest.fixture
-    def shard_file(self, tmp_path):
-        shard_path = tmp_path / "resize.parquet"
-        create_test_parquet_file(shard_path, num_rows=10000, row_group_size=2000)
-        return shard_path
-
-    @pytest.fixture
-    def shard_metadata(self, shard_file):
-        metadata = pq.read_metadata(str(shard_file))
-        return [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-
-    def test_set_max_bytes_evicts_to_fit(self, shard_file, shard_metadata):
-        cache = _RowGroupCache()
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        _ = shard.getsamples([0, 2000, 4000])  # three row groups cached
-        assert len(cache) == 3
-
-        cache.set_max_bytes(1)  # below one row group → evict down to a single entry
-        assert len(cache) == 1
-        assert cache.max_bytes == 1
-
-    def test_set_max_bytes_zero_clears(self, shard_file, shard_metadata):
-        cache = _RowGroupCache()
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        _ = shard[0]
-        assert len(cache) == 1
-
-        cache.set_max_bytes(0)
-        assert len(cache) == 0
-        assert cache.used_bytes == 0
-
-    def test_apply_store_options_overrides_cap(self):
-        from zephon.io.options import CacheOptions, StoreOptions
-
-        fmt = ParquetFormat()
-        with pytest.warns(DeprecationWarning, match="rg_cache_bytes is deprecated"):
-            options = StoreOptions(cache=CacheOptions(rg_cache_bytes=12345))
-        fmt.apply_store_options(options)
-        assert fmt._rg_cache.max_bytes == 12345
-
-    def test_apply_store_options_none_keeps_default(self):
-        from zephon.io.options import StoreOptions
-
-        fmt = ParquetFormat()
-        default = fmt._rg_cache.max_bytes
-        fmt.apply_store_options(StoreOptions())
-        assert fmt._rg_cache.max_bytes == default
-
-    def test_cache_options_parses_human_size(self):
-        from zephon.io.options import CacheOptions
-
-        opts = CacheOptions.from_any({"rg_cache_bytes": "4gb"})
-        assert opts.rg_cache_bytes == 4 * 1024**3
-
-
-class TestRowGroupCacheThrash:
-    """Ghost-list reload counter flags a too-small cache."""
-
-    @pytest.fixture
-    def shard_file(self, tmp_path):
-        shard_path = tmp_path / "thrash.parquet"
-        create_test_parquet_file(shard_path, num_rows=10000, row_group_size=2000)
-        return shard_path
-
-    @pytest.fixture
-    def shard_metadata(self, shard_file):
-        metadata = pq.read_metadata(str(shard_file))
-        return [
-            {
-                "num_rows": metadata.row_group(i).num_rows,
-                "total_byte_size": metadata.row_group(i).total_byte_size,
-            }
-            for i in range(metadata.num_row_groups)
-        ]
-
-    def test_reloads_counted_when_working_set_exceeds_cache(
-        self, shard_file, shard_metadata
-    ):
-        probe = _RowGroupCache()
-        _ = ParquetShard(shard_file, shard_metadata, rg_cache=probe)[0]
-        one_rg = probe.used_bytes
-
-        cache = _RowGroupCache(max_bytes=one_rg + 1)  # room for ~one row group
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        # Alternate two row groups so each access evicts (then reloads) the other.
-        for _ in range(3):
-            _ = shard[0]
-            _ = shard[2000]
-
-        stats = cache.stats()
-        assert stats["evictions"] >= 1
-        assert stats["reloads"] >= 1
-
-    def test_no_reloads_when_cache_fits(self, shard_file, shard_metadata):
-        cache = _RowGroupCache()  # 2 GiB default easily holds both row groups
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        for _ in range(3):
-            _ = shard[0]
-            _ = shard[2000]
-
-        stats = cache.stats()
-        assert stats["reloads"] == 0
-        assert stats["evictions"] == 0
-
-    def test_thrash_warning_fires_after_fill(self, shard_file, shard_metadata, caplog):
-        """The warning fires once reloads dominate the reads since the cache
-        filled — anchored at the first eviction, not a fixed read count."""
-        import logging
-
-        probe = _RowGroupCache()
-        _ = ParquetShard(shard_file, shard_metadata, rg_cache=probe)[0]
-        one_rg = probe.used_bytes
-
-        cache = _RowGroupCache(max_bytes=one_rg + 1)  # holds ~one row group
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        # Alternate two row groups so each access reloads the other, well past
-        # _THRASH_MIN_READS_AFTER_FILL reads after the cache fills.
-        with caplog.at_level(
-            logging.WARNING, logger="zephon._internal.io.formats.parquet"
-        ):
-            for _ in range(_THRASH_MIN_READS_AFTER_FILL + 20):
-                _ = shard[0]
-                _ = shard[2000]
-
-        warnings = [r for r in caplog.records if "thrashing" in r.message.lower()]
-        assert len(warnings) == 1  # warns exactly once
-        assert cache._thrash_warned is True
-
-    def test_thrash_warning_silent_when_cache_fits(
-        self, shard_file, shard_metadata, caplog
-    ):
-        """No warning (and no arming) when the cache never fills, even over many
-        reads — guards against false positives on a fitting working set."""
-        import logging
-
-        cache = _RowGroupCache()  # 2 GiB holds both row groups -> no eviction
-        shard = ParquetShard(shard_file, shard_metadata, rg_cache=cache)
-        with caplog.at_level(
-            logging.WARNING, logger="zephon._internal.io.formats.parquet"
-        ):
-            for _ in range(_THRASH_MIN_READS_AFTER_FILL + 20):
-                _ = shard[0]
-                _ = shard[2000]
-
-        assert cache._reads_at_fill == -1  # never filled, detection unarmed
-        assert not [r for r in caplog.records if "thrashing" in r.message.lower()]
 
 
 def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
@@ -1085,12 +564,12 @@ def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
         }
         for i in range(metadata.num_row_groups)
     ]
-    shard = ParquetShard(path, row_groups, rg_cache=_RowGroupCache())
+    shard = ParquetShard(path, row_groups)
 
     row = shard[1]
     assert isinstance(row["tok"], np.ndarray)
     assert row["tok"].dtype == np.int64
-    assert row["tok"].flags.writeable  # _extract_row copies list cells
+    assert row["tok"].flags.writeable  # Materialization copies list cells
     np.testing.assert_array_equal(row["tok"], [3, 4, 5])
 
     # getsamples spanning both row groups, arbitrary order.

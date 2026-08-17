@@ -9,13 +9,21 @@ import numpy as np
 
 from zephon._internal.io.catalog import CatalogSet, ShardCatalog, set_catalog_dir
 from zephon._internal.io.formats import ensure_builtin_formats
-from zephon._internal.io.formats.base import get_format
+from zephon._internal.io.formats.base import ShardOpener, get_format
+from zephon._internal.io.formats.parquet import ParquetFormat
+from zephon._internal.io.formats.parquet_cache.runtime import (
+    build_parquet_cache_runtime,
+    validate_parquet_cache_disk_space,
+)
 from zephon._internal.io.memory import InMemoryDatasetStore
 from zephon._internal.io.protocols import (
     DatasetShardView,
     RandomAccessShard,
 )
 from zephon._internal.io.resolvers import CacheManager, DirectResolver, ShardResolver
+from zephon._internal.io.resolvers.cache.layout import (
+    validate_raw_cache_dataset_names,
+)
 from zephon._internal.io.storage import (
     LocalFSBackend,
     RouterStorageBackend,
@@ -24,6 +32,7 @@ from zephon._internal.io.storage import (
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
 from zephon._internal.io.types import ShardLocator
+from zephon._internal.utils.disk import check_cache_disk_space
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 
@@ -156,12 +165,42 @@ class CatalogLocators(Mapping[tuple[int, int], ShardLocator]):
 
 def has_cacheable_dataset(datasets: Mapping[int, Dataset]) -> bool:
     """Return ``True`` if any dataset is file-backed (a non-inmem string kind)."""
-    return any(
-        isinstance((backend := d.backend), dict)
-        and isinstance((kind := backend.get("kind")), str)
-        and kind != "inmem"
-        for d in datasets.values()
-    )
+    cacheable, _parquet = _cacheable_dataset_flags(datasets)
+    return cacheable
+
+
+def _cacheable_dataset_flags(
+    datasets: Mapping[int, Dataset],
+) -> tuple[bool, bool]:
+    cacheable = False
+    parquet = False
+    for dataset in datasets.values():
+        backend = dataset.backend
+        kind = backend.get("kind") if isinstance(backend, dict) else None
+        if not isinstance(kind, str) or kind == "inmem":
+            continue
+        cacheable = True
+        parquet = parquet or kind == "parquet"
+    return cacheable, parquet
+
+
+def validate_store_cache_disk_space(
+    datasets: Mapping[int, Dataset],
+    options: StoreOptions | None = None,
+) -> None:
+    """Preflight the complete on-disk cache budget before workers start."""
+    store_opts = StoreOptions.from_any(options)
+    cacheable, parquet = _cacheable_dataset_flags(datasets)
+    if not cacheable:
+        return
+    if parquet:
+        validate_parquet_cache_disk_space(store_opts)
+        return
+    if store_opts.cache.enabled:
+        check_cache_disk_space(
+            Path(store_opts.cache.root).expanduser().resolve(),
+            store_opts.cache.limit_bytes,
+        )
 
 
 def build_resolver(
@@ -176,6 +215,9 @@ def build_resolver(
     """
     store_opts = StoreOptions.from_any(options)
     if store_opts.cache.enabled and catalog_set is not None and catalog_set.num_shards:
+        validate_raw_cache_dataset_names(
+            Path(store_opts.cache.root), catalog_set.cacheable_names
+        )
         storage = RouterStorageBackend() if storage is None else storage
         cache_root = Path(store_opts.cache.root).expanduser()
         return CacheManager(
@@ -229,43 +271,64 @@ def build_multi_dataset_store(
     store_opts = StoreOptions.from_any(options)
     catalog_set = build_catalog_set(datasets)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
+    try:
+        parquet_runtime = build_parquet_cache_runtime(catalog_set, store_opts)
+    except Exception:
+        if isinstance(resolver, CacheManager):
+            resolver.close()
+        raise
+
+    def close_resources() -> None:
+        try:
+            parquet_runtime.close()
+        finally:
+            if isinstance(resolver, CacheManager):
+                resolver.close()
 
     registry = DatasetStoreRegistry(
-        on_close=resolver.close if isinstance(resolver, CacheManager) else None
+        on_close=close_resources,
     )
-    for dataset_id, dataset in datasets.items():
-        backend = dataset.backend
-        kind = backend.get("kind") if isinstance(backend, dict) else None
-        if kind == "inmem":
-            shards_obj = backend.get("shards", {}) if isinstance(backend, dict) else {}
-            view: DatasetShardView = InMemoryDatasetStore(
-                cast(Mapping[int, RandomAccessShard], shards_obj)
-            )
-        elif isinstance(kind, str):
-            try:
-                handler = get_format(kind)
-            except KeyError as exc:
+    try:
+        for dataset_id, dataset in datasets.items():
+            backend = dataset.backend
+            kind = backend.get("kind") if isinstance(backend, dict) else None
+            if kind == "inmem":
+                assert isinstance(backend, dict)
+                shards_obj = backend.get("shards", {})
+                view: DatasetShardView = InMemoryDatasetStore(
+                    cast(Mapping[int, RandomAccessShard], shards_obj)
+                )
+            elif isinstance(kind, str):
+                try:
+                    handler = get_format(kind)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
+                    ) from exc
+                opener: ShardOpener = handler
+                if kind == "parquet":
+                    assert isinstance(handler, ParquetFormat)
+                    opener = parquet_runtime.opener
+                catalog: ShardCatalog | None = None
+                if catalog_set is not None and dataset._catalog_handle is not None:
+                    catalog = catalog_set.catalog_for(dataset.name)
+                view = FileBackedDatasetShardView(
+                    dataset=dataset,
+                    opener=opener,
+                    resolver=resolver,
+                    retry_attempts=store_opts.cache.open_retry_attempts,
+                    retry_initial_backoff=store_opts.cache.open_retry_initial_backoff,
+                    retry_max_backoff=store_opts.cache.open_retry_max_backoff,
+                    catalog=catalog,
+                )
+            else:
                 raise ValueError(
                     f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
-                ) from exc
-            handler.apply_store_options(store_opts)
-            catalog: ShardCatalog | None = None
-            if catalog_set is not None and dataset._catalog_handle is not None:
-                catalog = catalog_set.catalog_for(dataset.name)
-            view = FileBackedDatasetShardView(
-                dataset=dataset,
-                handler=handler,
-                resolver=resolver,
-                retry_attempts=store_opts.cache.open_retry_attempts,
-                retry_initial_backoff=store_opts.cache.open_retry_initial_backoff,
-                retry_max_backoff=store_opts.cache.open_retry_max_backoff,
-                catalog=catalog,
-            )
-        else:
-            raise ValueError(
-                f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
-            )
-        registry.register(int(dataset_id), view)
+                )
+            registry.register(int(dataset_id), view)
+    except Exception:
+        registry.close()
+        raise
 
     return registry
 
@@ -278,4 +341,5 @@ __all__ = [
     "build_resolver_with_locators",
     "finalize_dataset_catalogs",
     "has_cacheable_dataset",
+    "validate_store_cache_disk_space",
 ]
