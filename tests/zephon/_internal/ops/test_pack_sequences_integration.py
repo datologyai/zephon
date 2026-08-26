@@ -687,8 +687,11 @@ def test_pack_sequences_varlen_mid_stream_eviction_after_checkpoint(
 
 
 # ---------------------------------------------------------------------------
-# The output matrix, end to end through real runners:
+# The output matrix, end to end through the real inline runner:
 #   every registered algorithm x output {envelope, flat(+/-positions)}
+# Runner behavior is covered by the checkpoint/reproducibility cases above and
+# by the dedicated runner parity suites. Repeating this full semantic matrix
+# through process workers adds minutes of startup/teardown without new coverage.
 # ---------------------------------------------------------------------------
 
 _MATRIX_SEQS = [[10, 11, 12], [20, 21], [30, 31, 32, 33], [40]]
@@ -713,14 +716,9 @@ def _matrix_work() -> StaticMixtureWorkSource:
     )
 
 
-@pytest.mark.parametrize(
-    "runner_kind",
-    ["inline", "threads", "process"],
-    ids=["inline", "threads", "process"],
-)
 @pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
 def test_pack_envelope_matrix_end_to_end(
-    runner_kind: str, algorithm: PackingAlgorithm
+    algorithm: PackingAlgorithm,
 ) -> None:
     """Envelope output across the algorithm axis: each record is a list of
     per-segment dicts carrying the token field (boundaries preserved)."""
@@ -730,9 +728,7 @@ def test_pack_envelope_matrix_end_to_end(
         num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
         algorithm=algorithm,
     )
-    pipeline.options(
-        deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
-    )
+    pipeline.options(deterministic=True, max_workers=1, runner="inline")
 
     records = list(pipeline)
     assert records
@@ -743,15 +739,11 @@ def test_pack_envelope_matrix_end_to_end(
         assert all("input_ids" in seg for seg in segs)
 
 
-@pytest.mark.parametrize(
-    "runner_kind",
-    ["inline", "threads", "process"],
-    ids=["inline", "threads", "process"],
-)
 @pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
 @pytest.mark.parametrize("emit_positions", [True, False], ids=["pos", "nopos"])
 def test_pack_flat_matrix_end_to_end(
-    runner_kind: str, algorithm: PackingAlgorithm, emit_positions: bool
+    algorithm: PackingAlgorithm,
+    emit_positions: bool,
 ) -> None:
     """Flat output across algorithm × positions: every record is a fixed-length
     ``{input_ids[, positions]}`` the trainer can stack directly."""
@@ -763,9 +755,7 @@ def test_pack_flat_matrix_end_to_end(
         pad_token_id=-1,
         emit_positions=emit_positions,
     )
-    pipeline.options(
-        deterministic=True, max_workers=1, default_stage_prefetch=16, runner=runner_kind
-    )
+    pipeline.options(deterministic=True, max_workers=1, runner="inline")
 
     records = list(pipeline)
     assert records

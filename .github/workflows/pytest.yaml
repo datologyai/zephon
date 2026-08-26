@@ -33,16 +33,18 @@ concurrency:
 
 jobs:
   unit:
-    name: Unit Tests
+    name: Unit Tests (${{ matrix.python_version }}, ${{ matrix.shard }})
     timeout-minutes: 30
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         python_version: ["3.10", "3.12", "3.13"]
         runner: ["ubuntu-latest"]
+        shard: ["process-runner", "remainder"]
         include:
         - python_version: "3.14t"
           runner: LargeGithubRunner
+          shard: "all"
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -78,7 +80,22 @@ jobs:
         PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
       run: |
         set -ex
-        uv run --python ${{ matrix.python_version }} pytest -m "not integration and not requires_ray" --maxfail=10
+        case "${{ matrix.shard }}" in
+          process-runner)
+            test_targets=(tests/zephon/_internal/runners/test_process.py)
+            ;;
+          remainder)
+            test_targets=(
+              tests
+              --ignore=tests/zephon/_internal/runners/test_process.py
+            )
+            ;;
+          all)
+            test_targets=(tests)
+            ;;
+        esac
+        uv run --python ${{ matrix.python_version }} pytest "${test_targets[@]}" \
+          -m "not integration and not requires_ray" --maxfail=10
     - name: Save venv cache for slow builds
       if: always() && (startsWith(matrix.python_version, '3.14') || endsWith(matrix.python_version, 't'))
       uses: actions/cache/save@v4
@@ -88,9 +105,12 @@ jobs:
   lowest-bounds:
     # Installs the OLDEST versions allowed by pyproject.toml (instead of uv.lock)
     # to verify the declared `>=` floors; on failure, bump the offending floor.
-    name: Unit Tests (lowest bounds)
+    name: Unit Tests (lowest bounds, ${{ matrix.shard }})
     timeout-minutes: 30
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: ["process-runner", "remainder"]
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -106,7 +126,19 @@ jobs:
     - name: Run Unit Tests
       run: |
         set -ex
-        uv run --python 3.10 --no-sync pytest -m "not integration and not requires_ray" --maxfail=10
+        case "${{ matrix.shard }}" in
+          process-runner)
+            test_targets=(tests/zephon/_internal/runners/test_process.py)
+            ;;
+          remainder)
+            test_targets=(
+              tests
+              --ignore=tests/zephon/_internal/runners/test_process.py
+            )
+            ;;
+        esac
+        uv run --python 3.10 --no-sync pytest "${test_targets[@]}" \
+          -m "not integration and not requires_ray" --maxfail=10
   packaging:
     name: Packaging Tests
     timeout-minutes: 15

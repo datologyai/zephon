@@ -33,12 +33,13 @@ concurrency:
 
 jobs:
   integration:
-    name: Integration Tests
+    name: Integration Tests (${{ matrix.python_version }}, ${{ matrix.shard }})
     timeout-minutes: 40
     runs-on: LargeGithubRunner
     strategy:
       matrix:
         python_version: ["3.10", "3.12", "3.13", "3.14t"]
+        shard: ["elastic-io", "remainder"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,7 +75,27 @@ jobs:
           PYTHON_GIL: ${{ endsWith(matrix.python_version, 't') && '0' || '' }}
         run: |
           set -ex
-          uv run --python ${{ matrix.python_version }} pytest -m "integration and not requires_ray" --run-integration --full-trace --timeout=180 --timeout-method=thread --tb=long --capture=tee-sys -vv --maxfail=10
+          case "${{ matrix.shard }}" in
+            elastic-io)
+              test_targets=(
+                tests/integration/test_elastic_continuation.py
+                tests/integration/test_jsonl_integration.py
+                tests/integration/test_torchdata_stateful_elasticity.py
+              )
+              ;;
+            remainder)
+              test_targets=(
+                tests/integration
+                --ignore=tests/integration/test_elastic_continuation.py
+                --ignore=tests/integration/test_jsonl_integration.py
+                --ignore=tests/integration/test_torchdata_stateful_elasticity.py
+              )
+              ;;
+          esac
+          uv run --python ${{ matrix.python_version }} pytest "${test_targets[@]}" \
+            -m "integration and not requires_ray" --run-integration --full-trace \
+            --timeout=180 --timeout-method=thread --tb=long \
+            --capture=tee-sys -vv --maxfail=10
 
   ray-integration:
     name: Ray Integration Tests
