@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,17 @@ from zephon.io.options import StoreOptions
 logger = logging.getLogger(__name__)
 
 _legacy_environment_warned = False
+_cache_failure_warning_keys: set[tuple[int, Path]] = set()
+_cache_failure_warning_lock = threading.Lock()
+
+
+def _is_first_cache_failure(root: Path) -> bool:
+    """Return whether this process has not logged a failure for ``root``."""
+    key = (os.getpid(), root)
+    with _cache_failure_warning_lock:
+        first_failure = key not in _cache_failure_warning_keys
+        _cache_failure_warning_keys.add(key)
+    return first_failure
 
 
 @dataclass
@@ -130,7 +142,8 @@ def build_parquet_cache_runtime(
     except ParquetRGSessionError:
         if is_custom:
             raise
-        logger.warning(
+        log = logger.warning if _is_first_cache_failure(root) else logger.debug
+        log(
             "Decoded Parquet RG cache is unavailable at %s; using direct decode.",
             root,
             exc_info=True,
@@ -138,7 +151,8 @@ def build_parquet_cache_runtime(
         cache = None
         index = None
     except Exception:
-        logger.warning(
+        log = logger.warning if _is_first_cache_failure(root) else logger.debug
+        log(
             "Decoded Parquet RG cache initialization failed at %s; using direct decode.",
             root,
             exc_info=True,

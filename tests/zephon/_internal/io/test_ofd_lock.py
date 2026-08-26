@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,108 @@ from zephon._internal.io.ofd_lock import (
     ofd_backend_info,
     probe_ofd_support,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_backend_selection_cache() -> Iterator[None]:
+    _select_backend.cache_clear()
+    yield
+    _select_backend.cache_clear()
+
+
+def test_backend_prefers_python_fcntl_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exposed_command = 123
+    monkeypatch.setattr(
+        ofd_lock_module,
+        "fcntl",
+        SimpleNamespace(F_OFD_SETLK=exposed_command),
+    )
+
+    backend = _select_backend(
+        sys_platform="linux",
+        architecture="x86_64",
+        pointer_size=8,
+    )
+
+    assert backend.info.setlk_command == exposed_command
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "aarch64"])
+def test_backend_uses_linux_fallback_when_python_symbol_is_absent(
+    architecture: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ofd_lock_module, "fcntl", SimpleNamespace())
+
+    backend = _select_backend(
+        sys_platform="linux",
+        architecture=architecture,
+        pointer_size=8,
+    )
+
+    assert backend.info.setlk_command == 37
+
+
+def test_backend_does_not_use_linux_fallback_on_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ofd_lock_module, "fcntl", SimpleNamespace())
+
+    with pytest.raises(OFDLockUnavailable, match="no safe numeric fallback"):
+        _select_backend(
+            sys_platform="darwin",
+            architecture="arm64",
+            pointer_size=8,
+        )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "pointer_size"),
+    [("riscv64", 8), ("x86_64", 4)],
+)
+def test_backend_does_not_use_linux_fallback_for_unsupported_abi(
+    architecture: str,
+    pointer_size: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ofd_lock_module, "fcntl", SimpleNamespace())
+
+    with pytest.raises(OFDLockUnavailable):
+        _select_backend(
+            sys_platform="linux",
+            architecture=architecture,
+            pointer_size=pointer_size,
+        )
+
+
+def test_linux_fallback_command_is_passed_to_fcntl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, bytes]] = []
+
+    def record_fcntl(fd: int, command: int, request: bytes) -> None:
+        calls.append((fd, command, request))
+
+    monkeypatch.setattr(
+        ofd_lock_module,
+        "fcntl",
+        SimpleNamespace(
+            F_RDLCK=0,
+            F_WRLCK=1,
+            F_UNLCK=2,
+            fcntl=record_fcntl,
+        ),
+    )
+    backend = _select_backend(
+        sys_platform="linux",
+        architecture="x86_64",
+        pointer_size=8,
+    )
+
+    assert backend.try_lock(9, ofd_lock_module.OFDLockMode.EXCLUSIVE, 0, 1)
+    assert calls[0][0:2] == (9, 37)
 
 
 def test_backend_has_expected_native_layout() -> None:

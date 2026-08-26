@@ -35,6 +35,8 @@ except ImportError:  # pragma: no cover - exercised only on non-Unix hosts
 
 _DARWIN_FLOCK = struct.Struct("@qqihh")
 _LINUX_64_FLOCK = struct.Struct("@hh4xqqi4x")
+# Linux UAPI include/uapi/asm-generic/fcntl.h defines F_OFD_SETLK as 37.
+_LINUX_F_OFD_SETLK = 37
 _CONFLICT_ERRNOS = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
 _FORK_GUARD = threading.RLock()
 _LIVE_LEASES: weakref.WeakSet[OFDLease] = weakref.WeakSet()
@@ -166,9 +168,6 @@ def _select_backend(
     pointer_size: int | None = None,
 ) -> _NativeOFDBackend:
     fcntl_module = _require_fcntl()
-    if not hasattr(fcntl_module, "F_OFD_SETLK"):
-        raise OFDLockUnavailable("Python's fcntl module does not expose F_OFD_SETLK")
-
     selected_platform = sys.platform if sys_platform is None else sys_platform
     selected_arch = (
         platform.machine() if architecture is None else architecture
@@ -179,8 +178,12 @@ def _select_backend(
     if selected_pointer_size != 8:
         raise OFDLockUnavailable(f"Unsupported {selected_pointer_size * 8}-bit OFD ABI")
 
-    setlk_command = fcntl_module.F_OFD_SETLK
     if selected_platform == "darwin" and selected_arch in {"arm64", "x86_64"}:
+        if not hasattr(fcntl_module, "F_OFD_SETLK"):
+            raise OFDLockUnavailable(
+                "Python's fcntl module does not expose F_OFD_SETLK, and no safe "
+                "numeric fallback is available for Darwin"
+            )
         if _DARWIN_FLOCK.size != 24:
             raise OFDLockUnavailable(
                 f"Unexpected Darwin struct flock size: {_DARWIN_FLOCK.size}"
@@ -190,7 +193,7 @@ def _select_backend(
                 abi_id="darwin-64",
                 architecture=selected_arch,
                 struct_size=_DARWIN_FLOCK.size,
-                setlk_command=setlk_command,
+                setlk_command=fcntl_module.F_OFD_SETLK,
             ),
             flock_struct=_DARWIN_FLOCK,
             darwin_field_order=True,
@@ -200,6 +203,11 @@ def _select_backend(
         "aarch64",
         "x86_64",
     }:
+        setlk_command = getattr(
+            fcntl_module,
+            "F_OFD_SETLK",
+            _LINUX_F_OFD_SETLK,
+        )
         if _LINUX_64_FLOCK.size != 32:
             raise OFDLockUnavailable(
                 f"Unexpected Linux struct flock size: {_LINUX_64_FLOCK.size}"

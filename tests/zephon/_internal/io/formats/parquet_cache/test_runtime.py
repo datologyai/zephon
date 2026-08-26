@@ -1,11 +1,14 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from zephon._internal.io.formats.parquet import ParquetShardOpener
+from zephon._internal.io.formats.parquet_cache import runtime as runtime_module
 from zephon._internal.io.formats.parquet_cache.session import (
     ParquetRGSessionInUseError,
 )
@@ -14,6 +17,50 @@ from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon.io.dataset import Dataset
 from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+
+
+def test_repeated_initialization_failure_warns_once_per_process_and_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingCache:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("simulated initialization failure")
+
+    monkeypatch.setattr(
+        runtime_module,
+        "ParquetRGIndex",
+        lambda _catalog_set: SimpleNamespace(num_row_groups=1),
+    )
+    monkeypatch.setattr(runtime_module, "ParquetRGCache", FailingCache)
+    monkeypatch.setattr(
+        runtime_module,
+        "validate_parquet_cache_disk_space",
+        lambda _options: None,
+    )
+    runtime_module._cache_failure_warning_keys.clear()
+    options = StoreOptions(
+        cache=CacheOptions(enabled=True, root=tmp_path / "raw-cache"),
+        parquet_rg_cache=ParquetRGCacheOptions(
+            limit_bytes=16 * 1024 * 1024,
+            min_free_bytes=0,
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
+
+    first = runtime_module.build_parquet_cache_runtime(object(), options)  # type: ignore[arg-type]
+    second = runtime_module.build_parquet_cache_runtime(object(), options)  # type: ignore[arg-type]
+
+    assert first.cache is None
+    assert second.cache is None
+    failures = [
+        record
+        for record in caplog.records
+        if "cache initialization failed" in record.getMessage()
+    ]
+    assert len(failures) == 1
+    assert failures[0].exc_info is not None
 
 
 def _parquet_dataset(

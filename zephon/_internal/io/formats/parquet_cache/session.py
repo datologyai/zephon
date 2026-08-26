@@ -221,7 +221,8 @@ class ParquetRGSession:
         probe = probe_ofd_support(self.root)
         if not probe.supported:
             raise OFDLockUnavailable(
-                f"Decoded RG cache filesystem lacks OFD range locks: {probe.reason}"
+                "Decoded RG cache cannot use OFD range locks in this environment: "
+                f"{probe.reason}"
             )
         lock_identity = self._lock_id.encode("ascii")
         try:
