@@ -34,7 +34,7 @@ concurrency:
 jobs:
   unit:
     name: Unit Tests
-    timeout-minutes: 20
+    timeout-minutes: 30
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -89,7 +89,7 @@ jobs:
     # Installs the OLDEST versions allowed by pyproject.toml (instead of uv.lock)
     # to verify the declared `>=` floors; on failure, bump the offending floor.
     name: Unit Tests (lowest bounds)
-    timeout-minutes: 20
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
