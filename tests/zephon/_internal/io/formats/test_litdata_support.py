@@ -1,4 +1,7 @@
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -9,6 +12,7 @@ import optree
 from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
 from litdata.streaming.writer import BinaryWriter
 
+from zephon._internal.io.formats import litdata_support
 from zephon._internal.io.formats.litdata_support import (
     _NUMPY_DTYPES_REVERSE,
     _TORCH_DTYPES_MAPPING,
@@ -23,6 +27,29 @@ from zephon._internal.io.formats.litdata_support import (
     treespec_dumps,
     treespec_loads,
 )
+
+
+def test_litdata_dependency_initialization_is_single_flight(monkeypatch) -> None:
+    monkeypatch.setattr(litdata_support, "_litdata_deps_ready", False)
+    calls = 0
+
+    def load() -> None:
+        nonlocal calls
+        calls += 1
+        time.sleep(0.01)
+        litdata_support._litdata_deps_ready = True
+
+    monkeypatch.setattr(litdata_support, "_load_litdata_deps", load)
+    barrier = threading.Barrier(8)
+
+    def initialize() -> None:
+        barrier.wait()
+        litdata_support.ensure_litdata_deps()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _index: initialize(), range(8)))
+
+    assert calls == 1
 
 
 class _EchoSerializer(Serializer):

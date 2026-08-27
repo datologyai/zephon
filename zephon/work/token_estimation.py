@@ -767,10 +767,20 @@ def _init_prime_worker(
     )
 
 
+def _ensure_imports(dataset: Dataset) -> None:
+    """Finish format-specific cold imports before calibration fans out."""
+    if dataset.backend["kind"] == "litdata":
+        from zephon._internal.io.formats import litdata_support
+
+        litdata_support.ensure_litdata_deps()
+
+
 def _measure_in_worker(dataset_id: int) -> _DatasetMeasurement:
     w = _prime_worker
+    dataset = w["datasets"][dataset_id]
+    _ensure_imports(dataset)
     return _measure_dataset(
-        w["datasets"][dataset_id],
+        dataset,
         dataset_id,
         w["store"],
         w["estimation"],
@@ -1101,6 +1111,8 @@ def prime_token_ratios(
             stacklevel=2,
         )
 
+    # TODO: Broadcast or publish one authoritative ratio map (for example via
+    # the cloud/checkpoint directory) so every rank and node uses identical costs.
     for name, ratio in ratios.items():
         _logger.info(
             "token-aware priming: dataset %s -> %.6f tokens/byte (%s)",

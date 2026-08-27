@@ -27,13 +27,13 @@ from optree import treespec
 # processes that register the litdata format but never open a shard, this is
 # pure waste.
 #
-# We defer ALL litdata (and torch) imports to ``_ensure_litdata_deps()``,
+# We defer ALL litdata (and torch) imports to ``ensure_litdata_deps()``,
 # which runs on first call to ``_get_serializers()`` — i.e. at shard-open
 # time, not at format-registration time.
 #
 # ``_ensure_torch()`` provides standalone lazy access to the torch module
 # for ``TokensLoader``, which needs ``torch.frombuffer`` / ``torch.empty``.
-# Once ``_ensure_litdata_deps()`` has run torch is already in sys.modules,
+# Once ``ensure_litdata_deps()`` has run torch is already in sys.modules,
 # so ``_ensure_torch()`` is effectively a dict lookup at that point.
 # ---------------------------------------------------------------------------
 
@@ -66,6 +66,7 @@ def _ensure_torch():  # pragma: no cover - optional dependency
 # -- Lazy litdata deps (serializers + dtype mappings) -----------------------
 
 _litdata_deps_ready = False
+_litdata_deps_lock = threading.Lock()
 
 _SERIALIZERS: OrderedDict[str, Any] = OrderedDict()
 _NUMPY_DTYPES_REVERSE: dict[Any, int] = {}
@@ -73,27 +74,12 @@ _TORCH_DTYPES_MAPPING: dict[int, Any] = {}
 _NUMPY_DTYPES_MAPPING: dict[int, Any] = {}
 
 
-def _ensure_litdata_deps() -> None:
-    """Populate serializer and dtype mappings from litdata on first use.
-
-    This triggers ``import torch`` (via ``litdata.constants``).  Called from
-    ``_get_serializers()``, which runs during ``BaseItemLoader.setup()`` —
-    i.e. when a worker actually opens a shard, not at format registration
-    time.
-    """
+def _load_litdata_deps() -> None:
     global _litdata_deps_ready
-    if _litdata_deps_ready:
-        return
 
-    from litdata.constants import (
-        _NUMPY_DTYPES_MAPPING as _ndm,
-    )
-    from litdata.constants import (
-        _TORCH_DTYPES_MAPPING as _tdm,
-    )
-    from litdata.streaming.serializers import (
-        _SERIALIZERS as _litdata_serializers,
-    )
+    from litdata.constants import _NUMPY_DTYPES_MAPPING as _ndm
+    from litdata.constants import _TORCH_DTYPES_MAPPING as _tdm
+    from litdata.streaming.serializers import _SERIALIZERS as _litdata_serializers
     from litdata.streaming.serializers import (
         NoHeaderNumpySerializer,
         NoHeaderTensorSerializer,
@@ -105,9 +91,6 @@ def _ensure_litdata_deps() -> None:
     _NUMPY_DTYPES_MAPPING.update(_ndm)
     _TORCH_DTYPES_MAPPING.update(_tdm)
     _NUMPY_DTYPES_REVERSE.update({dtype: idx for idx, dtype in _ndm.items()})
-
-    # Make litdata types accessible as module attributes so that external
-    # code (e.g. tests) can ``from litdata_support import Serializer``.
     globals().update(
         {
             "NoHeaderNumpySerializer": NoHeaderNumpySerializer,
@@ -116,17 +99,25 @@ def _ensure_litdata_deps() -> None:
             "Serializer": Serializer,
         }
     )
-
     _litdata_deps_ready = True
+
+
+def ensure_litdata_deps() -> None:
+    """Load LitData's serializer and dtype modules exactly once."""
+    if _litdata_deps_ready:
+        return
+    with _litdata_deps_lock:
+        if not _litdata_deps_ready:
+            _load_litdata_deps()
 
 
 def __getattr__(name: str) -> Any:
     """Module-level __getattr__ (PEP 562) for lazy litdata type access.
 
-    Triggers ``_ensure_litdata_deps()`` so that ``from litdata_support
+    Triggers ``ensure_litdata_deps()`` so that ``from litdata_support
     import Serializer`` works without eagerly importing litdata/torch.
     """
-    _ensure_litdata_deps()
+    ensure_litdata_deps()
     try:
         return globals()[name]
     except KeyError:
@@ -175,7 +166,7 @@ def _get_serializers(
     overrides: Optional[Mapping[str, Serializer]] = None,
 ) -> dict[str, Serializer]:
     """Return serializer instances, allowing overrides for testing."""
-    _ensure_litdata_deps()
+    ensure_litdata_deps()
     serializers: OrderedDict[str, Serializer] = OrderedDict(_SERIALIZERS)
     if overrides:
         for key, value in overrides.items():

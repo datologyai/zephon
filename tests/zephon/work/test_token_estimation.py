@@ -5,7 +5,9 @@
 
 import json
 import pickle
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cloudpickle
@@ -313,6 +315,37 @@ def test_pps_select_returns_records_in_fetch_order():
 # ---------------------------------------------------------------------------
 # Priming: delivery planning + fallback
 # ---------------------------------------------------------------------------
+
+
+def test_measure_worker_initializes_litdata_before_measurement(monkeypatch) -> None:
+    events: list[str] = []
+    measurement = object()
+    monkeypatch.setattr(
+        sys.modules["zephon._internal.io.formats"],
+        "litdata_support",
+        SimpleNamespace(ensure_litdata_deps=lambda: events.append("initialize")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        token_estimation,
+        "_measure_dataset",
+        lambda *_args, **_kwargs: events.append("measure") or measurement,
+    )
+    monkeypatch.setattr(
+        token_estimation,
+        "_prime_worker",
+        {
+            "datasets": {0: Dataset("lit", {"kind": "litdata"})},
+            "store": None,
+            "estimation": None,
+            "counter": None,
+            "seed": 0,
+            "pre_tokenize_replay": None,
+        },
+    )
+
+    assert token_estimation._measure_in_worker(0) is measurement
+    assert events == ["initialize", "measure"]
 
 
 def test_measure_plan_aborts_dataset_on_error():
