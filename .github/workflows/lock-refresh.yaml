@@ -30,7 +30,7 @@ jobs:
         # the LOCK_REFRESH_TOKEN secret (machine PAT / App token) to lift that.
         token: ${{ secrets.LOCK_REFRESH_TOKEN || github.token }}
         commit-message: "chore: refresh uv.lock to latest resolutions"
-        title: "chore: weekly uv.lock refresh"
+        title: "chore: monthly uv.lock refresh"
         body: |
           Automated `uv lock --upgrade`: bumps every locked version, including
           transitive dependencies, to the latest allowed by `pyproject.toml`.
