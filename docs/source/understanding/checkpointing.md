@@ -615,22 +615,22 @@ accumulator starts each epoch from the same clean state as the original
 run, all inflight chunks are preserved, so replay produces identical
 output and the ReplayFilter finds its target cursor.
 
-```{warning}
-**Known limitation: cross-lane shuffle determinism with multi-lane
-workers.**  When a single worker serves multiple lanes, the internal
-round-robin that interleaves records from those lanes is not restored on
-resume.  For most accumulators (packing, mixture correction) this is
-irrelevant because they are keyed per-lane.  However, the shuffle buffer
-uses a shared `CountingAccumulator` whose microbatch composition — and
-therefore `batch_seed` — can differ after resume, producing a different
-shuffle permutation within the buffer window.
+```{note}
+**Same-topology output order is preserved.** For unchanged ownership,
+Zephon preserves the order in which lane outputs reach the consumer.
+Delivery acknowledgements update the saved round-robin position, and
+checkpoint save/load preserve it. Source progress alone cannot reliably
+reconstruct this order, particularly with buffering, packing, or replay.
+The round-robin position controls tail output order after the processing
+stages; it does not control the input sequence to their accumulators.
 
-In a `shuffle → pack` pipeline this can break replay: different shuffle
-order → different bin composition → `pack_meta` produces different output
-cursors → the ReplayFilter's target cursor never appears.  The typical
-`pack → shuffle` ordering is safe because shuffle preserves existing
-cursors (it only reorders), so the ReplayFilter always finds its target
-regardless of permutation.  We need to fix this.
+After an elastic topology change, the old physical pointer may no longer
+describe a valid owner or lane set. If no entry matches the current owner
+and lane assignment, Zephon deterministically derives a new pointer from
+durable per-lane progress instead.  This retains the
+no-skip/no-duplicate guarantee, but exact sample-by-sample interleaving is
+not promised across the remap; checkpoint at global-window boundaries when
+window composition must remain stable.
 ```
 
 Operators that **buffer samples across chunk boundaries** must cooperate

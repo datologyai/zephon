@@ -338,6 +338,10 @@ class Engine:
         self._checkpoint_lock = threading.Lock()
         self._inflight_shm: ctypes.Array[ctypes.c_int] | None = None
         self._rr_next_idx: dict[str, int] = {}
+        # Fixed lookup for the current iterator:
+        # delivered lane ID -> (checkpoint owner key, following owned-lane index).
+        # Rebuilt at iterator startup; not serialized in checkpoints.
+        self._rr_ack_next: dict[LaneId, tuple[str, int]] = {}
 
         # Component ids come from the source's declared vocabulary so they are
         # a function of config, not encounter order (which differs across
@@ -1070,58 +1074,20 @@ class Engine:
             a -= 1
         return a  # at least 1
 
-    def _refresh_rr_from_progress(self) -> None:
-        """Recompute the tail round-robin (RR) pointer for THIS owner (rank + DataLoader worker) from durable per-lane progress.
+    def _ensure_rr_next_idx(self) -> None:
+        """Ensure a checkpoint RR position exists for the current owner.
 
-        Scope: physical vs logical
-        - Physical-scoped (ephemeral): the RR pointer is keyed by the current topology and
-        the exact owned lane set:
-            "{physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
-        It means "which lane index should this owner emit from next?". When topology
-        changes (ranks/workers/mapping), the key changes, and any stale pointer is ignored.
-        - Logical-scoped (durable): per-lane state keyed by canonical lane_id:
-            * LanePtr(chunk_id, offset)
-            * inflight chunks
-            * last replay cursor
-            * next chunk id
-        This state is the source of truth across checkpoints and elastic remaps and
-        guarantees no skips/duplicates globally.
+        Called during checkpoint save and load. Preserve an existing entry for
+        the current rank, DataLoader worker, active-worker count, and owned lane
+        list. Delivery acknowledgements maintain this entry during iteration.
 
-        What this method does
-        - For the current owner, determine the set of owned lanes under the current topology.
-        - If the owner is idle (worker_id >= active), return.
-        - If there is ≤ 1 owned lane, set the RR index to 0.
-        - Otherwise, choose the "least-advanced" lane among the owned lanes using:
-            (progress.chunk_id, progress.offset, lane_id)
-        and set the RR pointer to that lane's index within the owned lane list.
-        This is deterministic and tends to preserve fairness.
+        If the entry is missing, initialize it from the least-advanced owned lane,
+        ordered by (chunk_id, offset, lane_id). This provides a deterministic
+        starting position when no matching RR state was saved.
 
-        Guarantees
-        - No skips/duplicates globally: ensured by durable per-lane progress and inflight state.
-        - Deterministic local emission within the same topology: the RR pointer is persisted
-        under the physical key and reused.
-        - Multiset equality per global window when checkpointing at window boundaries:
-        lane progress + one-lane-per-batch invariant ensure the same set of samples per
-        window (order may be permuted).
-
-        Non-goals
-        - Exact cross-topology, sample-by-sample interleaving is not preserved. After a
-        remap, the RR pointer is recomputed from progress and may differ from the prior
-        owner's next turn. If you were to checkpoint mid-window, the composition of the
-        remainder of that window could permute (still no skips/dups overall). Therefore,
-        checkpoint at window boundaries if you require window-level set semantics.
-
-        Where it's used
-        - Called during load_state_dict() (after restoring per-lane progress) to seed the
-        RR pointer for the new topology.
-        - Called inside state_dict() before local state is written, ensuring RR state is
-        consistent with observed progress.
-        - If this method has not been called for a fresh run/topology, _lane_rr_iter()
-        falls back to RR index 0 for the current key.
-
-        Bottom line
-        - RR pointer: local, physical-world-scoped fairness hint; recomputed or reused per key.
-        - Per-lane progress: durable, topology-agnostic correctness state; guarantees continuity.
+        Source progress is only a fallback: it does not reliably identify the
+        next output turn after buffering, packing, or replay. Recomputing an
+        existing entry could therefore change delivery order on resume.
         """
         lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
         worker_id, workers_per_rank = get_torch_worker_info()
@@ -1132,6 +1098,10 @@ class Engine:
         key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
         if len(lanes) <= 1:
             self._rr_next_idx[key] = 0
+            return
+        # Preserve the saved delivery position. Source progress cannot reliably
+        # reconstruct whose output turn follows the last acknowledged item.
+        if key in self._rr_next_idx:
             return
 
         def lane_progress_tuple(lane: int) -> tuple[int, int, int]:
@@ -1196,48 +1166,28 @@ class Engine:
         self,
         upstream: Iterable[StreamItem],
     ) -> Iterator[StreamItem]:
-        """Tail round-robin multiplexer over the lanes owned by THIS DataLoader worker.
+        """Interleave this worker's lane outputs in round-robin order.
 
-        Purpose
-        - Maintain the "one lane per batch" invariant at the tail:
-        drain the upstream into per-lane buffers and emit in round-robin order
-        across the owned lanes.
+        Upstream batches must already contain a single lane. Buffer items by
+        lane and emit one non-sentinel item per turn, preserving order within
+        each lane. Sentinels do not consume a turn. Once upstream ends, skip
+        empty lanes while draining. Idle workers drain upstream for shutdown.
 
-        Physical key scoping
-        - The RR pointer is keyed by:
-            "{physical_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
-        which binds the pointer to this owner and its current lane assignment.
-        When topology changes, the key changes and the stale pointer is ignored.
+        Initialize producer_idx from the owner's saved _rr_next_idx entry,
+        defaulting to zero. Both values are indices into the owned lane list,
+        not lane IDs.
 
-        Initialization and interaction with RR refresh
-        - This iterator reads the saved RR pointer for the current key; if missing,
-        it defaults to 0.
-        - _refresh_rr_from_progress() should be called after loading a checkpoint (and is
-        called by load_state_dict()) to provide a progress-derived starting point.
-        For brand-new runs with no checkpoint, defaulting to 0 is fine.
+        producer_idx is local to this generator and is never checkpointed.
+        Advancing it after yield is safe: the increment executes before the
+        generator selects its next item. record_delivery() independently updates
+        _rr_next_idx from acknowledged delivery.
 
-        Round-robin algorithm (high level)
-        - If this worker is idle (worker_id >= active), drain upstream (expected empty) and return.
-        - Otherwise:
-        1) Initialize idx from the saved RR pointer (or 0).
-        2) Drain upstream into per-lane deques (routing by item.lane_id).
-        3) Emit exactly one item from lane owned_lanes[idx], then advance:
-            idx = (idx + 1) % len(owned_lanes), and persist the updated pointer
-            under the same physical key.
-        4) Continue until upstream ends and all per-lane buffers are drained.
+        Final prefetch (prefetch_batches) and MTP output queues can pull this
+        generator ahead of delivery. Producer advancement must therefore never
+        overwrite _rr_next_idx.
 
-        Guarantees and limits
-        - No skips/duplicates: ensured by durable per-lane progress in the engine.
-        - One lane per batch at the tail: the pipeline enforces that batches carry a
-        single lane id; this mux preserves that invariant on emission.
-        - Deterministic local interleaving in the same topology: the saved pointer is reused.
-        - Across topology changes, the exact interleaving may differ; if you checkpoint
-        at window boundaries, the multiset of samples per window remains identical.
-
-        Best practices
-        - Checkpoint at window boundaries to preserve window-level set semantics across
-        elastic remaps.
-        - Rely on per-lane progress for correctness; the RR pointer is a local fairness hint.
+        Build _rr_ack_next before yielding. It maps each owned lane ID to the
+        checkpoint owner key and the index following that lane.
         """
         warn_threshold = 10000
 
@@ -1257,6 +1207,7 @@ class Engine:
         if len(lanes) <= 1:  # Simple case: only one owned lane
             key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
             self._rr_next_idx[key] = 0
+            self._rr_ack_next = dict.fromkeys(lanes, (key, 0))
             yield from upstream
             return
 
@@ -1264,7 +1215,11 @@ class Engine:
         it = iter(upstream)
         upstream_ended = False
         key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
-        idx = self._rr_next_idx.get(key, 0) % len(lanes)
+        self._rr_ack_next = {
+            lane: (key, (lane_idx + 1) % len(lanes))
+            for lane_idx, lane in enumerate(lanes)
+        }
+        producer_idx = self._rr_next_idx.get(key, 0) % len(lanes)
 
         # soft warning thresholds (double each time they’re tripped)
         per_lane_next_warn: dict[int, int] = {}
@@ -1294,7 +1249,7 @@ class Engine:
                     total_next_warn = max(total_next_warn * 2, total_next_warn + 1)
 
         while not upstream_ended:
-            lane = lanes[idx]
+            lane = lanes[producer_idx]
             # Block-fill until current lane has something or upstream ends.
             while not buffers[lane]:
                 try:
@@ -1310,37 +1265,34 @@ class Engine:
             if upstream_ended:
                 break  # move to drain regime
 
-            # Emit exactly one from the current lane, then advance RR pointer.
+            # Emit from the current lane, then advance the producer index.
             # Sentinels (tombstones, etc.) are transparent to RR scheduling —
             # they must not consume a slot, otherwise the interleaving order
             # diverges from the pre-checkpoint baseline after a replay.
             item = buffers[lane].popleft()
             yield item
             if not is_sentinel(item):
-                idx = (idx + 1) % len(lanes)
-                self._rr_next_idx[key] = idx
+                producer_idx = (producer_idx + 1) % len(lanes)
 
         # -------- DRAIN REGIME: upstream ended, flush everything in RR ----------
         while any(buffers[l] for l in lanes):
-            # Find next non-empty lane starting at idx (skip empties).
+            # Find next non-empty lane starting at producer_idx (skip empties).
             rotated = 0
             emitted = False
             while rotated < len(lanes):
-                lane = lanes[idx]
+                lane = lanes[producer_idx]
                 if buffers[lane]:
                     item = buffers[lane].popleft()
                     yield item
                     if not is_sentinel(item):
-                        idx = (idx + 1) % len(lanes)
-                        self._rr_next_idx[key] = idx
+                        producer_idx = (producer_idx + 1) % len(lanes)
                     emitted = True
                     break
-                idx = (idx + 1) % len(lanes)
+                producer_idx = (producer_idx + 1) % len(lanes)
                 rotated += 1
             if not emitted:
                 # All empty (defensive; the outer while should break next iteration).
                 break
-        self._rr_next_idx[key] = idx
 
     def build_iter(self) -> Iterator[StreamItem]:
         """Return an iterator that threads the work stream through all stages."""
@@ -1577,19 +1529,25 @@ class Engine:
             self._lane_last_cursor[lane_id] = record_cursor
 
     def record_delivery(self, lane_id: int) -> None:
-        """Count one consumer-delivered item at the pipeline tail for *lane_id*.
+        """Record one acknowledged output and update its owner's checkpoint RR position.
 
-        Called from the tail notify path (``_apply_notify_args``) once per
-        item actually yielded to the consumer — a batch when batching is
-        present, a record otherwise. Tombstones and flush sentinels are
-        excluded upstream (they are notified but never delivered), which is
-        what keeps replayed-and-dropped records after a checkpoint restore
-        from double-counting.
+        Called through the delivery notification path once per real output item:
+        a batch when batching is enabled, otherwise a record. Sentinels and replay
+        tombstones do not count as deliveries.
 
-        Purely observability: the counters feed the mid-window checkpoint
-        warning and never influence scheduling, replay, or RR emission.
+        Update the delivery counter and, when RR bookkeeping is initialized,
+        save the index following the delivered lane. Derive this position from
+        the delivered item because the producer may be paused at yield or may
+        have advanced through prefetch.
+
+        Inline iteration applies this update before yielding to the consumer.
+        MTP applies it when processing the consumer's ACK; preceding ACKs are
+        processed before a subsequent checkpoint request.
         """
         self._lane_emitted[lane_id] += 1
+        if self._rr_ack_next:
+            key, next_idx = self._rr_ack_next[lane_id]
+            self._rr_next_idx[key] = next_idx
 
     @staticmethod
     def _complete_lane_counts(
@@ -1699,7 +1657,7 @@ class Engine:
         with self._checkpoint_lock:
             owned = self._owned_lanes
 
-            self._refresh_rr_from_progress()
+            self._ensure_rr_next_idx()
 
             for purge_candidate_str in [
                 "_lane_ws",
@@ -2334,14 +2292,14 @@ class Engine:
         self._checkpoint_reload_count = ckpt.checkpoint_reload_count + 1
         self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
 
-        # rr_next_idx is owner-keyed ("{global_rank}:..."); keep only our own so
-        # peers' stale pointers can't collide in the next merge (_refresh below
-        # re-derives our key from progress).
+        # rr_next_idx is owner-keyed ("{global_rank}:..."); keep only this rank's
+        # entries so peers' stale pointers can't collide in the next merge.
         own_prefix = f"{self._opts.global_rank}:"
         rr_raw = ckpt.rr_next_idx or {}
         self._rr_next_idx = {
             k: int(v) for k, v in rr_raw.items() if k.startswith(own_prefix)
         }
+        self._rr_ack_next.clear()
 
         replay_raw = ckpt.replay_cursors or {}
         self._lane_last_cursor = dict.fromkeys(owned)
@@ -2395,5 +2353,5 @@ class Engine:
                 stacklevel=2,
             )
 
-        self._refresh_rr_from_progress()
+        self._ensure_rr_next_idx()
         self._publish_replay_snapshot()

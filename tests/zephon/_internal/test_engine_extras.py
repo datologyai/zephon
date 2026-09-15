@@ -896,6 +896,30 @@ class TestLaneEmittedCounters:
         eng.record_delivery(1)
         assert eng._lane_emitted == {0: 2, 1: 1}
 
+    def test_record_delivery_persists_next_rr_lane_before_checkpoint(self) -> None:
+        """A checkpoint immediately after delivery saves the next lane."""
+        eng = _mk_engine_with_opts(canonical_replicas=4, dp_degree=1)
+        rr = eng._lane_rr_iter(iter([_mk_rec(0, 0), _mk_rec(1, 0)]))
+        first = next(rr)
+        eng.record_delivery(first.meta.lane_id)
+        second = next(rr)
+        eng.record_delivery(second.meta.lane_id)
+        state = eng.state_dict()
+        assert state["rr_next_idx"] == {"0:0/1:0,1,2,3": 2}
+
+    def test_rr_prefetch_does_not_persist_undelivered_lanes(self) -> None:
+        """Producer read-ahead cannot advance the checkpoint's RR pointer."""
+        eng = _mk_engine_with_opts(canonical_replicas=4, dp_degree=1)
+        rr = eng._lane_rr_iter(iter([_mk_rec(lane, 0) for lane in range(4)]))
+
+        first = next(rr)
+        next(rr)
+        eng.record_delivery(first.meta.lane_id)
+        next(rr)  # producer advances again while only lane 0 is acknowledged
+
+        state = eng.state_dict()
+        assert state["rr_next_idx"] == {"0:0/1:0,1,2,3": 1}
+
     def test_state_dict_serializes_counters_for_owned_lanes(
         self, recwarn: pytest.WarningsRecorder
     ) -> None:
@@ -1181,10 +1205,14 @@ def test_reload_then_checkpoint_does_not_conflict_on_rr_pointer(tmp_path) -> Non
     for e in engs:
         e.load_state_dict(merged0, replay=False)
 
-    # Advance so the higher-id lane is now least-advanced for every rank: each
-    # owner's pointer flips 0 -> 1, while peers keep the frozen 0 they loaded.
+    # Deliver from the lower-id lane so the acknowledged next pointer flips
+    # 0 -> 1 for every owner. Peer pointers were discarded during load.
     for e in engs:
-        _set_least_advanced(e, behind_lane=_owned_pair(e)[1])
+        lo, hi = _owned_pair(e)
+        rr = e._lane_rr_iter(iter([_mk_rec(lo, 0), _mk_rec(hi, 0)]))
+        first = next(rr)
+        assert first.meta.lane_id == lo
+        e.record_delivery(first.meta.lane_id)
 
     # Must NOT raise (pre-fix: rr_next_idx conflict across the shards).
     merged1 = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
