@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import pickle
 import sys
 from io import BytesIO
@@ -10,12 +11,13 @@ from multiprocessing.reduction import ForkingPickler
 import pytest
 
 from zephon._internal.ops.decode_text import DecodeText
-from zephon._internal.stream import resolve_lazy_payloads
+from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
 from zephon._internal.utils.shm_coalesce import (
     CoalescedMicrobatch,
     ShmLazyPayload,
     _ShmBytes,
     _ShmBytesLegacy,
+    _ShmLeafPayload,
     coalesce_microbatch,
 )
 from zephon.ops.accumulators import CountingAccumulator
@@ -35,7 +37,7 @@ def _meta(i: int) -> SampleMeta:
 
 
 def _round_trip(coalesced: CoalescedMicrobatch) -> list:
-    """ForkingPickler round-trip — returns records with ShmLazyPayload (unresolved)."""
+    """ForkingPickler round-trip — returns records with unresolved LazyPayloads."""
     blob = _forking_round_trip(coalesced)
     restored = pickle.loads(blob)
     assert isinstance(restored, list)
@@ -499,6 +501,87 @@ np = pytest.importorskip("numpy")
 # Numpy ndarray coalescing
 # ---------------------------------------------------------------------------
 class TestCoalesceNdarray:
+    @pytest.mark.parametrize(
+        "array",
+        [
+            np.arange(2048, dtype=np.uint32),
+            np.arange(12, dtype=np.float64).reshape(3, 4)[:, ::-1],
+            np.asfortranarray(np.arange(12, dtype=np.int16).reshape(3, 4)),
+            np.array(7, dtype=np.int64),
+            np.empty((0, 3), dtype=np.float32),
+        ],
+    )
+    def test_root_array_stays_lazy_across_forwarding(self, array: np.ndarray) -> None:
+        original = array.copy()
+        meta = _meta(0).child(3)
+        meta.tags["source"] = "text"
+        records = [
+            SampleRecord(meta=meta, payload=array),
+            # Ensure an empty array can share a message with a nonempty buffer.
+            SampleRecord(meta=_meta(1), payload=np.arange(4, dtype=np.float32)),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        first_hop = _round_trip(coalesced)
+        assert isinstance(first_hop[0].payload, _ShmLeafPayload)
+        second_hop = pickle.loads(_forking_round_trip(first_hop))
+        assert isinstance(second_hop[0], SampleRecord)
+        assert isinstance(second_hop[0].payload, _ShmLeafPayload)
+        assert second_hop[0].meta == meta
+        resolve_lazy_payloads(second_hop)
+        result = second_hop[0].payload
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == original.dtype
+        assert result.shape == original.shape
+        np.testing.assert_array_equal(result, original)
+        del records, coalesced, first_hop, second_hop
+        gc.collect()
+        np.testing.assert_array_equal(result, original)
+
+    def test_batched_root_arrays_preserve_records_and_metadata(self) -> None:
+        arrays = [np.arange(8, dtype=np.uint32) + i for i in range(2)]
+        metas = [_meta(i).child(i + 1) for i in range(2)]
+        records = tuple(
+            SampleRecord(meta=meta, payload=array) for meta, array in zip(metas, arrays)
+        )
+        coalesced = coalesce_microbatch([SampleBatch(records=records)])
+        assert coalesced is not None
+        forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
+        assert isinstance(forwarded[0], SampleBatch)
+        assert all(isinstance(r.payload, LazyPayload) for r in forwarded[0].records)
+        resolve_lazy_payloads(forwarded)
+        for record, meta, array in zip(forwarded[0].records, metas, arrays):
+            assert isinstance(record, SampleRecord)
+            assert record.meta == meta
+            np.testing.assert_array_equal(record.payload, array)
+
+    def test_root_arrays_and_nested_payloads_share_one_message(self) -> None:
+        root = np.arange(2048, dtype=np.uint32)
+        nested = np.arange(6, dtype=np.float64).reshape(2, 3)
+        records = [
+            SampleRecord(meta=_meta(0), payload=root),
+            SampleRecord(meta=_meta(1), payload={"array": nested, "label": "nested"}),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        restored = _round_trip_resolved(coalesced)
+        np.testing.assert_array_equal(restored[0].payload, root)
+        np.testing.assert_array_equal(restored[1].payload["array"], nested)
+        assert restored[1].payload["label"] == "nested"
+
+    def test_root_arrays_are_views_into_the_coalesced_buffer(self) -> None:
+        records = [
+            SampleRecord(meta=_meta(i), payload=np.arange(8, dtype=np.float32) + i)
+            for i in range(2)
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        restored = _round_trip_resolved(coalesced)
+        buffer = next(iter(coalesced.buffers.values()))
+        buffer[0] = 123
+        assert restored[0].payload[0] == 123
+        assert restored[1].payload.ctypes.data - restored[0].payload.ctypes.data == 32
+
     def test_single_dtype_round_trip(self) -> None:
         """numpy arrays coalesce and restore with correct values and dtype."""
         records = [
@@ -664,6 +747,94 @@ class TestCoalesceNdarray:
 # ---------------------------------------------------------------------------
 # Lazy payload behavior
 # ---------------------------------------------------------------------------
+class TestRootLeafPayload:
+    @pytest.mark.parametrize(
+        "tensor",
+        [
+            torch.arange(8, dtype=torch.int64),
+            torch.arange(12, dtype=torch.float64).reshape(3, 4).t(),
+            torch.tensor(7, dtype=torch.int16),
+            torch.empty((0, 3), dtype=torch.int64),
+        ],
+    )
+    def test_tensor_forwarding_preserves_metadata_and_storage(
+        self, tensor: torch.Tensor
+    ) -> None:
+        meta = _meta(0).child(2)
+        meta.tags["source"] = "tensor"
+        records = [
+            SampleRecord(meta=meta, payload=tensor),
+            # An empty int64 root has no buffer of its own dtype.
+            SampleRecord(meta=_meta(1), payload=torch.ones(1, dtype=torch.float32)),
+        ]
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        first_hop = _round_trip(coalesced)
+        assert isinstance(first_hop[0].payload, _ShmLeafPayload)
+        forwarded = pickle.loads(_forking_round_trip(first_hop))
+        assert isinstance(forwarded[0].payload, _ShmLeafPayload)
+        assert forwarded[0].meta == meta
+        resolve_lazy_payloads(forwarded)
+        result = forwarded[0].payload
+        torch.testing.assert_close(result, tensor)
+        if tensor.numel():
+            buffer = coalesced.buffers[str(tensor.dtype)]
+            assert result.is_shared()
+            assert result.untyped_storage().data_ptr() == buffer.data_ptr()
+            buffer[0] = 123
+            assert result.reshape(-1)[0] == 123
+        expected = result.clone()
+        del records, coalesced, first_hop, forwarded
+        gc.collect()
+        torch.testing.assert_close(result, expected)
+
+    @pytest.mark.parametrize("kind", ["numpy", "torch"])
+    @pytest.mark.parametrize("container", ["dict", "list"])
+    def test_one_leaf_container_retains_its_structure(
+        self, kind: str, container: str
+    ) -> None:
+        leaf = np.arange(4) if kind == "numpy" else torch.arange(4)
+        payload = {"tokens": leaf} if container == "dict" else [leaf]
+        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
+        assert coalesced is not None
+        forwarded = _round_trip(coalesced)
+        assert isinstance(forwarded[0].payload, ShmLazyPayload)
+        resolve_lazy_payloads(forwarded)
+        result = forwarded[0].payload
+        assert type(result) is type(payload)
+        restored_leaf = result["tokens"] if container == "dict" else result[0]
+        if kind == "numpy":
+            np.testing.assert_array_equal(restored_leaf, leaf)
+        else:
+            torch.testing.assert_close(restored_leaf, leaf)
+
+    @pytest.mark.parametrize("payload", [b"x" * 8192, [1, 2, 3], [1.5, 2.5]])
+    def test_other_extracted_roots_forward_lazily(self, payload: object) -> None:
+        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
+        assert coalesced is not None
+        forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
+        assert isinstance(forwarded[0].payload, _ShmLeafPayload)
+        resolve_lazy_payloads(forwarded)
+        assert forwarded[0].payload == payload
+
+    def test_inline_roots_can_share_a_message_with_extracted_leaves(self) -> None:
+        shared = torch.arange(4).share_memory_()
+        objects = np.array(["hello", {"nested": True}], dtype=object)
+        payloads = [None, "text", b"tiny", [], (1, "two"), shared, objects]
+        records = [
+            SampleRecord(meta=_meta(i), payload=p) for i, p in enumerate(payloads)
+        ]
+        records.append(SampleRecord(meta=_meta(7), payload=np.arange(4)))
+        coalesced = coalesce_microbatch(records)
+        assert coalesced is not None
+        forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
+        resolve_lazy_payloads(forwarded)
+        assert [r.payload for r in forwarded[:5]] == payloads[:5]
+        torch.testing.assert_close(forwarded[5].payload, shared)
+        assert forwarded[5].payload.untyped_storage().data_ptr() == shared.data_ptr()
+        np.testing.assert_array_equal(forwarded[6].payload, objects)
+
+
 class TestShmLazyPayload:
     def test_unpickle_produces_lazy_payload(self) -> None:
         """Unpickled records have ShmLazyPayload on .payload, meta is accessible."""
@@ -990,12 +1161,12 @@ class TestStructDataclass:
 
         # Hop 1
         restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, ShmLazyPayload)
+        assert isinstance(restored1[0].payload, LazyPayload)
 
         # Hop 2
         blob2 = _forking_round_trip(restored1)
         restored2 = pickle.loads(blob2)
-        assert isinstance(restored2[0].payload, ShmLazyPayload)
+        assert isinstance(restored2[0].payload, LazyPayload)
 
         # Resolve
         resolve_lazy_payloads(restored2)
@@ -1109,7 +1280,7 @@ class TestStructPydantic:
         assert coalesced is not None
 
         restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, ShmLazyPayload)
+        assert isinstance(restored1[0].payload, LazyPayload)
 
         blob2 = _forking_round_trip(restored1)
         restored2 = pickle.loads(blob2)
@@ -1157,6 +1328,73 @@ class TestStructAttrs:
 )
 class TestStructMixed:
     """Mixed struct types and cross-framework nesting."""
+
+    @pytest.mark.parametrize("depth", [1, 8])
+    def test_deeply_nested_mixed_payloads_keep_structure_and_shared_storage(
+        self, depth: int
+    ) -> None:
+        tensor = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        array = np.arange(6, dtype=np.uint32).reshape(2, 3)
+        # Descriptor-shaped user fields must remain ordinary user data.
+        lookalike = {
+            "slots": ["user"],
+            "spec": None,
+            "dtype_key": "np:uint32",
+            "offset": 0,
+            "shape": (2, 3),
+            "bind": "user",
+            "restore": "user",
+        }
+        payload = {"tensor": tensor, "array": array, "raw": b"x" * 8192, **lookalike}
+        for level in range(depth):
+            payload = DCSample(
+                image=[
+                    {
+                        "child": PydSample(
+                            image=AttrsSample(image=payload, label=f"attrs-{level}"),
+                            label=f"pyd-{level}",
+                        )
+                    }
+                ],
+                label=f"dc-{level}",
+            )
+        meta = _meta(0).child(3)
+        meta.tags["source"] = "nested"
+        coalesced = coalesce_microbatch(
+            [SampleBatch(records=(SampleRecord(meta=meta, payload=payload),))]
+        )
+        assert coalesced is not None
+        assert set(coalesced.buffers) == {"torch.float32", "np:uint32", "_bytes_uint8"}
+        first_hop = _round_trip(coalesced)
+        forwarded = pickle.loads(_forking_round_trip(first_hop))
+        record = forwarded[0].records[0]
+        assert isinstance(record.payload, LazyPayload)
+        assert record.meta == meta
+        resolve_lazy_payloads(forwarded)
+        result = record.payload
+        for level in reversed(range(depth)):
+            assert isinstance(result, DCSample)
+            assert result.label == f"dc-{level}"
+            assert isinstance(result.image, list) and len(result.image) == 1
+            assert isinstance(result.image[0], dict)
+            pyd = result.image[0]["child"]
+            assert isinstance(pyd, PydSample) and pyd.label == f"pyd-{level}"
+            assert isinstance(pyd.image, AttrsSample)
+            assert pyd.image.label == f"attrs-{level}"
+            result = pyd.image.image
+        assert isinstance(result, dict)
+        assert {key: result[key] for key in lookalike} == lookalike
+        torch.testing.assert_close(result["tensor"], tensor)
+        np.testing.assert_array_equal(result["array"], array)
+        assert bytes(result["raw"]) == b"x" * 8192
+        # Check actual shared storage, not merely equal values after pickling.
+        coalesced.buffers["torch.float32"][0] = 123
+        coalesced.buffers["np:uint32"][0] = 456
+        assert result["tensor"][0, 0] == 123
+        assert result["array"][0, 0] == 456
+        if sys.version_info >= (3, 12):
+            coalesced.buffers["_bytes_uint8"][0] = ord("z")
+            assert bytes(result["raw"]).startswith(b"z")
 
     def test_pydantic_inside_dataclass(self) -> None:
         t = torch.tensor([1.0, 2.0])

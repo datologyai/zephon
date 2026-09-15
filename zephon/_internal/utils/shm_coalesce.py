@@ -16,16 +16,16 @@ Supported payload types:
 
 Strategy (single memcpy):
 
-1. Flatten each payload via ``optree.tree_flatten``, extract every torch
-   tensor, numpy array, and bytes payload above a size threshold from
-   the flat leaf list; replace with a lightweight placeholder.
+1. Describe a leaf payload directly, or flatten a container via
+   ``optree.tree_flatten``. Extract tensors, arrays, and large bytes into
+   lightweight descriptors, retaining a tree spec only for containers.
 2. For each distinct dtype (plus ``torch.uint8`` for raw bytes), allocate
    a single 1-D ``torch.Tensor``, call ``share_memory_()`` to place it
    in ``/dev/shm`` **before** any data is written, then ``copy_`` each
    sub-tensor directly into the shared buffer.  This means each byte of
    real data is copied exactly once — straight into SHM.
 3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
-   ``__reduce__`` produces ``list[StreamItem]`` with ``ShmLazyPayload``
+   ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
    wrappers.  Payloads are restored only when explicitly resolved
    (typically in the worker process before ``process_many``).
 
@@ -97,19 +97,61 @@ _NDARRAY_PREFIX = "np:"
 
 
 # ---------------------------------------------------------------------------
-# Placeholders for values that were moved to coalesced storage
+# Payload descriptors: either one leaf or a flattened tree
 # ---------------------------------------------------------------------------
+# Private descriptor types distinguish transport state from real user payloads.
+# Keep these bases lightweight: leaf classification is on the restoration path.
+class _PayloadDescriptor:
+    """Description of a payload, separate from its SampleRecord metadata."""
+
+    __slots__ = ()
+
+    def bind(self, buffers: dict[str, Any]) -> LazyPayload:
+        """Attach shared buffers without materializing the payload."""
+        raise NotImplementedError
+
+
+class _LeafDescriptor(_PayloadDescriptor):
+    """One extracted value, usable as a tree leaf or an entire payload."""
+
+    __slots__ = ()
+
+    def bind(self, buffers: dict[str, Any]) -> LazyPayload:
+        """Keep a root leaf lazy without adding a singleton tree around it."""
+        return _ShmLeafPayload(self, buffers)
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore this value using its shared buffers."""
+        raise NotImplementedError
+
+
 @dataclass(slots=True)
-class _TensorSlot:
+class _TensorSlot(_LeafDescriptor):
     """Lightweight stand-in for a tensor extracted into a coalesced buffer."""
 
     dtype_key: str  # str(tensor.dtype)
     offset: int  # element offset into the per-dtype buffer
     shape: tuple[int, ...]
 
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore a tensor view, preserving the dtype of empty tensors too."""
+        numel = 1
+        for size in self.shape:
+            numel *= size
+        buf = buffers.get(self.dtype_key)
+        if numel == 0 or buf is None:
+            torch = _get_torch()
+            dtype = (
+                buf.dtype
+                if buf is not None
+                else getattr(torch, self.dtype_key.removeprefix("torch."))
+            )
+            return torch.empty(self.shape, dtype=dtype)
+        return buf.narrow(0, self.offset, numel).reshape(self.shape)
+
 
 @dataclass(slots=True)
-class _NdarraySlot:
+class _NdarraySlot(_LeafDescriptor):
     """Lightweight stand-in for a numpy array extracted into a coalesced buffer."""
 
     dtype_key: str  # _NDARRAY_PREFIX + str(ndarray.dtype)
@@ -117,9 +159,19 @@ class _NdarraySlot:
     shape: tuple[int, ...]
     np_dtype_str: str  # str(ndarray.dtype) for restoring the correct numpy dtype
 
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore a NumPy view without intermediate torch tensor views."""
+        numel = 1
+        for size in self.shape:
+            numel *= size
+        if numel == 0:
+            return _get_numpy().empty(self.shape, dtype=self.np_dtype_str)
+        array = buffers[self.dtype_key].numpy()
+        return array[self.offset : self.offset + numel].reshape(self.shape)
+
 
 @dataclass(slots=True)
-class _NumericListSlot:
+class _NumericListSlot(_LeafDescriptor):
     """Stand-in for a ``list[int]`` or ``list[float]`` promoted to a tensor for SHM.
 
     Same layout as ``_TensorSlot`` but restored via ``.tolist()`` so the
@@ -130,17 +182,29 @@ class _NumericListSlot:
     offset: int
     length: int  # original list length (== numel for 1-D)
 
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore the original Python list contract."""
+        buf = buffers.get(self.dtype_key)
+        if self.length == 0 or buf is None:
+            return []
+        return buf.narrow(0, self.offset, self.length).tolist()
+
 
 @dataclass(slots=True)
-class _BytesSlot:
+class _BytesSlot(_LeafDescriptor):
     """Lightweight stand-in for a bytes payload moved to the uint8 SHM buffer."""
 
     offset: int  # byte offset into the _BYTES_DTYPE_KEY buffer
     length: int
 
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore a bytes view backed by the shared uint8 buffer."""
+        buf = buffers[_BYTES_DTYPE_KEY]
+        return _ShmBytes(buf.narrow(0, self.offset, self.length))
+
 
 @dataclass(slots=True)
-class _StructSlot:
+class _StructSlot(_LeafDescriptor):
     """Stand-in for a structured type (dataclass / pydantic) whose fields were extracted.
 
     Only stores the class and the inner skeleton.  ``kind`` and
@@ -151,6 +215,15 @@ class _StructSlot:
 
     cls: type
     inner_skeleton: "_FlatSkeleton"
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        """Restore named fields and reconstruct their enclosing object."""
+        inner_leaves = _resolve_slots(self.inner_skeleton.slots, buffers)
+        fields_dict = cast(
+            dict[str, Any],
+            optree.tree_unflatten(self.inner_skeleton.spec, inner_leaves),
+        )
+        return _reconstruct_struct(self, fields_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +278,20 @@ def _struct_to_dict(obj: Any) -> tuple[type, tuple[str, ...], dict[str, Any]]:
 # Flattened payload skeleton (stored on records during coalescing)
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
-class _FlatSkeleton:
+class _FlatSkeleton(_PayloadDescriptor):
     """Flattened payload stored on records between coalescing and pickling.
 
-    Distinct type prevents confusion with real user payloads.
+    Always retains a tree spec, including for a container with only one leaf.
+    The enclosing SampleRecord retains its metadata separately.
     """
 
+    # Root leaves use their own descriptor; this specification is always a tree.
     slots: list[Any]  # flat list of slots + inline leaf values
     spec: optree.PyTreeSpec  # structure recipe for tree_unflatten
+
+    def bind(self, buffers: dict[str, Any]) -> LazyPayload:
+        """Keep the existing tree lazy payload without retaining this wrapper."""
+        return ShmLazyPayload(self.slots, self.spec, buffers)
 
 
 # ---------------------------------------------------------------------------
@@ -406,31 +485,47 @@ def _extract_payload_pytree(
     return _FlatSkeleton(slots=leaves, spec=spec)
 
 
+def _extract_record_payload(
+    payload: Any,
+    collector: dict[str, list[Any]],
+    offsets: dict[str, int],
+    shm_min_size: int,
+) -> _PayloadDescriptor:
+    """Describe a root leaf directly; preserve the structure of containers."""
+    # Dictionaries cannot be SHM leaves. Avoid running the leaf classifiers
+    # on this common container before traversing its actual leaves.
+    if not isinstance(payload, dict):
+        descriptor = _extract_leaf(payload, collector, offsets, shm_min_size)
+        if isinstance(descriptor, _LeafDescriptor):
+            return descriptor
+    return _extract_payload_pytree(payload, collector, offsets, shm_min_size)
+
+
 def _extract_from_records(
     items: list[StreamItem],
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
-) -> list[tuple[SampleRecord, _FlatSkeleton]]:
+) -> list[tuple[SampleRecord, _PayloadDescriptor]]:
     """Extract tensors from records without mutating payloads yet.
 
-    Returns a list of (record, skeleton) pairs.  The caller must commit
-    the skeletons only after confirming that ``collector`` is non-empty.
+    Returns (record, descriptor) pairs. The caller commits the descriptors
+    only after shared-buffer allocation succeeds.
     """
-    skeletons: list[tuple[SampleRecord, _FlatSkeleton]] = []
+    descriptors: list[tuple[SampleRecord, _PayloadDescriptor]] = []
     for item in items:
         if isinstance(item, SampleRecord):
-            skel = _extract_payload_pytree(
+            descriptor = _extract_record_payload(
                 item.payload, collector, offsets, shm_min_size
             )
-            skeletons.append((item, skel))
+            descriptors.append((item, descriptor))
         elif isinstance(item, SampleBatch):
             for rec in item.records:
-                skel = _extract_payload_pytree(
+                descriptor = _extract_record_payload(
                     rec.payload, collector, offsets, shm_min_size
                 )
-                skeletons.append((rec, skel))
-    return skeletons
+                descriptors.append((rec, descriptor))
+    return descriptors
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +599,22 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
 # Lazy payload (deferred restoration)
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
+class _ShmLeafPayload(LazyPayload):
+    """One deferred value, with no singleton list or tree specification."""
+
+    _descriptor: _LeafDescriptor
+    _buffers: dict[str, Any]
+
+    def resolve_payload(self) -> SamplePayload:
+        """Restore the leaf using its descriptor's existing type knowledge."""
+        return cast(SamplePayload, self._descriptor.restore(self._buffers))
+
+    def __reduce__(self) -> tuple:
+        """Forward the descriptor and buffers without resolving the value."""
+        return (_ShmLeafPayload, (self._descriptor, self._buffers))
+
+
+@dataclass(slots=True)
 class ShmLazyPayload(LazyPayload):
     """SHM-backed deferred payload — flat slots + pytree spec + SHM buffer refs.
 
@@ -549,52 +660,10 @@ def _resolve_slots(slots: list[Any], buffers: dict[str, Any]) -> list[Any]:
     Each slot becomes a tensor/ndarray/bytes view backed by the coalesced
     SHM buffer, or a reconstructed struct for ``_StructSlot``.
     """
-    result: list[Any] = []
-    for item in slots:
-        if isinstance(item, _StructSlot):
-            inner_leaves = _resolve_slots(item.inner_skeleton.slots, buffers)
-            fields_dict = cast(
-                dict[str, Any],
-                optree.tree_unflatten(item.inner_skeleton.spec, inner_leaves),
-            )
-            result.append(_reconstruct_struct(item, fields_dict))
-            continue
-        if isinstance(item, _NumericListSlot):
-            buf = buffers.get(item.dtype_key)
-            if item.length == 0 or buf is None:
-                result.append([])
-            else:
-                result.append(buf.narrow(0, item.offset, item.length).tolist())
-            continue
-        if isinstance(item, _TensorSlot):
-            numel = 1
-            for s in item.shape:
-                numel *= s
-            buf = buffers.get(item.dtype_key)
-            if numel == 0 or buf is None:
-                torch = _get_torch()
-                dtype = buf.dtype if buf is not None else torch.float32
-                result.append(torch.empty(item.shape, dtype=dtype))
-            else:
-                result.append(buf.narrow(0, item.offset, numel).reshape(item.shape))
-        elif isinstance(item, _NdarraySlot):
-            numel = 1
-            for s in item.shape:
-                numel *= s
-            if numel == 0:
-                np = _get_numpy()
-                result.append(np.empty(item.shape, dtype=item.np_dtype_str))
-            else:
-                buf = buffers[item.dtype_key]
-                result.append(
-                    buf.narrow(0, item.offset, numel).reshape(item.shape).numpy()
-                )
-        elif isinstance(item, _BytesSlot):
-            buf = buffers[_BYTES_DTYPE_KEY]
-            result.append(_ShmBytes(buf.narrow(0, item.offset, item.length)))
-        else:
-            result.append(item)
-    return result
+    return [
+        item.restore(buffers) if isinstance(item, _LeafDescriptor) else item
+        for item in slots
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +674,7 @@ class CoalescedMicrobatch:
     """Microbatch with tensors/bytes coalesced into SHM buffers.
 
     On unpickle (``__reduce__``), produces ``list[StreamItem]`` where each
-    record's payload is a :class:`ShmLazyPayload`.  Call
+    record's payload is a :class:`LazyPayload`. Call
     :func:`resolve_lazy_payloads` to materialize before use.
     """
 
@@ -628,14 +697,14 @@ def coalesce_microbatch(
     Returns ``None`` when no tensors or large bytes are found.
     Payloads smaller than *shm_min_size* bytes are left inline.
 
-    Uses a two-pass approach: extraction first collects skeletons without
+    Uses a two-pass approach: extraction first collects descriptors without
     mutating payloads, then commits only after SHM allocation succeeds.
     """
     if _get_torch() is None:
         return None
     collector: dict[str, list[Any]] = {}
     offsets: dict[str, int] = {}
-    skeletons = _extract_from_records(items, collector, offsets, shm_min_size)
+    descriptors = _extract_from_records(items, collector, offsets, shm_min_size)
     if not collector:
         return None
 
@@ -645,9 +714,9 @@ def coalesce_microbatch(
     if not buffers:
         return None
 
-    # Commit: only now mutate record payloads to flat skeleton form.
-    for rec, skel in skeletons:
-        rec.payload = skel  # type: ignore[assignment]
+    # Commit: metadata stays on each record; only its payload is replaced.
+    for rec, descriptor in descriptors:
+        rec.payload = descriptor  # type: ignore[assignment]
 
     return CoalescedMicrobatch(skeleton=items, buffers=buffers)
 
@@ -659,24 +728,22 @@ def _reconstruct_microbatch_lazy(
     skeleton: list[StreamItem],
     buffers: dict[str, Any],
 ) -> list[StreamItem]:
-    """Unpickle helper — wrap payloads in ShmLazyPayload instead of restoring."""
+    """Bind each payload descriptor to shared buffers without restoring it."""
     result: list[StreamItem] = []
     for item in skeleton:
         if isinstance(item, SampleRecord):
-            skel = item.payload  # _FlatSkeleton from extraction
+            descriptor = cast(_PayloadDescriptor, item.payload)
             result.append(
                 SampleRecord(
                     meta=item.meta,
-                    payload=ShmLazyPayload(skel.slots, skel.spec, buffers),  # type: ignore[union-attr,assignment]
+                    payload=descriptor.bind(buffers),  # type: ignore[assignment]
                 )
             )
         elif isinstance(item, SampleBatch):
             records = tuple(
                 SampleRecord(
                     meta=rec.meta,
-                    payload=ShmLazyPayload(
-                        rec.payload.slots, rec.payload.spec, buffers
-                    ),  # type: ignore[union-attr,assignment]
+                    payload=cast(_PayloadDescriptor, rec.payload).bind(buffers),  # type: ignore[assignment]
                 )
                 for rec in item.records
             )
