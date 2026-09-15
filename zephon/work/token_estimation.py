@@ -770,9 +770,9 @@ def _init_prime_worker(
 def _ensure_imports(dataset: Dataset) -> None:
     """Finish format-specific cold imports before calibration fans out."""
     if dataset.backend["kind"] == "litdata":
-        from zephon._internal.io.formats import litdata_support
+        from zephon._internal.io.formats.litdata_support import dependencies
 
-        litdata_support.ensure_litdata_deps()
+        dependencies.ensure_litdata_deps()
 
 
 def _measure_in_worker(dataset_id: int) -> _DatasetMeasurement:

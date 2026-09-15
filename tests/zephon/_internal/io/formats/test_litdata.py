@@ -1,3 +1,5 @@
+import inspect
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -9,14 +11,26 @@ from litdata.streaming.writer import BinaryWriter
 
 from tests._catalog_helpers import catalog_locators
 from tests._helpers import counts_dict
+from tests.helpers.litdata_chunks import write_litdata_fixture
 from tests.helpers.storage import _install_obstore_stubs
 from zephon._internal.io.formats import ensure_builtin_formats
 from zephon._internal.io.formats.base import get_format
-from zephon._internal.io.formats.litdata import LitDataFormat, _LitDataExtraCodec
+from zephon._internal.io.formats.litdata import (
+    LitDataFormat,
+    _LitDataExtraCodec,
+    _LitDataShard,
+)
+from zephon._internal.io.formats.litdata_support import arrow, dependencies
+from zephon._internal.io.formats.litdata_support.arrow import ArrowLoader
+from zephon._internal.io.formats.litdata_support.pytree import (
+    PyTreeLoader,
+    TokensLoader,
+)
 from zephon._internal.io.resolvers import DirectResolver
 from zephon._internal.io.storage import LocalFSBackend
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.storage.s3 import S3Backend
+from zephon._internal.io.types import LocalShardFile, LocalShardRef
 from zephon.io.dataset import Dataset
 
 
@@ -75,6 +89,12 @@ def test_litdata_reader_handles_dataset(
             assert locator.compression == "zstd:3"
             assert locator.zip is not None
             assert str(config_meta.get("compression")) == "zstd:3"
+            assert config_meta.get("compression_level") in {None, "chunk"}
+            assert locator.zip.basename != locator.raw.basename
+            # Verify the fixture is a whole-file Zstd frame, not merely labelled
+            # compressed in its index (a regression in newer LitData writers).
+            with (dataset_dir / locator.zip.basename).open("rb") as compressed_file:
+                assert compressed_file.read(4) == b"\x28\xb5\x2f\xfd"
         else:
             assert locator.compression is None
             assert locator.zip is None
@@ -334,6 +354,11 @@ def _binary_writer_for_samples(
     kwargs: dict[str, object] = {"cache_dir": str(out), "chunk_size": chunk_size}
     if compression:
         kwargs["compression"] = compression
+        # Exercise whole-chunk compression for both pytree and token fixtures.
+        # LitData 0.2.74+ defaults to batch compression, which rejects TokensLoader;
+        # earlier writers do not accept the compression_level keyword.
+        if "compression_level" in inspect.signature(BinaryWriter).parameters:
+            kwargs["compression_level"] = "chunk"
     if loader_kind == "tokens":
         pytest.importorskip("torch")
         from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
@@ -427,7 +452,7 @@ def test_litdata_codec_rejects_partial_config() -> None:
 
 def test_litdata_codec_rejects_partial_interval() -> None:
     """``interval`` on some shards but not all would be fabricated at decode."""
-    from zephon._internal.io.formats.litdata_support import Interval
+    from zephon._internal.io.formats.litdata_support.support import Interval
 
     codec = _LitDataExtraCodec()
     metas = [
@@ -456,3 +481,180 @@ def _ensure_single_thread_zstd(writer: BinaryWriter) -> None:
         return _compress(data, _level, 1)
 
     compressor.compress = _patched
+
+
+def _open_shard(root: Path, shard_index: int = 0) -> _LitDataShard:
+    # Exercise the format handler directly, without catalog or resolver behavior.
+    handler = LitDataFormat()
+    _, metadata = handler.discover(str(root), LocalFSBackend(root=root))
+    dataset = Dataset("lit", {"kind": "litdata", "path": str(root), "shards": metadata})
+    locator = handler.build_locators(dataset)[shard_index]
+    path = root / locator.raw.basename
+    shard = handler.open_shard(
+        locator, LocalShardRef(raw=LocalShardFile(path, path.stat().st_size))
+    )
+    assert isinstance(shard, _LitDataShard)
+    return shard
+
+
+@pytest.mark.parametrize("layout", ["legacy", "file", "stream", "hybrid"])
+def test_dispatch_uses_file_layout(tmp_path: Path, layout: str) -> None:
+    if layout != "legacy":
+        pytest.importorskip("pyarrow")
+    rows = [{"id": i, "text": f"row-{i}"} for i in range(6)]
+    write_litdata_fixture(tmp_path, rows, layout=layout)
+    shard = _open_shard(tmp_path)
+    try:
+        assert type(shard) is _LitDataShard
+        assert type(shard._loader) is (
+            PyTreeLoader if layout == "legacy" else ArrowLoader
+        )
+        assert len(shard) == len(rows)
+        assert shard[3] == rows[3]
+        indices = [5, 0, 2, 5, 1]
+        assert shard.getsamples(indices) == [rows[i] for i in indices]
+        assert shard.getsamples([]) == []
+        for index in [-1, len(rows)]:
+            with pytest.raises(IndexError):
+                shard[index]
+            with pytest.raises(IndexError):
+                shard.getsamples([0, index])
+    finally:
+        shard.close()
+    shard.close()  # Repeated cleanup remains harmless for both layouts.
+
+
+@pytest.mark.parametrize(
+    "layouts",
+    [("legacy", "file"), ("file", "legacy"), ("file", "file"), ("legacy", "legacy")],
+)
+def test_chunks_share_shard_and_intervals(
+    tmp_path: Path, layouts: tuple[str, str]
+) -> None:
+    pytest.importorskip("pyarrow")
+    chunks = []
+    expected = []
+    for group, layout in enumerate(layouts):
+        rows = [{"id": group * 10 + i, "text": f"{layout}-{i}"} for i in range(3)]
+        source = tmp_path / str(group)
+        path = write_litdata_fixture(source, rows, layout=layout)
+        index = json.loads((source / "index.json").read_text())
+        chunk = index["chunks"][0]
+        chunk["filename"] = f"chunk-{group}.bin"
+        path.rename(tmp_path / chunk["filename"])
+        chunks.append(chunk)
+        expected.append(rows)
+    config = index["config"]
+    (tmp_path / "index.json").write_text(
+        json.dumps({"config": config, "chunks": chunks})
+    )
+
+    # The second shard has a nonzero global interval, regardless of its layout.
+    for group, rows in enumerate(expected):
+        shard = _open_shard(tmp_path, group)
+        try:
+            assert shard[1] == rows[1]
+            assert shard.getsamples([2, 0, 2]) == [rows[i] for i in [2, 0, 2]]
+        finally:
+            shard.close()
+
+
+def test_arrow_discovery_does_not_need_new_litdata_serializers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pyarrow")
+    rows = [{"id": i, "text": str(i)} for i in range(3)]
+    write_litdata_fixture(tmp_path, rows, layout="file")
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    index["config"]["data_format"] = ["new_serializer_not_installed"]
+    index["config"]["return_flat_leaves"] = True
+    index_path.write_text(json.dumps(index))
+
+    def fail() -> None:
+        pytest.fail(
+            "Arrow discovery/reading attempted to initialize LitData serializers"
+        )
+
+    monkeypatch.setattr(dependencies, "_get_serializers", fail)
+    shard = _open_shard(tmp_path)
+    try:
+        result = shard.getsamples([2, 0, 2])
+        assert [row.materialize() for row in result] == [rows[i] for i in [2, 0, 2]]
+    finally:
+        shard.close()
+
+
+def test_legacy_read_does_not_require_pyarrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [{"id": i, "text": str(i)} for i in range(3)]
+    write_litdata_fixture(tmp_path, rows)
+
+    def fail() -> None:
+        pytest.fail("Legacy read attempted to import PyArrow")
+
+    monkeypatch.setattr(arrow, "require_pyarrow", fail)
+    shard = _open_shard(tmp_path)
+    try:
+        assert shard.getsamples([2, 0, 2]) == [rows[i] for i in [2, 0, 2]]
+    finally:
+        shard.close()
+
+
+@pytest.mark.parametrize("loader_spec", ["TokensLoader", {"name": "tokens"}])
+def test_tokens_shard_open_does_not_access_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, loader_spec: object
+) -> None:
+    path = tmp_path / "not-yet-downloaded.bin"
+    config = {
+        "item_loader": loader_spec,
+        "block_size": 4,
+        "data_format": ["no_header_tensor:0"],
+    }
+    chunk = {"chunk_size": 4, "dim": 16, "chunk_bytes": 100}
+
+    def fail(*args: object, **kwargs: object) -> None:
+        pytest.fail("Token shard opening must not inspect the chunk file")
+
+    # Initialize optional packages before checking the chunk's lazy-open path.
+    dependencies.ensure_litdata_deps()
+    monkeypatch.setattr(arrow, "arrow_footer_span", fail)
+    monkeypatch.setattr(Path, "open", fail)
+    monkeypatch.setattr(Path, "stat", fail)
+    shard = _LitDataShard(
+        str(tmp_path), config, chunk, LocalShardRef(LocalShardFile(path, 100))
+    )
+    try:
+        assert isinstance(shard._loader, TokensLoader)
+        assert len(shard) == 4
+    finally:
+        shard.close()
+
+
+def test_truncated_arrow_chunk_does_not_dispatch_to_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pyarrow")
+    path = write_litdata_fixture(tmp_path, [{"id": 0, "text": "row"}], layout="file")
+    path.write_bytes(path.read_bytes()[:-12])
+
+    def fail() -> None:
+        pytest.fail("Incomplete Arrow chunk was dispatched to the binary decoder")
+
+    monkeypatch.setattr(dependencies, "_get_serializers", fail)
+    with pytest.raises(FileNotFoundError, match="not found or incomplete"):
+        _open_shard(tmp_path)
+
+
+def test_binary_serializer_validation_happens_at_shard_open(tmp_path: Path) -> None:
+    write_litdata_fixture(tmp_path, [{"id": 0, "text": "row"}])
+    index_path = tmp_path / "index.json"
+    index = json.loads(index_path.read_text())
+    index["config"]["data_format"] = ["unknown_serializer"]
+    index_path.write_text(json.dumps(index))
+    handler = LitDataFormat()
+    sizes, _ = handler.discover(str(tmp_path), LocalFSBackend(root=tmp_path))
+    assert sizes == {0: 1}
+    with pytest.raises(KeyError, match="unknown_serializer"):
+        _open_shard(tmp_path)

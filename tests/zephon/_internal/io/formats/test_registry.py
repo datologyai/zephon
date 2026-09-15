@@ -32,10 +32,10 @@ def test_ensure_builtin_formats_idempotent() -> None:
 
 
 def test_ensure_builtin_formats_selective_does_not_load_litdata() -> None:
-    """Loading only jsonl should not pull in litdata_support or torch."""
+    """Loading only jsonl should not pull in LitData support or torch."""
     # Remove litdata modules if previously loaded (test isolation)
     litdata_mod = "zephon._internal.io.formats.litdata"
-    support_mod = "zephon._internal.io.formats.litdata_support"
+    support_mod = "zephon._internal.io.formats.litdata_support.support"
     was_loaded = litdata_mod in sys.modules or support_mod in sys.modules
     if was_loaded:
         # Can't test isolation when modules are already loaded — skip
@@ -44,7 +44,7 @@ def test_ensure_builtin_formats_selective_does_not_load_litdata() -> None:
     ensure_builtin_formats(required={"jsonl"})
 
     assert litdata_mod not in sys.modules, "litdata module should not be imported"
-    assert support_mod not in sys.modules, "litdata_support should not be imported"
+    assert support_mod not in sys.modules, "LitData support should not be imported"
 
 
 def test_ensure_builtin_formats_all() -> None:

@@ -39,6 +39,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.types:ShardLocator",
         }
     ),
+    # Persisted LitData fixtures need the internal index treespec representation.
+    "tests/helpers/litdata_chunks.py": frozenset(
+        {"zephon._internal.io.formats.litdata_support:support"}
+    ),
     # HF range and revision details have no public seam.
     "tests/integration/test_hf_integration.py": frozenset(
         {
@@ -134,6 +138,8 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Census and calibration coverage needs internal plans and oracles.
     "tests/zephon/work/test_token_estimation.py": frozenset(
         {
+            # Verify format dependency initialization before worker measurement.
+            "zephon._internal.io.formats:litdata_support",
             "zephon._internal.io.stores.multi:build_multi_dataset_store",
             "zephon._internal.observability.size_estimator:content_bytes",
             "zephon._internal.ops.map_transform:MapTransform",

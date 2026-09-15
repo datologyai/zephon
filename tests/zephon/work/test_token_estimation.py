@@ -5,7 +5,6 @@
 
 import json
 import pickle
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -318,11 +317,13 @@ def test_pps_select_returns_records_in_fetch_order():
 
 
 def test_measure_worker_initializes_litdata_before_measurement(monkeypatch) -> None:
+    from zephon._internal.io.formats import litdata_support
+
     events: list[str] = []
     measurement = object()
     monkeypatch.setattr(
-        sys.modules["zephon._internal.io.formats"],
-        "litdata_support",
+        litdata_support,
+        "dependencies",
         SimpleNamespace(ensure_litdata_deps=lambda: events.append("initialize")),
         raising=False,
     )

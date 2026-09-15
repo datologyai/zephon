@@ -1,127 +1,29 @@
-"""Support utilities for Zephon's LitData format integration."""
+"""Readers and serializers for LitData's binary pytree and token layouts."""
 
 from __future__ import annotations
 
 import copy
 import functools
-import json
 import logging
 import os
 import threading
-from abc import ABC, abstractmethod
-from collections import OrderedDict, defaultdict
-from dataclasses import dataclass
+from abc import abstractmethod
+from collections import defaultdict
 from io import BytesIO, FileIO
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import numpy as np
 import optree
-from optree import treespec
 
-# ---------------------------------------------------------------------------
-# Lazy imports — torch and litdata internals
-#
-# litdata.constants (third-party) does ``import torch`` at module level, and
-# litdata.streaming.serializers transitively imports it too.  Importing *any*
-# litdata submodule therefore pulls in torch (~700 MB RSS).  In worker
-# processes that register the litdata format but never open a shard, this is
-# pure waste.
-#
-# We defer ALL litdata (and torch) imports to ``ensure_litdata_deps()``,
-# which runs on first call to ``_get_serializers()`` — i.e. at shard-open
-# time, not at format-registration time.
-#
-# ``_ensure_torch()`` provides standalone lazy access to the torch module
-# for ``TokensLoader``, which needs ``torch.frombuffer`` / ``torch.empty``.
-# Once ``ensure_litdata_deps()`` has run torch is already in sys.modules,
-# so ``_ensure_torch()`` is effectively a dict lookup at that point.
-# ---------------------------------------------------------------------------
+from zephon._internal.io.formats.litdata_support import dependencies
+from zephon._internal.io.formats.litdata_support.support import (
+    BaseItemLoader,
+    FlatPyTree,
+    Interval,
+)
 
 if TYPE_CHECKING:
-    from litdata.streaming.serializers import (
-        NoHeaderNumpySerializer,
-        NoHeaderTensorSerializer,
-        PILSerializer,
-        Serializer,
-    )
-
-# -- Lazy torch (used only by TokensLoader) --------------------------------
-
-_torch_mod = None
-
-
-def _ensure_torch():  # pragma: no cover - optional dependency
-    """Import torch on first use.  Returns the torch module."""
-    global _torch_mod
-    if _torch_mod is None:
-        try:
-            import torch
-
-            _torch_mod = torch
-        except ImportError:
-            raise ImportError("PyTorch is required for the TokensLoader")
-    return _torch_mod
-
-
-# -- Lazy litdata deps (serializers + dtype mappings) -----------------------
-
-_litdata_deps_ready = False
-_litdata_deps_lock = threading.Lock()
-
-_SERIALIZERS: OrderedDict[str, Any] = OrderedDict()
-_NUMPY_DTYPES_REVERSE: dict[Any, int] = {}
-_TORCH_DTYPES_MAPPING: dict[int, Any] = {}
-_NUMPY_DTYPES_MAPPING: dict[int, Any] = {}
-
-
-def _load_litdata_deps() -> None:
-    global _litdata_deps_ready
-
-    from litdata.constants import _NUMPY_DTYPES_MAPPING as _ndm
-    from litdata.constants import _TORCH_DTYPES_MAPPING as _tdm
-    from litdata.streaming.serializers import _SERIALIZERS as _litdata_serializers
-    from litdata.streaming.serializers import (
-        NoHeaderNumpySerializer,
-        NoHeaderTensorSerializer,
-        PILSerializer,
-        Serializer,
-    )
-
-    _SERIALIZERS.update(_litdata_serializers)
-    _NUMPY_DTYPES_MAPPING.update(_ndm)
-    _TORCH_DTYPES_MAPPING.update(_tdm)
-    _NUMPY_DTYPES_REVERSE.update({dtype: idx for idx, dtype in _ndm.items()})
-    globals().update(
-        {
-            "NoHeaderNumpySerializer": NoHeaderNumpySerializer,
-            "NoHeaderTensorSerializer": NoHeaderTensorSerializer,
-            "PILSerializer": PILSerializer,
-            "Serializer": Serializer,
-        }
-    )
-    _litdata_deps_ready = True
-
-
-def ensure_litdata_deps() -> None:
-    """Load LitData's serializer and dtype modules exactly once."""
-    if _litdata_deps_ready:
-        return
-    with _litdata_deps_lock:
-        if not _litdata_deps_ready:
-            _load_litdata_deps()
-
-
-def __getattr__(name: str) -> Any:
-    """Module-level __getattr__ (PEP 562) for lazy litdata type access.
-
-    Triggers ``ensure_litdata_deps()`` so that ``from litdata_support
-    import Serializer`` works without eagerly importing litdata/torch.
-    """
-    ensure_litdata_deps()
-    try:
-        return globals()[name]
-    except KeyError:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    from zephon._internal.io.formats.litdata_support.dependencies import Serializer
 
 
 logger = logging.getLogger("zephon.litdata")
@@ -129,21 +31,6 @@ logger = logging.getLogger("zephon.litdata")
 # -----------------------------------------------------------------------------
 # Serializers
 # -----------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class FlatPyTree:
-    """Lightweight wrapper around flattened pytree leaves with lazy reconstruction."""
-
-    leaves: list[Any]
-    spec: optree.PyTreeSpec
-
-    def materialize(self) -> Any:
-        """Reconstruct the original pytree structure."""
-        return optree.tree_unflatten(self.spec, self.leaves)
-
-    # Alias for ergonomics
-    to_tree = materialize
 
 
 _CONFIGURED_SERIALIZER_CACHE: dict[str, Serializer] = {}
@@ -160,18 +47,6 @@ def _clone_serializer(serializer: Serializer) -> Serializer:
             return cls()  # type: ignore[call-arg]
         except Exception:
             return copy.deepcopy(serializer)
-
-
-def _get_serializers(
-    overrides: Optional[Mapping[str, Serializer]] = None,
-) -> dict[str, Serializer]:
-    """Return serializer instances, allowing overrides for testing."""
-    ensure_litdata_deps()
-    serializers: OrderedDict[str, Serializer] = OrderedDict(_SERIALIZERS)
-    if overrides:
-        for key, value in overrides.items():
-            serializers[key] = value
-    return serializers
 
 
 def _configured_serializer_for_format(
@@ -197,22 +72,8 @@ def _configured_serializer_for_format(
     return configured
 
 
-# -----------------------------------------------------------------------------
-# Item loaders
-# -----------------------------------------------------------------------------
-
-
-class Interval(NamedTuple):
-    """Represents a half-open interval [chunk_start, chunk_end) for a chunk."""
-
-    chunk_start: int
-    roi_start_idx: int
-    roi_end_idx: int
-    chunk_end: int
-
-
-class BaseItemLoader(ABC):
-    """Base class for loaders that expose LitData chunks as random-access shards."""
+class _SerializedItemLoader(BaseItemLoader):
+    """Original serializer setup shared by binary pytree and token readers."""
 
     def setup(
         self,
@@ -233,7 +94,10 @@ class BaseItemLoader(ABC):
                 continue
             key = self._data_format_to_key(fmt)
             base_serializer = self._serializers[key]
-            shareable = key in _SERIALIZERS and base_serializer is _SERIALIZERS[key]
+            shareable = (
+                key in dependencies._SERIALIZERS
+                and base_serializer is dependencies._SERIALIZERS[key]
+            )
             configured = _configured_serializer_for_format(
                 fmt, key, base_serializer, shareable
             )
@@ -248,47 +112,6 @@ class BaseItemLoader(ABC):
             return serializer
         return data_format
 
-    def state_dict(self) -> dict[str, Any]:
-        return {}
-
-    @abstractmethod
-    def generate_intervals(self) -> list[Interval]: ...
-
-    @abstractmethod
-    def load_item_from_chunk(
-        self,
-        index: int,
-        chunk_index: int,
-        chunk_filepath: str,
-        begin: int,
-        filesize_bytes: int,
-    ) -> Any: ...
-
-    def load_items_from_chunk(
-        self,
-        indices: list[int],
-        chunk_index: int,
-        chunk_filepath: str,
-        begin: int,
-        filesize_bytes: int,
-    ) -> list[Any]:
-        """Load multiple items from a chunk efficiently.
-
-        Default implementation falls back to calling load_item_from_chunk
-        for each index. Subclasses should override for better performance.
-        """
-        return [
-            self.load_item_from_chunk(
-                index, chunk_index, chunk_filepath, begin, filesize_bytes
-            )
-            for index in indices
-        ]
-
-    def load_item_from_bytes(
-        self, raw_bytes: bytes, chunk_index: int
-    ) -> Any:  # pragma: no cover - rarely used
-        raise NotImplementedError
-
     @abstractmethod
     def delete(self, chunk_index: int, chunk_filepath: str) -> None: ...
 
@@ -299,7 +122,7 @@ class BaseItemLoader(ABC):
     ) -> tuple[bytes, Optional[int]]: ...
 
 
-class PyTreeLoader(BaseItemLoader):
+class PyTreeLoader(_SerializedItemLoader):
     """Loader that reconstructs arbitrary pytrees from LitData payloads."""
 
     def __init__(self, *, return_flat_leaves: bool = False) -> None:
@@ -329,23 +152,6 @@ class PyTreeLoader(BaseItemLoader):
         else:
             self._tree_spec = None
             self._unflatten = None
-
-    def generate_intervals(self) -> list[Interval]:
-        intervals: list[Interval] = []
-        begin = 0
-        end = 0
-        for idx, chunk in enumerate(self._chunks):
-            chunk_size = int(chunk["chunk_size"])
-            end += chunk_size
-            start_idx = begin
-            end_idx = end
-            if self.region_of_interest is not None:
-                roi = self.region_of_interest[idx]
-                start_idx = begin + roi[0]
-                end_idx = begin + roi[1]
-            intervals.append(Interval(begin, start_idx, end_idx, end))
-            begin += chunk_size
-        return intervals
 
     def _load_data(self, fp: FileIO | BytesIO, offset: int) -> bytes:
         fp.seek(offset)
@@ -527,11 +333,11 @@ class PyTreeLoader(BaseItemLoader):
         return head + body, None
 
 
-class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
+class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch tensors
     """Loader specialised for token-block shards produced by LitData."""
 
     def __init__(self, block_size: int | None = None) -> None:
-        _ensure_torch()
+        dependencies._ensure_torch()
         super().__init__()
         self._block_size = block_size
         self._mmaps: dict[int, np.memmap] = {}
@@ -551,7 +357,7 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         serializers: Mapping[str, Serializer],
         region_of_interest: Optional[list[tuple[int, int]]] = None,
     ) -> None:
-        _ensure_torch()
+        dependencies._ensure_torch()
         super().setup(config, chunks, serializers, region_of_interest)
         self._shift_idx = 0
 
@@ -560,12 +366,12 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
             raise ValueError("Unsupported data format for tokens loader")
 
         if serializer_name == "no_header_tensor":
-            self._dtype = _TORCH_DTYPES_MAPPING[int(dtype_index)]
+            self._dtype = dependencies._TORCH_DTYPES_MAPPING[int(dtype_index)]
             self._elem_size = int(
-                _ensure_torch().empty((), dtype=self._dtype).element_size()
+                dependencies._ensure_torch().empty((), dtype=self._dtype).element_size()
             )
         else:
-            self._dtype = _NUMPY_DTYPES_MAPPING[int(dtype_index)]
+            self._dtype = dependencies._NUMPY_DTYPES_MAPPING[int(dtype_index)]
             self._elem_size = int(np.dtype(self._dtype).itemsize)  # type: ignore[arg-type]
 
         elem_size = self._elem_size
@@ -674,8 +480,11 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         )
         rel_offset = start_abs - self._header_bytes[chunk_index]
 
-        _t = _ensure_torch()
-        if _t is not None and self._dtype in _TORCH_DTYPES_MAPPING.values():
+        _t = dependencies._ensure_torch()
+        if (
+            _t is not None
+            and self._dtype in dependencies._TORCH_DTYPES_MAPPING.values()
+        ):
             return _t.frombuffer(
                 buffer, dtype=self._dtype, count=self._block_size, offset=rel_offset
             )
@@ -718,91 +527,4 @@ class TokensLoader(BaseItemLoader):  # pragma: no cover - requires torch tensors
         return data[0], dim
 
 
-# -----------------------------------------------------------------------------
-# Treespec conversions
-# -----------------------------------------------------------------------------
-
-
-def treespec_loads(serialized: str) -> optree.PyTreeSpec:
-    """Deserialize a PyTreeSpec from the legacy LitData JSON representation."""
-    _protocol, json_schema = json.loads(serialized)
-    return _convert_legacy_treespec(json_schema)
-
-
-def _convert_legacy_treespec(schema: Mapping[str, Any]) -> optree.PyTreeSpec:
-    if (
-        schema.get("type") is None
-        and schema.get("context") is None
-        and len(schema.get("children_spec", [])) == 0
-    ):
-        return treespec.leaf()
-
-    children = [
-        _convert_legacy_treespec(child) for child in schema.get("children_spec", [])
-    ]
-
-    type_name = schema.get("type")
-    context = json.loads(schema["context"]) if schema.get("context") else None
-
-    if type_name == "builtins.dict":
-        keys = context if isinstance(context, list) else []
-        pairs = [(key, child) for key, child in zip(keys, children)]
-        return treespec.ordereddict(pairs)
-    if type_name == "builtins.list":
-        return treespec.list(children)
-    if type_name == "builtins.tuple":
-        return treespec.tuple(children)
-    if type_name == "collections.OrderedDict":
-        keys = context if isinstance(context, list) else []
-        pairs = [(key, child) for key, child in zip(keys, children)]
-        return treespec.ordereddict(pairs)
-    return treespec.list(children)
-
-
-def treespec_dumps(spec: optree.PyTreeSpec) -> str:
-    """Serialize an optree PyTreeSpec into the legacy LitData JSON representation."""
-
-    def _encode(node: optree.PyTreeSpec) -> dict[str, Any]:
-        if node.is_leaf():
-            return {"type": None, "context": None, "children_spec": []}
-
-        children = [_encode(child) for child in node.children()]
-        kind: optree.PyTreeKind = node.kind  # type: ignore[assignment]
-        context: Any = None
-
-        if kind == optree.PyTreeKind.TUPLE:
-            type_name = "builtins.tuple"
-        elif kind == optree.PyTreeKind.LIST:
-            type_name = "builtins.list"
-        elif kind == optree.PyTreeKind.DICT:
-            type_name = "builtins.dict"
-            context = list(node.entries())
-        elif kind == optree.PyTreeKind.ORDEREDDICT:
-            type_name = "collections.OrderedDict"
-            context = list(node.entries())
-        else:
-            type_name = "builtins.list"
-
-        return {
-            "type": type_name,
-            "context": json.dumps(context) if context is not None else None,
-            "children_spec": children,
-        }
-
-    schema = _encode(spec)
-    return json.dumps([0, schema])
-
-
-__all__ = [
-    "_get_serializers",
-    "BaseItemLoader",
-    "FlatPyTree",
-    "Interval",
-    "NoHeaderNumpySerializer",
-    "NoHeaderTensorSerializer",
-    "PILSerializer",
-    "PyTreeLoader",
-    "TokensLoader",
-    "treespec_dumps",
-    "treespec_loads",
-]
+__all__ = ["PyTreeLoader", "TokensLoader"]

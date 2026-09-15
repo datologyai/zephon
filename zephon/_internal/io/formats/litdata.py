@@ -6,6 +6,7 @@ import os
 import struct
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -23,7 +24,7 @@ from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
-# litdata_support requires numpy, optree, and (lazily) litdata+torch.
+# Shared metadata support requires optree; payload readers load optional deps lazily.
 # Defer the import so that registering the format handler does not pull in
 # heavy dependencies — they are only needed when discover/open_shard run.
 _litdata_support = None
@@ -33,7 +34,9 @@ def _ensure_litdata_support():
     global _litdata_support
     if _litdata_support is None:
         try:
-            from zephon._internal.io.formats import litdata_support
+            from zephon._internal.io.formats.litdata_support import (
+                support as litdata_support,
+            )
 
             _litdata_support = litdata_support
         except ImportError as exc:
@@ -52,11 +55,10 @@ class _StreamingTemplateDict(dict[str, Any]):
     """Typed dict-like helper to appease static type checking."""
 
 
-def _select_item_loader(
+def _tokens_block_size(
     config: Mapping[str, Any], chunks: list[Mapping[str, Any]] | None = None
-) -> Any:
-    """Choose the appropriate item loader based on the config metadata."""
-    support = _ensure_litdata_support()
+) -> int | None:
+    """Resolve the token block size, or None for row-based chunks."""
     loader_spec = config.get("item_loader")
     loader_name: str | None = None
     block_size: int | None = None
@@ -94,10 +96,37 @@ def _select_item_loader(
                             break
         if block_size is None:
             raise ValueError("LitData tokens loader requires an integer 'block_size'")
-        return support.TokensLoader(block_size=block_size)
+        return block_size
+
+    return None
+
+
+def _select_item_loader(
+    config: Mapping[str, Any],
+    chunks: list[Mapping[str, Any]],
+    chunk_path: Path | None = None,
+    filesize_bytes: int = 0,
+) -> Any:
+    """Select the payload reader from the resolved file before using serializers."""
+    block_size = _tokens_block_size(config, chunks)
+    if block_size is not None:
+        from zephon._internal.io.formats.litdata_support.pytree import TokensLoader
+
+        return TokensLoader(block_size=block_size)
+
+    if chunk_path is not None:
+        from zephon._internal.io.formats.litdata_support.arrow import (
+            ArrowLoader,
+            arrow_footer_span,
+        )
+
+        if arrow_footer_span(chunk_path, filesize_bytes) is not None:
+            return ArrowLoader()
+
+    from zephon._internal.io.formats.litdata_support.pytree import PyTreeLoader
 
     flag = config.get("return_flat_leaves")
-    return support.PyTreeLoader(
+    return PyTreeLoader(
         return_flat_leaves=bool(flag) if isinstance(flag, bool) else False
     )
 
@@ -118,6 +147,36 @@ def _extract_chunk_basename(chunk: Mapping[str, Any], shard_id: int) -> str:
         if isinstance(value, str) and value:
             return value
     raise ValueError(f"LitData chunk {shard_id} missing file path metadata")
+
+
+def _setup_item_loader(
+    config: Mapping[str, Any],
+    chunks: list[Mapping[str, Any]],
+    chunk_path: Path | None = None,
+    filesize_bytes: int = 0,
+) -> Any:
+    """Configure a reader; each layout initializes only the dependencies it needs."""
+    from zephon._internal.io.formats.litdata_support.arrow import ArrowLoader
+
+    loader = _select_item_loader(config, chunks, chunk_path, filesize_bytes)
+    serializers = None
+    if not isinstance(loader, ArrowLoader):
+        from zephon._internal.io.formats.litdata_support.dependencies import (
+            _get_serializers,
+        )
+
+        serializers = _get_serializers()
+    loader.setup(config, chunks, serializers, None)
+    return loader
+
+
+def _generate_intervals(
+    config: Mapping[str, Any], chunks: list[Mapping[str, Any]]
+) -> list[Any]:
+    """Count rows before local files and their payload layouts are available."""
+    if _tokens_block_size(config, chunks) is not None:
+        return _setup_item_loader(config, chunks).generate_intervals()
+    return _ensure_litdata_support().row_intervals(chunks)
 
 
 def _extract_chunk_bytes(chunk: Mapping[str, Any], root: str, basename: str) -> int:
@@ -229,7 +288,13 @@ def _read_chunk_metadata_only(
 
 
 class LitDataFormat(FormatHandler):
-    """Format handler for LitData datasets."""
+    """Format handler for LitData datasets.
+
+    Row discovery uses index metadata without validating binary serializers.
+    Their validation happens when opening a binary chunk, after layout dispatch:
+    Arrow chunks can name serializers unavailable in the installed LitData and
+    do not need them to decode rows.
+    """
 
     kind = "litdata"
 
@@ -260,10 +325,7 @@ class LitDataFormat(FormatHandler):
             chunks.append(chunk)
 
         support = _ensure_litdata_support()
-        loader = _select_item_loader(config, chunks)
-        serializers = support._get_serializers()
-        loader.setup(config, chunks, serializers, None)
-        intervals = loader.generate_intervals()
+        intervals = _generate_intervals(config, chunks)
         if len(intervals) != len(chunks):
             raise ValueError("LitData loader returned inconsistent interval counts")
 
@@ -312,8 +374,6 @@ class LitDataFormat(FormatHandler):
             }
         )
 
-        chunks: list[dict[str, Any]] = []
-
         def read_metadata(shard_id: int, name: str) -> tuple[int, dict, dict]:
             full_path = os.path.join(path, name)
             stats = storage.stat(full_path)
@@ -340,13 +400,10 @@ class LitDataFormat(FormatHandler):
 
         # Sort by shard_id to preserve order
         results.sort(key=lambda x: x[0])
-        chunks = [r[2] for r in results]
+        chunks: list[Mapping[str, Any]] = [r[2] for r in results]
 
         support = _ensure_litdata_support()
-        loader = _select_item_loader(config, chunks)
-        serializers = support._get_serializers()
-        loader.setup(config, chunks, serializers, None)
-        intervals = loader.generate_intervals()
+        intervals = _generate_intervals(config, chunks)
         if len(intervals) != len(chunks):
             raise ValueError("LitData loader returned inconsistent interval counts")
 
@@ -466,9 +523,9 @@ class _LitDataShard(RandomAccessShard):
         self._chunk = chunk if isinstance(chunk, dict) else dict(chunk)
         self._chunk_bytes = int(self._chunk.get("chunk_bytes", local_ref.raw.bytes))
 
-        loader = _select_item_loader(self._config, [self._chunk])
-        serializers = support._get_serializers()
-        loader.setup(self._config, [self._chunk], serializers, None)
+        loader = _setup_item_loader(
+            self._config, [self._chunk], Path(self._raw_path), self._chunk_bytes
+        )
         if isinstance(interval, support.Interval):
             self._interval = interval
             self._length = int(interval.chunk_end - interval.chunk_start)
