@@ -1424,24 +1424,6 @@ class Engine:
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
 
-    def _accumulator_eviction_floor(self) -> int | None:
-        """Return the global minimum epoch floor across all runners.
-
-        The epoch floor is the lowest chunk_id that influenced any
-        ``preserves_cursor_order=False`` accumulator since the last sentinel
-        flush.  Chunks below this floor are candidates for atomic eviction
-        (subject to the ``all_done`` bitmap check).
-
-        Returns None if no records have entered any accumulator yet or if
-        the floor was just reset after a sentinel flush.
-        """
-        floor: int | None = None
-        for runner in self._runners:
-            wm = runner.epoch_floor()
-            if wm is not None:
-                floor = min(floor, wm) if floor is not None else wm
-        return floor
-
     def notify(
         self,
         lane_id: int,
@@ -1450,11 +1432,11 @@ class Engine:
     ) -> None:
         """Record delivery progress for ``lane_id`` and evict completed chunks.
 
-        ``entries`` describe contributors that have been emitted. A chunk can be
-        evicted once every base offset in that chunk has produced exactly one
-        contributor (or tombstone) with ``is_last_child=True``. ``record_cursor``
-        is the replay identity of the delivered training record and is stored as
-        the per-lane sentinel for equality-based replay.
+        ``entries`` describe contributors that have been emitted. An epoch can
+        be evicted once this lane has a recorded flush boundary and every base
+        offset in its chunks has produced a contributor (or tombstone) with
+        ``is_last_child=True``. ``record_cursor`` pins its epoch and is stored
+        as the per-lane sentinel for equality-based replay.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts
@@ -1483,11 +1465,11 @@ class Engine:
         # 2) Per-epoch eviction: walk epoch boundaries bottom-up, evict
         #    completed epochs contiguously from the lowest.
         #
-        #    The pump (feeder thread) runs ahead of delivery, so the
-        #    accumulator epoch floor may span many epoch boundaries.
-        #    Instead of requiring ALL chunks below the floor to be done
-        #    (which never passes when the pump is ahead), we evaluate
-        #    each epoch independently via _epoch_boundaries.
+        #    Only this lane's recorded boundaries establish replay-safe epochs.
+        #    A shared runner floor can advance when a different lane flushes;
+        #    it cannot authorize eviction of this lane's accumulator history.
+        #    Without a boundary, retain the entire open epoch, even if its
+        #    offsets are complete. Full pipeline drain handles final cleanup.
         #
         #    Epoch i covers [boundaries[i-1], boundaries[i]).
         #    We stop at the cursor's epoch or the first incomplete epoch
@@ -1495,7 +1477,6 @@ class Engine:
         last_completed_cid = -1
         last_completed_offset = 0
         cids_to_evict: list[int] = []
-        accum_floor = self._accumulator_eviction_floor()
         # Snapshot inflight keys and boundaries under the same lock so the
         # two views are consistent.  The feeder thread mutates both under
         # _checkpoint_lock; without the lock, free-threaded Python can
@@ -1540,28 +1521,6 @@ class Engine:
                 last_completed_cid = max(epoch_cids)
                 last_completed_offset = len(inflight_lane[last_completed_cid])
 
-        elif accum_floor is not None and cid_snapshot:
-            # Fallback: no epoch boundaries (flush_every_k_chunks=0 or no
-            # sentinel fired yet).  All chunks below accum_floor are in a
-            # single epoch — use the original atomic "all below floor" check.
-            below = [
-                cid
-                for cid in cid_snapshot
-                if cid < accum_floor and inflight_lane.get(cid) is not None
-            ]
-            all_below_done = all(
-                cid in done and done_count[cid] >= len(inflight_lane[cid])
-                for cid in below
-            )
-            if all_below_done and below:
-                # Cursor pinning: abort if cursor is in the eviction set.
-                if record_cursor is not None and record_cursor.chunk_id in below:
-                    pass  # don't evict
-                else:
-                    cids_to_evict = below
-                    last_completed_cid = max(below)
-                    last_completed_offset = len(inflight_lane[last_completed_cid])
-
         # Deliberately no lock on this hot-path pop (see notify_monotone): we
         # keep eviction lock-free and let the cold reader _lane_stream retry on
         # a racing resize instead. The snapshot above takes _checkpoint_lock
@@ -1593,7 +1552,7 @@ class Engine:
                 print(
                     f"[zephon.evict.non-monotone] lane={lane_id} cids={cids_to_evict} "
                     f"remaining_inflight~={remaining} "
-                    f"accum_floor={accum_floor} record_cursor_cid={_rc_cid} {rank_ctx()}",
+                    f"record_cursor_cid={_rc_cid} {rank_ctx()}",
                     file=sys.stderr,
                     flush=True,
                 )

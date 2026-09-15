@@ -153,10 +153,45 @@ def test_torch_worker_helpers_with_stubbed_torch(
 
 
 def _set_accum_floor(eng: Engine, floor: int) -> None:
-    """Set epoch floor on all runner ops so _accumulator_eviction_floor() returns *floor*."""
+    """Simulate a shared runner watermark advanced by a peer lane's flush."""
     for runner in eng._runners:  # type: ignore[attr-defined]
         for op_state in runner.ops:
             op_state._epoch_floor = floor
+
+
+def test_notify_retains_open_epoch_when_another_lane_flushes() -> None:
+    eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
+    lane = 1
+    cursors = []
+    for cid in range(2):
+        sample_id = (0, 0, cid)
+        eng.inflight_chunks_per_lane[lane][cid] = WorkChunk(
+            components={"X": [sample_id]}
+        )
+        cursors.append(
+            SampleMeta(sample_id=sample_id, lane_id=lane, chunk_id=cid).cursor
+        )
+
+    # A peer lane's flush advances the shared runner floor, but lane 1's
+    # shuffle state still depends on both of its chunks, even when all their
+    # offsets have completed. It has no replay-safe boundary of its own yet.
+    eng._epoch_boundaries[0] = [2]
+    _set_accum_floor(eng, 2)
+    try:
+        eng.notify(
+            lane, [ContributorRef(cursor=c, is_last_child=True) for c in cursors]
+        )
+        assert set(eng.inflight_chunks_per_lane[lane]) == {0, 1}
+
+        # Once this lane has a boundary, the completed epoch is eligible for
+        # eviction, subject to the usual replay cursor pin.
+        eng._epoch_boundaries[lane] = [2]
+        eng.notify(lane, [], record_cursor=cursors[-1])
+        assert set(eng.inflight_chunks_per_lane[lane]) == {0, 1}
+        eng.notify(lane, [], record_cursor=None)
+        assert eng.inflight_chunks_per_lane[lane] == {}
+    finally:
+        eng.close()
 
 
 def test_notify_updates_progress_and_cursor() -> None:
@@ -166,8 +201,8 @@ def test_notify_updates_progress_and_cursor() -> None:
     eng.inflight_chunks_per_lane[lane][0] = WorkChunk(
         components={"X": [(1, 2, 3), (4, 5, 6)]}, seed=None
     )
-    # Set epoch floor above chunk 0 so atomic eviction can proceed.
-    _set_accum_floor(eng, 1)
+    # Close this lane's epoch so atomic eviction can proceed.
+    eng._epoch_boundaries[lane] = [1]
 
     cursor0 = SampleMeta(
         sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0
@@ -197,7 +232,7 @@ def test_notify_updates_progress_and_cursor() -> None:
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(
         components={"Y": [(7, 8, 9)]}, seed=None
     )
-    _set_accum_floor(eng, 2)
+    eng._epoch_boundaries[lane].append(2)
 
     cursor2 = SampleMeta(
         sample_id=(0, 0, 2), lane_id=lane, chunk_id=1, chunk_offset=0
@@ -242,8 +277,8 @@ def test_chunk_eviction_waits_for_all_offsets() -> None:
         components={"X": [(1,), (2,)]}
     )  # two offsets
     eng.inflight_chunks_per_lane[lane][1] = WorkChunk(components={"Y": [(3,)]})
-    # Set epoch floor above both chunks so atomic eviction can proceed.
-    _set_accum_floor(eng, 2)
+    # Both chunks belong to one closed epoch and must evict atomically.
+    eng._epoch_boundaries[lane] = [2]
 
     # Close only offset 0 of chunk 0 -> no eviction (all_done fails)
     c0_0 = SampleMeta(sample_id=(0, 0, 0), lane_id=lane, chunk_id=0, chunk_offset=0)

@@ -1,6 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+from collections import defaultdict
 from typing import Literal
 
 import pytest
@@ -10,6 +11,7 @@ from tests.integration.test_elastic_continuation import (
     make_dataset,
 )
 from zephon import Pipeline as PublicPipeline
+from zephon.types import SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
 pytestmark = pytest.mark.integration
@@ -81,3 +83,65 @@ def test_shuffle_reorders_and_is_lossless_e2e(
     natural = [f"alpha-{i}" for i in range(sample_count)]
     assert sorted(out) == sorted(natural), "shuffle must be a lossless permutation"
     assert out != natural, "shuffle must actually reorder the stream"
+
+
+@pytest.mark.parametrize(
+    "runner,mtp_mode",
+    [("inline", False), ("threads", False), ("process", False), ("threads", True)],
+)
+@pytest.mark.parametrize("prefetch_batches", [0, 8])
+def test_shuffle_resume_retains_lanes_without_a_flush_boundary(
+    runner: str, mtp_mode: bool, prefetch_batches: int
+) -> None:
+    """One lane's flush must not evict another lane's open shuffle epoch."""
+    # 22 chunks: lane 0 reaches its first boundary at 8 chunks, while lanes
+    # 1 and 2 exhaust after 7. Their full history must survive checkpoints
+    # taken while lane 0 is still delivering its tail.
+    ds = make_dataset("alpha", 242)
+
+    def make_pipe() -> PublicPipeline:
+        work = StaticMixtureWorkSource(
+            [ds],
+            {ds.name: 1.0},
+            chunk_size=11,
+            shuffle_shards=False,
+            lane_assignment="modulo",
+        )
+        return (
+            PublicPipeline(work)
+            .shuffle(buffer_size=15, seed=17)
+            .options(
+                runner=runner,
+                mtp_mode=mtp_mode,
+                canonical_replicas=3,
+                max_workers=2,
+                default_stage_prefetch=0,
+                prefetch_batches=prefetch_batches,
+                flush_every_k_chunks=8,
+            )
+        )
+
+    def per_lane(items: list[SampleRecord]) -> dict[int, list[str]]:
+        lanes: dict[int, list[str]] = defaultdict(list)
+        for item in items:
+            lanes[item.meta.lane_id].append(item.payload["text"])
+        return dict(lanes)
+
+    baseline = list(make_pipe())
+    assert len(baseline) == 242
+    assert len({item.payload["text"] for item in baseline}) == 242
+
+    pipe = make_pipe()
+    iterator = iter(pipe)
+    try:
+        prefix = [next(iterator) for _ in range(232)]
+        checkpoint = pipe.checkpoint()
+    finally:
+        iterator.close()
+
+    restored = make_pipe()
+    restored.restore(checkpoint)
+    combined = prefix + list(restored)
+    # Compare each lane's exact sequence: cross-lane scheduling is independent
+    # of whether replay preserves all records and their shuffle order.
+    assert per_lane(combined) == per_lane(baseline)
