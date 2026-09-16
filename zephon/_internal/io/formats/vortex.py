@@ -61,6 +61,7 @@ class VortexShard(RandomAccessShard):
         self._file = None
 
     def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
+        """Bulk read rows in request order, preserving duplicate indices."""
         if not indices:
             return []
         for i in indices:
@@ -69,19 +70,16 @@ class VortexShard(RandomAccessShard):
         if self._file is None or _vortex is None:
             raise RuntimeError("VortexShard has been closed")
 
-        # Deduplicate consecutive indices (input is sorted by fetch.py,
-        # Vortex scan API requires unique indices)
-        sorted_unique: list[int] = []
-        for idx in indices:
-            if not sorted_unique or idx != sorted_unique[-1]:
-                sorted_unique.append(idx)
+        # Vortex scans require strictly increasing indices, even when callers
+        # request rows out of order or more than once.
+        sorted_unique = sorted(set(indices))
         index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
 
         batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
         arrow_table = batch.to_arrow_table()
         batch_dict = arrow_table.to_pydict()
 
-        # Map results back to handle duplicates
+        # Restore the caller's order and duplicate rows.
         return [
             {k: v[index_to_pos[idx]] for k, v in batch_dict.items()} for idx in indices
         ]

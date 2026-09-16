@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import pytest
 
 from tests._catalog_helpers import catalog_locators
@@ -102,26 +103,64 @@ def test_vortex_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) 
         _ = handler.build_locators(ds)
 
 
-def test_vortex_shard_getsamples(tmp_path: Path) -> None:
-    """Test VortexShard.getsamples with sorted indices."""
+@pytest.mark.parametrize(
+    "indices",
+    [
+        pytest.param([], id="empty"),
+        pytest.param([3], id="single"),
+        pytest.param([0, 1, 4, 5], id="sorted"),
+        pytest.param([0, 1, 1, 4, 4], id="sorted-duplicates"),
+        pytest.param([5, 4, 3, 2, 1, 0], id="reverse"),
+        pytest.param([4, 1, 5, 0], id="unsorted"),
+        pytest.param([4, 1, 4, 0, 1, 5, 0], id="unsorted-duplicates"),
+        pytest.param([2, 2, 2], id="all-identical"),
+    ],
+)
+def test_vortex_shard_getsamples(tmp_path: Path, indices: list[int]) -> None:
+    """Bulk reads preserve request order and duplicates without mutating indices."""
     p = tmp_path / "shard.vortex"
-    rows = [{"v": i} for i in range(6)]
+    rows = [{"v": i, "text": f"row_{i}"} for i in range(6)]
     _create_vortex_file(p, rows)
 
     shard = VortexShard(p)
+    original_indices = indices.copy()
+    try:
+        assert shard.getsamples(indices) == [rows[i] for i in original_indices]
+        assert indices == original_indices
+    finally:
+        shard.close()
 
-    # Test sorted indices with consecutive duplicates (as fetch.py may provide)
-    out = shard.getsamples([0, 1, 1, 4, 4])
-    assert [r["v"] for r in out] == [0, 1, 1, 4, 4]
 
-    # Test empty indices
-    assert shard.getsamples([]) == []
+def test_vortex_shard_getsamples_random_order(tmp_path: Path) -> None:
+    """Regression for issue #302: shuffled bulk reads on a larger shard."""
+    p = tmp_path / "shard.vortex"
+    rows = [{"id": i, "text": f"row_{i}"} for i in range(5000)]
+    _create_vortex_file(p, rows)
+    indices = np.random.default_rng(0).integers(0, len(rows), size=64).tolist()
+    # Include distant boundaries and guarantee non-consecutive duplicates.
+    indices.extend([len(rows) - 1, 0, indices[0]])
 
-    # Test out of range
-    with pytest.raises(IndexError):
-        _ = shard.getsamples([10])
+    shard = VortexShard(p)
+    try:
+        for requested in (sorted(indices), indices):
+            assert shard.getsamples(requested) == [rows[i] for i in requested]
+    finally:
+        shard.close()
 
-    shard.close()
+
+@pytest.mark.parametrize("indices", [[-1], [6], [4, -1, 0], [4, 6, 0]])
+def test_vortex_shard_getsamples_out_of_bounds(
+    tmp_path: Path, indices: list[int]
+) -> None:
+    """Reject invalid indices before passing the request to Vortex."""
+    p = tmp_path / "shard.vortex"
+    _create_vortex_file(p, [{"v": i} for i in range(6)])
+    shard = VortexShard(p)
+    try:
+        with pytest.raises(IndexError):
+            shard.getsamples(indices)
+    finally:
+        shard.close()
 
 
 def test_vortex_shard_indexing(tmp_path: Path) -> None:

@@ -26,6 +26,10 @@ class RandomAccessShard(Protocol):
     pattern used by ``__getitem__``: implementations may return just the rows or
     a tuple of (rows, per-sample stats). Implementations that do not surface
     per-sample stats can simply loop over ``__getitem__`` and return the rows.
+
+    ``getsamples`` accepts indices in arbitrary order, including duplicates.
+    Returned rows (and per-sample stats, when present) must preserve that order
+    and include one entry per requested index without modifying ``indices``.
     """
 
     def __getitem__(
