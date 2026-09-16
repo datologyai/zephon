@@ -5,13 +5,14 @@ PY ?= $(UV) run
 PYTEST ?= pytest
 EXTRA_ARGS ?=
 
-.PHONY: help setup test integration packaging lint format docs typecheck-public verifytypes
+.PHONY: help setup test integration fuzz packaging lint format docs typecheck-public verifytypes
 
 help:
 	@echo "Targets:"
 	@echo "  setup           - Create dev/test environment via uv"
 	@echo "  test            - Run pytest ($(EXTRA_ARGS) optional)"
 	@echo "  integration     - Run integration tests"
+	@echo "  fuzz            - Run property-based fuzz tests"
 	@echo "  packaging       - Build the wheel/sdist and smoke-test the artifacts"
 	@echo "  lint            - Check formatting, linting, and types"
 	@echo "  format          - Format code and fix lint issues"
@@ -27,6 +28,9 @@ test:
 
 integration:
 	$(PY) $(PYTEST) --run-integration tests/integration $(EXTRA_ARGS)
+
+fuzz:
+	$(PY) $(PYTEST) tests/fuzzing $(EXTRA_ARGS)
 
 packaging:
 	$(PY) $(PYTEST) --run-packaging tests/packaging $(EXTRA_ARGS)

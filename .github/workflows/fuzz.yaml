@@ -1,0 +1,55 @@
+name: Fuzz Tests
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Run weekly on Mondays at 6 AM UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: fuzz-tests
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz tests
+    runs-on: LargeGithubRunner
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+      - name: Setup
+        run: uv sync --python 3.12 --group dev --group test
+      - name: Run fuzz tests
+        env:
+          ZEPHON_FUZZ_DERANDOMIZE: "0"
+          ZEPHON_FUZZ_EXAMPLES: "100"
+        run: uv run --python 3.12 make fuzz
+
+  notify-on-failure:
+    name: Notify zephon-dev on failure
+    needs: fuzz
+    if: failure()
+    permissions: {}
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_ZEPHON_DEV: ${{ secrets.SLACK_WEBHOOK_ZEPHON_DEV }}
+    steps:
+      - name: Post failure to zephon-dev
+        if: env.SLACK_WEBHOOK_ZEPHON_DEV != ''
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          webhook: ${{ env.SLACK_WEBHOOK_ZEPHON_DEV }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "❌ Weekly Zephon fuzz tests failed.\nRun: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|open logs>"
+            }

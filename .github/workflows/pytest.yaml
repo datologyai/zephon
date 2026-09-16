@@ -87,11 +87,15 @@ jobs:
           remainder)
             test_targets=(
               tests
+              --ignore=tests/fuzzing
               --ignore=tests/zephon/_internal/runners/test_process.py
             )
             ;;
           all)
-            test_targets=(tests)
+            test_targets=(
+              tests
+              --ignore=tests/fuzzing
+            )
             ;;
         esac
         uv run --python ${{ matrix.python_version }} pytest "${test_targets[@]}" \
