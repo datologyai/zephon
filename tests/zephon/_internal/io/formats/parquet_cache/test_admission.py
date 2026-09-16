@@ -17,7 +17,7 @@ from zephon._internal.io.formats.parquet_cache.admission import (
 )
 from zephon._internal.io.formats.parquet_cache.control import DecodedRGState
 from zephon._internal.io.formats.parquet_cache.session import ParquetRGSession
-from zephon._internal.io.ofd_lock import OFDLockMode
+from zephon._internal.io.ofd_lock import OFDLease, OFDLockMode
 
 _CATALOG_FINGERPRINT = "sha256:" + "78" * 32
 _CONFIGURATION_FINGERPRINT = "sha256:" + "9a" * 32
@@ -377,6 +377,61 @@ def test_same_rg_wait_observes_exact_builder_without_builder_train(
         assert result and result[0][0] is None
         assert result[0][1] >= 0.02
         assert session.control.slot(2).state is DecodedRGState.EMPTY
+
+
+@pytest.mark.parametrize("publish", [False, True])
+def test_same_rg_wait_rechecks_ready_when_builder_finishes_before_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publish: bool,
+) -> None:
+    with _session(tmp_path / "decoded") as session:
+        admission = _admission(session)
+        builder = admission.try_exact_exclusive(2)
+        assert builder is not None
+        original_try_ready = admission.try_ready_shared
+        first_attempt = True
+
+        def finish_builder_after_miss(slot: int) -> OFDLease | None:
+            nonlocal first_attempt
+            lease = original_try_ready(slot)
+            if first_attempt:
+                first_attempt = False
+                assert lease is None
+                # Force publication/release between the READY check and the
+                # shared-lock probe, without depending on thread scheduling.
+                if publish:
+                    assert (
+                        admission.try_reserve(
+                            slot=slot,
+                            exact_lease=builder,
+                            payload_bytes=100,
+                            min_free_bytes=0,
+                            timeout=0.1,
+                        )
+                        is RGAdmissionOutcome.ADMITTED
+                    )
+                    assert admission.publish_ready(
+                        slot=slot, exact_lease=builder, timeout=0.1
+                    )
+                builder.close()
+            return lease
+
+        monkeypatch.setattr(admission, "try_ready_shared", finish_builder_after_miss)
+        with builder:
+            hit = admission.wait_ready_shared(2, timeout=0.2)
+            try:
+                assert (hit is not None) is publish
+                if hit is not None:
+                    assert admission.try_exact_exclusive(2) is None
+            finally:
+                if hit is not None:
+                    hit.close()
+
+        # Neither the returned reader nor the unsuccessful probe leaks a lock.
+        exact = admission.try_exact_exclusive(2)
+        assert exact is not None
+        exact.close()
 
 
 def test_global_clock_second_chance_evicts_and_reserves_for_leader(

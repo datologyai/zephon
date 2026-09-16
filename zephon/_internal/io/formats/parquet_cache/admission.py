@@ -115,8 +115,10 @@ class ParquetRGAdmission:
                 mode=OFDLockMode.SHARED,
             )
             if probe is not None:
-                probe.close()
-                return None
+                # Publication may have completed since the first READY check.
+                # Keep SH held through the recheck so eviction cannot intervene.
+                with probe:
+                    return self.try_ready_shared(slot)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
