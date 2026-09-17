@@ -78,18 +78,20 @@ class JsonlShard(RandomAccessShard):
             waiting[int(idx)].append(pos)
 
         # Single pass over file collecting requested rows.
+        logical_index = 0
         with self._path.open("r", encoding="utf-8") as handle:
-            for lnum, line in enumerate(handle):
+            for line in handle:
                 if not waiting:
                     break
                 stripped = line.strip()
                 if not stripped:
                     continue
-                if lnum in waiting:
+                if logical_index in waiting:
                     obj = json.loads(stripped)
-                    for pos in waiting[lnum]:
+                    for pos in waiting[logical_index]:
                         out[pos] = obj
-                    del waiting[lnum]
+                    del waiting[logical_index]
+                logical_index += 1
 
         if waiting:
             # Some indices were out of range; report the smallest missing one.

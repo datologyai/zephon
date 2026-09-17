@@ -31,7 +31,6 @@ class JsonlIndexBuilder(IndexBuilder):
             basename=path.rsplit("/", 1)[-1],
             bytes=file_size,
             num_rows=count,
-            extra={"length": count},
         )
 
 

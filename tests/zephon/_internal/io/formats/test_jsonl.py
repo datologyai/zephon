@@ -54,10 +54,7 @@ def test_jsonl_create_index(tmp_path: Path) -> None:
         "b.jsonl",
     ]
     assert [shard["num_rows"] for shard in data["shards"]] == [1, 2]
-    assert [shard["extra"] for shard in data["shards"]] == [
-        {"length": 1},
-        {"length": 2},
-    ]
+    assert [shard["extra"] for shard in data["shards"]] == [{}, {}]
     assert data["shards"][1]["bytes"] == (tmp_path / "b.jsonl").stat().st_size
 
 
@@ -344,3 +341,18 @@ def test_compressed_jsonl_reads_through_store(
     )
     # Decoded copies are not shards: rediscovery sees the same dataset.
     assert counts_dict(Dataset.from_path("demo", str(data))) == {0: 4, 1: 2}
+
+
+def test_jsonl_shard_getsamples_uses_logical_indices_across_blank_lines(
+    tmp_path: Path,
+) -> None:
+    """Blank lines do not shift JSONL record indices during bulk reads."""
+    path = tmp_path / "shard.jsonl"
+    path.write_text(
+        '{"v": 0}\n\n  \n{"v": 1}\n{"v": 2}\n',
+        encoding="utf-8",
+    )
+
+    shard = JsonlShard(path, length=3)
+
+    assert shard.getsamples([2, 0, 1]) == [{"v": 2}, {"v": 0}, {"v": 1}]
