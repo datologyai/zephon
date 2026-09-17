@@ -10,6 +10,7 @@ import zephon._internal.io.resolvers.cache.manager as manager_mod
 import zephon._internal.io.resolvers.direct as direct_mod
 from tests._helpers import counts_dict
 from zephon._internal.io.formats.jsonl import JsonlFormat, JsonlShard
+from zephon._internal.io.index.jsonl_index import JsonlIndexBuilder
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
@@ -37,6 +38,33 @@ def _write_compressed_jsonl(
         fh.write("".join(lines[:half]))
     with _WRITERS[compression](path, "at", encoding="utf-8") as fh:
         fh.write("".join(lines[half:]))
+
+
+def test_jsonl_create_index(tmp_path: Path) -> None:
+    """The builder writes sorted shard metadata and ignores blank lines."""
+    (tmp_path / "b.jsonl").write_text('{"i": 1}\n\n  \n{"i": 2}\n', encoding="utf-8")
+    _write_jsonl(tmp_path / "a.jsonl", [{"i": 0}])
+
+    result = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    data = json.loads(result.read_text(encoding="utf-8"))
+
+    assert data["format_version"] == 1
+    assert [shard["basename"] for shard in data["shards"]] == [
+        "a.jsonl",
+        "b.jsonl",
+    ]
+    assert [shard["num_rows"] for shard in data["shards"]] == [1, 2]
+    assert [shard["extra"] for shard in data["shards"]] == [
+        {"length": 1},
+        {"length": 2},
+    ]
+    assert data["shards"][1]["bytes"] == (tmp_path / "b.jsonl").stat().st_size
+
+
+def test_jsonl_create_index_rejects_empty_directory(tmp_path: Path) -> None:
+    """Building an index requires at least one JSONL shard."""
+    with pytest.raises(ValueError, match=r"No \*\.jsonl files found"):
+        JsonlIndexBuilder().create_index(tmp_path, progress=False)
 
 
 def test_jsonl_discover_local(tmp_path: Path) -> None:
@@ -72,6 +100,70 @@ def test_jsonl_discover_assigns_shard_ids_in_sorted_basename_order(
     basenames = [shard_meta[sid]["raw"]["basename"] for sid in sorted(shard_meta)]
     assert basenames == ["a.jsonl", "b.jsonl", "c.jsonl"]
     assert dict(shard_index) == {0: 2, 1: 3, 2: 1}
+
+
+def test_jsonl_discover_and_counts_use_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indexed discovery obtains counts without scanning shard contents again."""
+    _write_jsonl(tmp_path / "a.jsonl", [{"i": 0}, {"i": 1}])
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": 2}])
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    handler = JsonlFormat()
+    monkeypatch.setattr(
+        handler,
+        "_discover_from_files",
+        lambda *_args: pytest.fail("indexed discovery scanned JSONL shards"),
+    )
+    storage = LocalFSBackend(tmp_path)
+
+    shard_index, shard_meta = handler.discover(str(tmp_path), storage)
+    ids, counts = handler.discover_counts(str(tmp_path), storage)
+
+    assert dict(shard_index) == {0: 2, 1: 1}
+    assert ids.tolist() == [0, 1]
+    assert counts.tolist() == [2, 1]
+    assert shard_meta[0]["raw"]["basename"] == "a.jsonl"
+    assert shard_meta[0]["extra"] == {"length": 2}
+
+
+def test_jsonl_discover_ignores_non_jsonl_shard_index(tmp_path: Path) -> None:
+    """An index for another format does not replace JSONL file discovery."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [
+                    {
+                        "basename": "data.parquet",
+                        "bytes": 1,
+                        "num_rows": 99,
+                        "hashes": {},
+                        "extra": {"row_groups": []},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    shard_index, _ = JsonlFormat().discover(str(tmp_path), LocalFSBackend(tmp_path))
+
+    assert dict(shard_index) == {0: 2}
+
+
+def test_jsonl_auto_detects_from_index(tmp_path: Path) -> None:
+    """A Zephon shard index with JSONL basenames identifies the format."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    dataset = Dataset.from_path("indexed", str(tmp_path))
+
+    assert dataset.backend["kind"] == "jsonl"
+    assert dataset.ids().tolist() == [0]
+    assert dataset.counts().tolist() == [2]
 
 
 def test_jsonl_build_locators_and_open(tmp_path: Path) -> None:

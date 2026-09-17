@@ -30,6 +30,21 @@ def test_build_index_delegates(monkeypatch):
     assert str(result) == "/idx/index.json"
 
 
+def test_build_index_imports_jsonl_builder(monkeypatch):
+    """JSONL is registered as an indexable CLI format."""
+    imported: list[str] = []
+    monkeypatch.setattr(bi.importlib, "import_module", lambda m: imported.append(m))
+    monkeypatch.setattr(
+        bi,
+        "_create_index",
+        lambda *_args, **_kwargs: Path("/idx/index.json"),
+    )
+
+    bi.build_index("jsonl", "/data")
+
+    assert imported == ["zephon._internal.io.index.jsonl_index"]
+
+
 def test_build_index_unknown_format_raises():
     with pytest.raises(ValueError):
         bi.build_index("no_such_format", "/data")

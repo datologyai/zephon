@@ -11,7 +11,11 @@ from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Mapping, cast
 
+import numpy as np
+
 from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.index import find_and_load_index, warn_missing_index
+from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import JSONL_SUFFIXES
@@ -117,7 +121,47 @@ class JsonlFormat(FormatHandler):
     def discover(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
-        """Scan ``path`` and return shard statistics and metadata."""
+        """Return indexed shard metadata, falling back to scanning files."""
+        result = find_and_load_index(path, storage)
+        if is_shard_index(result) and self._is_valid_jsonl_index(result):
+            return self._discover_from_index_data(result)
+
+        return self._discover_from_files(path, storage)
+
+    def _is_valid_jsonl_index(self, data: ShardIndex) -> bool:
+        """Return whether an index describes a non-empty JSONL dataset."""
+        shards = data.get("shards", [])
+        return bool(shards) and all(
+            isinstance(shard.get("basename"), str)
+            and shard["basename"].endswith(".jsonl")
+            for shard in shards
+        )
+
+    def _discover_from_index_data(
+        self, data: ShardIndex
+    ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
+        """Build discovery metadata without opening the indexed shards."""
+        shard_index: dict[int, int] = {}
+        shard_meta: dict[int, dict[str, object]] = {}
+
+        for shard_id, shard in enumerate(data["shards"]):
+            count = shard.get("num_rows", 0)
+            shard_index[shard_id] = count
+            shard_meta[shard_id] = {
+                "raw": {
+                    "basename": shard["basename"],
+                    "bytes": shard.get("bytes", 0),
+                    "hashes": shard.get("hashes", {}),
+                },
+                "extra": {"length": count},
+            }
+
+        return shard_index, shard_meta
+
+    def _discover_from_files(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
+        """Scan JSONL files and count their non-empty records."""
         # Sort so shard_id assignment is reproducible across processes/machines
         # (cache JOIN, cross-node Ray). Re-numbers existing jsonl datasets once.
         entries = sorted(
@@ -127,6 +171,7 @@ class JsonlFormat(FormatHandler):
             raise ValueError(
                 f"No JSONL shards ({', '.join(JSONL_SUFFIXES)}) found under {path}"
             )
+        warn_missing_index(path, self.kind, num_shards=len(entries))
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, object]] = {}
@@ -164,6 +209,19 @@ class JsonlFormat(FormatHandler):
             shard_meta[shard_id] = meta
 
         return shard_index, shard_meta
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read per-shard row counts directly from an index when available."""
+        result = find_and_load_index(path, storage)
+        if is_shard_index(result) and self._is_valid_jsonl_index(result):
+            counts = [shard.get("num_rows", 0) for shard in result["shards"]]
+            return (
+                np.arange(len(counts), dtype=np.int64),
+                np.array(counts, dtype=np.int64),
+            )
+        return super().discover_counts(path, storage)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         backend = dataset.backend
