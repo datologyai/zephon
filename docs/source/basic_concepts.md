@@ -257,8 +257,8 @@ fields like `input_ids` to measure how many tokens each sample contributes.
 
 After the `batch` operator, individual records are collected into a
 `SampleBatch`. This object offers certain convenience functions. For example, when you call `batch.to_training()` in your training loop, the
-batch's payloads are collated into the dict-of-lists format many models in training frameworks such as torchtitan typically
-expect. For a deeper look at how samples are created, split, and packed, see
+batch's payloads are collated into stacked token tensors (or lists with `dtype=None`)
+and per-record `ids`/`texts` lists. For a deeper look at how samples are created, split, and packed, see
 [Sample Lifecycle](understanding/sample_lifecycle.md).
 
 ---

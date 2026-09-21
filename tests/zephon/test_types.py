@@ -1,4 +1,6 @@
+import copy
 import dataclasses
+from typing import Any
 
 import pytest
 
@@ -1048,3 +1050,225 @@ class TestToTrainingCrossProduct:
         # Metadata always preserved
         assert out["ids"] == [(0, 0, 0), (0, 0, 1)]
         assert out["texts"] == ["hello", "world"]
+
+
+@pytest.fixture(params=["list", "numpy", "torch"])
+def conversion_dtype(request: pytest.FixtureRequest) -> Any:
+    return _get_dtype_and_framework(request.param)[0]
+
+
+def _values(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else value.tolist()
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_training_conversion_masks_before_counting_and_flattening(
+    conversion_dtype: Any, flatten: bool
+) -> None:
+    payloads = [
+        {
+            "tokens": [10, 11, -7, 13, 14],
+            "positions": [0, 1, 0, 1, 2],
+            "loss_mask": [0, 1, 1, 0, 1],
+            "attention_mask": [1, 2, 3, 4, 5],
+        },
+        {
+            "tokens": [20, 21, 22, 23, 24],
+            "positions": [0, 1, 2, 0, 1],
+            "loss_mask": [1, 0, 1, 1, 1],
+            "attention_mask": [6, 7, 8, 9, 10],
+        },
+    ]
+    original = copy.deepcopy(payloads)
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, payloads[0], 1),
+            _rec((0, 0, 1), 0, 0, payloads[1]),
+        )
+    )
+    out = batch.to_training(
+        tokens_field="tokens",
+        return_labels=True,
+        dtype=conversion_dtype,
+        extra_fields=("attention_mask",),
+        ignore_index=-7,
+        rename_fields={"input_ids": "input"},
+        flatten=flatten,
+        exclude_fields=("ids", "texts"),
+        return_num_valid_tokens=True,
+    )
+    expected = (
+        {
+            "input": [10, 11, -7, 13, 20, 21, 22, 23],
+            "labels": [11, -7, -7, -7, -7, 22, 23, 24],
+            "positions": [0, 1, 0, 1, 0, 1, 2, 0],
+            "attention_mask": [1, 2, 3, 4, 6, 7, 8, 9],
+        }
+        if flatten
+        else {
+            "input": [[10, 11, -7, 13], [20, 21, 22, 23]],
+            "labels": [[11, -7, -7, -7], [-7, 22, 23, 24]],
+            "positions": [[0, 1, 0, 1], [0, 1, 2, 0]],
+            "attention_mask": [[1, 2, 3, 4], [6, 7, 8, 9]],
+        }
+    )
+    assert set(out) == {*expected, "num_valid_tokens"}
+    assert out["num_valid_tokens"] == 4
+    assert type(out["num_valid_tokens"]) is int
+    for name, values in expected.items():
+        assert _values(out[name]) == values
+        if conversion_dtype is not None:
+            assert out[name].dtype == conversion_dtype
+    assert payloads == original
+
+
+def test_flatten_without_labels_preserves_record_fields(conversion_dtype: Any) -> None:
+    batch = SampleBatch(
+        records=(
+            _rec(
+                (0, 0, 0), 0, 0, {"input_ids": [1, 2], "loss_mask": [0, 1], "text": "a"}
+            ),
+            _rec(
+                (0, 0, 1), 0, 0, {"input_ids": [3, 4], "loss_mask": [1, 0], "text": "b"}
+            ),
+        )
+    )
+    out = batch.to_training(dtype=conversion_dtype, flatten=True)
+    assert set(out) == {"ids", "texts", "input_ids", "loss_mask"}
+    assert out["ids"] == [(0, 0, 0), (0, 0, 1)]
+    assert out["texts"] == ["a", "b"]
+    assert _values(out["input_ids"]) == [1, 2, 3, 4]
+    assert _values(out["loss_mask"]) == [0, 1, 1, 0]
+
+
+def test_exclusion_uses_renamed_keys_and_keeps_count(conversion_dtype: Any) -> None:
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3]}),))
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_num_valid_tokens=True,
+        rename_fields={"input_ids": "input", "num_valid_tokens": "count"},
+        exclude_fields=("ids", "texts", "labels", "input", "absent"),
+    )
+    assert out == {"count": 2}
+    out = batch.to_training(
+        dtype=None,
+        rename_fields={"input_ids": "input"},
+        exclude_fields=("ids", "texts", "input_ids"),
+    )
+    assert out == {"input": [[1, 2, 3]]}
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize("tokens", [[], [1], [1, -100, -100]])
+def test_zero_valid_tokens(
+    conversion_dtype: Any, flatten: bool, tokens: list[int]
+) -> None:
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"input_ids": tokens}),))
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_num_valid_tokens=True,
+        flatten=flatten,
+    )
+    assert out["num_valid_tokens"] == 0
+    assert type(out["num_valid_tokens"]) is int
+    expected = tokens[1:] if flatten else [tokens[1:]]
+    assert _values(out["labels"]) == expected
+
+
+def test_empty_batch_preserves_defaults_and_applies_exclusions() -> None:
+    batch = SampleBatch(records=())
+    assert batch.to_training() == {"ids": [], "texts": []}
+    assert batch.to_training(
+        return_labels=True,
+        return_num_valid_tokens=True,
+        flatten=True,
+        rename_fields={"input_ids": "input"},
+        exclude_fields=("ids", "texts", "positions"),
+    ) == {"num_valid_tokens": 0}
+    assert batch.to_training(exclude_fields=("ids", "texts")) == {}
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_token_count_requires_labels(empty: bool) -> None:
+    records = () if empty else (_rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]}),)
+    with pytest.raises(ValueError, match="requires return_labels=True"):
+        SampleBatch(records=records).to_training(return_num_valid_tokens=True)
+
+
+def test_exclusion_rejects_bare_string() -> None:
+    with pytest.raises(TypeError, match="sequence of names, not a string"):
+        SampleBatch(records=()).to_training(exclude_fields="ids")
+
+
+def test_requested_count_cannot_overwrite_extra_field() -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2], "num_valid_tokens": [3, 4]}),
+        )
+    )
+    with pytest.raises(
+        ValueError, match="extra_fields cannot include 'num_valid_tokens'"
+    ):
+        batch.to_training(
+            dtype=None,
+            return_labels=True,
+            return_num_valid_tokens=True,
+            extra_fields=("num_valid_tokens",),
+        )
+    # Without a requested count, this is an ordinary extra field.
+    out = batch.to_training(
+        dtype=None, flatten=True, extra_fields=("num_valid_tokens",)
+    )
+    assert out["num_valid_tokens"] == [3, 4]
+
+
+def test_rename_collision_is_checked_before_exclusion() -> None:
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]}),))
+    with pytest.raises(ValueError, match="target keys collide"):
+        batch.to_training(
+            dtype=None,
+            return_labels=True,
+            return_num_valid_tokens=True,
+            rename_fields={"labels": "num_valid_tokens"},
+            exclude_fields=("num_valid_tokens",),
+        )
+
+
+@pytest.mark.parametrize("array_framework", ["numpy", "torch"])
+def test_flatten_array_payloads(conversion_dtype: Any, array_framework: str) -> None:
+    framework = pytest.importorskip(array_framework)
+    as_array = framework.array if array_framework == "numpy" else framework.tensor
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, as_array([1, 2, 3])),
+            _rec((0, 0, 1), 0, 0, as_array([4, 5, 6])),
+        )
+    )
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_num_valid_tokens=True,
+        flatten=True,
+        exclude_fields=("ids", "texts"),
+    )
+    assert _values(out["input_ids"]) == [1, 2, 4, 5]
+    assert _values(out["labels"]) == [2, 3, 5, 6]
+    assert out["num_valid_tokens"] == 4
+    assert type(out["num_valid_tokens"]) is int
+
+
+def test_flatten_ragged_lists_shifts_within_each_row() -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2]}),
+            _rec((0, 0, 1), 0, 0, {"input_ids": [3, 4, 5]}),
+        )
+    )
+    out = batch.to_training(
+        dtype=None, return_labels=True, flatten=True, return_num_valid_tokens=True
+    )
+    assert out["input_ids"] == [1, 3, 4]
+    assert out["labels"] == [2, 4, 5]
+    assert out["num_valid_tokens"] == 3

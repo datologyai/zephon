@@ -14,6 +14,12 @@ from zephon._internal.utils.length_extraction import (
     detect_length_field as _detect_length_field,
 )
 from zephon._internal.utils.tensor_utils import (
+    count_valid_tokens as _count_valid_tokens,
+)
+from zephon._internal.utils.tensor_utils import (
+    flatten_sequences as _flatten_sequences,
+)
+from zephon._internal.utils.tensor_utils import (
     mask_padding_labels as _mask_padding_labels,
 )
 from zephon._internal.utils.tensor_utils import (
@@ -450,6 +456,9 @@ class SampleBatch:
         extra_fields: Sequence[str] = (),
         ignore_index: int = -100,
         rename_fields: Mapping[str, str] | None = None,
+        flatten: bool = False,
+        exclude_fields: Sequence[str] = (),
+        return_num_valid_tokens: bool = False,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
@@ -483,11 +492,18 @@ class SampleBatch:
                 ``return_labels``, each record's trailing pad labels
                 (``meta.padding_length``) are set to this value.
             rename_fields: Optional ``{emitted_key: new_key}`` mapping applied to
-                the output dict as the final step (e.g. ``{"input_ids":
+                the output dict before exclusion (e.g. ``{"input_ids":
                 "input"}``). Strict: every source key must be present in the
                 output and no target may collide with a key that is not itself
-                renamed. Skipped for empty batches (which emit only
-                ids/texts).
+                renamed. Skipped for empty batches.
+            flatten: Flatten stacked scalar token fields from ``[B, S]`` to
+                ``[B * S]`` after per-sequence shifting and masking. The ids/texts
+                fields remain per-record lists.
+            exclude_fields: Output names to omit after renaming, e.g.
+                ``("ids", "texts")``. Absent names are ignored.
+            return_num_valid_tokens: Include a Python int counting labels unequal
+                to ignore_index after masking (zero for empty batches). Requires
+                return_labels=True.
 
         Returns:
             Dictionary with:
@@ -500,15 +516,30 @@ class SampleBatch:
             - "positions": Stacked document-position tensor, present iff the
               payloads carry one (sliced to match input_ids if return_labels=True)
             - Any extra_fields as stacked tensors (shifted if return_labels=True)
+            - "num_valid_tokens": Number of non-ignored labels (only if
+              return_num_valid_tokens=True)
 
         Raises:
-            TypeError: If payloads are not dicts.
+            TypeError: If payloads are neither dicts nor arrays, or exclude_fields
+                is a string instead of a sequence of field names.
             ValueError: If tokens_field cannot be auto-detected or is missing,
                 if a loss_mask is present in only some payloads or misaligned
                 with the token field, if "loss_mask" is listed in extra_fields
                 with return_labels=True, or if rename_fields references a
-                missing source key or produces a key collision.
+                missing source key or produces a key collision. Also if
+                return_num_valid_tokens is used without return_labels, or an
+                extra field would overwrite the requested num_valid_tokens.
         """
+        if isinstance(exclude_fields, str):
+            raise TypeError("exclude_fields must be a sequence of names, not a string")
+        if return_num_valid_tokens:
+            if not return_labels:
+                raise ValueError("return_num_valid_tokens requires return_labels=True")
+            if "num_valid_tokens" in extra_fields:
+                raise ValueError(
+                    "extra_fields cannot include 'num_valid_tokens' "
+                    + "with return_num_valid_tokens=True"
+                )
         if return_labels and "loss_mask" in extra_fields:
             raise ValueError(
                 "extra_fields cannot include 'loss_mask' with return_labels=True: "
@@ -518,7 +549,10 @@ class SampleBatch:
             )
         items = list(self.records)
         if not items:
-            return {"ids": [], "texts": []}
+            empty: dict[str, Any] = {"ids": [], "texts": []}
+            if return_num_valid_tokens:
+                empty["num_valid_tokens"] = 0
+            return {k: v for k, v in empty.items() if k not in exclude_fields}
 
         # Extract based on payload type
         if isinstance(items[0].payload, dict):
@@ -584,6 +618,21 @@ class SampleBatch:
                 # extra_fields may have already emitted it explicitly.
                 result["loss_mask"] = masks
 
+        num_valid_tokens = None
+        if return_num_valid_tokens:
+            num_valid_tokens = _count_valid_tokens(
+                result["labels"], ignore_index, framework
+            )
+
+        if flatten:
+            result = {
+                k: v if k in ("ids", "texts") else _flatten_sequences(v, framework)
+                for k, v in result.items()
+            }
+
+        if num_valid_tokens is not None:
+            result["num_valid_tokens"] = num_valid_tokens
+
         if rename_fields:
             missing = [k for k in rename_fields if k not in result]
             if missing:
@@ -602,6 +651,8 @@ class SampleBatch:
                 )
             result = {rename_fields.get(k, k): v for k, v in result.items()}
 
+        for field_name in exclude_fields:
+            result.pop(field_name, None)
         return result
 
 

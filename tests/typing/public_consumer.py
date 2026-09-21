@@ -29,7 +29,7 @@ from zephon.observability import (
 )
 from zephon.ops import BaseOp, DomainGroups, OpContext, OpTraits, StageInfo
 from zephon.options import IpcTransport, RuntimeOptions
-from zephon.types import SampleId
+from zephon.types import SampleBatch, SampleId
 from zephon.validation import ValidationReport
 
 
@@ -47,6 +47,18 @@ def build_pipeline() -> Pipeline:
         opts,
     )
     return Pipeline(ws).options(max_workers=4, ipc_transport=transport)
+
+
+def training_batch(batch: SampleBatch) -> None:
+    converted = batch.to_training(
+        return_labels=True,
+        flatten=True,
+        exclude_fields=("ids", "texts"),
+        return_num_valid_tokens=True,
+        rename_fields={"input_ids": "input"},
+    )
+    count: int = converted["num_valid_tokens"]
+    _ = count
 
 
 def inspect_dataset() -> None:

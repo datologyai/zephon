@@ -121,6 +121,20 @@ def slice_last_dim(tensor: Any, slc: slice, framework: str | None) -> Any:
         return [row[slc] for row in tensor]
 
 
+def flatten_sequences(sequences: Any, framework: str | None) -> Any:
+    """Flatten batched scalar sequences in row order, preserving their dtype."""
+    if framework in ("torch", "numpy"):
+        return sequences.reshape(-1)
+    return [value for row in sequences for value in row]
+
+
+def count_valid_tokens(labels: Any, ignore_index: int, framework: str | None) -> int:
+    """Count non-ignored labels in a batch of sequences."""
+    if framework in ("torch", "numpy"):
+        return int((labels != ignore_index).sum())
+    return int(sum(value != ignore_index for row in labels for value in row))
+
+
 def mask_padding_labels(
     labels: Any, pad_lengths: list[int], replacement: int, framework: str | None
 ) -> Any:
