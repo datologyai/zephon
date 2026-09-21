@@ -3,13 +3,44 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from zephon._internal.utils.tensor_utils import (
     count_valid_tokens,
     flatten_sequences,
     mask_padding_labels,
+    stack_sequences,
 )
+
+
+@pytest.mark.parametrize("source", ["list", "numpy", "torch"])
+@pytest.mark.parametrize("dtype_name", ["int32", "float32"])
+def test_stack_sequences_numpy(source: str, dtype_name: str) -> None:
+    np = pytest.importorskip("numpy")
+    rows = [[1, 2, 3], [4, 5, 6]]
+    if source == "numpy":
+        sequences = [np.asarray(row) for row in rows]
+    elif source == "torch":
+        torch = pytest.importorskip("torch")
+        sequences = [torch.tensor(row) for row in rows]
+    else:
+        sequences = rows
+
+    dtype = getattr(np, dtype_name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        out = stack_sequences(sequences, dtype, "numpy")
+    assert out.tolist() == rows
+    assert out.dtype == dtype
+
+
+def test_stack_sequences_numpy_empty() -> None:
+    np = pytest.importorskip("numpy")
+    out = stack_sequences([], np.int32, "numpy")
+    assert out.shape == (0,)
+    assert out.dtype == np.int32
 
 
 def test_mask_padding_labels_list() -> None:
