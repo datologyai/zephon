@@ -1164,7 +1164,9 @@ def test_flat_feeds_to_training() -> None:
     acc.push_many([_rec_tokens(0, [100, 101]), _rec_tokens(1, [110, 111])])
     record = _records(acc.flush())[0]
     assert record.meta.padding_length == 2
-    out = SampleBatch(records=[record]).to_training(return_labels=True)
+    out = SampleBatch(records=[record]).to_training(
+        return_labels=True, return_loss_mask=True, return_cu_seqlens=True
+    )
     np.testing.assert_array_equal(
         out["input_ids"], np.array([[100, 101, 110, 111, 999]])
     )
@@ -1172,6 +1174,10 @@ def test_flat_feeds_to_training() -> None:
         out["labels"], np.array([[101, 110, 111, -100, -100]])
     )
     np.testing.assert_array_equal(out["positions"], np.array([[0, 1, 0, 1, 0]]))
+    np.testing.assert_array_equal(out["loss_mask"], np.array([[1, 1, 1, 0, 0]]))
+    # Preserve the separate pad segment, even though its labels are ignored.
+    np.testing.assert_array_equal(out["cu_seqlens"], np.array([[0, 2, 4, 5]]))
+    np.testing.assert_array_equal(out["max_seqlen"], np.array([2]))
 
 
 def test_flat_loss_mask_feeds_to_training() -> None:

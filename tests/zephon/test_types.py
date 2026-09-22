@@ -446,13 +446,19 @@ class TestToTrainingLossMask:
         out = SampleBatch(records=(r0,)).to_training(return_labels=True, dtype=None)
         assert out["labels"] == [[2, 3, -100]]
 
-    def test_loss_mask_in_extra_fields_with_labels_raises(self) -> None:
+    @pytest.mark.parametrize("return_loss_mask", [False, True])
+    def test_loss_mask_in_extra_fields_with_labels_raises(
+        self, return_loss_mask: bool
+    ) -> None:
         r0 = _rec(
             (0, 0, 0), 0, 0, {"input_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 1, 0]}
         )
         with pytest.raises(ValueError, match="input-aligned, not label-aligned"):
             SampleBatch(records=(r0,)).to_training(
-                return_labels=True, extra_fields=["loss_mask"], dtype=None
+                return_labels=True,
+                return_loss_mask=return_loss_mask,
+                extra_fields=["loss_mask"],
+                dtype=None,
             )
 
     def test_loss_mask_explicit_extra_field_without_labels_not_duplicated(
@@ -531,9 +537,68 @@ class TestToTrainingRenameFields:
         assert out["texts"] == [(0, 0, 0)]
         assert out["ids"] == [""]
 
-    def test_rename_skipped_for_empty_batch(self) -> None:
+    def test_rename_missing_source_ignored_for_empty_batch(self) -> None:
         out = SampleBatch(records=()).to_training(rename_fields={"input_ids": "input"})
         assert out == {"ids": [], "texts": []}
+
+    @pytest.mark.parametrize(
+        ("renames", "expected"),
+        [
+            (
+                {"ids": "sample_ids", "input_ids": "tokens"},
+                {"sample_ids": [], "texts": []},
+            ),
+            (
+                {"ids": "sample_ids", "input_ids": "sample_ids"},
+                {"sample_ids": [], "texts": []},
+            ),
+            ({"input_ids": "texts"}, {"ids": [], "texts": []}),
+            (
+                {"ids": "input_ids", "input_ids": "tokens"},
+                {"input_ids": [], "texts": []},
+            ),
+        ],
+    )
+    def test_empty_batch_renames_only_emitted_fields(
+        self, renames: dict[str, str], expected: dict[str, Any]
+    ) -> None:
+        assert SampleBatch(records=()).to_training(rename_fields=renames) == expected
+
+    def test_empty_batch_rename_swap_is_allowed(self) -> None:
+        out = SampleBatch(records=()).to_training(
+            return_labels=True,
+            return_num_valid_tokens=True,
+            rename_fields={"ids": "num_valid_tokens", "num_valid_tokens": "ids"},
+        )
+        assert out == {"num_valid_tokens": [], "ids": 0, "texts": []}
+
+    @pytest.mark.parametrize(
+        ("empty", "renames"),
+        [
+            (True, {"ids": "texts"}),
+            (True, {"loss_mask": "weights", "cu_seqlens": "weights"}),
+            (False, {"loss_mask": "max_seqlen"}),
+            (False, {"num_valid_tokens": "ids"}),
+        ],
+    )
+    def test_rename_collisions_raise_before_exclusions(
+        self, empty: bool, renames: dict[str, str]
+    ) -> None:
+        records = (
+            ()
+            if empty
+            else (_rec((0, 0, 0), 0, 0, {"input_ids": [1, 2], "positions": [0, 1]}),)
+        )
+        with pytest.raises(ValueError, match="target keys collide"):
+            SampleBatch(records=records).to_training(
+                dtype=None,
+                return_labels=True,
+                return_loss_mask=True,
+                return_cu_seqlens=True,
+                return_num_valid_tokens=True,
+                rename_fields=renames,
+                exclude_fields=tuple(renames.values()),
+            )
 
 
 class TestToTrainingDtype:
@@ -1061,6 +1126,20 @@ def _values(value: Any) -> list[Any]:
     return value if isinstance(value, list) else value.tolist()
 
 
+def _assert_loss_mask_dtype(mask: Any, conversion_dtype: Any) -> None:
+    if conversion_dtype is None:
+        values = (
+            [value for row in mask for value in row]
+            if mask and isinstance(mask[0], list)
+            else mask
+        )
+        assert all(type(value) is float for value in values)
+    elif type(mask).__module__.startswith("torch"):
+        assert mask.dtype == pytest.importorskip("torch").float32
+    else:
+        assert mask.dtype == pytest.importorskip("numpy").float32
+
+
 @pytest.mark.parametrize("flatten", [False, True])
 def test_training_conversion_masks_before_counting_and_flattening(
     conversion_dtype: Any, flatten: bool
@@ -1096,6 +1175,7 @@ def test_training_conversion_masks_before_counting_and_flattening(
         flatten=flatten,
         exclude_fields=("ids", "texts"),
         return_num_valid_tokens=True,
+        return_loss_mask=True,
     )
     expected = (
         {
@@ -1112,12 +1192,18 @@ def test_training_conversion_masks_before_counting_and_flattening(
             "attention_mask": [[1, 2, 3, 4], [6, 7, 8, 9]],
         }
     )
+    expected["loss_mask"] = (
+        [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+        if flatten
+        else [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 1.0, 1.0]]
+    )
+    _assert_loss_mask_dtype(out["loss_mask"], conversion_dtype)
     assert set(out) == {*expected, "num_valid_tokens"}
     assert out["num_valid_tokens"] == 4
     assert type(out["num_valid_tokens"]) is int
     for name, values in expected.items():
         assert _values(out[name]) == values
-        if conversion_dtype is not None:
+        if conversion_dtype is not None and name != "loss_mask":
             assert out[name].dtype == conversion_dtype
     assert payloads == original
 
@@ -1169,12 +1255,16 @@ def test_zero_valid_tokens(
         dtype=conversion_dtype,
         return_labels=True,
         return_num_valid_tokens=True,
+        return_loss_mask=True,
         flatten=flatten,
     )
     assert out["num_valid_tokens"] == 0
     assert type(out["num_valid_tokens"]) is int
     expected = tokens[1:] if flatten else [tokens[1:]]
     assert _values(out["labels"]) == expected
+    expected_mask = [0.0] * len(tokens[1:])
+    assert _values(out["loss_mask"]) == (expected_mask if flatten else [expected_mask])
+    _assert_loss_mask_dtype(out["loss_mask"], conversion_dtype)
 
 
 def test_empty_batch_preserves_defaults_and_applies_exclusions() -> None:
@@ -1250,11 +1340,14 @@ def test_flatten_array_payloads(conversion_dtype: Any, array_framework: str) -> 
         dtype=conversion_dtype,
         return_labels=True,
         return_num_valid_tokens=True,
+        return_loss_mask=True,
         flatten=True,
         exclude_fields=("ids", "texts"),
     )
     assert _values(out["input_ids"]) == [1, 2, 4, 5]
     assert _values(out["labels"]) == [2, 3, 5, 6]
+    assert _values(out["loss_mask"]) == [1.0, 1.0, 1.0, 1.0]
+    _assert_loss_mask_dtype(out["loss_mask"], conversion_dtype)
     assert out["num_valid_tokens"] == 4
     assert type(out["num_valid_tokens"]) is int
 
@@ -1267,8 +1360,343 @@ def test_flatten_ragged_lists_shifts_within_each_row() -> None:
         )
     )
     out = batch.to_training(
-        dtype=None, return_labels=True, flatten=True, return_num_valid_tokens=True
+        dtype=None,
+        return_labels=True,
+        flatten=True,
+        return_num_valid_tokens=True,
+        return_loss_mask=True,
     )
     assert out["input_ids"] == [1, 3, 4]
     assert out["labels"] == [2, 4, 5]
     assert out["num_valid_tokens"] == 3
+    assert out["loss_mask"] == [1.0, 1.0, 1.0]
+
+
+def test_return_loss_mask_without_payload_mask(conversion_dtype: Any) -> None:
+    # Token ID 0 is real content as well as the pad ID; only pad positions vanish.
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [10, 0, 12, 0]}, padding_length=1),
+            _rec((0, 0, 1), 0, 0, {"input_ids": [20, 21, 22, 23]}),
+        )
+    )
+    out = batch.to_training(
+        dtype=conversion_dtype, return_labels=True, return_loss_mask=True
+    )
+    assert _values(out["labels"]) == [[0, 12, -100], [21, 22, 23]]
+    assert _values(out["loss_mask"]) == [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]]
+    _assert_loss_mask_dtype(out["loss_mask"], conversion_dtype)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_return_loss_mask_requires_labels(empty: bool) -> None:
+    records = (
+        ()
+        if empty
+        else (_rec((0, 0, 0), 0, 0, {"input_ids": [1, 2], "loss_mask": [0, 1]}),)
+    )
+    with pytest.raises(
+        ValueError, match="return_loss_mask requires return_labels=True"
+    ):
+        SampleBatch(records=records).to_training(return_loss_mask=True)
+
+
+def test_return_loss_mask_empty_batch() -> None:
+    batch = SampleBatch(records=())
+    out = batch.to_training(
+        dtype=None,
+        return_labels=True,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        flatten=True,
+        rename_fields={"loss_mask": "weights"},
+        exclude_fields=("ids", "texts"),
+    )
+    assert out == {"num_valid_tokens": 0, "weights": []}
+    assert (
+        batch.to_training(
+            return_labels=True,
+            return_loss_mask=True,
+            rename_fields={"loss_mask": "weights"},
+            exclude_fields=("ids", "texts", "weights"),
+        )
+        == {}
+    )
+
+
+def test_return_loss_mask_rename_and_exclude() -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 0]}),
+        )
+    )
+    out = batch.to_training(
+        dtype=None,
+        return_labels=True,
+        return_loss_mask=True,
+        flatten=True,
+        rename_fields={"loss_mask": "weights"},
+        exclude_fields=("ids", "texts", "input_ids", "labels", "loss_mask"),
+    )
+    assert set(out) == {"weights"}
+    assert _values(out["weights"]) == [1.0, 0.0]
+    assert (
+        batch.to_training(
+            dtype=None,
+            return_labels=True,
+            return_loss_mask=True,
+            rename_fields={"loss_mask": "weights"},
+            exclude_fields=("ids", "texts", "input_ids", "labels", "weights"),
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="target keys collide"):
+        batch.to_training(
+            dtype=None,
+            return_labels=True,
+            return_loss_mask=True,
+            rename_fields={"labels": "loss_mask"},
+        )
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize("return_labels", [False, True])
+def test_return_cu_seqlens_alignment_and_batch_offsets(
+    conversion_dtype: Any, flatten: bool, return_labels: bool
+) -> None:
+    payloads = [
+        {"tokens": [10, 11, 12, 13, 14, 15, 16], "positions": [0, 1, 0, 1, 2, 0, 0]},
+        {"tokens": [20, 21, 22, 23, 24, 25, 26], "positions": [0, 1, 2, 3, 0, 1, 2]},
+    ]
+    original = copy.deepcopy(payloads)
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, payload) for i, payload in enumerate(payloads)
+        )
+    )
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=return_labels,
+        return_loss_mask=return_labels,
+        return_num_valid_tokens=return_labels,
+        return_cu_seqlens=True,
+        flatten=flatten,
+    )
+    if flatten:
+        expected = [0, 2, 5, 6, 10, 12] if return_labels else [0, 2, 5, 6, 7, 11, 14]
+        assert _values(out["cu_seqlens"]) == expected
+        assert out["max_seqlen"] == 4
+        assert type(out["max_seqlen"]) is int
+    else:
+        expected = (
+            [[0, 2, 5, 6], [0, 4, 6, 6]]
+            if return_labels
+            else [[0, 2, 5, 6, 7], [0, 4, 7, 7, 7]]
+        )
+        assert _values(out["cu_seqlens"]) == expected
+        assert _values(out["max_seqlen"]) == [3, 4]
+    if conversion_dtype is not None:
+        framework = (
+            "torch" if type(out["cu_seqlens"]).__module__ == "torch" else "numpy"
+        )
+        assert out["cu_seqlens"].dtype == pytest.importorskip(framework).int32
+        if not flatten:
+            assert out["max_seqlen"].dtype == pytest.importorskip(framework).int32
+            assert out["max_seqlen"].shape == (2,)
+        if framework == "torch":
+            assert out["cu_seqlens"].device == out["input_ids"].device
+
+    # Requesting attention metadata changes neither token data nor loss policy.
+    baseline = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=return_labels,
+        return_loss_mask=return_labels,
+        return_num_valid_tokens=return_labels,
+        flatten=flatten,
+    )
+    assert set(out) == {*baseline, "cu_seqlens", "max_seqlen"}
+    for key, value in baseline.items():
+        if key == "num_valid_tokens":
+            assert out[key] == value
+        else:
+            assert _values(out[key]) == _values(value)
+    assert payloads == original
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_return_cu_seqlens_empty_input_after_label_shift(
+    conversion_dtype: Any, flatten: bool
+) -> None:
+    batch = SampleBatch(
+        records=(
+            _rec(
+                (0, 0, 0),
+                0,
+                0,
+                {"input_ids": [1], "positions": [0]},
+            ),
+        )
+    )
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_cu_seqlens=True,
+        flatten=flatten,
+    )
+    assert _values(out["cu_seqlens"]) == ([0] if flatten else [[0]])
+    if flatten:
+        assert out["max_seqlen"] == 0
+        assert type(out["max_seqlen"]) is int
+    else:
+        assert _values(out["max_seqlen"]) == [0]
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_return_cu_seqlens_empty_batch(flatten: bool) -> None:
+    out = SampleBatch(records=()).to_training(
+        dtype=None,
+        return_cu_seqlens=True,
+        flatten=flatten,
+        exclude_fields=("ids", "texts"),
+    )
+    assert out == {
+        "cu_seqlens": [0] if flatten else [],
+        "max_seqlen": 0 if flatten else [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("flatten", "exclude_metadata"), [(False, False), (True, True)]
+)
+def test_empty_training_metadata_rename_and_exclude(
+    flatten: bool, exclude_metadata: bool
+) -> None:
+    expected = {
+        "weights": [],
+        "count": 0,
+        "cu": [0] if flatten else [],
+        "maximum": 0 if flatten else [],
+    }
+    excluded = ("sample_ids", "texts")
+    if exclude_metadata:
+        excluded += tuple(expected)
+    out = SampleBatch(records=()).to_training(
+        dtype=None,
+        return_labels=True,
+        return_loss_mask=True,
+        return_cu_seqlens=True,
+        return_num_valid_tokens=True,
+        flatten=flatten,
+        rename_fields={
+            "ids": "sample_ids",
+            "input_ids": "tokens",
+            "positions": "position_ids",
+            "loss_mask": "weights",
+            "num_valid_tokens": "count",
+            "cu_seqlens": "cu",
+            "max_seqlen": "maximum",
+        },
+        exclude_fields=excluded,
+    )
+    assert out == ({} if exclude_metadata else expected)
+
+
+@pytest.mark.parametrize(
+    ("conversion_dtype", "positions", "message"),
+    [
+        ("list", [1, 2, 3], "start at zero"),
+        ("list", [0, 1], "sequence length"),
+        ("list", 0, "sequence length"),
+        ("list", [[0], [1], [2]], "2-D"),
+        ("numpy", [[0], [1], [2]], "shape"),
+    ],
+    indirect=["conversion_dtype"],
+)
+def test_return_cu_seqlens_rejects_invalid_positions(
+    conversion_dtype: Any, positions: Any, message: str
+) -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "positions": positions}),
+        )
+    )
+    with pytest.raises(ValueError, match=message):
+        batch.to_training(
+            dtype=conversion_dtype, return_labels=True, return_cu_seqlens=True
+        )
+
+
+@pytest.mark.parametrize("missing_index", [0, 1])
+def test_return_cu_seqlens_requires_positions_in_every_row(missing_index: int) -> None:
+    payloads = [{"input_ids": [1, 2], "positions": [0, 1]} for _ in range(2)]
+    del payloads[missing_index]["positions"]
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, payload) for i, payload in enumerate(payloads)
+        )
+    )
+    with pytest.raises(ValueError, match="positions"):
+        batch.to_training(dtype=None, return_cu_seqlens=True)
+
+
+@pytest.mark.parametrize("field", ["cu_seqlens", "max_seqlen"])
+def test_return_cu_seqlens_rejects_extra_field_collision(field: str) -> None:
+    with pytest.raises(ValueError, match="extra_fields cannot include"):
+        SampleBatch(records=()).to_training(
+            return_cu_seqlens=True, extra_fields=(field,)
+        )
+
+
+def test_return_cu_seqlens_rename_and_exclude() -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 1, 0]}),
+        )
+    )
+    out = batch.to_training(
+        dtype=None,
+        return_cu_seqlens=True,
+        flatten=True,
+        rename_fields={"cu_seqlens": "cu_seq_q", "max_seqlen": "max_q"},
+        exclude_fields=("ids", "texts", "input_ids", "positions", "cu_seqlens"),
+    )
+    assert set(out) == {"cu_seq_q", "max_q"}
+    assert _values(out["cu_seq_q"]) == [0, 2, 3]
+    assert out["max_q"] == 2
+    assert (
+        batch.to_training(
+            dtype=None,
+            return_cu_seqlens=True,
+            rename_fields={"cu_seqlens": "cu"},
+            exclude_fields=(
+                "ids",
+                "texts",
+                "input_ids",
+                "positions",
+                "cu",
+                "max_seqlen",
+            ),
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="target keys collide"):
+        batch.to_training(
+            dtype=None,
+            return_cu_seqlens=True,
+            rename_fields={"positions": "cu_seqlens"},
+        )
+
+
+def test_return_cu_seqlens_ragged_lists_and_empty_rows() -> None:
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, {"input_ids": [1] * len(row), "positions": row})
+            for i, row in enumerate([[], [0, 1, 0], [], [0, 1]])
+        )
+    )
+    out = batch.to_training(dtype=None, return_cu_seqlens=True, flatten=True)
+    assert out["cu_seqlens"] == [0, 2, 3, 5]
+    assert out["max_seqlen"] == 2
+    out = batch.to_training(dtype=None, return_cu_seqlens=True)
+    assert out["cu_seqlens"] == [[0, 0, 0], [0, 2, 3], [0, 0, 0], [0, 2, 2]]
+    assert out["max_seqlen"] == [0, 2, 0, 2]

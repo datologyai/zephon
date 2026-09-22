@@ -55,6 +55,8 @@ def training_batch(batch: SampleBatch) -> None:
         flatten=True,
         exclude_fields=("ids", "texts"),
         return_num_valid_tokens=True,
+        return_loss_mask=True,
+        return_cu_seqlens=True,
         rename_fields={"input_ids": "input"},
     )
     count: int = converted["num_valid_tokens"]

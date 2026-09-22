@@ -3,6 +3,7 @@
 
 """Canonical data model shared across the core data-loading pipeline."""
 
+from collections import Counter
 from collections.abc import Sized
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, TypeAlias, cast
@@ -20,10 +21,16 @@ from zephon._internal.utils.tensor_utils import (
     flatten_sequences as _flatten_sequences,
 )
 from zephon._internal.utils.tensor_utils import (
+    labels_to_loss_mask as _labels_to_loss_mask,
+)
+from zephon._internal.utils.tensor_utils import (
     mask_padding_labels as _mask_padding_labels,
 )
 from zephon._internal.utils.tensor_utils import (
     mask_unsupervised_labels as _mask_unsupervised_labels,
+)
+from zephon._internal.utils.tensor_utils import (
+    positions_to_cu_seqlens as _positions_to_cu_seqlens,
 )
 from zephon._internal.utils.tensor_utils import (
     resolve_dtype as _resolve_dtype,
@@ -300,6 +307,34 @@ class SampleRecord:
     payload: "SamplePayload"
 
 
+def _rename_and_exclude_fields(
+    result: dict[str, Any],
+    rename_fields: Mapping[str, str] | None,
+    exclude_fields: Sequence[str],
+    *,
+    allow_missing_sources: bool = False,
+) -> dict[str, Any]:
+    """Rename emitted fields, rejecting collisions before applying exclusions."""
+    if rename_fields:
+        missing = [key for key in rename_fields if key not in result]
+        if missing and not allow_missing_sources:
+            raise ValueError(
+                f"rename_fields source keys not in output: {missing}; "
+                + f"emitted keys: {list(result)}"
+            )
+        # Count final names of emitted fields, so swaps are allowed and missing
+        # sources cannot introduce collisions in an empty batch.
+        target_counts = Counter(rename_fields.get(key, key) for key in result)
+        collisions = sorted(key for key, count in target_counts.items() if count > 1)
+        if collisions:
+            raise ValueError(f"rename_fields target keys collide: {collisions}")
+        result = {rename_fields.get(key, key): value for key, value in result.items()}
+
+    for field_name in exclude_fields:
+        result.pop(field_name, None)
+    return result
+
+
 @dataclass(slots=True)
 class SampleBatch:
     """A batch of SampleRecord."""
@@ -459,15 +494,18 @@ class SampleBatch:
         flatten: bool = False,
         exclude_fields: Sequence[str] = (),
         return_num_valid_tokens: bool = False,
+        return_loss_mask: bool = False,
+        return_cu_seqlens: bool = False,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
         A ``"loss_mask"`` payload field (a per-token supervised-vs-not mask,
         e.g. from chat-template tokenization) is recognized automatically, like
-        ``"positions"``. With ``return_labels=True`` it is consumed, not
-        emitted: labels whose mask entry (shifted into label alignment,
-        ``mask[:, 1:]``) is 0 are set to ``ignore_index``, and the supervision
-        mask stays derivable as ``labels != ignore_index``. Listing it in
+        ``"positions"``. With ``return_labels=True`` it is consumed: labels
+        whose mask entry (shifted into label alignment, ``mask[:, 1:]``) is 0
+        are set to ``ignore_index``. Set ``return_loss_mask=True`` to emit the
+        final label-aligned mask, derived as ``labels != ignore_index`` after
+        both supervision and padding masking. Listing ``"loss_mask"`` in
         ``extra_fields`` together with ``return_labels`` is an error: extra
         fields are sliced input-aligned (``[:, :-1]``), the wrong alignment for
         a label mask. Without ``return_labels`` it is surfaced stacked and
@@ -483,6 +521,10 @@ class SampleBatch:
             dtype: Tensor dtype for stacking. Use "auto" to detect (prefers
                 torch.long if available, else np.int64, else returns lists).
                 Use None to explicitly return lists instead of tensors.
+                A requested loss mask always uses float32 (Python floats for
+                lists), independently of this dtype. Requested cumulative
+                sequence lengths and per-row maxima use int32 (Python ints for
+                lists). With flatten=True, the maximum is always a Python int.
             extra_fields: Additional fields to include and stack (e.g.,
                 ["attention_mask"]). When return_labels=True they are sliced like
                 input_ids (drop the last token) to stay aligned with it. A
@@ -493,9 +535,10 @@ class SampleBatch:
                 (``meta.padding_length``) are set to this value.
             rename_fields: Optional ``{emitted_key: new_key}`` mapping applied to
                 the output dict before exclusion (e.g. ``{"input_ids":
-                "input"}``). Strict: every source key must be present in the
-                output and no target may collide with a key that is not itself
-                renamed. Skipped for empty batches.
+                "input"}``). Source keys must be present in the output, except
+                for empty batches, where missing sources are ignored. All
+                emitted fields are renamed, including for empty batches, and
+                their final names must be unique. Swaps are allowed.
             flatten: Flatten stacked scalar token fields from ``[B, S]`` to
                 ``[B * S]`` after per-sequence shifting and masking. The ids/texts
                 fields remain per-record lists.
@@ -504,6 +547,25 @@ class SampleBatch:
             return_num_valid_tokens: Include a Python int counting labels unequal
                 to ignore_index after masking (zero for empty batches). Requires
                 return_labels=True.
+            return_loss_mask: Include a label-aligned "loss_mask" with 1.0 for
+                non-ignored labels and 0.0 otherwise. Requires return_labels=True.
+                Uses float32 for tensors/arrays, Python floats for lists, and
+                an empty list for empty batches. Follows flatten, rename_fields,
+                and exclude_fields like other sequence fields.
+            return_cu_seqlens: Include "cu_seqlens" and "max_seqlen" derived
+                from zeros in input-aligned "positions". Requires a positions
+                sequence matching the tokens in every payload, starting at zero
+                in every nonempty input row. With flatten=False, boundaries
+                have shape [B, K], where K is the largest boundary count in the
+                batch, padded with each row's input length. Maxima have shape [B].
+                With flatten=True, boundaries are one compact cumulative sequence
+                across the batch, ending at the total input length, and the
+                maximum is a Python int. Boundaries and per-row maxima use int32
+                for tensors/arrays, Python ints for lists. Empty batches return
+                []/[] for boundaries/maxima, or [0]/0 when flattened. Renaming
+                and exclusion apply normally. Padding segments are preserved;
+                this metadata does not itself enable attention masking or
+                change labels. Works with or without return_labels.
 
         Returns:
             Dictionary with:
@@ -518,6 +580,11 @@ class SampleBatch:
             - Any extra_fields as stacked tensors (shifted if return_labels=True)
             - "num_valid_tokens": Number of non-ignored labels (only if
               return_num_valid_tokens=True)
+            - "loss_mask": Float mask of non-ignored labels if
+              return_loss_mask=True; otherwise the raw payload mask if present
+              and return_labels=False
+            - "cu_seqlens", "max_seqlen": Cumulative segment boundaries and
+              maximum segment lengths (only if return_cu_seqlens=True)
 
         Raises:
             TypeError: If payloads are neither dicts nor arrays, or exclude_fields
@@ -526,12 +593,24 @@ class SampleBatch:
                 if a loss_mask is present in only some payloads or misaligned
                 with the token field, if "loss_mask" is listed in extra_fields
                 with return_labels=True, or if rename_fields references a
-                missing source key or produces a key collision. Also if
-                return_num_valid_tokens is used without return_labels, or an
-                extra field would overwrite the requested num_valid_tokens.
+                missing source key in a nonempty batch or produces a key collision.
+                Also if return_num_valid_tokens or return_loss_mask is used without
+                return_labels, or an extra field would overwrite the requested
+                num_valid_tokens, cu_seqlens, or max_seqlen. Also if requested
+                boundaries cannot be derived from aligned, zero-start positions
+                or represented as int32.
         """
         if isinstance(exclude_fields, str):
             raise TypeError("exclude_fields must be a sequence of names, not a string")
+        if return_loss_mask and not return_labels:
+            raise ValueError("return_loss_mask requires return_labels=True")
+        if return_cu_seqlens and {"cu_seqlens", "max_seqlen"}.intersection(
+            extra_fields
+        ):
+            raise ValueError(
+                "extra_fields cannot include 'cu_seqlens' or 'max_seqlen' "
+                + "with return_cu_seqlens=True"
+            )
         if return_num_valid_tokens:
             if not return_labels:
                 raise ValueError("return_num_valid_tokens requires return_labels=True")
@@ -543,8 +622,8 @@ class SampleBatch:
         if return_labels and "loss_mask" in extra_fields:
             raise ValueError(
                 "extra_fields cannot include 'loss_mask' with return_labels=True: "
-                + "extra fields are input-aligned, not label-aligned. Derive "
-                + "the supervision mask as labels != ignore_index, or use "
+                + "extra fields are input-aligned, not label-aligned. Use "
+                + "return_loss_mask=True for the label-aligned mask, or "
                 + "return_labels=False for the raw mask."
             )
         items = list(self.records)
@@ -552,7 +631,14 @@ class SampleBatch:
             empty: dict[str, Any] = {"ids": [], "texts": []}
             if return_num_valid_tokens:
                 empty["num_valid_tokens"] = 0
-            return {k: v for k, v in empty.items() if k not in exclude_fields}
+            if return_loss_mask:
+                empty["loss_mask"] = []
+            if return_cu_seqlens:
+                empty["cu_seqlens"] = [0] if flatten else []
+                empty["max_seqlen"] = 0 if flatten else []
+            return _rename_and_exclude_fields(
+                empty, rename_fields, exclude_fields, allow_missing_sources=True
+            )
 
         # Extract based on payload type
         if isinstance(items[0].payload, dict):
@@ -563,6 +649,24 @@ class SampleBatch:
             token_lists, texts, extra_data, loss_mask_lists = self._extract_from_arrays(
                 items
             )
+
+        if return_cu_seqlens:
+            if "positions" not in extra_data:
+                raise ValueError(
+                    "return_cu_seqlens requires a 'positions' field in every payload; "
+                    + "use pack_flat(emit_positions=True)"
+                )
+            for i, (tokens_row, positions_row) in enumerate(
+                zip(token_lists, extra_data["positions"])
+            ):
+                if (
+                    not isinstance(positions_row, Sized)
+                    or not isinstance(tokens_row, Sized)
+                    or len(positions_row) != len(tokens_row)
+                ):
+                    raise ValueError(
+                        f"'positions' must match the token sequence length at index {i}"
+                    )
 
         # Resolve dtype
         resolved_dtype, framework = _resolve_dtype(dtype)
@@ -618,11 +722,28 @@ class SampleBatch:
                 # extra_fields may have already emitted it explicitly.
                 result["loss_mask"] = masks
 
+        if return_loss_mask:
+            result["loss_mask"] = _labels_to_loss_mask(
+                result["labels"], ignore_index, framework
+            )
+
         num_valid_tokens = None
         if return_num_valid_tokens:
             num_valid_tokens = _count_valid_tokens(
                 result["labels"], ignore_index, framework
             )
+
+        sequence_metadata: dict[str, Any] = {}
+        if return_cu_seqlens:
+            if (
+                framework is not None
+                and result["positions"].shape != result["input_ids"].shape
+            ):
+                raise ValueError("'positions' must match the input_ids shape")
+            cu_seqlens, max_seqlen = _positions_to_cu_seqlens(
+                result["positions"], framework, flatten=flatten
+            )
+            sequence_metadata = {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen}
 
         if flatten:
             result = {
@@ -632,28 +753,9 @@ class SampleBatch:
 
         if num_valid_tokens is not None:
             result["num_valid_tokens"] = num_valid_tokens
+        result.update(sequence_metadata)
 
-        if rename_fields:
-            missing = [k for k in rename_fields if k not in result]
-            if missing:
-                raise ValueError(
-                    f"rename_fields source keys not in output: {missing}; "
-                    + f"emitted keys: {list(result)}"
-                )
-            # A target may take over a renamed-away key (swaps are fine); only
-            # unrenamed keys and duplicate targets collide.
-            targets = list(rename_fields.values())
-            unrenamed = set(result) - set(rename_fields)
-            collisions = [t for t in targets if t in unrenamed or targets.count(t) > 1]
-            if collisions:
-                raise ValueError(
-                    f"rename_fields target keys collide: {sorted(set(collisions))}"
-                )
-            result = {rename_fields.get(k, k): v for k, v in result.items()}
-
-        for field_name in exclude_fields:
-            result.pop(field_name, None)
-        return result
+        return _rename_and_exclude_fields(result, rename_fields, exclude_fields)
 
 
 # Payload typing --------------------------------------------------------------

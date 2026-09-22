@@ -138,6 +138,117 @@ def count_valid_tokens(labels: Any, ignore_index: int, framework: str | None) ->
     return int(sum(value != ignore_index for row in labels for value in row))
 
 
+def labels_to_loss_mask(labels: Any, ignore_index: int, framework: str | None) -> Any:
+    """Return a float32 mask of non-ignored labels (Python floats for lists)."""
+    if framework == "torch":
+        return (labels != ignore_index).float()
+    if framework == "numpy":
+        import numpy as np
+
+        return (labels != ignore_index).astype(np.float32)
+    return [[float(value != ignore_index) for value in row] for row in labels]
+
+
+def positions_to_cu_seqlens(
+    positions: Any, framework: str | None, *, flatten: bool
+) -> tuple[Any, Any]:
+    """Derive int32 cumulative segment lengths and maxima from position resets.
+
+    Batched boundaries are padded with each row's length to the largest boundary
+    count in the batch; maxima have shape ``[B]``. Flattened boundaries are compact
+    offsets into the whole batch, with a Python int maximum. Lists use Python ints.
+    """
+    if framework in ("torch", "numpy"):
+        if positions.ndim != 2:
+            raise ValueError("return_cu_seqlens requires 2-D positions")
+        batch_size, width = positions.shape
+        if width and bool((positions[:, 0] != 0).any()):
+            raise ValueError("positions must start at zero in every nonempty row")
+        extent = positions.size if framework == "numpy" else positions.numel()
+        if (extent if flatten else width) > 2**31 - 1:
+            raise ValueError("cumulative sequence lengths exceed the int32 range")
+
+        if framework == "torch":
+            import torch
+
+            if flatten:
+                starts = (positions.reshape(-1) == 0).nonzero(as_tuple=True)[0]
+                cu = torch.cat(
+                    [
+                        starts.to(torch.int32),
+                        torch.tensor(
+                            [extent], dtype=torch.int32, device=positions.device
+                        ),
+                    ]
+                )
+                maximum = int(cu.diff().max().item()) if extent else 0
+                return cu, maximum
+
+            starts = positions == 0
+            rows, columns = starts.nonzero(as_tuple=True)
+            counts = starts.sum(dim=1)
+            boundary_count = int(counts.max().item()) + 1 if batch_size else 1
+            cu = torch.full(
+                (batch_size, boundary_count),
+                width,
+                dtype=torch.int32,
+                device=positions.device,
+            )
+            offsets = counts.cumsum(dim=0) - counts
+            # nonzero groups starts by row; subtract preceding rows' counts
+            # to get each start's slot in its padded boundary row.
+            slots = torch.arange(rows.numel(), device=positions.device) - offsets[rows]
+            cu[rows, slots] = columns.to(torch.int32)
+            maxima = (
+                cu.diff(dim=1).amax(dim=1)
+                if boundary_count > 1
+                else cu.new_zeros(batch_size)
+            )
+            return cu, maxima
+
+        import numpy as np
+
+        if flatten:
+            starts = np.flatnonzero(positions.reshape(-1) == 0)
+            cu = np.append(starts, extent).astype(np.int32)
+            return cu, int(np.diff(cu).max(initial=0))
+
+        starts = positions == 0
+        rows, columns = np.nonzero(starts)
+        counts = starts.sum(axis=1)
+        boundary_count = int(counts.max(initial=0)) + 1
+        cu = np.full((batch_size, boundary_count), width, dtype=np.int32)
+        offsets = counts.cumsum() - counts
+        cu[rows, np.arange(len(rows)) - offsets[rows]] = columns
+        return cu, np.diff(cu, axis=1).max(axis=1, initial=0)
+
+    boundaries, maxima = [], []
+    flat_starts: list[int] = []
+    offset = 0
+    for row in positions:
+        if any(
+            isinstance(value, (list, tuple, dict, str, bytes))
+            or getattr(value, "ndim", 0) != 0
+            for value in row
+        ):
+            raise ValueError("return_cu_seqlens requires 2-D positions")
+        if row and row[0] != 0:
+            raise ValueError("positions must start at zero in every nonempty row")
+        starts = [i for i, value in enumerate(row) if value == 0]
+        cu = starts + [len(row)]
+        maxima.append(max((b - a for a, b in zip(cu, cu[1:])), default=0))
+        if flatten:
+            flat_starts.extend(offset + start for start in starts)
+            offset += len(row)
+        else:
+            boundaries.append(cu)
+    if flatten:
+        return flat_starts + [offset], max(maxima, default=0)
+    boundary_count = max(map(len, boundaries), default=0)
+    boundaries = [cu + [cu[-1]] * (boundary_count - len(cu)) for cu in boundaries]
+    return boundaries, maxima
+
+
 def mask_padding_labels(
     labels: Any, pad_lengths: list[int], replacement: int, framework: str | None
 ) -> Any:

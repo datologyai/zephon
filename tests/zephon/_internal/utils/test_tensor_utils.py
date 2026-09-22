@@ -10,7 +10,9 @@ import pytest
 from zephon._internal.utils.tensor_utils import (
     count_valid_tokens,
     flatten_sequences,
+    labels_to_loss_mask,
     mask_padding_labels,
+    positions_to_cu_seqlens,
     stack_sequences,
 )
 
@@ -103,3 +105,124 @@ def test_count_valid_tokens_uses_ignore_index(framework: str | None) -> None:
     assert count == 3
     assert type(count) is int
     assert count_valid_tokens(labels[:0], -7, framework) == 0
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+def test_labels_to_loss_mask_preserves_labels_and_uses_float32(
+    framework: str | None,
+) -> None:
+    rows = [[2, -7, 3], [-7, -7, 6]]
+    labels = rows
+    if framework == "numpy":
+        np = pytest.importorskip("numpy")
+        labels = np.array([[0] + row for row in rows], dtype=np.int64)[:, 1:]
+    elif framework == "torch":
+        torch = pytest.importorskip("torch")
+        labels = torch.tensor([[0] + row for row in rows], dtype=torch.long)[:, 1:]
+
+    mask = labels_to_loss_mask(labels, -7, framework)
+    expected = [[1.0, 0.0, 1.0], [0.0, 0.0, 1.0]]
+    if framework is None:
+        assert mask == expected
+        assert all(type(value) is float for row in mask for value in row)
+    else:
+        assert mask.tolist() == expected
+        assert mask.dtype == pytest.importorskip(framework).float32
+        if framework == "torch":
+            assert mask.device == labels.device
+    mask[0][0] = 0.0
+    assert (labels if framework is None else labels.tolist()) == rows
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize(
+    ("positions", "boundaries", "maximum"),
+    [
+        ([], [0], 0),
+        ([0], [0, 1], 1),
+        ([0, 0, 0], [0, 1, 2, 3], 1),
+        ([0, 1, 2], [0, 3], 3),
+        ([0, 1, 0, 1, 2, 0], [0, 2, 5, 6], 3),
+    ],
+)
+def test_positions_to_cu_seqlens_segment_boundaries(
+    framework: str | None,
+    flatten: bool,
+    positions: list[int],
+    boundaries: list[int],
+    maximum: int,
+) -> None:
+    rows = [positions]
+    if framework == "numpy":
+        rows = pytest.importorskip("numpy").array(rows)
+    elif framework == "torch":
+        rows = pytest.importorskip("torch").tensor(rows)
+
+    cu, maxima = positions_to_cu_seqlens(rows, framework, flatten=flatten)
+    expected = boundaries if flatten else [boundaries]
+    assert (cu if framework is None else cu.tolist()) == expected
+    assert (maxima if flatten or framework is None else maxima.tolist()) == (
+        maximum if flatten else [maximum]
+    )
+    if flatten:
+        assert type(maxima) is int
+    if framework is not None:
+        module = pytest.importorskip(framework)
+        assert cu.dtype == module.int32
+        if not flatten:
+            assert maxima.dtype == module.int32
+            assert maxima.shape == (1,)
+        if framework == "torch":
+            assert cu.device == rows.device
+            if not flatten:
+                assert maxima.device == rows.device
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+def test_positions_to_cu_seqlens_padding_depends_on_segment_count(
+    framework: str | None,
+) -> None:
+    rows = [list(range(8192)), list(range(4096)) * 2]
+    if framework == "numpy":
+        rows = pytest.importorskip("numpy").array(rows)
+    elif framework == "torch":
+        rows = pytest.importorskip("torch").tensor(rows)
+
+    cu, maxima = positions_to_cu_seqlens(rows, framework, flatten=False)
+    assert (cu if framework is None else cu.tolist()) == [
+        [0, 8192, 8192],
+        [0, 4096, 8192],
+    ]
+    assert (maxima if framework is None else maxima.tolist()) == [8192, 4096]
+
+
+@pytest.mark.parametrize("framework", ["numpy", "torch"])
+@pytest.mark.parametrize("flatten", [False, True])
+def test_positions_to_cu_seqlens_zero_rows(framework: str, flatten: bool) -> None:
+    module = pytest.importorskip(framework)
+    rows = module.empty((0, 7), dtype=module.int64)
+    cu, maxima = positions_to_cu_seqlens(rows, framework, flatten=flatten)
+    assert cu.tolist() == ([0] if flatten else [])
+    if flatten:
+        assert maxima == 0
+        assert type(maxima) is int
+    else:
+        assert cu.shape == (0, 1)
+        assert maxima.shape == (0,)
+        assert maxima.dtype == module.int32
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+@pytest.mark.parametrize("positions", [[[1, 2]], [[[0], [1]]]])
+def test_positions_to_cu_seqlens_rejects_malformed_positions(
+    framework: str | None,
+    positions: list,
+) -> None:
+    rows = positions
+    if framework == "numpy":
+        rows = pytest.importorskip("numpy").array(rows)
+    elif framework == "torch":
+        rows = pytest.importorskip("torch").tensor(rows)
+    with pytest.raises(ValueError, match="start at zero|2-D"):
+        positions_to_cu_seqlens(rows, framework, flatten=False)
