@@ -10,6 +10,8 @@ accordingly, with a final matrix section asserting every algorithm × output
 combination and the ``flat == flatten(envelope)`` relationship.
 """
 
+import random
+from collections import Counter
 from typing import Any, get_args
 
 import pytest
@@ -1043,6 +1045,160 @@ def _flat(
         drop_oversized=False,
         **kw,
     )
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_invalid_segment_capacity(cap: int) -> None:
+    with pytest.raises(ValueError, match="max_sequences_per_bin"):
+        _flat(8, max_sequences_per_bin=cap)
+
+
+def test_capped_flat_wrap_requires_pad_token() -> None:
+    with pytest.raises(ValueError, match="pad_token_id is required"):
+        PackSequences(
+            max_length=8, algorithm="wrap", output="flat", max_sequences_per_bin=2
+        )
+
+
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+def test_segment_capacity_emits_before_token_capacity(
+    algorithm: PackingAlgorithm,
+) -> None:
+    options = {"candidate_pool_size": 1} if algorithm == "best_fit_wrap" else {}
+    acc = _flat(9, algorithm=algorithm, max_sequences_per_bin=2, **options)
+    assert acc.push_many([_rec_tokens(0, [1, 2])]) == []
+    out = _records(acc.push_many([_rec_tokens(1, [3, 4])]))
+    assert len(out) == 1
+    assert out[0].payload["input_ids"] == [1, 2, 3, 4, 0, 0, 0, 0, 0]
+    assert out[0].meta.padding_length == 5
+    assert out[0].meta.tags["_packing_metadata"]["num_sequences"] == 2
+    assert not acc.has_pending_data()
+
+
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+@pytest.mark.parametrize("output", ["flat", "envelope"])
+@pytest.mark.parametrize("cap", [1, 2, 5])
+def test_capped_packing_conserves_tokens_and_lineage(
+    algorithm: PackingAlgorithm, output: str, cap: int
+) -> None:
+    """Exercise cuts, padding, starvation, lane/domain isolation and flush tails."""
+    rng = random.Random(42)
+    records = []
+    expected_tokens = []
+    for i in range(96):
+        max_input = 40 if algorithm in ("wrap", "best_fit_wrap") else 17
+        length = rng.randrange(1, max_input + 1)
+        tokens = list(range(i * 100 + 1, i * 100 + length + 1))
+        expected_tokens.extend(tokens)
+        records.append(_crec_tokens(i, tokens, i % 3, lane=i % 2))
+
+    kwargs: dict[str, Any] = dict(
+        algorithm=algorithm,
+        output=output,
+        max_sequences_per_bin=cap,
+        homogeneity="full",
+        drop_oversized=False,
+    )
+    if output == "flat":
+        kwargs["pad_token_id"] = 0
+    if algorithm == "best_fit_wrap":
+        kwargs.update(candidate_pool_size=7, max_candidate_age=1)
+    acc = _pack(17, **kwargs)
+    emitted = []
+    for i in range(0, len(records), 7):
+        emitted.extend(_records(acc.push_many(records[i : i + 7])))
+    emitted.extend(_records(acc.flush()))
+    assert not acc.has_pending_data()
+    assert acc.flush() == []
+
+    actual_tokens = []
+    closers: Counter = Counter()
+    token_count = 0
+    for record in emitted:
+        metadata = record.meta.tags["_packing_metadata"]
+        assert 1 <= metadata["num_sequences"] <= cap
+        if output == "flat":
+            tokens = record.payload["input_ids"][: metadata["total_length"]]
+            assert len(record.payload["input_ids"]) == 17
+            assert record.meta.padding_length == 17 - len(tokens)
+        else:
+            assert len(record.payload["packed_samples"]) <= cap
+            tokens = [
+                t for s in record.payload["packed_samples"] for t in s["input_ids"]
+            ]
+            assert record.meta.padding_length is None
+        actual_tokens.extend(tokens)
+        refs = record.meta.contribution_refs()
+        sources = [ref.cursor.sample_id[2] for ref in refs]
+        assert len({source % 3 for source in sources}) == 1
+        assert all(source % 2 == record.meta.lane_id for source in sources)
+        closers.update(ref.cursor for ref in refs if ref.is_last_child)
+        token_count += sum((record.meta.component_token_counts or {}).values())
+    assert sorted(actual_tokens) == sorted(expected_tokens)
+    assert token_count == len(expected_tokens)
+    assert closers == Counter(record.meta.cursor for record in records)
+    assert len({(r.meta.lane_id, r.meta.cursor) for r in emitted}) == len(emitted)
+
+
+def test_capped_buffered_wrap_bounds_short_document_pool() -> None:
+    acc = _flat(
+        4096, algorithm="best_fit_wrap", max_sequences_per_bin=2, candidate_pool_size=4
+    )
+    out = _records(acc.push_many([_rec_tokens(i, [i + 1]) for i in range(101)]))
+    assert len(out) == 49
+    out.extend(_records(acc.flush()))
+    assert sorted(t for r in out for t in r.payload["input_ids"] if t) == list(
+        range(1, 102)
+    )
+
+
+def test_capped_buffered_wrap_flush_limits_small_tail() -> None:
+    """A sub-token-capacity pool can still need several count-limited bins."""
+    acc = _flat(
+        100, algorithm="best_fit_wrap", max_sequences_per_bin=2, candidate_pool_size=100
+    )
+    assert acc.push_many([_rec_tokens(i, [i + 1]) for i in range(7)]) == []
+    out = _records(acc.flush())
+    assert [r.meta.tags["_packing_metadata"]["num_sequences"] for r in out] == [
+        2,
+        2,
+        2,
+        1,
+    ]
+    assert [r.meta.padding_length for r in out] == [98, 98, 98, 99]
+
+
+def test_capped_wrap_lane_flush_keeps_other_lane_and_closes_split() -> None:
+    acc = _flat(5, algorithm="wrap", max_sequences_per_bin=2)
+    out = _records(
+        acc.push_many([_rec_tokens(0, list(range(1, 8))), _rec_tokens(1, [8], lane=1)])
+    )
+    assert len(out) == 1
+    assert not out[0].meta.contributors[0].is_last_child
+    lane_zero = _records(acc.flush(reset=True, lane_id=0))
+    assert lane_zero[0].payload["input_ids"] == [6, 7, 0, 0, 0]
+    assert lane_zero[0].meta.contributors[0].is_last_child
+    assert acc.has_pending_data(lane_id=1)
+    assert not acc.has_pending_data(lane_id=0)
+    assert _records(acc.flush())[0].payload["input_ids"] == [8, 0, 0, 0, 0]
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
+def test_count_capacity_closes_even_with_zero_min_length(algorithm: str) -> None:
+    acc = _flat(8, algorithm=algorithm, max_sequences_per_bin=1, min_sequence_length=0)
+    assert len(_records(acc.push_many([_rec_tokens(0, [1])]))) == 1
+    assert not acc.has_pending_data()
+
+
+@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
+def test_empty_capped_flat_record_has_only_padding(algorithm: str) -> None:
+    acc = _flat(4, algorithm=algorithm, max_sequences_per_bin=1)
+    records = _records(acc.push_many([_rec_tokens(0, [])]))
+    assert len(records) == 1
+    assert records[0].payload["input_ids"] == [0, 0, 0, 0]
+    assert records[0].meta.padding_length == 4
+    assert records[0].meta.tags["_packing_metadata"]["num_sequences"] == 1
+    assert not acc.has_pending_data()
 
 
 @pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])

@@ -173,6 +173,32 @@ def test_pipeline_best_fit_wrap_forwards_candidate_pool_options() -> None:
     assert tail_op.max_candidate_age == 23
 
 
+@pytest.mark.parametrize("method", ["pack_sequences", "pack_flat"])
+@pytest.mark.parametrize("cap", [None, 2])
+def test_pipeline_packing_forwards_segment_limit(method: str, cap: int | None) -> None:
+    ds = make_inmem_dataset("tiny", [{"input_ids": [1, 2]}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds))
+    kwargs = {"pad_token_id": 0} if method == "pack_flat" else {}
+
+    assert (
+        getattr(pipe, method)(
+            max_length=8, algorithm="wrap", max_sequences_per_bin=cap, **kwargs
+        )
+        is pipe
+    )
+    tail_op = pipe._tail.op  # type: ignore[attr-defined]
+    assert isinstance(tail_op, PackSequences)
+    assert tail_op.max_sequences_per_bin == cap
+
+
+@pytest.mark.parametrize("method", ["pack_sequences", "pack_flat"])
+def test_pipeline_packing_rejects_invalid_segment_limit(method: str) -> None:
+    ds = make_inmem_dataset("tiny", [{"input_ids": [1, 2]}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds))
+    with pytest.raises(ValueError, match="max_sequences_per_bin"):
+        getattr(pipe, method)(max_length=8, algorithm="wrap", max_sequences_per_bin=0)
+
+
 def test_pipeline_pack_flat_first_fit_forwards_pad_token_id() -> None:
     """first_fit/best_fit pad partial bins, so pad_token_id flows through."""
     ds = make_inmem_dataset("tiny", [{"text": "x"}])

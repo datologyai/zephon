@@ -56,6 +56,7 @@ def training_batch(batch: SampleBatch) -> None:
         exclude_fields=("ids", "texts"),
         return_num_valid_tokens=True,
         return_loss_mask=True,
+        return_padding_mask=True,
         return_cu_seqlens=True,
         rename_fields={"input_ids": "input"},
     )
@@ -107,7 +108,15 @@ def pack_grouped(pipe: Pipeline) -> Pipeline:
     groups = DomainGroups({"code": ["python", "java"]})
     members: dict[str, str] = groups.to_member_map()
     _ = members
-    return pipe.pack_sequences(max_length=8, homogeneity="group", groups=groups)
+    return pipe.pack_sequences(
+        max_length=8, homogeneity="group", groups=groups, max_sequences_per_bin=2
+    )
+
+
+def pack_training(pipe: Pipeline) -> Pipeline:
+    return pipe.pack_flat(
+        max_length=9, algorithm="wrap", pad_token_id=0, max_sequences_per_bin=2
+    ).batch(4)
 
 
 class IdentityOp(BaseOp):

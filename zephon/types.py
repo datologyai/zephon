@@ -30,6 +30,9 @@ from zephon._internal.utils.tensor_utils import (
     mask_unsupervised_labels as _mask_unsupervised_labels,
 )
 from zephon._internal.utils.tensor_utils import (
+    padding_lengths_to_mask as _padding_lengths_to_mask,
+)
+from zephon._internal.utils.tensor_utils import (
     positions_to_cu_seqlens as _positions_to_cu_seqlens,
 )
 from zephon._internal.utils.tensor_utils import (
@@ -496,6 +499,7 @@ class SampleBatch:
         return_num_valid_tokens: bool = False,
         return_loss_mask: bool = False,
         return_cu_seqlens: bool = False,
+        return_padding_mask: bool = False,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
@@ -552,6 +556,15 @@ class SampleBatch:
                 Uses float32 for tensors/arrays, Python floats for lists, and
                 an empty list for empty batches. Follows flatten, rename_fields,
                 and exclude_fields like other sequence fields.
+            return_padding_mask: Include a boolean input-aligned "padding_mask",
+                True only for trailing padding described by each record's
+                ``meta.padding_length`` (missing metadata means no padding).
+                Uses bool tensors/arrays or Python bools for lists. With labels,
+                drops the last token like input_ids; then follows flatten,
+                rename_fields, and exclude_fields. Independent of loss_mask:
+                real unsupervised tokens are not padding. Requires 2-D scalar
+                token rows for tensor/array output. Empty batches return [].
+                Does not infer padding from token IDs or ignore_index.
             return_cu_seqlens: Include "cu_seqlens" and "max_seqlen" derived
                 from zeros in input-aligned "positions". Requires a positions
                 sequence matching the tokens in every payload, starting at zero
@@ -585,6 +598,8 @@ class SampleBatch:
               and return_labels=False
             - "cu_seqlens", "max_seqlen": Cumulative segment boundaries and
               maximum segment lengths (only if return_cu_seqlens=True)
+            - "padding_mask": Boolean input padding mask (only if
+              return_padding_mask=True)
 
         Raises:
             TypeError: If payloads are neither dicts nor arrays, or exclude_fields
@@ -596,7 +611,9 @@ class SampleBatch:
                 missing source key in a nonempty batch or produces a key collision.
                 Also if return_num_valid_tokens or return_loss_mask is used without
                 return_labels, or an extra field would overwrite the requested
-                num_valid_tokens, cu_seqlens, or max_seqlen. Also if requested
+                num_valid_tokens, padding_mask, cu_seqlens, or max_seqlen. Also
+                if requested padding lengths fall outside their token rows or
+                tokens are not 2-D for a tensor/array padding mask. Also if requested
                 boundaries cannot be derived from aligned, zero-start positions
                 or represented as int32.
         """
@@ -604,6 +621,10 @@ class SampleBatch:
             raise TypeError("exclude_fields must be a sequence of names, not a string")
         if return_loss_mask and not return_labels:
             raise ValueError("return_loss_mask requires return_labels=True")
+        if return_padding_mask and "padding_mask" in extra_fields:
+            raise ValueError(
+                "extra_fields cannot include 'padding_mask' with return_padding_mask=True"
+            )
         if return_cu_seqlens and {"cu_seqlens", "max_seqlen"}.intersection(
             extra_fields
         ):
@@ -633,6 +654,8 @@ class SampleBatch:
                 empty["num_valid_tokens"] = 0
             if return_loss_mask:
                 empty["loss_mask"] = []
+            if return_padding_mask:
+                empty["padding_mask"] = []
             if return_cu_seqlens:
                 empty["cu_seqlens"] = [0] if flatten else []
                 empty["max_seqlen"] = 0 if flatten else []
@@ -680,16 +703,33 @@ class SampleBatch:
         # Stack tokens
         tokens = _stack_sequences(token_lists, resolved_dtype, framework)
 
+        pad_lengths = (
+            [r.meta.padding_length or 0 for r in items]
+            if return_labels or return_padding_mask
+            else []
+        )
+        if return_padding_mask:
+            result["padding_mask"] = _padding_lengths_to_mask(
+                tokens,
+                pad_lengths,
+                framework,
+                shifted=return_labels,
+            )
+
         if return_labels:
             # Shift for next-token prediction: input = tokens[:-1], labels = tokens[1:]
             result["input_ids"] = _slice_last_dim(tokens, slice(None, -1), framework)
             labels = _slice_last_dim(tokens, slice(1, None), framework)
             # After the shift, a record's trailing padding_length labels are
             # exactly its right-pad tokens; mask by position, not by id.
-            pad_lengths = [r.meta.padding_length or 0 for r in items]
             if any(pad_lengths):
+                # An all-padding row loses one padding label in the shift too.
+                label_pad_lengths = [
+                    n - int(n > 0 and n == len(row))
+                    for n, row in zip(pad_lengths, token_lists)
+                ]
                 labels = _mask_padding_labels(
-                    labels, pad_lengths, ignore_index, framework
+                    labels, label_pad_lengths, ignore_index, framework
                 )
             result["labels"] = labels
         else:

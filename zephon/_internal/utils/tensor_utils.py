@@ -149,6 +149,60 @@ def labels_to_loss_mask(labels: Any, ignore_index: int, framework: str | None) -
     return [[float(value != ignore_index) for value in row] for row in labels]
 
 
+def padding_lengths_to_mask(
+    tokens: Any,
+    pad_lengths: list[int],
+    framework: str | None,
+    *,
+    shifted: bool,
+) -> Any:
+    """Return a boolean input-aligned padding mask without inspecting token IDs.
+
+    Lengths describe unshifted rows. Next-token inputs omit the last token,
+    reducing their padding by one; their real-token cutoff stays unchanged.
+    Array backends broadcast O(B + S) indices only when padding is present.
+    Lists may be ragged.
+    """
+    if framework in ("torch", "numpy"):
+        if tokens.ndim != 2:
+            raise ValueError("return_padding_mask requires 2-D tokens")
+        raw_width = tokens.shape[1]
+        lengths = [raw_width] * tokens.shape[0]
+    else:
+        lengths = [len(row) for row in tokens]
+    if len(pad_lengths) != len(lengths) or any(
+        not 0 <= pad <= length for pad, length in zip(pad_lengths, lengths)
+    ):
+        raise ValueError("padding_length must lie within its token row's length")
+
+    shift = int(shifted)
+    if framework == "torch":
+        import torch
+
+        width = max(0, tokens.shape[1] - shift)
+        if not any(n > shift for n in pad_lengths):
+            return tokens.new_zeros((tokens.shape[0], width), dtype=torch.bool)
+        cutoff = torch.tensor(
+            [tokens.shape[1] - n for n in pad_lengths],
+            dtype=torch.int64,
+            device=tokens.device,
+        )
+        return torch.arange(width, device=tokens.device)[None, :] >= cutoff[:, None]
+    if framework == "numpy":
+        import numpy as np
+
+        width = max(0, tokens.shape[1] - shift)
+        if not any(n > shift for n in pad_lengths):
+            return np.zeros((tokens.shape[0], width), dtype=bool)
+        cutoff = tokens.shape[1] - np.asarray(pad_lengths)
+        return np.arange(width)[None, :] >= cutoff[:, None]
+    return [
+        [False] * min(length - pad, max(0, length - shift))
+        + [True] * max(0, pad - shift)
+        for length, pad in zip(lengths, pad_lengths)
+    ]
+
+
 def positions_to_cu_seqlens(
     positions: Any, framework: str | None, *, flatten: bool
 ) -> tuple[Any, Any]:
@@ -260,14 +314,13 @@ def mask_padding_labels(
     """
     if framework in ("torch", "numpy"):
         n_rows, width = labels.shape[0], labels.shape[-1]
+        assert all(0 <= n <= width for n in pad_lengths), (
+            f"pad_lengths must lie in [0, {width}]: {pad_lengths}"
+        )
     else:
         n_rows = len(labels)
-        width = len(labels[0]) if labels else 0
     assert len(pad_lengths) == n_rows, (
         f"pad_lengths has {len(pad_lengths)} entries for {n_rows} rows"
-    )
-    assert all(0 <= n <= width for n in pad_lengths), (
-        f"pad_lengths must lie in [0, {width}]: {pad_lengths}"
     )
 
     if framework == "torch":
@@ -287,6 +340,7 @@ def mask_padding_labels(
     else:
         masked = []
         for row, n in zip(labels, pad_lengths):
+            assert 0 <= n <= len(row), f"pad_lengths must lie in [0, {len(row)}]: {n}"
             row = list(row)
             if n:
                 row[len(row) - n :] = [replacement] * n

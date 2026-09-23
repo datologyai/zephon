@@ -1127,6 +1127,7 @@ class Pipeline:
         max_length: int,
         *,
         num_bins: int | None = None,
+        max_sequences_per_bin: int | None = None,
         algorithm: PackingAlgorithm = "first_fit",
         tokens_field: str = "auto",
         length_fn: Callable[[SampleRecord], int] | None = None,
@@ -1155,6 +1156,9 @@ class Pipeline:
 
         Args:
             max_length: Maximum length for packed bins.
+            max_sequences_per_bin: Optional positive bound on segments per bin;
+                split fragments count once per bin. Capped wrap emits partial
+                bins, including the final remainder.
             num_bins: Number of bins to maintain per packing group. Required for
                 first_fit/best_fit and not allowed for wrapping algorithms.
             algorithm: ``"first_fit"`` (default), ``"best_fit"``, ``"wrap"``, or
@@ -1180,7 +1184,7 @@ class Pipeline:
                 "torch_tensor", "numpy_array", or a custom callable taking list[Any].
             candidate_pool_size: best_fit_wrap only — candidate lookahead per
                 packing group. May be exceeded until the pool contains
-                ``max_length`` tokens. Defaults to 1024.
+                ``max_length`` tokens or reaches the segment cap. Defaults to 1024.
             max_candidate_age: best_fit_wrap only — candidate arrivals before a
                 still-buffered record is force-placed. Defaults to
                 ``8 * candidate_pool_size``.
@@ -1199,6 +1203,7 @@ class Pipeline:
         """
         op = PackSequences(
             max_length=max_length,
+            max_sequences_per_bin=max_sequences_per_bin,
             num_bins=num_bins,
             length_fn=length_fn,
             algorithm=algorithm,
@@ -1231,6 +1236,7 @@ class Pipeline:
         max_length: int,
         *,
         num_bins: int | None = None,
+        max_sequences_per_bin: int | None = None,
         algorithm: PackingAlgorithm = "first_fit",
         tokens_field: str = "auto",
         pad_token_id: Optional[int] = None,
@@ -1251,9 +1257,10 @@ class Pipeline:
 
         Each bin is emitted flat as ``{tokens_field: concat[+pad], "positions"?}``
         — no ``packed_samples`` — so ``SampleBatch.to_training`` consumes it
-        directly (``positions`` is surfaced automatically). ``wrap`` emits only
-        full bins. The other algorithms pad partial bins, including the final
-        best_fit_wrap tail, to ``max_length`` with ``pad_token_id``.
+        directly (``positions`` is surfaced automatically). Uncapped ``wrap``
+        emits only full bins. Capped wrap and the other algorithms pad partial
+        bins, including their final remainder, to ``max_length`` with
+        ``pad_token_id``.
         Buffered algorithms may reorder segments, and best_fit_wrap may emit a
         suffix before its remaining prefix. When ``emit_positions=True``, positions
         still reset at every emitted segment; they do not restore source order.
@@ -1262,6 +1269,8 @@ class Pipeline:
 
         Args:
             max_length: Fixed length of every emitted record.
+            max_sequences_per_bin: Optional positive bound on real segments per
+                output bin, excluding padding. Split fragments count once per bin.
             num_bins: Number of bins to maintain per packing group. Required for
                 first_fit/best_fit and not allowed for wrapping algorithms.
             algorithm: ``"first_fit"`` (default), ``"best_fit"``, ``"wrap"``, or
@@ -1269,9 +1278,9 @@ class Pipeline:
                 length-based selection and at most one split per bin).
             tokens_field: Token field to concatenate (``"auto"`` or explicit name).
             pad_token_id: Fill value for the token field when padding partial
-                bins (aligned fields pad with 0): every partial first_fit/
-                best_fit bin, and best_fit_wrap's flush-tail bin. Required for
-                those algorithms; unused for wrap. Any embeddable id works —
+                bins (aligned fields pad with 0). Required for first_fit,
+                best_fit, best_fit_wrap, and capped wrap; unused for uncapped
+                wrap. Any embeddable id works —
                 ``to_training`` masks the pad tail from the loss by position
                 (``meta.padding_length``), not by id.
             emit_positions: Include the ``positions`` array marking document
@@ -1286,7 +1295,7 @@ class Pipeline:
             flush_strategy: "fifo" (default) or "fullest" when num_bins is reached.
             candidate_pool_size: best_fit_wrap only — candidate lookahead per
                 packing group. May be exceeded until the pool contains
-                ``max_length`` tokens. Defaults to 1024.
+                ``max_length`` tokens or reaches the segment cap. Defaults to 1024.
             max_candidate_age: best_fit_wrap only — candidate arrivals before a
                 still-buffered record is force-placed. Defaults to
                 ``8 * candidate_pool_size``.
@@ -1305,6 +1314,7 @@ class Pipeline:
         """
         op = PackSequences(
             max_length=max_length,
+            max_sequences_per_bin=max_sequences_per_bin,
             num_bins=num_bins,
             algorithm=algorithm,
             output="flat",

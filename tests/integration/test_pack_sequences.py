@@ -266,3 +266,141 @@ def test_pack_flat_equals_flatten_envelope_end_to_end(
         return [t for rec in p for t in rec.payload["input_ids"] if t != -1]
 
     assert flat_tokens() == env_tokens()
+
+
+def _capped_work() -> StaticMixtureWorkSource:
+    """Dataset large enough to fan many bins across worker threads."""
+    seqs = [list(range(i, i + (i % 7) + 1)) for i in range(200)]
+    ds = Dataset.from_dict(
+        "big", {0: InMemoryShard([{"input_ids": seq} for seq in seqs])}
+    )
+    return StaticMixtureWorkSource(
+        [ds],
+        {ds.name: 1.0},
+        chunk_size=8,
+        seed=7,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+
+
+def _norm_payload(payload: Any) -> Any:
+    """Normalize a packed payload for equality (numpy arrays -> lists)."""
+
+    def norm(v: Any) -> Any:
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, dict):
+            return {k: norm(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [norm(x) for x in v]
+        return v
+
+    return norm(payload)
+
+
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+@pytest.mark.parametrize("output", ["envelope", "flat"], ids=["envelope", "flat"])
+def test_capped_packing_parallelism_invariant(
+    algorithm: PackingAlgorithm, output: str
+) -> None:
+    """parallelism>1 produces identical payloads, order, and lineage as
+    parallelism=1: bin assignment stays serial, only materialization fans out."""
+
+    def run(parallelism: int) -> list[tuple[Any, Any]]:
+        p = Pipeline(_capped_work())
+        if output == "flat":
+            p.pack_flat(
+                max_length=8,
+                num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
+                algorithm=algorithm,
+                pad_token_id=-1,
+                max_sequences_per_bin=2,
+                parallelism=parallelism,
+            )
+        else:
+            p.pack_sequences(
+                max_length=8,
+                num_bins=8 if algorithm in ("first_fit", "best_fit") else None,
+                algorithm=algorithm,
+                parallelism=parallelism,
+                max_sequences_per_bin=2,
+            )
+        p.options(deterministic=True, runner="threads", default_stage_prefetch=16)
+        return [(r.meta.cursor.as_key(), _norm_payload(r.payload)) for r in p]
+
+    serial = run(1)
+    assert serial
+    assert run(4) == serial
+
+
+@pytest.mark.parametrize("algorithm", _PACKING_ALGORITHMS)
+@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
+def test_capped_training_microbatch_checkpoint_resume(
+    algorithm: PackingAlgorithm, runner: str
+) -> None:
+    """Count-limited bins preserve the full training contract through replay."""
+
+    def make_pipeline() -> Pipeline:
+        pipe = Pipeline(_capped_work())
+        pipe.pack_flat(
+            max_length=9,
+            num_bins=4 if algorithm in ("first_fit", "best_fit") else None,
+            algorithm=algorithm,
+            max_sequences_per_bin=2,
+            pad_token_id=0,
+            candidate_pool_size=8 if algorithm == "best_fit_wrap" else None,
+            parallelism=2,
+        ).batch(3)
+        return pipe.options(
+            deterministic=True,
+            runner=runner,
+            mtp_mode=False,
+            canonical_replicas=2,
+            # These tiny batches test packing/replay, not shared-memory transport.
+            coalesce_tensors=False,
+        )
+
+    def convert(batch: SampleBatch) -> tuple[Any, Any]:
+        training = batch.to_training(
+            dtype=None,
+            return_labels=True,
+            return_loss_mask=True,
+            return_padding_mask=True,
+            return_num_valid_tokens=True,
+            return_cu_seqlens=True,
+            flatten=True,
+            rename_fields={"input_ids": "input"},
+            exclude_fields=("ids", "texts"),
+        )
+        assert len(training["input"]) == len(training["padding_mask"]) == 24
+        assert (
+            sum(
+                p == 0 and not pad
+                for p, pad in zip(training["positions"], training["padding_mask"])
+            )
+            <= 6
+        )
+        assert training["num_valid_tokens"] == sum(training["loss_mask"])
+        assert training["cu_seqlens"][-1] == 24
+        assert all(
+            r.meta.tags["_packing_metadata"]["num_sequences"] <= 2
+            for r in batch.records
+        )
+        return tuple(r.meta.cursor.as_key() for r in batch.records), training
+
+    baseline = [convert(batch) for batch in make_pipeline()]
+    assert len(baseline) > 6
+    first = make_pipeline()
+    iterator = iter(first)
+    try:
+        prefix = [convert(next(iterator)) for _ in range(6)]
+        checkpoint = first.checkpoint()
+    finally:
+        iterator.close()
+    resumed = make_pipeline()
+    resumed.restore(checkpoint)
+    suffix = [convert(batch) for batch in resumed]
+    assert prefix + suffix == baseline
+    assert resumed._engine is not None
+    assert not any(resumed._engine.inflight_chunks_per_lane.values())

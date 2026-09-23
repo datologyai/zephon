@@ -1126,6 +1126,162 @@ def _values(value: Any) -> list[Any]:
     return value if isinstance(value, list) else value.tolist()
 
 
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize("return_labels", [False, True])
+def test_padding_mask_is_input_aligned_and_independent_of_supervision(
+    conversion_dtype: Any, flatten: bool, return_labels: bool
+) -> None:
+    records = (
+        _rec(
+            (0, 0, 0),
+            0,
+            0,
+            {
+                "input_ids": [0, 11, 12, 0, 0],
+                "positions": [0, 1, 2, 0, 1],
+                "loss_mask": [0, 0, 1, 0, 0],
+            },
+            padding_length=2,
+        ),
+        _rec(
+            (0, 0, 1),
+            0,
+            0,
+            {
+                "input_ids": [0, 21, 22, 23, 0],
+                "positions": [0, 1, 2, 3, 0],
+                "loss_mask": [0, 1, 1, 1, 0],
+            },
+            padding_length=1,
+        ),
+    )
+    output = SampleBatch(records=records).to_training(
+        dtype=conversion_dtype,
+        return_labels=return_labels,
+        return_loss_mask=return_labels,
+        return_num_valid_tokens=return_labels,
+        return_padding_mask=True,
+        return_cu_seqlens=True,
+        flatten=flatten,
+    )
+    expected = [[False, False, False, True, True], [False, False, False, False, True]]
+    if return_labels:
+        expected = [row[:-1] for row in expected]
+        assert output["num_valid_tokens"] == 4
+        expected_loss = [[0.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0]]
+        assert _values(output["loss_mask"]) == (
+            [v for row in expected_loss for v in row] if flatten else expected_loss
+        )
+    mask = output["padding_mask"]
+    assert _values(mask) == (
+        [v for row in expected for v in row] if flatten else expected
+    )
+    if conversion_dtype is None:
+        assert all(
+            type(v) is bool
+            for v in (mask if flatten else [v for row in mask for v in row])
+        )
+    else:
+        assert str(mask.dtype) in ("bool", "torch.bool")
+        assert mask.shape == output["input_ids"].shape
+
+
+@pytest.mark.parametrize("length", [0, 1, 5])
+@pytest.mark.parametrize("return_labels", [False, True])
+def test_padding_mask_empty_and_all_padding_rows(
+    conversion_dtype: Any, length: int, return_labels: bool
+) -> None:
+    record = _rec((0, 0, 0), 0, 0, {"input_ids": [0] * length}, padding_length=length)
+    result = SampleBatch(records=(record,)).to_training(
+        dtype=conversion_dtype,
+        return_labels=return_labels,
+        return_padding_mask=True,
+        return_loss_mask=return_labels,
+        return_num_valid_tokens=return_labels,
+    )
+    width = max(0, length - int(return_labels))
+    assert _values(result["padding_mask"]) == [[True] * width]
+    if return_labels:
+        assert _values(result["labels"]) == [[-100] * width]
+        assert result["num_valid_tokens"] == 0
+
+
+def test_padding_mask_ragged_lists_and_missing_metadata() -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [0, 0]}),
+            _rec((0, 0, 1), 0, 0, {"input_ids": [0, 0, 0]}, padding_length=2),
+        )
+    )
+    out = batch.to_training(dtype=None, return_padding_mask=True, flatten=True)
+    assert out["padding_mask"] == [False, False, False, True, True]
+    assert "padding_mask" not in batch.to_training(dtype=None)
+    assert (
+        SampleBatch(records=()).to_training(return_padding_mask=True)["padding_mask"]
+        == []
+    )
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_padding_and_loss_masks_for_ragged_rows(flatten: bool) -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": []}),
+            _rec((0, 0, 1), 0, 0, {"input_ids": [10, 11]}),
+            _rec((0, 0, 2), 0, 0, {"input_ids": [20, 21, 0, 0, 0]}, padding_length=3),
+            _rec((0, 0, 3), 0, 0, {"input_ids": [0, 0, 0]}, padding_length=3),
+        )
+    )
+    out = batch.to_training(
+        dtype=None,
+        return_labels=True,
+        return_padding_mask=True,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        flatten=flatten,
+    )
+    expected = {
+        "input_ids": [[], [10], [20, 21, 0, 0], [0, 0]],
+        "labels": [[], [11], [21, -100, -100, -100], [-100, -100]],
+        "padding_mask": [[], [False], [False, False, True, True], [True, True]],
+        "loss_mask": [[], [1.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0]],
+    }
+    for name, rows in expected.items():
+        assert out[name] == ([v for row in rows for v in row] if flatten else rows)
+    assert out["num_valid_tokens"] == 2
+
+
+def test_padding_mask_renaming_exclusion_and_collision() -> None:
+    batch = SampleBatch(
+        records=(_rec((0, 0, 0), 0, 0, {"input_ids": [1, 0]}, padding_length=1),)
+    )
+    out = batch.to_training(
+        dtype=None, return_padding_mask=True, rename_fields={"padding_mask": "pad"}
+    )
+    assert out["pad"] == [[False, True]]
+    out = batch.to_training(
+        dtype=None, return_padding_mask=True, exclude_fields=("padding_mask",)
+    )
+    assert "padding_mask" not in out
+    with pytest.raises(ValueError, match="extra_fields cannot include 'padding_mask'"):
+        batch.to_training(return_padding_mask=True, extra_fields=("padding_mask",))
+    with pytest.raises(ValueError, match="collide"):
+        batch.to_training(
+            return_padding_mask=True, rename_fields={"input_ids": "padding_mask"}
+        )
+
+
+@pytest.mark.parametrize("padding", [-1, 4])
+def test_padding_mask_rejects_invalid_lengths(padding: int) -> None:
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [1, 2, 3]}, padding_length=padding),
+        )
+    )
+    with pytest.raises(ValueError, match="padding_length"):
+        batch.to_training(dtype=None, return_padding_mask=True)
+
+
 def _assert_loss_mask_dtype(mask: Any, conversion_dtype: Any) -> None:
     if conversion_dtype is None:
         values = (
@@ -1573,6 +1729,7 @@ def test_empty_training_metadata_rename_and_exclude(
 ) -> None:
     expected = {
         "weights": [],
+        "padding": [],
         "count": 0,
         "cu": [0] if flatten else [],
         "maximum": 0 if flatten else [],
@@ -1584,6 +1741,7 @@ def test_empty_training_metadata_rename_and_exclude(
         dtype=None,
         return_labels=True,
         return_loss_mask=True,
+        return_padding_mask=True,
         return_cu_seqlens=True,
         return_num_valid_tokens=True,
         flatten=flatten,
@@ -1592,6 +1750,7 @@ def test_empty_training_metadata_rename_and_exclude(
             "input_ids": "tokens",
             "positions": "position_ids",
             "loss_mask": "weights",
+            "padding_mask": "padding",
             "num_valid_tokens": "count",
             "cu_seqlens": "cu",
             "max_seqlen": "maximum",

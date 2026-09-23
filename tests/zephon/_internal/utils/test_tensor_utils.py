@@ -12,6 +12,7 @@ from zephon._internal.utils.tensor_utils import (
     flatten_sequences,
     labels_to_loss_mask,
     mask_padding_labels,
+    padding_lengths_to_mask,
     positions_to_cu_seqlens,
     stack_sequences,
 )
@@ -70,6 +71,113 @@ def test_mask_padding_labels_torch() -> None:
 def test_mask_padding_labels_zero_is_noop() -> None:
     out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [0, 0], -100, None)
     assert out == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_mask_padding_labels_ragged_rows() -> None:
+    labels = [[], [4], [5, 6, 7, 8]]
+    assert mask_padding_labels(labels, [0, 0, 2], -100, None) == [
+        [],
+        [4],
+        [5, 6, -100, -100],
+    ]
+    assert labels == [[], [4], [5, 6, 7, 8]]
+
+
+def test_mask_padding_labels_validates_each_ragged_row() -> None:
+    with pytest.raises(AssertionError, match="pad_lengths"):
+        mask_padding_labels([[1, 2, 3], [4]], [0, 2], -100, None)
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+@pytest.mark.parametrize("shifted", [False, True])
+def test_padding_lengths_to_mask_without_input_padding(
+    framework: str | None, shifted: bool
+) -> None:
+    module = pytest.importorskip(framework) if framework is not None else None
+    tokens = stack_sequences([[0] * 5] * 2, module.int32 if module else None, framework)
+    # A single trailing pad disappears from the input after next-token shifting.
+    mask = padding_lengths_to_mask(
+        tokens, [int(shifted)] * 2, framework, shifted=shifted
+    )
+    expected = [[False] * (5 - int(shifted))] * 2
+    if framework is None:
+        assert mask == expected
+    else:
+        assert mask.tolist() == expected
+        assert str(mask.dtype) in ("bool", "torch.bool")
+
+
+@pytest.mark.parametrize("framework", ["numpy", "torch"])
+@pytest.mark.parametrize("shape", [(0, 5), (2, 0)])
+def test_padding_lengths_to_mask_empty_dimensions(
+    framework: str, shape: tuple[int, int]
+) -> None:
+    module = pytest.importorskip(framework)
+    mask = padding_lengths_to_mask(
+        module.zeros(shape), [0] * shape[0], framework, shifted=True
+    )
+    assert mask.shape == (shape[0], max(0, shape[1] - 1))
+    assert str(mask.dtype) in ("bool", "torch.bool")
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+@pytest.mark.parametrize("shifted", [False, True])
+def test_padding_lengths_to_mask(framework: str | None, shifted: bool) -> None:
+    rows = [[0] * 5 for _ in range(4)]
+    module = pytest.importorskip(framework) if framework is not None else None
+    tokens = stack_sequences(rows, module.int32 if module else None, framework)
+    out = padding_lengths_to_mask(tokens, [0, 1, 3, 5], framework, shifted=shifted)
+    expected = [
+        [False, False, False, False, False],
+        [False, False, False, False, True],
+        [False, False, True, True, True],
+        [True, True, True, True, True],
+    ]
+    if shifted:
+        expected = [row[:-1] for row in expected]
+    if module is None:
+        assert out == expected
+        assert all(type(value) is bool for row in out for value in row)
+        assert tokens == rows
+    else:
+        assert out.tolist() == expected
+        assert str(out.dtype) in ("bool", "torch.bool")
+        assert tokens.tolist() == rows
+        if framework == "torch":
+            assert out.device == tokens.device
+
+
+@pytest.mark.parametrize("shifted", [False, True])
+def test_padding_lengths_to_mask_ragged_rows(shifted: bool) -> None:
+    out = padding_lengths_to_mask(
+        [[], [0], [0, 0, 0]], [0, 1, 2], None, shifted=shifted
+    )
+    assert out == (
+        [[], [], [False, True]] if shifted else [[], [True], [False, True, True]]
+    )
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+@pytest.mark.parametrize("pad_lengths", [[-1, 0], [4, 0], [1], [0, 0, 0]])
+def test_padding_lengths_to_mask_rejects_invalid_lengths(
+    framework: str | None, pad_lengths: list[int]
+) -> None:
+    module = pytest.importorskip(framework) if framework is not None else None
+    tokens = stack_sequences(
+        [[1, 2, 3], [4, 5, 6]], module.int32 if module else None, framework
+    )
+    with pytest.raises(ValueError, match="padding_length"):
+        padding_lengths_to_mask(tokens, pad_lengths, framework, shifted=False)
+
+
+@pytest.mark.parametrize("framework", ["numpy", "torch"])
+@pytest.mark.parametrize("shape", [(3,), (1, 2, 3)])
+def test_padding_lengths_to_mask_requires_token_rows(
+    framework: str, shape: tuple[int, ...]
+) -> None:
+    module = pytest.importorskip(framework)
+    with pytest.raises(ValueError, match="2-D"):
+        padding_lengths_to_mask(module.zeros(shape), [0], framework, shifted=False)
 
 
 @pytest.mark.parametrize("framework", [None, "numpy", "torch"])

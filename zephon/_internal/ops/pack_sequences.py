@@ -9,8 +9,10 @@ Packing is split into two orthogonal concerns:
   records into bins; ``wrap`` slices a continuous token stream into bins of
   exactly ``max_length``; ``best_fit_wrap`` buffers candidate records and
   builds each bin to exactly ``max_length`` — whole records by largest-fit,
-  then one split to close the bin. Every algorithm produces an ordered list of
-  :class:`Segment` per bin and knows nothing about the output format.
+  then one split to close the bin. An optional ``max_sequences_per_bin`` closes
+  any algorithm's bin early when segment capacity is reached. Every algorithm
+  produces an ordered list of :class:`Segment` per bin and knows nothing about
+  the output format.
 - **How to serialize** a finished bin (a :class:`Segment` list): the
   :class:`_EnvelopeSerializer` keeps segment boundaries; the
   :class:`_FlatSerializer` concatenates the token field into a fixed-length
@@ -374,7 +376,9 @@ class _BufferedWrapState(Protocol):
 
     def add(self, segment: Segment) -> None: ...
 
-    def build_bin(self, max_length: int) -> list[Segment]: ...
+    def build_bin(
+        self, max_length: int, max_sequences_per_bin: int | None = None
+    ) -> list[Segment]: ...
 
     def drain(self) -> list[Segment]: ...
 
@@ -472,12 +476,17 @@ class _BestFitWrapState:
         self.total_length -= count
         return placed
 
-    def build_bin(self, max_length: int) -> list[Segment]:
-        """Build an exact bin; the caller guarantees sufficient buffered tokens."""
+    def build_bin(
+        self, max_length: int, max_sequences_per_bin: int | None = None
+    ) -> list[Segment]:
+        """Fill token or segment capacity, retaining all unselected candidates."""
         segments: list[Segment] = []
         gap = max_length
+        segment_limit = len(self._items)
+        if max_sequences_per_bin is not None:
+            segment_limit = min(segment_limit, max_sequences_per_bin)
         # Length selection can shadow an item indefinitely behind better fits.
-        while gap > 0:
+        while gap > 0 and len(segments) < segment_limit:
             oldest = self._oldest()
             assert oldest is not None
             age = self.arrival_index - oldest.arrival_index
@@ -485,7 +494,7 @@ class _BestFitWrapState:
                 break
             gap -= oldest.length
             segments.append(self._take(oldest))
-        while gap > 0:
+        while gap > 0 and len(segments) < segment_limit:
             item = self._largest_fitting(gap)
             if item is not None:
                 gap -= item.length
@@ -666,8 +675,10 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         candidate_pool_size: int = 0,
         buffered_wrap_state_factory: Callable[[], _BufferedWrapState] | None = None,
         domain_fn: Callable[[SampleRecord], Any] | None = None,
+        max_sequences_per_bin: int | None = None,
     ) -> None:
         self.max_length = max_length
+        self.max_sequences_per_bin = max_sequences_per_bin
         self.num_bins = num_bins
         self.length_fn = length_fn
         self.algorithm = algorithm
@@ -830,12 +841,8 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             keys = self._sorted_keys(k for k in self._known_keys() if k[0] == lane_id)
 
         ready: list[ReadyBatch[SampleRecord]] = []
-        # Wrap mode: drop any tail that did not fill a full ``max_length``, emit
-        # tombstones so dropped records still close contributor offsets, and
-        # clear buffered state. ``tombstones_for_record`` only emits for
-        # contributors with ``is_last_child=True`` (mirroring ReplayFilter /
-        # MapTransform), so non-closing contributors are not falsely advanced.
-        # One entry per packing group (lane, domain) with a dropped wrap tail.
+        # Dropped wrap tails per (lane, domain) group and their tombstones, which
+        # ``tombstones_for_record`` emits only for closing contributors.
         tail_drop_groups: list[tuple[PackKey, int]] = []
         wrap_tombstones: list[ReadyBatch[SampleRecord]] = []
         for key in keys:
@@ -846,10 +853,12 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
             state = self._buffered_wrap_state_by_key.pop(key, None)
             if state is not None:
-                while state.total_length >= self.max_length:
-                    ready.append(
-                        ([self._emit_bin(state.build_bin(self.max_length), lid)], 0)
-                    )
+                cap = self.max_sequences_per_bin
+                while state.total_length >= self.max_length or (
+                    cap is not None and len(state) > cap
+                ):
+                    bin_segments = state.build_bin(self.max_length, cap)
+                    ready.append(([self._emit_bin(bin_segments, lid)], 0))
                 tail = state.drain()
                 if tail:
                     ready.append(([self._emit_bin(tail, lid)], 0))
@@ -857,11 +866,25 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             total = self._wrap_total.pop(key, 0)
             segments = self._wrap_segments.pop(key, None)
             if total > 0 and segments:
-                tail_drop_groups.append((key, total))
-                for seg in segments:
-                    rec = seg.record
-                    self._wrap_comp_emitted.pop((lid, rec.meta.cursor.as_key()), None)
-                    wrap_tombstones.extend(([t], 0) for t in tombstones_for_record(rec))
+                if self.max_sequences_per_bin is not None:
+                    # Capped wrap already emits partially filled bins, so the
+                    # flush tail is just one more: keep it and pad it.
+                    tail = list(segments)
+                    for seg in tail:
+                        seg.is_last = True
+                    ready.append(([self._emit_bin(tail, lid)], 0))
+                else:
+                    # Uncapped wrap never pads, so a tail short of max_length is
+                    # dropped; tombstones still close the dropped records.
+                    tail_drop_groups.append((key, total))
+                    for seg in segments:
+                        rec = seg.record
+                        self._wrap_comp_emitted.pop(
+                            (lid, rec.meta.cursor.as_key()), None
+                        )
+                        wrap_tombstones.extend(
+                            ([t], 0) for t in tombstones_for_record(rec)
+                        )
 
         if tail_drop_groups:
             dropped_tokens = sum(t for _, t in tail_drop_groups)
@@ -950,6 +973,13 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         outputs.extend(self._create_bin_with_sample(bins, seq, seq_len, key))
         return outputs
 
+    def _bin_full(self, bin_data: Bin) -> bool:
+        """Return whether the bin is ready to emit."""
+        return bin_data.remaining < self.min_sequence_length or (
+            self.max_sequences_per_bin is not None
+            and len(bin_data.segments) >= self.max_sequences_per_bin
+        )
+
     def _create_bin_with_sample(
         self,
         bins: list[Bin],
@@ -962,7 +992,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
             segments=[self._whole_segment(seq, seq_len)],
             remaining=self.max_length - seq_len,
         )
-        if new_bin.remaining < self.min_sequence_length:
+        if self._bin_full(new_bin):
             # Self-emits immediately and is never retained, so no eviction needed
             # — don't flush an existing partial bin to make room it won't use.
             return [self._emit_first_best_bin(new_bin, key[0])]
@@ -982,7 +1012,7 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         bin_data.segments.append(self._whole_segment(seq, seq_len))
         bin_data.remaining -= seq_len
         outputs: list[SampleRecord] = []
-        if bin_data.remaining < self.min_sequence_length:
+        if self._bin_full(bin_data):
             bins.remove(bin_data)
             outputs.append(self._emit_first_best_bin(bin_data, key[0]))
         return outputs
@@ -1175,10 +1205,11 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         return detected
 
     def _wrap_pack(self, key: PackKey, elem: SampleRecord) -> list[SampleRecord]:
-        """Stream ``elem`` through the per-group wrap buffer and emit full bins.
+        """Stream ``elem`` through the buffer, closing on token or segment capacity.
 
         Tokens flow into a single FIFO buffer; whenever the buffer holds at least
         ``max_length`` tokens we slice off exactly that many and emit one record.
+        A segment cap can close a shorter bin; its unused tokens stay buffered.
         Empty records carry no tokens but still emit tombstones so their
         contributor offsets close.
         """
@@ -1208,10 +1239,12 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
         outputs: list[SampleRecord] = []
         max_length = self.max_length
-        while total >= max_length:
+        cap = self.max_sequences_per_bin
+        while total >= max_length or (cap is not None and len(segments) >= cap):
             bin_slices: list[Segment] = []
             remaining = max_length
-            while remaining > 0:
+            segment_limit = len(segments) if cap is None else min(len(segments), cap)
+            while remaining > 0 and len(bin_slices) < segment_limit:
                 seg = segments[0]
                 seg_len = seg.end - seg.start
                 if seg_len <= remaining:
@@ -1305,12 +1338,16 @@ class PackingAccumulator(Accumulator[SampleRecord]):
 
         state = self._buffered_wrap_state_by_key[key]
         state.add(tail)
-        # Sufficient total length guarantees the state can close a bin.
-        while (
-            len(state) >= self.candidate_pool_size
-            and state.total_length >= self.max_length
+        # Retain the configured lookahead. Either capacity can close a bin,
+        # so short documents cannot make a capped pool grow without bound.
+        cap = self.max_sequences_per_bin
+        while len(state) >= self.candidate_pool_size and (
+            state.total_length >= self.max_length
+            or (cap is not None and len(state) >= cap)
         ):
-            outputs.append(self._emit_bin(state.build_bin(self.max_length), lane_id))
+            outputs.append(
+                self._emit_bin(state.build_bin(self.max_length, cap), lane_id)
+            )
         return outputs
 
 
@@ -1344,11 +1381,16 @@ class PackSequences(BaseOp):
         max_candidate_age: int | None = None,
         homogeneity: Literal["none", "group", "full"] = "none",
         groups: DomainGroups | None = None,
+        max_sequences_per_bin: int | None = None,
     ) -> None:
         """Initialize the PackSequences operator.
 
         Args:
             max_length: Maximum length for packed bins.
+            max_sequences_per_bin: Optional positive limit on constituent
+                segments in each bin, excluding padding. Split fragments count
+                independently in the bins they enter. Capped wrap emits partial
+                bins, including its final remainder; flat output pads them.
             num_bins: Number of bins to maintain per packing group. Required for
                 first_fit/best_fit and not allowed for wrapping algorithms.
             length_fn: Optional callable measuring a record's packing length —
@@ -1395,14 +1437,15 @@ class PackSequences(BaseOp):
             emit_positions: Flat output only — include the ``positions`` array
                 (document boundaries). Defaults to True.
             pad_token_id: Flat output only — fill value for the token field when
-                padding partial bins (aligned fields pad with 0): every partial
-                first_fit/best_fit bin, and best_fit_wrap's flush-tail bin.
-                Required for those algorithms; unused for wrap. Any embeddable
-                id works — pad is masked from the loss by position, not by id.
+                padding partial bins (aligned fields pad with 0). Required for
+                first_fit, best_fit, best_fit_wrap, and capped wrap; unused for
+                uncapped wrap. Any embeddable id works — pad is masked from the
+                loss by position, not by id.
             candidate_pool_size: best_fit_wrap only — candidate lookahead per
                 packing group. Larger values improve selection at the cost of
                 memory and latency. The pool may exceed this size until it
-                contains ``max_length`` tokens. Defaults to 1024.
+                contains ``max_length`` tokens or reaches the segment cap.
+                Defaults to 1024.
             max_candidate_age: best_fit_wrap only — candidate arrivals before a
                 still-buffered record is force-placed at the next bin's start.
                 Defaults to ``8 * candidate_pool_size``.
@@ -1424,6 +1467,8 @@ class PackSequences(BaseOp):
 
         if max_length <= 0:
             raise ValueError("max_length must be positive")
+        if max_sequences_per_bin is not None and max_sequences_per_bin <= 0:
+            raise ValueError("max_sequences_per_bin must be positive")
         if min_sequence_length < 0:
             raise ValueError("min_sequence_length must be non-negative")
         if algorithm not in _PACKING_ALGORITHMS:
@@ -1480,8 +1525,12 @@ class PackSequences(BaseOp):
                 "this algorithm splits long records instead."
             )
 
-        # Flat first/best pads partial bins to max_length, so it needs a pad id.
-        if output == "flat" and algorithm != "wrap" and pad_token_id is None:
+        # Every capped algorithm can close before filling its token capacity.
+        if (
+            output == "flat"
+            and (algorithm != "wrap" or max_sequences_per_bin is not None)
+            and pad_token_id is None
+        ):
             raise ValueError(
                 f"pack_flat with algorithm={algorithm!r} pads partial bins to "
                 "max_length, so pad_token_id is required."
@@ -1520,6 +1569,7 @@ class PackSequences(BaseOp):
             )
 
         self.max_length = max_length
+        self.max_sequences_per_bin = max_sequences_per_bin
         self.algorithm = algorithm
         self.output = output
         self.tokens_field = tokens_field
@@ -1632,6 +1682,7 @@ class PackSequences(BaseOp):
             candidate_pool_size=self.candidate_pool_size,
             buffered_wrap_state_factory=buffered_wrap_state_factory,
             domain_fn=self._build_domain_fn(ctx),
+            max_sequences_per_bin=self.max_sequences_per_bin,
         )
 
     def _resolve_pack_payloads_fn(
