@@ -5,6 +5,7 @@ import signal
 import sys
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1048,10 +1049,13 @@ class TestFeederErrorDetection:
 # ---------------------------------------------------------------------------
 
 import errno
+import queue
 from multiprocessing.reduction import ForkingPickler
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import zephon._internal.utils.shm as _shm_mod
+from zephon._internal.runners.process import _RemoteServiceProxy, _ServiceRequest
 
 
 @pytest.fixture()
@@ -2082,3 +2086,120 @@ def test_process_worker_receives_stage_info() -> None:
     )
     (out,) = list(runner.run(iter(_mk_records([7]))))
     assert out.payload["probe"] == (2, "probe_stage", 0, False)
+
+
+@pytest.mark.parametrize("failure", ["cancelled", "parent"])
+def test_proxy_wait_exits_on_cancellation_or_parent_death(failure: str) -> None:
+    request, response = queue.Queue(), queue.Queue()
+    cancelled, pending = SimpleNamespace(value=0), SimpleNamespace(value=0)
+    parent = Mock()
+    parent.is_alive.return_value = True
+    proxy = _RemoteServiceProxy(0, "metadata", request, response, cancelled, pending)
+
+    def stop_wait(**_: Any) -> None:
+        assert pending.value  # put() does not mean the feeder has finished.
+        if failure == "parent":
+            parent.is_alive.return_value = False
+        else:
+            cancelled.value = 1
+        raise queue.Empty
+
+    with patch("multiprocessing.parent_process", return_value=parent):
+        with patch.object(response, "get", side_effect=stop_wait):
+            with pytest.raises(RuntimeError, match="cancelled|parent process"):
+                proxy("report")
+        assert not pending.value
+        response.put((True, "late reply"))
+        with pytest.raises(RuntimeError, match="cancelled"):
+            proxy("next report")
+    assert request.qsize() == 1
+
+
+def test_proxy_slow_response_has_no_wall_clock_deadline() -> None:
+    request, response = queue.Queue(), queue.Queue()
+    proxy = _RemoteServiceProxy(
+        0,
+        "metadata",
+        request,
+        response,
+        SimpleNamespace(value=0),
+        SimpleNamespace(value=0),
+    )
+    # An arbitrarily late reply remains valid. No startup/handler time budget.
+    with patch.object(response, "get", side_effect=[queue.Empty, (True, "result")]):
+        with patch("time.monotonic", side_effect=[0.0, 3600.0]):
+            assert proxy("report") == "result"
+
+
+@pytest.fixture
+def control_runner() -> Any:
+    runner = ProcessStageRunner(
+        _probe_stage("control"),
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+    )
+    try:
+        yield runner
+    finally:
+        runner.close(hard=True)
+
+
+def test_service_transport_failure_is_reported(
+    control_runner: ProcessStageRunner,
+) -> None:
+    context = control_runner._create_context()
+    original = OSError("broken channel")
+
+    def broken_transport() -> None:
+        raise original
+
+    with patch.object(control_runner, "_active_context", context):
+        with patch.object(
+            control_runner, "_serve_requests", side_effect=broken_transport
+        ):
+            control_runner._service_loop()
+    assert control_runner._service_cancelled.value
+    assert context.stop_event.is_set()
+    assert context.stage_out_queue.get_nowait() is context.stop_token
+    assert context.error is original
+    with pytest.raises(OSError, match="broken channel") as caught:
+        raise context.error
+    assert caught.value is original
+    assert (
+        traceback.extract_tb(caught.value.__traceback__)[-1].name == "broken_transport"
+    )
+
+
+def test_failed_start_removes_pre_registered_endpoint(
+    control_runner: ProcessStageRunner,
+) -> None:
+    response = object()
+    control_runner._service_responses[17] = response
+    control_runner._service_pending[17] = SimpleNamespace(value=0)
+    proc = Mock()
+    proc.start.side_effect = OSError("start failed")
+    with patch.object(control_runner, "_close_ipc_queue") as close:
+        with pytest.raises(OSError, match="start failed"):
+            control_runner._start_worker(proc, 17)
+    assert not control_runner._service_responses and not control_runner._service_pending
+    close.assert_called_once_with(response, hard=True)
+
+
+def test_retired_worker_request_cannot_reply_to_replacement(
+    control_runner: ProcessStageRunner,
+) -> None:
+    accepted = []
+    requests, response = queue.Queue(), queue.Queue()
+    requests.put(_ServiceRequest(4, "custom_service", ("old",), {}))
+    requests.put(_ServiceRequest(5, "custom_service", ("new",), {}))
+    requests.put(None)
+    with patch.object(control_runner, "_service_queue", requests):
+        with patch.object(control_runner, "_service_responses", {5: response}):
+            with patch.dict(
+                control_runner._ctx_services, custom_service=accepted.append
+            ):
+                control_runner._serve_requests()
+    assert accepted == ["new"]
+    assert response.get_nowait() == (True, None)
+    assert response.empty()

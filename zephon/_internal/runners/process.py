@@ -105,6 +105,10 @@ class _ClosableQueue(_QueueLike[Q], Protocol):
     def close(self) -> None: ...
 
 
+class _SharedFlag(Protocol):
+    value: int
+
+
 _DEBUG = bool(os.environ.get("ZEPHON_DEBUG_PROCESS_RUNNER"))
 _SHUTDOWN_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_SHUTDOWN"))
 _STARTUP_DEBUG = bool(os.environ.get("ZEPHON_DEBUG_WORKER_STARTUP"))
@@ -113,6 +117,7 @@ _SHUTDOWN_WATCHDOG_TIMEOUT = float(os.environ.get("ZEPHON_SHUTDOWN_WATCHDOG", "0
 #: overhead negligible; tests override via ``ZEPHON_WATCHDOG_POLL_S``
 #: to tighten resubmit-round-trip latency.
 _WATCHDOG_POLL_S = float(os.environ.get("ZEPHON_WATCHDOG_POLL_S", "5.0"))
+_SERVICE_POLL_S = 0.1
 
 # -- Shutdown timeout constants (seconds) -----------------------------------
 _GRACEFUL_QUEUE_FLUSH: float = 5.0
@@ -266,7 +271,14 @@ class _ServiceRequest:
 class _RemoteServiceProxy:
     """Callable shim that forwards execution to the main process."""
 
-    __slots__ = ("_worker_id", "_name", "_request_q", "_response_q")
+    __slots__ = (
+        "_worker_id",
+        "_name",
+        "_request_q",
+        "_response_q",
+        "_cancelled",
+        "_pending",
+    )
 
     def __init__(
         self,
@@ -274,23 +286,48 @@ class _RemoteServiceProxy:
         name: str,
         request_queue: _ClosableQueue[_ServiceRequest | None],
         response_queue: _ClosableQueue[tuple[bool, Any]],
+        cancelled: _SharedFlag,
+        pending: _SharedFlag,
     ) -> None:
         self._worker_id = worker_id
         self._name = name
         self._request_q = request_queue
         self._response_q = response_queue
+        self._cancelled = cancelled
+        self._pending = pending
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         _debug(f"proxy[{self._worker_id}:{self._name}] enqueue request")
-        self._request_q.put(
-            _ServiceRequest(
-                worker_id=self._worker_id,
-                name=self._name,
-                args=tuple(args),
-                kwargs=dict(kwargs),
+        parent = mp.parent_process()
+        # Queue.put() only buffers: its feeder can still be serializing/writing
+        # while we wait. Keep the flag raised until the reply proves delivery.
+        self._pending.value = 1
+        try:
+            if self._cancelled.value:
+                raise RuntimeError(f"Control service {self._name!r} was cancelled")
+            self._request_q.put(
+                _ServiceRequest(
+                    worker_id=self._worker_id,
+                    name=self._name,
+                    args=tuple(args),
+                    kwargs=dict(kwargs),
+                ),
             )
-        )
-        ok, payload = self._response_q.get()
+            while True:
+                if self._cancelled.value:
+                    raise RuntimeError(f"Control service {self._name!r} was cancelled")
+                if parent is not None and not parent.is_alive():
+                    self._cancelled.value = 1
+                    raise RuntimeError(
+                        f"Control service {self._name!r} lost its parent process"
+                    )
+                try:
+                    ok, payload = self._response_q.get(timeout=_SERVICE_POLL_S)
+                    break
+                except queue.Empty:
+                    continue
+        finally:
+            self._pending.value = 0
         _debug(f"proxy[{self._worker_id}:{self._name}] response ok={ok}")
         if ok:
             return payload
@@ -741,6 +778,10 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         self._service_thread: threading.Thread | None = None
         self._service_stop = threading.Event()
         self._service_responses: dict[int, _ClosableQueue[tuple[bool, Any]]] = {}
+        # Single-byte, process-shared flags avoid orphaned locks if a worker is
+        # killed while inside a service call. No threading.Event crosses IPC.
+        self._service_cancelled = ctx.Value("b", 0, lock=False)
+        self._service_pending: dict[int, _SharedFlag] = {}
         self._next_worker_id = 0
         self._single_op_direct_ipc = len(stage.nodes) == 1
         self._shutdown_lock = threading.Lock()
@@ -877,12 +918,14 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     def _before_run(self, context: ConcurrentRunContext) -> None:
         # Reset shutdown flag for runner reuse (start -> stop -> start)
         self._workers_shutdown = False
+        self._service_cancelled.value = 0
         for state in self.ops:
             self._launch_workers(state)
         self._start_service_thread()
         self._start_watchdog()
 
     def _after_run(self, context: ConcurrentRunContext) -> None:
+        self._service_cancelled.value = 1
         self._stop_watchdog()
         self._shutdown_workers()
         self._stop_service_thread()
@@ -1011,7 +1054,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         """
         pid = dead_proc.pid
         exitcode = dead_proc.exitcode
-
         # Determine which seq the worker was ACTIVELY processing at the
         # moment of death (the likely culprit), versus innocent bystanders.
         #
@@ -1038,6 +1080,23 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             state, worker_index, pid, exitcode, to_consider, culprit_seq
         )
 
+        worker_id = state.worker_ids[worker_index]
+        pending = self._service_pending.get(worker_id)
+        if pending is not None and pending.value:
+            # Result-queue recovery cannot repair a control queue whose writer
+            # died mid-message. Fail this execution instead of reusing it.
+            self._service_cancelled.value = 1
+            context = self._active_context
+            if context is not None:
+                self._record_error(
+                    context,
+                    RuntimeError(
+                        f"Worker {worker_id} died during a control service call; "
+                        + "the control transport cannot be safely reused"
+                    ),
+                )
+            return
+
         if self._max_worker_retries <= 0:
             # Diagnostic-only mode: leave pending_commands / workers alone.
             # Pipeline will surface an error or hang per pre-resilience
@@ -1061,6 +1120,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         # Drop the dead worker's response queue so it doesn't leak.
         old_wid = state.worker_ids[worker_index]
         old_resp = self._service_responses.pop(old_wid, None)
+        self._service_pending.pop(old_wid, None)
         if old_resp is not None:
             self._close_ipc_queue(old_resp)
 
@@ -1078,7 +1138,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                     state.worker_seq_slots[worker_index] = -1
                 except Exception:
                     pass
-            proc.start()  # 1–3 s under spawn; watchdog thread can afford to block
+            self._start_worker(proc, wid)
             self._install_worker(state, worker_index, proc, sem, wid, resp_queue)
             print(
                 f"[zephon] Respawned worker: stage={state.stage_name!r} "
@@ -1320,6 +1380,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         self._service_thread = thread
 
     def _stop_service_thread(self, *, hard: bool = False) -> None:
+        self._service_cancelled.value = 1
         # Grab a local ref to avoid races with concurrent callers
         # (_after_run and close() can both reach here).
         thread = self._service_thread
@@ -1345,6 +1406,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         for resp in self._service_responses.values():
             self._close_ipc_queue(resp, hard=hard)
         self._service_responses.clear()
+        self._service_pending.clear()
         _shutdown_debug("_stop_service_thread: done")
 
     def _start_feeder(
@@ -1467,12 +1529,20 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             self._handle_result(state, item, None, context)
 
     def _service_loop(self) -> None:
+        try:
+            self._serve_requests()
+        except BaseException as exc:  # noqa: BLE001 - report transport failures
+            if not self._service_stop.is_set():
+                self._service_cancelled.value = 1
+                context = self._active_context
+                if context is not None:
+                    self._record_error(context, exc)
+
+    def _serve_requests(self) -> None:
         while not self._service_stop.is_set():
             try:
                 req = self._service_queue.get(timeout=0.1)
-            except Exception:
-                if self._service_stop.is_set():
-                    break
+            except queue.Empty:
                 continue
             if req is None:
                 break
@@ -1491,9 +1561,10 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             try:
                 _debug(f"service handling worker={req.worker_id} service={req.name}")
                 result = fn(*req.args, **req.kwargs)
-                resp.put((True, result))
             except BaseException as exc:  # noqa: BLE001
                 resp.put((False, exc))
+            else:
+                resp.put((True, result))
 
     def _build_worker(
         self,
@@ -1526,6 +1597,11 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                 f"service-response:{queue_label}:{worker_id}",
             ),
         )
+        # Install the service endpoint before start: a replacement can consume
+        # queued work immediately while the service thread is already running.
+        # Keep both pipe ends open until the child has inherited/serialized them.
+        self._service_responses[worker_id] = resp_queue
+        self._service_pending[worker_id] = self._mp_context.Value("b", 0, lock=False)
         ctx_payload = self._build_worker_ctx(worker_id, resp_queue)
         config = _ProcessWorkerConfig(
             worker_index=worker_index,
@@ -1566,7 +1642,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         launch), otherwise overwrites the existing slot (replacement).
         """
         _debug(f"started worker process idx={worker_index} pid={proc.pid}")
-        self._service_responses[worker_id] = resp_queue
         # main -> worker (service response queue): main is producer-only
         _close_reader_end(resp_queue)
         if worker_index < len(state.workers):
@@ -1577,6 +1652,16 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             state.worker_ids.append(worker_id)
             state.result_semaphores.append(semaphore)
             state.workers.append(proc)
+
+    def _start_worker(self, proc: BaseProcess, worker_id: int) -> None:
+        """Start with the reply endpoint installed, cleaning it on failure."""
+        try:
+            proc.start()
+        except BaseException:
+            response = self._service_responses.pop(worker_id, None)
+            self._service_pending.pop(worker_id, None)
+            self._close_ipc_queue(response, hard=True)
+            raise
 
     def _launch_workers(self, state: _ProcessOperatorState) -> None:
         state.workers = []
@@ -1642,22 +1727,49 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         # leading to potential deadlocks. Concurrent fork() calls exacerbate this.
         spawn_t0 = time.perf_counter_ns()
         start_method = self._mp_context.get_start_method()
+        start_errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def start(proc: BaseProcess, worker_id: int) -> None:
+            try:
+                self._start_worker(proc, worker_id)
+            except BaseException as exc:
+                with errors_lock:
+                    start_errors.append(exc)
+
         if start_method in ("spawn", "forkserver"):
             spawn_threads: list[threading.Thread] = []
-            for _, proc, _, _, _ in built:
-                t = threading.Thread(target=proc.start, daemon=True)
+            for _, proc, _, wid, _ in built:
+                t = threading.Thread(target=start, args=(proc, wid), daemon=True)
                 t.start()
                 spawn_threads.append(t)
             for t in spawn_threads:
                 t.join()
         else:
-            for _, proc, _, _, _ in built:
-                proc.start()
+            for _, proc, _, wid, _ in built:
+                start(proc, wid)
         spawn_s = (time.perf_counter_ns() - spawn_t0) / 1e9
         _startup_log(
             f"spawned {state.parallelism} workers for {queue_label} "
             f"in {spawn_s:.2f}s ({start_method})"
         )
+
+        if start_errors:
+            # Do not install a partial pool: worker indices also index reply
+            # permits, so missing slots cannot be compacted safely.
+            for _, proc, sem, wid, resp_queue in built:
+                if proc.pid is not None:
+                    proc.terminate()
+                    proc.join(timeout=_GRACEFUL_TERMINATE_JOIN)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join()
+                response = self._service_responses.pop(wid, None)
+                self._service_pending.pop(wid, None)
+                if response is not None:
+                    self._close_ipc_queue(response, hard=True)
+                cleanup_semaphores([sem])
+            raise start_errors[0]
 
         # Phase 3: Install started processes into state.
         for idx, proc, sem, wid, resp_queue in built:
@@ -1820,6 +1932,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             )
             for wid in state.worker_ids:
                 resp = self._service_responses.pop(wid, None)
+                self._service_pending.pop(wid, None)
                 self._close_ipc_queue(resp, hard=hard)
 
             state.workers.clear()
@@ -1861,6 +1974,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                     name,
                     self._service_queue,
                     response_queue,
+                    self._service_cancelled,
+                    self._service_pending[worker_id],
                 )
             else:
                 ctx[name] = value
@@ -2186,6 +2301,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         raise NotImplementedError("ProcessStageRunner does not support live scaling")
 
     def close(self, *, hard: bool = False) -> None:
+        self._service_cancelled.value = 1
         _shutdown_debug("close() called")
         with ShutdownWatchdog(_SHUTDOWN_WATCHDOG_TIMEOUT, "close()"):
             with self._context_lock:

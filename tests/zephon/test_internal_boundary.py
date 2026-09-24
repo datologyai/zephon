@@ -21,6 +21,15 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
+    # Control-service crash/startup tests require real internal runners and stages.
+    "tests/integration/test_process_control_services.py": frozenset(
+        {
+            "zephon._internal.graph:Node",
+            "zephon._internal.graph:Stage",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.runners.process:ProcessStageRunner",
+        }
+    ),
     # Reset sticky catalog state and the mmap registry between tests.
     "tests/conftest.py": frozenset(
         {
