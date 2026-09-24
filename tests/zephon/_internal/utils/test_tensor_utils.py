@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import warnings
+from typing import Any
 
 import pytest
 
@@ -11,9 +12,11 @@ from zephon._internal.utils.tensor_utils import (
     count_valid_tokens,
     flatten_sequences,
     labels_to_loss_mask,
+    mask_eos_labels,
     mask_padding_labels,
     padding_lengths_to_mask,
     positions_to_cu_seqlens,
+    sequence_positions,
     stack_sequences,
 )
 
@@ -334,3 +337,57 @@ def test_positions_to_cu_seqlens_rejects_malformed_positions(
         rows = pytest.importorskip("torch").tensor(rows)
     with pytest.raises(ValueError, match="start at zero|2-D"):
         positions_to_cu_seqlens(rows, framework, flatten=False)
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+def test_mask_eos_labels_matches_inputs_without_mutating_sources(
+    framework: str | None,
+) -> None:
+    inputs = [[1, 2, 7], [0, 2, 2]]
+    labels = [[2, 7, 2], [2, 2, 8]]
+    tokens: Any = inputs
+    targets: Any = labels
+    if framework == "numpy":
+        np = pytest.importorskip("numpy")
+        tokens, targets = (
+            np.array(inputs, dtype=np.int32),
+            np.array(labels, dtype=np.int32),
+        )
+    elif framework == "torch":
+        torch = pytest.importorskip("torch")
+        tokens, targets = (
+            torch.tensor(inputs, dtype=torch.int32),
+            torch.tensor(labels, dtype=torch.int32),
+        )
+    masked = mask_eos_labels(targets, tokens, 2, -9, framework)
+    assert (masked.tolist() if framework else masked) == [[2, -9, 2], [2, -9, -9]]
+    assert (targets.tolist() if framework else targets) == labels
+    assert (tokens.tolist() if framework else tokens) == inputs
+    if framework:
+        assert masked.dtype == targets.dtype
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+def test_sequence_positions_returns_independent_contiguous_rows(
+    framework: str | None,
+) -> None:
+    rows = [[11, 12, 13], [21, 22, 23]]
+    tokens: Any = rows
+    if framework == "numpy":
+        np = pytest.importorskip("numpy")
+        tokens = np.array(rows, dtype=np.int64)
+    elif framework == "torch":
+        torch = pytest.importorskip("torch")
+        tokens = torch.tensor(rows, dtype=torch.int64)
+    positions = sequence_positions(tokens, framework)
+    assert (positions.tolist() if framework else positions) == [[0, 1, 2], [0, 1, 2]]
+    positions[0][0] = 9
+    assert positions[1][0] == 0
+    assert (tokens.tolist() if framework else tokens) == rows
+    if framework:
+        assert positions.dtype == tokens.dtype
+    if framework == "torch":
+        assert positions.device == tokens.device
+        assert positions.view(-1).tolist() == [9, 1, 2, 0, 1, 2]
+    elif framework == "numpy":
+        assert positions.flags.c_contiguous

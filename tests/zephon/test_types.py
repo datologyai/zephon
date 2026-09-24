@@ -1,5 +1,6 @@
 import copy
 import dataclasses
+import warnings
 from typing import Any
 
 import pytest
@@ -295,6 +296,42 @@ class TestToTrainingExtraFields:
         batch = SampleBatch(records=(r0,))
         with pytest.raises(ValueError, match="Extra field 'attention_mask' not found"):
             batch.to_training(extra_fields=["attention_mask"], dtype=None)
+
+    @pytest.mark.parametrize(
+        ("field", "return_labels"),
+        [
+            ("input_ids", False),
+            ("input_ids", True),
+            ("labels", True),
+            ("ids", False),
+            ("texts", False),
+        ],
+    )
+    def test_extra_fields_cannot_overwrite_generated_outputs(
+        self, field: str, return_labels: bool
+    ) -> None:
+        record = _rec((0, 0, 0), 0, 0, {"encoded": [1, 7, 2, 1], field: [99] * 4})
+        batch = SampleBatch(records=(record,))
+        with pytest.raises(
+            ValueError, match=f"cannot overwrite generated field '{field}'"
+        ):
+            batch.to_training(
+                dtype=None,
+                tokens_field="encoded",
+                return_labels=return_labels,
+                eos_mask_loss=return_labels,
+                eos_token_id=2 if return_labels else None,
+                extra_fields=(field,),
+                rename_fields={"input_ids": "tokens"},
+            )
+
+    def test_extra_labels_allowed_when_labels_are_not_generated(self) -> None:
+        record = _rec((0, 0, 0), 0, 0, {"tokens": [1, 2, 3], "labels": [4, 5, 6]})
+        out = SampleBatch(records=(record,)).to_training(
+            dtype=None, extra_fields=("labels",)
+        )
+        assert out["input_ids"] == [[1, 2, 3]]
+        assert out["labels"] == [[4, 5, 6]]
 
 
 class TestToTrainingPositions:
@@ -1859,3 +1896,319 @@ def test_return_cu_seqlens_ragged_lists_and_empty_rows() -> None:
     out = batch.to_training(dtype=None, return_cu_seqlens=True)
     assert out["cu_seqlens"] == [[0, 0, 0], [0, 2, 3], [0, 0, 0], [0, 2, 2]]
     assert out["max_seqlen"] == [0, 2, 0, 2]
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_eos_masking_and_sequence_positions_preserve_document_boundaries(
+    conversion_dtype: Any, flatten: bool
+) -> None:
+    # Distinct BOS=1, EOS=2, PAD=0. Row 0 also masks a prompt token and pads.
+    payloads = [
+        {
+            "tokens": [1, 10, 2, 1, 20, 2, 0, 0],
+            "positions": [0, 1, 2, 0, 1, 2, 0, 1],
+            "loss_mask": [0, 0, 1, 1, 1, 1, 1, 1],
+        },
+        {
+            "tokens": [1, 30, 31, 2, 1, 40, 41, 2],
+            "positions": [0, 1, 2, 3, 0, 1, 2, 3],
+            "loss_mask": [1] * 8,
+        },
+    ]
+    original = copy.deepcopy(payloads)
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, payloads[0], padding_length=2),
+            _rec((0, 0, 1), 0, 0, payloads[1]),
+        )
+    )
+    options: dict[str, Any] = dict(
+        dtype=conversion_dtype,
+        return_labels=True,
+        ignore_index=-7,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        return_cu_seqlens=True,
+        flatten=flatten,
+        rename_fields={"input_ids": "tokens", "positions": "position_ids"},
+        exclude_fields=("ids", "texts"),
+    )
+    baseline = batch.to_training(**options)
+    with pytest.warns(UserWarning, match="eos_token_id is ignored") as caught:
+        disabled = batch.to_training(**options, eos_token_id=2)
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    assert {
+        k: _values(v) if hasattr(v, "tolist") else v for k, v in disabled.items()
+    } == {k: _values(v) if hasattr(v, "tolist") else v for k, v in baseline.items()}
+    out = batch.to_training(
+        **options, eos_mask_loss=True, eos_token_id=2, position_mode="sequence"
+    )
+    expected = {
+        "tokens": [[1, 10, 2, 1, 20, 2, 0], [1, 30, 31, 2, 1, 40, 41]],
+        "labels": [[-7, 2, -7, 20, 2, -7, -7], [30, 31, 2, -7, 40, 41, 2]],
+        "loss_mask": [
+            [0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0],
+        ],
+        "position_ids": [list(range(7)), list(range(7))],
+    }
+    assert set(out) == {*expected, "cu_seqlens", "max_seqlen", "num_valid_tokens"}
+    for name, rows in expected.items():
+        assert _values(out[name]) == (
+            [value for row in rows for value in row] if flatten else rows
+        )
+    assert out["num_valid_tokens"] == 9
+    assert baseline["num_valid_tokens"] == 11
+    original_positions = [payload["positions"][:-1] for payload in original]
+    assert _values(baseline["position_ids"]) == (
+        [value for row in original_positions for value in row]
+        if flatten
+        else original_positions
+    )
+    assert _values(out["cu_seqlens"]) == (
+        [0, 3, 6, 7, 11, 14] if flatten else [[0, 3, 6, 7], [0, 4, 7, 7]]
+    )
+    assert _values(out["cu_seqlens"]) == _values(baseline["cu_seqlens"])
+    assert (out["max_seqlen"] if flatten else _values(out["max_seqlen"])) == (
+        4 if flatten else [3, 4]
+    )
+    _assert_loss_mask_dtype(out["loss_mask"], conversion_dtype)
+    if conversion_dtype is not None:
+        assert out["labels"].dtype == conversion_dtype
+        assert out["position_ids"].dtype == conversion_dtype
+        if type(out["tokens"]).__module__ == "torch":
+            assert out["position_ids"].device == out["tokens"].device
+    assert payloads == original
+
+
+def test_eos_masking_matches_every_occurrence_of_shared_bos_eos_id() -> None:
+    # ID zero is valid. Literal ID matching also masks first-content targets.
+    batch = SampleBatch(
+        records=(_rec((0, 0, 0), 0, 0, {"tokens": [0, 11, 0, 0, 22, 0]}),)
+    )
+    out = batch.to_training(
+        dtype=None, return_labels=True, eos_mask_loss=True, eos_token_id=0
+    )
+    assert out["input_ids"] == [[0, 11, 0, 0, 22]]
+    assert out["labels"] == [[-100, 0, -100, -100, 0]]
+    assert "loss_mask" not in out
+    assert "positions" not in out
+
+
+def test_sequence_positions_without_payload_positions(conversion_dtype: Any) -> None:
+    batch = SampleBatch(
+        records=tuple(_rec((0, 0, i), 0, 0, {"tokens": [10, 11, 12]}) for i in range(2))
+    )
+    out = batch.to_training(dtype=conversion_dtype, position_mode="sequence")
+    assert _values(out["positions"]) == [[0, 1, 2], [0, 1, 2]]
+    assert _values(out["input_ids"]) == [[10, 11, 12], [10, 11, 12]]
+    if conversion_dtype is not None:
+        if type(out["positions"]).__module__ == "torch":
+            # Tensor-parallel broadcast helpers commonly flatten with view().
+            assert out["positions"].view(-1).tolist() == [0, 1, 2, 0, 1, 2]
+        out["positions"][0, 0] = 7
+        assert out["positions"][1, 0] == 0
+    # Synthetic positions cannot stand in for missing document boundaries.
+    with pytest.raises(ValueError, match="requires a 'positions' field"):
+        batch.to_training(
+            dtype=conversion_dtype, position_mode="sequence", return_cu_seqlens=True
+        )
+
+
+@pytest.mark.parametrize("tokens", [[], [2]])
+def test_training_policies_with_empty_rows(
+    conversion_dtype: Any, tokens: list[int]
+) -> None:
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"tokens": tokens}),))
+    out = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+        position_mode="sequence",
+    )
+    for name in ("input_ids", "labels", "loss_mask", "positions"):
+        assert _values(out[name]) == [[]]
+    assert out["num_valid_tokens"] == 0
+
+
+def test_training_policies_with_ragged_lists() -> None:
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, {"tokens": row})
+            for i, row in enumerate([[], [2, 10, 2], [11, 2, 12, 13]])
+        )
+    )
+    out = batch.to_training(
+        dtype=None,
+        return_labels=True,
+        flatten=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+        position_mode="sequence",
+    )
+    assert out["input_ids"] == [2, 10, 11, 2, 12]
+    assert out["labels"] == [-100, 2, 2, -100, 13]
+    assert out["positions"] == [0, 1, 0, 1, 2]
+
+
+def test_training_policies_with_empty_batch() -> None:
+    out = SampleBatch(records=()).to_training(
+        return_labels=True,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        return_cu_seqlens=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+        position_mode="sequence",
+        flatten=True,
+        rename_fields={"positions": "position_ids"},
+        exclude_fields=("ids", "texts"),
+    )
+    assert out == {
+        "position_ids": [],
+        "loss_mask": [],
+        "num_valid_tokens": 0,
+        "cu_seqlens": [0],
+        "max_seqlen": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"position_mode": "document"}, "position_mode must be"),
+        ({"eos_mask_loss": True, "eos_token_id": 2}, "requires return_labels=True"),
+        *[
+            ({"eos_token_id": value}, "nonnegative integer")
+            for value in (-1, 1.5, "2", True)
+        ],
+    ],
+)
+def test_training_policies_reject_invalid_options(
+    options: dict[str, Any], message: str
+) -> None:
+    # Validation precedes the empty-batch fast path and framework selection.
+    with pytest.raises(ValueError, match=message):
+        SampleBatch(records=()).to_training(dtype=None, **options)
+
+
+def test_sequence_positions_rejects_nested_tokens(conversion_dtype: Any) -> None:
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"tokens": [[1, 2], [3, 4]]}),))
+    with pytest.raises(ValueError, match="requires 2-D input_ids"):
+        batch.to_training(dtype=conversion_dtype, position_mode="sequence")
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_eos_masking_requires_explicit_id(empty: bool) -> None:
+    records = () if empty else (_rec((0, 0, 0), 0, 0, {"tokens": [1, 2]}),)
+    batch = SampleBatch(records=records)
+    with pytest.raises(ValueError, match="requires an explicit eos_token_id"):
+        batch.to_training(dtype=None, return_labels=True, eos_mask_loss=True)
+
+
+def test_eos_masking_accepts_numpy_integer_id() -> None:
+    np = pytest.importorskip("numpy")
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, {"tokens": [7, 2, 8]}),))
+    out = batch.to_training(
+        dtype=None, return_labels=True, eos_mask_loss=True, eos_token_id=np.int64(2)
+    )
+    assert out["labels"] == [[2, -100]]
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_labels"),
+    [
+        ({}, [7, 2, 1, 8, 2]),
+        ({"eos_mask_loss": True, "eos_token_id": 2}, [7, 2, -100, 8, 2]),
+        ({"eos_mask_loss": True, "eos_token_id": 1}, [-100, 2, 1, -100, 2]),
+    ],
+)
+def test_explicit_token_field_is_independent_of_eos_policy(
+    options: dict[str, Any], expected_labels: list[int]
+) -> None:
+    record = _rec(
+        (0, 0, 0),
+        0,
+        0,
+        {
+            "input_ids": [9] * 6,
+            "encoded": [1, 7, 2, 1, 8, 2],
+            "positions": [0, 1, 2, 0, 1, 2],
+        },
+    )
+    batch = SampleBatch(records=(record,))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        result = batch.to_training(
+            dtype=None,
+            tokens_field="encoded",
+            return_labels=True,
+            return_loss_mask=True,
+            return_cu_seqlens=True,
+            position_mode="sequence",
+            rename_fields={"input_ids": "tokens", "labels": "targets"},
+            **options,
+        )
+    assert result["tokens"] == [[1, 7, 2, 1, 8]]
+    assert result["targets"] == [expected_labels]
+    assert result["loss_mask"] == [[float(label != -100) for label in expected_labels]]
+    assert result["positions"] == [[0, 1, 2, 3, 4]]
+    assert result["cu_seqlens"] == [[0, 3, 5]]
+    assert "input_ids" not in result and "labels" not in result
+
+
+@pytest.mark.parametrize("missing_index", [0, 1])
+def test_missing_explicit_token_field_does_not_fall_back(missing_index: int) -> None:
+    payloads = [{"encoded": [1, 2], "input_ids": [9, 9]} for _ in range(2)]
+    del payloads[missing_index]["encoded"]
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, payload) for i, payload in enumerate(payloads)
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"Field 'encoded' not found in payload at index {missing_index}",
+    ):
+        batch.to_training(dtype=None, tokens_field="encoded", return_labels=True)
+
+
+@pytest.mark.parametrize("boundaries", [False, True])
+@pytest.mark.parametrize("explicit_positions", [False, True])
+def test_sequence_positions_only_stack_originals_for_attention_boundaries(
+    conversion_dtype: Any,
+    boundaries: bool,
+    explicit_positions: bool,
+) -> None:
+    from unittest.mock import patch
+
+    import zephon.types as types_module
+
+    batch = SampleBatch(
+        records=(
+            _rec(
+                (0, 0, 0),
+                0,
+                0,
+                {"tokens": [1, 10, 2, 1, 20, 2], "positions": [0, 1, 2, 0, 1, 2]},
+            ),
+        )
+    )
+    with patch.object(
+        types_module, "_stack_sequences", wraps=types_module._stack_sequences
+    ) as stack:
+        out = batch.to_training(
+            dtype=conversion_dtype,
+            return_labels=True,
+            position_mode="sequence",
+            return_cu_seqlens=boundaries,
+            extra_fields=("positions",) if explicit_positions else (),
+        )
+    assert stack.call_count == (2 if boundaries else 1)
+    assert _values(out["positions"]) == [[0, 1, 2, 3, 4]]
+    if boundaries:
+        assert _values(out["cu_seqlens"]) == [[0, 3, 5]]

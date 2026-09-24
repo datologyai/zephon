@@ -3,10 +3,21 @@
 
 """Canonical data model shared across the core data-loading pipeline."""
 
+import warnings
 from collections import Counter
 from collections.abc import Sized
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence, TypeAlias, cast
+from numbers import Integral
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterable,
+    Literal,
+    Mapping,
+    Sequence,
+    TypeAlias,
+    cast,
+)
 
 from zephon._internal.utils.length_extraction import (
     TOKEN_FIELD_CANDIDATES as _TOKEN_FIELD_CANDIDATES,
@@ -24,6 +35,9 @@ from zephon._internal.utils.tensor_utils import (
     labels_to_loss_mask as _labels_to_loss_mask,
 )
 from zephon._internal.utils.tensor_utils import (
+    mask_eos_labels as _mask_eos_labels,
+)
+from zephon._internal.utils.tensor_utils import (
     mask_padding_labels as _mask_padding_labels,
 )
 from zephon._internal.utils.tensor_utils import (
@@ -37,6 +51,9 @@ from zephon._internal.utils.tensor_utils import (
 )
 from zephon._internal.utils.tensor_utils import (
     resolve_dtype as _resolve_dtype,
+)
+from zephon._internal.utils.tensor_utils import (
+    sequence_positions as _sequence_positions,
 )
 from zephon._internal.utils.tensor_utils import (
     slice_last_dim as _slice_last_dim,
@@ -500,6 +517,9 @@ class SampleBatch:
         return_loss_mask: bool = False,
         return_cu_seqlens: bool = False,
         return_padding_mask: bool = False,
+        eos_mask_loss: bool = False,
+        eos_token_id: int | None = None,
+        position_mode: Literal["preserve", "sequence"] = "preserve",
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
@@ -509,15 +529,17 @@ class SampleBatch:
         whose mask entry (shifted into label alignment, ``mask[:, 1:]``) is 0
         are set to ``ignore_index``. Set ``return_loss_mask=True`` to emit the
         final label-aligned mask, derived as ``labels != ignore_index`` after
-        both supervision and padding masking. Listing ``"loss_mask"`` in
+        supervision, padding, and optional EOS masking. Listing ``"loss_mask"`` in
         ``extra_fields`` together with ``return_labels`` is an error: extra
         fields are sliced input-aligned (``[:, :-1]``), the wrong alignment for
         a label mask. Without ``return_labels`` it is surfaced stacked and
         unshifted, like any data field.
 
         Args:
-            tokens_field: Field name containing token IDs, or "auto" to detect
-                from common field names (input_ids, tokens, token_ids, ids).
+            tokens_field: Field name containing token IDs. "auto" detects
+                common names (input_ids, tokens, token_ids, ids), in that order.
+                An explicit field takes precedence. Independent of EOS masking;
+                output uses "input_ids" before rename_fields.
             return_labels: If True, generates next-token prediction labels by
                 shifting tokens. input_ids becomes tokens[:, :-1] and labels
                 becomes tokens[:, 1:]. Extra fields are sliced like input_ids
@@ -533,7 +555,8 @@ class SampleBatch:
                 ["attention_mask"]). When return_labels=True they are sliced like
                 input_ids (drop the last token) to stay aligned with it. A
                 ``"positions"`` field (emitted by ``pack_flat``) is surfaced
-                automatically and need not be listed here.
+                automatically and need not be listed here. Extra fields cannot
+                overwrite generated output fields, such as input_ids or labels.
             ignore_index: Loss-ignore sentinel (default ``-100``). With
                 ``return_labels``, each record's trailing pad labels
                 (``meta.padding_length``) are set to this value.
@@ -578,7 +601,58 @@ class SampleBatch:
                 []/[] for boundaries/maxima, or [0]/0 when flattened. Renaming
                 and exclusion apply normally. Padding segments are preserved;
                 this metadata does not itself enable attention masking or
-                change labels. Works with or without return_labels.
+                change labels. Always uses the payload positions, independently
+                of position_mode. Works with or without return_labels.
+            eos_mask_loss: If True, set labels to ignore_index wherever the
+                corresponding input token equals eos_token_id. Requires
+                return_labels=True and a known EOS ID (see eos_token_id). For packed
+                ``[BOS, A, EOS, BOS, B, EOS]``, this masks the EOS -> BOS
+                prediction, not the A -> EOS or B -> EOS predictions. Requested
+                loss masks and valid-token counts reflect this masking, together
+                with padding and supervision masks.
+
+                Defaults to False to preserve existing label generation. For
+                documents bracketed with BOS and EOS, this keeps EOS -> BOS
+                transitions supervised. Enable it when the training recipe
+                excludes predictions made from EOS tokens.
+
+                CAREFUL: matching is by token ID, not document boundaries. If
+                BOS and EOS share an ID, this also masks predictions after BOS,
+                including the first content token.
+            eos_token_id: Nonnegative EOS ID, required when eos_mask_loss=True.
+                Supplying an ID alone does not enable masking and warns when
+                eos_mask_loss=False.
+                Automatic EOS propagation is in progress; for now, account for
+                Zephon EOS overrides and tokenizer defaults when choosing the ID.
+            position_mode: How to emit model positions. "preserve" (default)
+                forwards payload positions, sliced like input_ids, and omits
+                them when absent. With pack_flat(emit_positions=True), these
+                restart at zero for each packed segment: two three-token
+                documents have positions ``[0, 1, 2, 0, 1, 2]``. Preserving them
+                keeps the packer's document structure and existing caller
+                behavior, and is a natural default for independent packed
+                examples. It does not itself prevent attention across documents.
+
+                "sequence" generates ``[0, 1, ..., S-1]`` in every input row,
+                including when payload positions are absent. The same example
+                becomes ``[0, 1, 2, 3, 4, 5]``. Use it for recipes that number a
+                packed row continuously. Numbering restarts per row even with
+                flatten=True. Generated positions use the input dtype/device;
+                empty batches return an empty list.
+
+                For reference, TorchTitan's packed-text loaders preserve
+                segment-reset positions by default, whereas Megatron gives the
+                user control via --reset-position-ids and defaults to continuous
+                positions.
+
+                Resetting is not required for standard RoPE correctness: with
+                fixed rotary frequencies and isolated documents, a common
+                position offset cancels from within-document attention scores.
+                These choices can change training with cross-document attention
+                or absolute position embeddings. They never change loss masking.
+                Requested cu_seqlens/max_seqlen still use the original payload
+                positions, so document boundaries survive continuous numbering;
+                those original positions are still required for this metadata.
 
         Returns:
             Dictionary with:
@@ -588,8 +662,8 @@ class SampleBatch:
             - "labels": Shifted labels tensor (only if return_labels=True), with
               each record's trailing pad labels and loss-masked positions set to
               ignore_index
-            - "positions": Stacked document-position tensor, present iff the
-              payloads carry one (sliced to match input_ids if return_labels=True)
+            - "positions": Payload positions sliced to match input_ids, or
+              generated per-row positions when position_mode="sequence"
             - Any extra_fields as stacked tensors (shifted if return_labels=True)
             - "num_valid_tokens": Number of non-ignored labels (only if
               return_num_valid_tokens=True)
@@ -610,12 +684,17 @@ class SampleBatch:
                 with return_labels=True, or if rename_fields references a
                 missing source key in a nonempty batch or produces a key collision.
                 Also if return_num_valid_tokens or return_loss_mask is used without
-                return_labels, or an extra field would overwrite the requested
-                num_valid_tokens, padding_mask, cu_seqlens, or max_seqlen. Also
-                if requested padding lengths fall outside their token rows or
-                tokens are not 2-D for a tensor/array padding mask. Also if requested
-                boundaries cannot be derived from aligned, zero-start positions
-                or represented as int32.
+                return_labels, or an extra field would overwrite a generated
+                output field. Also if requested padding lengths fall outside their
+                token rows or tokens are not 2-D for a tensor/array padding mask.
+                Also if requested boundaries cannot be derived from aligned,
+                zero-start positions or represented as int32, position_mode is
+                unknown, eos_token_id is not a nonnegative integer, or
+                eos_mask_loss is used without
+                return_labels=True or a known EOS ID.
+
+        Warns:
+            UserWarning: If eos_token_id is supplied with eos_mask_loss=False.
         """
         if isinstance(exclude_fields, str):
             raise TypeError("exclude_fields must be a sequence of names, not a string")
@@ -624,6 +703,25 @@ class SampleBatch:
         if return_padding_mask and "padding_mask" in extra_fields:
             raise ValueError(
                 "extra_fields cannot include 'padding_mask' with return_padding_mask=True"
+            )
+        if position_mode not in ("preserve", "sequence"):
+            raise ValueError("position_mode must be 'preserve' or 'sequence'")
+        if eos_token_id is not None and (
+            isinstance(eos_token_id, bool)
+            or not isinstance(eos_token_id, Integral)
+            or eos_token_id < 0
+        ):
+            raise ValueError("eos_token_id must be a nonnegative integer or None")
+        if eos_mask_loss and not return_labels:
+            raise ValueError("eos_mask_loss requires return_labels=True")
+        if eos_mask_loss and eos_token_id is None:
+            raise ValueError("eos_mask_loss requires an explicit eos_token_id")
+        if eos_token_id is not None and not eos_mask_loss:
+            warnings.warn(
+                "eos_token_id is ignored when eos_mask_loss=False; "
+                + "set eos_mask_loss=True to enable EOS loss masking.",
+                UserWarning,
+                stacklevel=2,
             )
         if return_cu_seqlens and {"cu_seqlens", "max_seqlen"}.intersection(
             extra_fields
@@ -656,6 +754,8 @@ class SampleBatch:
                 empty["loss_mask"] = []
             if return_padding_mask:
                 empty["padding_mask"] = []
+            if position_mode == "sequence":
+                empty["positions"] = []
             if return_cu_seqlens:
                 empty["cu_seqlens"] = [0] if flatten else []
                 empty["max_seqlen"] = 0 if flatten else []
@@ -737,6 +837,20 @@ class SampleBatch:
 
         # Handle extra fields
         for field_name, field_lists in extra_data.items():
+            # Final renaming cannot detect an input/label overwrite that already
+            # happened here, so reject collisions before assigning extras.
+            if field_name in result:
+                raise ValueError(
+                    f"extra_fields cannot overwrite generated field '{field_name}'"
+                )
+            if (
+                field_name == "positions"
+                and position_mode == "sequence"
+                and not return_cu_seqlens
+            ):
+                # Sequence mode replaces these; only attention boundaries
+                # require materializing the packer's original positions.
+                continue
             field_tensor = _stack_sequences(field_lists, resolved_dtype, framework)
 
             if return_labels:
@@ -762,6 +876,16 @@ class SampleBatch:
                 # extra_fields may have already emitted it explicitly.
                 result["loss_mask"] = masks
 
+        if eos_mask_loss:
+            assert eos_token_id is not None  # Validated before extracting payloads.
+            result["labels"] = _mask_eos_labels(
+                result["labels"],
+                result["input_ids"],
+                eos_token_id,
+                ignore_index,
+                framework,
+            )
+
         if return_loss_mask:
             result["loss_mask"] = _labels_to_loss_mask(
                 result["labels"], ignore_index, framework
@@ -784,6 +908,10 @@ class SampleBatch:
                 result["positions"], framework, flatten=flatten
             )
             sequence_metadata = {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen}
+
+        # Derive attention boundaries before replacing the model's positions.
+        if position_mode == "sequence":
+            result["positions"] = _sequence_positions(result["input_ids"], framework)
 
         if flatten:
             result = {

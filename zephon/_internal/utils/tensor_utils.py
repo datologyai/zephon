@@ -203,6 +203,57 @@ def padding_lengths_to_mask(
     ]
 
 
+def mask_eos_labels(
+    labels: Any,
+    input_ids: Any,
+    eos_token_id: int,
+    replacement: int,
+    framework: str | None,
+) -> Any:
+    """Mask labels at EOS input positions, rather than matching the target ID."""
+    if framework == "torch":
+        return labels.masked_fill(input_ids == eos_token_id, replacement)
+    if framework == "numpy":
+        import numpy as np
+
+        return np.where(input_ids == eos_token_id, replacement, labels)
+    return [
+        [
+            replacement if token == eos_token_id else label
+            for token, label in zip(row, labs)
+        ]
+        for row, labs in zip(input_ids, labels)
+    ]
+
+
+def sequence_positions(input_ids: Any, framework: str | None) -> Any:
+    """Number scalar tokens from zero in each input row, matching dtype/device."""
+    if framework in ("torch", "numpy"):
+        if input_ids.ndim != 2:
+            raise ValueError("position_mode='sequence' requires 2-D input_ids")
+        if framework == "torch":
+            import torch
+
+            return torch.arange(
+                input_ids.shape[1], dtype=input_ids.dtype, device=input_ids.device
+            ).repeat(input_ids.shape[0], 1)
+        import numpy as np
+
+        return np.broadcast_to(
+            np.arange(input_ids.shape[1], dtype=input_ids.dtype), input_ids.shape
+        ).copy()
+    # List stacking does not validate rank, so nested payloads can still arrive.
+    # Reject them instead of assigning one position per container as if scalar.
+    if any(
+        isinstance(value, (list, tuple, dict, str, bytes))
+        or getattr(value, "ndim", 0) != 0
+        for row in input_ids
+        for value in row
+    ):
+        raise ValueError("position_mode='sequence' requires 2-D input_ids")
+    return [list(range(len(row))) for row in input_ids]
+
+
 def positions_to_cu_seqlens(
     positions: Any, framework: str | None, *, flatten: bool
 ) -> tuple[Any, Any]:

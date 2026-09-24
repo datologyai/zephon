@@ -58,6 +58,9 @@ def training_batch(batch: SampleBatch) -> None:
         return_loss_mask=True,
         return_padding_mask=True,
         return_cu_seqlens=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+        position_mode="sequence",
         rename_fields={"input_ids": "input"},
     )
     count: int = converted["num_valid_tokens"]

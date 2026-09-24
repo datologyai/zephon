@@ -54,6 +54,24 @@ def _round_trip_resolved(coalesced: CoalescedMicrobatch) -> list:
 # ---------------------------------------------------------------------------
 # Basic round-trip
 # ---------------------------------------------------------------------------
+def test_training_policies_after_coalesced_transport() -> None:
+    """EOS loss masking works after SHM transport and lazy payload resolution."""
+    tokens = torch.tensor([1, 10, 2, 1, 20, 2])
+    batch = SampleBatch(
+        records=(SampleRecord(meta=_meta(0), payload={"input_ids": tokens}),),
+    )
+    coalesced = coalesce_microbatch([batch], shm_min_size=0)
+    assert coalesced is not None
+    [restored_batch] = _round_trip(coalesced)
+    assert isinstance(restored_batch.records[0].payload, LazyPayload)
+    resolve_lazy_payloads([restored_batch])
+    assert restored_batch.to_training(
+        return_labels=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+    )["labels"].tolist() == [[10, 2, -100, 20, 2]]
+
+
 class TestCoalesceMicrobatchRoundTrip:
     """Coalesce → ForkingPickler → pickle.loads → resolve should recover original data."""
 

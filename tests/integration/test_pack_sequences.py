@@ -184,6 +184,46 @@ def test_pack_flat_to_training_end_to_end(
                 batch.to_training(dtype=dtype, return_cu_seqlens=True, flatten=flatten)
 
 
+def test_pack_flat_eos_loss_and_continuous_positions() -> None:
+    """Model positions and EOS loss policy leave packed attention boundaries intact."""
+    torch = pytest.importorskip("torch")
+    dataset = Dataset.from_dict(
+        "docs",
+        {0: InMemoryShard([{"tokens": [1, 11, 2]}, {"tokens": [1, 22, 2]}])},
+    )
+    work = StaticMixtureWorkSource(
+        [dataset],
+        {"docs": 1.0},
+        chunk_size=2,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = Pipeline(work)
+    pipeline.pack_flat(max_length=6, algorithm="wrap", emit_positions=True)
+    pipeline.batch(1)
+    pipeline.options(deterministic=True, max_workers=1, runner="inline")
+
+    batches = list(pipeline)
+    assert len(batches) == 1
+    out = batches[0].to_training(
+        dtype=torch.long,
+        return_labels=True,
+        return_loss_mask=True,
+        return_cu_seqlens=True,
+        return_num_valid_tokens=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+        position_mode="sequence",
+    )
+    assert out["input_ids"].tolist() == [[1, 11, 2, 1, 22]]
+    assert out["labels"].tolist() == [[11, 2, -100, 22, 2]]
+    assert out["loss_mask"].tolist() == [[1.0, 1.0, 0.0, 1.0, 1.0]]
+    assert out["positions"].tolist() == [[0, 1, 2, 3, 4]]
+    assert out["cu_seqlens"].tolist() == [[0, 3, 5]]
+    assert out["max_seqlen"].tolist() == [3]
+    assert out["num_valid_tokens"] == 4
+
+
 def _training_reference(batch: SampleBatch, *, supervised: bool) -> dict[str, Any]:
     """Use source document identities and supervision, not emitted positions/masks."""
     source = {
