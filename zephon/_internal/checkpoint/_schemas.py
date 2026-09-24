@@ -815,6 +815,19 @@ def _engine_state_errors(state: EngineStateV1 | EngineStateV2) -> list[str]:
         if not isinstance(val, dict):
             errors.append(f"{name} must be a dict, got {type(val).__name__}")
 
+    # Validate before v1 migration can coerce values or collapse peer keys.
+    if not isinstance(state.rr_next_idx, dict):
+        errors.append(
+            f"rr_next_idx must be a dict, got {type(state.rr_next_idx).__name__}"
+        )
+    else:
+        for key, idx in state.rr_next_idx.items():
+            if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
+                errors.append(
+                    f"rr_next_idx[{key!r}] must be a non-negative integer "
+                    f"(not bool), got {idx!r}"
+                )
+
     if isinstance(state.world, dict):
         if "canonical_replicas" not in state.world:
             errors.append("world missing 'canonical_replicas'")
@@ -878,11 +891,22 @@ class EngineStateV2(CheckpointMixin):
     def __post_init__(self) -> None:
         errors = _engine_state_errors(self)
         if isinstance(self.rr_next_idx, dict):
-            errors.extend(
-                f"rr_next_idx key {key!r} is not '{{worker}}/{{active}}:{{lanes}}'"
-                for key in self.rr_next_idx
-                if not (isinstance(key, str) and _RR_KEY.fullmatch(key))
-            )
+            for key, idx in self.rr_next_idx.items():
+                match = _RR_KEY.fullmatch(key) if isinstance(key, str) else None
+                if match is None:
+                    errors.append(
+                        f"rr_next_idx key {key!r} is not '{{worker}}/{{active}}:{{lanes}}'"
+                    )
+                    continue
+                lanes = match.group(1)
+                lane_count = len(lanes.split(",")) if lanes else 0
+                # Idle workers may retain an empty-lane entry, always at zero.
+                if isinstance(idx, int) and idx >= max(1, lane_count):
+                    errors.append(
+                        f"rr_next_idx[{key!r}]={idx} is out of range for "
+                        f"{lane_count} owned lanes (expected "
+                        f"0 <= index < {max(1, lane_count)})"
+                    )
         if errors:
             raise ValueError(
                 "EngineStateV2 invariants violated:\n  - " + "\n  - ".join(errors)

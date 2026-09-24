@@ -10,6 +10,7 @@ import pytest
 from zephon._internal.checkpoint import (
     CursorStateV1,
     EngineStateV1,
+    EngineStateV2,
     StaticMixtureStateV1,
     StaticMixtureStateV2,
     StaticMixtureStateV3,
@@ -593,6 +594,57 @@ def test_engine_lane_emitted_survives_load_migration_chain():
     raw = _minimal_engine_raw(lane_emitted={"0": 7})
     e = EngineStateV1.load(raw)
     assert e.lane_emitted == {"0": 7}
+
+
+@pytest.mark.parametrize(
+    ("version", "rr"),
+    [
+        pytest.param(1, [], id="v1-non-dict"),
+        pytest.param(1, {"0/1:0,1": 1.5}, id="v1-fractional"),
+        pytest.param(2, [], id="v2-non-dict"),
+        pytest.param(2, {"0/1:0,1": 1.5}, id="v2-fractional"),
+        pytest.param(2, {"0/1:0,1": True}, id="v2-bool"),
+        pytest.param(2, {"0/1:0,1": -1}, id="v2-negative"),
+        pytest.param(2, {"0/1:0,1": 2}, id="v2-out-of-range"),
+    ],
+)
+def test_engine_load_rejects_invalid_rr_state(version: int, rr: object) -> None:
+    """Malformed state must fail before restore can fall back or coerce it."""
+    raw = EngineStateV1.from_dict(_minimal_engine_raw()).to_dict()
+    if version == 1 and isinstance(rr, dict):
+        rr = {f"0:{key}": value for key, value in rr.items()}
+    raw.update(version=version, rr_next_idx=rr)
+    with pytest.raises(ValueError, match="rr_next_idx"):
+        EngineStateV2.load(raw)
+
+
+@pytest.mark.parametrize(
+    ("key", "idx"), [("0/1:0,1", 0), ("0/1:0,1", 1), ("0/1:0", 0), ("2/2:", 0)]
+)
+@pytest.mark.parametrize("version", [1, 2])
+def test_engine_load_preserves_valid_rr_pointer(
+    version: int, key: str, idx: int
+) -> None:
+    """Boundary pointers and the idle worker's zero survive migration/load."""
+    raw = EngineStateV1.from_dict(_minimal_engine_raw()).to_dict()
+    saved_key = f"0:{key}" if version == 1 else key
+    raw.update(version=version, rr_next_idx={saved_key: idx})
+    assert EngineStateV2.load(raw).rr_next_idx == {key: idx}
+
+
+@pytest.mark.parametrize("key", ["0/1:0", "2/2:"])
+def test_engine_v2_rejects_nonzero_single_or_empty_lane_pointer(key: str) -> None:
+    raw = EngineStateV1.from_dict(_minimal_engine_raw()).to_dict()
+    raw.update(version=2, rr_next_idx={key: 1})
+    with pytest.raises(ValueError, match="rr_next_idx"):
+        EngineStateV2.load(raw)
+
+
+def test_engine_v1_rejects_invalid_pointer_before_peer_collapse() -> None:
+    """An invalid value equal to an integer must not disappear during dedupe."""
+    raw = _minimal_engine_raw(rr_next_idx={"0:0/1:0,1": 1.0, "1:0/1:0,1": 1})
+    with pytest.raises(ValueError, match="rr_next_idx"):
+        EngineStateV2.load(raw)
 
 
 # -- to_dict() helper --------------------------------------------------------

@@ -1493,9 +1493,10 @@ class TestTPPeerResume:
             assert heads[r] + tails[r] == baseline[dp_id], f"rank {r} diverged"
 
     @pytest.mark.filterwarnings("ignore::UserWarning")
-    # Window-aligned cuts only: a mid-window cut into a new topology may
-    # permute the rest of the window (see Engine._check_mid_window_counts).
-    @pytest.mark.parametrize("cut", [2, 4])
+    # Adding TP peers leaves lane ownership unchanged, so even mid-window
+    # cuts must resume exactly. The odd cuts expose the pre-fix divergence;
+    # cuts 2 and 4 alone already passed before the shared RR key fix.
+    @pytest.mark.parametrize("cut", range(1, 6))
     def test_single_rank_checkpoint_resumes_into_tp_peers(
         self, tmp_path: Path, cut: int
     ) -> None:
