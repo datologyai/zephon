@@ -1130,24 +1130,29 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         )
 
     def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
-        """Reject a repeat dataset too small to fill its worst-case chunk quota.
+        """Reject a repeat dataset smaller than its worst-case chunk quota.
 
-        With repeat policy each dataset must hold enough samples to fill its
-        maximum possible per-chunk quota after a cursor reset. The accumulator
-        can carry up to ~1.0 of fractional remainder, so the worst-case single
-        chunk quota is ``ceil(weight * chunk_size)``. Without this the retry
-        loop in :meth:`compute_quotas` would spin forever (rollback -> same
-        accumulators -> same impossible quota).
+        A fractional share can draw ``ceil(weight * chunk_size) + 1`` in one
+        chunk: a ``deficit < 0`` credit can leave its accumulator above 1. An
+        integral share was never observed to overshoot, so it keeps the exact
+        bound; the runtime check in :meth:`compute_quotas` backstops both. No
+        quota exceeds ``chunk_size``, so the bound is capped there.
         """
         cfg = self._config
-        _validate_repeat_liveness(
-            cfg,
-            cursors,
-            lambda n: math.ceil(cfg.weights[n] * cfg.chunk_size),
-            lambda n: (
-                f"ceil(weight={cfg.weights[n]:.4g} * chunk_size={cfg.chunk_size})"
-            ),
-        )
+
+        def required(n: str) -> int:
+            share = cfg.weights[n] * cfg.chunk_size
+            if share.is_integer():
+                return int(share)
+            return min(math.ceil(share) + 1, cfg.chunk_size)
+
+        def formula(n: str) -> str:
+            share = f"weight={cfg.weights[n]:.4g} * chunk_size={cfg.chunk_size}"
+            if (cfg.weights[n] * cfg.chunk_size).is_integer():
+                return share
+            return f"min(ceil({share}) + 1, chunk_size)"
+
+        _validate_repeat_liveness(cfg, cursors, required, formula)
 
     # -- quota computation ------------------------------------------------
 
@@ -1257,6 +1262,19 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                         ):
                             self._accumulators = saved
                             return None
+                        if quota > cursor._total_samples:
+                            # A reset can never satisfy this quota; retrying
+                            # would spin forever.
+                            self._accumulators = saved
+                            raise RuntimeError(
+                                f"Dataset '{name}' "
+                                f"({cursor._total_samples} samples) drew a "
+                                f"quota of {quota} for one chunk "
+                                f"(chunk_size={cfg.chunk_size}): more than a "
+                                f"full pass, so retrying cannot converge. The "
+                                f"repeat liveness bound was violated; this is "
+                                f"a zephon bug."
+                            )
                         cursor.reset(reshuffle=cfg.reshuffle_on_repeat[name])
                         self._accumulators = saved
                         needs_retry = True

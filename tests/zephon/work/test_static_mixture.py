@@ -2387,10 +2387,10 @@ def test_max_repeats_one() -> None:
 def test_repeat_guard_rejects_too_few_samples() -> None:
     """Repeat policy must reject datasets that can't fill their per-chunk quota.
 
-    With weight=0.5 and chunk_size=10, the max single-chunk quota is
-    ceil(0.5 * 10) = 5.  A dataset with only 3 samples would cause an
-    infinite retry loop in _next_chunk_accumulator, so the constructor
-    must reject it.
+    With weight=0.5 and chunk_size=10 the share is integral, so the max
+    single-chunk quota is exactly 0.5 * 10 = 5.  A dataset with only 3
+    samples would cause an infinite retry loop in
+    AccumulatorStrategy.compute_quotas, so the constructor must reject it.
     """
     ds_small = make_dataset("small", 3)
     ds_big = make_dataset("big", 100)
@@ -2407,7 +2407,8 @@ def test_repeat_guard_rejects_2_samples_chunk5() -> None:
     """Regression: 2-sample dataset with chunk_size=5 would previously hang."""
     ds_small = make_dataset("small", 2)
     ds_big = make_dataset("big", 100)
-    with pytest.raises(ValueError, match="requires at least 3"):
+    # ceil(0.5 * 5) + 1 = 4
+    with pytest.raises(ValueError, match="requires at least 4"):
         StaticMixtureWorkSource(
             datasets=[ds_small, ds_big],
             mixture={"small": 0.5, "big": 0.5},
@@ -2417,8 +2418,8 @@ def test_repeat_guard_rejects_2_samples_chunk5() -> None:
 
 
 def test_repeat_guard_allows_exact_quota() -> None:
-    """When total_samples == ceil(weight * chunk_size), construction succeeds."""
-    # ceil(0.5 * 10) = 5, dataset has exactly 5 samples — should be fine
+    """An integral share needs only weight * chunk_size samples."""
+    # 0.5 * 10 = 5, dataset has exactly 5 samples — should be fine
     ds_exact = make_dataset("exact", 5)
     ds_big = make_dataset("big", 100)
     ws = StaticMixtureWorkSource(
@@ -2431,6 +2432,31 @@ def test_repeat_guard_allows_exact_quota() -> None:
     # Should produce chunks without hanging
     chunk = ws.next_chunk()
     assert chunk is not None
+
+
+def test_repeat_guard_integral_share_exact_amid_fractional_shares() -> None:
+    """An integral share keeps the exact bound even when other shares are fractional."""
+    # a: 0.4 * 5 = 2 (integral); b, c: 1.5 each (fractional, bound 3)
+    datasets = [
+        make_dataset("a", 2),
+        make_dataset("b", 3),
+        make_dataset("c", 3),
+    ]
+    ws = StaticMixtureWorkSource(
+        datasets,
+        {"a": 0.4, "b": 0.3, "c": 0.3},
+        chunk_size=5,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    for _ in range(50):
+        assert ws.next_chunk() is not None
+    with pytest.raises(ValueError, match="requires at least 3"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 2), make_dataset("b", 2), make_dataset("c", 3)],
+            {"a": 0.4, "b": 0.3, "c": 0.3},
+            chunk_size=5,
+            exhausted_policy="repeat",
+        )
 
 
 def test_single_sample_dataset_repeat() -> None:
@@ -2448,6 +2474,72 @@ def test_single_sample_dataset_repeat() -> None:
     chunks = _drain_chunks(ws)
     assert len(chunks) == 4
     assert ws.next_chunk() is None
+
+
+# Dataset 'a' has w*C = 55/67 (ceil 1), yet the accumulator hands it a quota of
+# 2 on chunk 20 (index 19): the worst case is ceil(w*C) + 1, not ceil(w*C).
+_OVERSHOOT_WEIGHTS = {"a": 11 / 67, "b": 21 / 67, "c": 35 / 67}
+_OVERSHOOT_CHUNK_SIZE = 5
+_OVERSHOOT_CHUNK_INDEX = 19
+
+
+def _overshoot_work_source(a_samples: int) -> StaticMixtureWorkSource:
+    return StaticMixtureWorkSource(
+        [
+            make_dataset("a", a_samples),
+            make_dataset("b", 1000),
+            make_dataset("c", 1000),
+        ],
+        _OVERSHOOT_WEIGHTS,
+        chunk_size=_OVERSHOOT_CHUNK_SIZE,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+        reshuffle_on_repeat=False,
+    )
+
+
+def test_repeat_guard_rejects_dataset_at_ceil_quota() -> None:
+    """Regression: a repeat dataset holding only ceil(w*C) samples used to hang."""
+    with pytest.raises(ValueError, match="repeat policy requires"):
+        _overshoot_work_source(a_samples=1)
+
+
+@pytest.mark.timeout(60)
+def test_repeat_dataset_at_ceil_plus_one_survives_overshoot() -> None:
+    """ceil(w*C) + 1 samples fill the overshooting chunk without spinning."""
+    ws = _overshoot_work_source(a_samples=2).clone_for_lane(0, canonical_replicas=1)
+    for i in range(100):
+        chunk = ws.next_chunk()
+        assert chunk is not None
+        if i == _OVERSHOOT_CHUNK_INDEX:
+            assert len(chunk.components["a"]) == 2
+
+
+@pytest.mark.timeout(60)
+def test_accumulator_raises_when_reset_cannot_fill_quota() -> None:
+    """Bypassing the liveness guard must raise, not spin, and leave state intact."""
+    names = ("a", "b", "c")
+    config = _AllocationConfig(
+        component_order=names,
+        weights=_OVERSHOOT_WEIGHTS,
+        chunk_size=_OVERSHOOT_CHUNK_SIZE,
+        exhausted_policy=dict.fromkeys(names, "repeat"),
+        reshuffle_on_repeat=dict.fromkeys(names, False),
+        max_repeats=dict.fromkeys(names, None),
+    )
+    cursors = {
+        "a": _single_shard_cursor(0, 1),
+        "b": _single_shard_cursor(1, 1000),
+        "c": _single_shard_cursor(2, 1000),
+    }
+    strategy = AccumulatorStrategy(config)
+    for _ in range(_OVERSHOOT_CHUNK_INDEX):
+        assert strategy.produce(cursors) is not None
+    before = dict(strategy._accumulators)
+    with pytest.raises(RuntimeError, match="liveness bound was violated"):
+        strategy.produce(cursors)
+    assert strategy._accumulators == before
 
 
 # ---------------------------------------------------------------------------
@@ -3427,7 +3519,7 @@ def test_stop_after_passes_rejects_non_positive_int(bad: int) -> None:
 def test_stop_after_passes_repeat_guard_applies_to_every_dataset() -> None:
     """Under stop_after_passes all datasets repeat, so the min-samples guard covers all.
 
-    tiny(1) cannot fill its ceil(0.5 * chunk_size=5) = 3-sample quota after a
+    tiny(1) cannot fill its ceil(0.5 * chunk_size=5) + 1 = 4-sample quota after a
     reset, so construction must raise rather than spin forever at runtime.
     """
     with pytest.raises(ValueError, match="repeat policy requires"):
