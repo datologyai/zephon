@@ -5,6 +5,7 @@
 
 import pytest
 
+from zephon._internal.checkpoint import EngineStateV2
 from zephon._internal.checkpoint._migrations import (
     _MIGRATIONS,
     CURRENT_VERSIONS,
@@ -14,23 +15,23 @@ from zephon._internal.checkpoint._migrations import (
 
 
 def test_migrate_noop_at_current_version():
-    state = {"version": 1, "world": {}}
-    result = migrate("engine", state)
+    state = {"version": 1, "position": 0}
+    result = migrate("cursor", state)
     assert result == state
     assert result is not state  # shallow copy protects caller's top-level keys
 
 
 def test_migrate_defaults_missing_version_to_1():
-    state = {"world": {}}
-    result = migrate("engine", state)
+    state = {"position": 0}
+    result = migrate("cursor", state)
     assert result == state
 
 
 def test_migrate_does_not_mutate_input_top_level():
     """migrate() must not mutate the caller's top-level dict (§1.6)."""
-    state = {"version": 1, "world": {}}
+    state = {"version": 1, "position": 0}
     snapshot = dict(state)
-    migrate("engine", state)
+    migrate("cursor", state)
     assert state == snapshot
 
 
@@ -45,13 +46,26 @@ def test_migrate_unknown_component_raises():
         migrate("nonexistent", {"version": 1})
 
 
+def _minimal_engine_v1(rr_next_idx: dict[str, int] | None = None) -> dict[str, object]:
+    return {
+        "version": 1,
+        "world": {"canonical_replicas": 2},
+        "progress": {},
+        "lane_next_cid": {},
+        "lane_ws_state": {},
+        "last_round_id": None,
+        "checkpoint_reload_count": 0,
+        "rr_next_idx": rr_next_idx or {},
+    }
+
+
 def test_migrate_all_components_at_v1():
     # Each component needs whatever minimal v1-required fields its schema
     # demands so the migration framework's pre-migration validation passes.
-    # Components without active migrations (engine, cursor) skip validation
-    # entirely since the migration loop never runs.
+    # Components without active migrations (cursor) skip validation entirely
+    # since the migration loop never runs.
     minimal_v1: dict[str, dict[str, object]] = {
-        "engine": {"version": 1},
+        "engine": _minimal_engine_v1(),
         "work_chunk": {
             "version": 1,
             "components": [("a", [[0, 0, 0]])],
@@ -640,3 +654,43 @@ def test_work_chunk_v2_payload_loads_directly():
 def test_work_chunk_newer_than_supported_rejected():
     with pytest.raises(RuntimeError, match="newer"):
         migrate("work_chunk", {"version": 3, "components": [], "component_order": []})
+
+
+# ---------------------------------------------------------------------------
+# Engine v1 -> v2: rr_next_idx keyed by lane set, not rank
+# ---------------------------------------------------------------------------
+
+
+def test_engine_v1_to_v2_strips_rank_prefix_from_rr_keys():
+    state = _minimal_engine_v1({"0:0/1:0,1": 1, "2:1/2:2,3": 0})
+    result = migrate("engine", state)
+    assert result["version"] == 2
+    assert result["rr_next_idx"] == {"0/1:0,1": 1, "1/2:2,3": 0}
+    EngineStateV2.from_dict(result)
+
+
+def test_engine_v1_to_v2_fills_v1_defaults():
+    state = _minimal_engine_v1()
+    del state["rr_next_idx"]
+    result = migrate("engine", state)
+    assert result["rr_next_idx"] == {}
+    assert result["lane_emitted"] == {}
+    EngineStateV2.from_dict(result)
+
+
+def test_engine_v1_to_v2_rejects_conflicting_peer_pointers():
+    state = _minimal_engine_v1({"0:0/1:0,1": 0, "1:0/1:0,1": 1})
+    with pytest.raises(ValueError, match="conflicts with another rank"):
+        migrate("engine", state)
+
+
+def test_engine_v1_to_v2_merges_agreeing_peer_pointers():
+    state = _minimal_engine_v1({"0:0/1:0,1": 1, "1:0/1:0,1": 1})
+    assert migrate("engine", state)["rr_next_idx"] == {"0/1:0,1": 1}
+
+
+def test_engine_v2_rejects_rank_prefixed_rr_key():
+    state = migrate("engine", _minimal_engine_v1())
+    state["rr_next_idx"] = {"0:0/1:0,1": 1}
+    with pytest.raises(ValueError, match="rr_next_idx key '0:0/1:0,1'"):
+        EngineStateV2.from_dict(state)

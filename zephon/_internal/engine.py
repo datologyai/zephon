@@ -49,7 +49,7 @@ from typing import Any, Callable, Iterable, Iterator, TypeVar, cast
 from zephon._internal.checkpoint import (
     ENGINE_VERSION,
     AggregationCodec,
-    EngineStateV1,
+    EngineStateV2,
 )
 from zephon._internal.graph import Plan
 from zephon._internal.io.storage import RouterStorageBackend
@@ -188,7 +188,7 @@ _RELOAD_SUFFIX = re.compile(r"-(\d+)$")
 # pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
 # lane_ws_state, epoch_boundaries) may legitimately differ across peers due
 # to async prefetch and are taken wholesale from one representative.
-_DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors")
+_DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_next_idx")
 
 
 # =============================================================================
@@ -339,7 +339,7 @@ class Engine:
         self._inflight_shm: ctypes.Array[ctypes.c_int] | None = None
         self._rr_next_idx: dict[str, int] = {}
         # Fixed lookup for the current iterator:
-        # delivered lane ID -> (checkpoint owner key, following owned-lane index).
+        # delivered lane ID -> (checkpoint RR key, following owned-lane index).
         # Rebuilt at iterator startup; not serialized in checkpoints.
         self._rr_ack_next: dict[LaneId, tuple[str, int]] = {}
 
@@ -1074,11 +1074,16 @@ class Engine:
             a -= 1
         return a  # at least 1
 
+    @staticmethod
+    def _rr_key(worker_id: int, active: int, lanes: list[LaneId]) -> str:
+        # Peers in a DP group own identical lanes and must share one RR entry.
+        return f"{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+
     def _ensure_rr_next_idx(self) -> None:
         """Ensure a checkpoint RR position exists for the current owner.
 
         Called during checkpoint save and load. Preserve an existing entry for
-        the current rank, DataLoader worker, active-worker count, and owned lane
+        the current DataLoader worker, active-worker count, and owned lane
         list. Delivery acknowledgements maintain this entry during iteration.
 
         If the entry is missing, initialize it from the least-advanced owned lane,
@@ -1095,7 +1100,7 @@ class Engine:
         if worker_id >= active:
             return
         lanes = self._owned_lanes
-        key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        key = self._rr_key(worker_id, active, lanes)
         if len(lanes) <= 1:
             self._rr_next_idx[key] = 0
             return
@@ -1173,7 +1178,7 @@ class Engine:
         each lane. Sentinels do not consume a turn. Once upstream ends, skip
         empty lanes while draining. Idle workers drain upstream for shutdown.
 
-        Initialize producer_idx from the owner's saved _rr_next_idx entry,
+        Initialize producer_idx from the saved _rr_next_idx entry for these lanes,
         defaulting to zero. Both values are indices into the owned lane list,
         not lane IDs.
 
@@ -1187,7 +1192,7 @@ class Engine:
         overwrite _rr_next_idx.
 
         Build _rr_ack_next before yielding. It maps each owned lane ID to the
-        checkpoint owner key and the index following that lane.
+        checkpoint RR key and the index following that lane.
         """
         warn_threshold = 10000
 
@@ -1205,7 +1210,7 @@ class Engine:
 
         lanes = self._owned_lanes
         if len(lanes) <= 1:  # Simple case: only one owned lane
-            key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+            key = self._rr_key(worker_id, active, lanes)
             self._rr_next_idx[key] = 0
             self._rr_ack_next = dict.fromkeys(lanes, (key, 0))
             yield from upstream
@@ -1214,7 +1219,7 @@ class Engine:
         buffers: dict[int, deque[StreamItem]] = {lane: deque() for lane in lanes}
         it = iter(upstream)
         upstream_ended = False
-        key = f"{self._opts.global_rank}:{worker_id}/{active}:{','.join(str(l) for l in lanes)}"
+        key = self._rr_key(worker_id, active, lanes)
         self._rr_ack_next = {
             lane: (key, (lane_idx + 1) % len(lanes))
             for lane_idx, lane in enumerate(lanes)
@@ -1721,9 +1726,9 @@ class Engine:
             lane_ws_state = {
                 int(l): self._lane_ws[l].state_dict() for l in self._lane_ws
             }
-            # rr_next_idx is owner-keyed, not lane-keyed: don't add it to the
-            # purge loop above (its `lane not in owned` check would drop our own
-            # key). Peer keys are filtered out on load instead.
+            # rr_next_idx is lane-set-keyed, shared by DP peers, not lane-keyed:
+            # don't add it to the purge loop above (its `lane not in owned`
+            # check would drop our own key). Other keys are filtered on load.
             rr_next_idx = dict(self._rr_next_idx)
 
             replay_cursors: dict[int, Any] = {}
@@ -1741,13 +1746,14 @@ class Engine:
             if self._lane_emitted_valid:
                 lane_emitted = {lane: self._lane_emitted.get(lane, 0) for lane in owned}
 
-            state = EngineStateV1(
+            state = EngineStateV2(
                 version=ENGINE_VERSION,
                 world=world,
                 inflight=inflight,
                 progress=progress,
                 lane_next_cid=lane_next,
                 work_source=self._work.state_dict(),
+                work_config=None,
                 lane_ws_state=lane_ws_state,
                 last_round_id=self._last_round_id,
                 checkpoint_reload_count=self._checkpoint_reload_count,
@@ -1992,8 +1998,8 @@ class Engine:
         return merged
 
     def _dedupe_dp_group_peers(
-        self, states: list[EngineStateV1]
-    ) -> list[EngineStateV1]:
+        self, states: list[EngineStateV2]
+    ) -> list[EngineStateV2]:
         """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
@@ -2002,7 +2008,7 @@ class Engine:
         per ``(dp_group_id, owned-lane-set)`` group survives, with
         ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
 
-        Operates on typed ``EngineStateV1`` so callers can run schema
+        Operates on typed ``EngineStateV2`` so callers can run schema
         migration and cross-shard global-invariant checks BEFORE dedupe —
         otherwise a divergence in a universal field (``world.world_size``,
         ``last_round_id``, ``checkpoint_reload_count``) between same-DP-group
@@ -2016,13 +2022,13 @@ class Engine:
         ``workers_per_rank=1`` the lane-set is redundant and grouping
         collapses to ``dp_group_id``.
         """
-        groups: dict[tuple[int, frozenset[int]], list[EngineStateV1]] = {}
+        groups: dict[tuple[int, frozenset[int]], list[EngineStateV2]] = {}
         for st in states:
             dp_id = int(st.world["dp_group_id"])
             lane_set = frozenset(int(k) for k in st.progress)
             groups.setdefault((dp_id, lane_set), []).append(st)
 
-        chosen: list[EngineStateV1] = []
+        chosen: list[EngineStateV2] = []
         for (dp_id, lane_set), group in groups.items():
             # Deterministic representative: lowest global_rank wins.
             rep = min(group, key=lambda st: int(st.world["global_rank"]))
@@ -2047,7 +2053,7 @@ class Engine:
         # AFTER the cross-shard global-invariant checks below; otherwise a
         # divergence in a universal field between same-DP-group peers would
         # be silently dropped together with the peer.
-        typed = [EngineStateV1.load(s) for s in states]
+        typed = [EngineStateV2.load(s) for s in states]
         errors: list[str] = []
 
         C = int(typed[0].world["canonical_replicas"])
@@ -2189,13 +2195,14 @@ class Engine:
 
         self._check_mid_window_counts(lane_emitted, C)
 
-        merged = EngineStateV1(
+        merged = EngineStateV2(
             version=ENGINE_VERSION,
             world={"canonical_replicas": C, "world_size": merged_world_size},
             inflight=inflight,
             progress=progress,
             lane_next_cid=lane_next,
             work_config=work_config,
+            work_source=None,
             lane_ws_state=lane_ws_state,
             last_round_id=merged_last_round_id,
             checkpoint_reload_count=merged_reload_count,
@@ -2208,7 +2215,7 @@ class Engine:
 
     def load_state_dict(self, state: dict[str, Any], *, replay: bool = True) -> None:
         """Restore engine & WorkSource; enter replay mode if 'replay' is True."""
-        ckpt = EngineStateV1.load(state)
+        ckpt = EngineStateV2.load(state)
         # ckpt.work_source is intentionally unread: it is captured on write for
         # debugging only. The authoritative WorkSource is the one constructed
         # in-process; per-lane state is restored from ckpt.lane_ws_state below.
@@ -2292,13 +2299,21 @@ class Engine:
         self._checkpoint_reload_count = ckpt.checkpoint_reload_count + 1
         self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
 
-        # rr_next_idx is owner-keyed ("{global_rank}:..."); keep only this rank's
-        # entries so peers' stale pointers can't collide in the next merge.
-        own_prefix = f"{self._opts.global_rank}:"
-        rr_raw = ckpt.rr_next_idx or {}
-        self._rr_next_idx = {
-            k: int(v) for k, v in rr_raw.items() if k.startswith(own_prefix)
-        }
+        # rr_next_idx is lane-set-keyed, shared by DP peers. Keep only the entry
+        # this worker uses so stale copies of other pointers can't collide in
+        # the next merge.
+        worker_id, workers_per_rank = get_torch_worker_info()
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
+        own_key = self._rr_key(
+            worker_id,
+            self._active_workers(workers_per_rank, lanes_all),
+            self._owned_lanes,
+        )
+        self._rr_next_idx = (
+            {own_key: int(ckpt.rr_next_idx[own_key])}
+            if own_key in ckpt.rr_next_idx
+            else {}
+        )
         self._rr_ack_next.clear()
 
         replay_raw = ckpt.replay_cursors or {}

@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import math
+import re
 import types
 import typing
 from dataclasses import dataclass, field
@@ -755,7 +756,7 @@ class StaticMixtureStateV5(StaticMixtureStateV4):
 # Component: Engine (top-level checkpoint)
 # ---------------------------------------------------------------------------
 
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -796,42 +797,93 @@ class EngineStateV1(CheckpointMixin):
     lane_emitted: dict[str, Any] = field(default_factory=dict)  # empty = unknown
 
     def __post_init__(self) -> None:
-        # Accumulate every invariant violation so a malformed checkpoint
-        # surfaces all issues at once instead of forcing fix-and-retry cycles.
-        errors: list[str] = []
-
-        for name in ("world", "progress", "lane_next_cid", "lane_ws_state"):
-            val = getattr(self, name)
-            if not isinstance(val, dict):
-                errors.append(f"{name} must be a dict, got {type(val).__name__}")
-
-        if isinstance(self.world, dict):
-            if "canonical_replicas" not in self.world:
-                errors.append("world missing 'canonical_replicas'")
-            else:
-                try:
-                    int(self.world["canonical_replicas"])
-                except (TypeError, ValueError):
-                    errors.append(
-                        f"world['canonical_replicas'] must be int-like, "
-                        f"got {self.world['canonical_replicas']!r}"
-                    )
-
-        if isinstance(self.progress, dict):
-            for lane_key, entry in self.progress.items():
-                if not isinstance(entry, dict):
-                    errors.append(
-                        f"progress[{lane_key!r}] must be a dict, "
-                        f"got {type(entry).__name__}"
-                    )
-                    continue
-                for fld in ("chunk_id", "offset"):
-                    if fld not in entry:
-                        errors.append(
-                            f"progress[{lane_key!r}] missing required field {fld!r}"
-                        )
-
+        errors = _engine_state_errors(self)
         if errors:
             raise ValueError(
                 "EngineStateV1 invariants violated:\n  - " + "\n  - ".join(errors)
+            )
+
+
+def _engine_state_errors(state: EngineStateV1 | EngineStateV2) -> list[str]:
+    """Invariants shared by every engine schema version."""
+    # Accumulate every invariant violation so a malformed checkpoint
+    # surfaces all issues at once instead of forcing fix-and-retry cycles.
+    errors: list[str] = []
+
+    for name in ("world", "progress", "lane_next_cid", "lane_ws_state"):
+        val = getattr(state, name)
+        if not isinstance(val, dict):
+            errors.append(f"{name} must be a dict, got {type(val).__name__}")
+
+    if isinstance(state.world, dict):
+        if "canonical_replicas" not in state.world:
+            errors.append("world missing 'canonical_replicas'")
+        else:
+            try:
+                int(state.world["canonical_replicas"])
+            except (TypeError, ValueError):
+                errors.append(
+                    f"world['canonical_replicas'] must be int-like, "
+                    f"got {state.world['canonical_replicas']!r}"
+                )
+
+    if isinstance(state.progress, dict):
+        for lane_key, entry in state.progress.items():
+            if not isinstance(entry, dict):
+                errors.append(
+                    f"progress[{lane_key!r}] must be a dict, got {type(entry).__name__}"
+                )
+                continue
+            for fld in ("chunk_id", "offset"):
+                if fld not in entry:
+                    errors.append(
+                        f"progress[{lane_key!r}] missing required field {fld!r}"
+                    )
+
+    return errors
+
+
+# "{worker}/{active_workers}:{comma-separated owned lanes}". v1 prefixed this
+# with "{global_rank}:", which DP peers could not share.
+_RR_KEY = re.compile(r"\d+/\d+:(\d+(,\d+)*)?")
+
+
+@dataclass(frozen=True, kw_only=True)
+class EngineStateV2(CheckpointMixin):
+    """Checkpoint schema for the top-level engine state (version 2).
+
+    ``rr_next_idx`` is keyed by lane set (see ``_RR_KEY``) instead of by
+    global rank, so every TP/PP peer of a DP group restores the same tail
+    round-robin pointer. A standalone class, not an ``EngineStateV1``
+    subclass: v2 drops v1's historical field defaults.
+    """
+
+    _COMPONENT: ClassVar[str] = "engine"
+    world: dict[str, Any]
+    progress: dict[str, Any]
+    lane_next_cid: dict[str, Any]
+    lane_ws_state: dict[str, Any]
+    last_round_id: str | None
+    checkpoint_reload_count: int
+    inflight: dict[str, Any]
+    # work_source is written for debugging and never read back.
+    work_source: dict[str, Any] | None
+    work_config: dict[str, Any] | None
+    rr_next_idx: dict[str, int]
+    replay_cursors: dict[str, Any]
+    epoch_boundaries: dict[str, Any]
+    lane_emitted: dict[str, Any]  # empty = unknown
+    version: int = 2
+
+    def __post_init__(self) -> None:
+        errors = _engine_state_errors(self)
+        if isinstance(self.rr_next_idx, dict):
+            errors.extend(
+                f"rr_next_idx key {key!r} is not '{{worker}}/{{active}}:{{lanes}}'"
+                for key in self.rr_next_idx
+                if not (isinstance(key, str) and _RR_KEY.fullmatch(key))
+            )
+        if errors:
+            raise ValueError(
+                "EngineStateV2 invariants violated:\n  - " + "\n  - ".join(errors)
             )

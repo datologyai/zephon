@@ -107,6 +107,7 @@ from zephon._internal.checkpoint._schemas import (
     CheckpointMixin,
     CursorStateV1,
     EngineStateV1,
+    EngineStateV2,
     StaticMixtureStateV1,
     StaticMixtureStateV2,
     StaticMixtureStateV3,
@@ -180,13 +181,36 @@ def _work_chunk_v1_to_v2(v1: WorkChunkStateV1) -> dict[str, Any]:
     return d
 
 
+def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
+    """Drop the ``"{global_rank}:"`` prefix from ``rr_next_idx`` keys.
+
+    v1 keyed the tail RR pointer by rank, so only the rank that saved it could
+    find it again; v2 keys it by lane set, shared by every DP peer. The merge
+    keeps one representative per DP group, so stripped keys should not collide;
+    if they disagree, no peer's pointer is trustworthy.
+    """
+    rr: dict[str, int] = {}
+    for key, val in sorted(v1.rr_next_idx.items()):
+        rank, sep, rest = key.partition(":")
+        new_key = rest if sep and rank.isdigit() and ":" in rest else key
+        if new_key in rr and rr[new_key] != int(val):
+            raise ValueError(
+                f"rr_next_idx[{key!r}]={int(val)} conflicts with another rank's "
+                f"pointer {rr[new_key]} for lanes {new_key!r}"
+            )
+        rr[new_key] = int(val)
+    d = v1.to_dict()
+    d["rr_next_idx"] = rr
+    return d
+
+
 #: Migration functions take a validated v_N instance and return a v_{N+1} dict.
 MigrationFn = Callable[[Any], dict[str, Any]]
 
 #: Component name -> {from_version: migration_fn}. Chains are applied in
 #: order: v1->v2, v2->v3, etc.
 _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
-    "engine": {},
+    "engine": {1: _engine_v1_to_v2},
     "work_chunk": {1: _work_chunk_v1_to_v2},
     "static_mixture": {
         1: _static_mixture_v1_to_v2,
@@ -201,7 +225,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
 #: in the migration chain. Each version's entry is constructed from the raw
 #: dict via ``from_dict``; failure raises immediately, before migration.
 _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
-    "engine": {1: EngineStateV1},
+    "engine": {1: EngineStateV1, 2: EngineStateV2},
     "work_chunk": {
         1: WorkChunkStateV1,
         2: WorkChunkStateV2,

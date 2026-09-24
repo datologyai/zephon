@@ -16,6 +16,7 @@ Key invariants tested:
 import multiprocessing as mp
 import os
 import tempfile
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -1299,3 +1300,211 @@ class TestFollowerObservesMergedCheckpoint:
         assert ckpts_by_rank[0] == ckpts_by_rank[1], (
             "Follower must observe the same merged checkpoint as the leader"
         )
+
+
+# =============================================================================
+# TP/PP peers resume identically after a checkpoint
+# =============================================================================
+#
+# The tail round-robin pointer used to be keyed by global_rank. The merge keeps
+# only the lowest rank of each DP group, so after restore every other peer
+# missed its key and fell back to least-advanced-lane, which a reordering op
+# (here a shuffle buffer) makes unreliable. Peers then silently diverged in
+# cross-lane order. Reaching it needs >= 2 ranks and >= 2 lanes per DP group
+# plus a reordering op; window-aligned checkpoints are affected too.
+
+_TP_RR_SAMPLES = 24
+
+
+def _build_shuffled_pipeline(
+    *,
+    world_size: int,
+    global_rank: int,
+    dp_degree: int,
+    canonical_replicas: int,
+    agg_dir: str,
+) -> PublicPipeline:
+    ds = make_dataset("a", _TP_RR_SAMPLES)
+    work = StaticMixtureWorkSource(
+        [ds], {"a": 1.0}, chunk_size=1, seed=0, shuffle_shards=False
+    )
+    pipe = PublicPipeline(work).decode_text().shuffle(buffer_size=4, seed=1)
+    return pipe.options(
+        deterministic=True,
+        canonical_replicas=canonical_replicas,
+        world_size=world_size,
+        global_rank=global_rank,
+        dp_degree=dp_degree,
+        dp_group_id=global_rank // (world_size // dp_degree),
+        default_stage_prefetch=0,
+        prefetch_batches=0,
+        max_workers=2,
+        aggregate_dir=agg_dir,
+        mtp_mode=False,
+        aggregate_timeout_s=30,
+    )
+
+
+def _drain_texts(pipe: PublicPipeline, n: int | None = None) -> list[str]:
+    texts: list[str] = []
+    it = iter(pipe)
+    try:
+        for item in it:
+            texts.extend(_extract_texts(item))
+            if n is not None and len(texts) >= n:
+                break
+    finally:
+        it.close()
+    return texts
+
+
+def _run_threads(ranks: list[int], fn: Any) -> None:
+    errors: dict[int, BaseException] = {}
+
+    def target(r: int) -> None:
+        try:
+            fn(r)
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors[r] = exc
+
+    threads = [threading.Thread(target=target, args=(r,)) for r in ranks]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in threads), "rank thread hung"
+    if errors:
+        raise next(iter(errors.values()))
+
+
+def _checkpoint_after(
+    cut: int,
+    agg: str,
+    *,
+    world_size: int,
+    dp_degree: int,
+    canonical_replicas: int,
+) -> tuple[dict[int, list[str]], dict[str, Any]]:
+    """All ranks consume ``cut`` items in lockstep, then checkpoint together."""
+    barrier = threading.Barrier(world_size)
+    heads: dict[int, list[str]] = {}
+    ckpts: dict[int, dict[str, Any]] = {}
+
+    def phase(r: int) -> None:
+        pipe = _build_shuffled_pipeline(
+            world_size=world_size,
+            global_rank=r,
+            dp_degree=dp_degree,
+            canonical_replicas=canonical_replicas,
+            agg_dir=agg,
+        )
+        texts: list[str] = []
+        it = iter(pipe)
+        try:
+            for item in it:
+                texts.extend(_extract_texts(item))
+                if len(texts) >= cut:
+                    break
+            barrier.wait(timeout=60.0)
+            ckpts[r] = pipe.checkpoint()
+        finally:
+            it.close()
+        heads[r] = texts
+
+    _run_threads(list(range(world_size)), phase)
+    return heads, ckpts[0]
+
+
+def _resume_tails(
+    ckpt: dict[str, Any],
+    agg: str,
+    *,
+    world_size: int,
+    dp_degree: int,
+    canonical_replicas: int,
+) -> dict[int, list[str]]:
+    tails: dict[int, list[str]] = {}
+
+    def phase(r: int) -> None:
+        pipe = _build_shuffled_pipeline(
+            world_size=world_size,
+            global_rank=r,
+            dp_degree=dp_degree,
+            canonical_replicas=canonical_replicas,
+            agg_dir=agg,
+        )
+        pipe.restore(ckpt)
+        tails[r] = _drain_texts(pipe)
+
+    _run_threads(list(range(world_size)), phase)
+    return tails
+
+
+def _baseline_per_dp_group(
+    agg: str, *, world_size: int, dp_degree: int, canonical_replicas: int
+) -> dict[int, list[str]]:
+    ranks_per_dp = world_size // dp_degree
+    return {
+        dp_id: _drain_texts(
+            _build_shuffled_pipeline(
+                world_size=world_size,
+                global_rank=dp_id * ranks_per_dp,
+                dp_degree=dp_degree,
+                canonical_replicas=canonical_replicas,
+                agg_dir=agg,
+            )
+        )
+        for dp_id in range(dp_degree)
+    }
+
+
+class TestTPPeerResume:
+    """Every TP/PP peer resumes the same stream after a checkpoint."""
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    @pytest.mark.parametrize(
+        ("world_size", "dp_degree", "canonical_replicas"),
+        [
+            pytest.param(2, 1, 2, id="dp1-tp2-2lanes"),
+            pytest.param(4, 2, 4, id="dp2-tp2-2lanes"),
+        ],
+    )
+    @pytest.mark.parametrize("cut", range(1, 2 * 2 + 2))
+    def test_peers_resume_identically(
+        self,
+        tmp_path: Path,
+        world_size: int,
+        dp_degree: int,
+        canonical_replicas: int,
+        cut: int,
+    ) -> None:
+        topo = {
+            "world_size": world_size,
+            "dp_degree": dp_degree,
+            "canonical_replicas": canonical_replicas,
+        }
+        baseline = _baseline_per_dp_group(str(tmp_path / "base"), **topo)
+        heads, ckpt = _checkpoint_after(cut, str(tmp_path / "p1"), **topo)
+        tails = _resume_tails(ckpt, str(tmp_path / "p2"), **topo)
+
+        ranks_per_dp = world_size // dp_degree
+        for r in range(world_size):
+            dp_id = r // ranks_per_dp
+            assert heads[r] + tails[r] == baseline[dp_id], f"rank {r} diverged"
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    # Window-aligned cuts only: a mid-window cut into a new topology may
+    # permute the rest of the window (see Engine._check_mid_window_counts).
+    @pytest.mark.parametrize("cut", [2, 4])
+    def test_single_rank_checkpoint_resumes_into_tp_peers(
+        self, tmp_path: Path, cut: int
+    ) -> None:
+        """A world_size=1 checkpoint restores identically into both TP peers."""
+        topo = {"dp_degree": 1, "canonical_replicas": 2}
+        (baseline,) = _baseline_per_dp_group(
+            str(tmp_path / "base"), world_size=1, **topo
+        ).values()
+        heads, ckpt = _checkpoint_after(cut, str(tmp_path / "p1"), world_size=1, **topo)
+        tails = _resume_tails(ckpt, str(tmp_path / "p2"), world_size=2, **topo)
+        for r in (0, 1):
+            assert heads[0] + tails[r] == baseline, f"rank {r} diverged"

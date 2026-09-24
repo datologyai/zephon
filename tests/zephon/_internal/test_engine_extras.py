@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from zephon._internal.checkpoint._schemas import EngineStateV1
+from zephon._internal.checkpoint._schemas import EngineStateV2
 from zephon._internal.engine import Engine, get_torch_worker_info, inside_torch_worker
 from zephon._internal.graph import Graph
 from zephon._internal.ops.delay import DelayById
@@ -713,10 +713,11 @@ def _mk_typed_state(
     lane_ws_state: dict[Any, Any] | None = None,
     replay_cursors: dict[Any, Any] | None = None,
     epoch_boundaries: dict[Any, Any] | None = None,
+    rr_next_idx: dict[str, int] | None = None,
     last_round_id: str | None = "rid-1",
     checkpoint_reload_count: int = 0,
-) -> EngineStateV1:
-    """Minimal valid EngineStateV1 for testing _dedupe_dp_group_peers in isolation."""
+) -> EngineStateV2:
+    """Minimal valid EngineStateV2 for testing _dedupe_dp_group_peers in isolation."""
     if progress is None:
         progress = {l: {"chunk_id": 0, "offset": 0} for l in lanes}
     if inflight is None:
@@ -729,7 +730,7 @@ def _mk_typed_state(
         replay_cursors = dict.fromkeys(lanes)
     if epoch_boundaries is None:
         epoch_boundaries = {}
-    return EngineStateV1(
+    return EngineStateV2(
         world={
             "canonical_replicas": canonical_replicas,
             "world_size": world_size,
@@ -745,6 +746,10 @@ def _mk_typed_state(
         inflight=inflight,
         replay_cursors=replay_cursors,
         epoch_boundaries=epoch_boundaries,
+        rr_next_idx=rr_next_idx or {},
+        work_source=None,
+        work_config=None,
+        lane_emitted={},
     )
 
 
@@ -797,6 +802,18 @@ class TestDedupeDpGroupPeers:
         with pytest.raises(RuntimeError) as excinfo:
             dedupe_engine._dedupe_dp_group_peers([rep, diverged])
         assert "'replay_cursors'" in str(excinfo.value)
+
+    def test_rr_next_idx_divergence_raises(self, dedupe_engine: Engine) -> None:
+        """Peers share one RR key, so a differing tail pointer is flagged."""
+        rep = _mk_typed_state(
+            global_rank=0, dp_group_id=0, lanes=[0, 1], rr_next_idx={"0/1:0,1": 0}
+        )
+        diverged = _mk_typed_state(
+            global_rank=1, dp_group_id=0, lanes=[0, 1], rr_next_idx={"0/1:0,1": 1}
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            dedupe_engine._dedupe_dp_group_peers([rep, diverged])
+        assert "'rr_next_idx'" in str(excinfo.value)
 
     def test_production_side_divergence_accepted_rep_wins(
         self, dedupe_engine: Engine
@@ -905,7 +922,7 @@ class TestLaneEmittedCounters:
         second = next(rr)
         eng.record_delivery(second.meta.lane_id)
         state = eng.state_dict()
-        assert state["rr_next_idx"] == {"0:0/1:0,1,2,3": 2}
+        assert state["rr_next_idx"] == {"0/1:0,1,2,3": 2}
 
     def test_rr_prefetch_does_not_persist_undelivered_lanes(self) -> None:
         """Producer read-ahead cannot advance the checkpoint's RR pointer."""
@@ -918,7 +935,7 @@ class TestLaneEmittedCounters:
         next(rr)  # producer advances again while only lane 0 is acknowledged
 
         state = eng.state_dict()
-        assert state["rr_next_idx"] == {"0:0/1:0,1,2,3": 1}
+        assert state["rr_next_idx"] == {"0/1:0,1,2,3": 1}
 
     def test_state_dict_serializes_counters_for_owned_lanes(
         self, recwarn: pytest.WarningsRecorder
@@ -968,7 +985,8 @@ class TestLaneEmittedCounters:
         eng = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
         eng.record_delivery(0)
         state = eng._state_dict_local()
-        state.pop("lane_emitted")  # simulate an old checkpoint
+        state.pop("lane_emitted")  # simulate an old (v1) checkpoint
+        state["version"] = 1
 
         eng2 = _mk_engine_with_opts(canonical_replicas=2, dp_degree=1)
         eng2.load_state_dict(state, replay=False)
@@ -1124,8 +1142,10 @@ class TestMidWindowCheckpointWarning:
 # the full merged pointer-set into every rank.
 # =============================================================================
 #
-# The tail-RR pointer is physical/owner-scoped: its key encodes the owning rank
-# ("{global_rank}:{worker}/{active}:{lanes}"). A fresh run merges cleanly
+# The tail-RR pointer used to be owner-scoped: its key encoded the owning rank
+# ("{global_rank}:{worker}/{active}:{lanes}"); it is now keyed by the lane set
+# alone ("{worker}/{active}:{lanes}") so DP-group peers share it. A fresh run
+# merges cleanly
 # because each rank contributes only its own key (one author per key). The
 # merged checkpoint, however, holds every rank's key. ``load_state_dict`` used
 # to copy that whole dict into *every* rank, so each rank then carried all
@@ -1221,8 +1241,8 @@ def test_reload_then_checkpoint_does_not_conflict_on_rr_pointer(tmp_path) -> Non
 
 
 def test_load_state_dict_scopes_rr_pointer_to_owner(tmp_path) -> None:
-    """After a reload a rank keeps only its OWN rr pointer key (never peers'),
-    and that key's value is preserved (progress unchanged => no spurious flip)."""
+    """After a reload a rank keeps only the rr key for its OWN lane set (never
+    peers'), and that key's value is preserved (no spurious flip)."""
     world_size = 4
     engs = _build_pure_dp_engines(world_size, str(tmp_path))
     for e in engs:
@@ -1235,8 +1255,59 @@ def test_load_state_dict_scopes_rr_pointer_to_owner(tmp_path) -> None:
     for r, e in enumerate(engs):
         e.load_state_dict(merged0, replay=False)
         rr = e._rr_next_idx
-        assert {int(k.split(":")[0]) for k in rr} == {r}, (
+        own_key = e._rr_key(0, 1, e._owned_lanes)
+        assert set(rr) == {own_key}, (
             f"rank {r} restored peers' rr pointers: {sorted(rr)}"
         )
-        (own_key,) = rr  # exactly one key for this single-worker rank
         assert rr[own_key] == merged0["rr_next_idx"][own_key]
+
+
+def _build_tp_peer_engines(agg_dir: str) -> list[Engine]:
+    """Two TP peers (world_size=2, dp_degree=1) sharing two canonical lanes."""
+    engs: list[Engine] = []
+    for r in range(2):
+        e = _mk_engine_with_opts(
+            canonical_replicas=LANES_PER_RANK,
+            world_size=2,
+            global_rank=r,
+            dp_degree=1,
+            dp_group_id=0,
+            aggregate_dir=agg_dir,
+            run_id="rr-tp-peer-regression",
+        )
+        _seed_inflight_state(e)
+        engs.append(e)
+    return engs
+
+
+def test_tp_peers_restore_shared_rr_pointer(tmp_path) -> None:
+    """Every TP peer restores the representative's pointer, not a fallback.
+
+    The dedupe keeps only the lowest rank's state, so a rank-keyed pointer left
+    peers without an entry and they fell back to least-advanced-lane.
+    """
+    engs = _build_tp_peer_engines(str(tmp_path))
+    for e in engs:
+        # Least-advanced lane is 0, so a fallback would resolve to index 0.
+        _set_least_advanced(e, behind_lane=_owned_pair(e)[0])
+        e._rr_next_idx = {e._rr_key(0, 1, e._owned_lanes): 1}
+    merged = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+    assert merged["rr_next_idx"] == {"0/1:0,1": 1}
+
+    for e in engs:
+        e.load_state_dict(merged, replay=False)
+        assert e._rr_next_idx == {"0/1:0,1": 1}
+
+
+def test_v1_rank_prefixed_rr_key_restores_into_every_peer(tmp_path) -> None:
+    """A v1 "{rank}:"-prefixed key migrates and loads into all peers."""
+    engs = _build_tp_peer_engines(str(tmp_path))
+    for e in engs:
+        _set_least_advanced(e, behind_lane=_owned_pair(e)[0])
+    merged = engs[0]._merge_state_dicts([e._state_dict_local() for e in engs])
+    merged["version"] = 1
+    merged["rr_next_idx"] = {"0:0/1:0,1": 1}  # v1 representative-only key
+
+    for e in engs:
+        e.load_state_dict(merged, replay=False)
+        assert e._rr_next_idx == {"0/1:0,1": 1}

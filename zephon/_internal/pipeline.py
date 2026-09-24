@@ -1920,11 +1920,11 @@ class Pipeline:
         return self._engine.state_dict()
 
     def restore(self, ckpt: dict[str, Any]) -> None:
-        from zephon._internal.checkpoint import EngineStateV1
+        from zephon._internal.checkpoint import EngineStateV2
 
         # Fail-fast: construct the schema purely for its validation side
         # effects. The Engine reloads it later when iteration starts.
-        EngineStateV1.load(ckpt)
+        EngineStateV2.load(ckpt)
         # Always stash — applied lazily at the start of iteration in both
         # _iter_inline() and _iter_mtp().  This keeps restore()
         # lightweight and avoids eagerly building an Engine.
