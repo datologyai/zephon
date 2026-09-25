@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -85,6 +88,58 @@ def test_load_fallback_ids_return_stub() -> None:
     for tokenizer_id in (None, "__fallback__"):
         tok = load_hf_tokenizer(tokenizer_id)
         assert tok.name_or_path == "__fallback__"
+
+
+def test_load_serializes_lazy_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_transformers(monkeypatch, lambda *args, **kwargs: _Tok())
+    fake = sys.modules["transformers"]
+    auto_tokenizer = fake.AutoTokenizer
+    monkeypatch.delattr(fake, "AutoTokenizer")
+    importing = threading.Lock()
+    start = threading.Barrier(2, timeout=5)
+
+    def lazy_export(name: str) -> Any:
+        if name != "AutoTokenizer":
+            raise AttributeError(name)
+        if not importing.acquire(blocking=False):
+            raise ImportError("overlapping lazy imports")
+        try:
+            time.sleep(0.02)  # Simulate import work that releases the GIL.
+            return auto_tokenizer
+        finally:
+            importing.release()
+
+    monkeypatch.setattr(fake, "__getattr__", lazy_export, raising=False)
+    monkeypatch.setattr(
+        "zephon._internal.utils.tokenizer.suppress_library_threads", lambda: None
+    )
+
+    def load() -> Any:
+        start.wait()
+        return load_hf_tokenizer("model")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(load) for _ in range(2)]
+        assert all(isinstance(result.result(timeout=5), _Tok) for result in results)
+
+
+def test_load_keeps_construction_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    constructing = threading.Barrier(2, timeout=2)
+
+    def from_pretrained(name: str, **kwargs: Any) -> Any:
+        try:
+            constructing.wait()
+        except threading.BrokenBarrierError as exc:
+            raise ValueError("tokenizer construction was serialized") from exc
+        return _Tok()
+
+    _install_fake_transformers(monkeypatch, from_pretrained)
+    monkeypatch.setattr(
+        "zephon._internal.utils.tokenizer.suppress_library_threads", lambda: None
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(load_hf_tokenizer, "model") for _ in range(2)]
+        assert all(isinstance(result.result(timeout=5), _Tok) for result in results)
 
 
 def test_load_forwards_use_fast(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,6 @@ ops.
 
 from __future__ import annotations
 
-import contextlib
 import sys
 import threading
 import traceback
@@ -36,7 +35,7 @@ from tenacity import (
 )
 
 from zephon._internal.utils.thread_utils import suppress_library_threads
-from zephon._internal.utils.torch_compat import _gil_disabled, _tensor_lock_ctx
+from zephon._internal.utils.torch_compat import _tensor_lock_ctx
 
 if TYPE_CHECKING:
     import numpy as np
@@ -186,8 +185,10 @@ def fallback_tokenizer() -> TokenizerLike:
     return _Tokenizer()
 
 
-# Only needed for free-threaded builds (e.g., CPython 3.13t/3.14t) where the GIL is absent.
-_IMPORT_LOCK: threading.Lock | None = threading.Lock() if _gil_disabled() else None
+# Transformers replaces its module with a lazy module during import. Concurrent
+# cold imports can receive the original module without AutoTokenizer, even with
+# the GIL enabled. Serialize imports, but keep tokenizer loading parallel below.
+_IMPORT_LOCK = threading.Lock()
 
 
 def load_hf_tokenizer(
@@ -221,10 +222,7 @@ def load_hf_tokenizer(
     # Deferred: tokenizer_cloud pulls the io/storage stack into this otherwise light module.
     from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 
-    import_lock_ctx = (
-        _IMPORT_LOCK if _IMPORT_LOCK is not None else contextlib.nullcontext()
-    )
-    with import_lock_ctx:
+    with _IMPORT_LOCK:
         from transformers import AutoTokenizer
 
     # Resolve before the HF retry — nesting would re-list the bucket on every
