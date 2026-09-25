@@ -151,6 +151,28 @@ def test_jsonl_discover_ignores_non_jsonl_shard_index(tmp_path: Path) -> None:
     assert dict(shard_index) == {0: 2}
 
 
+def test_jsonl_discover_rescans_when_index_lacks_row_counts(tmp_path: Path) -> None:
+    """An index entry without a usable num_rows falls back to scanning."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [{"basename": "data.jsonl", "bytes": 1, "hashes": {}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+
+    shard_index, _ = handler.discover(str(tmp_path), storage)
+    _, counts = handler.discover_counts(str(tmp_path), storage)
+
+    assert dict(shard_index) == {0: 2}
+    assert counts.tolist() == [2]
+
+
 def test_jsonl_auto_detects_from_index(tmp_path: Path) -> None:
     """A Zephon shard index with JSONL basenames identifies the format."""
     _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])

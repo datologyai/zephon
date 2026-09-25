@@ -133,9 +133,12 @@ class JsonlFormat(FormatHandler):
     def _is_valid_jsonl_index(self, data: ShardIndex) -> bool:
         """Return whether an index describes a non-empty JSONL dataset."""
         shards = data.get("shards", [])
+        # A missing/bad num_rows would silently drop the shard's rows; rescan.
         return bool(shards) and all(
             isinstance(shard.get("basename"), str)
             and shard["basename"].endswith(".jsonl")
+            and isinstance(shard.get("num_rows"), int)
+            and shard["num_rows"] >= 0
             for shard in shards
         )
 
