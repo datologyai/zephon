@@ -378,3 +378,13 @@ def test_jsonl_shard_getsamples_uses_logical_indices_across_blank_lines(
     shard = JsonlShard(path, length=3)
 
     assert shard.getsamples([2, 0, 1]) == [{"v": 2}, {"v": 0}, {"v": 1}]
+
+
+def test_jsonl_shard_getsamples_keeps_null_rows_aligned(tmp_path: Path) -> None:
+    """A JSON ``null`` record keeps its slot instead of shifting later rows."""
+    path = tmp_path / "shard.jsonl"
+    path.write_text('{"v": 0}\nnull\n{"v": 2}\n', encoding="utf-8")
+
+    shard = JsonlShard(path, length=3)
+
+    assert shard.getsamples([2, 1, 0]) == [{"v": 2}, None, {"v": 0}]

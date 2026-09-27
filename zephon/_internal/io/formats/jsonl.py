@@ -97,8 +97,8 @@ class JsonlShard(RandomAccessShard):
             # Some indices were out of range; report the smallest missing one.
             missing = min(waiting.keys())
             raise IndexError(missing)
-        rows = [x for x in out if x is not None]
-        return rows
+        # Every slot is filled here; a JSON ``null`` row is a legit None value.
+        return cast(list[dict[str, object]], out)
 
 
 # Suffix of the decoded copy of a compressed shard. The local resolver writes it
