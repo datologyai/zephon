@@ -3,17 +3,20 @@
 
 """JSONL shard format support."""
 
+import io
 import json
 import os
 from collections import defaultdict
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, BinaryIO, Mapping, cast
 
 from zephon._internal.io.formats.base import FormatHandler, register_format
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.suffixes import JSONL_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.compression import compression_for_name, open_decompressed
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
@@ -92,8 +95,22 @@ class JsonlShard(RandomAccessShard):
         return rows
 
 
+# Suffix of the decoded copy of a compressed shard. The local resolver writes it
+# next to the data, so it must not be a JSONL suffix that discovery would list.
+_DECODED_SUFFIX = ".raw"
+
+
+def _count_records(stream: BinaryIO) -> int:
+    """Count the non-blank lines :class:`JsonlShard` indexes as records."""
+    text = io.TextIOWrapper(stream, encoding="utf-8")
+    try:
+        return sum(1 for line in text if line.strip())
+    finally:
+        text.detach()  # leave ``stream`` open for the caller
+
+
 class JsonlFormat(FormatHandler):
-    """Format handler for JSON Lines datasets."""
+    """Format handler for JSON Lines datasets, optionally compressed per shard."""
 
     kind = "jsonl"
 
@@ -104,10 +121,12 @@ class JsonlFormat(FormatHandler):
         # Sort so shard_id assignment is reproducible across processes/machines
         # (cache JOIN, cross-node Ray). Re-numbers existing jsonl datasets once.
         entries = sorted(
-            name for name in storage.listdir(path) if name.endswith(".jsonl")
+            name for name in storage.listdir(path) if name.endswith(JSONL_SUFFIXES)
         )
         if not entries:
-            raise ValueError(f"No .jsonl shards found under {path}")
+            raise ValueError(
+                f"No JSONL shards ({', '.join(JSONL_SUFFIXES)}) found under {path}"
+            )
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, object]] = {}
@@ -119,20 +138,30 @@ class JsonlFormat(FormatHandler):
             # TODO(MaxiBoether): Counting lines by opening every shard is expensive on
             # remote/cloud storage. Consider storing counts in metadata or lazily
             # computing lengths during shard open.
-            count = 0
-            with storage.open(full, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip():
-                        count += 1
+            compression = compression_for_name(name)
+            with storage.open(full, "rb") as handle:
+                if compression is None:
+                    count = _count_records(cast(BinaryIO, handle))
+                    raw_bytes = size
+                else:
+                    with open_decompressed(cast(BinaryIO, handle), compression) as src:
+                        count = _count_records(src)
+                        raw_bytes = src.tell()
             shard_index[shard_id] = count
-            shard_meta[shard_id] = {
+            meta: dict[str, object] = {
                 "raw": {
-                    "basename": name,
-                    "bytes": size,
+                    "basename": name if compression is None else name + _DECODED_SUFFIX,
+                    "bytes": raw_bytes,
                     "hashes": {},
                 },
                 "extra": {"length": count},
             }
+            if compression is not None:
+                # As for compressed MDS/LitData shards: resolvers decode the archive
+                # once into the raw file that JsonlShard reads.
+                meta["zip"] = {"basename": name, "bytes": size, "hashes": {}}
+                meta["compression"] = compression
+            shard_meta[shard_id] = meta
 
         return shard_index, shard_meta
 

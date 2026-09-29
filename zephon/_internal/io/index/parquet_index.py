@@ -12,6 +12,7 @@ from zephon._internal.io.index.index_builder import (
     ShardInfo,
     register_builder,
 )
+from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 
 try:
     import pyarrow.parquet as _pq
@@ -22,7 +23,7 @@ except ImportError:
 class ParquetIndexBuilder(IndexBuilder):
     """Index builder for Parquet datasets."""
 
-    file_pattern = "*.parquet"
+    suffixes = PARQUET_SUFFIXES
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract row count and metadata from a Parquet file."""

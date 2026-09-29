@@ -39,6 +39,7 @@ from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
+from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
@@ -345,7 +346,7 @@ class ParquetFormat(FormatHandler):
             ValueError: If no .parquet files found
         """
         entries = sorted(
-            name for name in storage.listdir(path) if name.endswith(".parquet")
+            name for name in storage.listdir(path) if name.endswith(PARQUET_SUFFIXES)
         )
         if not entries:
             raise ValueError(f"No .parquet shards found under {path}")

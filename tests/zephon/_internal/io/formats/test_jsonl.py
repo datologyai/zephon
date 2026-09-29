@@ -1,16 +1,42 @@
+import bz2
+import gzip
 import json
+import lzma
 from pathlib import Path
 
 import pytest
 
+import zephon._internal.io.resolvers.cache.manager as manager_mod
+import zephon._internal.io.resolvers.direct as direct_mod
+from tests._helpers import counts_dict
 from zephon._internal.io.formats.jsonl import JsonlFormat, JsonlShard
 from zephon._internal.io.storage.local import LocalFSBackend
+from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon._internal.utils.compression import decompress_file, zstd
 from zephon.io.dataset import Dataset
+from zephon.io.options import CacheOptions, StoreOptions
+
+_WRITERS = {"gzip": gzip.open, "bz2": bz2.open, "xz": lzma.open, "zstd": zstd.open}
+_SUFFIXES = {"gzip": ".gz", "bz2": ".bz2", "xz": ".xz", "zstd": ".zst"}
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def _write_compressed_jsonl(
+    path: Path, rows: list[dict[str, object]], compression: str, *, blank: bool = False
+) -> None:
+    """Write ``rows`` as two streamed frames/members, optionally with a blank line."""
+    lines = [json.dumps(r) + "\n" for r in rows]
+    if blank:
+        lines.insert(len(lines) // 2, "\n")
+    half = len(lines) // 2
+    with _WRITERS[compression](path, "wt", encoding="utf-8") as fh:
+        fh.write("".join(lines[:half]))
+    with _WRITERS[compression](path, "at", encoding="utf-8") as fh:
+        fh.write("".join(lines[half:]))
 
 
 def test_jsonl_discover_local(tmp_path: Path) -> None:
@@ -126,3 +152,103 @@ def test_jsonl_shard_getsamples_unsorted_and_duplicates(tmp_path: Path) -> None:
 
     with pytest.raises(IndexError):
         _ = shard.getsamples([10])
+
+
+@pytest.mark.parametrize("compression", sorted(_WRITERS))
+def test_jsonl_discover_compressed_shard(tmp_path: Path, compression: str) -> None:
+    name = f"a.jsonl{_SUFFIXES[compression]}"
+    _write_compressed_jsonl(
+        tmp_path / name, [{"i": i} for i in range(5)], compression, blank=True
+    )
+
+    shard_index, shard_meta = JsonlFormat().discover(
+        str(tmp_path), LocalFSBackend(tmp_path)
+    )
+
+    with _WRITERS[compression](tmp_path / name, "rb") as fh:
+        decoded = fh.read()
+    assert dict(shard_index) == {0: 5}  # the blank line is not a record
+    # zip = the compressed file; raw = its decoded copy, as for MDS/LitData.
+    assert shard_meta[0]["zip"] == {
+        "basename": name,
+        "bytes": (tmp_path / name).stat().st_size,
+        "hashes": {},
+    }
+    assert shard_meta[0]["raw"] == {
+        "basename": f"{name}.raw",
+        "bytes": len(decoded),
+        "hashes": {},
+    }
+    assert shard_meta[0]["compression"] == compression
+    assert shard_meta[0]["extra"] == {"length": 5}
+
+
+def test_jsonl_discover_mixes_plain_and_compressed_shards(tmp_path: Path) -> None:
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": i} for i in range(2)])
+    _write_compressed_jsonl(
+        tmp_path / "a.jsonl.zst", [{"i": i} for i in range(3)], "zstd"
+    )
+    (tmp_path / "c.json").write_text('{"i": 0}\n', encoding="utf-8")  # not JSONL
+
+    shard_index, shard_meta = JsonlFormat().discover(
+        str(tmp_path), LocalFSBackend(tmp_path)
+    )
+
+    assert [shard_meta[sid]["raw"]["basename"] for sid in sorted(shard_meta)] == [
+        "a.jsonl.zst.raw",
+        "b.jsonl",
+    ]
+    assert dict(shard_index) == {0: 3, 1: 2}
+    assert "zip" not in shard_meta[1]
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_compressed_jsonl_reads_through_store(
+    tmp_path: Path, cache_enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    rows = [{"i": i} for i in range(6)]
+    _write_compressed_jsonl(data / "s0.jsonl.zst", rows[:4], "zstd")
+    _write_compressed_jsonl(data / "s1.jsonl.gz", rows[4:], "gzip")
+
+    decoded_shards: list[str] = []
+
+    def _counting_decompress(src: Path, dst: Path, compression: str) -> None:
+        decoded_shards.append(src.name.split(".")[0])
+        decompress_file(src, dst, compression)
+
+    for resolver_mod in (manager_mod, direct_mod):
+        monkeypatch.setattr(resolver_mod, "decompress_file", _counting_decompress)
+
+    ds = Dataset.from_path("demo", str(data))
+    cache_root = tmp_path / "cache"
+    store = build_multi_dataset_store(
+        {0: ds},
+        options=StoreOptions(
+            cache=CacheOptions(enabled=cache_enabled, root=cache_root)
+        ),
+    )
+    try:
+        view = store.for_dataset(0)
+        # The store wraps shards in ResilientShard, which returns (rows, stats).
+        shard0, _ = view.open(0)
+        assert len(shard0) == 4
+        assert shard0.getsamples([3, 0, 3])[0] == [rows[3], rows[0], rows[3]]
+        assert shard0[1][0] == rows[1]
+        shard1, _ = view.open(1)
+        assert shard1.getsamples([1])[0] == [rows[5]]
+    finally:
+        store.close()
+
+    # Each shard is decoded once, however often it is read, into its raw file:
+    # in the cache when enabled, otherwise next to the data (as for MDS/LitData).
+    assert sorted(decoded_shards) == ["s0", "s1"]
+    decoded_dir = cache_root / "demo" if cache_enabled else data
+    decoded = sorted(p.name for p in decoded_dir.iterdir() if p.suffix == ".raw")
+    assert decoded == ["s0.jsonl.zst.raw", "s1.jsonl.gz.raw"]
+    assert (decoded_dir / "s0.jsonl.zst.raw").read_text(encoding="utf-8") == "".join(
+        json.dumps(r) + "\n" for r in rows[:4]
+    )
+    # Decoded copies are not shards: rediscovery sees the same dataset.
+    assert counts_dict(Dataset.from_path("demo", str(data))) == {0: 4, 1: 2}

@@ -30,6 +30,7 @@ from zephon._internal.io.catalog.builder import DatasetHeader, build_catalog
 from zephon._internal.io.catalog.catalog import ShardCatalog
 from zephon._internal.io.catalog.io import SCHEMA_VERSION
 from zephon._internal.io.index.index_reader import INDEX_FILENAMES
+from zephon._internal.io.suffixes import AUTO_DETECT_ORDER
 
 if TYPE_CHECKING:
     from zephon.io.options import StoreOptions
@@ -232,8 +233,13 @@ def _source_sig(header: DatasetHeader) -> str:
             break
         else:
             # No index (scan formats): fold a sorted (name,size) listing so an
-            # in-place change re-keys the build.
-            for name in sorted(storage.listdir(header.root)):
+            # in-place change re-keys the build. Only discovery's inputs count:
+            # resolvers write decoded copies of compressed shards next to them.
+            names = storage.listdir(header.root)
+            suffixes = dict(AUTO_DETECT_ORDER).get(header.format)
+            if suffixes is not None:
+                names = [name for name in names if name.endswith(suffixes)]
+            for name in sorted(names):
                 try:
                     st = storage.stat(os.path.join(header.root, name))
                     parts.append(f"{name}:{st.get('size', '')}")

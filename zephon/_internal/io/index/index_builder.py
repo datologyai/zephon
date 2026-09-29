@@ -15,7 +15,6 @@ import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,11 +36,15 @@ class IndexBuilder(ABC):
     """Base class for format-specific index builders.
 
     Subclasses must implement:
-    - file_pattern: glob pattern for matching shard files (e.g., "*.jsonl")
+    - suffixes: data-file suffixes to index, from :mod:`zephon._internal.io.suffixes`
     - extract_shard_info: extract metadata from a single file
     """
 
-    file_pattern: str
+    suffixes: tuple[str, ...]
+
+    @property
+    def _file_patterns(self) -> str:
+        return ", ".join(f"*{suffix}" for suffix in self.suffixes)
 
     @abstractmethod
     def extract_shard_info(
@@ -76,11 +79,11 @@ class IndexBuilder(ABC):
         entries = [
             f.name
             for f in dataset_dir.iterdir()
-            if f.is_file() and fnmatch(f.name, self.file_pattern)
+            if f.is_file() and f.name.endswith(self.suffixes)
         ]
 
         if not entries:
-            raise ValueError(f"No {self.file_pattern} files found in {dataset_dir}")
+            raise ValueError(f"No {self._file_patterns} files found in {dataset_dir}")
 
         return sorted(entries)
 
@@ -106,7 +109,7 @@ class IndexBuilder(ABC):
 
         if progress:
             print(
-                f"Found {len(entries)} {self.file_pattern} files, reading metadata..."
+                f"Found {len(entries)} {self._file_patterns} files, reading metadata..."
             )
 
         shards: list[ShardInfoDict] = []

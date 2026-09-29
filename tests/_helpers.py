@@ -6,6 +6,14 @@
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
 
+# The zstd codec Zephon decodes with, for writing compressed fixtures.
+try:
+    from compression import zstd
+except ImportError:
+    from backports import zstd
+
+__all__ = ["counts_dict", "mk_dataset", "zstd"]
+
 
 def mk_dataset(name: str, shards: dict[int, int]) -> Dataset:
     """Create a Dataset backed by in-memory shards.

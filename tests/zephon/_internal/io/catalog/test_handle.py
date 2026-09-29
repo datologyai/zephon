@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import zephon._internal.io.catalog.handle as handle_mod
 from zephon._internal.io.catalog import (
     DatasetHeader,
     ShardCatalogHandle,
@@ -22,6 +23,7 @@ from zephon._internal.io.catalog import (
     finalize,
     set_catalog_dir,
 )
+from zephon._internal.io.catalog.builder import BuiltCatalog, build_catalog
 from zephon.io.options import StoreOptions
 
 
@@ -68,3 +70,29 @@ def test_finalize_brackets_build_with_timing_logs(
     assert timing[0].startswith("Building shard catalog for dataset 'ds'")
     assert str(root) in timing[0]
     assert re.fullmatch(r"Built shard catalog for dataset 'ds' in \d+\.\d+s", timing[1])
+
+
+def test_only_discovery_inputs_key_a_scan_catalog(
+    catalog_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decoded copies written beside the shards must not force a rebuild."""
+    builds: list[BuiltCatalog] = []
+
+    def _counting_build(header: DatasetHeader) -> BuiltCatalog:
+        builds.append(build_catalog(header))
+        return builds[-1]
+
+    monkeypatch.setattr(handle_mod, "build_catalog", _counting_build)
+    root = tmp_path / "ds"
+    root.mkdir()
+    _make_jsonl(root, {"a": 3})
+    finalize(ShardCatalogHandle(dataset=_header(root)))
+    assert len(builds) == 1
+
+    (root / "b.jsonl.gz.raw").write_text("decoded copy\n", encoding="utf-8")
+    finalize(ShardCatalogHandle(dataset=_header(root)))
+    assert len(builds) == 1
+
+    _make_jsonl(root, {"c": 2})  # a new shard does change the dataset
+    finalize(ShardCatalogHandle(dataset=_header(root)))
+    assert len(builds) == 2

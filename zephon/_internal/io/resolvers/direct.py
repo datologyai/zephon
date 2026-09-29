@@ -1,11 +1,11 @@
 """Resolver that operates on shards present on the local filesystem."""
 
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from tenacity import (
-    RetryError,
     Retrying,
     retry_if_exception_type,
     stop_after_attempt,
@@ -16,7 +16,7 @@ from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.resolvers.utils import compute_file_hash
 from zephon._internal.io.storage import LocalFSBackend
 from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
-from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon._internal.utils.compression import decompress_file, normalize_compression
 
 
 class DirectResolver(ShardResolver):
@@ -86,54 +86,36 @@ class DirectResolver(ShardResolver):
                 f"Zip shard missing: dataset={locator.dataset} shard={locator.shard_id}"
             )
 
-        compression = compression_name.lower()
-        if compression.startswith("zstd"):
+        compression = normalize_compression(compression_name)
+        retrying = Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_none(),
+            # Decompressors raise library-specific errors, so retry on any.
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        )
+
+        def _decompress_once() -> int:
+            # Unique temp sibling, so concurrent resolvers never see a partial file.
+            # Its length is fixed, so long shard names stay within NAME_MAX.
+            tmp = raw_path.with_name(f".{uuid.uuid4().hex}.tmp")
             try:
-                import zstd
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Resolving compressed shards requires the 'zstd' package"
-                ) from exc
+                decompress_file(zip_path, tmp, compression)
+                os.replace(tmp, raw_path)
+            finally:
+                tmp.unlink(missing_ok=True)
 
-            retryable_exceptions: tuple[type[BaseException], ...] = (
-                _RetryableValidationError,
-                OSError,
-                IOError,
-                Exception,  # zstd raises generic exceptions
-            )
+            # Validation here keeps the retry loop focused on integrity failures rather than
+            # letting broken output leak to callers.
+            status = self._validate_raw(locator, raw_path)
+            if not status.valid:
+                raise _RetryableValidationError(status.to_exception())
+            return status.bytes
 
-            retrying = Retrying(
-                stop=stop_after_attempt(3),
-                wait=wait_none(),
-                retry=retry_if_exception_type(retryable_exceptions),
-                reraise=False,
-            )
-
-            def _decompress_once() -> int:
-                compressed = zip_path.read_bytes()
-                decompressed = zstd.decompress(compressed)
-                atomic_write_bytes(raw_path, decompressed)
-
-                # Validation here keeps the retry loop focused on integrity failures rather than
-                # letting broken output leak to callers.
-                status = self._validate_raw(locator, raw_path)
-                if not status.valid:
-                    raise _RetryableValidationError(status.to_exception())
-                return status.bytes
-
-            try:
-                return retrying(_decompress_once)
-            except RetryError as exc:
-                last_exc = exc.last_attempt.exception()
-                if isinstance(last_exc, _RetryableValidationError):
-                    raise last_exc.original
-                raise
-            except _RetryableValidationError as exc:
-                raise exc.original
-        else:
-            raise RuntimeError(
-                f"Unsupported compression '{locator.compression}' for direct resolver"
-            )
+        try:
+            return retrying(_decompress_once)
+        except _RetryableValidationError as exc:
+            raise exc.original
 
     def _validate_raw(
         self, locator: ShardLocator, raw_path: Path

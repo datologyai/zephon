@@ -1,3 +1,4 @@
+import gzip
 import json
 from pathlib import Path
 
@@ -5,7 +6,7 @@ import numpy as np
 import pytest
 
 from tests._catalog_helpers import attach_catalog, catalog_locators
-from tests._helpers import counts_dict
+from tests._helpers import counts_dict, zstd
 from tests.helpers.storage import _install_obstore_stubs
 from zephon.io.dataset import Dataset
 
@@ -92,6 +93,38 @@ def test_dataset_from_path_remote_gcs_jsonl(monkeypatch: pytest.MonkeyPatch) -> 
     assert counts_dict(dataset) == {0: 2, 1: 2}
     _, locators = catalog_locators(dataset)
     assert locators[0].raw.basename == "shard0.jsonl"
+
+
+@pytest.mark.parametrize("backend_kind", ["local", "s3"])
+def test_dataset_from_path_detects_compressed_jsonl(
+    backend_kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shards = {
+        "shard0.jsonl.gz": gzip.compress(b'{"id":1}\n{"id":2}\n'),
+        "shard1.jsonl.zst": zstd.compress(b'{"id":3}\n'),
+    }
+    if backend_kind == "local":
+        for name, data in shards.items():
+            (tmp_path / name).write_bytes(data)
+        path = str(tmp_path)
+    else:
+        state = _install_obstore_stubs(monkeypatch)
+        for name, data in shards.items():
+            state["objects"][("bucket", f"json/{name}")] = data
+        path = "s3://bucket/json"
+
+    dataset = Dataset.from_path("compressed", path)
+
+    assert dataset.backend["kind"] == "jsonl"
+    assert counts_dict(dataset) == {0: 2, 1: 1}
+    _, locators = catalog_locators(dataset)
+    assert [locators[i].compression for i in (0, 1)] == ["gzip", "zstd"]
+    for i, (name, data) in enumerate(shards.items()):
+        zip_file = locators[i].zip
+        assert zip_file is not None
+        assert (zip_file.basename, zip_file.bytes) == (name, len(data))
+        assert locators[i].raw.basename == f"{name}.raw"
+    assert [locators[i].raw.bytes for i in (0, 1)] == [18, 9]  # decoded sizes
 
 
 def test_from_path_dataset_pickle_is_small(tmp_path: Path) -> None:

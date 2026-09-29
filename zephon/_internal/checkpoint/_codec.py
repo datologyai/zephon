@@ -17,7 +17,8 @@ import json
 from typing import Any, cast
 
 import msgpack
-import zstd
+
+from zephon._internal.utils.compression import require_zstd
 
 # msgpack's int wire format tops out at int64 / uint64. numpy's PCG64
 # ``bit_generator.state`` exposes ``state`` and ``inc`` as 128-bit Python
@@ -132,10 +133,10 @@ class AggregationCodec:
 
     def _compress(self, data: bytes) -> bytes:
         if self._compressor == "zstd":
-            return zstd.compress(data, 3)  # level 3: fast, decent ratio
+            return require_zstd().compress(data, level=3)  # fast, decent ratio
         return data
 
     def _decompress(self, data: bytes) -> bytes:
         if self._compressor == "zstd":
-            return zstd.decompress(data)
+            return require_zstd().decompress(data)
         return data

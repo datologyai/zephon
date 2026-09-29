@@ -34,6 +34,7 @@ from zephon._internal.io.storage import (
 from zephon._internal.io.storage import (
     StorageBackend as _StorageBackend,
 )
+from zephon._internal.io.suffixes import detect_format as _detect_format
 from zephon.io.memory import InMemoryShard
 
 
@@ -278,13 +279,7 @@ def _auto_detect_format(
         except Exception:
             entries = []
 
-    if any(name.endswith(".jsonl") for name in entries):
-        return "jsonl"
-    if any(name.endswith(".vortex") for name in entries):
-        return "vortex"
-    if any(name.endswith(".parquet") for name in entries):
-        return "parquet"
-    return None
+    return _detect_format(entries)
 
 
 def _classify_index_payload(data: _IndexData) -> str:

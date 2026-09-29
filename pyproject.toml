@@ -28,6 +28,7 @@ classifiers = [
 dynamic = ["version"]
 
 dependencies = [
+    "backports.zstd>=0.2.0; python_version < '3.14'",  # stdlib compression.zstd on 3.14+
     "cloudpickle>=1.6.0",
     "filelock>=3.0.0",
     "msgpack>=1.0.0",
@@ -35,7 +36,6 @@ dependencies = [
     "optree>=0.12.0",
     "tenacity>=8.0.0",
     "wrapt>=1.11.0",
-    "zstd>=1.5.0",
 ]
 
 [project.optional-dependencies]

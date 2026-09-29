@@ -7,6 +7,7 @@ from typing import Iterable
 
 import pytest
 
+from tests._helpers import zstd
 from zephon import Pipeline as PublicPipeline
 from zephon.io.dataset import Dataset
 from zephon.work.base import MixtureReadConfig, MixtureReadMode
@@ -16,7 +17,11 @@ pytestmark = pytest.mark.integration
 
 
 def _write_jsonl_dir(
-    root: Path, shard_files: int, values: Iterable[int], language: str
+    root: Path,
+    shard_files: int,
+    values: Iterable[int],
+    language: str,
+    zstd_compressed: bool = False,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     vals = list(values)
@@ -36,11 +41,16 @@ def _write_jsonl_dir(
                 "license": "MIT" if (v // 2) % 2 == 0 else "CC",
             }
             lines.append(json.dumps({"text": int(v), "meta": meta}))
-        (root / f"data_{f}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        text = "\n".join(lines) + "\n"
+        if not zstd_compressed:
+            (root / f"data_{f}.jsonl").write_text(text, encoding="utf-8")
+            continue
+        with zstd.open(root / f"data_{f}.jsonl.zst", "wt", encoding="utf-8") as fh:
+            fh.write(text)
 
 
 def _prepare_datasets(
-    tmp: Path, total: int = 600, files: int = 6
+    tmp: Path, total: int = 600, files: int = 6, zstd_compressed: bool = False
 ) -> tuple[Dataset, Dataset]:
     # Even numbers → JavaScript; odd numbers → HTML
     js_vals = list(range(0, total, 2))
@@ -48,8 +58,8 @@ def _prepare_datasets(
 
     js_dir = tmp / "js"
     html_dir = tmp / "html"
-    _write_jsonl_dir(js_dir, files, js_vals, "JavaScript")
-    _write_jsonl_dir(html_dir, files, html_vals, "HTML")
+    _write_jsonl_dir(js_dir, files, js_vals, "JavaScript", zstd_compressed)
+    _write_jsonl_dir(html_dir, files, html_vals, "HTML", zstd_compressed)
 
     ds_js = Dataset.from_path("JavaScript", str(js_dir), fmt="jsonl")
     ds_html = Dataset.from_path("HTML", str(html_dir), fmt="jsonl")
@@ -324,6 +334,33 @@ def test_jsonl_runner_threads_parity(tmp_path: Path, runner_kind: str) -> None:
     out_threads = _run_pipeline(datasets, runner_kind="threads", **common_kwargs)
     out_inline = _run_pipeline(datasets, runner_kind=runner_kind, **common_kwargs)
     assert out_threads == out_inline
+
+
+def test_compressed_jsonl_matches_plain(tmp_path: Path) -> None:
+    common_kwargs = dict(
+        deterministic=True,
+        workers=4,
+        chunk_size=32,
+        mode=MixtureReadMode.WEIGHTED_ROUND_ROBIN,
+        cache_enabled=True,
+        stage_prefetch=0,
+        final_prefetch=0,
+        runner_kind="threads",
+    )
+    plain = _run_pipeline(
+        _prepare_datasets(tmp_path / "plain", total=240, files=3),
+        cache_root=tmp_path / "plain-cache",
+        **common_kwargs,
+    )
+    compressed = _run_pipeline(
+        _prepare_datasets(
+            tmp_path / "compressed", total=240, files=3, zstd_compressed=True
+        ),
+        cache_root=tmp_path / "compressed-cache",
+        **common_kwargs,
+    )
+    assert plain
+    assert compressed == plain
 
 
 @pytest.mark.xfail(

@@ -21,6 +21,7 @@ from zephon._internal.io.resolvers.cache import (
 from zephon._internal.io.resolvers.cache.shared_state import _ShardState
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.compression import zstd
 from zephon.io.dataset import Dataset
 
 # ---------------------------------------------------------------------------
@@ -199,6 +200,74 @@ def test_resolve_with_zstd_level_suffix_compression(tmp_path: Path) -> None:
         assert ref.raw.path.is_file()
         assert ref.raw.path.read_bytes() == payload
         assert ref.compression == "zstd:7"
+    finally:
+        mgr.close()
+
+
+def test_resolve_unsized_multi_frame_zstd(tmp_path: Path) -> None:
+    """Streamed zstd output carries no content size and may span several frames."""
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    raw_name = "chunk.bin"
+    zip_name = raw_name + ".zstd"
+    payload = b"streamed zstd payload\n" * 16384  # frames above the 128 KiB block
+    remote.mkdir()
+    with zstd.open(remote / zip_name, "wb") as fh:  # two frames, neither sized
+        fh.write(payload[: len(payload) // 2])
+    with zstd.open(remote / zip_name, "ab") as fh:
+        fh.write(payload[len(payload) // 2 :])
+
+    storage = LocalFSBackend(root=remote)
+    loc = _locator(
+        dataset="lit",
+        shard_id=0,
+        root=str(remote),
+        raw_name=raw_name,
+        raw_bytes=len(payload),
+        zip_name=zip_name,
+        zip_bytes=(remote / zip_name).stat().st_size,
+        compression="zstd",
+    )
+
+    mgr = _make_manager(cache_root, storage, [loc], keep_zip=False)
+    try:
+        ref = mgr.resolve(loc)
+        assert ref.raw.path.read_bytes() == payload
+    finally:
+        mgr.close()
+
+
+@pytest.mark.parametrize("keep_zip", [False, True])
+def test_failed_decompression_leaves_no_temp_files(
+    tmp_path: Path, keep_zip: bool
+) -> None:
+    """A decoder failing after writing output must not strand unaccounted bytes."""
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    raw_name = "shard.bin"
+    zip_name = raw_name + ".zst"
+    # 16 MiB decodes past the first 8 MiB copy chunk before the truncation hits.
+    payload = b"0123456789abcdef" * 1_048_576
+    _make_file(remote / zip_name, zstd.compress(payload)[:-5])
+
+    storage = LocalFSBackend(root=remote)
+    loc = _locator(
+        dataset="ds",
+        shard_id=0,
+        root=str(remote),
+        raw_name=raw_name,
+        raw_bytes=len(payload),
+        zip_name=zip_name,
+        zip_bytes=(remote / zip_name).stat().st_size,
+        compression="zstd",
+    )
+
+    mgr = _make_manager(cache_root, storage, [loc], keep_zip=keep_zip)
+    try:
+        with pytest.raises(EOFError):
+            mgr.resolve(loc)
+        assert [p.name for p in (cache_root / "ds").iterdir() if p.is_file()] == []
+        assert mgr.stats().bytes_used == 0
     finally:
         mgr.close()
 

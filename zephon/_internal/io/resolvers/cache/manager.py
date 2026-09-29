@@ -1,13 +1,9 @@
 """Cache-backed implementation of the shard resolver protocol."""
 
-import bz2
 import contextlib
 import errno
-import gzip
-import io
 import json
 import logging
-import lzma
 import os
 import shutil
 import time
@@ -15,7 +11,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Optional, cast
+from typing import Optional
 
 import numpy as np
 from filelock import BaseFileLock, FileLock
@@ -42,17 +38,8 @@ from zephon._internal.io.types import (
     ShardLocator,
 )
 from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon._internal.utils.compression import decompress_file
 from zephon._internal.utils.disk import check_cache_disk_space
-
-try:  # LZ4 is optional
-    import lz4.frame as lz4frame
-except Exception:
-    lz4frame = None
-
-try:  # zstd is optional
-    import zstd as zstd_mod
-except Exception:
-    zstd_mod = None
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +48,6 @@ _STATE_DIR_NAME = ".zephon_cache_state"
 _SESSION_FILENAME = "session.json"
 _RESET_LOCK_FILENAME = ".reset.lock"
 _TICK_SECONDS = float(os.environ.get("ZEPHON_CACHE_TICK", "0.05"))
-Opener = Callable[[Path], BinaryIO]
 
 
 def _parse_proc_stat_starttime(data: bytes) -> int | None:
@@ -953,12 +939,17 @@ class CacheManager(ShardResolver):
             self._download_file(locator.root, locator.zip, zip_tmp)
             try:
                 self._decompress_stream(zip_tmp, raw_tmp, locator.compression)
-            finally:
-                if self._keep_zip:
-                    with contextlib.suppress(Exception):
-                        zip_tmp.replace(zip_path)
-                else:
-                    zip_tmp.unlink(missing_ok=True)
+            except BaseException:
+                # Streaming decoders fail after writing output; neither temp
+                # file is accounted for, so a failed shard must leave nothing.
+                raw_tmp.unlink(missing_ok=True)
+                zip_tmp.unlink(missing_ok=True)
+                raise
+            if self._keep_zip:
+                with contextlib.suppress(Exception):
+                    zip_tmp.replace(zip_path)
+            else:
+                zip_tmp.unlink(missing_ok=True)
             raw_tmp.replace(raw_path)
         else:
             raw_tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -987,57 +978,8 @@ class CacheManager(ShardResolver):
                 time.sleep(min(1.0 * (attempt + 1), 5.0))
 
     def _decompress_stream(self, src: Path, dst_tmp: Path, compression: str) -> None:
-        # LitData/MDS store write-time level as ``algo:level`` (e.g. ``zstd:7``).
-        # Decompression only needs the algorithm name.
-        algo = (compression or "").lower().split(":", 1)[0]
         dst_tmp.parent.mkdir(parents=True, exist_ok=True)
-        opener: Opener
-        if algo in {"gz", "gzip"}:
-
-            def _open_gzip(p: Path) -> BinaryIO:
-                return cast(BinaryIO, gzip.open(p, "rb"))
-
-            opener = _open_gzip
-        elif algo in {"bz2", "bzip2"}:
-
-            def _open_bz2(p: Path) -> BinaryIO:
-                return cast(BinaryIO, bz2.open(p, "rb"))
-
-            opener = _open_bz2
-        elif algo in {"lzma", "xz"}:
-
-            def _open_lzma(p: Path) -> BinaryIO:
-                return cast(BinaryIO, lzma.open(p, "rb"))
-
-            opener = _open_lzma
-        elif algo in {"zst", "zstd", "zstandard"}:
-            if zstd_mod is None:
-                raise RuntimeError("zstd compression requires the 'zstd' package")
-
-            def _open_zstd(p: Path) -> BinaryIO:
-                compressed = p.read_bytes()
-                decompressed = zstd_mod.decompress(compressed)
-                return cast(BinaryIO, io.BytesIO(decompressed))
-
-            opener = _open_zstd
-        elif algo in {"lz4"}:
-            lz4_mod = lz4frame
-            if lz4_mod is None:
-                raise RuntimeError("lz4 compression requires the 'lz4' package")
-
-            def _open_lz4(p: Path) -> BinaryIO:
-                return cast(BinaryIO, lz4_mod.open(p, mode="rb"))
-
-            opener = _open_lz4
-        else:
-            raise ValueError(f"Unsupported compression: {compression}")
-
-        with opener(src) as in_f, dst_tmp.open("wb") as out_f:
-            while True:
-                chunk = in_f.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                out_f.write(chunk)
+        decompress_file(src, dst_tmp, compression)
 
     def _validate(self, raw_path: Path, raw_meta: ShardFile) -> None:
         if not self._validate_hash:

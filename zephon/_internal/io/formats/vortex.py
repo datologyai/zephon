@@ -18,6 +18,7 @@ from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
@@ -143,7 +144,9 @@ class VortexFormat(FormatHandler):
                 + "install it via `pip install zephon[vortex]`"
             )
 
-        entries = [name for name in storage.listdir(path) if name.endswith(".vortex")]
+        entries = [
+            name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
+        ]
         if not entries:
             raise ValueError(f"No .vortex shards found under {path}")
         warn_missing_index(path, self.kind, num_shards=len(entries))

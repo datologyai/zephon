@@ -1,11 +1,15 @@
-import sys
+import bz2
+import gzip
+import lzma
 from pathlib import Path
 
 import pytest
 
+import zephon._internal.io.resolvers.direct as direct_mod
 from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import ShardFile, ShardLocator
+from zephon._internal.utils.compression import zstd
 
 
 def _mk_locator(
@@ -80,37 +84,81 @@ def test_direct_resolver_hash_validation(tmp_path: Path) -> None:
         _ = resolver_bad.resolve(loc_bad)
 
 
-def test_direct_resolver_decompresses_zstd_when_missing_raw(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _write_compressed(path: Path, payload: bytes, compression: str) -> None:
+    """Write ``payload`` as a streaming (multi-frame, size-less) compressed file."""
+    openers = {"gzip": gzip.open, "bz2": bz2.open, "xz": lzma.open, "zstd": zstd.open}
+    half = len(payload) // 2
+    with openers[compression](path, "wb") as fh:
+        fh.write(payload[:half])
+    with openers[compression](path, "ab") as fh:  # second frame / member
+        fh.write(payload[half:])
+
+
+@pytest.mark.parametrize("compression", ["gzip", "bz2", "xz", "zstd"])
+def test_direct_resolver_decompresses_when_missing_raw(
+    tmp_path: Path, compression: str
 ) -> None:
     backend = LocalFSBackend(root=Path("/"))
     resolver = DirectResolver(backend)
 
-    zip_path = tmp_path / "shard.zst"
-    zip_path.write_bytes(b"compressed")
+    payload = b"row\n" * 10_000
+    zip_path = tmp_path / "shard.cmp"
+    _write_compressed(zip_path, payload, compression)
     raw_path = tmp_path / "shard.raw"
 
-    class _Zstd:
-        @staticmethod
-        def decompress(data):
-            # Our stub just returns verbatim, good enough for the test
-            return data
+    zip_meta = ShardFile(basename="shard.cmp", bytes=zip_path.stat().st_size, hashes={})
+    loc = _mk_locator(
+        str(tmp_path),
+        basename="shard.raw",
+        bytes=len(payload),
+        zip_meta=zip_meta,
+        compression=compression,
+    )
+    assert not raw_path.exists()
+    ref = resolver.resolve(loc)
+    assert ref.raw.path == raw_path
+    assert raw_path.read_bytes() == payload
+    # The temp sibling is gone once the raw file is published.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["shard.cmp", "shard.raw"]
 
-    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
 
+def test_direct_resolver_decodes_long_shard_names(tmp_path: Path) -> None:
+    """The temp file must not add to a name already near NAME_MAX (255 bytes)."""
+    resolver = DirectResolver(LocalFSBackend(root=Path("/")))
+    payload = b"row\n" * 100
+    zip_name = "s" * 238 + ".jsonl.zst"
+    raw_name = zip_name + ".raw"  # 252 bytes
+    _write_compressed(tmp_path / zip_name, payload, "zstd")
+    zip_meta = ShardFile(
+        basename=zip_name, bytes=(tmp_path / zip_name).stat().st_size, hashes={}
+    )
+    loc = _mk_locator(
+        str(tmp_path),
+        basename=raw_name,
+        bytes=len(payload),
+        zip_meta=zip_meta,
+        compression="zstd",
+    )
+    assert resolver.resolve(loc).raw.path.read_bytes() == payload
+
+
+def test_direct_resolver_surfaces_decoder_errors(tmp_path: Path) -> None:
+    """A corrupt archive raises the decoder's own error, not a retry wrapper."""
+    resolver = DirectResolver(LocalFSBackend(root=Path("/")))
+    payload = b"row\n" * 100_000
+    zip_path = tmp_path / "shard.zst"
+    zip_path.write_bytes(zstd.compress(payload)[:-5])
     zip_meta = ShardFile(basename="shard.zst", bytes=zip_path.stat().st_size, hashes={})
     loc = _mk_locator(
         str(tmp_path),
         basename="shard.raw",
-        bytes=zip_path.stat().st_size,
+        bytes=len(payload),
         zip_meta=zip_meta,
         compression="zstd",
     )
-    assert not raw_path.exists()
-    ref = resolver.resolve(loc)
-    # Decompression produced raw file and returned ref
-    assert ref.raw.path.exists()
-    assert ref.raw.path.read_bytes() == zip_path.read_bytes()
+    with pytest.raises(EOFError):
+        resolver.resolve(loc)
+    assert [p.name for p in tmp_path.iterdir()] == ["shard.zst"]
 
 
 def test_direct_resolver_zip_missing_raises(tmp_path: Path) -> None:
@@ -131,18 +179,30 @@ def test_direct_resolver_zip_missing_raises(tmp_path: Path) -> None:
 def test_direct_resolver_unsupported_compression(tmp_path: Path) -> None:
     backend = LocalFSBackend(root=Path("/"))
     resolver = DirectResolver(backend)
-    zipf = tmp_path / "archive.gz"
-    zipf.write_bytes(b"gz")
-    zip_meta = ShardFile(basename="archive.gz", bytes=zipf.stat().st_size, hashes={})
+    zipf = tmp_path / "archive.br"
+    zipf.write_bytes(b"br")
+    zip_meta = ShardFile(basename="archive.br", bytes=zipf.stat().st_size, hashes={})
     loc = _mk_locator(
         str(tmp_path),
         basename="raw.bin",
         bytes=zipf.stat().st_size,
         zip_meta=zip_meta,
-        compression="gzip",
+        compression="br",
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="Unsupported compression"):
         _ = resolver.resolve(loc)
+
+
+def _stub_decompress(
+    monkeypatch: pytest.MonkeyPatch, outputs: list[bytes], attempts: dict[str, int]
+) -> None:
+    """Replace decompression with one that writes ``outputs[attempt]``."""
+
+    def _fake(src: Path, dst: Path, compression: str) -> None:
+        dst.write_bytes(outputs[min(attempts["count"], len(outputs) - 1)])
+        attempts["count"] += 1
+
+    monkeypatch.setattr(direct_mod, "decompress_file", _fake)
 
 
 def test_direct_resolver_reprepares_empty_raw(
@@ -158,14 +218,7 @@ def test_direct_resolver_reprepares_empty_raw(
     zip_path.write_bytes(payload)
 
     attempts = {"count": 0}
-
-    class _Zstd:
-        @staticmethod
-        def decompress(data):
-            attempts["count"] += 1
-            return data
-
-    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
+    _stub_decompress(monkeypatch, [payload], attempts)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(
@@ -189,20 +242,10 @@ def test_direct_resolver_retries_until_success(
     zip_path = tmp_path / "shard.zst"
     payload = b"payload"
     zip_path.write_bytes(payload)
-    raw_path = tmp_path / "shard.raw"
 
     attempts = {"count": 0}
-
-    class _Zstd:
-        @staticmethod
-        def decompress(data):
-            attempts["count"] += 1
-            if attempts["count"] < 3:
-                # simulate a broken decompression that returns nothing
-                return b""
-            return data
-
-    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
+    # Broken decompression that yields nothing, twice, then the real payload.
+    _stub_decompress(monkeypatch, [b"", b"", payload], attempts)
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(
@@ -227,18 +270,9 @@ def test_direct_resolver_retry_exhaustion_raises(
     zip_path = tmp_path / "shard.zst"
     payload = b"payload"
     zip_path.write_bytes(payload)
-    raw_path = tmp_path / "shard.raw"
 
     attempts = {"count": 0}
-
-    class _Zstd:
-        @staticmethod
-        def decompress(data):
-            attempts["count"] += 1
-            # Always return nothing, triggering validation failure
-            return b""
-
-    monkeypatch.setitem(sys.modules, "zstd", _Zstd)
+    _stub_decompress(monkeypatch, [b""], attempts)  # always empty
 
     zip_meta = ShardFile(basename="shard.zst", bytes=len(payload), hashes={})
     loc = _mk_locator(

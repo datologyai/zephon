@@ -14,6 +14,7 @@ from zephon._internal.io.index.index_builder import (
     ShardInfo,
     register_builder,
 )
+from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 
 try:
     import vortex as _vortex
@@ -24,7 +25,7 @@ except ImportError:
 class VortexIndexBuilder(IndexBuilder):
     """Index builder for Vortex datasets."""
 
-    file_pattern = "*.vortex"
+    suffixes = VORTEX_SUFFIXES
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract row count and metadata from a Vortex file."""

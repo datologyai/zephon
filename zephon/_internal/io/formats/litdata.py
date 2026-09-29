@@ -22,6 +22,10 @@ from zephon._internal.io.index import find_and_load_index
 from zephon._internal.io.index.index_types import LitDataIndex, is_litdata_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.suffixes import (
+    LITDATA_CHUNK_SUFFIX,
+    LITDATA_COMPRESSED_CHUNK_SUFFIX,
+)
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 # Shared metadata support requires optree; payload readers load optional deps lazily.
@@ -353,8 +357,12 @@ class LitDataFormat(FormatHandler):
         if only .bin.zst files exist, raises a clear error.
         """
         all_entries = storage.listdir(path)
-        entries = sorted(name for name in all_entries if name.endswith(".bin"))
-        zst_entries = [n for n in all_entries if n.endswith(".bin.zst")]
+        entries = sorted(
+            name for name in all_entries if name.endswith(LITDATA_CHUNK_SUFFIX)
+        )
+        zst_entries = [
+            n for n in all_entries if n.endswith(LITDATA_COMPRESSED_CHUNK_SUFFIX)
+        ]
 
         if not entries:
             if zst_entries:
