@@ -30,6 +30,10 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
         """Get or create an obstore Store for the given bucket."""
         ...
 
+    def canonical_root(self, path: str, fmt: str | None = None) -> str:
+        """Object-store paths already name fixed locations; return ``path``."""
+        return path
+
     def exists(self, path: str) -> bool:
         """Check if a file exists at the given cloud path."""
         scheme, bucket, key = split_url(path)

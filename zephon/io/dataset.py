@@ -171,8 +171,15 @@ class Dataset:
         Special URI schemes:
 
         - ``hf://org/name[@rev]/[config/]split`` is served through the
-          HuggingFace backend, which streams parquet shards just-in-time via
-          the HuggingFace Datasets Server.
+          HuggingFace backend: the split's uploaded files when their format is
+          readable, else HuggingFace's Parquet conversion when it is complete
+          and built from the requested commit. ``fmt`` picks the source in that
+          format; appending ``~original`` or ``~parquet`` to the revision
+          (``hf://org/name@~parquet/split``) forces one. A partial conversion is
+          used only with ``ZEPHON_HF_ALLOW_PARTIAL=1``. Uploaded files are read
+          as stored: the dataset card's reader options and ``features`` casting
+          are not applied. The dataset's ``path`` becomes a URI pinned to the
+          resolved commit, source and config.
 
         Returns:
             Dataset: a descriptor populated with shard counts and a catalog
@@ -198,6 +205,7 @@ class Dataset:
             root_str = path.rstrip("/") or path
 
         storage = _RouterStorageBackend()
+        root_str = storage.canonical_root(root_str, fmt=fmt)
         kind = fmt
         if kind is None:
             kind = _auto_detect_format(storage, root_str, root_path)

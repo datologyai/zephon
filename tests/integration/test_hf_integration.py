@@ -3,12 +3,12 @@
 
 """Live integration tests for the ``hf://`` storage backend.
 
-These exercise the backend against the real HuggingFace Datasets Server +
-``huggingface.co`` resolve URLs. They are gated by ``pytest.mark.integration``
+These exercise the backend against the real HuggingFace Hub, Datasets Server
+and ``huggingface.co`` resolve URLs. They are gated by ``pytest.mark.integration``
 (skipped by default; ``make integration`` / ``--run-integration`` to run).
 
-Uses ``rajpurkar/squad`` because it's small, public, and parquet-native with
-a stable layout.
+``rajpurkar/squad`` is small, public and uploaded as Parquet, so it exercises
+both sources: its uploaded files by default and its conversion via ``~parquet``.
 """
 
 from __future__ import annotations
@@ -19,9 +19,8 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-# All tests here mock-free-talk to HF; if huggingface_hub isn't installed we
-# can't drive ``download()`` or build resolve URLs. Skip the whole module
-# rather than per-test for clarity.
+# Resolving uploaded files needs ``datasets``; downloads need huggingface_hub.
+pytest.importorskip("datasets")
 pytest.importorskip("huggingface_hub")
 pytest.importorskip("pyarrow")
 
@@ -35,29 +34,35 @@ _SQUAD_TRAIN_URI = "hf://rajpurkar/squad/plain_text/train"
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _require_datasets_server() -> None:
-    """Skip the module on Datasets Server outages (5xx/unreachable); 4xx still fails loudly.
+def _require_hub() -> None:
+    """Skip the module on HF outages (5xx/unreachable); 4xx still fails loudly.
 
     A fixture rather than an import-time check so unit-test collection makes no HTTP call.
     """
-    try:
-        resp = requests.get(
+    probes = [
+        ("https://huggingface.co/api/datasets/rajpurkar/squad/refs", {}),
+        (
             _DATASETS_SERVER_PARQUET_URL,
-            params={"dataset": "rajpurkar/squad", "config": "plain_text"},
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        pytest.skip(f"HF Datasets Server unreachable: {exc}")
-    if resp.status_code >= 500:
-        pytest.skip(f"HF Datasets Server unavailable (HTTP {resp.status_code})")
+            {"dataset": "rajpurkar/squad", "config": "plain_text"},
+        ),
+    ]
+    for url, params in probes:
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+        except requests.RequestException as exc:
+            pytest.skip(f"HuggingFace unreachable: {exc}")
+        if resp.status_code >= 500:
+            pytest.skip(f"HuggingFace unavailable (HTTP {resp.status_code}): {url}")
 
 
-def test_dataset_from_path_streams_squad() -> None:
-    """``Dataset.from_path`` lists + discovers SQuAD without predownloading."""
+def test_dataset_from_path_pins_squad_uploads() -> None:
+    """``Dataset.from_path`` resolves SQuAD's uploaded Parquet and pins the commit."""
     from zephon.io.dataset import Dataset
 
     ds = Dataset.from_path("squad", _SQUAD_TRAIN_URI)
-    assert ds.path == _SQUAD_TRAIN_URI
+    assert ds.path is not None
+    parts = parse_hf_uri(ds.path)
+    assert parts.is_frozen and parts.source == "original"
     assert ds.backend["kind"] == "parquet"
     assert ds.shard_count() >= 1
     assert ds.total() > 0
@@ -66,16 +71,16 @@ def test_dataset_from_path_streams_squad() -> None:
 def test_download_squad_shard_via_http_get(tmp_path: Path) -> None:
     """``HFBackend.download`` streams a real shard to disk via ``http_get``."""
     backend = HFBackend()
-    names = backend.listdir(_SQUAD_TRAIN_URI)
+    root = backend.canonical_root(_SQUAD_TRAIN_URI)
+    names = backend.listdir(root)
     assert names, "Expected at least one parquet shard"
 
-    src = f"{_SQUAD_TRAIN_URI}/{names[0]}"
-    dst = tmp_path / names[0]
+    src = f"{root}/{names[0]}"
+    dst = tmp_path / "shard.parquet"
     backend.download(src, str(dst))
 
-    expected = backend.stat(src)["size"]
-    assert dst.stat().st_size == expected
-    assert not (tmp_path / (names[0] + ".incomplete")).exists()
+    assert dst.stat().st_size == backend.stat(src)["size"]
+    assert not (tmp_path / "shard.parquet.incomplete").exists()
 
 
 def test_hf_actually_honors_range_reads() -> None:
@@ -90,14 +95,13 @@ def test_hf_actually_honors_range_reads() -> None:
     directly.
     """
     backend = HFBackend()
-    shards = backend._list_shards(parse_hf_uri(_SQUAD_TRAIN_URI))
-    assert shards, "Expected at least one shard"
-    first = next(iter(shards.values()))
+    root = backend.canonical_root(_SQUAD_TRAIN_URI)
+    _, _, url = backend._resolve_file(f"{root}/{backend.listdir(root)[0]}")
 
     # Use the backend's retrying session, not a bare request: HF's CDN resets
     # connections, and 206/200 pass through untouched so the assert is intact.
     resp = backend._get_session().get(
-        first.url,
+        url,
         headers={"Range": "bytes=0-63", "Accept-Encoding": "identity"},
         allow_redirects=True,
         timeout=60,
@@ -115,12 +119,9 @@ def test_hf_actually_honors_range_reads() -> None:
 def test_minimal_pipeline_consumes_squad(tmp_path: Path) -> None:
     """Drive a tiny pipeline end-to-end against a live ``hf://`` dataset.
 
-    Mirrors the JSONL pipeline smoke test in ``test_pipeline.py``: build a
-    Dataset, wire it through StaticMixtureWorkSource + Pipeline, and prove
-    we can pull a microbatch out the other end. Validates the whole stack
-    — HFBackend listing, footer range reads, parquet discovery, the cache
-    manager downloading shards just-in-time via ``http_get``, parquet
-    random access — against real HF.
+    Validates the whole stack — resolution, footer range reads, parquet
+    discovery, the cache manager downloading shards just-in-time via
+    ``http_get``, parquet random access — against real HF.
     """
     from zephon import Pipeline as PublicPipeline
     from zephon.io import Dataset
@@ -162,47 +163,79 @@ def test_minimal_pipeline_consumes_squad(tmp_path: Path) -> None:
             )
         # Catch the "right schema, garbage values" failure mode that
         # checking only key presence would let through.
-        assert isinstance(payload["id"], str) and payload["id"], (
-            "Expected non-empty SQuAD id"
-        )
-        assert isinstance(payload["context"], str) and payload["context"], (
-            "Expected non-empty SQuAD context"
-        )
-        assert isinstance(payload["question"], str) and payload["question"], (
-            "Expected non-empty SQuAD question"
-        )
+        assert isinstance(payload["id"], str) and payload["id"]
+        assert isinstance(payload["context"], str) and payload["context"]
+        assert isinstance(payload["question"], str) and payload["question"]
 
 
-def test_explicit_revision_serves_bytes_via_hf_hub_url() -> None:
-    """End-to-end validation of the ``@<rev>`` rebuild path.
-
-    Builds the rebuilt resolve URL by feeding a real ``refs/convert/parquet``
-    commit SHA into the URI grammar, then proves it works by range-reading
-    the first 64 bytes of a shard. This is the canary that catches us
-    shipping a URL builder that passes string-equality unit tests but
-    produces 404s against HF.
-    """
-    from huggingface_hub import HfApi
-
-    # Discover the current commit SHA on refs/convert/parquet so the
-    # rebuilt /resolve/<sha>/... URL points at a real revision.
-    api = HfApi()
-    info = api.dataset_info("rajpurkar/squad", revision="refs/convert/parquet")
-    sha = info.sha
-    assert sha, "Expected a SHA on refs/convert/parquet"
-
+def test_commit_pin_serves_uploaded_bytes() -> None:
+    """``@<commit>`` reads the uploaded files at that commit."""
     backend = HFBackend()
-    uri = f"hf://rajpurkar/squad@{sha}/plain_text/train"
-    shards = backend._list_shards(parse_hf_uri(uri))
-    assert shards, "Expected at least one shard"
-    first = next(iter(shards.values()))
+    commit = backend.commit_for("rajpurkar/squad", "main")
+    root = backend.canonical_root(f"hf://rajpurkar/squad@{commit}/plain_text/train")
 
-    # Rebuilt URL is the canonical resolve form pinned to <sha>, not the
-    # /api/.../parquet/ form /parquet hands back.
-    assert "/datasets/rajpurkar/squad/resolve/" in first.url
-    assert sha in first.url
-
-    # And the URL actually serves bytes — a range read returns 64 bytes
-    # from the file at the pinned revision.
-    data = backend.read_range(f"{uri}/{first.filename}", 0, length=64)
+    assert parse_hf_uri(root).revision == commit
+    data = backend.read_range(f"{root}/{backend.listdir(root)[0]}", 0, length=64)
     assert len(data) == 64
+
+
+def test_forced_conversion_serves_parquet_bytes() -> None:
+    """``@~parquet`` pins HF's conversion commit and reads from it."""
+    backend = HFBackend()
+    root = backend.canonical_root("hf://rajpurkar/squad@~parquet/plain_text/train")
+    parts = parse_hf_uri(root)
+
+    assert parts.source == "parquet"
+    assert parts.revision == backend.conversion_commit("rajpurkar/squad")
+    data = backend.read_range(f"{root}/{backend.listdir(root)[0]}", 0, length=4)
+    assert data == b"PAR1"
+
+
+def test_fmt_parquet_selects_the_conversion_of_a_jsonl_upload() -> None:
+    root = HFBackend().canonical_root(
+        "hf://databricks/databricks-dolly-15k/train", "parquet"
+    )
+    assert parse_hf_uri(root).source == "parquet"
+
+
+def test_compressed_jsonl_uploads_resolve_to_uploaded_files() -> None:
+    """A large compressed-JSONL upload resolves to its uploaded files from metadata alone."""
+    backend = HFBackend()
+    root = backend.canonical_root("hf://mlfoundations/dclm-baseline-1.0/train")
+    names = backend.listdir(root)
+
+    assert parse_hf_uri(root).source == "original"
+    assert len(names) > 20_000
+    assert all(name.endswith(".jsonl.zst") for name in names)
+
+
+def test_unreadable_upload_with_partial_conversion_explains_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """c4 uploads JSON (not JSONL) and HF converted only part of it."""
+    monkeypatch.delenv("ZEPHON_HF_ALLOW_PARTIAL", raising=False)
+    with pytest.raises(ValueError) as exc:
+        HFBackend().canonical_root("hf://allenai/c4/en/validation")
+    message = str(exc.value)
+    assert "uploaded files:" in message and "json.gz" in message
+    assert "parquet conversion:" in message and "partial" in message
+
+
+def test_local_directory_does_not_shadow_the_hub_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-named local directory must not supply the remote dataset's config."""
+    shadow = tmp_path / "databricks" / "databricks-dolly-15k"
+    shadow.mkdir(parents=True)
+    (shadow / "README.md").write_text(
+        "---\nconfigs:\n- config_name: shadow\n  data_files: train.jsonl\n"
+        "  default: true\n---\n",
+        encoding="utf-8",
+    )
+    (shadow / "train.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    root = HFBackend().canonical_root("hf://databricks/databricks-dolly-15k/train")
+
+    parts = parse_hf_uri(root)
+    assert (parts.source, parts.config) == ("original", "default")

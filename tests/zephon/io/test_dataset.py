@@ -127,6 +127,28 @@ def test_dataset_from_path_detects_compressed_jsonl(
     assert [locators[i].raw.bytes for i in (0, 1)] == [18, 9]  # decoded sizes
 
 
+def test_dataset_from_path_discovers_the_canonical_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backend's canonical root replaces the given path before discovery."""
+    from zephon._internal.io.storage.router import RouterStorageBackend
+
+    state = _install_obstore_stubs(monkeypatch)
+    state["objects"][("bucket", "pinned/shard0.jsonl")] = b'{"id":1}\n{"id":2}\n'
+    seen: list[tuple[str, str | None]] = []
+
+    def canonical_root(self, path: str, fmt: str | None = None) -> str:
+        seen.append((path, fmt))
+        return "s3://bucket/pinned"
+
+    monkeypatch.setattr(RouterStorageBackend, "canonical_root", canonical_root)
+    dataset = Dataset.from_path("pinned", "s3://bucket/alias", fmt="jsonl")
+
+    assert seen == [("s3://bucket/alias", "jsonl")]
+    assert dataset.path == "s3://bucket/pinned"
+    assert counts_dict(dataset) == {0: 2}
+
+
 def test_from_path_dataset_pickle_is_small(tmp_path: Path) -> None:
     """A file-backed Dataset must pickle to KB (handle only; no shard graph)."""
     import pickle

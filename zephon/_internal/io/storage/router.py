@@ -33,7 +33,7 @@ class RouterStorageBackend(StorageBackend):
 
     - ``s3://`` -> S3 backend
     - ``gs://`` or ``gcs://`` -> GCS backend
-    - ``hf://`` -> HuggingFace backend (Datasets Server-backed parquet shards)
+    - ``hf://`` -> HuggingFace backend (a split's uploaded or converted files)
     - otherwise -> Local filesystem
     """
 
@@ -68,6 +68,9 @@ class RouterStorageBackend(StorageBackend):
 
     def exists(self, path: str) -> bool:
         return self._backend_for(path).exists(path)
+
+    def canonical_root(self, path: str, fmt: str | None = None) -> str:
+        return self._backend_for(path).canonical_root(path, fmt)
 
     def download(self, src: str, dst: str, timeout: float | None = None) -> None:
         return self._backend_for(src).download(src, dst, timeout)

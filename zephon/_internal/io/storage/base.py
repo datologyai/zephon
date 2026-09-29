@@ -34,6 +34,15 @@ class StorageBackend(Protocol):
         """Return ``True`` if ``path`` exists on the backend."""
         ...
 
+    def canonical_root(self, path: str, fmt: str | None = None) -> str:
+        """Return the dataset root that every later process should read.
+
+        Called once by ``Dataset.from_path`` before discovery; the result is
+        the dataset's root from then on. Backends whose paths already name
+        fixed content return ``path``. ``fmt`` is the caller's requested format.
+        """
+        ...
+
     def download(self, src: str, dst: str, timeout: float | None = None) -> None:
         """Copy ``src`` from the backend onto the local filesystem at ``dst``."""
         ...

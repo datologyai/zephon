@@ -1,99 +1,93 @@
 """HuggingFace dataset storage backend.
 
-Treats an ``hf://org/name[@rev]/[config/]split`` URI as a virtual directory of
-parquet shards backed by the Datasets Server ``/parquet`` endpoint:
+Serves an ``hf://`` URI (grammar in :mod:`._hf_uri`) as a flat virtual directory
+holding the files of one split:
 
-- ``listdir`` issues one HTTP call to ``/parquet`` and returns the parquet
-  shard filenames for the requested split.
-- ``stat`` / ``read_range`` operate on the per-file HTTPS URLs returned by
-  ``/parquet`` (``huggingface.co`` hosts speak HTTP range GETs), reusing the
-  cached listing so there are no per-file HEAD requests.
-- ``download`` delegates to ``huggingface_hub.file_download.http_get`` for
-  HF's redirect/retry/resume handling
+- :meth:`HFBackend.canonical_root` resolves the URI once (:mod:`._hf_resolve`):
+  the split's uploaded files when Zephon reads their format, else HuggingFace's
+  Parquet conversion. It returns a frozen URI naming the commit, the source and
+  the config, so every later process lists the same files.
+- ``listdir`` / ``walk`` list a frozen URI. Names are repo paths with ``/``
+  percent-encoded, so the directory is flat and names never collide, even
+  across HF's ``train-part{k}`` conversion directories.
+- ``stat`` / ``read_range`` / ``download`` turn a frozen root plus a name
+  straight into a ``resolve/<commit>/<path>`` URL; they need no listing.
 
 The backend is registered for the ``hf://`` scheme in
-:class:`zephon._internal.io.storage.router.RouterStorageBackend`, which lets
-:class:`zephon._internal.io.formats.parquet.ParquetFormat` consume HF datasets without
-any HF-specific code paths in ``Dataset.from_path`` or the format handlers.
+:class:`zephon._internal.io.storage.router.RouterStorageBackend`, so the format
+handlers read HF datasets without HF-specific code.
 
 Auth: bearer token from ``huggingface_hub.HfFolder.get_token()`` if available,
 otherwise the ``HF_TOKEN`` environment variable.
-
-Revision semantics:
-
-- Default (``main``, i.e. no ``@<rev>``): we use the URLs ``/parquet``
-  returns, which point at the auto-converted ``refs/convert/parquet``
-  branch. This is the path that always has parquet, regardless of the
-  dataset's native format.
-- Explicit ``@<rev>`` (a tag, branch, or commit SHA): we extract the
-  per-shard path from ``/parquet``'s URL and rebuild a resolve URL via
-  ``huggingface_hub.hf_hub_url(repo_id, path, revision=<rev>)``. For
-  parquet-native repos that maintain a stable directory layout this
-  delivers reproducible per-revision pinning. For non-parquet-native
-  repos the rebuilt URL will 404 at read/download time (those revisions
-  don't have parquet at the same paths), surfacing as
-  ``FileNotFoundError`` — honest failure instead of silently serving the
-  auto-converted bytes under a mismatched cache key.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import threading
-from collections.abc import Iterator
-from dataclasses import dataclass
+import urllib.parse
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any, Mapping
 
-from ._hf_uri import HF_URI_SCHEME, HFUriParts, parse_hf_uri
-from ._utils import OpenViaDownloadMixin
+from zephon._internal.io.storage._hf_resolve import list_frozen, resolve
+from zephon._internal.io.storage._hf_uri import HFUriParts, parse_hf_uri
+from zephon._internal.io.storage._utils import OpenViaDownloadMixin
+from zephon._internal.io.suffixes import format_of
 
 logger = logging.getLogger(__name__)
 
+_HUB_URL = "https://huggingface.co"
 _DATASETS_SERVER_PARQUET_URL = "https://datasets-server.huggingface.co/parquet"
 _HTTP_TIMEOUT_SECONDS = 120.0
 
-# Retry transient errors on the HF Datasets Server and CDN. The /parquet
+# Retry transient errors on the Hub and the Datasets Server. The /parquet
 # endpoint returns 503 while a dataset is being converted, and the CDN
 # occasionally returns 429 under high concurrency.
 _RETRY_TOTAL = 4
 _RETRY_BACKOFF_FACTOR = 0.5
 _RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
-# ``partial=true`` means the Datasets Server only converted part of the
-# dataset, so the shard listing is incomplete. Silently training on a
-# truncated dataset is the foot-gun the rewrite is meant to avoid; refuse
-# by default and let the user opt in if they explicitly want a partial view.
+# A partial or still-pending conversion covers only part of the split, so it is
+# refused unless the user opts in for a diagnostic run.
 _ALLOW_PARTIAL_ENV = "ZEPHON_HF_ALLOW_PARTIAL"
 
+_INCOMPLETE_SUFFIX = ".incomplete"
+# The shard cache stages a download at ``<name>.tmp`` and ``download`` writes
+# to ``<dst>.incomplete``; both suffixes must fit in one 255-byte file name.
+_MAX_NAME_BYTES = 255 - len(".tmp") - len(_INCOMPLETE_SUFFIX)
 
-@dataclass(frozen=True)
-class _HFShard:
-    """A parquet shard advertised by the Datasets Server."""
+# Process-wide, shared by every HFBackend: ``Dataset.from_path``, the catalog
+# signature and the catalog build each construct their own backend.
+_memo_lock = threading.Lock()
+_frozen_roots: dict[tuple[str, str | None, bool], str] = {}
+_listings: dict[str, dict[str, int]] = {}
+_sizes: dict[str, int] = {}
+# One lock per in-flight resolution or listing, so concurrent misses on the
+# same key wait for one result instead of repeating the Hub requests.
+_key_locks: dict[tuple[str, ...], threading.Lock] = {}
 
-    filename: str
-    url: str
-    size: int
 
+def _key_lock(key: tuple[str | bool | None, ...]) -> threading.Lock:
+    with _memo_lock:
+        return _key_locks.setdefault(tuple(str(part) for part in key), threading.Lock())
+
+
+# The Hub's paths-info endpoint accepts at most 100 paths per request.
+_PATHS_INFO_LIMIT = 100
 
 _TOKEN_UNSET: Any = object()
 
 
 class HFBackend(OpenViaDownloadMixin):
-    """Storage backend that reads parquet shards from HuggingFace datasets.
+    """Read-only storage backend for HuggingFace dataset splits.
 
-    All IO is just-in-time: there is no pre-download to disk and no symlink
-    view. The first call into the backend for a given
-    ``(repo_id, revision, config, split)`` populates a per-instance listing
-    cache; subsequent ``stat`` / ``read_range`` / ``download`` calls reuse the
-    cached URL and size.
+    All IO is just-in-time: nothing is pre-downloaded. Resolution and listings
+    are memoized per process; file access needs only the frozen URI and a name.
     """
 
     def __init__(self) -> None:
-        self._listing_cache: dict[
-            tuple[str, str, str | None, str], dict[str, _HFShard]
-        ] = {}
-        self._cache_lock = threading.Lock()
         self._token: Any = _TOKEN_UNSET
         self._token_lock = threading.Lock()
         self._session: Any = None
@@ -119,7 +113,8 @@ class HFBackend(OpenViaDownloadMixin):
                     total=_RETRY_TOTAL,
                     backoff_factor=_RETRY_BACKOFF_FACTOR,
                     status_forcelist=_RETRY_STATUS_FORCELIST,
-                    allowed_methods=frozenset({"GET", "HEAD"}),
+                    # POST is only used for the idempotent paths-info lookup.
+                    allowed_methods=frozenset({"GET", "HEAD", "POST"}),
                     respect_retry_after_header=True,
                     raise_on_status=False,
                 )
@@ -131,171 +126,17 @@ class HFBackend(OpenViaDownloadMixin):
         return self._session
 
     @staticmethod
-    def _not_found_message(path: str) -> str:
-        """404 error message, hinting at @<rev> path-layout mismatch."""
-        try:
-            parts, _ = HFBackend._split_path(path)
-        except ValueError:
-            parts = None
-        if parts is not None and parts.revision != "main":
-            return (
-                f"hf:// object not found at @{parts.revision!r}: {path}. "
-                f"The path used by /parquet (from the auto-converted "
-                f"refs/convert/parquet branch) likely doesn't exist at "
-                f"@{parts.revision}; that revision may use a different "
-                "layout. Drop the @<revision> suffix to use the "
-                "auto-converted view, or query the HF tree API to find the "
-                "actual parquet paths at your revision."
-            )
-        return f"hf:// object not found: {path}"
-
-    @staticmethod
-    def _raise_for_http_error(resp: Any, path: str) -> None:
+    def _raise_for_http_error(resp: Any, what: str) -> None:
         """Map HTTP error responses to protocol-conforming exceptions."""
         status = resp.status_code
         if status == 404:
-            raise FileNotFoundError(HFBackend._not_found_message(path))
+            raise FileNotFoundError(f"hf:// object not found: {what}")
         if status in (401, 403):
             raise PermissionError(
-                f"hf:// access denied: {path}; "
+                f"hf:// access denied: {what}; "
                 "set HF_TOKEN or run `huggingface-cli login`."
             )
         resp.raise_for_status()
-
-    @staticmethod
-    def _resolve_shard_url(repo_id: str, parquet_url: str, revision: str) -> str:
-        """Return the URL to actually fetch a shard from.
-
-        For the default revision (``main``), the URL returned by ``/parquet``
-        (always pointing at the auto-converted ``refs/convert/parquet``
-        branch) is the canonical source.
-
-        For any other revision the user explicitly typed (``@v1.0``,
-        ``@<sha>``), we rebuild the URL via ``huggingface_hub.hf_hub_url``
-        so the shard fetch is pinned to that revision. This delivers real
-        reproducibility for parquet-native repos; for non-parquet-native
-        repos the URL will 404 at read/download time (the user revision
-        doesn't have parquet at those paths), which surfaces honestly as
-        ``FileNotFoundError`` rather than silently returning the
-        auto-converted bytes under a misleading cache key.
-
-        Path extraction: ``/parquet`` returns canonical resolve URLs of the
-        form
-        ``https://huggingface.co/datasets/{repo}/resolve/{encoded-rev}/{path}``
-        (HF URL-encodes ``refs/convert/parquet`` as ``refs%2Fconvert%2Fparquet``
-        in the path segment). We slice off the prefix and the embedded
-        ref, and reuse the trailing ``{path}`` for the rebuilt URL on the
-        assumption that the user-specified revision uses the same
-        layout — which is true for parquet-native repos that maintain a
-        stable directory structure.
-        """
-        if revision == "main":
-            return parquet_url
-
-        import urllib.parse as _urlparse
-
-        parsed = _urlparse.urlparse(parquet_url)
-        if parsed.netloc != "huggingface.co":
-            raise RuntimeError(
-                f"Cannot pin to revision {revision!r}: /parquet returned URL "
-                f"{parquet_url!r} on an unexpected host. This usually means "
-                "HF changed the URL shape; please report it. Omit "
-                "@<revision> for the default view in the meantime."
-            )
-        resolve_prefix = f"/datasets/{repo_id}/resolve/"
-        if not parsed.path.startswith(resolve_prefix):
-            raise RuntimeError(
-                f"Cannot pin to revision {revision!r}: /parquet URL "
-                f"{parquet_url!r} doesn't match the expected resolve shape "
-                f"{resolve_prefix}.... This usually means HF changed the "
-                "URL format; please report it. Omit @<revision> for the "
-                "default view in the meantime."
-            )
-        rest = parsed.path[len(resolve_prefix) :]
-        if "/" not in rest:
-            raise RuntimeError(
-                f"Cannot pin to revision {revision!r}: /parquet URL "
-                f"{parquet_url!r} has no path after the embedded ref."
-            )
-        # Discard the embedded ref; the user's revision replaces it.
-        _, path_in_repo = rest.split("/", 1)
-
-        try:
-            from huggingface_hub import hf_hub_url
-
-            return hf_hub_url(
-                repo_id=repo_id,
-                filename=path_in_repo,
-                repo_type="dataset",
-                revision=revision,
-            )
-        except ImportError:
-            # huggingface_hub absent (e.g. 3.14t CI). Build the resolve URL
-            # manually — same shape as hf_hub_url produces.
-            quoted_rev = _urlparse.quote(revision, safe="")
-            return (
-                f"https://huggingface.co/datasets/{repo_id}/resolve/"
-                f"{quoted_rev}/{path_in_repo}"
-            )
-
-    @staticmethod
-    def _split_matches(item: Mapping[str, Any], parts: HFUriParts) -> bool:
-        if item.get("split") != parts.split:
-            return False
-        if parts.config is not None and item.get("config") != parts.config:
-            return False
-        return True
-
-    @classmethod
-    def _guard_against_incomplete_conversion(
-        cls, payload: Mapping[str, Any], parts: HFUriParts
-    ) -> None:
-        """Refuse to silently serve a truncated split listing.
-
-        ``/parquet`` exposes three independent failure signals:
-        - ``partial=true``: dataset-wide conversion is still streaming and the
-          listing may be missing later shards;
-        - ``failed=[...]``: per-(config, split) entries the converter gave up
-          on; the shard set for those splits is permanently incomplete;
-        - ``pending=[...]``: per-(config, split) entries still being converted.
-
-        We raise if any of those touch the requested split. ``failed`` is
-        always fatal (waiting won't help). ``partial``/``pending`` can be
-        opted into via ``ZEPHON_HF_ALLOW_PARTIAL=1`` for diagnostic runs.
-        """
-        failed = payload.get("failed") or []
-        for item in failed:
-            if cls._split_matches(item, parts):
-                raise RuntimeError(
-                    f"HuggingFace Datasets Server reports failed conversion "
-                    f"for {parts.repo_id!r} split={parts.split!r}; the "
-                    "parquet shard set is permanently incomplete for this "
-                    "split. Pick a different split, or open an issue on the "
-                    "dataset repo."
-                )
-
-        allow_partial = bool(os.environ.get(_ALLOW_PARTIAL_ENV))
-        if allow_partial:
-            return
-
-        pending = payload.get("pending") or []
-        for item in pending:
-            if cls._split_matches(item, parts):
-                raise RuntimeError(
-                    f"HuggingFace Datasets Server reports pending conversion "
-                    f"for {parts.repo_id!r} split={parts.split!r}; the shard "
-                    "listing would be truncated. Retry later, or set "
-                    f"{_ALLOW_PARTIAL_ENV}=1 to opt in to a partial view."
-                )
-
-        if payload.get("partial"):
-            raise RuntimeError(
-                f"HuggingFace Datasets Server reports partial=true for "
-                f"{parts.repo_id!r} split={parts.split!r}; conversion is "
-                "incomplete and the shard listing would be truncated. Retry "
-                f"later, or set {_ALLOW_PARTIAL_ENV}=1 to opt in to a "
-                "partial view."
-            )
 
     def _get_token(self) -> str | None:
         if self._token is not _TOKEN_UNSET:
@@ -316,100 +157,237 @@ class HFBackend(OpenViaDownloadMixin):
         token = self._get_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
+    def _get(self, url: str, what: str, **kwargs: Any) -> Any:
+        resp = self._get_session().get(
+            url, headers=self._auth_headers(), timeout=_HTTP_TIMEOUT_SECONDS, **kwargs
+        )
+        self._raise_for_http_error(resp, what)
+        return resp
+
+    # ------------------------------------------------------------------
+    # HubClient (see _hf_resolve)
+    # ------------------------------------------------------------------
+
+    def commit_for(self, repo_id: str, revision: str) -> str:
+        """Return the 40-hex commit ``revision`` names in ``repo_id``."""
+        quoted = urllib.parse.quote(revision, safe="")
+        resp = self._get(
+            f"{_HUB_URL}/api/datasets/{repo_id}/revision/{quoted}",
+            f"hf://{repo_id}@{revision}",
+            params={"expand[]": "sha"},
+        )
+        return str(resp.json()["sha"])
+
+    def conversion_commit(self, repo_id: str) -> str | None:
+        """Return the head commit of ``refs/convert/parquet``, if it exists."""
+        resp = self._get(f"{_HUB_URL}/api/datasets/{repo_id}/refs", f"hf://{repo_id}")
+        for ref in resp.json().get("converts") or []:
+            if ref.get("name") == "parquet":
+                return str(ref["targetCommit"])
+        return None
+
+    def parquet_export(
+        self, repo_id: str, config: str | None
+    ) -> tuple[Mapping[str, Any], str | None]:
+        """Return the Datasets Server ``/parquet`` payload and its ``X-Revision``."""
+        params = {"dataset": repo_id}
+        if config is not None:
+            params["config"] = config
+        resp = self._get(
+            _DATASETS_SERVER_PARQUET_URL,
+            f"parquet conversion of hf://{repo_id}",
+            params=params,
+        )
+        return resp.json(), resp.headers.get("X-Revision")
+
+    def _tree(
+        self, repo_id: str, commit: str, path: str, *, recursive: bool
+    ) -> Iterator[Mapping[str, Any]]:
+        """Yield the tree entries under ``path``, following the Hub's pagination."""
+        quoted = f"/{urllib.parse.quote(path)}" if path else ""
+        url: str | None = f"{_HUB_URL}/api/datasets/{repo_id}/tree/{commit}{quoted}"
+        params = {"recursive": "true", "expand": "false"} if recursive else None
+        while url is not None:
+            resp = self._get(url, f"hf://{repo_id}@{commit}/{path}", params=params)
+            yield from resp.json()
+            url = resp.links.get("next", {}).get("url")
+            params = None  # the next-page URL carries the query
+
+    def list_tree(
+        self, repo_id: str, commit: str, path: str
+    ) -> tuple[dict[str, int], list[str]]:
+        """Return ``({file name: size}, [subdirectory names])`` directly under ``path``."""
+        files: dict[str, int] = {}
+        directories: list[str] = []
+        for entry in self._tree(repo_id, commit, path, recursive=False):
+            name = str(entry["path"]).rsplit("/", 1)[-1]
+            if entry.get("type") == "file":
+                files[name] = int(entry["size"])
+            elif entry.get("type") == "directory":
+                directories.append(name)
+        return files, directories
+
+    def file_sizes(
+        self, repo_id: str, commit: str, paths: Sequence[str]
+    ) -> dict[str, int]:
+        """Return ``{repo path: size}`` for ``paths`` at ``commit``.
+
+        Up to 100 paths take one paths-info request, so a small split never
+        lists the directory it shares with large ones. Larger selections list
+        their common directory recursively (1,000 entries per page) and stop as
+        soon as every size is known.
+        """
+        if not paths:
+            return {}
+        wanted = set(paths)
+        sizes: dict[str, int] = {}
+        if len(wanted) <= _PATHS_INFO_LIMIT:
+            resp = self._get_session().post(
+                f"{_HUB_URL}/api/datasets/{repo_id}/paths-info/{commit}",
+                data={"paths": sorted(wanted)},
+                headers=self._auth_headers(),
+                timeout=_HTTP_TIMEOUT_SECONDS,
+            )
+            self._raise_for_http_error(resp, f"hf://{repo_id}@{commit}")
+            entries: Iterable[Mapping[str, Any]] = resp.json()
+        else:
+            root = posixpath.commonpath([posixpath.dirname(path) for path in paths])
+            entries = self._tree(repo_id, commit, root, recursive=True)
+        for entry in entries:
+            if entry.get("type") == "file" and entry["path"] in wanted:
+                sizes[str(entry["path"])] = int(entry["size"])
+                if len(sizes) == len(wanted):
+                    break  # later tree pages cannot add anything
+        missing = [path for path in paths if path not in sizes]
+        if missing:
+            raise FileNotFoundError(
+                f"hf://{repo_id}@{commit} has no {missing[:3]} "
+                f"({len(missing)} of {len(paths)} files missing)"
+            )
+        return {path: sizes[path] for path in paths}
+
+    # ------------------------------------------------------------------
+    # Resolution, listings and names
+    # ------------------------------------------------------------------
+
+    def canonical_root(self, path: str, fmt: str | None = None) -> str:
+        """Resolve ``path`` once and return the frozen URI that pins it.
+
+        ``fmt`` restricts the choice to a source in that format. A frozen URI
+        is returned as is, without any request.
+        """
+        parts = parse_hf_uri(path)
+        if parts.is_frozen:
+            return parts.uri()
+        # The partial opt-in changes the answer, so it is part of the key.
+        allow_partial = bool(os.environ.get(_ALLOW_PARTIAL_ENV))
+        key = (parts.uri(), fmt, allow_partial)  # normalized: "@main", trailing "/"
+        with _memo_lock:
+            frozen = _frozen_roots.get(key)
+        if frozen is not None:
+            return frozen
+
+        with _key_lock(("root", *key)):
+            with _memo_lock:
+                frozen = _frozen_roots.get(key)
+            if frozen is not None:
+                return frozen
+            resolution = resolve(self, parts, fmt, allow_partial=allow_partial)
+            frozen = resolution.parts.uri()
+            listing = self._names(resolution.files)
+            with _memo_lock:
+                _listings.setdefault(frozen, listing)
+                _frozen_roots[key] = frozen
+        logger.info("Resolved %s to %s (%s)", path, frozen, resolution.summary)
+        return frozen
+
+    def _listing(self, root: str) -> dict[str, int]:
+        """Return ``{name: size}`` for the split ``root`` names."""
+        frozen = self.canonical_root(root)
+        with _memo_lock:
+            listing = _listings.get(frozen)
+        if listing is not None:
+            return listing
+        with _key_lock(("listing", frozen)):
+            with _memo_lock:
+                listing = _listings.get(frozen)
+            if listing is None:
+                listing = self._names(list_frozen(self, parse_hf_uri(frozen)))
+                with _memo_lock:
+                    _listings[frozen] = listing
+        return listing
+
+    @staticmethod
+    def _names(files: Mapping[str, int]) -> dict[str, int]:
+        """Map repo paths to flat, unique virtual-directory names."""
+        names: dict[str, int] = {}
+        for path, size in files.items():
+            name = urllib.parse.quote(path, safe="")
+            if len(name.encode("utf-8")) > _MAX_NAME_BYTES:
+                raise ValueError(
+                    f"hf:// file {path!r} is too long to cache: its name {name!r} "
+                    f"exceeds {_MAX_NAME_BYTES} bytes"
+                )
+            names[name] = size
+        return names
+
     @staticmethod
     def _split_path(path: str) -> tuple[HFUriParts, str | None]:
-        """Return ``(dataset parts, optional filename)`` for an ``hf://`` path.
+        """Return ``(dataset parts, name)``; ``name`` is set only under a frozen root."""
+        body = path.rstrip("/")
+        parent, _, name = body.rpartition("/")
+        try:
+            root = parse_hf_uri(parent)
+        except ValueError:
+            root = None
+        if root is not None and root.is_frozen:
+            return root, name
+        return parse_hf_uri(body), None
 
-        File paths take the form ``hf://org/name[@rev]/[config/]split/<file>``;
-        a trailing segment is treated as a filename when it contains a ``.``
-        and the URI has at least four path segments after the scheme. This
-        leaves the documented split/config grammar of :func:`parse_hf_uri`
-        unchanged for dataset-level URIs.
-        """
-        if not path.startswith(HF_URI_SCHEME):
-            raise ValueError(f"Not an hf:// URI: {path!r}")
+    def _resolve_file(self, path: str) -> tuple[HFUriParts, str, str]:
+        """Return ``(frozen root, name, URL)`` for a file ``path``."""
+        parts, name = self._split_path(path)
+        if name is None:
+            raise IsADirectoryError(f"hf:// path is a directory: {path}")
+        if format_of(name) is None:
+            # Only data files are ever listed; a repo's own index.json and the
+            # like must not be mistaken for Zephon metadata.
+            raise FileNotFoundError(f"No such hf:// file: {path}")
+        quoted = urllib.parse.quote(urllib.parse.unquote(name))
+        url = f"{_HUB_URL}/datasets/{parts.repo_id}/resolve/{parts.revision}/{quoted}"
+        return parts, name, url
 
-        body = path[len(HF_URI_SCHEME) :].rstrip("/")
-        segments = body.split("/") if body else []
-        if segments and "." in segments[-1] and len(segments) >= 4:
-            filename = segments[-1]
-            dataset_uri = HF_URI_SCHEME + "/".join(segments[:-1])
-            return parse_hf_uri(dataset_uri), filename
-        return parse_hf_uri(path), None
-
-    def _list_shards(self, parts: HFUriParts) -> dict[str, _HFShard]:
-        key = (parts.repo_id, parts.revision, parts.config, parts.split)
-        with self._cache_lock:
-            cached = self._listing_cache.get(key)
-            if cached is not None:
-                return cached
-
-        params: dict[str, str] = {"dataset": parts.repo_id}
-        if parts.config is not None:
-            params["config"] = parts.config
+    def _size(self, parts: HFUriParts, name: str, url: str) -> int | None:
+        """Return the file's size, or ``None`` if it does not exist."""
+        with _memo_lock:
+            listing = _listings.get(parts.uri())
+            if listing is not None:
+                return listing.get(name)
+            cached = _sizes.get(url)
+        if cached is not None:
+            return cached
 
         session = self._get_session()
-        resp = session.get(
-            _DATASETS_SERVER_PARQUET_URL,
-            params=params,
-            headers=self._auth_headers(),
-            timeout=_HTTP_TIMEOUT_SECONDS,
+        headers = self._auth_headers()
+        resp = session.head(
+            url, headers=headers, timeout=_HTTP_TIMEOUT_SECONDS, allow_redirects=False
         )
-        self._raise_for_http_error(
-            resp,
-            f"hf://{parts.repo_id}@{parts.revision}/{parts.config or ''}/{parts.split}",
-        )
-        payload = resp.json()
-
-        self._guard_against_incomplete_conversion(payload, parts)
-
-        shards: dict[str, _HFShard] = {}
-        for item in payload.get("parquet_files", []):
-            if item.get("split") != parts.split:
-                continue
-            if parts.config is not None and item.get("config") != parts.config:
-                continue
-            filename = item.get("filename")
-            parquet_url = item.get("url")
-            size = item.get("size")
-            if not filename or not parquet_url:
-                continue
-            if filename in shards:
-                # Same filename appearing under two different configs: refuse
-                # rather than silently picking one. The user should pin a
-                # config in the URI.
-                raise ValueError(
-                    f"Ambiguous filename {filename!r} in {parts.repo_id!r} "
-                    f"split={parts.split!r}; specify a config in the hf:// URI."
-                )
-            url = self._resolve_shard_url(parts.repo_id, parquet_url, parts.revision)
-            shards[filename] = _HFShard(
-                filename=filename,
-                url=url,
-                size=int(size) if size is not None else 0,
+        linked = resp.headers.get("X-Linked-Size")
+        if linked is None and resp.is_redirect:
+            resp = session.head(
+                url,
+                headers=headers,
+                timeout=_HTTP_TIMEOUT_SECONDS,
+                allow_redirects=True,
             )
-
-        if not shards:
-            config_msg = f"config={parts.config!r}, " if parts.config else ""
-            raise FileNotFoundError(
-                f"No parquet shards for {config_msg}split={parts.split!r} "
-                f"in {parts.repo_id!r}. The dataset may not expose parquet "
-                "via the Datasets Server, or the split/config may be wrong."
-            )
-
-        with self._cache_lock:
-            self._listing_cache.setdefault(key, shards)
-            return self._listing_cache[key]
-
-    def _resolve_file(self, path: str) -> _HFShard:
-        parts, filename = self._split_path(path)
-        if filename is None:
-            raise IsADirectoryError(f"hf:// path is a directory: {path}")
-        shards = self._list_shards(parts)
-        shard = shards.get(filename)
-        if shard is None:
-            raise FileNotFoundError(f"No such hf:// file: {path}")
-        return shard
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            self._raise_for_http_error(resp, url)
+        size = int(linked if linked is not None else resp.headers["Content-Length"])
+        with _memo_lock:
+            _sizes[url] = size
+        return size
 
     # ------------------------------------------------------------------
     # StorageBackend protocol
@@ -417,49 +395,48 @@ class HFBackend(OpenViaDownloadMixin):
 
     def exists(self, path: str) -> bool:
         try:
-            parts, filename = self._split_path(path)
-        except ValueError:
-            return False
-        try:
-            shards = self._list_shards(parts)
-        except FileNotFoundError:
-            return False
-        if filename is None:
+            parts, name, url = self._resolve_file(path)
+        except IsADirectoryError:
+            try:
+                self._listing(path)
+            except FileNotFoundError:
+                return False
             return True
-        return filename in shards
+        except (ValueError, FileNotFoundError):
+            return False
+        return self._size(parts, name, url) is not None
 
     def listdir(self, path: str) -> list[str]:
-        parts, filename = self._split_path(path)
-        if filename is not None:
+        _, name = self._split_path(path)
+        if name is not None:
             raise NotADirectoryError(f"Not a directory: {path}")
-        return sorted(self._list_shards(parts).keys())
+        return sorted(self._listing(path))
 
     def walk(self, path: str) -> Iterator[tuple[str, int]]:
-        """Yield ``(filename, size)`` for every shard under ``path``.
+        """Yield ``(name, size)`` for every file of the split ``path`` names.
 
-        The ``hf://`` virtual directory is flat — there are no nested
-        subdirectories — so the walk emits the same set of files as
-        :meth:`listdir`, paired with the sizes already cached from the
-        ``/parquet`` listing (no extra HEAD round-trip).
+        The virtual directory is flat, so this is :meth:`listdir` with sizes.
         """
         try:
-            parts, filename = self._split_path(path)
+            _, name = self._split_path(path)
         except ValueError:
             return
-        if filename is not None:
+        if name is not None:
             return
         try:
-            shards = self._list_shards(parts)
+            listing = self._listing(path)
         except FileNotFoundError:
             return
-        for name in sorted(shards):
-            yield name, shards[name].size
+        for entry in sorted(listing):
+            yield entry, listing[entry]
 
     def stat(self, path: str) -> Mapping[str, int | float]:
-        shard = self._resolve_file(path)
-        # The /parquet endpoint doesn't expose a useful mtime; consumers in
-        # zephon only care about ``size``.
-        return {"size": shard.size, "mtime": 0.0}
+        parts, name, url = self._resolve_file(path)
+        size = self._size(parts, name, url)
+        if size is None:
+            raise FileNotFoundError(f"No such hf:// file: {path}")
+        # HF exposes no useful mtime; Zephon only consumes ``size``.
+        return {"size": size, "mtime": 0.0}
 
     def read_range(
         self,
@@ -474,13 +451,16 @@ class HFBackend(OpenViaDownloadMixin):
         if end is not None and length is not None:
             raise ValueError("Specify at most one of end or length")
 
-        shard = self._resolve_file(path)
+        parts, name, url = self._resolve_file(path)
         if length is not None:
-            last = start + length - 1
+            last: int | None = start + length - 1
         elif end is not None:
             last = end - 1
         else:
-            last = shard.size - 1 if shard.size > 0 else None
+            size = self._size(parts, name, url)
+            if size is None:
+                raise FileNotFoundError(f"No such hf:// file: {path}")
+            last = size - 1 if size > 0 else None
 
         if last is None or last < start:
             return b""
@@ -493,7 +473,7 @@ class HFBackend(OpenViaDownloadMixin):
         headers["Accept-Encoding"] = "identity"
 
         resp = self._get_session().get(
-            shard.url,
+            url,
             headers=headers,
             timeout=_HTTP_TIMEOUT_SECONDS,
             allow_redirects=True,
@@ -518,7 +498,10 @@ class HFBackend(OpenViaDownloadMixin):
         # timeout also lives at the store/config level rather than per call.
         del timeout
 
-        shard = self._resolve_file(src)
+        parts, name, url = self._resolve_file(src)
+        expected_size = self._size(parts, name, url)
+        if expected_size is None:
+            raise FileNotFoundError(f"No such hf:// file: {src}")
 
         try:
             from huggingface_hub.file_download import http_get
@@ -531,15 +514,13 @@ class HFBackend(OpenViaDownloadMixin):
 
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
 
-        expected_size = shard.size if shard.size > 0 else None
-        incomplete = dst + ".incomplete"
-
+        incomplete = dst + _INCOMPLETE_SUFFIX
         resume_size = 0
         if os.path.exists(incomplete):
             resume_size = os.path.getsize(incomplete)
             # If a previous attempt already finished into ``.incomplete``
             # but the rename was interrupted, just promote it.
-            if expected_size is not None and resume_size >= expected_size:
+            if expected_size > 0 and resume_size >= expected_size:
                 os.replace(incomplete, dst)
                 return
 
@@ -547,21 +528,21 @@ class HFBackend(OpenViaDownloadMixin):
         try:
             with open(incomplete, "ab") as fh:
                 http_get(
-                    url=shard.url,
+                    url=url,
                     temp_file=fh,
                     resume_size=resume_size,
-                    expected_size=expected_size,
+                    expected_size=expected_size or None,
                     headers=headers,
                 )
         except EntryNotFoundError as exc:
             self._unlink_quiet(incomplete)
-            raise FileNotFoundError(self._not_found_message(src)) from exc
+            raise FileNotFoundError(f"No such hf:// file: {src}") from exc
         except HfHubHTTPError as exc:
             resp = getattr(exc, "response", None)
             status = getattr(resp, "status_code", None)
             if status == 404:
                 self._unlink_quiet(incomplete)
-                raise FileNotFoundError(self._not_found_message(src)) from exc
+                raise FileNotFoundError(f"No such hf:// file: {src}") from exc
             if status in (401, 403):
                 self._unlink_quiet(incomplete)
                 raise PermissionError(
@@ -583,7 +564,7 @@ class HFBackend(OpenViaDownloadMixin):
 
     def glob(self, pattern: str) -> list[str]:
         # Wildcards over hf:// URIs aren't well-defined (configs and splits
-        # are enumerated by the Datasets Server, not by path globbing).
+        # are resolved by the Hub, not by path globbing).
         if "*" in pattern or "?" in pattern:
             raise NotImplementedError("Glob patterns are not supported for hf:// URIs")
         return [pattern] if self.exists(pattern) else []

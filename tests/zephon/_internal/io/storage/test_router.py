@@ -255,3 +255,15 @@ def test_router_walk_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert yielded_so_far == [("a", 1)]
     # And the rest only arrive when asked.
     assert list(it) == [("b", 2), ("c", 3)]
+
+
+def test_router_canonical_root_is_identity_for_local_and_object_stores(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("obstore")
+    router = RouterStorageBackend(local_root=tmp_path)
+    assert router.canonical_root(str(tmp_path), fmt="jsonl") == str(tmp_path)
+    assert router.canonical_root("s3://bucket/data") == "s3://bucket/data"
+    assert (
+        router.canonical_root("gs://bucket/data", fmt="parquet") == "gs://bucket/data"
+    )

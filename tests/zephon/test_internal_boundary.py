@@ -52,7 +52,7 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/helpers/litdata_chunks.py": frozenset(
         {"zephon._internal.io.formats.litdata_support:support"}
     ),
-    # HF range and revision details have no public seam.
+    # HF resolution, range and revision details have no public seam.
     "tests/integration/test_hf_integration.py": frozenset(
         {
             "zephon._internal.io.storage:HFBackend",
@@ -135,6 +135,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Probe coverage requires enumerating internal tokenizer ops.
     "tests/zephon/test_validation.py": frozenset(
         {"zephon._internal.ops.tokenize_base:TokenizeBase"}
+    ),
+    # from_path must discover the root the storage backend canonicalizes to.
+    "tests/zephon/io/test_dataset.py": frozenset(
+        {"zephon._internal.io.storage.router:RouterStorageBackend"}
     ),
     # Token-mode coverage needs the internal counting spec.
     "tests/zephon/work/test_static_mixture.py": frozenset(

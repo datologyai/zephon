@@ -30,6 +30,18 @@ AUTO_DETECT_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("parquet", PARQUET_SUFFIXES),
 )
 
+# Formats whose index-less discovery works through any StorageBackend. Vortex
+# is absent: its discovery opens ``file://`` paths, so it only works locally.
+REMOTE_SCAN_FORMATS: frozenset[str] = frozenset({"jsonl", "parquet"})
+
+
+def format_of(name: str) -> str | None:
+    """Return the :data:`AUTO_DETECT_ORDER` format whose suffixes match ``name``."""
+    for kind, suffixes in AUTO_DETECT_ORDER:
+        if name.endswith(suffixes):
+            return kind
+    return None
+
 
 def detect_format(names: Iterable[str]) -> str | None:
     """Return the first :data:`AUTO_DETECT_ORDER` format matching any of ``names``."""
@@ -46,6 +58,8 @@ __all__ = [
     "LITDATA_CHUNK_SUFFIX",
     "LITDATA_COMPRESSED_CHUNK_SUFFIX",
     "PARQUET_SUFFIXES",
+    "REMOTE_SCAN_FORMATS",
     "VORTEX_SUFFIXES",
     "detect_format",
+    "format_of",
 ]
