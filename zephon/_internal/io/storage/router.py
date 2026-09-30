@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any, Mapping, cast
 
+from .azure import AzureBackend
 from .base import StorageBackend
 from .local import LocalFSBackend
 
@@ -22,6 +23,10 @@ def _make_gcs_backend() -> StorageBackend:
     return GCSBackend()
 
 
+def _make_azure_backend() -> StorageBackend:
+    return AzureBackend()
+
+
 def _make_hf_backend() -> StorageBackend:
     from .hf import HFBackend
 
@@ -33,22 +38,27 @@ class RouterStorageBackend(StorageBackend):
 
     - ``s3://`` -> S3 backend
     - ``gs://`` or ``gcs://`` -> GCS backend
+    - ``az://``, ``azure://``, ``abfs://`` or ``abfss://`` -> Azure backend
     - ``hf://`` -> HuggingFace backend (a split's uploaded or converted files)
-    - otherwise -> Local filesystem
+    - no ``://`` -> Local filesystem
+    - any other ``<scheme>://`` -> ``ValueError``, rather than a local path named
+      after the URL
     """
 
     def __init__(self, *, local_root: Path | None = None) -> None:
         self._local = LocalFSBackend(root=local_root or Path("/"))
         self._s3 = None
         self._gcs = None
+        self._azure = None
         self._hf = None
 
     def _backend_for(self, path: str) -> StorageBackend:
         import urllib.parse as _url
 
-        scheme = _url.urlparse(path).scheme
-        if not scheme:
+        # ``dataset:v1/x.jsonl`` is a local file that urlparse reads as a scheme.
+        if "://" not in path:
             return self._local
+        scheme = _url.urlparse(path).scheme
         if scheme == "s3":
             if self._s3 is None:
                 self._s3 = _make_s3_backend()
@@ -57,11 +67,19 @@ class RouterStorageBackend(StorageBackend):
             if self._gcs is None:
                 self._gcs = _make_gcs_backend()
             return self._gcs
+        if scheme in AzureBackend.valid_schemes:
+            if self._azure is None:
+                self._azure = _make_azure_backend()
+            return self._azure
         if scheme == "hf":
             if self._hf is None:
                 self._hf = _make_hf_backend()
             return self._hf
-        return self._local
+        raise ValueError(
+            f"Unsupported storage URL scheme {scheme!r} in {path!r}; expected a "
+            "local path or one of s3://, gs://, gcs://, az://, azure://, "
+            "abfs://, abfss://, hf://"
+        )
 
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
         return self._backend_for(path).open(path, mode, **kwargs)

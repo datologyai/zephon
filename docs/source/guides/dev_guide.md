@@ -6,7 +6,7 @@ Zephon is a high-performance, modular, multimodal-first data loader for PyTorch 
 
 - Fluent builder-pattern API for composing data pipelines
 - Deterministic checkpoint/restart for fault-tolerant training
-- Cloud storage support (S3, GCS, local filesystem)
+- Cloud storage support (S3, GCS, Azure, local filesystem)
 - Elastic training (change rank count while preserving order)
 - Multiple data formats (JSONL, LitData, MosaicML Streaming/MDS, Vortex)
 
@@ -109,7 +109,7 @@ uv pip install -e ".[litdata]"
 # For Parquet format support
 uv pip install -e ".[parquet]"
 
-# For cloud storage (S3 and GCS)
+# For cloud storage (S3, GCS and Azure)
 uv pip install -e ".[cloud]"
 
 # Combine multiple extras

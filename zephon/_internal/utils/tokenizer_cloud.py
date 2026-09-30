@@ -4,10 +4,9 @@
 """Sync cloud-mirrored tokenizers to a local cache.
 
 ``AutoTokenizer.from_pretrained`` only understands HF Hub ids and local
-filesystem paths. :func:`resolve_tokenizer_id` syncs an ``s3://`` /
-``gs://`` / ``gcs://`` prefix to a deterministic local directory and
-returns that path. The internal ``TokenizeText`` op calls it automatically
-for cloud URIs.
+filesystem paths. :func:`resolve_tokenizer_id` syncs an S3, GCS or Azure
+prefix to a deterministic local directory and returns that path. The
+internal ``TokenizeText`` op calls it automatically for cloud URIs.
 """
 
 from __future__ import annotations
@@ -26,12 +25,14 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.io.storage import AzureBackend, RouterStorageBackend
 
 logger = logging.getLogger(__name__)
 
 
-CLOUD_TOKENIZER_SCHEMES: frozenset[str] = frozenset({"s3", "gs", "gcs"})
+CLOUD_TOKENIZER_SCHEMES: frozenset[str] = (
+    frozenset({"s3", "gs", "gcs"}) | AzureBackend.valid_schemes
+)
 TOKENIZER_CACHE_DIR_ENV: str = "ZEPHON_TOKENIZER_CACHE_DIR"
 _DEFAULT_CACHE_ROOT: str = "~/.cache/zephon/tokenizers"
 
@@ -49,7 +50,7 @@ class TransientCloudTokenizerError(CloudTokenizerError):
 
 
 def is_cloud_tokenizer_uri(tokenizer_id: str | None) -> bool:
-    """Return True for ``s3://`` / ``gs://`` / ``gcs://`` URIs."""
+    """Return True for S3, GCS and Azure URIs."""
     if not tokenizer_id:
         return False
     return urlparse(tokenizer_id).scheme in CLOUD_TOKENIZER_SCHEMES
@@ -85,6 +86,13 @@ def _credential_hint(scheme: str) -> str:
             "(set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or run "
             "`aws sso login`), (2) wrong S3 URI, "
             "(3) IAM access denied."
+        )
+    if scheme in AzureBackend.valid_schemes:
+        return (
+            "Common causes: (1) Azure credentials or account missing "
+            "(set AZURE_STORAGE_ACCOUNT_NAME plus AZURE_STORAGE_ACCOUNT_KEY, "
+            "AZURE_STORAGE_SAS_KEY or AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/"
+            "AZURE_TENANT_ID), (2) wrong Azure URI, (3) RBAC access denied."
         )
     return (
         "Common causes: (1) GCS credentials missing "
@@ -122,7 +130,7 @@ def resolve_tokenizer_id(tokenizer_id: str | None) -> str | None:
     """Resolve a tokenizer id, syncing cloud mirrors to a local cache.
 
     HF Hub ids, local paths, ``"__fallback__"`` and ``None`` are returned
-    unchanged. Cloud URIs (``s3://`` / ``gs://`` / ``gcs://``) are synced
+    unchanged. Cloud URIs (S3, GCS or Azure) are synced
     to ``<cache_root>/<scheme>/<bucket>/<prefix>`` and that local path is
     returned. Files whose local size already matches the remote size are
     skipped.
@@ -160,6 +168,10 @@ def resolve_tokenizer_id(tokenizer_id: str | None) -> str | None:
     _validate_cache_prefix(prefix, tokenizer_id)
 
     storage = RouterStorageBackend()
+    # Key the cache by the canonical root, so ``az://`` mirrors in different
+    # Azure accounts don't share a directory.
+    canonical = urlparse(storage.canonical_root(tokenizer_id))
+    scheme, bucket = canonical.scheme, canonical.netloc
     listing_uri = f"{scheme}://{bucket}/{prefix.rstrip('/')}/"
     try:
         files = list(storage.walk(listing_uri))

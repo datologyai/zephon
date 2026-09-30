@@ -111,7 +111,7 @@ class StorageBackend(Protocol):
             parents: If True, create parent directories as needed (like mkdir -p).
             exist_ok: If True, don't raise an error if directory already exists.
 
-        For cloud backends, creates a folder marker (empty object with trailing /).
+        Object-store backends write nothing; their directories are implicit.
         """
         ...
 

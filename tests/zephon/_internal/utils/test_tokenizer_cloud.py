@@ -103,6 +103,8 @@ def test_resolve_passthrough(tokenizer_id: str | None) -> None:
         ("s3://bucket/prefix/", True),
         ("gs://bucket/prefix/", True),
         ("gcs://bucket/prefix/", True),
+        ("az://container/prefix/", True),
+        ("abfss://container@account.dfs.core.windows.net/prefix/", True),
         ("https://example.com/path", False),
         ("ftp://example.com/path", False),
     ],
@@ -273,6 +275,35 @@ def test_resolve_syncs_flat_tokenizer(
         local_file = Path(local) / name
         assert local_file.exists(), f"{name} missing"
         assert local_file.stat().st_size == size
+
+
+def test_resolve_keys_azure_cache_by_account(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(TOKENIZER_CACHE_DIR_ENV, str(tmp_path))
+    uri = "az://models/tokenizers/llama/"
+    files = [("tokenizer.json", 4)]
+
+    def fake_download(src, dst):
+        del src
+        Path(dst).write_bytes(b"\x00" * 4)
+
+    locals_by_account = {}
+    for account in ("dev", "prod"):
+        monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_NAME", account)
+        listing = f"abfss://models@{account}.dfs.core.windows.net/tokenizers/llama/"
+        with _patch_walk({listing: files}), _patch_download(fake_download):
+            locals_by_account[account] = resolve_tokenizer_id(uri)
+
+    assert locals_by_account == {
+        account: str(
+            tmp_path
+            / "abfss"
+            / f"models@{account}.dfs.core.windows.net"
+            / "tokenizers/llama"
+        )
+        for account in ("dev", "prod")
+    }
 
 
 def test_resolve_skips_already_cached_files(

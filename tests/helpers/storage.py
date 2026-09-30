@@ -157,7 +157,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     Returns a state dict that can be used to configure mock behavior:
     - state["objects"]: dict mapping (bucket, key) -> bytes
     - state["configs"]: list of configs passed to from_url
-    - state["store_type"]: list of store types used ("s3" or "gcs")
+    - state["store_type"]: list of store types used ("s3", "gcs" or "azure")
     """
     from datetime import datetime, timezone
     from unittest.mock import MagicMock
@@ -194,8 +194,20 @@ def _install_obstore_stubs(monkeypatch) -> dict:
             state["store_type"].append("gcs")
             return store
 
+    class MockAzureStore:
+        @classmethod
+        def from_url(cls, url: str, config: dict = None, client_options: dict = None):
+            store = MagicMock()
+            store._config = config or {}
+            store._url = url
+            store._client_options = client_options or {}
+            state["configs"].append(config or {})
+            state["store_type"].append("azure")
+            return store
+
     store_mod.S3Store = MockS3Store
     store_mod.GCSStore = MockGCSStore
+    store_mod.AzureStore = MockAzureStore
 
     class MockGetResult:
         def __init__(self, data: bytes):
@@ -206,8 +218,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
     def mock_get(store, key):
         url = getattr(store, "_url", "")
-        # Handle both s3:// and gs:// URLs
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         data = state["objects"].get((bucket, key))
         if data is None:
             raise Exception(f"404 NotFound: {key}")
@@ -215,7 +226,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
     def mock_get_range(store, key, *, start, end=None, length=None):
         url = getattr(store, "_url", "")
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         data = state["objects"].get((bucket, key))
         if data is None:
             raise Exception(f"404 NotFound: {key}")
@@ -234,7 +245,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
     def mock_head(store, key):
         url = getattr(store, "_url", "")
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         data = state["objects"].get((bucket, key))
         if data is None:
             raise Exception(f"404 NotFound: {key}")
@@ -246,7 +257,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
     def mock_list(store, prefix: str = ""):
         url = getattr(store, "_url", "")
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         results = []
         for (b, k), data in state["objects"].items():
             if b == bucket and k.startswith(prefix):
@@ -255,12 +266,12 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
     def mock_put(store, key, data):
         url = getattr(store, "_url", "")
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         state["objects"][(bucket, key)] = bytes(data)
 
     def mock_delete(store, key):
         url = getattr(store, "_url", "")
-        bucket = url.replace("s3://", "").replace("gs://", "")
+        bucket = url.split("://", 1)[-1]
         state["objects"].pop((bucket, key), None)
 
     obstore_mod.get = mock_get

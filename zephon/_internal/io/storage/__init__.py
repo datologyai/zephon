@@ -1,5 +1,6 @@
 """Storage backends available to Zephon IO."""
 
+from .azure import AzureBackend
 from .base import StorageBackend
 from .gcs import GCSBackend
 from .hf import HFBackend
@@ -8,6 +9,7 @@ from .router import RouterStorageBackend
 from .s3 import S3Backend
 
 __all__ = [
+    "AzureBackend",
     "GCSBackend",
     "HFBackend",
     "LocalFSBackend",

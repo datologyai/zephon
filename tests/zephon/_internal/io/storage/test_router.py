@@ -114,13 +114,47 @@ def test_router_defaults_to_local(tmp_path: Path) -> None:
         assert handle.read() == "local"
 
 
-def test_router_unknown_scheme_falls_back_to_local(tmp_path: Path) -> None:
-    router = RouterStorageBackend(local_root=tmp_path)
-    # Access the backend selection method directly to assert fallback behaviour
-    backend = router._backend_for("ftp://host/path/file.bin")  # type: ignore[attr-defined]
-    from zephon._internal.io.storage.local import LocalFSBackend
+@pytest.mark.parametrize(
+    "path",
+    [
+        "az://cont/file",
+        "azure://cont/file",
+        "abfs://cont/file",
+        "abfss://c@a.dfs.core.windows.net/f",
+    ],
+)
+def test_router_selects_azure(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    dummy = _DummyBackend()
+    monkeypatch.setattr(
+        "zephon._internal.io.storage.router._make_azure_backend", lambda: dummy
+    )
 
-    assert isinstance(backend, LocalFSBackend)
+    router = RouterStorageBackend()
+    router.stat(path)
+    assert router.is_cloud_path(path) is True
+    assert dummy.calls == [("stat", path)]
+
+
+def test_router_rejects_unknown_scheme(tmp_path: Path) -> None:
+    router = RouterStorageBackend(local_root=tmp_path)
+
+    with pytest.raises(ValueError, match="Unsupported storage URL scheme 'ftp'"):
+        router.exists("ftp://host/path/file.bin")
+    assert not (tmp_path / "ftp:").exists()
+
+
+@pytest.mark.parametrize("path", ["dataset:v1/part.jsonl", "C:\\data\\file.bin"])
+def test_router_treats_colon_paths_as_local(tmp_path: Path, path: str) -> None:
+    router = RouterStorageBackend(local_root=tmp_path)
+    assert router.is_cloud_path(path) is False
+
+
+def test_router_reads_local_file_with_colon(tmp_path: Path) -> None:
+    (tmp_path / "dataset:v1").mkdir()
+    (tmp_path / "dataset:v1" / "part.jsonl").write_text("{}")
+
+    router = RouterStorageBackend(local_root=tmp_path)
+    assert router.exists("dataset:v1/part.jsonl") is True
 
 
 def test_router_read_range_uses_backend_when_supported(
@@ -226,11 +260,10 @@ def test_router_walk_routes_local_paths_to_local_backend(tmp_path: Path) -> None
     assert out == [("a.txt", 2), ("sub/b.json", 2)]
 
 
-def test_router_walk_unknown_scheme_falls_through_to_local(tmp_path: Path) -> None:
-    """Unknown URL schemes route to the local backend, which simply walks
-    them as a literal path; non-existent → empty iterator."""
+def test_router_walk_rejects_unknown_scheme(tmp_path: Path) -> None:
     router = RouterStorageBackend(local_root=tmp_path)
-    assert list(router.walk("ftp://host/path")) == []
+    with pytest.raises(ValueError, match="Unsupported storage URL scheme"):
+        list(router.walk("ftp://host/path"))
 
 
 def test_router_walk_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:

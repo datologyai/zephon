@@ -258,52 +258,25 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
         return sorted(results)
 
     def mkdir(self, path: str, parents: bool = False, exist_ok: bool = False) -> None:
-        """Create a folder marker in cloud storage.
+        """Validate ``path``; object-store directories are implicit, so nothing is written.
 
-        For cloud storage, directories are virtual. This creates an empty object
-        with a trailing slash to serve as a folder marker, which some tools expect.
-
-        Args:
-            path: Directory path to create (e.g., "s3://bucket/path/to/dir").
-            parents: If True, create parent folder markers as needed.
-            exist_ok: If True, don't raise an error if marker already exists.
+        No folder marker: obstore strips the trailing slash, so ``dir/`` would be
+        stored as a file named ``dir``, which blocks writes under it on ADLS Gen2.
         """
-        import obstore as obs
-
+        del parents  # Parents are as implicit as the directory itself.
         scheme, bucket, key = split_url(path)
         if scheme not in self.valid_schemes or not bucket:
             raise ValueError(f"Invalid path: {path}")
 
+        prefix = key.rstrip("/")
+        if exist_ok or not prefix:
+            return
+
+        import obstore as obs
+
         store = self._get_store(bucket)
-
-        # Normalize key to have trailing slash for folder marker
-        key = key.rstrip("/") + "/" if key else ""
-
-        if not key:
-            return  # Nothing to create for bucket root
-
-        # Check if marker already exists when exist_ok=False
-        if not exist_ok:
-            try:
-                obs.head(store, key)
-                raise FileExistsError(f"Directory already exists: {path}")
-            except Exception as e:
-                err = str(e)
-                if (
-                    "404" not in err
-                    and "NoSuchKey" not in err
-                    and "NotFound" not in err
-                ):
-                    raise
-
-        if parents:
-            # Create parent folder markers
-            parts = key.rstrip("/").split("/")
-            for i in range(1, len(parts) + 1):
-                parent_key = "/".join(parts[:i]) + "/"
-                obs.put(store, parent_key, b"")
-        else:
-            obs.put(store, key, b"")
+        if any(obj for chunk in obs.list(store, prefix=prefix + "/") for obj in chunk):
+            raise FileExistsError(f"Directory already exists: {path}")
 
 
 __all__ = ["ObstoreBackend"]
