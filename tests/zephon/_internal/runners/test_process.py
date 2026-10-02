@@ -2,11 +2,13 @@ import multiprocessing
 import multiprocessing.context
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
 import traceback
 from dataclasses import dataclass
+from multiprocessing.connection import wait
 from pathlib import Path
 from typing import Any
 
@@ -2203,3 +2205,96 @@ def test_retired_worker_request_cannot_reply_to_replacement(
     assert accepted == ["new"]
     assert response.get_nowait() == (True, None)
     assert response.empty()
+
+
+def _start_inheriting_helper(pid_path: Path) -> None:
+    """Start a helper that outlives the worker, like torch_shm_manager."""
+    helper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], close_fds=False
+    )
+    pid_path.write_text(str(helper.pid))
+
+
+def _kill_helper(pid_path: Path) -> None:
+    if pid_path.exists() and (pid := pid_path.read_text()):
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _worker_with_inheriting_helper(pid_path: Path, close_on_exec: bool) -> None:
+    """Optionally protect the spawned worker's fds before starting its helper."""
+    from zephon._internal.runners.process import _set_worker_fds_close_on_exec
+
+    if close_on_exec:
+        _set_worker_fds_close_on_exec()
+    _start_inheriting_helper(pid_path)
+
+
+@pytest.mark.parametrize("close_on_exec", [True, False])
+def test_worker_exit_is_visible_despite_helper_subprocess(
+    tmp_path: Path, close_on_exec: bool
+) -> None:
+    """Only the unprotected control should leave the exit pipe open."""
+    pid_path = tmp_path / "helper.pid"
+    proc = multiprocessing.get_context("spawn").Process(
+        target=_worker_with_inheriting_helper, args=(pid_path, close_on_exec)
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 30
+        while not pid_path.exists() or not pid_path.read_text():
+            assert time.monotonic() < deadline, "child never started its helper"
+            time.sleep(0.05)
+        proc.join(timeout=3.0)
+        # Check the pipe itself: exitcode/is_alive can reap the worker even
+        # when its helper keeps the pipe open and join has timed out.
+        assert bool(wait([proc.sentinel], timeout=0)) is close_on_exec
+        assert proc.exitcode == 0
+    finally:
+        _kill_helper(pid_path)
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=5)
+        proc.close()
+
+
+@pytest.mark.timeout(30)
+def test_process_runner_worker_exit_is_visible_despite_helper_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise fd protection through real worker startup and operator setup."""
+    pid_path = tmp_path / "helper.pid"
+
+    class HelperOp(_IdentityOp):
+        def setup(self, ctx: OpContext) -> None:
+            super().setup(ctx)
+            _start_inheriting_helper(pid_path)
+
+    node = Node(name="helper", op=HelperOp())
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    # Keep a regression's timeout short; assertions below inspect the pipe,
+    # rather than imposing a timing bound on worker imports and setup.
+    monkeypatch.setattr("zephon._internal.runners.process._GRACEFUL_WORKER_JOIN", 3.0)
+    try:
+        with patch.object(runner, "_start_worker", wraps=runner._start_worker) as start:
+            assert _collect(runner, [7]) == [7]
+        start.assert_called_once()
+        proc = start.call_args.args[0]
+        os.kill(int(pid_path.read_text()), 0)  # The helper must still be alive.
+        assert wait([proc.sentinel], timeout=0), (
+            "helper retained the worker's exit pipe"
+        )
+        assert proc.exitcode == 0
+    finally:
+        _kill_helper(pid_path)
+        runner.close()

@@ -137,6 +137,28 @@ def _debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
         print(f"[ProcessRunner] {msg}", file=sys.stderr, flush=True)
 
 
+def _set_worker_fds_close_on_exec() -> None:
+    """Best-effort close-on-exec for open worker fds above stderr.
+
+    Exec'd helpers (e.g. torch_shm_manager) must not retain the exit pipe and
+    delay join(). Multiprocessing has no public API for its child-side fd, so this
+    also covers library-owned fds. Descriptors remain usable in this worker;
+    the parent's flags and plain fork inheritance are unchanged. Helpers that
+    need an existing fd must receive it explicitly (e.g. via pass_fds).
+    """
+    try:
+        fds = [int(name) for name in os.listdir("/dev/fd")]
+    except OSError:
+        return
+    for fd in fds:
+        if fd <= 2:
+            continue
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            pass  # An fd may have closed since listdir, including its own fd.
+
+
 def _shutdown_debug(msg: str) -> None:  # pragma: no cover - diagnostics helper
     """Debug logging specifically for shutdown paths."""
     if _SHUTDOWN_DEBUG:
@@ -371,6 +393,7 @@ ProcessFactory = Callable[..., BaseProcess]
 
 
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
+    _set_worker_fds_close_on_exec()
     startup_t0 = time.perf_counter_ns()
     rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
