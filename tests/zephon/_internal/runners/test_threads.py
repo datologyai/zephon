@@ -1,7 +1,10 @@
+import logging
 import queue
 import threading
 from dataclasses import dataclass
 from typing import Any
+
+import pytest
 
 from tests.zephon._internal.runners._helpers import (
     _ctx_services,
@@ -132,6 +135,54 @@ def test_prefetching_stage_iterator_close_is_clean() -> None:
     # Explicitly close iterator; should not raise or hang
     if hasattr(it, "close"):
         it.close()  # type: ignore[call-arg]
+
+
+def test_shutdown_during_input_wait_flushes_without_warning(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during a queue read must still flush, but without a warning."""
+    op = PackSequences(max_length=4, algorithm="wrap", tokens_field="input_ids")
+    stage = Stage(
+        name="packing",
+        nodes=[Node(name="pack", op=op)],
+        placement="auto",
+        break_reason="test",
+    )
+    runner = ThreadStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+    )
+    state = runner.ops[0]
+    context = runner._create_context()
+    state.input_queue.put(
+        [SampleRecord(meta=_mk_record(0).meta, payload={"input_ids": [1, 2, 3]})]
+    )
+
+    def receive_after_cancellation(q: Any, timeout: float) -> Any:
+        # Simulate shutdown and the feeder's stop token arriving during the read.
+        assert q is state.input_queue
+        assert state.accumulator_impl.has_pending_data()
+        context.stop_event.set()
+        return context.stop_token
+
+    monkeypatch.setattr(runner, "_queue_get", receive_after_cancellation)
+    try:
+        with caplog.at_level(
+            logging.DEBUG, logger="zephon._internal.ops.pack_sequences"
+        ):
+            runner._operator_loop(0, context)
+        assert context.error is None
+        assert not state.accumulator_impl.has_pending_data()
+    finally:
+        runner.close()
+
+    tail_logs = [r for r in caplog.records if "trailing token" in r.getMessage()]
+    assert len(tail_logs) == 1
+    assert tail_logs[0].levelno == logging.DEBUG
+    assert "emitted 1 tombstone(s)" in tail_logs[0].getMessage()
 
 
 def test_passthrough_stage_forwards_stream() -> None:

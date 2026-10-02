@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
+from zephon._internal.flush_context import in_shutdown_flush
 from zephon._internal.utils.length_extraction import extract_length
 from zephon._internal.utils.swrr import SmoothWeightedRoundRobin
 from zephon.ops.accumulators import Accumulator, ReadyBatch
@@ -394,7 +395,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             # Skewed strict-mode runs discard on roughly every flush, so warn
             # once and log the rest at DEBUG. The cumulative count is per
             # accumulator (one per rank), not run-wide across ranks.
-            if not self._discard_warned:
+            # An early-close drain is never consumed, so don't spend the warning on it.
+            if not self._discard_warned and not in_shutdown_flush():
                 self._discard_warned = True
                 logger.warning(
                     "EnsureMixture strict mode discarded %d record(s) across %d "

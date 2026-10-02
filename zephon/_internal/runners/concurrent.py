@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from multiprocessing import queues as mp_queues
 from typing import Any, Generic, Iterable, Iterator, Protocol, Sequence, TypeVar
 
+from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.observability.size_estimator import estimate_bytes
 from zephon._internal.runners.base import BaseOperatorState, StageRunnerBase
 from zephon._internal.runners.pump_timer import PumpTimer
@@ -604,7 +605,8 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
                 if context.stop_event.is_set():
                     upstream_closed = True
-                    ready = state.enqueue([], force=True)
+                    with shutdown_flush():
+                        ready = state.enqueue([], force=True)
                     for batch, wait_ns in ready:
                         self._drain_results(state, next_queue, context)
                         self._schedule_batch(
@@ -627,6 +629,11 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
                             item = self._queue_get(state.input_queue, timeout=0.05)
                     except queue.Empty:
                         continue
+
+                # Shutdown may have started during the queue read. Let the
+                # existing stop_event branch above perform the shutdown flush.
+                if context.stop_event.is_set():
+                    continue
 
                 if isinstance(item, _Stop):
                     upstream_closed = True

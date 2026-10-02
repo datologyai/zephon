@@ -57,6 +57,7 @@ try:
 except ImportError:  # pragma: no cover - torch absent only in slim envs.
     _torch = None  # type: ignore[assignment]
 
+from zephon._internal.flush_context import in_shutdown_flush
 from zephon._internal.utils.length_extraction import (
     TOKEN_FIELD_CANDIDATES,
     _get_length,
@@ -889,7 +890,9 @@ class PackingAccumulator(Accumulator[SampleRecord]):
         if tail_drop_groups:
             dropped_tokens = sum(t for _, t in tail_drop_groups)
             dropped_lanes = len({k[0] for k, _ in tail_drop_groups})
-            logger.warning(
+            # An early-close drain is never consumed, so its tail isn't data loss.
+            log = logger.debug if in_shutdown_flush() else logger.warning
+            log(
                 "PackSequences wrap: dropping %s trailing token(s) across %d packing "
                 "group(s) in %d lane(s) that did not fill a full max_length=%d bin; "
                 "emitted %d tombstone(s) to close contributor offsets.",

@@ -29,6 +29,9 @@ _INDEX_BUILD_COMMANDS: dict[str, str] = {
 # Paths already warned about, so we shout once per dataset rather than per scan.
 _warned_paths: set[str] = set()
 
+# Shard-count heuristic for escalating the missing-index hint to WARNING.
+_LOUD_SCAN_MIN_SHARDS = 64
+
 
 def find_and_load_index(dir_path: str, storage: StorageBackend) -> IndexData | None:
     """Find and load the first existing index file in a dataset directory.
@@ -62,7 +65,8 @@ def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) ->
     Discovery without an index opens every shard to read its metadata — one
     network/disk round-trip per shard, which is painfully slow for large
     datasets. Building an index once makes later discovery O(1). Warns at most
-    once per ``path`` so it shouts per dataset, not per scan.
+    once per ``path`` so it shouts per dataset, not per scan, and logs at INFO
+    when the shard count is known to be small.
 
     Args:
         path: Dataset directory being scanned.
@@ -73,8 +77,18 @@ def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) ->
         return
     _warned_paths.add(path)
 
-    scope = f"{num_shards} shards" if num_shards is not None else "every shard"
     build_cmd = _INDEX_BUILD_COMMANDS.get(fmt, "").format(path=path)
+    if num_shards is not None and num_shards < _LOUD_SCAN_MIN_SHARDS:
+        logger.info(
+            "No index.json for %s dataset at %s; reading metadata from %d shard(s)%s.",
+            fmt,
+            path,
+            num_shards,
+            f" (build one with: {build_cmd})" if build_cmd else "",
+        )
+        return
+
+    scope = f"{num_shards} shards" if num_shards is not None else "every shard"
     hint = f"\n  ==> Build one once with:  {build_cmd}" if build_cmd else ""
     logger.warning(
         """

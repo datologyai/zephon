@@ -66,6 +66,7 @@ from zephon.options import IpcTransport
 # tracebacks to stderr.  Idempotent via ``faulthandler.is_enabled()``.
 setup_faulthandler()
 
+from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
@@ -1469,7 +1470,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                     if context.stop_event.is_set():
                         break
 
-                ready = state.enqueue([], force=True)
+                with shutdown_flush(enabled=context.stop_event.is_set()):
+                    ready = state.enqueue([], force=True)
                 self._dispatch_ipc_batches(state, ready, context)
 
                 self._drain_until_idle(state, context)

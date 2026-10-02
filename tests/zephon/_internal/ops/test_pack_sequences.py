@@ -10,12 +10,14 @@ accordingly, with a final matrix section asserting every algorithm × output
 combination and the ``flat == flatten(envelope)`` relationship.
 """
 
+import logging
 import random
 from collections import Counter
 from typing import Any, get_args
 
 import pytest
 
+from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.ops.pack_sequences import (
     PackingAccumulator,
     PackingAlgorithm,
@@ -1892,6 +1894,19 @@ def test_homogeneous_full_wrap_drops_partial_tail_per_domain(caplog: Any) -> Non
     assert any(
         "2 packing group(s) in 1 lane(s)" in r.message for r in caplog.records
     ), [r.message for r in caplog.records]
+
+
+def test_wrap_shutdown_flush_logs_tail_drop_at_debug(caplog: Any) -> None:
+    """An early-close drain still tombstones the tail but doesn't warn about it."""
+    acc = _wrap(4)
+    acc.push_many([_rec_tokens(0, [1, 2, 3])])
+
+    with caplog.at_level(logging.DEBUG), shutdown_flush():
+        flushed = _records(acc.flush())
+
+    assert flushed and all(r.meta.tombstone for r in flushed)
+    tail_logs = [r for r in caplog.records if "trailing token" in r.getMessage()]
+    assert [r.levelno for r in tail_logs] == [logging.DEBUG]
 
 
 def test_homogeneous_full_wrap_auto_field_is_consistent_lane_wide() -> None:

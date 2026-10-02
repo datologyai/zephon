@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.ops.ensure_mixture import (
     EnsureMixture,
     EnsureMixtureAccumulator,
@@ -1548,6 +1549,22 @@ def test_strict_discard_logs_warning(caplog) -> None:
     assert any("discarded" in r.getMessage() for r in warned)
     assert str(buffered) in caplog.text
     assert acc._total_discarded == buffered
+
+
+def test_strict_shutdown_flush_discard_does_not_spend_warning(caplog) -> None:
+    """An early-close discard logs at DEBUG and leaves the one-time WARNING for a
+    real discard later."""
+    acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=None)
+    acc.push_many([_rec(i, component_id=0) for i in range(20)])
+    with caplog.at_level(logging.WARNING, logger="zephon._internal.ops.ensure_mixture"):
+        with shutdown_flush():
+            acc.flush(reset=True)
+    assert "discarded" not in caplog.text
+
+    acc.push_many([_rec(i, component_id=0) for i in range(20, 40)])
+    with caplog.at_level(logging.WARNING, logger="zephon._internal.ops.ensure_mixture"):
+        acc.flush(reset=True)
+    assert "discarded" in caplog.text
 
 
 def test_strict_no_discard_emits_no_warning(caplog) -> None:

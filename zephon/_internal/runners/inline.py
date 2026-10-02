@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 
+from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
@@ -226,7 +227,8 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                     if outputs:
                         yield from self._emit_stage_output(outputs)
 
-                tail = self._finalize_pipeline()
+                with shutdown_flush(enabled=stop_event.is_set()):
+                    tail = self._finalize_pipeline()
                 if tail:
                     yield from self._emit_stage_output(tail)
             finally:

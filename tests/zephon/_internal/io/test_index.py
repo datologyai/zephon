@@ -1,6 +1,7 @@
 """Tests for the index utility module."""
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from zephon._internal.io.index import (
     is_mds_index,
     is_shard_index,
 )
+from zephon._internal.io.index.index_reader import warn_missing_index
 from zephon._internal.io.storage import RouterStorageBackend
 
 
@@ -114,3 +116,27 @@ def test_find_and_load_index_raises_on_invalid_format(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Invalid index format"):
         find_and_load_index(str(tmp_path), storage)
+
+
+def test_warn_missing_index_is_quiet_for_few_shards(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A small unindexed scan logs one INFO line instead of the loud banner."""
+    with caplog.at_level(logging.INFO, logger="zephon._internal.io.index.index_reader"):
+        warn_missing_index(str(tmp_path), "parquet", num_shards=1)
+
+    assert [r.levelno for r in caplog.records] == [logging.INFO]
+    assert "SLOW DATASET DISCOVERY" not in caplog.text
+    assert "zephon.build_index parquet" in caplog.text
+
+
+@pytest.mark.parametrize("num_shards", [64, None])
+def test_warn_missing_index_shouts_for_large_or_unknown_scans(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, num_shards: int | None
+) -> None:
+    """A large (or unknown-size) unindexed scan keeps the loud WARNING banner."""
+    with caplog.at_level(logging.INFO, logger="zephon._internal.io.index.index_reader"):
+        warn_missing_index(str(tmp_path), "parquet", num_shards=num_shards)
+
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert "SLOW DATASET DISCOVERY" in caplog.text
