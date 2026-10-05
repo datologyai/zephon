@@ -20,7 +20,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 # Resolving uploaded files needs ``datasets``; downloads need huggingface_hub.
-pytest.importorskip("datasets")
+datasets = pytest.importorskip("datasets")
 pytest.importorskip("huggingface_hub")
 pytest.importorskip("pyarrow")
 
@@ -234,6 +234,13 @@ def test_local_directory_does_not_shadow_the_hub_dataset(
     )
     (shadow / "train.jsonl").write_text('{"a": 1}\n', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+
+    major, minor = (int(part) for part in datasets.__version__.split(".")[:2])
+    if (major, minor) < (4, 8):
+        # Only ``datasets`` 4.8+ can skip the local directory, so it's refused.
+        with pytest.raises(RuntimeError, match="would shadow"):
+            HFBackend().canonical_root("hf://databricks/databricks-dolly-15k/train")
+        return
 
     root = HFBackend().canonical_root("hf://databricks/databricks-dolly-15k/train")
 

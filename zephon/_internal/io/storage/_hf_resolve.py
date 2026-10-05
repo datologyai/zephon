@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import os
 import re
 import urllib.parse
 from collections.abc import Mapping, Sequence
@@ -165,6 +166,23 @@ def list_frozen(hub: HubClient, parts: HFUriParts) -> dict[str, int]:
     return hub.file_sizes(parts.repo_id, parts.revision, uploaded.paths)
 
 
+def _builder_path(datasets_version: str, repo_id: str) -> str:
+    """The ``load_dataset_builder`` path that reaches ``repo_id`` on the Hub only."""
+    major, minor = (int(part) for part in datasets_version.split(".")[:2])
+    if (major, minor) >= (4, 8):
+        # Never loads a same-named local directory in the working directory.
+        return f"hf://datasets/{repo_id}"
+    # Older ``datasets`` reach the Hub only through a bare ``org/name``, which
+    # a same-named local path would shadow.
+    if os.path.exists(repo_id):
+        raise RuntimeError(
+            f"Local path {repo_id!r} would shadow hf://{repo_id} with datasets "
+            f"{datasets_version}; run from another directory or upgrade to "
+            "datasets>=4.8"
+        )
+    return repo_id
+
+
 def _uploaded_files(
     repo_id: str, commit: str, config: str | None, split: str
 ) -> _Uploaded:
@@ -182,10 +200,8 @@ def _uploaded_files(
     from datasets.exceptions import DataFilesNotFoundError
 
     try:
-        # The ``hf://datasets/`` form never loads a local ``org/name`` directory
-        # that happens to exist in the working directory.
         builder = datasets.load_dataset_builder(
-            f"hf://datasets/{repo_id}", name=config, revision=commit
+            _builder_path(datasets.__version__, repo_id), name=config, revision=commit
         )
     except (DataFilesNotFoundError, EmptyDatasetError) as exc:
         return _Uploaded(config, (), f"`datasets` finds no data files ({exc})")

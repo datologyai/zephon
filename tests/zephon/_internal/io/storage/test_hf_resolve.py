@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -719,10 +720,37 @@ def test_a_split_named_like_a_part_is_not_merged() -> None:
 
 def test_builder_is_loaded_from_the_hub_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """A bare ``org/repo`` would load a same-named local directory instead."""
-    pytest.importorskip("datasets")
+    datasets = pytest.importorskip("datasets")
     loaded = _fake_builder(monkeypatch, _json_config())
     resolve_mod._uploaded_files(_REPO, SOURCE, None, "train")
-    assert loaded == [f"hf://datasets/{_REPO}"]
+    assert loaded == [resolve_mod._builder_path(datasets.__version__, _REPO)]
+
+
+@pytest.mark.parametrize("version", ["4.8.0", "4.10.1", "5.0.0.dev0"])
+def test_builder_path_is_hub_only_from_4_8(
+    version: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / _REPO).mkdir(parents=True)  # ignored by the hf://datasets/ form
+    assert resolve_mod._builder_path(version, _REPO) == f"hf://datasets/{_REPO}"
+
+
+@pytest.mark.parametrize("version", ["4.4.0", "4.7.0"])
+def test_builder_path_is_bare_before_4_8(
+    version: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hf://datasets/`` paths don't reach the Hub before ``datasets`` 4.8."""
+    monkeypatch.chdir(tmp_path)
+    assert resolve_mod._builder_path(version, _REPO) == _REPO
+
+
+def test_builder_path_refuses_a_shadowing_local_dir_before_4_8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / _REPO).mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="would shadow hf://org/repo"):
+        resolve_mod._builder_path("4.7.0", _REPO)
 
 
 def test_conversion_is_rejected_when_main_moves_while_pinning(uploaded) -> None:

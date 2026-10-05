@@ -6751,7 +6751,7 @@ test = [
 requires-dist = [
     { name = "backports-zstd", marker = "python_full_version < '3.14'", specifier = ">=0.2.0" },
     { name = "cloudpickle", specifier = ">=1.6.0" },
-    { name = "datasets", marker = "extra == 'hf'", specifier = ">=4.8.0" },
+    { name = "datasets", marker = "extra == 'hf'", specifier = ">=4.4.0" },
     { name = "filelock", specifier = ">=3.0.0" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2023.0.0" },
     { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=0.20.0" },

@@ -64,7 +64,7 @@ mds = [
     "zephon[streaming]",
 ]
 hf = [
-    "datasets>=4.8.0",
+    "datasets>=4.4.0",
     "huggingface_hub>=0.20.0",
     "zephon[parquet]",
 ]
