@@ -1,0 +1,24 @@
+# Data recipe shared by the TorchTitan and Megatron-LM integrations.
+
+text_field = "text"
+
+cache_dir = "/local-ssd/zephon"
+cache_limit_bytes = "500gb"
+
+seed = 42
+chunk_size = 16384
+shuffle_block_size = "auto"
+
+tokenize_parallelism = 8
+pack_parallelism = 8
+
+[[sources]]
+name = "web"
+path = "s3://example-bucket/web"
+fmt = "parquet"
+weight = 3.0
+
+[[sources]]
+name = "code"
+path = "hf://organization/code/train"
+weight = 1.0

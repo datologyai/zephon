@@ -1,0 +1,67 @@
+name: Documentation Preview
+
+# A repo has exactly one Pages site, so this REPLACES the published docs at the
+# Pages URL until the next push to main redeploys them. Manual trigger only, for
+# that reason.
+#
+# The github-pages environment restricts deployments by branch: the branch being
+# previewed must be listed in its deployment branch policy, or the deploy job
+# fails before it starts.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Shares the group with the main docs workflow so a preview and a main deploy
+# can never race for the single Pages site.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.11.15"
+    - name: Install dependencies
+      run: |
+        uv sync --group dev --all-extras
+    - name: Build documentation
+      run: |
+        uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: docs/build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
+
+  summary:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+    - name: Note that main docs are superseded
+      run: |
+        echo "Previewing \`${{ github.ref_name }}\` at the Pages URL." >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "Run the \`Documentation\` workflow on \`main\` to restore the published docs." >> "$GITHUB_STEP_SUMMARY"

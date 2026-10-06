@@ -142,10 +142,12 @@ for batch in pipeline:
 
 Full documentation is available at [datologyai.github.io/zephon](https://datologyai.github.io/zephon), including:
 
-- [Quick Start](https://datologyai.github.io/zephon/quickstart.html) -- get running in 5 minutes
-- [Basic Concepts](https://datologyai.github.io/zephon/basic_concepts.html) -- WorkSources, Pipelines, Operators, Runners, and the Engine
-- [Elastic Determinism](https://datologyai.github.io/zephon/understanding/determinism.html) -- reproducibility guarantees across GPU counts
-- [Checkpointing](https://datologyai.github.io/zephon/understanding/checkpointing.html) -- fault-tolerant training with mid-epoch resumption
+- [Basic Concepts](https://datologyai.github.io/zephon/basic_concepts.html) -- Datasets, WorkSources, and Pipelines
+- [Why Zephon?](https://datologyai.github.io/zephon/why_zephon.html) -- elastic determinism and why it matters for experiments
+- [Working with Datasets](https://datologyai.github.io/zephon/datasets/index.html) -- supported shard formats, storage backends, and the shard cache
+- [WorkSources](https://datologyai.github.io/zephon/worksources/index.html) -- mixing, shuffling, and repeating samples
+- [Pipelines](https://datologyai.github.io/zephon/pipelines/index.html) -- operators, distributed training, and checkpointing
+- [Training Integrations](https://datologyai.github.io/zephon/training_integrations.html) -- TorchTitan and Megatron-LM reference integrations
 - [API Reference](https://datologyai.github.io/zephon/api/zephon_pipeline.html) -- full Pipeline and operator reference
 
 ## 📄 License
