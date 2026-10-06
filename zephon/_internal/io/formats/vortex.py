@@ -36,8 +36,8 @@ class VortexShard(RandomAccessShard):
     def __init__(self, path: Path, *, length: int | None = None) -> None:
         if _vortex is None:
             raise RuntimeError(
-                "Opening Vortex shards requires the 'vortex-data' package; "
-                + "install it via `pip install zephon[vortex]`"
+                "Opening Vortex shards requires the 'vortex-data' package. "
+                + 'Install with: pip install "zephon[vortex]"'
             )
         self._path = path
         self._file = _vortex.open(str(path))
@@ -140,8 +140,8 @@ class VortexFormat(FormatHandler):
         """Scan directory and open each file to get metadata."""
         if _vortex is None:
             raise RuntimeError(
-                "Discovering Vortex datasets requires the 'vortex-data' package; "
-                + "install it via `pip install zephon[vortex]`"
+                "Discovering Vortex datasets requires the 'vortex-data' package. "
+                + 'Install with: pip install "zephon[vortex]"'
             )
 
         entries = [

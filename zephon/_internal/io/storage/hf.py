@@ -106,7 +106,7 @@ class HFBackend(OpenViaDownloadMixin):
                 except ImportError as exc:
                     raise ImportError(
                         "The `requests` library is required for hf:// URIs. "
-                        "Install with: pip install zephon[hf]"
+                        'Install with: pip install "zephon[hf]"'
                     ) from exc
 
                 retry = Retry(
@@ -509,7 +509,7 @@ class HFBackend(OpenViaDownloadMixin):
         except ImportError as exc:
             raise ImportError(
                 "huggingface_hub is required for hf:// downloads. "
-                "Install with: pip install zephon[hf]"
+                'Install with: pip install "zephon[hf]"'
             ) from exc
 
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)

@@ -124,6 +124,7 @@ class S3Backend(ObstoreBackend):
     valid_schemes = frozenset({"s3"})
 
     def __init__(self) -> None:
+        super().__init__()
         self._stores: dict[str, Any] = {}  # bucket -> S3Store
         self._base_config: dict[str, Any] | None = None
         self._unsigned_stores: dict[str, Any] = {}  # bucket -> unsigned S3Store

@@ -61,6 +61,7 @@ class GCSBackend(ObstoreBackend):
     valid_schemes = frozenset({"gs", "gcs"})
 
     def __init__(self) -> None:
+        super().__init__()
         self._stores: dict[str, Any] = {}  # bucket -> Store
         self._base_config: dict[str, Any] | None = None
         self._use_s3_compat: bool | None = None

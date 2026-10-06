@@ -28,7 +28,7 @@ def require_pyarrow() -> Any:
                 except ImportError as exc:
                     raise ImportError(
                         "pyarrow is required for Parquet format support. "
-                        + "Install with: pip install zephon[parquet]"
+                        + 'Install with: pip install "zephon[parquet]"'
                     ) from exc
                 cap_arrow_threads()
                 _pa = pa

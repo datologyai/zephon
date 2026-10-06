@@ -30,7 +30,7 @@ class ParquetIndexBuilder(IndexBuilder):
         if _pq is None:
             raise ImportError(
                 "pyarrow is required for Parquet index building. "
-                "Install with: pip install zephon[parquet]"
+                'Install with: pip install "zephon[parquet]"'
             )
 
         # Read metadata only (footer), not the full file

@@ -32,7 +32,7 @@ class VortexIndexBuilder(IndexBuilder):
         if _vortex is None:
             raise ImportError(
                 "vortex-data is required for Vortex index building. "
-                "Install with: pip install zephon[vortex]"
+                'Install with: pip install "zephon[vortex]"'
             )
 
         url = f"file://{path}"

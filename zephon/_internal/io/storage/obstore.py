@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import fnmatch
+import importlib.util
 import os
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any, Mapping
 
 from ._utils import OpenViaDownloadMixin, split_url
+
+
+def _require_obstore(schemes: frozenset[str]) -> None:
+    """Fail at backend construction, with an install hint, if the cloud extra is missing."""
+    if "obstore" not in sys.modules and importlib.util.find_spec("obstore") is None:
+        urls = ", ".join(f"{scheme}://" for scheme in sorted(schemes))
+        raise ImportError(
+            f"Accessing {urls} paths requires the `obstore` package. "
+            'Install with: pip install "zephon[cloud]"'
+        )
 
 
 class ObstoreBackend(OpenViaDownloadMixin, ABC):
@@ -24,6 +36,9 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
     """
 
     valid_schemes: frozenset[str]
+
+    def __init__(self) -> None:
+        _require_obstore(self.valid_schemes)
 
     @abstractmethod
     def _get_store(self, bucket: str) -> Any:

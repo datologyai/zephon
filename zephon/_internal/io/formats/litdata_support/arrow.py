@@ -102,7 +102,7 @@ class ArrowLoader(BaseItemLoader):
         except ImportError as exc:
             raise ImportError(
                 "Arrow-backed LitData chunks require pyarrow. "
-                + "Install with: pip install zephon[parquet]"
+                + 'Install with: pip install "zephon[parquet]"'
             ) from exc
         self._length = chunk_size
         try:

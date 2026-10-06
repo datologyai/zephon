@@ -26,6 +26,7 @@ class AzureBackend(ObstoreBackend):
     valid_schemes = frozenset({"az", "azure", "abfs", "abfss"})
 
     def __init__(self) -> None:
+        super().__init__()
         self._stores: dict[str, Any] = {}  # container (or container@host) -> Store
 
     def canonical_root(self, path: str, fmt: str | None = None) -> str:

@@ -46,7 +46,7 @@ def _ensure_litdata_support():
         except ImportError as exc:
             raise ImportError(
                 "LitData format requires numpy, optree, and litdata packages. "
-                "Install with: pip install zephon[litdata]"
+                'Install with: pip install "zephon[litdata]"'
             ) from exc
     return _litdata_support
 
