@@ -253,15 +253,3 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 # internal lock; use same version as in test group.
 [tool.uv]
 override-dependencies = ["transformers>=4.44.0"]
-
-# Public packages resolve directly from public PyPI (uv's implicit default index).
-# zephon consumes no private DatologyAI packages, so the private index below is
-# `explicit` and is never consulted during resolution -- CI therefore needs no
-# CodeArtifact credentials. It exists only to publish zephon's own wheel to the
-# private CodeArtifact index (domain datologyai, repo main, us-east-1). See
-# docs/source/guides/dev_guide.md.
-[[tool.uv.index]]
-name = "datologyai"
-url = "https://datologyai-764487710063.d.codeartifact.us-east-1.amazonaws.com/pypi/main/simple/"
-publish-url = "https://datologyai-764487710063.d.codeartifact.us-east-1.amazonaws.com/pypi/main/"
-explicit = true
