@@ -17,8 +17,8 @@ The backend is registered for the ``hf://`` scheme in
 :class:`zephon._internal.io.storage.router.RouterStorageBackend`, so the format
 handlers read HF datasets without HF-specific code.
 
-Auth: bearer token from ``huggingface_hub.HfFolder.get_token()`` if available,
-otherwise the ``HF_TOKEN`` environment variable.
+Auth: bearer token from ``huggingface_hub.get_token()`` (``HF_TOKEN``, then the
+``hf auth login`` token), or just ``HF_TOKEN`` if huggingface_hub isn't installed.
 """
 
 from __future__ import annotations
@@ -145,9 +145,9 @@ class HFBackend(OpenViaDownloadMixin):
             if self._token is _TOKEN_UNSET:
                 token: str | None = None
                 try:
-                    from huggingface_hub import HfFolder
+                    from huggingface_hub import get_token
 
-                    token = HfFolder.get_token()
+                    token = get_token()
                 except ImportError:
                     token = None
                 self._token = token or os.environ.get("HF_TOKEN")

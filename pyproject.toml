@@ -65,7 +65,12 @@ mds = [
 ]
 hf = [
     "datasets>=4.4.0",
-    "huggingface_hub>=0.20.0",
+    # Floors match datasets>=4.4.0's own requirements.
+    "huggingface_hub>=0.25.0",
+    # hf.py's metadata client; huggingface_hub 1.x moved to httpx and no longer pulls it in.
+    "requests>=2.32.2",
+    # Retry(allowed_methods=...) needs 1.26; requests still allows 1.21.
+    "urllib3>=1.26.0",
     "zephon[parquet]",
 ]
 ray = [
