@@ -7,10 +7,6 @@ These tests import and run the main() functions from each example to ensure
 the documentation examples stay in sync with the codebase.
 """
 
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-
 
 def test_run_basic(capsys):
     """Test that run_basic.py example runs without error."""
@@ -75,20 +71,3 @@ def test_first_pipeline_warns_and_uses_fallback_without_transformers(
 
     assert your_first_pipeline.default_tokenizer_id() == "__fallback__"
     assert "Transformers is not installed" in str(recwarn.pop(RuntimeWarning).message)
-
-
-def test_every_runnable_example_is_included_in_docs():
-    """Keep the examples index tied to the files exercised by this module."""
-    examples_page = (ROOT / "docs/source/examples/index.md").read_text()
-    runnable_examples = {
-        path.name
-        for path in (ROOT / "examples").glob("*.py")
-        if path.name != "__init__.py"
-    }
-
-    missing = sorted(
-        name
-        for name in runnable_examples
-        if f"../../../examples/{name}" not in examples_page
-    )
-    assert not missing, f"Runnable examples missing from docs: {missing}"

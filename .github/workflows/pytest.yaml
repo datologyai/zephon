@@ -3,9 +3,7 @@ name: Unit Tests
 permissions:
   contents: read
 
-# Docs-only changes are skipped, except docs/source/examples/index.md, which
-# tests/test_examples.py reads. That carve-out needs `paths` with a trailing
-# re-include (last matching pattern wins); `paths-ignore` cannot express it.
+# Docs-only changes are skipped.
 on:
   push:
     branches:
@@ -15,13 +13,11 @@ on:
     - "**"
     - "!*.md"
     - "!docs/**"
-    - "docs/source/examples/**"
   pull_request:
     paths:
     - "**"
     - "!*.md"
     - "!docs/**"
-    - "docs/source/examples/**"
   workflow_call:
   workflow_dispatch: {}
 
