@@ -147,8 +147,6 @@ jobs:
     name: Packaging Tests
     timeout-minutes: 15
     runs-on: ubuntu-latest
-    env:
-      PYX_API_KEY: ${{ secrets.PYX_READ_ONLY_KEY }}
     steps:
     - uses: actions/checkout@v4
       with:

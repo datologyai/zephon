@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+# Manual-only: v* tags also mark internal releases, so tag pushes
+# must not publish publicly. Run from a tag via "Use workflow from".
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Package index to publish to
+        type: choice
+        options:
+        - testpypi
+        - pypi
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    # Fail rather than skip, so a dispatch from a branch can't look like success.
+    - name: Require a tag ref
+      if: github.ref_type != 'tag'
+      run: |
+        echo "::error::Run this workflow from a v* tag, not ${GITHUB_REF}"
+        exit 1
+    - uses: actions/checkout@v4
+      with:
+        # setuptools-scm derives the version from git history/tags.
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+      with:
+        version: "0.8.17"
+    - name: Build sdist and wheel
+      run: uv build
+    - name: Check version matches tag
+      run: |
+        expected="${GITHUB_REF_NAME#v}"
+        ls dist/
+        test -f "dist/zephon-${expected}-py3-none-any.whl"
+        test -f "dist/zephon-${expected}.tar.gz"
+    - name: Run packaging tests
+      run: |
+        uv sync --python 3.12 --group dev
+        uv run --python 3.12 pytest --run-packaging tests/packaging -ra
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+  publish:
+    name: Publish to ${{ inputs.target }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ${{ inputs.target }}
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/p/zephon' || 'https://test.pypi.org/p/zephon' }}
+    permissions:
+      id-token: write  # trusted publishing; no API token stored
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    - uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: ${{ inputs.target == 'pypi' && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}
