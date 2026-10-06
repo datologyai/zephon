@@ -46,10 +46,12 @@ jobs:
         ls dist/
         test -f "dist/zephon-${expected}-py3-none-any.whl"
         test -f "dist/zephon-${expected}.tar.gz"
-    - name: Run packaging tests
+    # Only the wheel/sdist smoke tests: the pyright --verifytypes check already
+    # runs in regular CI and spends ~11 min fetching Node on a fresh runner.
+    - name: Run packaging smoke tests
       run: |
         uv sync --python 3.12 --group dev
-        uv run --python 3.12 pytest --run-packaging tests/packaging -ra
+        uv run --python 3.12 pytest --run-packaging tests/packaging/test_wheel_smoke.py -ra
     - uses: actions/upload-artifact@v4
       with:
         name: dist
