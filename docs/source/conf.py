@@ -40,6 +40,8 @@ exclude_patterns = []
 
 html_theme = "furo"
 html_static_path = ["_static"]
+# Stubs holding the API paths the published README links to.
+html_extra_path = ["_redirects"]
 html_title = "Zephon"
 html_css_files = ["theme.css", "figures.css"]
 html_js_files = ["embeds.js"]
