@@ -115,7 +115,7 @@ simply returns the constituent payloads without doing any additional padding.
 
 Most users should opt for the `wrap` algorithm when they are trying to maximize token
 utilization and the `first_fit` algorithm when they must keep records intact. The
-`pack_flat` and `pack_sequences` entries in the [API reference](../api/zephon_pipeline.rst)
+`pack_flat` and `pack_sequences` entries in the [API reference](../api/pipeline.rst)
 cover the `best_fit`, `best_fit_wrap`, and other packing options.
 
 **Packing Homogeneity.** By default, Zephon can pack samples from different upstream
