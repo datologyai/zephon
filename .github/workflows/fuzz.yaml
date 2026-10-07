@@ -16,7 +16,7 @@ concurrency:
 jobs:
   fuzz:
     name: Fuzz tests
-    runs-on: LargeGithubRunner
+    runs-on: zephon-large
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
