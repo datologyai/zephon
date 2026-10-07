@@ -39,7 +39,7 @@ jobs:
         shard: ["process-runner", "remainder"]
         include:
         - python_version: "3.14t"
-          runner: LargeGithubRunner
+          runner: zephon-large
           shard: "all"
     steps:
     - uses: actions/checkout@v4
@@ -162,7 +162,7 @@ jobs:
   ray:
     name: Ray Tests
     timeout-minutes: 20
-    runs-on: LargeGithubRunner
+    runs-on: zephon-large
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5

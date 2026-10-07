@@ -35,7 +35,7 @@ jobs:
   integration:
     name: Integration Tests (${{ matrix.python_version }}, ${{ matrix.shard }})
     timeout-minutes: 40
-    runs-on: LargeGithubRunner
+    runs-on: zephon-large
     strategy:
       matrix:
         python_version: ["3.10", "3.12", "3.13", "3.14t"]
@@ -100,7 +100,7 @@ jobs:
   ray-integration:
     name: Ray Integration Tests
     timeout-minutes: 40
-    runs-on: LargeGithubRunner
+    runs-on: zephon-large
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
