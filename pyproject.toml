@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zephon"
 description = "High-performance, modular, multimodal-first data loader"
-authors = [{name = "Datology Team", email = "team@datology.ai"}]
+authors = [{name = "Datology Team", email = "zephon@datologyai.com"}]
 license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.10"

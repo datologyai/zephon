@@ -36,10 +36,6 @@ of randomness in your training loop without any meaningful cost in I/O efficienc
 because the `WorkSource` will be able to draw the samples from each shard in the
 `Dataset` sequentially.
 
-:::{note}
-TODO: add the shuffle strategies visualization.
-:::
-
 The next level of shuffling is `shuffle_within_shard`, which is disabled by default; it
 randomizes the order in which samples from a single shard are read on each epoch. This is
 a good option to enable when the adjacent samples within a shard have strongly correlated

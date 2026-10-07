@@ -9,11 +9,7 @@ the individual samples are only a few hundred tokens long, then much of the spac
 allocated for the input sequence would be wasted on padding, which makes our overall
 training pipeline much less efficient than it could be. Instead of this, many training
 stacks support a mechanism to indicate that tokens from multiple documents are included in
-the same input sequence. This is perhaps best illustrated visually:
-
-:::{note}
-TODO: add the packed-sequence visualization.
-:::
+the same input sequence.
 
 In the general case, optimal packing is an NP-hard problem, but there are several useful
 heuristics that seem to work well in practice. That said, packing is not always necessary
@@ -118,14 +114,9 @@ those positions from the loss (see
 simply returns the constituent payloads without doing any additional padding.
 
 Most users should opt for the `wrap` algorithm when they are trying to maximize token
-utilization and the `first_fit` algorithm when they must keep records intact. See the
-advanced packing configuration reference for recommendations for the `best_fit`,
-`best_fit_wrap`, and other packing options.
-
-:::{note}
-TODO: write the advanced packing configuration reference the paragraph above points at, and
-link it.
-:::
+utilization and the `first_fit` algorithm when they must keep records intact. The
+`pack_flat` and `pack_sequences` entries in the [API reference](../api/zephon_pipeline.rst)
+cover the `best_fit`, `best_fit_wrap`, and other packing options.
 
 **Packing Homogeneity.** By default, Zephon can pack samples from different upstream
 `Dataset` components together into a single training sequence. For many training

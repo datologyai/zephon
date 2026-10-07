@@ -75,11 +75,6 @@ Zephon detects cache thrashing, we still recommend configuring your cache delibe
 :caption: examples/guide/datasets/storage_configuration.py
 ```
 
-:::{note}
-TODO: call out the more advanced cache configuration options in the configuration settings
-reference.
-:::
-
 :::{warning}
 **Direct reads from S3.** Some object storage services like S3 introduced the option to
 read byte ranges from files stored in the cloud, rather than having to download the entire

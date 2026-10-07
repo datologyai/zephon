@@ -13,11 +13,9 @@ enough with input tensors — the data loader must produce these tensors faster 
 can consume them. In simple pipelines (e.g., our fetch-and-batch example) this is
 typically not a problem. However, when operations such as image decoding are introduced,
 this can, depending on the compute requirements, become a bottleneck; academic researchers
-have investigated how to avoid such data stalls since the late 2010s.
-
-:::{note}
-TODO: link the Mohan et al. VLDB data stalls paper.
-:::
+have investigated how to avoid such data stalls since the late 2010s (see, e.g., Mohan et
+al., [Analyzing and Mitigating Data Stalls in DNN Training](https://arxiv.org/abs/2007.06775),
+VLDB 2021).
 
 Zephon provides default execution settings that are a reasonable starting point for most
 workloads. This page explains how to inspect those settings, measure and understand where
