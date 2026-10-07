@@ -5,6 +5,8 @@
     <title>Moved to Pipeline</title>
     <link rel="canonical" href="pipeline.html">
     <meta http-equiv="refresh" content="0; url=pipeline.html">
+    <!-- replace() leaves no history entry; the meta refresh covers no-script. -->
+    <script>location.replace("pipeline.html" + location.hash);</script>
   </head>
   <body>
     <p>This page is now <a href="pipeline.html">Pipeline</a>.</p>
