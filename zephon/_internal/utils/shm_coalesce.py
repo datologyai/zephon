@@ -391,7 +391,25 @@ def _is_leaf(obj: Any) -> bool:
 
 
 def _memoryview_source(view: memoryview) -> Any:
-    """Keep buffer views when their exact byte representation can be copied."""
+    """Return a source for copying a memoryview into the shared byte buffer.
+
+    The result represents the same bytes, in logical C order, as
+    ``view.tobytes()``. It is one of:
+
+    - A flat byte ``memoryview`` for C-contiguous input. Casting to ``B``
+      changes only the view; it does not copy the underlying data.
+    - A NumPy array view for supported noncontiguous input. This retains the
+      source dtype, shape, and strides without making a contiguous copy.
+      ``_build_shm_buffers`` gives the destination slice that dtype and shape,
+      then uses ``np.copyto`` to gather the elements into shared memory.
+    - Owned ``bytes`` when NumPy is unavailable or cannot safely represent
+      the input. Structured dtypes also use this fallback: NumPy assignment
+      copies fields but can omit padding bytes. Object dtypes are excluded
+      because their values are Python references rather than raw data.
+
+    The view results keep their source allocation alive until the copy into
+    shared memory finishes. Only the bytes fallback copies at this step.
+    """
     if view.c_contiguous:
         return view.cast("B")
     np = _get_numpy()
@@ -402,7 +420,7 @@ def _memoryview_source(view: memoryview) -> Any:
             # bytes fallback for those formats and for object pointers.
             if not array.dtype.hasobject and array.dtype.fields is None:
                 return array
-        except (TypeError, ValueError, NotImplementedError):
+        except (TypeError, ValueError, RuntimeError, NotImplementedError):
             pass
     return bytes(view)
 
