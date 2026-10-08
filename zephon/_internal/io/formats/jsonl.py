@@ -136,9 +136,17 @@ class JsonlFormat(FormatHandler):
         # A missing/bad num_rows would silently drop the shard's rows; rescan.
         return bool(shards) and all(
             isinstance(shard.get("basename"), str)
-            and shard["basename"].endswith(".jsonl")
+            and shard["basename"].endswith(JSONL_SUFFIXES)
             and isinstance(shard.get("num_rows"), int)
             and shard["num_rows"] >= 0
+            and (
+                compression_for_name(shard["basename"]) is None
+                or (
+                    isinstance(shard.get("extra"), dict)
+                    and isinstance(shard["extra"].get("raw_bytes"), int)
+                    and shard["extra"]["raw_bytes"] >= 0
+                )
+            )
             for shard in shards
         )
 
@@ -152,14 +160,26 @@ class JsonlFormat(FormatHandler):
         for shard_id, shard in enumerate(data["shards"]):
             count = shard.get("num_rows", 0)
             shard_index[shard_id] = count
-            shard_meta[shard_id] = {
-                "raw": {
-                    "basename": shard["basename"],
-                    "bytes": shard.get("bytes", 0),
-                    "hashes": shard.get("hashes", {}),
-                },
+            name = shard["basename"]
+            compression = compression_for_name(name)
+            file_meta = {
+                "basename": name,
+                "bytes": shard.get("bytes", 0),
+                "hashes": shard.get("hashes", {}),
+            }
+            meta: dict[str, object] = {
+                "raw": file_meta,
                 "extra": {"length": count},
             }
+            if compression is not None:
+                meta["raw"] = {
+                    "basename": name + _DECODED_SUFFIX,
+                    "bytes": shard["extra"]["raw_bytes"],
+                    "hashes": {},
+                }
+                meta["zip"] = file_meta
+                meta["compression"] = compression
+            shard_meta[shard_id] = meta
 
         return shard_index, shard_meta
 

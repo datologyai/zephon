@@ -34,6 +34,7 @@ from zephon._internal.io.storage import (
 from zephon._internal.io.storage import (
     StorageBackend as _StorageBackend,
 )
+from zephon._internal.io.suffixes import JSONL_SUFFIXES as _JSONL_SUFFIXES
 from zephon._internal.io.suffixes import detect_format as _detect_format
 from zephon.io.memory import InMemoryShard
 
@@ -306,7 +307,7 @@ def _classify_index_payload(data: _IndexData) -> str:
                     if isinstance(extra, dict) and "row_groups" in extra:
                         return "parquet"
                     basename = first_shard.get("basename")
-                    if isinstance(basename, str) and basename.endswith(".jsonl"):
+                    if isinstance(basename, str) and basename.endswith(_JSONL_SUFFIXES):
                         return "jsonl"
             return "mds"
     return "mds"

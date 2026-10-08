@@ -60,7 +60,7 @@ def test_jsonl_create_index(tmp_path: Path) -> None:
 
 def test_jsonl_create_index_rejects_empty_directory(tmp_path: Path) -> None:
     """Building an index requires at least one JSONL shard."""
-    with pytest.raises(ValueError, match=r"No \*\.jsonl files found"):
+    with pytest.raises(ValueError, match=r"No \*\.jsonl.* files found"):
         JsonlIndexBuilder().create_index(tmp_path, progress=False)
 
 
@@ -313,15 +313,21 @@ def test_jsonl_discover_mixes_plain_and_compressed_shards(tmp_path: Path) -> Non
     assert "zip" not in shard_meta[1]
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize(
+    "cache_enabled,indexed",
+    [(False, False), (True, False), (False, True), (True, True)],
+)
 def test_compressed_jsonl_reads_through_store(
-    tmp_path: Path, cache_enabled: bool, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, cache_enabled: bool, indexed: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     data = tmp_path / "data"
     data.mkdir()
     rows = [{"i": i} for i in range(6)]
     _write_compressed_jsonl(data / "s0.jsonl.zst", rows[:4], "zstd")
     _write_compressed_jsonl(data / "s1.jsonl.gz", rows[4:], "gzip")
+
+    if indexed:
+        JsonlIndexBuilder().create_index(data, progress=False)
 
     decoded_shards: list[str] = []
 
@@ -388,3 +394,49 @@ def test_jsonl_shard_getsamples_keeps_null_rows_aligned(tmp_path: Path) -> None:
     shard = JsonlShard(path, length=3)
 
     assert shard.getsamples([2, 1, 0]) == [{"v": 2}, None, {"v": 0}]
+
+
+@pytest.mark.parametrize("compression", sorted(_WRITERS))
+def test_jsonl_index_keeps_compressed_shards(
+    tmp_path: Path, compression: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indexing a mixed dataset keeps its rows and decompression metadata."""
+    name = f"a.jsonl{_SUFFIXES[compression]}"
+    _write_compressed_jsonl(
+        tmp_path / name, [{"i": i} for i in range(3)], compression, blank=True
+    )
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": 3}])
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    expected = handler.discover(str(tmp_path), storage)
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    monkeypatch.setattr(
+        JsonlFormat,
+        "_discover_from_files",
+        lambda *_args: pytest.fail("indexed discovery scanned JSONL shards"),
+    )
+    assert handler.discover(str(tmp_path), storage) == expected
+    ids, counts = handler.discover_counts(str(tmp_path), storage)
+    assert ids.tolist() == [0, 1]
+    assert counts.tolist() == [3, 1]
+    dataset = Dataset.from_path("indexed", str(tmp_path))
+    assert dataset.backend["kind"] == "jsonl"
+    assert dataset.counts().tolist() == [3, 1]
+
+
+def test_jsonl_index_rescans_without_compressed_raw_size(tmp_path: Path) -> None:
+    """Incomplete compression metadata must not bypass file discovery."""
+    _write_compressed_jsonl(tmp_path / "a.jsonl.gz", [{"i": 0}], "gzip")
+    index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    del data["shards"][0]["extra"]["raw_bytes"]
+    data["shards"][0]["num_rows"] = 99
+    index_path.write_text(json.dumps(data), encoding="utf-8")
+
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    counts, metadata = handler.discover(str(tmp_path), storage)
+    assert dict(counts) == {0: 1}
+    assert metadata[0]["compression"] == "gzip"
+    assert handler.discover_counts(str(tmp_path), storage)[1].tolist() == [1]
