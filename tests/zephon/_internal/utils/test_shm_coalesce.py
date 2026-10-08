@@ -395,6 +395,8 @@ class TestCoalesceBytes:
         restored = _round_trip_resolved(coalesced)
         assert bytes(restored[0].payload["mv"]) == data
         assert isinstance(restored[0].payload["mv"], _ShmBytes)
+
+    def test_empty_multidim_memoryview_stays_inline(self) -> None:
         empty = memoryview(np.zeros((0, 4), dtype=np.int32))
         record = SampleRecord(meta=_meta(0), payload=empty)
         assert coalesce_microbatch([record], shm_min_size=0) is None
@@ -544,10 +546,6 @@ np = pytest.importorskip("numpy")
 # ---------------------------------------------------------------------------
 # Numpy ndarray coalescing
 # ---------------------------------------------------------------------------
-class _NumberList(list[int]):
-    pass
-
-
 class TestCoalesceNdarray:
     def test_unsupported_numpy_dtypes_stay_inline(self) -> None:
         values = {
@@ -1595,6 +1593,10 @@ class DCWithTokenIds:
     label: str
 
 
+class _NumberList(list[int]):
+    pass
+
+
 class TestPrimitiveListAsLeaf:
     """List[int] inside structs must be treated as atomic leaves, not flattened."""
 
@@ -1744,7 +1746,7 @@ class TestPrimitiveListAsLeaf:
         for i, rec in enumerate(restored):
             assert rec.payload["token_ids"] == list(range(i * 100, (i + 1) * 100))
 
-    def test_mixed_int_and_float_lists(self) -> None:
+    def test_homogeneous_lists_round_trip_exactly(self) -> None:
         """Homogeneous lists preserve values and their Python list types."""
         int_ids = [0, 2**63 - 1, -(2**63)]
         float_scores = [0.1 * i for i in range(30)]
@@ -1768,7 +1770,7 @@ class TestPrimitiveListAsLeaf:
         assert type(restored[0].payload["ids"]) is list
         assert type(restored[0].payload["scores"]) is list
         assert restored[0].payload["ids"] == int_ids
-        assert restored[0].payload["scores"] == pytest.approx(float_scores)
+        assert restored[0].payload["scores"] == float_scores
 
     def test_unsupported_numeric_lists_round_trip_unchanged(self) -> None:
         values = {

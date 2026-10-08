@@ -450,15 +450,18 @@ def _extract_leaf(
             or set(map(type, leaf)) != {kind}
         ):
             return leaf
-        if kind is int and not (-(2**63) <= min(leaf) and max(leaf) < 2**63):
+        np = _get_numpy()
+        try:
+            array = np.array(leaf, dtype=np.int64 if kind is int else np.float64)
+        except OverflowError:
             return leaf
-        dtype = torch.int64 if kind is int else torch.float64
-        dtype_key = str(dtype)
+        tensor = torch.from_numpy(array)
+        dtype_key = str(tensor.dtype)
         n = len(leaf)
         offset = offsets.get(dtype_key, 0)
         slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
         offsets[dtype_key] = offset + n
-        collector.setdefault(dtype_key, []).append(leaf)
+        collector.setdefault(dtype_key, []).append(tensor)
         return slot
     if torch is not None and isinstance(leaf, torch.Tensor):
         if leaf.device.type != "cpu":
@@ -586,8 +589,8 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
     Allocates the shared destination with :func:`_alloc_shm_buffer`, then
-    writes tensors, strided NumPy arrays, supported memoryviews, and
-    homogeneous numeric lists directly into the final shared region.
+    writes tensors, strided NumPy arrays, and supported memoryviews into
+    the final shared region. Numeric lists are converted before allocation.
 
     If ``/dev/shm`` is exhausted, retries with exponential backoff via
     :func:`_alloc_shm_buffer` instead of propagating the error.
@@ -634,27 +637,16 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
                 offset += n
             buffers[dtype_key] = buf
         else:
-            total_numel = sum(
-                len(t) if isinstance(t, list) else t.numel() for t in items
-            )
+            total_numel = sum(t.numel() for t in items)
             if total_numel == 0:
                 continue
-            dtype = (
-                (torch.int64 if dtype_key == str(torch.int64) else torch.float64)
-                if isinstance(items[0], list)
-                else items[0].dtype
-            )
+            dtype = items[0].dtype
             # Allocate directly in SHM, then write sub-tensors in.
             buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
             offset = 0
-            np_buf = None
             for t in items:
-                n = len(t) if isinstance(t, list) else t.numel()
-                if isinstance(t, list):
-                    if np_buf is None:
-                        np_buf = buf.numpy()
-                    np_buf[offset : offset + n] = t
-                elif n > 0:
+                n = t.numel()
+                if n > 0:
                     buf.narrow(0, offset, n).view(t.shape).copy_(t)
                 offset += n
             buffers[dtype_key] = buf
