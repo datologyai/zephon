@@ -322,8 +322,6 @@ class TestAllocShmBuffer:
 # ---------------------------------------------------------------------------
 # SHM properties
 # ---------------------------------------------------------------------------
-
-
 class TestCoalesceShmProperties:
     def test_buffers_are_in_shared_memory(self) -> None:
         records = [

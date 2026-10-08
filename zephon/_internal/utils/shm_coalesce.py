@@ -555,9 +555,9 @@ def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
-    Allocates the target directly in shared memory, then
-    copies each sub-tensor (or bytes chunk) directly into the shared
-    region — **one memcpy per item**, no intermediate staging buffer.
+    Allocates the target directly in shared memory, then copies each
+    sub-tensor (or bytes chunk) into the shared region: **one memcpy per
+    item**, no intermediate staging buffer.
 
     If ``/dev/shm`` is exhausted, retries with exponential backoff via
     :func:`_alloc_shm_buffer` instead of propagating the error.
