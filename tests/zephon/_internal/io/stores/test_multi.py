@@ -237,3 +237,24 @@ def test_jsonl_store_ignores_parquet_cache_root(tmp_path: Path) -> None:
         ),
     )
     store.close()
+
+
+def test_remote_dataset_needs_cache_when_format_cannot_read_in_place() -> None:
+    from types import SimpleNamespace
+
+    from zephon._internal.io.formats.base import get_format
+    from zephon._internal.io.formats.vortex import VortexFormat
+    from zephon._internal.io.stores.multi import _check_readable_in_place
+
+    remote = SimpleNamespace(name="remote", backend={"path": "s3://bucket/data"})
+    local = SimpleNamespace(name="local", backend={"path": "/data"})
+    jsonl = get_format("jsonl")
+    uncached = StoreOptions()
+    cached = StoreOptions(cache=CacheOptions(enabled=True))
+
+    with pytest.raises(ValueError, match="cache.enabled=True"):
+        _check_readable_in_place(remote, jsonl, uncached)  # type: ignore[arg-type]
+
+    _check_readable_in_place(remote, jsonl, cached)  # type: ignore[arg-type]
+    _check_readable_in_place(local, jsonl, uncached)  # type: ignore[arg-type]
+    _check_readable_in_place(remote, VortexFormat(), uncached)  # type: ignore[arg-type]

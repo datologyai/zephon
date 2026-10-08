@@ -14,24 +14,44 @@ from tenacity import (
 
 from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.resolvers.utils import compute_file_hash
-from zephon._internal.io.storage import LocalFSBackend
-from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
+from zephon._internal.io.storage import (
+    LocalFSBackend,
+    StorageBackend,
+    is_remote_path,
+)
+from zephon._internal.io.types import (
+    LocalShardFile,
+    LocalShardRef,
+    RemoteShardRef,
+    ShardLocator,
+    ShardRef,
+)
 from zephon._internal.utils.compression import decompress_file, normalize_compression
 
 
 class DirectResolver(ShardResolver):
-    """Resolve shard locators by reading directly from the filesystem."""
+    """Resolve shard locators without a shard cache.
+
+    A shard under a local root resolves to its file, which is validated first.
+    A shard under a remote root resolves to a :class:`RemoteShardRef` on
+    ``remote_storage``, without IO. Its format then reads it in place.
+    """
 
     def __init__(
         self,
         storage: LocalFSBackend,
         *,
+        remote_storage: StorageBackend | None = None,
         validate_hash: str | None = None,
     ) -> None:
         self._storage = storage
+        self._remote_storage = remote_storage
         self._validate_hash = validate_hash
 
-    def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
+    def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> ShardRef:
+        if is_remote_path(locator.root):
+            return self._resolve_remote(locator)
+
         raw_path = self._filepath(locator.root, locator.raw.basename)
         raw_bytes = self._ensure_raw_ready(locator, raw_path)
 
@@ -55,6 +75,34 @@ class DirectResolver(ShardResolver):
 
     def touch(self, locator: ShardLocator) -> None:
         return None
+
+    def _resolve_remote(self, locator: ShardLocator) -> RemoteShardRef:
+        if self._remote_storage is None:
+            raise ValueError(
+                f"Shard {locator.shard_id} of dataset {locator.dataset!r} is under "
+                + f"the remote root {locator.root!r}; set cache.enabled=True"
+            )
+
+        if locator.zip is not None or locator.compression:
+            raise ValueError(
+                f"Compressed shards of dataset {locator.dataset!r} under a remote "
+                + "root must be downloaded; set cache.enabled=True"
+            )
+
+        # A whole-file hash cannot be checked without reading the whole file.
+        if self._validate_hash and self._validate_hash in locator.raw.hashes:
+            raise ValueError(
+                f"cache.validate_hash={self._validate_hash!r} for dataset "
+                + f"{locator.dataset!r} under a remote root needs cache.enabled=True"
+            )
+
+        return RemoteShardRef(
+            storage=self._remote_storage,
+            path=f"{locator.root.rstrip('/')}/{locator.raw.basename}",
+            bytes=locator.raw.bytes,
+            extra=locator.extra,
+            cache_hit=False,
+        )
 
     def _filepath(self, root: str, basename: str) -> Path:
         if os.path.isabs(basename):

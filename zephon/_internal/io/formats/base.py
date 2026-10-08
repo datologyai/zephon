@@ -3,16 +3,17 @@
 
 """Base interfaces and registry for shard formats."""
 
-from typing import TYPE_CHECKING, Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 import numpy as np
 
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
-from zephon._internal.io.types import LocalShardRef, ShardLocator
+from zephon._internal.io.types import LocalShardRef, RemoteShardRef, ShardLocator
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 
 class ShardOpener(Protocol):
@@ -24,6 +25,19 @@ class ShardOpener(Protocol):
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
+    ) -> RandomAccessShard: ...
+
+
+@runtime_checkable
+class RemoteShardOpener(Protocol):
+    """Read shards in place through storage, without a local copy.
+
+    Openers that implement this can read shards under a remote root when the
+    shard cache is disabled. Other openers need the cache for such shards.
+    """
+
+    def open_remote_shard(
+        self, locator: ShardLocator, remote_ref: RemoteShardRef
     ) -> RandomAccessShard: ...
 
 
@@ -64,6 +78,14 @@ class FormatHandler(ShardOpener, Protocol):
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]: ...
 
+    def opener(self, options: "StoreOptions") -> ShardOpener:
+        """Return the opener that a store uses for shards of this format.
+
+        The default is the handler itself. A format with store options returns
+        a new opener that applies them.
+        """
+        return self
+
 
 _REGISTRY: dict[str, FormatHandler] = {}
 
@@ -81,4 +103,10 @@ def get_format(kind: str) -> FormatHandler:
         raise KeyError(f"Format handler not registered for kind '{kind}'") from exc
 
 
-__all__ = ["FormatHandler", "ShardOpener", "get_format", "register_format"]
+__all__ = [
+    "FormatHandler",
+    "RemoteShardOpener",
+    "ShardOpener",
+    "get_format",
+    "register_format",
+]

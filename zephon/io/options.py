@@ -27,6 +27,9 @@ class _NotSupplied(Enum):
 _NOT_SUPPLIED = _NotSupplied.TOKEN
 
 
+_VORTEX_SEGMENT_CACHE_BYTES = 256 << 20
+
+
 def _option(default: object) -> Any:
     return field(default=_NOT_SUPPLIED, metadata={_OPTION_DEFAULT: default})
 
@@ -207,8 +210,26 @@ class StoreOptions:
     parquet_rg_cache: ParquetRGCacheOptions = field(
         default_factory=ParquetRGCacheOptions
     )
+    vortex_read_concurrency: int | None = _option(None)
+    vortex_segment_cache_bytes: int = _option(_VORTEX_SEGMENT_CACHE_BYTES)
+    _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        _normalize_options(self)
+        concurrency = self.vortex_read_concurrency
+        if concurrency is not None and (
+            type(concurrency) is not int or concurrency < 1
+        ):
+            raise ValueError(
+                "vortex_read_concurrency must be a positive integer or None"
+            )
+
+        cache_bytes = self.vortex_segment_cache_bytes
+        if type(cache_bytes) is not int or cache_bytes < 0:
+            raise ValueError(
+                "vortex_segment_cache_bytes must be a non-negative integer or size"
+            )
+
         legacy_limit = self.cache.rg_cache_bytes
         if legacy_limit is not None:
             warnings.warn(
@@ -262,6 +283,8 @@ class StoreOptions:
             return cls(
                 cache=CacheOptions.from_any(None),
                 parquet_rg_cache=ParquetRGCacheOptions.from_any(None),
+                vortex_read_concurrency=None,
+                vortex_segment_cache_bytes=None,
             )
         if isinstance(obj, StoreOptions):
             return obj
@@ -276,7 +299,15 @@ class StoreOptions:
                 if "parquet_rg_cache" in obj
                 else ParquetRGCacheOptions()
             )
-            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache)
+            kwargs = {
+                name: obj[name]
+                for name in ("vortex_read_concurrency", "vortex_segment_cache_bytes")
+                if name in obj
+            }
+            cache_bytes = kwargs.get("vortex_segment_cache_bytes")
+            if isinstance(cache_bytes, str):
+                kwargs["vortex_segment_cache_bytes"] = parse_size_bytes(cache_bytes)
+            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache, **kwargs)
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 
     def merge(self, other: "StoreOptions") -> "StoreOptions":
@@ -284,6 +315,7 @@ class StoreOptions:
         return StoreOptions(
             cache=self.cache.merge(other.cache),
             parquet_rg_cache=self.parquet_rg_cache.merge(other.parquet_rg_cache),
+            **_merged_options(self, other),
         )
 
 

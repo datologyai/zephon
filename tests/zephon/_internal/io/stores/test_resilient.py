@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from zephon._internal.io.formats.base import FormatHandler
 from zephon._internal.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon._internal.io.resolvers.base import ShardResolver
+from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.stores.resilient import ResilientShard
 from zephon._internal.io.types import (
     LocalShardFile,
     LocalShardRef,
+    RemoteShardRef,
     ShardFile,
     ShardLocator,
+    ShardRef,
 )
 
 
@@ -35,13 +39,13 @@ class _FakeShard(RandomAccessShard):
 
 @dataclass
 class _FakeResolver(ShardResolver):
-    local: LocalShardRef
+    local: ShardRef
     raises_first: bool = False
     resolve_calls: int = 0
     touch_calls: int = 0
     _raised: bool = False
 
-    def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> LocalShardRef:
+    def resolve(self, locator: ShardLocator, *, blocking: bool = True) -> ShardRef:
         self.resolve_calls += 1
         if self.raises_first and not self._raised:
             self._raised = True
@@ -256,3 +260,49 @@ def test_resilient_getsamples_single_item_delegates(tmp_path) -> None:
     row, st = shard[0]
     assert row["x"] == 5
     assert st.retries >= 0
+
+
+@dataclass
+class _FakeRemoteHandler(_FakeHandler):
+    remote_refs: list[RemoteShardRef] | None = None
+
+    def open_remote_shard(
+        self, locator: ShardLocator, remote_ref: RemoteShardRef
+    ) -> RandomAccessShard:
+        if self.remote_refs is not None:
+            self.remote_refs.append(remote_ref)
+        return _FakeShard(self.rows or [{"x": 1}])
+
+
+def _remote_shard(handler: _FakeHandler) -> ResilientShard:
+    ref = RemoteShardRef(LocalFSBackend(Path("/")), "s3://bucket/raw.bin", 1)
+    return ResilientShard(
+        locator=_locator(),
+        resolver=_FakeResolver(local=ref),
+        opener=handler,
+        length=1,
+        retry_attempts=3,
+        retry_initial_backoff=0.0,
+        retry_max_backoff=0.0,
+    )
+
+
+def test_resilient_shard_opens_remote_ref_with_remote_opener() -> None:
+    refs: list[RemoteShardRef] = []
+    shard = _remote_shard(_FakeRemoteHandler(rows=[{"x": 7}], remote_refs=refs))
+
+    item, _stats = shard[0]
+    assert item == {"x": 7}
+    rows, _stats_list = shard.getsamples([0, 0])
+    assert rows == [{"x": 7}, {"x": 7}]
+    assert [ref.path for ref in refs] == ["s3://bucket/raw.bin"] * 2
+
+
+def test_resilient_shard_refuses_remote_ref_without_remote_opener() -> None:
+    handler = _FakeHandler()
+    shard = _remote_shard(handler)
+
+    with pytest.raises(ValueError, match="cache.enabled=True"):
+        shard[0]
+
+    assert handler.open_calls == 0

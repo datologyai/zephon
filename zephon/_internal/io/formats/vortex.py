@@ -8,21 +8,33 @@ data processing with zero-copy Arrow integration and GPU-friendly design.
 """
 
 import os
+import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 
 from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.vortex_readable import StorageReadAt
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
-from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.storage import StorageBackend, is_remote_path
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
-from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.io.types import (
+    LocalShardRef,
+    RemoteShardRef,
+    ShardFile,
+    ShardLocator,
+)
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+    from vortex import SegmentCache
+    from vortex.file import Footer
+
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 try:
     import vortex as _vortex
@@ -30,35 +42,156 @@ except ImportError:
     _vortex = None
 
 
-class VortexShard(RandomAccessShard):
-    """Random access shard backed by a Vortex file."""
+# Caches shared by every Vortex shard of a process, by size. Vortex caches cannot
+# be pickled or used across a fork, so each process makes its own on first use.
+_segment_caches: dict[tuple[int, int], "SegmentCache"] = {}
+_segment_caches_lock = threading.Lock()
 
-    def __init__(self, path: Path, *, length: int | None = None) -> None:
+
+def process_segment_cache(max_bytes: int) -> "SegmentCache | None":
+    """Return this process's shared segment cache, or ``None`` when ``max_bytes`` is 0."""
+    if max_bytes == 0 or _vortex is None:
+        return None
+
+    key = (os.getpid(), max_bytes)
+    with _segment_caches_lock:
+        cache = _segment_caches.get(key)
+        if cache is None:
+            cache = _vortex.SegmentCache(max_bytes)
+            _segment_caches[key] = cache
+        return cache
+
+
+def segment_cache_key(locator: ShardLocator) -> str:
+    """Identify a shard's contents within a shared segment cache.
+
+    Datasets must not change during a run, so the location, size and any known
+    hashes identify the contents.
+    """
+    raw = locator.raw
+    hashes = ",".join(f"{k}={v}" for k, v in sorted(raw.hashes.items()))
+    return f"{locator.root}/{raw.basename}#{raw.bytes}#{hashes}"
+
+
+# Vortex stores rebuilt from obstore stores, by process and obstore store. Each
+# entry keeps its obstore store, so that its id is not used again.
+_vortex_stores: dict[tuple[int, int], tuple[object, Any]] = {}
+_vortex_stores_lock = threading.Lock()
+
+
+def _vortex_store(store: object) -> Any:
+    """Return the Vortex store with the configuration of an obstore ``store``.
+
+    Vortex accepts only its own store classes, so the store is rebuilt from its
+    configuration, once per process, and then shared by every open. The result
+    is ``None`` for a store without a configuration, such as ``MemoryStore``.
+    """
+    import vortex.store
+
+    key = (os.getpid(), id(store))
+    with _vortex_stores_lock:
+        entry = _vortex_stores.get(key)
+        if entry is not None:
+            return entry[1]
+
+        make = getattr(vortex.store, type(store).__name__, None)
+        get_args = getattr(store, "__getnewargs_ex__", None)
+        converted = None
+        if make is not None and get_args is not None:
+            args, kwargs = get_args()
+            converted = make(*args, **kwargs)
+
+        _vortex_stores[key] = (store, converted)
+        return converted
+
+
+def _native_store(storage: StorageBackend, path: str) -> tuple[Any, str] | None:
+    """Return a Vortex store and key that read ``path`` natively, if there is one.
+
+    There is one when the backend of ``path`` uses obstore, as the cloud
+    backends do. Vortex then does the IO itself, without the GIL.
+    """
+    object_store = getattr(storage, "object_store", None)
+    found = object_store(path) if object_store is not None else None
+    if found is None:
+        return None
+
+    store, key = found
+    converted = _vortex_store(store)
+    return (converted, key) if converted is not None else None
+
+
+class VortexShard(RandomAccessShard):
+    """Random access shard backed by a Vortex file.
+
+    With a ``store``, Vortex reads the key ``path`` from it natively. With a
+    ``source``, Vortex reads through Python positional reads, limited by
+    ``concurrency``. With neither, it opens the local ``path`` natively.
+
+    A ``segment_cache`` with a ``cache_key`` keeps decoded segments after this
+    shard closes, so a later open of the same file does not read them again.
+    Without one, the file has a private cache unless ``without_segment_cache``.
+
+    Rows are dicts. A list column of numbers without nulls in its values gives
+    a read-only NumPy array per row, which views the batch's Arrow memory.
+    Other columns give Python objects, as ``pyarrow.Array.to_pylist`` does.
+    """
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        length: int | None = None,
+        store: Any = None,
+        source: StorageReadAt | None = None,
+        concurrency: int | None = None,
+        footer: "Footer | None" = None,
+        segment_cache: "SegmentCache | None" = None,
+        cache_key: str | None = None,
+        without_segment_cache: bool = False,
+    ) -> None:
         if _vortex is None:
             raise RuntimeError(
                 "Opening Vortex shards requires the 'vortex-data' package. "
                 + 'Install with: pip install "zephon[vortex]"'
             )
         self._path = path
-        self._file = _vortex.open(str(path))
-        self._scan = self._file.to_repeated_scan()
+        require_read_at()
+
+        if source is None:
+            self._file = _vortex.open(
+                str(path),
+                store=store,
+                footer=footer,
+                without_segment_cache=without_segment_cache,
+                segment_cache=segment_cache,
+                cache_key=cache_key,
+            )
+        else:
+            self._file = _vortex.open_readable(
+                source,
+                footer=footer,
+                concurrency=concurrency,
+                without_segment_cache=without_segment_cache,
+                segment_cache=segment_cache,
+                cache_key=cache_key,
+            )
+        self._footer = self._file.footer
         self._length = length if length is not None else len(self._file)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        if index < 0 or index >= self._length:
-            raise IndexError(index)
-        if self._scan is None:
-            raise RuntimeError("VortexShard has been closed")
-
-        scalar = self._scan.scalar_at(index)
-        result = scalar.as_py()
-        return result  # type: ignore[return-value]
+        # One path for single rows and batches, so both give the same types.
+        return self.getsamples([index])[0]
 
     def __len__(self) -> int:
         return self._length
 
+    @property
+    def footer(self) -> "Footer":
+        """The parsed Vortex footer, which reopens this file without reading it again."""
+        return self._footer
+
     def close(self) -> None:
-        self._scan = None
         self._file = None
 
     def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
@@ -77,19 +210,134 @@ class VortexShard(RandomAccessShard):
         index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
 
         batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
-        arrow_table = batch.to_arrow_table()
-        batch_dict = arrow_table.to_pydict()
 
-        # Restore the caller's order and duplicate rows.
+        # Restore the caller's order and duplicate rows. Arrow has no take for
+        # the view types that Vortex exports, so Vortex takes the rows.
+        positions = _vortex.array([index_to_pos[idx] for idx in indices])
+        table = batch.take(positions).to_arrow_table(combine_chunks=True)
+
+        columns = {
+            name: _column_values(table.column(name).chunk(0))
+            for name in table.column_names
+        }
+
         return [
-            {k: v[index_to_pos[idx]] for k, v in batch_dict.items()} for idx in indices
+            {name: values[row] for name, values in columns.items()}
+            for row in range(len(indices))
         ]
 
 
+def _column_values(array: "pa.Array") -> Sequence[Any]:
+    """Export a column as one value per row.
+
+    A list of numbers becomes NumPy arrays, the same as MDS and LitData give.
+    Each is a view of one array for the whole column, so no values are copied
+    when they are already contiguous. Any other column becomes Python objects.
+    """
+    import pyarrow as pa
+
+    kind = array.type
+    is_list = (
+        pa.types.is_fixed_size_list(kind)
+        or pa.types.is_list(kind)
+        or pa.types.is_large_list(kind)
+    )
+    if not is_list:
+        return array.to_pylist()
+
+    item = kind.value_type
+    is_number = (
+        pa.types.is_integer(item)
+        or pa.types.is_floating(item)
+        or pa.types.is_boolean(item)
+    )
+    # Values that hold nulls have no exact NumPy form, so they stay Python objects.
+    values = array.flatten()
+    if not is_number or values.null_count:
+        return array.to_pylist()
+
+    numbers = values.to_numpy(zero_copy_only=False)
+    if pa.types.is_fixed_size_list(kind) and not array.null_count:
+        return numbers.reshape(len(array), kind.list_size)
+
+    # ``flatten`` drops the values of null rows, so offsets are recomputed from
+    # the row lengths rather than taken from the array.
+    lengths = array.value_lengths().fill_null(0).to_numpy(zero_copy_only=False)
+    ends = np.cumsum(lengths)
+    starts = ends - lengths
+    valid = array.is_valid().to_numpy(zero_copy_only=False)
+    return [
+        numbers[start:end] if is_valid else None
+        for start, end, is_valid in zip(starts, ends, valid)
+    ]
+
+
+def require_read_at() -> None:
+    """Fail explicitly when the experimental bindings have not been installed."""
+    if (
+        _vortex is None
+        or not hasattr(_vortex.io, "ReadBytesAt")
+        or not hasattr(_vortex, "SegmentCache")
+    ):
+        raise RuntimeError(
+            "Reading Vortex shards requires Vortex's Python ReadAt bindings; "
+            + "install vortex-data 0.88.0 or later."
+        )
+
+
 class VortexFormat(FormatHandler):
-    """Format handler for Vortex datasets."""
+    """Format handler for Vortex datasets.
+
+    A local shard is opened natively. Without the shard cache, a remote shard
+    is read in place. When its backend uses obstore, Vortex reads it natively
+    from the same store. Otherwise Vortex reads it through Python positional
+    reads on the backend, at most ``read_concurrency`` at once per file. Each
+    of these reads retries ``OSError`` as the ``read_retry_*`` arguments set,
+    because an error that crosses into Vortex is no longer an ``OSError``.
+
+    All shards share the process's segment cache of ``segment_cache_bytes``,
+    so that segments outlive the per-batch open; ``0`` disables it.
+    """
 
     kind = "vortex"
+
+    def __init__(
+        self,
+        *,
+        segment_cache_bytes: int = 0,
+        read_concurrency: int | None = None,
+        read_retry_attempts: int = 1,
+        read_retry_initial_backoff: float = 0.1,
+        read_retry_max_backoff: float = 2.0,
+    ) -> None:
+        self._segment_cache_bytes = segment_cache_bytes
+        self._read_concurrency = read_concurrency
+        self._read_retry_attempts = read_retry_attempts
+        self._read_retry_initial_backoff = read_retry_initial_backoff
+        self._read_retry_max_backoff = read_retry_max_backoff
+
+        # Shards are opened again for each batch. Their footers are kept, keyed
+        # by location, so that only the first open reads one. A cached file is
+        # hash-validated, so a download after eviction has the same footer.
+        # A failed open drops the footer, so that a retry does not reuse a bad
+        # one.
+        self._footers: dict[tuple[str, str], Footer] = {}
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Vortex footers are not picklable, and a new process reads its own.
+        state = self.__dict__.copy()
+        state["_footers"] = {}
+        return state
+
+    def opener(self, options: "StoreOptions") -> "VortexFormat":
+        """Return an opener that applies the Vortex options of ``options``."""
+        return VortexFormat(
+            segment_cache_bytes=options.vortex_segment_cache_bytes,
+            read_concurrency=options.vortex_read_concurrency,
+            read_retry_attempts=options.cache.open_retry_attempts,
+            read_retry_initial_backoff=options.cache.open_retry_initial_backoff,
+            read_retry_max_backoff=options.cache.open_retry_max_backoff,
+        )
 
     def discover(
         self, path: str, storage: StorageBackend
@@ -144,6 +392,7 @@ class VortexFormat(FormatHandler):
                 + 'Install with: pip install "zephon[vortex]"'
             )
 
+        require_read_at()
         entries = [
             name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
         ]
@@ -159,12 +408,8 @@ class VortexFormat(FormatHandler):
             stats = storage.stat(full)
             size = int(stats.get("size", 0))
 
-            # Read the Vortex file to get row count
-            # Use file:// URL for local paths
             try:
-                url = f"file://{full}"
-                reader = _vortex.io.read_url(url)
-                count = len(reader)
+                count = _row_count(storage, full, size)
             except Exception as exc:
                 raise ValueError(f"Failed to read Vortex shard {full}: {exc}") from exc
 
@@ -253,18 +498,94 @@ class VortexFormat(FormatHandler):
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
-        """Open a Vortex shard for random access reading."""
-        length = None
-        if local_ref.extra and "length" in local_ref.extra:
-            length_value = local_ref.extra["length"]
-            if isinstance(length_value, (int, float)):
-                length = int(length_value)
-            elif isinstance(length_value, str):
-                try:
-                    length = int(length_value)
-                except ValueError:
-                    length = None
-        return VortexShard(local_ref.raw.path, length=length)
+        """Open a local Vortex shard natively."""
+        return self._open(locator, local_ref.raw.path, _length(local_ref.extra))
+
+    def open_remote_shard(
+        self, locator: ShardLocator, remote_ref: RemoteShardRef
+    ) -> RandomAccessShard:
+        """Open a remote Vortex shard that is read in place through its storage."""
+        length = _length(remote_ref.extra)
+
+        native = _native_store(remote_ref.storage, remote_ref.path)
+        if native is not None:
+            store, key = native
+            return self._open(locator, key, length, store=store)
+
+        source = StorageReadAt(
+            remote_ref.storage,
+            remote_ref.path,
+            remote_ref.bytes,
+            retry_attempts=self._read_retry_attempts,
+            retry_initial_backoff=self._read_retry_initial_backoff,
+            retry_max_backoff=self._read_retry_max_backoff,
+        )
+        return self._open(locator, remote_ref.path, length, source=source)
+
+    def _open(
+        self,
+        locator: ShardLocator,
+        path: Path | str,
+        length: int | None,
+        *,
+        store: Any = None,
+        source: StorageReadAt | None = None,
+    ) -> VortexShard:
+        # The file lives for one batch, so only a shared cache is worth filling.
+        segment_cache = process_segment_cache(self._segment_cache_bytes)
+        key = (locator.root, locator.raw.basename)
+
+        try:
+            shard = VortexShard(
+                path,
+                length=length,
+                store=store,
+                source=source,
+                concurrency=self._read_concurrency,
+                footer=self._footers.get(key),
+                segment_cache=segment_cache,
+                cache_key=segment_cache_key(locator) if segment_cache else None,
+                without_segment_cache=segment_cache is None,
+            )
+        except Exception:
+            self._footers.pop(key, None)
+            raise
+
+        self._footers[key] = shard.footer
+        return shard
+
+
+def _row_count(storage: StorageBackend, path: str, size: int) -> int:
+    """Read the row count of a Vortex file, natively when it can be."""
+    # Only the row count is read, so a segment cache has nothing to reuse.
+    if not is_remote_path(path):
+        return len(_vortex.open(path, without_segment_cache=True))
+
+    native = _native_store(storage, path)
+    if native is not None:
+        store, key = native
+        return len(_vortex.open(key, store=store, without_segment_cache=True))
+
+    source = StorageReadAt(storage, path, size)
+    return len(_vortex.open_readable(source, without_segment_cache=True))
+
+
+def _length(extra: Mapping[str, object] | None) -> int | None:
+    """Return the row count that discovery recorded, if it is valid."""
+    if not extra or "length" not in extra:
+        return None
+
+    value = extra["length"]
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return None
 
 
 register_format(VortexFormat())

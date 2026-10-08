@@ -9,6 +9,11 @@ from types import TracebackType
 from typing import IO, Any, Optional, cast
 
 
+def is_remote_path(path: str) -> bool:
+    """Return True when ``path`` is a URL, which the local filesystem cannot open."""
+    return bool(urllib.parse.urlparse(path).scheme)
+
+
 def split_url(path: str) -> tuple[str, str, str]:
     """Return (scheme, bucket_or_host, key) for URL-like paths.
 

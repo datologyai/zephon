@@ -9,7 +9,11 @@ import numpy as np
 
 from zephon._internal.io.catalog import CatalogSet, ShardCatalog, set_catalog_dir
 from zephon._internal.io.formats import ensure_builtin_formats
-from zephon._internal.io.formats.base import ShardOpener, get_format
+from zephon._internal.io.formats.base import (
+    RemoteShardOpener,
+    ShardOpener,
+    get_format,
+)
 from zephon._internal.io.formats.parquet import ParquetFormat
 from zephon._internal.io.formats.parquet_cache.runtime import (
     build_parquet_cache_runtime,
@@ -28,6 +32,7 @@ from zephon._internal.io.storage import (
     LocalFSBackend,
     RouterStorageBackend,
     StorageBackend,
+    is_remote_path,
 )
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
@@ -233,9 +238,28 @@ def build_resolver(
             max_slack_bytes=store_opts.cache.max_slack_bytes,
         )
 
-    storage = LocalFSBackend(root=Path("/")) if storage is None else storage
-    assert isinstance(storage, LocalFSBackend)
-    return DirectResolver(storage, validate_hash=store_opts.cache.validate_hash)
+    # Local roots resolve to their files; remote roots are read in place.
+    local = storage if isinstance(storage, LocalFSBackend) else None
+    return DirectResolver(
+        local if local is not None else LocalFSBackend(root=Path("/")),
+        remote_storage=RouterStorageBackend() if storage is None else storage,
+        validate_hash=store_opts.cache.validate_hash,
+    )
+
+
+def _check_readable_in_place(
+    dataset: Dataset, opener: ShardOpener, store_opts: StoreOptions
+) -> None:
+    """Fail early when a remote dataset needs a cache that is disabled."""
+    if store_opts.cache.enabled or isinstance(opener, RemoteShardOpener):
+        return
+
+    root = dataset.backend.get("path")
+    if isinstance(root, str) and is_remote_path(root):
+        raise ValueError(
+            f"Dataset {dataset.name!r} is under the remote root {root!r}, and its "
+            + "format cannot read shards in place; set cache.enabled=True"
+        )
 
 
 def build_resolver_with_locators(
@@ -305,10 +329,13 @@ def build_multi_dataset_store(
                     raise ValueError(
                         f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
                     ) from exc
-                opener: ShardOpener = handler
+                opener = handler.opener(store_opts)
                 if kind == "parquet":
                     assert isinstance(handler, ParquetFormat)
                     opener = parquet_runtime.opener
+
+                _check_readable_in_place(dataset, opener, store_opts)
+
                 catalog: ShardCatalog | None = None
                 if catalog_set is not None and dataset._catalog_handle is not None:
                     catalog = catalog_set.catalog_for(dataset.name)

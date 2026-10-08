@@ -335,3 +335,41 @@ def test_vortex_runner_threads_parity(tmp_path: Path, runner_kind: str) -> None:
     out_threads = _run_pipeline(datasets, runner_kind="threads", **common_kwargs)
     out_other = _run_pipeline(datasets, runner_kind=runner_kind, **common_kwargs)
     assert out_threads == out_other
+
+
+@pytest.mark.parametrize("runner_kind", ["inline", "threads", "process"])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_vortex_python_io_pipeline_parity(
+    tmp_path: Path, runner_kind: str, cache_enabled: bool
+) -> None:
+    """Real native callbacks preserve shuffled output across workers and caching."""
+    if not hasattr(vortex.io, "ReadBytesAt"):
+        pytest.skip("requires experimental Vortex ReadBytesAt bindings")
+    datasets = _prepare_datasets(tmp_path, total=128, files=4)
+
+    def run(runner: str) -> list[tuple[str, int]]:
+        work = StaticMixtureWorkSource(
+            datasets,
+            {d.name: 0.5 for d in datasets},
+            chunk_size=16,
+            seed=7,
+            shuffle_shards=True,
+            shuffle_within_shard=True,
+        )
+        pipe = PublicPipeline(work).options(
+            deterministic=True,
+            runner=runner,
+            max_workers=2,
+            io_options={
+                "vortex_read_concurrency": 2,
+                "cache": {"enabled": cache_enabled, "root": str(tmp_path / "cache")},
+            },
+        )
+        return _project_items(pipe)
+
+    expected = run("inline")
+    actual = run(runner_kind)
+    assert sorted(expected) == sorted(
+        ("JavaScript" if i % 2 == 0 else "HTML", i) for i in range(128)
+    )
+    assert actual == expected

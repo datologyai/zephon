@@ -126,6 +126,18 @@ class ObstoreBackend(OpenViaDownloadMixin, ABC):
                 raise FileNotFoundError(f"Object not found: {path}") from e
             raise
 
+    def object_store(self, path: str) -> tuple[Any, str] | None:
+        """Return the obstore store that holds ``path``, and the key of ``path`` in it.
+
+        Readers with their own obstore support can then read ``path`` natively,
+        with the credentials and configuration of this backend.
+        """
+        scheme, bucket, key = split_url(path)
+        if scheme not in self.valid_schemes or not bucket or not key:
+            return None
+
+        return self._get_store(bucket), key
+
     def _walk_with_store(self, store: Any, base: str) -> Iterator[tuple[str, int]]:
         """Yield ``(rel_path, size)`` for every object under ``base``.
 

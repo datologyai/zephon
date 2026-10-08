@@ -662,6 +662,54 @@ def test_process_runner_bubbles_worker_exceptions() -> None:
 
 
 @dataclass
+class _DaemonStartingOp(_IdentityOp):
+    """Start a detached child that keeps all inheritable descriptors.
+
+    This copies how torch starts ``torch_shm_manager`` on macOS.
+    """
+
+    pid_file: str = ""
+
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            close_fds=False,
+            start_new_session=True,
+        )
+        Path(self.pid_file).write_text(str(child.pid))
+
+
+def test_process_runner_shutdown_is_fast_when_worker_starts_a_daemon(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "daemon.pid"
+    op = _DaemonStartingOp(pid_file=str(pid_file))
+    node = Node(name="daemon", op=op)
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+
+    start = time.monotonic()
+    try:
+        assert _collect(runner, list(range(4))) == list(range(4))
+        elapsed = time.monotonic() - start
+    finally:
+        if pid_file.exists():
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+    # If the daemon keeps the worker's sentinel pipe open, join waits for
+    # its full timeout of 10 seconds.
+    assert elapsed < 8.0
+
+
+@dataclass
 class _LambdaOp(BaseOp):
     """Operator that uses a lambda function internally.
 
