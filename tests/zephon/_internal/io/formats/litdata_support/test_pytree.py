@@ -13,6 +13,7 @@ from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
 from litdata.streaming.writer import BinaryWriter
 
 from tests.helpers.litdata_chunks import write_litdata_fixture
+from zephon._internal.io.formats.litdata_support import dependencies
 from zephon._internal.io.formats.litdata_support.dependencies import _get_serializers
 from zephon._internal.io.formats.litdata_support.pytree import (
     PyTreeLoader,
@@ -157,3 +158,69 @@ def test_pytree_loader_reuses_files_with_global_intervals(tmp_path: Path) -> Non
             assert rows == [expected[group][i] for i in [2, 0, 2]]
     finally:
         loader.close(0)
+
+
+@pytest.mark.parametrize("kind", ["numpy", "tensor"])
+def test_token_blocks_own_only_their_bytes_and_survive_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    torch = pytest.importorskip("torch")
+    dependencies.ensure_litdata_deps()
+    # The first item has no complete block. Subsequent items have two and
+    # three blocks, respectively, exercising repeated cumulative offsets.
+    items = [np.arange(n, dtype=np.int32) + i * 100 for i, n in enumerate([2, 8, 12])]
+    header_bytes = (len(items) + 2) * 4
+    offsets = np.cumsum(
+        [header_bytes, *(item.nbytes for item in items)], dtype=np.uint32
+    )
+    path = tmp_path / "tokens.bin"
+    path.write_bytes(
+        np.array([len(items)], dtype=np.uint32).tobytes()
+        + offsets.tobytes()
+        + b"".join(item.tobytes() for item in items)
+    )
+    mapping = (
+        dependencies._NUMPY_DTYPES_MAPPING
+        if kind == "numpy"
+        else dependencies._TORCH_DTYPES_MAPPING
+    )
+    dtype = np.dtype("int32") if kind == "numpy" else torch.int32
+    dtype_index = next(key for key, value in mapping.items() if value == dtype)
+    loader = TokensLoader(block_size=4)
+    loader.setup(
+        {
+            "item_loader": "TokensLoader",
+            "block_size": 4,
+            "data_format": [f"no_header_{kind}:{dtype_index}"],
+        },
+        [{"chunk_size": len(items), "dim": 22, "chunk_bytes": path.stat().st_size}],
+        _get_serializers(),
+    )
+    # Build the lookup once, then forbid recomputing it for every block.
+    loader._load_chunk(0, str(path))
+
+    def reject_cumsum(*args: object, **kwargs: object) -> None:
+        pytest.fail("Block lookup must reuse the chunk's cumulative index")
+
+    monkeypatch.setattr(np, "cumsum", reject_cumsum)
+    indices = [4, 0, 2, 4, 1]
+    expected_blocks = [
+        items[1][:4],
+        items[1][4:],
+        items[2][:4],
+        items[2][4:8],
+        items[2][8:],
+    ]
+    outputs = [
+        loader.load_item_from_chunk(index, 0, str(path), 0, path.stat().st_size)
+        for index in indices
+    ]
+    if kind == "numpy":
+        assert all(len(row.base) == 4 * 4 for row in outputs)
+    else:
+        assert all(row.untyped_storage().nbytes() == 4 * 4 for row in outputs)
+    # Eviction explicitly closes the mmap; returned values must remain valid.
+    loader.delete(0, str(path))
+    assert not path.exists()
+    for row, index in zip(outputs, indices, strict=True):
+        np.testing.assert_array_equal(np.asarray(row), expected_blocks[index])
