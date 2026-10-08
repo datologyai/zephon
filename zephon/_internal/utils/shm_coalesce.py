@@ -798,7 +798,8 @@ def coalesce_microbatch(
     """Extract private payloads from *items* into per-dtype SHM buffers.
 
     Returns ``None`` when no new buffers are needed. Shared Torch tensors and
-    NumPy arrays retain their storage through multiprocessing reduction.
+    NumPy views of Zephon buffers retain their storage through multiprocessing
+    reduction.
     Bytes and memoryviews smaller than *shm_min_size* are left inline; this
     threshold does not apply to tensors, NumPy arrays, or numeric lists.
 
