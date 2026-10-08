@@ -2300,24 +2300,25 @@ def test_process_runner_worker_exit_is_visible_despite_helper_subprocess(
         runner.close()
 
 
-class _UpdateSharedArray(BaseOp):
+class _CopySharedArray(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        import numpy as np
+        from zephon._internal.utils.shm_coalesce import _array_owner
 
+        outputs = []
         for record in elems:
             array: Any = record.payload
-            owner = array
-            while isinstance(owner, np.ndarray):
-                owner = owner.base
+            owner = _array_owner(array)
             assert isinstance(owner, torch.Tensor) and owner.is_shared()
-            array[0] += 1
-        return elems
+            copied = array.copy()
+            copied[0] += 1
+            outputs.append(SampleRecord(meta=record.meta, payload=copied))
+        return outputs
 
 
-def test_process_dispatch_and_output_reuse_numpy_storage() -> None:
+def test_process_numpy_reduction_shares_inputs_without_mutating_them() -> None:
     np = pytest.importorskip("numpy")
     source = torch.arange(32).share_memory_()
     array = source.numpy()[3:20:2]
@@ -2326,8 +2327,8 @@ def test_process_dispatch_and_output_reuse_numpy_storage() -> None:
     stage = Stage(
         "shared_numpy",
         [
-            Node("first", _UpdateSharedArray(), parallelism=1),
-            Node("second", _UpdateSharedArray(), parallelism=1),
+            Node("first", _CopySharedArray(), parallelism=1),
+            Node("second", _CopySharedArray(), parallelism=1),
         ],
         "auto",
         "test",
@@ -2342,10 +2343,10 @@ def test_process_dispatch_and_output_reuse_numpy_storage() -> None:
     try:
         [result] = list(runner.run([record]))
         assert isinstance(result, SampleRecord)
-        assert source[3].item() == 5
         assert record.payload is array
-        result_array: Any = result.payload
-        assert result_array.strides == array.strides
-        np.testing.assert_array_equal(result_array, array)
+        np.testing.assert_array_equal(source.numpy(), np.arange(32))
+        expected = array.copy()
+        expected[0] += 2
+        np.testing.assert_array_equal(result.payload, expected)
     finally:
         runner.close()

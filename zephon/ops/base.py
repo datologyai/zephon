@@ -74,6 +74,12 @@ class BaseOp(ABC):
     lets the runtime fan ``process_many`` out across parallel workers
     deterministically.
 
+    Process inputs may share storage with other workers or the caller,
+    including Torch tensors and NumPy arrays. Copy values before modifying
+    them: in-place writes can affect retained inputs and subsequent retries.
+    Small views can also keep their entire shared allocation alive; copy a
+    crop when retaining that allocation would be undesirable.
+
     Fan-out operators must preserve ``SampleMeta.sample_id`` and derive child
     lineage with helpers from :mod:`zephon.ops.children`. This preserves
     deterministic ordering and replay.
