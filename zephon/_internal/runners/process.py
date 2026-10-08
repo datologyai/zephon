@@ -95,6 +95,7 @@ from zephon._internal.stream import (
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_SHM_MIN_SIZE,
     coalesce_microbatch,
+    forward_shared_numpy,
 )
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.ops.base import OpContext, StageInfo
@@ -2127,10 +2128,16 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         task_queue = state.task_queue
         if task_queue is None:
             raise RuntimeError("Process runner has no worker queue")
+        transport_batch = batch
+        if self._coalesce_tensors:
+            forwarded = forward_shared_numpy(batch)
+            if forwarded is not None:
+                # The envelope's reducer reconstructs a list in the worker.
+                transport_batch = cast(list[RunnerStreamIn], forwarded)
         command = _WorkerCommand(
             kind="batch",
             seq=seq,
-            batch=batch,
+            batch=transport_batch,
             wait_ns=wait_ns if collect_stats else 0,
             consumed_elements=consumed_elements,
             consumed_bytes=consumed_bytes,

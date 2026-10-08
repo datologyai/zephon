@@ -9,8 +9,9 @@ Supported payload types:
 
 - **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
   views into the SHM buffer.
-- **numpy.ndarray** — converted to torch tensors for SHM transport,
-  restored as numpy array views (zero-copy via ``tensor.numpy()``).
+- **numpy.ndarray** — private arrays are copied into shared buffers;
+  views already backed by shared Torch storage retain that storage,
+  including their strides and read-only flag.
 - **bytes / memoryview** — payloads above a size threshold are packed
   into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
 
@@ -168,6 +169,64 @@ class _NdarraySlot(_LeafDescriptor):
             return _get_numpy().empty(self.shape, dtype=self.np_dtype_str)
         array = buffers[self.dtype_key].numpy()
         return array[self.offset : self.offset + numel].reshape(self.shape)
+
+
+@dataclass(slots=True)
+class _SharedNdarraySlot(_LeafDescriptor):
+    """A NumPy view into existing shared storage, including strided views."""
+
+    buffer_key: str
+    offset: int  # bytes from the start of storage
+    shape: tuple[int, ...]
+    strides: tuple[int, ...]
+    dtype: Any
+    writable: bool
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        array = _get_numpy().ndarray(
+            self.shape,
+            dtype=self.dtype,
+            buffer=buffers[self.buffer_key].numpy(),
+            offset=self.offset,
+            strides=self.strides,
+        )
+        if not self.writable:
+            array.flags.writeable = False
+        return array
+
+
+def _describe_shared_ndarray(
+    array: Any, shared_buffers: dict[str, Any]
+) -> _SharedNdarraySlot | None:
+    """Find a shared Torch owner without changing the public ndarray type."""
+    torch = sys.modules.get("torch")
+    if torch is None or array.dtype.hasobject or array.size == 0:
+        return None
+    np = _get_numpy()
+    owner = array
+    while isinstance(owner, (np.ndarray, memoryview)):
+        owner = owner.base if isinstance(owner, np.ndarray) else owner.obj
+    if not isinstance(owner, torch.Tensor) or not owner.is_shared():
+        return None
+    storage = owner.untyped_storage()
+    offset = array.ctypes.data - storage.data_ptr()
+    # Only transport views contained in the storage we own. Other base types
+    # (including arbitrary stride-trick owners) take the existing copy path.
+    low = high = offset
+    for size, stride in zip(array.shape, array.strides):
+        span = (size - 1) * stride
+        low += min(0, span)
+        high += max(0, span)
+    if low < 0 or high + array.itemsize > storage.nbytes():
+        return None
+    key = f"shared_np:{storage.data_ptr()}:{storage.nbytes()}"
+    if key not in shared_buffers:
+        shared_buffers[key] = torch.empty(0, dtype=torch.uint8, device="cpu").set_(
+            storage, 0, (storage.nbytes(),), (1,)
+        )
+    return _SharedNdarraySlot(
+        key, offset, array.shape, array.strides, array.dtype, array.flags.writeable
+    )
 
 
 @dataclass(slots=True)
@@ -392,9 +451,10 @@ def _is_leaf(obj: Any) -> bool:
 
 def _extract_leaf(
     leaf: Any,
-    collector: dict[str, list[Any]],
+    collector: dict[str, list[Any]] | None,
     offsets: dict[str, int],
     shm_min_size: int,
+    shared_buffers: dict[str, Any] | None = None,
 ) -> Any:
     """Replace a single tensor/ndarray/bytes/struct leaf with a slot placeholder.
 
@@ -402,13 +462,25 @@ def _extract_leaf(
     Structured types (dataclass, pydantic) are decomposed into a fields dict
     and recursively extracted via ``_extract_payload_pytree``.
     """
+    if isinstance(leaf, LazyPayload):
+        return leaf
     # Structured types: decompose fields → dict, recurse via optree.
     if _is_struct(leaf):
         cls, _names, fields_dict = _struct_to_dict(leaf)
         inner_skel = _extract_payload_pytree(
-            fields_dict, collector, offsets, shm_min_size
+            fields_dict, collector, offsets, shm_min_size, shared_buffers
         )
         return _StructSlot(cls=cls, inner_skeleton=inner_skel)
+    if shared_buffers is not None:
+        np = _get_numpy()
+        if np is not None and isinstance(leaf, np.ndarray):
+            shared = _describe_shared_ndarray(leaf, shared_buffers)
+            if shared is not None:
+                return shared
+    # Task dispatch only re-encodes existing shared arrays. It must not
+    # allocate/copy private payloads or promote Python lists into tensors.
+    if collector is None:
+        return leaf
     # Numeric lists: promote to tensor so they coalesce into SHM with
     # other same-dtype tensors.  Restored via .tolist() to preserve the
     # original Python list contract.
@@ -474,55 +546,66 @@ def _extract_leaf(
 
 def _extract_payload_pytree(
     payload: Any,
-    collector: dict[str, list[Any]],
+    collector: dict[str, list[Any]] | None,
     offsets: dict[str, int],
     shm_min_size: int,
+    shared_buffers: dict[str, Any] | None = None,
 ) -> _FlatSkeleton:
     """Flatten payload via optree and replace tensor/bytes leaves with slots."""
     leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
     for i, leaf in enumerate(leaves):
-        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_size)
+        leaves[i] = _extract_leaf(
+            leaf, collector, offsets, shm_min_size, shared_buffers
+        )
     return _FlatSkeleton(slots=leaves, spec=spec)
 
 
 def _extract_record_payload(
     payload: Any,
-    collector: dict[str, list[Any]],
+    collector: dict[str, list[Any]] | None,
     offsets: dict[str, int],
     shm_min_size: int,
-) -> _PayloadDescriptor:
+    shared_buffers: dict[str, Any] | None = None,
+) -> _PayloadDescriptor | LazyPayload:
     """Describe a root leaf directly; preserve the structure of containers."""
+    if isinstance(payload, LazyPayload):
+        return payload
     # Dictionaries cannot be SHM leaves. Avoid running the leaf classifiers
     # on this common container before traversing its actual leaves.
     if not isinstance(payload, dict):
-        descriptor = _extract_leaf(payload, collector, offsets, shm_min_size)
+        descriptor = _extract_leaf(
+            payload, collector, offsets, shm_min_size, shared_buffers
+        )
         if isinstance(descriptor, _LeafDescriptor):
             return descriptor
-    return _extract_payload_pytree(payload, collector, offsets, shm_min_size)
+    return _extract_payload_pytree(
+        payload, collector, offsets, shm_min_size, shared_buffers
+    )
 
 
 def _extract_from_records(
     items: list[StreamItem],
-    collector: dict[str, list[Any]],
+    collector: dict[str, list[Any]] | None,
     offsets: dict[str, int],
     shm_min_size: int,
-) -> list[tuple[SampleRecord, _PayloadDescriptor]]:
+    shared_buffers: dict[str, Any] | None = None,
+) -> list[tuple[SampleRecord, _PayloadDescriptor | LazyPayload]]:
     """Extract tensors from records without mutating payloads yet.
 
     Returns (record, descriptor) pairs. The caller commits the descriptors
     only after shared-buffer allocation succeeds.
     """
-    descriptors: list[tuple[SampleRecord, _PayloadDescriptor]] = []
+    descriptors: list[tuple[SampleRecord, _PayloadDescriptor | LazyPayload]] = []
     for item in items:
         if isinstance(item, SampleRecord):
             descriptor = _extract_record_payload(
-                item.payload, collector, offsets, shm_min_size
+                item.payload, collector, offsets, shm_min_size, shared_buffers
             )
             descriptors.append((item, descriptor))
         elif isinstance(item, SampleBatch):
             for rec in item.records:
                 descriptor = _extract_record_payload(
-                    rec.payload, collector, offsets, shm_min_size
+                    rec.payload, collector, offsets, shm_min_size, shared_buffers
                 )
                 descriptors.append((rec, descriptor))
     return descriptors
@@ -704,13 +787,17 @@ def coalesce_microbatch(
         return None
     collector: dict[str, list[Any]] = {}
     offsets: dict[str, int] = {}
-    descriptors = _extract_from_records(items, collector, offsets, shm_min_size)
-    if not collector:
+    shared_buffers: dict[str, Any] = {}
+    descriptors = _extract_from_records(
+        items, collector, offsets, shm_min_size, shared_buffers
+    )
+    if not collector and not shared_buffers:
         return None
 
     # Build SHM buffers first.  If a non-SHM error propagates, payloads
     # are still intact.  ENOSPC is retried internally by _build_shm_buffers.
     buffers = _build_shm_buffers(collector)
+    buffers.update(shared_buffers)
     if not buffers:
         return None
 
@@ -719,6 +806,49 @@ def coalesce_microbatch(
         rec.payload = descriptor  # type: ignore[assignment]
 
     return CoalescedMicrobatch(skeleton=items, buffers=buffers)
+
+
+def forward_shared_numpy(items: list[Any]) -> CoalescedMicrobatch | None:
+    """Encode shared NumPy inputs for process dispatch without copying payloads.
+
+    Copy only record wrappers: accumulators and retry commands may still own
+    the originals. Ordinary NumPy pickling (including MTP) remains unchanged.
+    """
+    if "torch" not in sys.modules or "numpy" not in sys.modules:
+        return None
+    # Most process inputs are still lazy. They already have a reducer that
+    # forwards shared buffers, so avoid traversing or copying their wrappers.
+    if not any(
+        not isinstance(rec.payload, LazyPayload)
+        for item in items
+        for rec in (
+            (item,)
+            if isinstance(item, SampleRecord)
+            else item.records
+            if isinstance(item, SampleBatch)
+            else ()
+        )
+    ):
+        return None
+    buffers: dict[str, Any] = {}
+    descriptors = _extract_from_records(items, None, {}, 0, buffers)
+    if not buffers:
+        return None
+    payloads = {id(rec): descriptor for rec, descriptor in descriptors}
+    skeleton = [
+        dataclasses.replace(item, payload=payloads[id(item)])
+        if isinstance(item, SampleRecord)
+        else SampleBatch(
+            records=tuple(
+                dataclasses.replace(rec, payload=payloads[id(rec)])
+                for rec in item.records
+            )
+        )
+        if isinstance(item, SampleBatch)
+        else item
+        for item in items
+    ]
+    return CoalescedMicrobatch(skeleton=skeleton, buffers=buffers)
 
 
 # ---------------------------------------------------------------------------
@@ -732,18 +862,26 @@ def _reconstruct_microbatch_lazy(
     result: list[StreamItem] = []
     for item in skeleton:
         if isinstance(item, SampleRecord):
-            descriptor = cast(_PayloadDescriptor, item.payload)
+            descriptor = cast(_PayloadDescriptor | LazyPayload, item.payload)
             result.append(
                 SampleRecord(
                     meta=item.meta,
-                    payload=descriptor.bind(buffers),  # type: ignore[assignment]
+                    payload=(
+                        descriptor
+                        if isinstance(descriptor, LazyPayload)
+                        else descriptor.bind(buffers)
+                    ),  # type: ignore[assignment]
                 )
             )
         elif isinstance(item, SampleBatch):
             records = tuple(
                 SampleRecord(
                     meta=rec.meta,
-                    payload=cast(_PayloadDescriptor, rec.payload).bind(buffers),  # type: ignore[assignment]
+                    payload=(
+                        rec.payload
+                        if isinstance(rec.payload, LazyPayload)
+                        else cast(_PayloadDescriptor, rec.payload).bind(buffers)
+                    ),  # type: ignore[assignment]
                 )
                 for rec in item.records
             )
