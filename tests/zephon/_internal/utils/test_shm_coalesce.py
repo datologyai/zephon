@@ -12,6 +12,7 @@ import pytest
 
 from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
+from zephon._internal.utils import shm_coalesce
 from zephon._internal.utils.shm_coalesce import (
     CoalescedMicrobatch,
     ShmLazyPayload,
@@ -519,6 +520,77 @@ np = pytest.importorskip("numpy")
 # Numpy ndarray coalescing
 # ---------------------------------------------------------------------------
 class TestCoalesceNdarray:
+    def test_recoalescing_preserves_shared_views_without_allocating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        initial = coalesce_microbatch(
+            [SampleRecord(meta=_meta(0), payload=np.arange(24, dtype=np.int64))]
+        )
+        assert initial is not None
+        [record] = _round_trip_resolved(initial)
+        base = record.payload
+        array = base.reshape(4, 6)[::-1, ::2]
+        array.flags.writeable = False
+        byte_view = base.view(np.uint8)[3::5]
+        record.payload = {"array": array, "bytes": byte_view}
+
+        def reject_allocation(*args: object, **kwargs: object) -> None:
+            pytest.fail("Shared views must reuse their existing storage")
+
+        monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", reject_allocation)
+        forwarded = coalesce_microbatch([record])
+        assert forwarded is not None
+        assert len(forwarded.buffers) == 1
+        [restored] = _round_trip_resolved(forwarded)
+        result = restored.payload
+        assert type(result["array"]) is np.ndarray
+        assert result["array"].dtype == array.dtype
+        assert result["array"].strides == array.strides
+        assert not result["array"].flags.writeable
+        assert result["bytes"].dtype == byte_view.dtype
+        assert result["bytes"].strides == byte_view.strides
+        np.testing.assert_array_equal(result["array"], array)
+        np.testing.assert_array_equal(result["bytes"], byte_view)
+        base[:] = 7
+        np.testing.assert_array_equal(result["array"], array)
+        expected_bytes = byte_view.copy()
+        del initial, forwarded, restored, record, array, byte_view, base
+        gc.collect()
+        np.testing.assert_array_equal(result["array"], np.full((4, 3), 7))
+        np.testing.assert_array_equal(result["bytes"], expected_bytes)
+
+    def test_dispatch_preserves_mixed_records_and_deduplicates_storage(self) -> None:
+        initial = coalesce_microbatch(
+            [SampleRecord(meta=_meta(0), payload=np.arange(4))]
+        )
+        assert initial is not None
+        [lazy_record] = _round_trip(initial)
+        lazy = lazy_record.payload
+        base = torch.arange(32).share_memory_().numpy()
+        array = base[2:]
+        root = SampleRecord(meta=_meta(1), payload=array)
+        payload = DCSample(image=base[::-1], label="shared")
+        nested = SampleRecord(meta=_meta(2), payload=payload)
+        private_owner = torch.arange(4)
+        private = SampleRecord(meta=_meta(3), payload=private_owner.numpy())
+        assert shm_coalesce.forward_shared_numpy([private]) is None
+        batch = SampleBatch(records=(lazy_record, nested, private))
+        forwarded = shm_coalesce.forward_shared_numpy([root, batch])
+        assert forwarded is not None
+        assert len(forwarded.buffers) == 1
+        assert root.payload is array
+        assert nested.payload is payload
+        assert lazy_record.payload is lazy
+        restored_root, restored_batch = _round_trip_resolved(forwarded)
+        assert restored_root.meta == root.meta
+        base[2] = 123
+        private_owner[0] = 99
+        assert restored_root.payload[0] == 123
+        assert restored_batch.records[1].payload.image[-3] == 123
+        assert restored_batch.records[1].payload.label == "shared"
+        np.testing.assert_array_equal(restored_batch.records[0].payload, np.arange(4))
+        np.testing.assert_array_equal(restored_batch.records[2].payload, np.arange(4))
+
     @pytest.mark.parametrize(
         "array",
         [
@@ -542,6 +614,7 @@ class TestCoalesceNdarray:
         assert coalesced is not None
         first_hop = _round_trip(coalesced)
         assert isinstance(first_hop[0].payload, _ShmLeafPayload)
+        assert shm_coalesce.forward_shared_numpy(first_hop) is None
         second_hop = pickle.loads(_forking_round_trip(first_hop))
         assert isinstance(second_hop[0], SampleRecord)
         assert isinstance(second_hop[0].payload, _ShmLeafPayload)
