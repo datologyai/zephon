@@ -544,7 +544,7 @@ def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
     nbytes = numel * buf.element_size()
     while True:
         try:
-            # Match torch's configured file_descriptor/file_system strategy.
+            # _new_shared() honors torch.multiprocessing.get_sharing_strategy().
             # share_memory_() on a nonempty tensor copies its old storage,
             # even when torch.empty() left those bytes uninitialized.
             storage = torch.UntypedStorage._new_shared(nbytes, device="cpu")
