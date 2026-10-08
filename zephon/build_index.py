@@ -34,10 +34,6 @@ def build_index(
 
     Writes to ``dataset_dir/index.json`` unless *output_path* is given, printing
     per-file progress when *progress* is true. Returns the written index path.
-
-    JSONL indexing reads each shard once, including compressed shards. Rebuild
-    the index after adding, removing, or changing shards. The index speeds up
-    dataset discovery; it does not contain offsets for seeking within a shard.
     """
     module = _FORMAT_INDEX_MODULES.get(format_name)
     if module is not None:

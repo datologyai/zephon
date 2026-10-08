@@ -220,6 +220,8 @@ class JsonlFormat(FormatHandler):
             )
         warn_missing_index(path, self.kind, num_shards=len(entries))
 
+        # Without a usable index, exact row counts require reading every shard.
+        # Build index.json to avoid this scan on subsequent discoveries.
         for name in entries:
             full = os.path.join(path, name)
             stats = storage.stat(full)
