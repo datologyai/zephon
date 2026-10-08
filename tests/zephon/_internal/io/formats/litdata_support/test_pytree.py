@@ -1,6 +1,8 @@
 """Unit tests for binary pytree and token chunk readers."""
 
 import json
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,7 @@ import pytest
 pytest.importorskip("optree")
 pytest.importorskip("litdata")
 import optree
+from litdata import StreamingDataset
 from litdata.streaming.item_loader import TokensLoader as StreamingTokensLoader
 from litdata.streaming.writer import BinaryWriter
 
@@ -73,19 +76,16 @@ def test_pytree_loader_flat_mode_returns_lazy_bundle():
     assert flat.materialize() == ("payload", 7)
 
 
-def test_tokens_loader_reads_blocks(tmp_path):
+def test_tokens_loader_reads_blocks_across_short_items(tmp_path):
     pytest.importorskip("torch")
 
     block_size = 4
     dataset_dir = tmp_path / "tokens"
-    samples = [
-        np.arange(i * block_size, (i + 1) * block_size, dtype=np.int32)
-        for i in range(3)
-    ]
+    samples = [np.arange(3, dtype=np.int32) + i * 100 for i in range(8)]
 
     writer = BinaryWriter(
         cache_dir=str(dataset_dir),
-        chunk_size=len(samples),
+        chunk_size=12,
         item_loader=StreamingTokensLoader(block_size=block_size),
     )
     for idx, sample in enumerate(samples):
@@ -101,8 +101,12 @@ def test_tokens_loader_reads_blocks(tmp_path):
     serializers = _get_serializers()
     loader.setup(config, chunks, serializers, None)
 
+    upstream = StreamingDataset(
+        input_dir=str(dataset_dir), item_loader=StreamingTokensLoader(block_size=4)
+    )
     intervals = loader.generate_intervals()
-    assert intervals[-1].chunk_end == len(samples)
+    assert len(chunks) == 2
+    assert intervals[-1].chunk_end == len(upstream) == 6
     assert len(intervals) == len(index_data["chunks"])
 
     for chunk_index, (chunk_entry, interval) in enumerate(
@@ -120,7 +124,7 @@ def test_tokens_loader_reads_blocks(tmp_path):
                 filesize_bytes=int(chunk_entry["chunk_bytes"]),
             )
             assert isinstance(item, np.ndarray)
-            assert np.array_equal(item, samples[block_idx])
+            np.testing.assert_array_equal(item, upstream[block_idx])
 
         loader.close(chunk_index)
 
@@ -157,3 +161,73 @@ def test_pytree_loader_reuses_files_with_global_intervals(tmp_path: Path) -> Non
             assert rows == [expected[group][i] for i in [2, 0, 2]]
     finally:
         loader.close(0)
+
+
+@pytest.fixture
+def torch_warn_always() -> Iterator[None]:
+    torch = pytest.importorskip("torch")
+    previous = torch.is_warn_always_enabled()
+    torch.set_warn_always(True)
+    try:
+        yield
+    finally:
+        torch.set_warn_always(previous)
+
+
+@pytest.mark.parametrize("kind", ["numpy", "tensor"])
+@pytest.mark.usefixtures("torch_warn_always")
+@pytest.mark.filterwarnings("error::UserWarning")
+def test_token_blocks_own_only_their_bytes_and_survive_eviction(
+    tmp_path: Path, kind: str
+) -> None:
+    torch = pytest.importorskip("torch")
+    items = [np.arange(n, dtype=np.int32) + i * 100 for i, n in enumerate([2, 8, 12])]
+    writer = BinaryWriter(
+        cache_dir=str(tmp_path),
+        chunk_bytes=1 << 20,
+        item_loader=StreamingTokensLoader(block_size=4),
+    )
+    for index, item in enumerate(items):
+        writer.add_item(index, item if kind == "numpy" else torch.from_numpy(item))
+    writer.done()
+    writer.merge()
+    index_data = json.loads((tmp_path / "index.json").read_text())
+    [chunk] = index_data["chunks"]
+    path = tmp_path / chunk["filename"]
+    loader = TokensLoader(block_size=4)
+    loader.setup(index_data["config"], [chunk], _get_serializers())
+    upstream = StreamingDataset(
+        input_dir=str(tmp_path), item_loader=StreamingTokensLoader(block_size=4)
+    )
+    # Upstream returns borrowed views; our outputs must own writable storage.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        expected_blocks = [np.asarray(upstream[i]).copy() for i in range(len(upstream))]
+    assert loader.generate_intervals()[0].chunk_end == len(expected_blocks) == 5
+    indices = [4, 0, 2, 4, 1]
+    outputs = loader.load_items_from_chunk(
+        indices, 0, str(path), 0, path.stat().st_size
+    )
+    if kind == "numpy":
+        assert all(len(row.base) == 4 * 4 and row.flags.writeable for row in outputs)
+    else:
+        assert all(row.untyped_storage().nbytes() == 4 * 4 for row in outputs)
+    mapping = loader._mmaps[0]._mmap
+    loader.close(0)
+    assert mapping.closed
+    assert not loader._mmaps and not loader._buffers
+    loader.close(0)  # Repeated close is harmless.
+    for row, index in zip(outputs, indices, strict=True):
+        np.testing.assert_array_equal(np.asarray(row), expected_blocks[index])
+    # Both outputs read block 4; repeated reads must have independent storage.
+    outputs[0][0] = -1
+    assert outputs[3][0] == expected_blocks[4][0]
+
+    # Reopening and deleting the chunk also leaves returned blocks usable.
+    row = loader.load_item_from_chunk(4, 0, str(path), 0, path.stat().st_size)
+    mapping = loader._mmaps[0]._mmap
+    loader.delete(0, str(path))
+    assert mapping.closed and not path.exists()
+    np.testing.assert_array_equal(np.asarray(row), expected_blocks[4])
+    row[0] = -2
+    assert row[0] == -2
