@@ -9,8 +9,8 @@ Supported payload types:
 
 - **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
   views into the SHM buffer.
-- **numpy.ndarray** — converted to torch tensors for SHM transport,
-  restored as numpy array views (zero-copy via ``tensor.numpy()``).
+- **numpy.ndarray** — copied from their original strides directly into
+  Torch-managed SHM buffers and restored as NumPy array views.
 - **bytes / memoryview** — payloads above a size threshold are packed
   into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
 
@@ -390,6 +390,23 @@ def _is_leaf(obj: Any) -> bool:
     return False
 
 
+def _memoryview_source(view: memoryview) -> Any:
+    """Keep buffer views when their exact byte representation can be copied."""
+    if view.c_contiguous:
+        return view.cast("B")
+    np = _get_numpy()
+    if np is not None:
+        try:
+            array = np.asarray(view)
+            # Structured assignment can skip padding bytes; retain the raw
+            # bytes fallback for those formats and for object pointers.
+            if not array.dtype.hasobject and array.dtype.fields is None:
+                return array
+        except (TypeError, ValueError, NotImplementedError):
+            pass
+    return bytes(view)
+
+
 def _extract_leaf(
     leaf: Any,
     collector: dict[str, list[Any]],
@@ -409,9 +426,9 @@ def _extract_leaf(
             fields_dict, collector, offsets, shm_min_size
         )
         return _StructSlot(cls=cls, inner_skeleton=inner_skel)
-    # Numeric lists: promote to tensor so they coalesce into SHM with
-    # other same-dtype tensors.  Restored via .tolist() to preserve the
-    # original Python list contract.
+    # Numeric lists share a buffer with same-dtype tensors and are restored
+    # via .tolist(). Homogeneous built-in values can fill that buffer directly;
+    # retain Torch's conversion semantics for mixed/custom numeric values.
     torch = _get_torch()
     if (
         torch is not None
@@ -426,7 +443,24 @@ def _extract_leaf(
         offset = offsets.get(dtype_key, 0)
         slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
         offsets[dtype_key] = offset + n
-        collector.setdefault(dtype_key, []).append(torch.tensor(leaf, dtype=dtype))
+        value_type = type(leaf[0])
+        direct = False
+        if (
+            type(leaf) is list
+            and value_type in (int, float)
+            and _get_numpy() is not None
+        ):
+            try:
+                # map/set perform the scan in C rather than running a Python
+                # generator for every token. Exact types preserve the fallback
+                # for mixed values and numeric subclasses.
+                direct = set(map(type, leaf)) == {value_type}
+            except TypeError:
+                # A custom metaclass can make type(value) unhashable.
+                pass
+        collector.setdefault(dtype_key, []).append(
+            leaf if direct else torch.tensor(leaf, dtype=dtype)
+        )
         return slot
     if torch is not None and isinstance(leaf, torch.Tensor):
         if leaf.device.type != "cpu":
@@ -454,18 +488,16 @@ def _extract_leaf(
             np_dtype_str=str(leaf.dtype),
         )
         offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(
-            torch.from_numpy(np.ascontiguousarray(leaf))
-        )
+        collector.setdefault(dtype_key, []).append(leaf)
         return slot
     if isinstance(leaf, (bytes, memoryview)):
-        nbytes = len(leaf)
+        nbytes = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
         if nbytes >= shm_min_size and _get_torch() is not None:
             offset = offsets.get(_BYTES_DTYPE_KEY, 0)
             slot = _BytesSlot(offset=offset, length=nbytes)
             offsets[_BYTES_DTYPE_KEY] = offset + nbytes
             collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                leaf if isinstance(leaf, bytes) else bytes(leaf)
+                _memoryview_source(leaf) if isinstance(leaf, memoryview) else leaf
             )
             return slot
         return leaf
@@ -554,8 +586,8 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
     Allocates the target in ``/dev/shm`` first (``share_memory_()``), then
-    copies each sub-tensor (or bytes chunk) directly into the shared
-    region — **one memcpy per item**, no intermediate staging buffer.
+    writes tensors, strided NumPy arrays, supported memoryviews, and
+    homogeneous numeric lists directly into the final shared region.
 
     If ``/dev/shm`` is exhausted, retries with exponential backoff via
     :func:`_alloc_shm_buffer` instead of propagating the error.
@@ -565,7 +597,10 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     for dtype_key, items in collector.items():
         if dtype_key == _BYTES_DTYPE_KEY:
             # Pack raw bytes into a uint8 tensor.
-            total = sum(len(b) for b in items)
+            np = _get_numpy()
+            total = sum(
+                b.nbytes if isinstance(b, np.ndarray) else len(b) for b in items
+            )
             if total == 0:
                 continue
             buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
@@ -573,22 +608,66 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
             np_buf = buf.numpy()
             offset = 0
             for b in items:
-                n = len(b)
-                if n > 0:
+                n = b.nbytes if isinstance(b, np.ndarray) else len(b)
+                if n > 0 and isinstance(b, np.ndarray):
+                    np.copyto(
+                        np_buf[offset : offset + n].view(b.dtype).reshape(b.shape),
+                        b,
+                        casting="no",
+                    )
+                elif n > 0:
                     np_buf[offset : offset + n] = memoryview(b).cast("B")
                 offset += n
             buffers[dtype_key] = buf
-        else:
-            total_numel = sum(t.numel() for t in items)
+        elif dtype_key.startswith(_NDARRAY_PREFIX):
+            # NumPy can read strided, reversed, and read-only sources directly
+            # into the final contiguous destination. No ascontiguousarray copy
+            # or per-array Torch wrapper is needed.
+            np = _get_numpy()
+            total_numel = sum(array.size for array in items)
             if total_numel == 0:
                 continue
-            dtype = items[0].dtype
+            dtype = torch.from_numpy(np.empty(0, dtype=items[0].dtype)).dtype
+            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
+            np_buf = buf.numpy()
+            offset = 0
+            for array in items:
+                n = array.size
+                if n > 0:
+                    np.copyto(
+                        np_buf[offset : offset + n].reshape(array.shape),
+                        array,
+                        casting="no",
+                    )
+                offset += n
+            buffers[dtype_key] = buf
+        else:
+            total_numel = sum(
+                len(t) if isinstance(t, list) else t.numel() for t in items
+            )
+            if total_numel == 0:
+                continue
+            dtype = (
+                getattr(torch, dtype_key.removeprefix("torch."))
+                if isinstance(items[0], list)
+                else items[0].dtype
+            )
             # Allocate directly in SHM, then write sub-tensors in.
             buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
             offset = 0
+            np_buf = None
             for t in items:
-                n = t.numel()
-                if n > 0:
+                n = len(t) if isinstance(t, list) else t.numel()
+                if isinstance(t, list):
+                    if np_buf is None:
+                        np_buf = buf.numpy()
+                    try:
+                        np_buf[offset : offset + n] = t
+                    except (TypeError, ValueError, OverflowError):
+                        # Preserve Torch's rejection behavior (e.g. int64
+                        # overflow). Payloads have not been mutated yet.
+                        buf.narrow(0, offset, n).copy_(torch.tensor(t, dtype=dtype))
+                elif n > 0:
                     buf.narrow(0, offset, n).view(t.shape).copy_(t)
                 offset += n
             buffers[dtype_key] = buf
