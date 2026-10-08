@@ -44,6 +44,15 @@ prepares ahead of the training loop (`final_prefetch`). You don't need to config
 this yourself, but it's a useful reference when you want to understand where the resources
 that a `Pipeline` uses are going.
 
+For process transport, Zephon coalesces NumPy payloads into shared buffers. Later
+transfers of views into those buffers reuse their storage. Importing Zephon registers
+a NumPy reducer with Python's multiprocessing pickler, so this forwarding also applies
+when a Zephon-owned view travels through another multiprocessing queue. Other NumPy
+arrays, including views of shared Torch tensors created outside Zephon, retain NumPy's
+usual copy semantics. They incur a small per-array reducer check; ordinary `pickle`
+is unchanged.
+
+
 **Parallelism Without Changing The Data.** When an operator runs with multiple workers,
 Zephon hands its input records out to those workers in small groups that we call
 **micro-batches**. Micro-batches are an internal grouping for processing efficiently, and

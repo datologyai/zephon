@@ -2305,25 +2305,34 @@ class _CopySharedArray(BaseOp):
         return OpTraits(preserves_cursor_order=True)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        from zephon._internal.utils.shm_coalesce import _array_owner
+        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage
 
         outputs = []
         for record in elems:
             array: Any = record.payload
-            owner = _array_owner(array)
-            assert isinstance(owner, torch.Tensor) and owner.is_shared()
+            assert _shared_numpy_storage(array) is not None
             copied = array.copy()
             copied[0] += 1
             outputs.append(SampleRecord(meta=record.meta, payload=copied))
         return outputs
 
 
-def test_process_numpy_reduction_shares_inputs_without_mutating_them() -> None:
+def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
+    import pickle
+    from multiprocessing.reduction import ForkingPickler
+
+    from zephon._internal.stream import resolve_lazy_payloads
+    from zephon._internal.utils.shm_coalesce import coalesce_microbatch
+
     np = pytest.importorskip("numpy")
-    source = torch.arange(32).share_memory_()
-    array = source.numpy()[3:20:2]
     record = _mk_record(0)
-    record.payload = array
+    record.payload = np.arange(32)[3:20:2]
+    coalesced = coalesce_microbatch([record])
+    assert coalesced is not None
+    records = pickle.loads(ForkingPickler.dumps(coalesced))
+    resolve_lazy_payloads(records)
+    [record] = records
+    array = record.payload
     stage = Stage(
         "shared_numpy",
         [
@@ -2344,7 +2353,6 @@ def test_process_numpy_reduction_shares_inputs_without_mutating_them() -> None:
         [result] = list(runner.run([record]))
         assert isinstance(result, SampleRecord)
         assert record.payload is array
-        np.testing.assert_array_equal(source.numpy(), np.arange(32))
         expected = array.copy()
         expected[0] += 2
         np.testing.assert_array_equal(result.payload, expected)

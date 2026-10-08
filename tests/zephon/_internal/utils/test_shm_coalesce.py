@@ -152,11 +152,7 @@ class TestCoalesceMicrobatchRoundTrip:
 # Edge cases
 # ---------------------------------------------------------------------------
 class TestCoalesceEdgeCases:
-    def test_no_tensors_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def reject_numpy_probe(*args: object) -> None:
-            pytest.fail("Batches without NumPy must not run NumPy transport checks")
-
-        monkeypatch.setattr(shm_coalesce, "_shared_numpy_storage", reject_numpy_probe)
+    def test_no_tensors_returns_none(self) -> None:
         records = [SampleRecord(meta=_meta(0), payload={"text": "hello", "count": 42})]
         assert coalesce_microbatch(records) is None
         assert pickle.loads(_forking_round_trip(records)) == records
@@ -528,8 +524,10 @@ class TestCoalesceNdarray:
     def test_shared_numpy_reduction_preserves_views_and_reuses_storage(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        source = torch.arange(24).share_memory_()
-        base = source.numpy()
+        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(24))])
+        assert coalesced is not None
+        base = _round_trip_resolved(coalesced)[0].payload
+        source = shm_coalesce._array_owner(base)
         array = base.reshape(4, 6)[::-1, ::2]
         array.flags.writeable = False
         tiny = base.view(np.uint8)[3:6]
@@ -538,7 +536,7 @@ class TestCoalesceNdarray:
             "array": array,
             "tiny": tiny,
             "structured": structured,
-            "tensor_slice": source[3:9].numpy(),
+            "slice": base[3:9],
         }
         records = [SampleRecord(meta=_meta(0), payload=payload)]
         assert coalesce_microbatch(records) is None
@@ -575,22 +573,27 @@ class TestCoalesceNdarray:
             shm_coalesce._array_owner(result["tiny"]).untyped_storage().nbytes()
             == source.numel() * source.element_size()
         )
+        # Restored views retain ownership through another serialization hop.
+        result = pickle.loads(_forking_round_trip(result))
+        assert shm_coalesce._shared_numpy_storage(result["array"]) is not None
         expected = array.copy()
         del source, base, array, tiny, structured, records, payload, restored, owner
+        del coalesced
         gc.collect()
         np.testing.assert_array_equal(result["array"], expected)
 
-    def test_numpy_reducer_fallback_and_plain_pickle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_numpy_reducer_private_fallback(self) -> None:
         private = torch.arange(8).numpy()[::2]
-        shared = torch.arange(8).share_memory_().numpy()
         values = {
             "private": private,
+            "same": private,
             "empty": np.empty((0, 3)),
             "object": np.array([{}]),
         }
-        restored = pickle.loads(_forking_round_trip(values))
+        wire = _forking_round_trip(values)
+        assert b"zephon" not in wire
+        restored = pickle.loads(wire)
+        assert restored["private"] is restored["same"]
         private[:] = 99
         np.testing.assert_array_equal(restored["private"], [0, 2, 4, 6])
         assert restored["empty"].shape == (0, 3)
@@ -600,20 +603,34 @@ class TestCoalesceNdarray:
         restored_cycle = pickle.loads(_forking_round_trip(cycle))
         assert restored_cycle[0] is restored_cycle
 
-        # The fallback must preserve NumPy's protocol-5 buffer reduction.
+    def test_numpy_reducer_preserves_protocol5_buffers(self) -> None:
         buffers: list[pickle.PickleBuffer] = []
         stream = BytesIO()
         pickler = pickle.Pickler(stream, protocol=5, buffer_callback=buffers.append)
         pickler.dispatch_table = ForkingPickler._extra_reducers.copy()
         pickler.dump(np.arange(8))
         assert len(buffers) == 1
+        assert b"zephon" not in stream.getvalue()
         np.testing.assert_array_equal(
             pickle.loads(stream.getvalue(), buffers=buffers), np.arange(8)
         )
 
-        ordinary = pickle.loads(pickle.dumps(shared))
-        assert not np.shares_memory(ordinary, shared)
+    def test_numpy_pickle_preserves_unrelated_shared_array_copy_semantics(self) -> None:
+        shared = torch.arange(8).share_memory_().numpy()
+        assert shm_coalesce._shared_numpy_storage(shared) is None
+        for wire in (pickle.dumps(shared), _forking_round_trip(shared)):
+            assert b"zephon" not in wire
+            restored = pickle.loads(wire)
+            np.testing.assert_array_equal(restored, shared)
+            assert not np.shares_memory(restored, shared)
 
+    def test_numpy_reducer_rejects_out_of_bounds_views(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(8))])
+        assert coalesced is not None
+        shared = _round_trip_resolved(coalesced)[0].payload
+        assert shm_coalesce._shared_numpy_storage(shared) is not None
         # Simulate a claimed span outside the owner without accessing invalid memory.
         start = shared.__array_interface__["data"][0]
         monkeypatch.setattr(

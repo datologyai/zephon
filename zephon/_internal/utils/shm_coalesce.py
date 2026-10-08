@@ -10,7 +10,7 @@ Supported payload types:
 - **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
   views into the SHM buffer.
 - **numpy.ndarray** — private arrays are coalesced into shared buffers.
-  Arrays already backed by shared Torch storage are forwarded by the
+  Arrays backed by Zephon's shared buffers are forwarded by the
   multiprocessing reducer, preserving their dtype, strides, and writeability.
 - **bytes / memoryview** — payloads above a size threshold are packed
   into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
@@ -41,6 +41,7 @@ the ``__buffer__`` protocol.
 from __future__ import annotations
 
 import dataclasses
+import operator
 import sys
 from dataclasses import dataclass
 from multiprocessing.reduction import register
@@ -65,8 +66,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _torch: Any = None
 _torch_loaded = False
-_np: Any = None
-_np_loaded = False
 
 
 def _get_torch() -> Any:
@@ -80,19 +79,6 @@ def _get_torch() -> Any:
             pass
         _torch_loaded = True
     return _torch
-
-
-def _get_numpy() -> Any:
-    global _np, _np_loaded  # noqa: PLW0603
-    if not _np_loaded:
-        try:
-            import numpy as _n
-
-            _np = _n
-        except ImportError:
-            pass
-        _np_loaded = True
-    return _np
 
 
 # Default minimum bytes/memoryview size worth sending through SHM.
@@ -175,9 +161,18 @@ class _NdarraySlot(_LeafDescriptor):
         for size in self.shape:
             numel *= size
         if numel == 0:
-            return _get_numpy().empty(self.shape, dtype=self.dtype)
-        array = buffers[self.dtype_key].numpy()
+            return np.empty(self.shape, dtype=self.dtype)
+        array = _shared_numpy_view(buffers[self.dtype_key])
         return array[self.offset : self.offset + numel].reshape(self.shape)
+
+
+def _shared_numpy_view(buffer: Any) -> np.ndarray[Any, Any]:
+    """Expose a Zephon buffer with an owner recognizable by the reducer."""
+    array = buffer.numpy()
+    # numpy() creates a detached Tensor owner; attributes on buffer do not carry
+    # over. Tag that owner so ordinary NumPy views retain Zephon's provenance.
+    array.base._zephon_shm = True
+    return array
 
 
 def _array_owner(array: np.ndarray[Any, Any]) -> Any:
@@ -189,7 +184,7 @@ def _array_owner(array: np.ndarray[Any, Any]) -> Any:
 
 
 def _shared_numpy_storage(array: np.ndarray[Any, Any]) -> Any | None:
-    """Return the shared Torch storage containing every byte of an array view.
+    """Return Zephon-owned shared storage containing every byte of an array view.
 
     Object arrays, empty arrays, and unfamiliar owners use ordinary NumPy
     serialization. Bounds include negative strides and exclude memory outside
@@ -199,7 +194,7 @@ def _shared_numpy_storage(array: np.ndarray[Any, Any]) -> Any | None:
     if array.base is None or array.dtype.hasobject or array.size == 0:
         return None
     owner = _array_owner(array)
-    if owner is None:
+    if not getattr(owner, "_zephon_shm", False):
         return None
     torch = _get_torch()
     if torch is None or not isinstance(owner, torch.Tensor) or not owner.is_shared():
@@ -223,7 +218,11 @@ def _rebuild_shared_numpy(
     torch = _get_torch()
     buffer = torch.empty(0, dtype=torch.uint8, device="cpu").set_(storage)
     array = np.ndarray(
-        shape, dtype=dtype, buffer=buffer.numpy(), offset=offset, strides=strides
+        shape,
+        dtype=dtype,
+        buffer=_shared_numpy_view(buffer),
+        offset=offset,
+        strides=strides,
     )
     if not writable:
         array.flags.writeable = False
@@ -246,19 +245,15 @@ class _NumpyPickleFallback:
         return self.array.__reduce_ex__(protocol)
 
 
-def _unwrapped_numpy(array: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
-    return array
-
-
 def _reduce_numpy(array: np.ndarray[Any, Any]) -> str | tuple[Any, ...]:
-    """Forward existing SHM through multiprocessing; pickle other arrays normally."""
+    """Forward Zephon-owned SHM; delegate other arrays to NumPy's reduction."""
     storage = _shared_numpy_storage(array)
     if storage is None:
         if array.dtype.hasobject:
             # Object arrays use NumPy's legacy reduction even with protocol 5.
             # Keep its memoization order so self-references still round-trip.
             return array.__reduce__()
-        return _unwrapped_numpy, (_NumpyPickleFallback(array),)
+        return operator.getitem, ((_NumpyPickleFallback(array),), 0)
     offset = array.__array_interface__["data"][0] - storage.data_ptr()
     return (
         _rebuild_shared_numpy,
@@ -273,8 +268,9 @@ def _reduce_numpy(array: np.ndarray[Any, Any]) -> str | tuple[Any, ...]:
     )
 
 
-# Like Torch's reducers, this is used when multiprocessing encounters the array.
-# Ordinary pickle is unchanged; private arrays never acquire shared storage here.
+# Registration is process-wide. Only Zephon-owned buffers use shared transport;
+# other arrays retain NumPy's copy semantics without Zephon names in the pickle.
+# Ordinary pickle is unchanged; this reducer never creates shared allocations.
 register(np.ndarray, _reduce_numpy)
 
 
@@ -548,8 +544,7 @@ def _extract_leaf(
         offsets[dtype_key] = offset + numel
         collector.setdefault(dtype_key, []).append(leaf)
         return slot
-    np = _get_numpy()
-    if np is not None and torch is not None and isinstance(leaf, np.ndarray):
+    if torch is not None and isinstance(leaf, np.ndarray):
         if leaf.dtype.hasobject or _shared_numpy_storage(leaf) is not None:
             return leaf
         dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
