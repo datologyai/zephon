@@ -145,7 +145,7 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     prefix = []
     checkpoint: dict[str, Any]
     try:
-        # Exercise an early cut and one after a marker released starvation.
+        # Exercise an early cut and one after a notification released buffered records.
         prefix = [_value(next(it)) for _ in range(cut)]
         checkpoint = pipe.checkpoint()
     finally:
@@ -154,7 +154,7 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     restored.restore(checkpoint)
     suffix = [_value(r) for r in restored]
     assert _per_lane(prefix + suffix) == _per_lane(baseline)
-    # A checkpoint after the final marker cannot acknowledge its dummy cursor.
+    # A checkpoint after the final notification cannot acknowledge its dummy cursor.
     done = restored.checkpoint()
     final = _make_pipe(**options)
     final.restore(done)

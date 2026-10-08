@@ -52,7 +52,7 @@ def test_source_exhaustion_only_on_final_committed_pass(
     assert chunks[-1].source_exhausted == ("a",)
 
 
-def test_default_pass_floor_does_not_announce_dataset_death() -> None:
+def test_default_pass_floor_does_not_announce_source_exhaustion() -> None:
     ws = StaticMixtureWorkSource(
         [make_dataset("a", 20), make_dataset("b", 40)],
         {"a": 0.5, "b": 0.5},
