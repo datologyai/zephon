@@ -42,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, cast
 
 import optree
@@ -391,38 +392,33 @@ def _is_leaf(obj: Any) -> bool:
 
 
 def _memoryview_source(view: memoryview) -> Any:
-    """Return a source for copying a memoryview into the shared byte buffer.
+    """Return a NumPy source whose C-order bytes match ``view.tobytes()``.
 
-    The result represents the same bytes, in logical C order, as
-    ``view.tobytes()``. It is one of:
-
-    - A flat byte ``memoryview`` for C-contiguous input. Casting to ``B``
-      changes only the view; it does not copy the underlying data.
-    - A NumPy array view for supported noncontiguous input. This retains the
-      source dtype, shape, and strides without making a contiguous copy.
-      ``_build_shm_buffers`` gives the destination slice that dtype and shape,
-      then uses ``np.copyto`` to gather the elements into shared memory.
-    - Owned ``bytes`` when NumPy is unavailable or cannot safely represent
-      the input. Structured dtypes also use this fallback: NumPy assignment
-      copies fields but can omit padding bytes. Object dtypes are excluded
-      because their values are Python references rather than raw data.
-
-    The view results keep their source allocation alive until the copy into
-    shared memory finishes. Only the bytes fallback copies at this step.
+    Contiguous inputs become flat uint8 views; supported strided inputs keep
+    their dtype, shape, and strides for ``np.copyto`` into SHM. These results
+    may alias the source until that copy finishes. Unsupported formats and
+    noncontiguous structured views use owned bytes, preserving padding that
+    NumPy field assignment could omit.
     """
-    if view.c_contiguous:
-        return view.cast("B")
     np = _get_numpy()
-    if np is not None:
-        try:
-            array = np.asarray(view)
-            # Structured assignment can skip padding bytes; retain the raw
-            # bytes fallback for those formats and for object pointers.
-            if not array.dtype.hasobject and array.dtype.fields is None:
-                return array
-        except (TypeError, ValueError, RuntimeError, NotImplementedError):
-            pass
-    return bytes(view)
+    if view.c_contiguous:
+        return np.frombuffer(view, dtype=np.uint8)
+    try:
+        array = np.asarray(view)
+        if not array.dtype.hasobject and array.dtype.fields is None:
+            return array
+    except Exception:  # Any unsupported exporter falls back to a byte copy.
+        pass
+    return np.frombuffer(view.tobytes(), dtype=np.uint8)
+
+
+@cache
+def _torch_dtype_for(dtype: Any) -> Any | None:
+    """Resolve supported NumPy dtypes once; unsupported dtypes remain inline."""
+    try:
+        return _get_torch().from_numpy(_get_numpy().empty(0, dtype=dtype)).dtype
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_leaf(
@@ -444,41 +440,25 @@ def _extract_leaf(
             fields_dict, collector, offsets, shm_min_size
         )
         return _StructSlot(cls=cls, inner_skeleton=inner_skel)
-    # Numeric lists share a buffer with same-dtype tensors and are restored
-    # via .tolist(). Homogeneous built-in values can fill that buffer directly;
-    # retain Torch's conversion semantics for mixed/custom numeric values.
+    # Only lossless built-in numeric lists share buffers with Torch tensors.
     torch = _get_torch()
-    if (
-        torch is not None
-        and isinstance(leaf, list)
-        and len(leaf) > 0
-        and isinstance(leaf[0], (int, float))
-        and isinstance(leaf[-1], (int, float))
-    ):
-        dtype = torch.int64 if isinstance(leaf[0], int) else torch.float64
+    if torch is not None and isinstance(leaf, list) and leaf:
+        kind = type(leaf[0])
+        if (
+            type(leaf) is not list
+            or kind not in (int, float)
+            or set(map(type, leaf)) != {kind}
+        ):
+            return leaf
+        if kind is int and not (-(2**63) <= min(leaf) and max(leaf) < 2**63):
+            return leaf
+        dtype = torch.int64 if kind is int else torch.float64
         dtype_key = str(dtype)
         n = len(leaf)
         offset = offsets.get(dtype_key, 0)
         slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
         offsets[dtype_key] = offset + n
-        value_type = type(leaf[0])
-        direct = False
-        if (
-            type(leaf) is list
-            and value_type in (int, float)
-            and _get_numpy() is not None
-        ):
-            try:
-                # map/set perform the scan in C rather than running a Python
-                # generator for every token. Exact types preserve the fallback
-                # for mixed values and numeric subclasses.
-                direct = set(map(type, leaf)) == {value_type}
-            except TypeError:
-                # A custom metaclass can make type(value) unhashable.
-                pass
-        collector.setdefault(dtype_key, []).append(
-            leaf if direct else torch.tensor(leaf, dtype=dtype)
-        )
+        collector.setdefault(dtype_key, []).append(leaf)
         return slot
     if torch is not None and isinstance(leaf, torch.Tensor):
         if leaf.device.type != "cpu":
@@ -494,7 +474,7 @@ def _extract_leaf(
         return slot
     np = _get_numpy()
     if np is not None and torch is not None and isinstance(leaf, np.ndarray):
-        if leaf.dtype.hasobject:
+        if _torch_dtype_for(leaf.dtype) is None:
             return leaf
         dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
         numel = leaf.size
@@ -510,12 +490,14 @@ def _extract_leaf(
         return slot
     if isinstance(leaf, (bytes, memoryview)):
         nbytes = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
-        if nbytes >= shm_min_size and _get_torch() is not None:
+        if nbytes > 0 and nbytes >= shm_min_size and torch is not None:
             offset = offsets.get(_BYTES_DTYPE_KEY, 0)
             slot = _BytesSlot(offset=offset, length=nbytes)
             offsets[_BYTES_DTYPE_KEY] = offset + nbytes
             collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                _memoryview_source(leaf) if isinstance(leaf, memoryview) else leaf
+                _memoryview_source(leaf)
+                if isinstance(leaf, memoryview)
+                else np.frombuffer(leaf, dtype=np.uint8)
             )
             return slot
         return leaf
@@ -603,7 +585,7 @@ def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
-    Allocates the target in ``/dev/shm`` first (``share_memory_()``), then
+    Allocates the shared destination with :func:`_alloc_shm_buffer`, then
     writes tensors, strided NumPy arrays, supported memoryviews, and
     homogeneous numeric lists directly into the final shared region.
 
@@ -616,25 +598,17 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
         if dtype_key == _BYTES_DTYPE_KEY:
             # Pack raw bytes into a uint8 tensor.
             np = _get_numpy()
-            total = sum(
-                b.nbytes if isinstance(b, np.ndarray) else len(b) for b in items
-            )
-            if total == 0:
-                continue
+            total = sum(array.nbytes for array in items)
             buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
-            # numpy view for fast memcpy from bytes into SHM
             np_buf = buf.numpy()
             offset = 0
-            for b in items:
-                n = b.nbytes if isinstance(b, np.ndarray) else len(b)
-                if n > 0 and isinstance(b, np.ndarray):
-                    np.copyto(
-                        np_buf[offset : offset + n].view(b.dtype).reshape(b.shape),
-                        b,
-                        casting="no",
-                    )
-                elif n > 0:
-                    np_buf[offset : offset + n] = memoryview(b).cast("B")
+            for array in items:
+                n = array.nbytes
+                np.copyto(
+                    np_buf[offset : offset + n].view(array.dtype).reshape(array.shape),
+                    array,
+                    casting="no",
+                )
                 offset += n
             buffers[dtype_key] = buf
         elif dtype_key.startswith(_NDARRAY_PREFIX):
@@ -645,7 +619,7 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
             total_numel = sum(array.size for array in items)
             if total_numel == 0:
                 continue
-            dtype = torch.from_numpy(np.empty(0, dtype=items[0].dtype)).dtype
+            dtype = _torch_dtype_for(items[0].dtype)
             buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
             np_buf = buf.numpy()
             offset = 0
@@ -666,7 +640,7 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
             if total_numel == 0:
                 continue
             dtype = (
-                getattr(torch, dtype_key.removeprefix("torch."))
+                (torch.int64 if dtype_key == str(torch.int64) else torch.float64)
                 if isinstance(items[0], list)
                 else items[0].dtype
             )
@@ -679,12 +653,7 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
                 if isinstance(t, list):
                     if np_buf is None:
                         np_buf = buf.numpy()
-                    try:
-                        np_buf[offset : offset + n] = t
-                    except (TypeError, ValueError, OverflowError):
-                        # Preserve Torch's rejection behavior (e.g. int64
-                        # overflow). Payloads have not been mutated yet.
-                        buf.narrow(0, offset, n).copy_(torch.tensor(t, dtype=dtype))
+                    np_buf[offset : offset + n] = t
                 elif n > 0:
                     buf.narrow(0, offset, n).view(t.shape).copy_(t)
                 offset += n

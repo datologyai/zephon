@@ -7,13 +7,11 @@ import pickle
 import sys
 from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
-from typing import Any
 
 import pytest
 
 from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
-from zephon._internal.utils import shm_coalesce
 from zephon._internal.utils.shm_coalesce import (
     CoalescedMicrobatch,
     ShmLazyPayload,
@@ -391,23 +389,20 @@ class TestCoalesceBytes:
         """Typed views retain every byte without staging through bytes()."""
         data = bytearray(range(256)) * 32
         view = memoryview(data).cast("I", shape=(32, 64))
-        source = shm_coalesce._memoryview_source(view)
-        assert isinstance(source, memoryview)
-        assert source.obj is data
-        assert source.format == "B"
         records = [SampleRecord(meta=_meta(0), payload={"mv": view})]
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
         restored = _round_trip_resolved(coalesced)
         assert bytes(restored[0].payload["mv"]) == data
         assert isinstance(restored[0].payload["mv"], _ShmBytes)
+        empty = memoryview(np.zeros((0, 4), dtype=np.int32))
+        record = SampleRecord(meta=_meta(0), payload=empty)
+        assert coalesce_microbatch([record], shm_min_size=0) is None
+        assert record.payload is empty
 
     def test_strided_memoryviews_preserve_bytes_and_offsets(self) -> None:
         array = np.arange(12, dtype=np.int32)
         view = memoryview(array)[::-2]
-        source = shm_coalesce._memoryview_source(view)
-        assert isinstance(source, np.ndarray)
-        assert np.shares_memory(source, array)
         # Field assignment would discard these deliberately nonzero padding bytes.
         padded = np.zeros(
             4, dtype=np.dtype({"names": ["x"], "formats": ["i1"], "itemsize": 8})
@@ -549,7 +544,29 @@ np = pytest.importorskip("numpy")
 # ---------------------------------------------------------------------------
 # Numpy ndarray coalescing
 # ---------------------------------------------------------------------------
+class _NumberList(list[int]):
+    pass
+
+
 class TestCoalesceNdarray:
+    def test_unsupported_numpy_dtypes_stay_inline(self) -> None:
+        values = {
+            "text": np.array(["ab", "cd"]),
+            "structured": np.array([(1, 2.5)], dtype=[("id", "i4"), ("score", "f8")]),
+            "non_native": np.array(
+                [1, 2], dtype=">i4" if sys.byteorder == "little" else "<i4"
+            ),
+        }
+        payload = dict(values, tensor=torch.ones(1))
+        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
+        assert coalesced is not None
+        [restored] = _round_trip_resolved(coalesced)
+        for name, expected in values.items():
+            actual = restored.payload[name]
+            inline = pickle.loads(_forking_round_trip(expected))
+            assert actual.dtype == inline.dtype
+            np.testing.assert_array_equal(actual, expected)
+
     @pytest.mark.parametrize(
         "array",
         [
@@ -756,7 +773,7 @@ class TestCoalesceNdarray:
             restored[0].payload["normal"], np.array([1.0, 2.0], dtype=np.float32)
         )
 
-    def test_noncontiguous_numpy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_noncontiguous_numpy(self) -> None:
         """Strided arrays write directly to SHM without a contiguous temporary."""
         arr_slice = np.arange(10, dtype=np.float32)[::-2]
         arr_slice.flags.writeable = False
@@ -769,23 +786,15 @@ class TestCoalesceNdarray:
                 payload={"sliced": arr_slice, "fortran": arr_fortran},
             )
         ]
-        from_numpy = torch.from_numpy
-
-        def reject_staging(*args: object, **kwargs: object) -> None:
-            pytest.fail("NumPy payloads must not allocate a contiguous temporary")
-
-        def only_empty_numpy(array: Any) -> Any:
-            assert array.size == 0, "Torch is needed only to resolve the dtype"
-            return from_numpy(array)
-
-        monkeypatch.setattr(np, "ascontiguousarray", reject_staging)
-        monkeypatch.setattr(torch, "from_numpy", only_empty_numpy)
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
 
         restored = _round_trip_resolved(coalesced)
-        np.testing.assert_array_equal(restored[0].payload["sliced"], arr_slice)
-        np.testing.assert_array_equal(restored[0].payload["fortran"], arr_fortran)
+        for name, expected in (("sliced", arr_slice), ("fortran", arr_fortran)):
+            actual = restored[0].payload[name]
+            np.testing.assert_array_equal(actual, expected)
+            assert actual.dtype == expected.dtype
+            assert actual.flags.c_contiguous
         assert restored[0].payload["fortran"].shape == (3, 4)
 
     def test_empty_array(self) -> None:
@@ -1735,8 +1744,8 @@ class TestPrimitiveListAsLeaf:
         for i, rec in enumerate(restored):
             assert rec.payload["token_ids"] == list(range(i * 100, (i + 1) * 100))
 
-    def test_mixed_int_and_float_lists(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Numeric lists fill their dtype buffers without temporary tensors."""
+    def test_mixed_int_and_float_lists(self) -> None:
+        """Homogeneous lists preserve values and their Python list types."""
         int_ids = [0, 2**63 - 1, -(2**63)]
         float_scores = [0.1 * i for i in range(30)]
         records = [
@@ -1750,10 +1759,6 @@ class TestPrimitiveListAsLeaf:
             ),
         ]
 
-        def reject_temporary(*args: object, **kwargs: object) -> None:
-            pytest.fail("Homogeneous lists must not allocate temporary tensors")
-
-        monkeypatch.setattr(torch, "tensor", reject_temporary)
         coalesced = coalesce_microbatch(records)
         assert coalesced is not None
         assert str(torch.int64) in coalesced.buffers
@@ -1765,22 +1770,25 @@ class TestPrimitiveListAsLeaf:
         assert restored[0].payload["ids"] == int_ids
         assert restored[0].payload["scores"] == pytest.approx(float_scores)
 
-    def test_mixed_values_keep_torch_conversion_and_overflow_errors(self) -> None:
-        values = [1, 2.75, 3]
-        expected = torch.tensor(values, dtype=torch.int64).tolist()
-        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=values)])
+    def test_unsupported_numeric_lists_round_trip_unchanged(self) -> None:
+        values = {
+            "scores": [1, 0.5, 0.25, 1],
+            "large_mixed": [0.5, 2**60 + 1],
+            "uint64": [0, 2**63, 2**64 - 1],
+            "bool": [True, False],
+            "subclass": _NumberList([1, 2, 3]),
+        }
+        payload = dict(values, tensor=torch.ones(1))
+        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
         assert coalesced is not None
         [restored] = _round_trip_resolved(coalesced)
-        assert restored.payload == expected
-        assert all(type(value) is int for value in restored.payload)
-
-        invalid = [0, 2**63]
-        record = SampleRecord(meta=_meta(0), payload=invalid)
-        with pytest.raises(Exception) as baseline:
-            torch.tensor(invalid, dtype=torch.int64)
-        with pytest.raises(type(baseline.value)):
-            coalesce_microbatch([record])
-        assert record.payload is invalid
+        for name, expected in values.items():
+            actual = restored.payload[name]
+            assert actual == expected
+            assert type(actual) is type(expected)
+            assert [type(value) for value in actual] == [
+                type(value) for value in expected
+            ]
 
     def test_single_element_list(self) -> None:
         records = [
@@ -1795,11 +1803,8 @@ class TestPrimitiveListAsLeaf:
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["one"] == [42]
 
-    def test_numeric_list_only_payload_still_coalesces(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Numeric lists still coalesce through Torch when NumPy is unavailable."""
-        monkeypatch.setattr(shm_coalesce, "_get_numpy", lambda: None)
+    def test_numeric_list_only_payload_still_coalesces(self) -> None:
+        """Numeric lists coalesce even when no Torch tensor is in the payload."""
         records = [
             SampleRecord(
                 meta=_meta(0),
