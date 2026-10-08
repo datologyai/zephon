@@ -8,6 +8,7 @@ Registers the ``jsonl`` ``IndexBuilder`` on import; build an index via the
 """
 
 import io
+from pathlib import Path
 
 from zephon._internal.io.index.index_builder import (
     IndexBuilder,
@@ -33,12 +34,12 @@ class JsonlIndexBuilder(IndexBuilder):
             else open_decompressed(path, compression)
         )
         with stream, io.TextIOWrapper(stream, encoding="utf-8") as handle:
-            count = sum(1 for line in handle if line.strip())
+            count = sum(1 for line in handle if not line.isspace())
             if compression is not None:
                 extra["raw_bytes"] = stream.tell()
 
         return ShardInfo(
-            basename=path.rsplit("/", 1)[-1],
+            basename=Path(path).name,
             bytes=file_size,
             num_rows=count,
             extra=extra,

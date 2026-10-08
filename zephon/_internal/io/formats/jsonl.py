@@ -7,6 +7,7 @@ import io
 import json
 import os
 from collections import defaultdict
+from collections.abc import Iterator
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Mapping, cast
@@ -42,25 +43,20 @@ class JsonlShard(RandomAccessShard):
         target = index
         with self._path.open("r", encoding="utf-8") as handle:
             for line in handle:
-                stripped = line.strip()
-                if not stripped:
+                if line.isspace():
                     continue
                 if target == 0:
                     # TODO: Build and use a byte-offset index so we can seek directly.
-                    return json.loads(stripped)
+                    return json.loads(line.strip())
                 target -= 1
         raise IndexError(index)
 
     def __len__(self) -> int:
         if self._length is not None:
             return self._length
-        count = 0
         with self._path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    count += 1
-        self._length = count
-        return count
+            self._length = sum(1 for line in handle if not line.isspace())
+        return self._length
 
     def close(self) -> None:
         return None
@@ -70,7 +66,7 @@ class JsonlShard(RandomAccessShard):
             return []
         # Validate and prepare scatter targets for duplicates and arbitrary order.
         for i in indices:
-            if i < 0:
+            if i < 0 or (self._length is not None and i >= self._length):
                 raise IndexError(i)
         out: list[dict[str, object] | None] = [None] * len(indices)
         waiting: defaultdict[int, list[int]] = defaultdict(list)
@@ -81,16 +77,15 @@ class JsonlShard(RandomAccessShard):
         logical_index = 0
         with self._path.open("r", encoding="utf-8") as handle:
             for line in handle:
-                if not waiting:
-                    break
-                stripped = line.strip()
-                if not stripped:
+                if line.isspace():
                     continue
-                if logical_index in waiting:
-                    obj = json.loads(stripped)
-                    for pos in waiting[logical_index]:
+                positions = waiting.pop(logical_index, None)
+                if positions is not None:
+                    obj = json.loads(line.strip())
+                    for pos in positions:
                         out[pos] = obj
-                    del waiting[logical_index]
+                    if not waiting:
+                        break
                 logical_index += 1
 
         if waiting:
@@ -110,9 +105,14 @@ def _count_records(stream: BinaryIO) -> int:
     """Count the non-blank lines :class:`JsonlShard` indexes as records."""
     text = io.TextIOWrapper(stream, encoding="utf-8")
     try:
-        return sum(1 for line in text if line.strip())
+        return sum(1 for line in text if not line.isspace())
     finally:
         text.detach()  # leave ``stream`` open for the caller
+
+
+def _is_nonnegative_int64(value: object) -> bool:
+    """Accept counts and sizes representable by the catalog's int64 columns."""
+    return type(value) is int and 0 <= value < 1 << 63
 
 
 class JsonlFormat(FormatHandler):
@@ -130,25 +130,36 @@ class JsonlFormat(FormatHandler):
 
         return self._discover_from_files(path, storage)
 
-    def _is_valid_jsonl_index(self, data: ShardIndex) -> bool:
+    def _is_valid_jsonl_index(self, data: Mapping[str, object]) -> bool:
         """Return whether an index describes a non-empty JSONL dataset."""
-        shards = data.get("shards", [])
-        # A missing/bad num_rows would silently drop the shard's rows; rescan.
-        return bool(shards) and all(
-            isinstance(shard.get("basename"), str)
-            and shard["basename"].endswith(JSONL_SUFFIXES)
-            and isinstance(shard.get("num_rows"), int)
-            and shard["num_rows"] >= 0
-            and (
-                compression_for_name(shard["basename"]) is None
-                or (
-                    isinstance(shard.get("extra"), dict)
-                    and isinstance(shard["extra"].get("raw_bytes"), int)
-                    and shard["extra"]["raw_bytes"] >= 0
-                )
-            )
-            for shard in shards
-        )
+        # The shared index reader checks only the outer keys.
+        shards = data.get("shards")
+        if not isinstance(shards, list) or not shards:
+            return False
+        for shard in shards:
+            if not isinstance(shard, dict):
+                return False
+            name = shard.get("basename")
+            if (
+                not isinstance(name, str)
+                or not name.endswith(JSONL_SUFFIXES)
+                or not _is_nonnegative_int64(shard.get("num_rows"))
+                or not _is_nonnegative_int64(shard.get("bytes"))
+            ):
+                return False
+            hashes = shard.get("hashes", {})
+            if not isinstance(hashes, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in hashes.items()
+            ):
+                return False
+            if compression_for_name(name) is not None:
+                extra = shard.get("extra")
+                if not isinstance(extra, dict) or not _is_nonnegative_int64(
+                    extra.get("raw_bytes")
+                ):
+                    return False
+        return True
 
     def _discover_from_index_data(
         self, data: ShardIndex
@@ -158,13 +169,13 @@ class JsonlFormat(FormatHandler):
         shard_meta: dict[int, dict[str, object]] = {}
 
         for shard_id, shard in enumerate(data["shards"]):
-            count = shard.get("num_rows", 0)
+            count = shard["num_rows"]
             shard_index[shard_id] = count
             name = shard["basename"]
             compression = compression_for_name(name)
             file_meta = {
                 "basename": name,
-                "bytes": shard.get("bytes", 0),
+                "bytes": shard["bytes"],
                 "hashes": shard.get("hashes", {}),
             }
             meta: dict[str, object] = {
@@ -186,7 +197,18 @@ class JsonlFormat(FormatHandler):
     def _discover_from_files(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]:
-        """Scan JSONL files and count their non-empty records."""
+        """Scan JSONL files and retain their counts and locator metadata."""
+        shard_index: dict[int, int] = {}
+        shard_meta: dict[int, dict[str, object]] = {}
+        for shard_id, (count, meta) in enumerate(self._scan_files(path, storage)):
+            shard_index[shard_id] = count
+            shard_meta[shard_id] = meta
+        return shard_index, shard_meta
+
+    def _scan_files(
+        self, path: str, storage: StorageBackend
+    ) -> Iterator[tuple[int, dict[str, object]]]:
+        """Yield each shard's count and metadata without retaining prior shards."""
         # Sort so shard_id assignment is reproducible across processes/machines
         # (cache JOIN, cross-node Ray). Re-numbers existing jsonl datasets once.
         entries = sorted(
@@ -198,16 +220,10 @@ class JsonlFormat(FormatHandler):
             )
         warn_missing_index(path, self.kind, num_shards=len(entries))
 
-        shard_index: dict[int, int] = {}
-        shard_meta: dict[int, dict[str, object]] = {}
-
-        for shard_id, name in enumerate(entries):
+        for name in entries:
             full = os.path.join(path, name)
             stats = storage.stat(full)
             size = int(stats.get("size", 0))
-            # TODO(MaxiBoether): Counting lines by opening every shard is expensive on
-            # remote/cloud storage. Consider storing counts in metadata or lazily
-            # computing lengths during shard open.
             compression = compression_for_name(name)
             with storage.open(full, "rb") as handle:
                 if compression is None:
@@ -217,7 +233,6 @@ class JsonlFormat(FormatHandler):
                     with open_decompressed(cast(BinaryIO, handle), compression) as src:
                         count = _count_records(src)
                         raw_bytes = src.tell()
-            shard_index[shard_id] = count
             meta: dict[str, object] = {
                 "raw": {
                     "basename": name if compression is None else name + _DECODED_SUFFIX,
@@ -231,9 +246,7 @@ class JsonlFormat(FormatHandler):
                 # once into the raw file that JsonlShard reads.
                 meta["zip"] = {"basename": name, "bytes": size, "hashes": {}}
                 meta["compression"] = compression
-            shard_meta[shard_id] = meta
-
-        return shard_index, shard_meta
+            yield count, meta
 
     def discover_counts(
         self, path: str, storage: StorageBackend
@@ -241,12 +254,17 @@ class JsonlFormat(FormatHandler):
         """Read per-shard row counts directly from an index when available."""
         result = find_and_load_index(path, storage)
         if is_shard_index(result) and self._is_valid_jsonl_index(result):
-            counts = [shard.get("num_rows", 0) for shard in result["shards"]]
-            return (
-                np.arange(len(counts), dtype=np.int64),
-                np.array(counts, dtype=np.int64),
+            counts = np.fromiter(
+                (shard["num_rows"] for shard in result["shards"]),
+                dtype=np.int64,
+                count=len(result["shards"]),
             )
-        return super().discover_counts(path, storage)
+        else:
+            counts = np.fromiter(
+                (count for count, _ in self._scan_files(path, storage)),
+                dtype=np.int64,
+            )
+        return np.arange(counts.size, dtype=np.int64), counts
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         backend = dataset.backend
