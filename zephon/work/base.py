@@ -74,12 +74,10 @@ class WorkChunk:
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
 
-    ``source_exhausted`` names components with no future source records after
-    their last sample in this chunk. The engine inserts informational markers
-    there, or before this chunk when it contains none of that component.
-    Repeat the names on later chunks so resets and replay retain the knowledge.
-    These markers may overtake buffered records downstream; they do not promise
-    that all descendants of those source samples have finished processing.
+    ``source_exhausted`` is cumulative: every chunk must list all components
+    whose final source sample has been produced in this or an earlier chunk.
+    The engine notifies downstream operators immediately after the component's
+    last sample, or before this chunk if absent, including on replay.
     """
 
     components: SamplesPerComponent
@@ -96,6 +94,14 @@ class WorkChunk:
     _total_samples: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        names = self.source_exhausted
+        if (
+            not isinstance(names, (tuple, list))
+            or any(not isinstance(n, str) or not n for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("source_exhausted must contain unique non-empty names")
+        self.source_exhausted = tuple(sorted(names))
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
         if self.target_mixture is not None:

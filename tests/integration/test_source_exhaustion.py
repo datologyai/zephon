@@ -3,7 +3,7 @@
 
 """Source exhaustion through runners, epoch resets, buffering and replay."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 import pytest
@@ -98,14 +98,14 @@ def test_source_exhaustion_releases_survivors_through_transports(
 class _CaptureExhaustion(EnsureMixtureAccumulator):
     calls: list[tuple[int, int]] = []
 
-    def on_source_exhausted(
+    def _on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[SampleRecord]]:
         self.calls.append((lane_id, component_id))
-        return super().on_source_exhausted(lane_id, component_id)
+        return super()._on_source_exhausted(lane_id, component_id)
 
 
-def test_notification_repeats_after_lane_epoch_reset(
+def test_notification_is_once_per_lane_across_epoch_resets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import zephon._internal.ops.ensure_mixture as em
@@ -113,9 +113,9 @@ def test_notification_repeats_after_lane_epoch_reset(
     _CaptureExhaustion.calls = []
     monkeypatch.setattr(em, "EnsureMixtureAccumulator", _CaptureExhaustion)
     records = [_value(r) for r in _make_pipe(lanes=2, flush_every=1)]
-    assert set(_CaptureExhaustion.calls) == {(0, 0), (1, 0)}
-    # Both lanes' final chunks follow the global exhaustion point. A fresh
-    # epoch must relearn A's death, including on the lane without its last A.
+    assert sorted(_CaptureExhaustion.calls) == [(0, 0), (1, 0)]
+    # Both lanes' final chunks follow the global exhaustion point. Later
+    # epochs retain exhaustion, including on the lane without the last A.
     assert all(len(texts) >= 10 for texts in _per_lane(records).values())
 
 
@@ -159,3 +159,32 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     final = _make_pipe(**options)
     final.restore(done)
     assert list(final) == []
+
+
+@pytest.mark.parametrize("limit", [None, 64])
+def test_large_shuffle_keeps_exhausted_dataset_records(limit: int | None) -> None:
+    """Notifications may pass most of A while its records remain in shuffle."""
+    datasets = [
+        Dataset.from_dict(
+            name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(count)])}
+        )
+        for name, count in (("a", 200), ("b", 5000))
+    ]
+    source = StaticMixtureWorkSource(
+        datasets, {"a": 0.5, "b": 0.5}, chunk_size=10, exhausted_policy="stop", seed=0
+    )
+    pipe = (
+        Pipeline(source)
+        .shuffle(buffer_size=256, seed=4)
+        .ensure_mixture(weight_by="samples", max_buffer_size=limit)
+        .options(
+            runner="inline",
+            deterministic=True,
+            max_workers=1,
+            canonical_replicas=1,
+            flush_every_k_chunks=1000,
+        )
+    )
+    values = [_value(r) for r in pipe]
+    assert len(values) == len(set(values)) == 400
+    assert Counter(text.split("-")[0] for _, text in values) == {"a": 200, "b": 200}

@@ -26,8 +26,7 @@ class _MonotoneNotify(NamedTuple):
     ``delivered`` is True when the notified item is actually yielded to the
     consumer at the pipeline tail (a real batch or record) and False for
     tombstones that are notified but never delivered. It feeds the per-lane
-    delivery counters used for mid-window
-    checkpoint detection.
+    delivery counters used for mid-window checkpoint detection.
     """
 
     lane_id: int
@@ -90,7 +89,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
         lane_id = item.meta.lane_id
         # Sentinels never reach the consumer; replayed-and-dropped records arrive
         # as tombstones, so excluding them prevents double-counting on resume.
-        delivered = not item.meta.is_sentinel
+        delivered = not item.meta.tombstone
         if use_monotone:
             return _MonotoneNotify(
                 lane_id, item.meta.chunk_id, 1, item.meta.cursor, delivered
@@ -137,7 +136,26 @@ def is_sentinel(item: StreamItem) -> bool:
 
 
 def should_notify(item: StreamItem) -> bool:
-    """Notify real data and tombstones, never control records with dummy cursors."""
-    return not is_sentinel(item) or (
-        isinstance(item, SampleRecord) and item.meta.tombstone
+    """Notify data and tombstones, which close real contributor offsets.
+
+    Flush and source-exhaustion notifications carry dummy cursors. Notifying
+    them would mark false chunk-0 progress and overwrite the lane's replay
+    cursor, potentially causing restored records to be skipped.
+    """
+    if not isinstance(item, SampleRecord):
+        return True
+    return (
+        not (
+            item.meta.tags.get("_flush_sentinel")
+            or "_source_exhausted" in item.meta.tags
+        )
+        or item.meta.tombstone
     )
+
+
+def source_exhausted_component(item: StreamItem) -> int | None:
+    """Return the notified component, including id zero, or None for other items."""
+    if not isinstance(item, SampleRecord):
+        return None
+    component = item.meta.tags.get("_source_exhausted")
+    return int(component) if component is not None else None

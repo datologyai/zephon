@@ -245,14 +245,14 @@ class TestShouldNotify:
         assert should_notify(SampleRecord(meta=meta, payload=None)) is False
 
     def test_source_exhausted_skipped(self):
-        # Regression: EOD sentinels carry dummy cursors; notifying one
+        # Regression: Source-exhaustion notifications carry dummy cursors; notifying one
         # overwrote the lane replay cursor and falsely completed chunk 0.
         meta = SampleMeta(
             sample_id=(0, 0, 0),
             lane_id=0,
             chunk_id=0,
             chunk_offset=0,
-            tags={"_source_exhausted": True},
+            tags={"_source_exhausted": 0},
         )
         assert should_notify(SampleRecord(meta=meta, payload=None)) is False
 

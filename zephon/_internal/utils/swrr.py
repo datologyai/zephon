@@ -19,7 +19,7 @@ applies with weights accumulated per emission.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Generic, Iterator, Sequence, TypeVar
+from typing import Container, Generic, Iterator, Sequence, TypeVar
 
 K = TypeVar("K")  # Component key type (str for WorkChunk, int for EnsureMixture)
 T = TypeVar("T")  # Item type
@@ -81,12 +81,16 @@ class SmoothWeightedRoundRobin(Generic[K]):
         self._emitted: dict[K, float] = defaultdict(float)
         self._total: float = 0.0
 
-    def peek(self) -> K | None:
-        """Return the ideal component (highest deficit) ignoring availability.
+    def peek(self, *, skip: Container[K] = ()) -> K | None:
+        """Return the highest-deficit component, temporarily excluding ``skip``.
 
         This is used for adaptive buffering: if the ideal component is available
         in the buffer, we can emit immediately. If not, we should buffer until
         it becomes available or max_buffer_size is reached.
+
+        Skipped components keep their targets and emission history. Selection
+        renormalizes the other targets against their remaining emitted mass;
+        merely ignoring skipped keys would distort unequal surviving weights.
 
         Returns:
             The component key with highest deficit, or None if no targets.
@@ -94,18 +98,26 @@ class SmoothWeightedRoundRobin(Generic[K]):
         if not self._target or not self._order:
             return None
 
-        effective_total = max(1.0, self._total)
-        deficits = {
-            k: self._target[k] * effective_total - self._emitted[k]
-            for k in self._target
-        }
-
         # Return highest deficit component, tie-break by original order
         # Only consider components in current target (filter out obsolete)
-        active = [k for k in self._order if k in self._target]
+        active = [k for k in self._order if k in self._target and k not in skip]
         if not active:
             return None
-        return max(active, key=lambda k: (deficits[k], -self._index[k]))
+        weight = 1.0
+        total = self._total
+        if skip:
+            excluded = [k for k in self._target if k in skip]
+            if excluded:
+                weight = sum(self._target[k] for k in active)
+                total -= sum(self._emitted[k] for k in excluded)
+        effective_total = max(1.0, total)
+        return max(
+            active,
+            key=lambda k: (
+                self._target[k] / weight * effective_total - self._emitted[k],
+                -self._index[k],
+            ),
+        )
 
     def select(self, available: set[K]) -> K | None:
         """Select the next component from the available set.
@@ -136,15 +148,10 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def record(self, component: K, weight: float = 1.0) -> None:
         """Record that an item was emitted from a component.
 
-        Off-target components are ignored so stragglers cannot re-create a
-        retired component's history or inflate the surviving components' deficits.
-
         Args:
             component: The component that emitted.
             weight: The weight of the emitted item (1.0 for samples, token_count for tokens).
         """
-        if component not in self._target:
-            return
         self._emitted[component] += weight
         self._total += weight
 
@@ -153,7 +160,6 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
         When a single sample contains content from multiple components (e.g., after
         packing), this method updates the deficit tracking for all components at once.
-        Contributions outside the current target are ignored, as in ``record``.
 
         Args:
             contributions: Maps component -> weight contributed by this emission.
@@ -161,8 +167,6 @@ class SmoothWeightedRoundRobin(Generic[K]):
                           300 tokens from component 0 and 200 from component 1.
         """
         for component, weight in contributions.items():
-            if component not in self._target:
-                continue
             self._emitted[component] += weight
             self._total += weight
 
@@ -181,18 +185,6 @@ class SmoothWeightedRoundRobin(Generic[K]):
             k: self._target[k] * effective_total - self._emitted[k]
             for k in self._target
         }
-
-    def remove_component(self, component: K) -> None:
-        """Retire a component and its emitted mass, renormalizing the survivors."""
-        if component not in self._target:
-            return
-        del self._target[component]
-        total_weight = sum(self._target.values())
-        if total_weight > 0:
-            self._target = {k: w / total_weight for k, w in self._target.items()}
-        self._order = [k for k in self._order if k != component]
-        self._index = {k: i for i, k in enumerate(self._order)}
-        self._total -= self._emitted.pop(component, 0.0)
 
     def update_target(self, new_target: dict[K, float]) -> None:
         """Update target weights while preserving emission history.

@@ -2321,14 +2321,20 @@ class StaticMixtureWorkSource(WorkSource):
             "Please assign lane for WorkSource before requesting chunk."
         )
         while True:
-            chunk = self._next_chunk()
-            if chunk is None:
+            components = self._strategy.produce(self._cursors)
+            if not components:
                 return None
+            self._recompute_total_samples()
             g = self._global_chunk_index
             self._global_chunk_index += 1
             if self._lane_for_chunk(g) != (self._lane % self._canon):
                 continue
-            return chunk
+            return WorkChunk(
+                components=components,
+                seed=self._seed,
+                target_mixture=self._strategy.target_mixture(),
+                source_exhausted=self._source_exhausted_components(),
+            )
 
     def _lane_for_chunk(self, g: int) -> int:
         """Map global chunk index ``g`` to a canonical lane.
@@ -2359,41 +2365,20 @@ class StaticMixtureWorkSource(WorkSource):
             self._perm_order = order
         return self._perm_order[slot]
 
-    def _next_chunk(self) -> WorkChunk | None:
-        components = self._strategy.produce(self._cursors)
-        if not components:
-            return None
-
-        self._recompute_total_samples()
-
-        return WorkChunk(
-            components=components,
-            seed=self._seed,
-            target_mixture=self._strategy.target_mixture(),
-            source_exhausted=self._source_exhausted_components(),
-        )
-
     def _source_exhausted_components(self) -> tuple[str, ...]:
         """Derive permanent exhaustion from the committed, checkpointed cursors.
 
-        Called only after successful production, so rolled-back draws cannot
-        announce exhaustion. Repeating the stamp on every later chunk lets
-        each lane and each fresh accumulator epoch learn it independently.
-        Ordinary pass boundaries (including stop_after_passes) are not deaths.
+        Called only for successfully produced chunks assigned to this lane.
+        The cumulative stamp lets a restored stream recover source facts.
+        Ordinary repeat boundaries (including stop_after_passes) do not imply
+        permanent exhaustion.
         """
         cfg = self._alloc_config
-        exhausted = []
-        for name in cfg.component_order:
-            cursor = self._cursors[name]
-            if cursor.remaining:
-                continue
-            policy = cfg.exhausted_policy[name]
-            cap = cfg.max_repeats[name]
-            if policy == "stop" or (
-                policy == "repeat" and cap is not None and cursor._epoch >= cap
-            ):
-                exhausted.append(name)
-        return tuple(sorted(exhausted))
+        return tuple(
+            name
+            for name in cfg.component_order
+            if _effective_remaining_samples(cfg, name, self._cursors[name]) == 0
+        )
 
     # ------------------------------------------------------------------
     # Length

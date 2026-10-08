@@ -588,7 +588,9 @@ def test_old_chunks_restore_without_source_exhaustion(version: int) -> None:
     assert restored.target_mixture == (None if version == 1 else {"A": 1.0})
 
 
-@pytest.mark.parametrize("bad", [None, "A", [0], ["", "A"], [None], ["A", "A"]])
+@pytest.mark.parametrize(
+    "bad", [None, "A", [0], ["", "A"], [None], ["A", "A"], ["B", "A"]]
+)
 def test_workchunk_rejects_corrupt_exhaustion_stamp(bad: Any) -> None:
     state = WorkChunk(components={"A": make_ids(0, 0, 1)}).state_dict()
     state["source_exhausted"] = bad
@@ -601,6 +603,20 @@ def test_current_workchunk_requires_exhaustion_stamp() -> None:
     del state["source_exhausted"]
     with pytest.raises(ValueError, match="source_exhausted"):
         WorkChunk.from_state(state)
+
+
+@pytest.mark.parametrize(
+    "bad", [None, "A", [0], ["", "A"], [None], ["A", "A"], ["A", 0]]
+)
+def test_workchunk_rejects_invalid_exhaustion_at_construction(bad: Any) -> None:
+    with pytest.raises(ValueError, match="source_exhausted"):
+        WorkChunk(components={}, source_exhausted=bad)
+
+
+def test_workchunk_canonicalizes_exhaustion_at_construction() -> None:
+    chunk = WorkChunk(components={}, source_exhausted=["z", "a"])  # type: ignore[arg-type]
+    assert chunk.source_exhausted == ("a", "z")
+    assert WorkChunk.from_state(chunk.state_dict()).source_exhausted == ("a", "z")
 
 
 class _PlainWorkSource(WorkSource):

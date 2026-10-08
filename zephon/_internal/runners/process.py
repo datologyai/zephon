@@ -2084,7 +2084,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         Invocation boundaries are defined by the operator's accumulator.
         Each batch is sent to workers as-is.
 
-        Sentinel batches (tombstones, flush signals) bypass worker execution
+        Sentinel batches (tombstones, flush and source-exhaustion notifications) bypass worker execution
         entirely — they are control signals that operators should never see.
         A RunnerResult is created inline and stashed in ``_local_results``
         so the pump thread never writes to the IPC result pipe.

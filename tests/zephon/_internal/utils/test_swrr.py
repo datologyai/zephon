@@ -242,20 +242,6 @@ class TestSWRRGetDeficits:
 
 
 class TestSWRRUpdateTarget:
-    def test_remove_component_reweights_surviving_history(self) -> None:
-        swrr = SmoothWeightedRoundRobin({"a": 1, "b": 1, "c": 2}, ["a", "b", "c"])
-        swrr.record_multi({"a": 10, "b": 3, "c": 6})
-        swrr.remove_component("a")
-        assert swrr.target_ratios == pytest.approx({"b": 1 / 3, "c": 2 / 3})
-        assert swrr.total_emitted == 9
-        assert swrr.get_actual_ratios() == pytest.approx({"b": 1 / 3, "c": 2 / 3})
-        swrr.remove_component("a")
-        assert swrr.total_emitted == 9
-        swrr.remove_component("b")
-        swrr.remove_component("c")
-        assert swrr.peek() is None
-        assert swrr.total_emitted == 0
-
     """Tests for the update_target() method."""
 
     def test_update_target_changes_weights(self):
@@ -612,81 +598,36 @@ class TestSwrrIterateWithIntegerKeys:
         assert len(result) == 4
 
 
-class TestSWRRRemoveComponent:
-    """Removal renormalizes survivors while preserving their mutual history."""
+class TestSWRRTemporarySkip:
+    """Temporary exclusions preserve the target and account for survivor weights."""
 
-    def test_removed_component_never_selected_again(self):
-        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.5}, ["a", "b"])
-        swrr.remove_component("a")
-        assert set(swrr.target_ratios) == {"b"}
-        assert swrr.target_ratios["b"] == 1.0
-        assert swrr.peek() == "b"
-        assert swrr.select({"a", "b"}) == "b"
+    @pytest.mark.parametrize("weight", [1.0, 7.0])
+    def test_unequal_survivors_keep_relative_proportions(self, weight: float) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.3, "c": 0.2}, ["a", "b", "c"])
+        counts: Counter[str] = Counter()
+        for _ in range(100):
+            chosen = swrr.peek(skip={"a"})
+            assert chosen is not None
+            counts[chosen] += 1
+            swrr.record(chosen, weight)
+        assert counts == {"b": 60, "c": 40}
+        assert swrr.target_ratios == {"a": 0.5, "b": 0.3, "c": 0.2}
+        assert swrr.peek() == "a"  # Its full-mixture deficit is retained.
+        assert swrr.total_emitted == 100 * weight
 
-    def test_survivors_keep_mutual_deficits(self):
-        """Removing a component must not make survivors "catch up" against
-        its lifetime emissions: the departed history leaves the total."""
-        swrr = SmoothWeightedRoundRobin(
-            {"a": 0.5, "b": 0.25, "c": 0.25}, ["a", "b", "c"]
-        )
-        swrr.record("a", 1000.0)
-        swrr.record("b", 10.0)
-        swrr.record("c", 30.0)
+    def test_skip_preserves_history_and_tie_order(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 2, "b": 1, "c": 1}, ["a", "c", "b"])
+        swrr.record_multi({"a": 10, "b": 3, "c": 3})
+        before = swrr.get_actual_ratios()
+        assert swrr.peek(skip={"a"}) == "c"
+        assert swrr.peek(skip={"a", "b", "c"}) is None
+        assert swrr.get_actual_ratios() == before
+        assert swrr.total_emitted == 16
+        assert swrr.peek(skip={"unknown"}) == swrr.peek()
 
-        swrr.remove_component("a")
-        deficits = swrr.get_deficits()
-        # total is now 40 (a's 1000 left with it): b owed 0.5*40-10=10,
-        # c owed 0.5*40-30=-10 — their relative standing is preserved.
-        assert deficits["b"] == 10.0
-        assert deficits["c"] == -10.0
-        assert swrr.total_emitted == 40.0
-
-    def test_remove_unknown_component_is_noop(self):
-        swrr = SmoothWeightedRoundRobin({"a": 1.0}, ["a"])
-        swrr.record("a", 5.0)
-        swrr.remove_component("zzz")
-        assert swrr.target_ratios == {"a": 1.0}
-        assert swrr.total_emitted == 5.0
-
-    def test_remove_last_component_empties_target(self):
-        swrr = SmoothWeightedRoundRobin({"a": 1.0}, ["a"])
-        swrr.remove_component("a")
-        assert swrr.target_ratios == {}
-        assert swrr.peek() is None
-        assert swrr.select({"a"}) is None
-
-    def test_tie_break_order_stays_deterministic_after_removal(self):
-        swrr = SmoothWeightedRoundRobin(
-            {"a": 0.25, "b": 0.25, "c": 0.25, "d": 0.25}, ["a", "b", "c", "d"]
-        )
-        swrr.remove_component("b")
-        # Equal deficits: earliest surviving order index wins.
-        assert swrr.peek() == "a"
-        swrr.remove_component("a")
-        assert swrr.peek() == "c"
-
-
-class TestSWRRRecordTargetGuard:
-    """record/record_multi ignore components outside the current target."""
-
-    def test_record_ignores_non_target_component(self):
-        swrr = SmoothWeightedRoundRobin({"a": 1.0}, ["a"])
-        swrr.record("ghost", 100.0)
-        assert swrr.total_emitted == 0.0
-        assert "ghost" not in swrr._emitted
-
-    def test_record_multi_after_removal_does_not_resurrect(self):
-        """A packed straggler contributing to a removed component must not
-        re-create its emitted entry or inflate the total — that would hand
-        the survivors a phantom collective deficit and pollute
-        get_actual_ratios (spurious warn_tolerance warnings)."""
-        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.5}, ["a", "b"])
-        swrr.record("a", 60.0)
-        swrr.record("b", 40.0)
-        swrr.remove_component("a")
-        assert swrr.total_emitted == 40.0
-
-        swrr.record_multi({"a": 50.0, "b": 10.0})
-        assert swrr.total_emitted == 50.0  # only b's share recorded
-        assert "a" not in swrr._emitted
-        assert swrr.get_actual_ratios() == {"b": 1.0}
+    def test_off_target_record_accounting_is_unchanged(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 1}, ["a"])
+        swrr.record("other", 2)
+        swrr.record_multi({"a": 1, "other": 3})
+        assert swrr.total_emitted == 6
+        assert swrr.get_actual_ratios() == {"a": 1 / 6, "other": 5 / 6}

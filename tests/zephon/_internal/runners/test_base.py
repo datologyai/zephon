@@ -384,6 +384,23 @@ def test_source_exhaustion_bypasses_buffers_without_corrupting_epoch_floor() -> 
     assert state._epoch_floor == 5
 
 
+def test_next_flush_after_source_notification_does_not_prove_drainage() -> None:
+    state = _make_batch_runner(batch_size=2).ops[0]
+    older = _rec(0, chunk_id=0)
+    boundary = _flush_sentinel(boundary_cid=1)
+    assert state.enqueue([older, boundary]) == []
+    notification = Engine._make_source_exhausted_sentinel(lane_id=0, component_id=0)
+    assert state.enqueue([notification]) == [([notification], 0)]
+    # An unrelated record releases the earlier stalled flush. Records already
+    # injected into later chunks can still be held in an upstream accumulator.
+    survivor = _rec(1, chunk_id=1)
+    ready = state.enqueue([survivor])
+    assert [batch for batch, _ in ready] == [[older, survivor], [boundary]]
+    later = _rec(2, chunk_id=1)
+    assert state.enqueue([later]) == []
+    assert state.accumulator_impl.has_pending_data()
+
+
 # ---------------------------------------------------------------------------
 # Per-lane flush sentinel scoping
 # ---------------------------------------------------------------------------

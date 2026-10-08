@@ -973,14 +973,9 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
-        A source-exhaustion notification allows a component to leave the target
-        once it is needed but unavailable in this operator's local buffer. The
-        surviving weights are renormalized in both bounded and strict modes.
-        This is a source signal: records buffered upstream may still arrive.
-        Late records containing only retired components are discarded at flush
-        in strict mode; bounded mode drains them. Packed records contributing to
-        a live component remain usable. This does not change source stop/repeat
-        policies or make the source allocate more work to surviving datasets.
+        Both modes stop waiting for exhausted sources while retaining late
+        records on target; ratios are approximate during that tail. See
+        :doc:`/pipelines/shuffling_and_maintaining_mixtures` for the semantics.
 
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
@@ -988,7 +983,8 @@ class Pipeline:
                 operator emits what it has, so the output mixture may drift if a
                 component stays scarce. Pass ``None`` to instead **drop** the surplus
                 it cannot place on-target — at every epoch boundary and at end of
-                stream. This makes the mixture exact but discards data, so use it only
+                stream. This enforces the mixture until source exhaustion but
+                discards data, so use it only
                 when an exact mixture matters more than keeping every sample. How much
                 is dropped depends on the stream's skew and on ``flush_every_k_chunks``
                 (smaller → more dropped). ensure_mixture is always non-monotonic, so
@@ -1795,17 +1791,19 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon._internal.notify import _notify_item, is_sentinel, should_notify
+        from zephon._internal.notify import _notify_item, is_sentinel
 
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            if should_notify(item):
-                _notify_item(engine, item, use_monotone)
-            if not is_sentinel(item):
-                yield item
+            if is_sentinel(item):
+                if isinstance(item, SampleRecord) and item.meta.tombstone:
+                    _notify_item(engine, item, use_monotone)
+                continue
+            _notify_item(engine, item, use_monotone)
+            yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,
         # notify() pins the record_cursor's chunk to keep it in inflight

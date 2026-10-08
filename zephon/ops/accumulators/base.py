@@ -91,24 +91,14 @@ class Accumulator(ABC, Generic[T]):
         """
         return False
 
-    def on_source_exhausted(
+    def _on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[T]]:
-        """React to permanent source exhaustion for one lane and component.
+        """Internal hint that this lane will receive no new source records.
 
-        No new source records will be injected for this component. Records
-        already buffered upstream may still arrive and remain usable; this
-        notification does not flush buffers or end the stream.
-
-        Notifications repeat on subsequent chunks so a fresh replay epoch can
-        recover the information. Reactions must be idempotent, lane-scoped,
-        and reproducible after ``flush(reset=True, lane_id=...)``. Stateful
-        consumers must use non-monotone epoch replay; this hook alone does
-        not checkpoint their state. Default behavior is a no-op.
-
-        A notification can overtake a flush held by ``Batch(drop_last=True)``.
-        Do not infer a drain barrier from its arrival or assume that upstream
-        epoch boundaries and these notifications always arrive in source order.
+        Records already buffered upstream may still arrive and must be handled
+        normally. Permanent source knowledge survives epoch resets; consumers
+        must be lane-scoped and idempotent. The default leaves buffers alone.
         """
         return []
 

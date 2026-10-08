@@ -428,42 +428,50 @@ class TestEnsureMixtureIntegration:
         # ...by dropping the code surplus it could not place on-target.
         assert 0 < total(strict) < total(baseline)
 
-    def test_source_exhaustion_strict_mode_terminates_cleanly(
-        self, tmp_path: Path
+    def test_source_exhaustion_strict_mode_releases_surplus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A scalar stop policy drives termination when the smaller dataset
-        exhausts. The end-of-dataset sentinel is announced in-band; strict
-        ensure_mixture discards its withheld tail (tombstones), and no
-        sentinel-shaped record ever reaches the trainer."""
-        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=20, text_count=400)
+        """The notification releases records that strict mode otherwise withholds."""
+        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=3, text_count=1000)
 
-        work = StaticMixtureWorkSource(
-            [ds_code, ds_text],
-            {"code": 0.5, "text": 0.5},
-            chunk_size=10,
-            seed=42,
-            exhausted_policy="stop",
+        def collect() -> list[SampleRecord]:
+            work = StaticMixtureWorkSource(
+                [ds_code, ds_text],
+                {"code": 0.05, "text": 0.95},
+                chunk_size=10,
+                seed=42,
+                exhausted_policy="stop",
+            )
+            pipe = (
+                Pipeline(work)
+                .decode_text()
+                .ensure_mixture(
+                    max_buffer_size=None,
+                    weight_by="samples",
+                    mixture={"code": 0.5, "text": 0.5},
+                )
+                .options(
+                    runner="inline",
+                    deterministic=True,
+                    max_workers=1,
+                    canonical_replicas=1,
+                    flush_every_k_chunks=128,
+                )
+            )
+            return _collect_records(pipe)
+
+        enabled = collect()
+        monkeypatch.setattr(
+            StaticMixtureWorkSource, "_source_exhausted_components", lambda self: ()
         )
-
-        pipe = (
-            Pipeline(work)
-            .decode_text()
-            .ensure_mixture(max_buffer_size=None, weight_by="samples")
-            .options(deterministic=True, max_workers=2)
-        )
-
-        records = _collect_records(pipe)
-        # Nothing sentinel-shaped leaks to the trainer.
-        assert all(not r.meta.is_sentinel for r in records)
-        # No duplicates; the run terminated (finite, did not hang).
-        ids = [r.meta.sample_id for r in records]
-        assert len(ids) == len(set(ids))
-        counts = _count_components(records)
-        assert counts["code"] > 0
-        assert counts["text"] > 0
+        disabled = collect()
+        assert _count_components(enabled) == {"code": 3, "text": 57}
+        assert _count_components(disabled) == {"code": 3, "text": 3}
+        assert all(not r.meta.is_sentinel for r in enabled)
+        assert len({r.meta.sample_id for r in enabled}) == len(enabled)
 
     def test_source_exhaustion_bounded_mode_lossless(self, tmp_path: Path) -> None:
-        """Bounded mode is lossless across the death: every sample the smaller
+        """Bounded mode is lossless across source exhaustion: every sample the smaller
         (stop) dataset produced before exhausting is delivered."""
         ds_code, ds_text = _prepare_datasets(tmp_path, code_count=20, text_count=400)
 

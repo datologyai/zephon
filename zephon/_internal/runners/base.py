@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Sequence, TypeVar
 
 from zephon._internal.graph import Node, Stage
-from zephon._internal.notify import is_sentinel
+from zephon._internal.notify import is_sentinel, source_exhausted_component
 from zephon._internal.observability.stopwatch import Stopwatch
 from zephon._internal.ops.batch import Batch
 from zephon._internal.stream import (
@@ -190,7 +190,8 @@ class BaseOperatorState:
 
         Sentinel records bypass ``push_many`` and ``process_many`` and are
         emitted as individual ready batches. Source-exhaustion notifications
-        invoke ``on_source_exhausted`` first, without forcing buffer drainage.
+        invoke ``_on_source_exhausted`` first, without flushing or resetting
+        the accumulator.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
         to drain that lane's buffered data before the sentinel passes
@@ -265,12 +266,14 @@ class BaseOperatorState:
                 if e.meta.tombstone:
                     self._update_epoch_floor([e])
 
-                if e.meta.is_source_exhausted:
+                component_id = source_exhausted_component(e)
+                if component_id is not None:
                     ready.extend(
-                        self.accumulator_impl.on_source_exhausted(
-                            e.meta.lane_id, e.meta.source_exhausted_component_id
+                        self.accumulator_impl._on_source_exhausted(
+                            e.meta.lane_id, component_id
                         )
                     )
+                    self._try_release_stalled_sentinels(ready)
                     ready.append(([e], 0))
                 elif e.meta.is_flush_sentinel:
                     boundary_cid_tag = e.meta.tags.get("_boundary_cid")
