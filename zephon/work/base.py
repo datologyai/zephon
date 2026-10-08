@@ -13,7 +13,7 @@ from zephon._internal.checkpoint import (
     WORK_CHUNK_VERSION as _WORK_CHUNK_VERSION,
 )
 from zephon._internal.checkpoint import (
-    WorkChunkStateV2 as _WorkChunkStateV2,
+    WorkChunkStateV3 as _WorkChunkStateV3,
 )
 from zephon._internal.utils.swrr import swrr_iterate as _swrr_iterate
 from zephon.io.dataset import Dataset
@@ -73,11 +73,19 @@ class WorkChunk:
     mixture here because their chunks deliberately carry a different sample
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
+
+    ``source_exhausted`` names components with no future source records after
+    their last sample in this chunk. The engine inserts informational markers
+    there, or before this chunk when it contains none of that component.
+    Repeat the names on later chunks so resets and replay retain the knowledge.
+    These markers may overtake buffered records downstream; they do not promise
+    that all descendants of those source samples have finished processing.
     """
 
     components: SamplesPerComponent
     seed: int | None = None
     target_mixture: Mapping[str, float] | None = None
+    source_exhausted: tuple[str, ...] = ()
 
     ### INTERNAL ATTRIBUTES ###
     _order_cache: list[SourcedSampleId] | None = field(
@@ -267,12 +275,13 @@ class WorkChunk:
             items = self.components.get(name, [])
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        state = _WorkChunkStateV2(
+        state = _WorkChunkStateV3(
             version=_WORK_CHUNK_VERSION,
             seed=None if self.seed is None else int(self.seed),
             components=comps_serial,
             component_order=list(self._component_order),
             total_samples=int(self._total_samples),
+            source_exhausted=list(self.source_exhausted),
             target_mixture=(
                 None
                 if self.target_mixture is None
@@ -284,7 +293,7 @@ class WorkChunk:
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        ckpt = _WorkChunkStateV2.load(payload)
+        ckpt = _WorkChunkStateV3.load(payload)
 
         comps: dict[str, list[SampleId]] = {}
         for name, items in ckpt.components:
@@ -300,6 +309,7 @@ class WorkChunk:
             components=comps,
             seed=ckpt.seed,
             target_mixture=ckpt.target_mixture,
+            source_exhausted=tuple(ckpt.source_exhausted),
         )
 
         if (

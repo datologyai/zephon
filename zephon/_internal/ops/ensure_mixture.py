@@ -108,6 +108,8 @@ class _LaneState:
     total_emitted: float = 0.0
     # Counter for obsolete interleaving: counts emissions since last obsolete drain
     emissions_since_obsolete_drain: int = 0
+    source_exhausted: set[int] = field(default_factory=set)
+    removed_components: set[int] = field(default_factory=set)
 
 
 class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
@@ -278,46 +280,70 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             state.total_buffered += 1
             affected_lanes.add(lane_id)
 
-        # Phase 2: Emit batched per-lane (adaptive)
         for lane_id in affected_lanes:
-            state = self._lanes[lane_id]
-            emitted_batch: list[SampleRecord] = []
-
-            # Compute drain target: when forced to emit, drain to this level.
-            max_buf = self._config.max_buffer_size
-            if max_buf is None:
-                # Unbounded: never force-drain (drain_target unused here).
-                started_forced_drain = False
-                drain_target = 0
-            else:
-                drain_target = int(self._config.drain_target_ratio * max_buf)
-                started_forced_drain = state.total_buffered >= max_buf
-
-            # Greedy emit: while SWRR is happy OR buffer needs draining
-            while self._has_buffered_samples(state):
-                is_optimal = self._can_emit_optimal(state)
-
-                # If we started forced draining, continue until we reach drain_target
-                is_forced_drain = (
-                    started_forced_drain and state.total_buffered > drain_target
-                )
-
-                if not is_optimal and not is_forced_drain:
-                    break
-
-                # Emit one sample. Obsolete components are drained automatically
-                # at obsolete_drain_rate, interleaved with normal emissions.
-                record = self._emit_one(lane_id, state)
-                if record is not None:
-                    state.total_buffered -= 1
-                    emitted_batch.append(record)
-                else:
-                    break
-
-            if emitted_batch:
-                ready.append((emitted_batch, 0))
-
+            ready.extend(self._emit_ready(lane_id, self._lanes[lane_id]))
         return ready
+
+    def _emit_ready(
+        self, lane_id: int, state: _LaneState
+    ) -> list[ReadyBatch[SampleRecord]]:
+        emitted: list[SampleRecord] = []
+        max_buf = self._config.max_buffer_size
+        force = max_buf is not None and state.total_buffered >= max_buf
+        drain_target = (
+            int(self._config.drain_target_ratio * max_buf) if max_buf is not None else 0
+        )
+        while self._has_buffered_samples(state):
+            self._retire_exhausted_components(lane_id, state)
+            if not self._can_emit_optimal(state) and not (
+                force and state.total_buffered > drain_target
+            ):
+                break
+            record = self._emit_one(lane_id, state)
+            if record is None:
+                break
+            state.total_buffered -= 1
+            emitted.append(record)
+        return [(emitted, 0)] if emitted else []
+
+    def on_source_exhausted(
+        self, lane_id: int, component_id: int
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Use remaining local records, then reweight when this component blocks.
+
+        Upstream stragglers may still arrive. Reweighting uses local buffer
+        availability, not proof of drainage; deterministic replay preserves
+        the same input partitions. Late single-component records wait for
+        flush discard in strict mode and drain in bounded mode.
+        """
+        state = self._lanes[lane_id]
+        if component_id in state.source_exhausted:
+            return []
+        state.source_exhausted.add(component_id)
+        # React even when this is the final input; waiting for another push
+        # would strand already-buffered survivors until terminal disposal.
+        return self._emit_ready(lane_id, state)
+
+    def _retire_exhausted_components(self, lane_id: int, state: _LaneState) -> None:
+        swrr = state.swrr
+        if swrr is None or not state.source_exhausted:
+            return
+        while True:
+            ideal = swrr.peek()
+            if ideal is None or ideal not in state.source_exhausted:
+                return
+            if state.buffers.get(ideal) or any(
+                ideal in sample.contributions for sample in state.multi_component_buffer
+            ):
+                return
+            swrr.remove_component(ideal)
+            state.removed_components.add(ideal)
+            logger.info(
+                "[ensure_mixture.reweight] lane=%d component=%d starved after "
+                "source exhaustion; target renormalized over survivors",
+                lane_id,
+                ideal,
+            )
 
     def flush(
         self, *, reset: bool = False, lane_id: int | None = None
@@ -389,6 +415,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 state.emissions_since_obsolete_drain = 0
                 state.current_chunk_id = None
                 state.swrr = None
+                state.source_exhausted.clear()
+                state.removed_components.clear()
 
         if discarded:
             self._total_discarded += discarded
@@ -476,7 +504,18 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             if chunk_mixture:
                 target = dict(chunk_mixture)
 
+        had_target = bool(target)
+        if state.removed_components:
+            target = {
+                k: v for k, v in target.items() if k not in state.removed_components
+            }
+
         if not target:
+            if had_target and state.swrr is not None:
+                # An exhausted empty target must stay closed, not become the
+                # "no target configured" fallback that permits any emission.
+                state.swrr.update_target({})
+                return
             # No mixture info - will use uniform weights over available components
             state.swrr = None
             return
@@ -506,7 +545,10 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         target_components = set(state.swrr.target_ratios.keys())
         buffered_components = {cid for cid, buf in state.buffers.items() if buf}
-        return buffered_components - target_components
+        obsolete = buffered_components - target_components
+        if self._config.max_buffer_size is None:
+            obsolete -= state.source_exhausted
+        return obsolete
 
     def _should_drain_obsolete(self, state: _LaneState) -> bool:
         """Check if it's time to drain an obsolete sample based on the drain rate.
@@ -725,6 +767,14 @@ class EnsureMixture(BaseOp):
     The operator uses SWRR (Smooth Weighted Round Robin) for selection, which
     tracks deficit (target - actual) and always picks the component most
     "owed" samples. This ensures smooth, deterministic convergence.
+
+    Source-exhausted components leave the target when they would block emission
+    and no local record can supply them. Both modes then renormalize the surviving
+    weights. This does not prove that upstream buffers have drained: strict mode
+    discards late records containing only retired components at flush; bounded
+    mode drains them. Packed records contributing to live components remain
+    usable, with their original contribution metadata. Source allocation and
+    stop/repeat policies are unchanged.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission

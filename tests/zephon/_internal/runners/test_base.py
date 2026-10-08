@@ -10,6 +10,7 @@ from typing import Any, Sequence
 import pytest
 
 from tests.zephon._internal.runners._helpers import _ctx_services
+from zephon._internal.engine import Engine
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
@@ -371,6 +372,16 @@ def test_flush_sentinel_dummy_chunk_id_does_not_corrupt_floor() -> None:
     # Flush sentinel has chunk_id=0 in its meta, but boundary_cid=6 in tags.
     state.enqueue([_flush_sentinel(boundary_cid=6)])
     assert state._epoch_floor == 6
+
+
+def test_source_exhaustion_bypasses_buffers_without_corrupting_epoch_floor() -> None:
+    state = _make_pack_runner().ops[0]
+    state.enqueue([_rec(0, chunk_id=5)])
+    assert state.accumulator_impl.has_pending_data()
+    sentinel = Engine._make_source_exhausted_sentinel(lane_id=0, component_id=7)
+    assert state.enqueue([sentinel]) == [([sentinel], 0)]
+    assert state.accumulator_impl.has_pending_data()
+    assert state._epoch_floor == 5
 
 
 # ---------------------------------------------------------------------------

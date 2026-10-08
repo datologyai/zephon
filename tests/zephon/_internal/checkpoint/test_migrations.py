@@ -624,7 +624,7 @@ def test_v4_to_v5_does_not_mutate_input():
     assert not hasattr(v4, "token_deficits")
 
 
-def test_work_chunk_v1_migrates_to_v2_with_none_target():
+def test_work_chunk_v1_migrates_with_none_target_and_no_exhaustion():
     raw = {
         "version": 1,
         "seed": 3,
@@ -633,8 +633,9 @@ def test_work_chunk_v1_migrates_to_v2_with_none_target():
         "total_samples": 2,
     }
     migrated = migrate("work_chunk", raw)
-    assert migrated["version"] == 2
+    assert migrated["version"] == 3
     assert migrated["target_mixture"] is None
+    assert migrated["source_exhausted"] == []
     assert migrated["components"] == [("a", [[0, 0, 0], [0, 0, 1]])]
 
 
@@ -653,7 +654,7 @@ def test_work_chunk_v2_payload_loads_directly():
 
 def test_work_chunk_newer_than_supported_rejected():
     with pytest.raises(RuntimeError, match="newer"):
-        migrate("work_chunk", {"version": 3, "components": [], "component_order": []})
+        migrate("work_chunk", {"version": 4, "components": [], "component_order": []})
 
 
 # ---------------------------------------------------------------------------

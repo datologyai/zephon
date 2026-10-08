@@ -136,10 +136,15 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def record(self, component: K, weight: float = 1.0) -> None:
         """Record that an item was emitted from a component.
 
+        Off-target components are ignored so stragglers cannot re-create a
+        retired component's history or inflate the surviving components' deficits.
+
         Args:
             component: The component that emitted.
             weight: The weight of the emitted item (1.0 for samples, token_count for tokens).
         """
+        if component not in self._target:
+            return
         self._emitted[component] += weight
         self._total += weight
 
@@ -148,6 +153,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
         When a single sample contains content from multiple components (e.g., after
         packing), this method updates the deficit tracking for all components at once.
+        Contributions outside the current target are ignored, as in ``record``.
 
         Args:
             contributions: Maps component -> weight contributed by this emission.
@@ -155,6 +161,8 @@ class SmoothWeightedRoundRobin(Generic[K]):
                           300 tokens from component 0 and 200 from component 1.
         """
         for component, weight in contributions.items():
+            if component not in self._target:
+                continue
             self._emitted[component] += weight
             self._total += weight
 
@@ -173,6 +181,18 @@ class SmoothWeightedRoundRobin(Generic[K]):
             k: self._target[k] * effective_total - self._emitted[k]
             for k in self._target
         }
+
+    def remove_component(self, component: K) -> None:
+        """Retire a component and its emitted mass, renormalizing the survivors."""
+        if component not in self._target:
+            return
+        del self._target[component]
+        total_weight = sum(self._target.values())
+        if total_weight > 0:
+            self._target = {k: w / total_weight for k, w in self._target.items()}
+        self._order = [k for k in self._order if k != component]
+        self._index = {k: i for i, k in enumerate(self._order)}
+        self._total -= self._emitted.pop(component, 0.0)
 
     def update_target(self, new_target: dict[K, float]) -> None:
         """Update target weights while preserving emission history.

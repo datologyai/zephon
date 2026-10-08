@@ -67,3 +67,29 @@ lost data and more memory use):
 :language: python
 :caption: examples/guide/pipelines/ensure_mixture_unbounded_buffer.py
 ```
+
+**When a Dataset Runs Out.** When a non-repeating dataset contributes its last source
+sample, Zephon inserts a source-exhaustion notification immediately after that sample.
+The same happens on the final allowed pass of a dataset with `max_repeats`. An ordinary
+repeat boundary does not trigger this notification.
+
+`ensure_mixture` uses the notification in both bounded and strict modes. It first uses
+the exhausted component's records that it has buffered locally. Once that component is
+needed but unavailable, it removes the component from its target and renormalizes the
+surviving weights. For example, with a 50:50 A/B target, buffered B records can continue
+when A has run out; strict mode no longer has to withhold and eventually discard those B
+records just to preserve an impossible ratio.
+
+The notification describes the source, not completion of downstream processing. It can
+overtake records held by an upstream shuffle, packer, or other operator. After a component
+has been removed from the target, late records containing only removed components are
+discarded at flush in strict mode and drained in bounded mode. Packed records that also
+contribute to a surviving component remain usable. This is a local buffering policy,
+not a guarantee of an exact ratio across all late-arriving data.
+
+The work source's [stop and repeat policies](../worksources/shuffling_and_repeating_samples.md)
+still govern how much work is produced. In particular, `exhausted_policy="stop"` still
+stops the source when a dataset cannot supply its next allocation; the notification does
+not make it read all remaining records from the other datasets. The default
+`stop_after_passes` run boundary does not announce permanent exhaustion of its repeating
+datasets.

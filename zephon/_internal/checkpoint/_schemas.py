@@ -220,7 +220,7 @@ class CursorStateV1(CheckpointMixin):
 # Component: WorkChunk
 # ---------------------------------------------------------------------------
 
-WORK_CHUNK_VERSION = 2
+WORK_CHUNK_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -290,6 +290,26 @@ class WorkChunkStateV2(WorkChunkStateV1):
             raise ValueError(
                 "WorkChunkStateV2 invariants violated:\n  - " + "\n  - ".join(errors)
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class WorkChunkStateV3(WorkChunkStateV2):
+    """Add replayable per-component source-exhaustion announcements."""
+
+    version: int = 3
+    source_exhausted: list[str]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        names = self.source_exhausted
+        if not isinstance(names, list) or any(
+            not isinstance(n, str) or not n for n in names
+        ):
+            raise ValueError(
+                "source_exhausted must be a list of non-empty component names"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError("source_exhausted must not contain duplicate components")
 
 
 # ---------------------------------------------------------------------------

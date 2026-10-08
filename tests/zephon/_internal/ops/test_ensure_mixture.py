@@ -127,6 +127,114 @@ def _flatten_ready(ready: list) -> list[SampleRecord]:
     return [rec for batch, _ in ready for rec in batch]
 
 
+class TestSourceExhaustion:
+    def test_strict_obsolete_drain_does_not_leak_announced_component(self) -> None:
+        target = {0: 0.5, 1: 0.5}
+        acc = _make_accumulator_with_chunk_mixture(
+            target, max_buffer_size=None, obsolete_drain_rate=0.5
+        )
+        assert len(_flatten_ready(acc.push_many([_rec(i) for i in range(3)]))) == 1
+        assert acc.on_source_exhausted(0, 0) == []
+        target.clear()
+        target[1] = 1.0
+        live = [_rec(i + 10, component_id=1, chunk=1) for i in range(6)]
+        assert _flatten_ready(acc.push_many(live)) == live
+        # The target update, rather than starvation retirement, removed A.
+        assert acc._lanes[0].removed_components == set()
+        _assert_tombstones_only(acc.flush(), expected_count=2)
+
+    @pytest.mark.parametrize("limit", [None, 64])
+    def test_notification_immediately_releases_buffered_survivors(
+        self, limit: int | None
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5}, max_buffer_size=limit
+        )
+        records = [_rec(i, component_id=1) for i in range(10)]
+        assert acc.push_many(records) == []
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == records
+        assert acc.on_source_exhausted(0, 0) == []
+        assert not acc.has_pending_data()
+
+    def test_local_records_are_used_before_retirement(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5}, max_buffer_size=None
+        )
+        a = [_rec(i) for i in range(3)]
+        assert _flatten_ready(acc.push_many(a)) == a[:1]
+        assert acc.on_source_exhausted(0, 0) == []
+        b = [_rec(i + 10, component_id=1) for i in range(6)]
+        out = _flatten_ready(acc.push_many(b))
+        assert [r.payload["value"] for r in out] == [10, 1, 11, 2, 12, 13, 14, 15]
+
+    @pytest.mark.parametrize("limit", [None, 2])
+    def test_late_records_do_not_resurrect_target_or_emission_mass(
+        self, limit: int | None
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5}, max_buffer_size=limit
+        )
+        acc.on_source_exhausted(0, 0)
+        acc.push_many([_rec(0, component_id=1)])
+        late = _rec(1, chunk=1)
+        live = _rec(2, component_id=1, chunk=1)
+        emitted = _flatten_ready(acc.push_many([late, live]))
+        flushed = _flatten_ready(acc.flush())
+        assert live in emitted
+        swrr = acc._lanes[0].swrr
+        assert swrr is not None
+        assert swrr.target_ratios == {1: 1.0}
+        assert swrr.total_emitted == 2
+        assert swrr.get_actual_ratios() == {1: 1.0}
+        if limit is None:
+            assert late not in emitted
+            assert len(flushed) == 1 and flushed[0].meta.tombstone
+        else:
+            assert late in emitted + flushed
+
+    def test_lane_reset_and_repeated_announcement(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5}, max_buffer_size=None
+        )
+        for lane in (0, 1):
+            acc.on_source_exhausted(lane, 0)
+            assert acc.push_many([_rec(0, component_id=1, lane=lane)])
+        acc.flush(reset=True, lane_id=0)
+        assert acc.push_many([_rec(1, component_id=1, lane=0)]) == []
+        assert acc.push_many([_rec(1, component_id=1, lane=1)])
+        assert len(_flatten_ready(acc.on_source_exhausted(0, 0))) == 1
+
+    def test_packed_straggler_preserves_metadata_without_reviving_dead_weight(
+        self,
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5}, max_buffer_size=None
+        )
+        acc.on_source_exhausted(0, 0)
+        acc.push_many([_rec(0, component_id=1)])
+        packed = SampleRecord(
+            meta=SampleMeta(
+                sample_id=(0, 0, 1),
+                lane_id=0,
+                chunk_id=1,
+                component_sample_counts={0: 2, 1: 3},
+            ),
+            payload={"value": "packed"},
+        )
+        assert _flatten_ready(acc.push_many([packed])) == [packed]
+        assert packed.meta.component_sample_counts == {0: 2, 1: 3}
+        swrr = acc._lanes[0].swrr
+        assert swrr is not None and swrr.total_emitted == 4
+        assert swrr.get_actual_ratios() == {1: 1.0}
+
+    def test_all_targets_removed_stays_closed_on_next_chunk(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture({0: 1.0}, max_buffer_size=None)
+        acc.on_source_exhausted(0, 0)
+        assert acc.push_many([_rec(0, component_id=1)]) == []
+        assert acc.push_many([_rec(1, chunk=1)]) == []
+        _assert_tombstones_only(acc.flush(), expected_count=2)
+
+
 class TestEnsureMixtureAccumulator:
     """Tests for EnsureMixtureAccumulator (adaptive buffering)."""
 
@@ -1678,3 +1786,64 @@ def test_bounded_mode_passes_balanced_stream_through() -> None:
     # SWRR is always happy on a balanced stream: everything emits, in order.
     assert len(out) == 16
     assert not acc.has_pending_data()
+
+
+def test_bounded_mode_drains_dead_component_stragglers() -> None:
+    """Bounded mode stays lossless: post-reweight stragglers of a dead
+    component leave through the obsolete drain."""
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=100,
+        obsolete_drain_rate=0.5,
+    )
+    acc.on_source_exhausted(0, 0)
+    acc.push_many([_rec(0, component_id=1)])  # starves comp 0 -> reweight
+    assert acc._lanes[0].removed_components == {0}
+
+    acc.push_many([_rec(50, component_id=0)])  # straggler
+    out = _flatten_ready(
+        acc.push_many([_rec(60 + i, component_id=1) for i in range(6)])
+    )
+    assert any(_get_component(r.meta) == 0 for r in out), "straggler must drain"
+
+
+def test_on_source_exhausted_is_lane_scoped() -> None:
+    """One lane's EOD must not affect other lanes.
+
+    Lanes advance at independent paces: lane 0's dataset dying says nothing
+    about lane 1, which gets its own sentinel when it reaches that point.
+    """
+    acc = _make_accumulator_with_chunk_mixture(
+        {0: 0.5, 1: 0.5},
+        max_buffer_size=None,
+    )
+    acc.push_many([_rec(i, component_id=0, lane=0) for i in range(10)])
+    acc.push_many([_rec(i, component_id=0, lane=1) for i in range(10)])
+    assert acc.has_pending_data()
+
+    acc.on_source_exhausted(0, 0)
+
+    assert acc._lanes[0].source_exhausted == {0}
+    assert acc._lanes[1].source_exhausted == set()
+    # Both lanes' buffers are intact (the announcement discards nothing).
+    assert acc.has_pending_data()
+
+
+def test_all_live_components_removed_keeps_gate_closed() -> None:
+    """When every target component is dead and starved, a chunk-target
+    refresh must keep the (empty-target) gate CLOSED — falling back to
+    swrr=None would open it and leak dead stragglers off-target."""
+    acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=None)
+    acc.on_source_exhausted(0, 0)
+    acc.on_source_exhausted(0, 1)
+    # A component-2 record (outside the target) triggers the emit loop:
+    # both dead components starve and are removed; target is now empty.
+    out = _flatten_ready(acc.push_many([_rec(0, component_id=2, chunk=0)]))
+    assert out == []
+    assert acc._lanes[0].removed_components == {0, 1}
+
+    # Chunk change re-reads the (unchanged) mixture {0,1}; filtered empty.
+    # The straggler stays buffered (gate closed) until the flush discard.
+    out2 = _flatten_ready(acc.push_many([_rec(1, component_id=2, chunk=1)]))
+    assert out2 == []
+    assert acc.has_pending_data()

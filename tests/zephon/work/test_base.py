@@ -3,6 +3,7 @@
 
 import math
 from collections import Counter
+from typing import Any
 
 import pytest
 
@@ -388,14 +389,14 @@ def test_workchunk_state_dict_uses_typed_schema_version():
 
     chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, seed=1)
     state = chunk.state_dict()
-    assert state["version"] == WORK_CHUNK_VERSION == 2
+    assert state["version"] == WORK_CHUNK_VERSION == 3
     assert state["target_mixture"] is None
 
     targeted = WorkChunk(
         components={"A": make_ids(0, 0, 1)}, seed=1, target_mixture={"A": 1.0}
     )
     state = targeted.state_dict()
-    assert state["version"] == 2
+    assert state["version"] == 3
     assert state["target_mixture"] == {"A": 1.0}
 
 
@@ -476,7 +477,7 @@ def test_workchunk_target_mixture_round_trip():
         target_mixture={"A": 0.5, "B": 0.5},
     )
     state = chunk.state_dict()
-    assert state["version"] == 2
+    assert state["version"] == 3
     restored = WorkChunk.from_state(state)
     assert restored.target_mixture == {"A": 0.5, "B": 0.5}
     assert restored.components == chunk.components
@@ -538,26 +539,68 @@ def test_workchunk_from_state_preserves_target_through_reorder():
     assert restored.target_mixture == {"A": 0.7, "B": 0.3}
 
 
-def test_workchunk_sample_mode_state_dict_is_v2_with_null_target():
-    """An unstamped chunk serialises to the current (v2) shape with
+def test_workchunk_sample_mode_state_dict_is_current_with_null_target():
+    """An unstamped chunk serialises to the current shape with
     ``target_mixture: None`` — the write path never emits an older version."""
     chunk = WorkChunk(
         components={"A": make_ids(0, 0, 2), "B": make_ids(1, 0, 1)}, seed=9
     )
     assert chunk.target_mixture is None
     assert chunk.state_dict() == {
-        "version": 2,
+        "version": 3,
         "seed": 9,
         "components": [("A", [[0, 0, 0], [0, 0, 1]]), ("B", [[1, 0, 0]])],
         "component_order": ["A", "B"],
         "total_samples": 3,
         "target_mixture": None,
+        "source_exhausted": [],
     }
 
 
 # ---------------------------------------------------------------------------
 # WorkSource token-priming protocol (default no-op)
 # ---------------------------------------------------------------------------
+
+
+def test_workchunk_source_exhaustion_round_trip() -> None:
+    chunk = WorkChunk(
+        components={"A": make_ids(0, 0, 2)},
+        source_exhausted=("A", "absent"),
+        target_mixture={"A": 0.5, "absent": 0.5},
+    )
+    restored = WorkChunk.from_state(chunk.state_dict())
+    assert restored.source_exhausted == ("A", "absent")
+    assert list(restored) == list(chunk)
+    assert restored.target_mixture == chunk.target_mixture
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_chunks_restore_without_source_exhaustion(version: int) -> None:
+    chunk = WorkChunk(components={"A": make_ids(0, 0, 1)}, target_mixture={"A": 1.0})
+    state = chunk.state_dict()
+    state["version"] = version
+    del state["source_exhausted"]
+    if version == 1:
+        del state["target_mixture"]
+    restored = WorkChunk.from_state(state)
+    assert restored.source_exhausted == ()
+    assert restored.components == chunk.components
+    assert restored.target_mixture == (None if version == 1 else {"A": 1.0})
+
+
+@pytest.mark.parametrize("bad", [None, "A", [0], ["", "A"], [None], ["A", "A"]])
+def test_workchunk_rejects_corrupt_exhaustion_stamp(bad: Any) -> None:
+    state = WorkChunk(components={"A": make_ids(0, 0, 1)}).state_dict()
+    state["source_exhausted"] = bad
+    with pytest.raises(ValueError, match="source_exhausted"):
+        WorkChunk.from_state(state)
+
+
+def test_current_workchunk_requires_exhaustion_stamp() -> None:
+    state = WorkChunk(components={"A": make_ids(0, 0, 1)}).state_dict()
+    del state["source_exhausted"]
+    with pytest.raises(ValueError, match="source_exhausted"):
+        WorkChunk.from_state(state)
 
 
 class _PlainWorkSource(WorkSource):

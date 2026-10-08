@@ -115,6 +115,7 @@ from zephon._internal.checkpoint._schemas import (
     StaticMixtureStateV5,
     WorkChunkStateV1,
     WorkChunkStateV2,
+    WorkChunkStateV3,
 )
 
 
@@ -181,6 +182,13 @@ def _work_chunk_v1_to_v2(v1: WorkChunkStateV1) -> dict[str, Any]:
     return d
 
 
+def _work_chunk_v2_to_v3(v2: WorkChunkStateV2) -> dict[str, Any]:
+    """Old chunks carry no source-exhaustion announcements."""
+    d = v2.to_dict()
+    d["source_exhausted"] = []
+    return d
+
+
 def _engine_v1_to_v2(v1: EngineStateV1) -> dict[str, Any]:
     """Drop the ``"{global_rank}:"`` prefix from ``rr_next_idx`` keys.
 
@@ -211,7 +219,7 @@ MigrationFn = Callable[[Any], dict[str, Any]]
 #: order: v1->v2, v2->v3, etc.
 _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
     "engine": {1: _engine_v1_to_v2},
-    "work_chunk": {1: _work_chunk_v1_to_v2},
+    "work_chunk": {1: _work_chunk_v1_to_v2, 2: _work_chunk_v2_to_v3},
     "static_mixture": {
         1: _static_mixture_v1_to_v2,
         2: _static_mixture_v2_to_v3,
@@ -229,6 +237,7 @@ _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
     "work_chunk": {
         1: WorkChunkStateV1,
         2: WorkChunkStateV2,
+        3: WorkChunkStateV3,
     },
     "static_mixture": {
         1: StaticMixtureStateV1,

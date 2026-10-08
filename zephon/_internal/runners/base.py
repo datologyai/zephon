@@ -188,9 +188,9 @@ class BaseOperatorState:
         The accumulator runs on the pump thread (serial) and maintains
         any cross-invocation state needed for deterministic batching.
 
-        Sentinel records (tombstones, flush signals, etc.) bypass the
-        accumulator entirely and are emitted as individual ready batches.
-        This ensures operators never see sentinels unless they create them.
+        Sentinel records bypass ``push_many`` and ``process_many`` and are
+        emitted as individual ready batches. Source-exhaustion notifications
+        invoke ``on_source_exhausted`` first, without forcing buffer drainage.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
         to drain that lane's buffered data before the sentinel passes
@@ -261,13 +261,18 @@ class BaseOperatorState:
                     self._try_release_stalled_sentinels(ready)
                     pre_sentinel = []
 
-                # Tombstones contribute to epoch floor tracking — their chunk_id
-                # must constrain eviction even though they bypass the accumulator.
-                # Flush sentinels have dummy chunk_id=0 and must NOT affect the floor.
-                if not e.meta.is_flush_sentinel:
+                # Only tombstones close real offsets; other controls have dummy cursors.
+                if e.meta.tombstone:
                     self._update_epoch_floor([e])
 
-                if e.meta.is_flush_sentinel:
+                if e.meta.is_source_exhausted:
+                    ready.extend(
+                        self.accumulator_impl.on_source_exhausted(
+                            e.meta.lane_id, e.meta.source_exhausted_component_id
+                        )
+                    )
+                    ready.append(([e], 0))
+                elif e.meta.is_flush_sentinel:
                     boundary_cid_tag = e.meta.tags.get("_boundary_cid")
                     bcid = int(boundary_cid_tag) if boundary_cid_tag is not None else 0
                     lane = e.meta.lane_id

@@ -285,12 +285,27 @@ class SampleMeta:
     @property
     def is_sentinel(self) -> bool:
         """True if this record is a control signal (tombstone, flush, etc.)."""
-        return self.tombstone or self.is_flush_sentinel
+        return self.tombstone or self.is_flush_sentinel or self.is_source_exhausted
 
     @property
     def is_flush_sentinel(self) -> bool:
         """True if this record is a flush sentinel (triggers accumulator flush)."""
         return bool(self.tags.get("_flush_sentinel", False))
+
+    @property
+    def is_source_exhausted(self) -> bool:
+        """Whether one dataset's source is permanently exhausted in this lane.
+
+        No further source records from this component will be injected.
+        Previously injected records and their descendants may still arrive
+        from upstream buffers: this notification is not a drain barrier.
+        """
+        return bool(self.tags.get("_source_exhausted", False))
+
+    @property
+    def source_exhausted_component_id(self) -> int:
+        """Component announced by a source-exhaustion notification."""
+        return int(self.tags["_source_exhausted_component_id"])
 
     @property
     def padding_length(self) -> int | None:

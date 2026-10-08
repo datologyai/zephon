@@ -25,8 +25,8 @@ class _MonotoneNotify(NamedTuple):
 
     ``delivered`` is True when the notified item is actually yielded to the
     consumer at the pipeline tail (a real batch or record) and False for
-    control items (tombstones, sentinels) that are notified but never
-    delivered. It feeds the per-lane delivery counters used for mid-window
+    tombstones that are notified but never delivered. It feeds the per-lane
+    delivery counters used for mid-window
     checkpoint detection.
     """
 
@@ -132,5 +132,12 @@ def is_tombstone(item: StreamItem) -> bool:
 
 
 def is_sentinel(item: StreamItem) -> bool:
-    """Check if a stream item is a sentinel (should be notified but not yielded)."""
+    """Whether a stream item is a control record, hidden from the consumer."""
     return isinstance(item, SampleRecord) and item.meta.is_sentinel
+
+
+def should_notify(item: StreamItem) -> bool:
+    """Notify real data and tombstones, never control records with dummy cursors."""
+    return not is_sentinel(item) or (
+        isinstance(item, SampleRecord) and item.meta.tombstone
+    )

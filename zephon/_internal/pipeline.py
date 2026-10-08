@@ -973,6 +973,15 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
+        A source-exhaustion notification allows a component to leave the target
+        once it is needed but unavailable in this operator's local buffer. The
+        surviving weights are renormalized in both bounded and strict modes.
+        This is a source signal: records buffered upstream may still arrive.
+        Late records containing only retired components are discarded at flush
+        in strict mode; bounded mode drains them. Packed records contributing to
+        a live component remain usable. This does not change source stop/repeat
+        policies or make the source allocate more work to surviving datasets.
+
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
                 target mixture needs next. Default 1000; when the buffer fills, the
@@ -1786,16 +1795,14 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon._internal.notify import _notify_item, is_sentinel
+        from zephon._internal.notify import _notify_item, is_sentinel, should_notify
 
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            # Flush sentinels carry dummy cursor data — skip notification to
-            # avoid corrupting offset_done bitmaps and cursor pinning.
-            if not (isinstance(item, SampleRecord) and item.meta.is_flush_sentinel):
+            if should_notify(item):
                 _notify_item(engine, item, use_monotone)
             if not is_sentinel(item):
                 yield item
