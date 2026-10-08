@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import gc
 import pickle
 import sys
@@ -256,53 +255,73 @@ class TestCoalesceEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# SHM allocation
+# ---------------------------------------------------------------------------
+class TestAllocShmBuffer:
+    def test_attaches_shared_storage_on_cpu(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allocate = torch.UntypedStorage._new_shared
+        allocations: list[object] = []
+
+        def capture_storage(size: int, *, device: str) -> object:
+            storage = allocate(size, device=device)
+            allocations.append(storage)
+            return storage
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", capture_storage)
+        with torch.device("meta"):
+            buf = shm_coalesce._alloc_shm_buffer(37, torch.int64, "test")
+        assert len(allocations) == 1
+        assert buf.untyped_storage() is allocations[0]
+        assert buf.device.type == "cpu"
+        assert buf.dtype == torch.int64
+        assert buf.shape == (37,)
+        assert buf.is_shared()
+        assert buf.untyped_storage().nbytes() == 37 * 8
+        buf.fill_(3)
+        assert buf.tolist() == [3] * 37
+
+    @pytest.mark.parametrize("message", ["No space left on device (28)", "Success (0)"])
+    def test_retries_shm_exhaustion(
+        self, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
+        allocate = torch.UntypedStorage._new_shared
+        attempts = 0
+        waits: list[str] = []
+
+        def transient_failure(size: int, *, device: str) -> object:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError(
+                    f"unable to allocate shared memory(shm) for file </torch_1_2_3>: {message}"
+                )
+            return allocate(size, device=device)
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", transient_failure)
+        monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", waits.append)
+        buf = shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
+        assert buf.is_shared()
+        assert attempts == 2
+        assert waits == ["test"]
+
+    def test_propagates_unrelated_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        waits: list[str] = []
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("unexpected allocation error")
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", fail)
+        monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", waits.append)
+        with pytest.raises(RuntimeError, match="unexpected allocation error"):
+            shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
+        assert waits == []
+
+
+# ---------------------------------------------------------------------------
 # SHM properties
 # ---------------------------------------------------------------------------
-def test_shared_allocation_does_not_copy_private_storage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def reject_copy(*args: object, **kwargs: object) -> None:
-        pytest.fail("Shared allocation must not copy a private tensor's storage")
-
-    monkeypatch.setattr(torch.Tensor, "share_memory_", reject_copy)
-    buf = shm_coalesce._alloc_shm_buffer(37, torch.int64, "test")
-    assert buf.device.type == "cpu"
-    assert buf.dtype == torch.int64
-    assert buf.shape == (37,)
-    assert buf.is_shared()
-    assert buf.untyped_storage().nbytes() == 37 * 8
-    buf.fill_(3)
-    assert buf.tolist() == [3] * 37
-
-
-def test_shared_allocation_retries_only_shm_exhaustion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    allocate = torch.UntypedStorage._new_shared
-    attempts = 0
-    waits: list[str] = []
-
-    def transient_failure(size: int, *, device: str) -> object:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise OSError(errno.ENOSPC, "No space left on device")
-        return allocate(size, device=device)
-
-    monkeypatch.setattr(torch.UntypedStorage, "_new_shared", transient_failure)
-    monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", waits.append)
-    buf = shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
-    assert buf.is_shared()
-    assert attempts == 2
-    assert waits == ["test"]
-
-    def fail(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("unexpected allocation error")
-
-    monkeypatch.setattr(torch.UntypedStorage, "_new_shared", fail)
-    with pytest.raises(RuntimeError, match="unexpected allocation error"):
-        shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
-    assert waits == ["test"]
 
 
 class TestCoalesceShmProperties:

@@ -20,9 +20,8 @@ Strategy (single memcpy):
    ``optree.tree_flatten``. Extract tensors, arrays, and large bytes into
    lightweight descriptors, retaining a tree spec only for containers.
 2. For each distinct dtype (plus ``torch.uint8`` for raw bytes), allocate
-   storage directly in shared memory and attach a single 1-D
-   ``torch.Tensor`` to it, then ``copy_`` each
-   sub-tensor directly into the shared buffer.  This means each byte of
+   storage directly in shared memory and attach a single 1-D ``torch.Tensor``
+   to it, then ``copy_`` each sub-tensor into the shared buffer. Each byte of
    real data is copied exactly once — straight into SHM.
 3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
    ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
@@ -532,27 +531,25 @@ def _extract_from_records(
 # Build coalesced SHM buffers
 # ---------------------------------------------------------------------------
 def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
-    """Allocate a 1-D tensor in ``/dev/shm``, retrying with backoff on ENOSPC.
+    """Allocate a 1-D tensor directly in shared memory, retrying on ENOSPC.
 
-    Allocates shared storage without first copying a private allocation.
-    Wraps allocation with the shared
-    :func:`~zephon._internal.utils.shm.wait_for_shm_space` retry so that transient
-    ``/dev/shm`` exhaustion blocks instead of crashing the worker.
+    Transient ``/dev/shm`` exhaustion blocks in :func:`wait_for_shm_space`
+    instead of crashing the worker.
     """
     torch = _get_torch()
     buf = torch.empty(0, dtype=dtype, device="cpu")
     nbytes = numel * buf.element_size()
     while True:
         try:
-            # _new_shared() honors torch.multiprocessing.get_sharing_strategy().
-            # share_memory_() on a nonempty tensor copies its old storage,
-            # even when torch.empty() left those bytes uninitialized.
+            # Torch's default_collate uses this allocator through typed storage;
+            # it honors torch.multiprocessing.get_sharing_strategy().
             storage = torch.UntypedStorage._new_shared(nbytes, device="cpu")
-            return buf.set_(storage, 0, (numel,), (1,))
         except Exception as e:
             if not is_shm_error(e):
                 raise
             wait_for_shm_space(label)
+        else:
+            return buf.set_(storage)
 
 
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
