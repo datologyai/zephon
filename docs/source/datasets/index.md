@@ -41,6 +41,28 @@ during data preparation. We recommend always including an index so Zephon can ga
 metadata needed for planning without inspecting each shard individually. Without one,
 Zephon will have to scan the shards to construct it before training can start.
 
+You can build an index for JSONL, Parquet, or Vortex at a local path or a remote
+storage root using the same command:
+
+```bash
+python -m zephon.build_index parquet s3://my-bucket/dataset
+python -m zephon.build_index jsonl gs://my-bucket/dataset
+python -m zephon.build_index vortex /data/dataset
+```
+
+The command indexes matching files directly under that root, in filename order,
+and writes `index.json` alongside them. Listing, reading, and writing all use
+Zephon's storage backends and their configured credentials. The output backend
+must support writes; for a read-only source, the Python API accepts an
+`output_path` pointing to a writable location.
+
+Parquet and Vortex read file metadata. JSONL must read each file's contents to
+count records, including decompressing supported compressed files. Indexing
+inspects up to eight shards concurrently. With the Python API,
+`build_index(..., max_workers=1)` makes those reads sequential; another positive
+value sets a different concurrency limit. Existing indexes are replaced only
+after every shard has been inspected successfully.
+
 **Inspecting a `Dataset`.** A `Dataset` is a lightweight descriptor of the collection and
 its metadata; it does not provide methods for reading samples directly. You can use the
 `DatasetInspector` class if you need to examine the raw samples inside of a `Dataset`

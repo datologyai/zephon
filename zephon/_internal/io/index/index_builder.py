@@ -12,13 +12,16 @@ registers an ``IndexBuilder`` subclass; the user-facing CLI is
 from __future__ import annotations
 
 import json
-import os
+import posixpath
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 from zephon._internal.io.index.index_types import ShardIndex, ShardInfoDict
+from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.storage.router import RouterStorageBackend
 
 
 @dataclass
@@ -42,6 +45,18 @@ class IndexBuilder(ABC):
 
     suffixes: tuple[str, ...]
 
+    def __init__(
+        self, storage: StorageBackend | None = None, *, max_workers: int = 8
+    ) -> None:
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
+        self._storage = (
+            storage
+            if storage is not None
+            else RouterStorageBackend(local_root=Path.cwd())
+        )
+        self._max_workers = max_workers
+
     @property
     def _file_patterns(self) -> str:
         return ", ".join(f"*{suffix}" for suffix in self.suffixes)
@@ -55,7 +70,7 @@ class IndexBuilder(ABC):
         """Extract metadata from a shard file.
 
         Args:
-            path: Full path to the shard file
+            path: Local path or remote URL for the shard file
             file_size: File size in bytes (already retrieved)
 
         Returns:
@@ -72,20 +87,18 @@ class IndexBuilder(ABC):
         Returns:
             Sorted list of matching filenames (not full paths)
         """
-        dataset_dir = Path(dataset_dir)
-        if not dataset_dir.exists():
-            raise ValueError(f"Directory does not exist: {dataset_dir}")
+        return [name for name, _ in self._scan_shards(str(dataset_dir))]
 
-        entries = [
-            f.name
-            for f in dataset_dir.iterdir()
-            if f.is_file() and f.name.endswith(self.suffixes)
-        ]
-
+    def _scan_shards(self, dataset_dir: str) -> list[tuple[str, int]]:
+        """List direct child shard files and their sizes through the backend."""
+        entries = sorted(
+            (name, size)
+            for name, size in self._storage.walk(dataset_dir)
+            if "/" not in name and name.endswith(self.suffixes)
+        )
         if not entries:
             raise ValueError(f"No {self._file_patterns} files found in {dataset_dir}")
-
-        return sorted(entries)
+        return entries
 
     def build(
         self,
@@ -104,24 +117,32 @@ class IndexBuilder(ABC):
         Returns:
             A :class:`ShardIndex` ready to be written as JSON.
         """
-        dataset_dir = Path(dataset_dir)
-        entries = self.scan_directory(dataset_dir)
+        if progress_interval < 1:
+            raise ValueError("progress_interval must be at least 1")
+        dataset_dir = str(dataset_dir)
+        entries = self._scan_shards(dataset_dir)
 
         if progress:
             print(
                 f"Found {len(entries)} {self._file_patterns} files, reading metadata..."
             )
 
+        def read_shard(entry: tuple[str, int]) -> ShardInfo:
+            name, size = entry
+            path = posixpath.join(dataset_dir, name)
+            try:
+                return self.extract_shard_info(path, size)
+            except Exception as exc:
+                raise ValueError(f"Failed to index shard {path}: {exc}") from exc
+
         shards: list[ShardInfoDict] = []
-        for i, name in enumerate(entries, 1):
-            full_path = dataset_dir / name
-            file_size = os.path.getsize(full_path)
-
-            info = self.extract_shard_info(str(full_path), file_size)
-            shards.append(cast(ShardInfoDict, asdict(info)))
-
-            if progress and i % progress_interval == 0:
-                print(f"  Processed {i}/{len(entries)} files...")
+        workers = min(self._max_workers, len(entries))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # Consume in filename order so index shard IDs never depend on IO timing.
+            for i, info in enumerate(executor.map(read_shard, entries), 1):
+                shards.append(cast(ShardInfoDict, asdict(info)))
+                if progress and i % progress_interval == 0:
+                    print(f"  Processed {i}/{len(entries)} files...")
 
         return ShardIndex(format_version=1, shards=shards)
 
@@ -131,7 +152,7 @@ class IndexBuilder(ABC):
         *,
         output_path: str | Path | None = None,
         progress: bool = True,
-    ) -> Path:
+    ) -> Path | str:
         """Build and write index.json for a dataset.
 
         Args:
@@ -140,30 +161,28 @@ class IndexBuilder(ABC):
             progress: Whether to print progress messages
 
         Returns:
-            Path to the created index.json file
+            Path to a local index or URL string to a remote index.
         """
-        dataset_dir = Path(dataset_dir)
         index = self.build(dataset_dir, progress=progress)
 
-        if output_path is None:
-            output_path = dataset_dir / "index.json"
-        else:
-            output_path = Path(output_path)
-
-        with open(output_path, "w") as f:
-            json.dump(index, f, indent=2)
+        target = (
+            str(output_path)
+            if output_path is not None
+            else posixpath.join(str(dataset_dir), "index.json")
+        )
+        self._storage.put(target, json.dumps(index, indent=2).encode("utf-8"))
 
         if progress:
             total_rows = sum(s["num_rows"] for s in index["shards"])
             total_size_mb = sum(s["bytes"] for s in index["shards"]) / (1024 * 1024)
-            print(f"Created {output_path}")
+            print(f"Created {target}")
             print(
                 f"  {len(index['shards'])} shards, "
                 f"{total_rows:,} total rows, "
                 f"{total_size_mb:.1f} MB"
             )
 
-        return output_path
+        return target if "://" in target else Path(target)
 
 
 # Registry of format -> IndexBuilder
@@ -175,7 +194,7 @@ def register_builder(format_name: str, builder_class: type[IndexBuilder]) -> Non
     _BUILDERS[format_name] = builder_class
 
 
-def get_builder(format_name: str) -> IndexBuilder:
+def get_builder(format_name: str, *, max_workers: int = 8) -> IndexBuilder:
     """Get an IndexBuilder instance for the given format."""
     if format_name not in _BUILDERS:
         available = ", ".join(sorted(_BUILDERS.keys())) or "(none)"
@@ -183,7 +202,7 @@ def get_builder(format_name: str) -> IndexBuilder:
             f"No index builder registered for format '{format_name}'. "
             f"Available: {available}"
         )
-    return _BUILDERS[format_name]()
+    return _BUILDERS[format_name](max_workers=max_workers)
 
 
 def create_index(
@@ -192,7 +211,8 @@ def create_index(
     *,
     output_path: str | Path | None = None,
     progress: bool = True,
-) -> Path:
+    max_workers: int = 8,
+) -> Path | str:
     """Create index.json for a dataset using the appropriate builder.
 
     Args:
@@ -200,11 +220,12 @@ def create_index(
         dataset_dir: Directory containing shard files
         output_path: Where to write index.json (default: dataset_dir/index.json)
         progress: Whether to print progress messages
+        max_workers: Maximum number of shards to inspect concurrently.
 
     Returns:
-        Path to the created index.json file
+        Path to a local index or URL string to a remote index.
     """
-    builder = get_builder(format_name)
+    builder = get_builder(format_name, max_workers=max_workers)
     return builder.create_index(dataset_dir, output_path=output_path, progress=progress)
 
 
