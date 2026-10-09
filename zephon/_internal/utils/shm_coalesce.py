@@ -1,8 +1,9 @@
 """Coalesce per-microbatch tensors, numpy arrays, and large bytes into SHM buffers.
 
 Reduces the number of POSIX SHM segments (and file descriptors) from
-N-per-microbatch to a few buffers per dtype, bounded by the coalescing
-limit. Large ``bytes``/``memoryview``/``bytearray`` payloads are packed
+N-per-microbatch to K-per-microbatch, grouping by distinct dtypes
+(usually 1–2) and splitting groups at the coalescing limit.
+Large ``bytes``/``memoryview``/``bytearray`` payloads are packed
 into a ``torch.uint8`` buffer so they travel through the same SHM path.
 
 Supported payload types:
@@ -700,9 +701,10 @@ _PRIMITIVE_TYPES = (int, float, str, bool, type(None))
 def _is_leaf(obj: Any) -> bool:
     """Predicate for ``optree.tree_flatten``.
 
-    Structured types are handled in ``_extract_leaf``, which decomposes them
-    into a fields dict and recurses via ``_extract_payload_pytree``. Ordinary
-    dicts, lists, and tuples use optree's container traversal.
+    Treats structured types (dataclass, pydantic) as leaves. These are handled
+    in ``_extract_leaf``, which decomposes them into a fields dict and recurses
+    via ``_extract_payload_pytree``. Ordinary dicts, lists, and tuples use
+    optree's container traversal.
 
     Lists of primitives (int, float, str, …) are also treated as leaves
     to avoid inflating the slot count.  A ``List[int]`` with 500 elements
@@ -1136,7 +1138,12 @@ def _extract_leaf(
     shm_min_item_bytes: int,
     plan: _BufferPlan | None = None,
 ) -> Any:
-    """Apply one policy after adapting a leaf; never copy into a staging slab."""
+    """Replace a single tensor/ndarray/bytes/struct leaf with a descriptor.
+
+    Returns a descriptor if the leaf needs preparation, or the original leaf
+    unchanged. Structured types (dataclass, pydantic) are decomposed into a
+    fields dict and recursively extracted via ``_extract_payload_pytree``.
+    """
     if plan is None:
         plan = _BufferPlan(
             PayloadMemoryPolicy(
@@ -1575,19 +1582,23 @@ def coalesce_microbatch(
     copy_records: bool = False,
     ensure_prepared: bool = False,
 ) -> CoalescedMicrobatch | None:
-    """Prepare supported values using a common transport and memory policy.
+    """Prepare payloads from *items* as per-dtype SHM buffers or inline values.
 
-    The legacy function name is retained, but inline transport and view
-    compaction also apply when coalescing is disabled. ``shm_min_item_bytes`` is a
-    shortcut setting all inline minimums; an explicit ``policy`` takes precedence.
+    Returns ``None`` when values need no preparation, unless ``ensure_prepared``
+    keeps accepted inline values lazy too. Shared Torch tensors and NumPy views
+    of Zephon buffers retain their storage through multiprocessing reduction,
+    unless the policy selects inline transport or view compaction.
 
-    Returns None when values need no preparation, unless ``ensure_prepared``
-    keeps accepted inline values lazy too. ``copy_records`` protects the
-    parent's retry records when preparation runs in a queue feeder.
+    ``shm_min_item_bytes`` is a shortcut setting all inline minimums; an explicit
+    ``policy`` takes precedence. Inline transport and view compaction also apply
+    when coalescing is disabled. ``copy_records`` protects the parent's retry
+    records when preparation runs in a queue feeder.
 
-    Extraction leaves records unchanged until allocation succeeds. Optional
-    view compaction keeps the source on SHM exhaustion instead of waiting for
-    space held by that source. Required allocations retain normal backpressure.
+    Uses a two-pass approach: extraction first collects descriptors without
+    mutating payloads, then commits only after SHM allocation succeeds or
+    optional compaction falls back to the source views. This fallback avoids
+    waiting for space held by those sources. Required allocations retain normal
+    backpressure.
     """
     if _get_torch() is None:
         return None

@@ -166,8 +166,10 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
 
     # === IPC serialization ===
-    # Process-stage CPU payload transport (does not configure MTP).
-    # Disabling coalescing still applies the inline and retained-storage policies.
+    # Coalesce eligible payloads in a microbatch by dtype into SHM buffers
+    # before serialization. Reduces POSIX SHM segments from N to K; coalesced
+    # groups are split at shm_max_coalesced_bytes. Only consumed by process runners.
+    # Disabling coalescing still applies transport thresholds and view compaction.
     shm_coalesce: bool = True
     # Minimum item size eligible for fresh SHM; shared views are grouped first.
     shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
