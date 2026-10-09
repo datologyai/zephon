@@ -1,8 +1,10 @@
 import bz2
 import gzip
+import io
 import json
 import lzma
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -10,6 +12,7 @@ import zephon._internal.io.resolvers.cache.manager as manager_mod
 import zephon._internal.io.resolvers.direct as direct_mod
 from tests._helpers import counts_dict
 from zephon._internal.io.formats.jsonl import JsonlFormat, JsonlShard
+from zephon._internal.io.index.jsonl_index import JsonlIndexBuilder
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
@@ -37,6 +40,30 @@ def _write_compressed_jsonl(
         fh.write("".join(lines[:half]))
     with _WRITERS[compression](path, "at", encoding="utf-8") as fh:
         fh.write("".join(lines[half:]))
+
+
+def test_jsonl_create_index(tmp_path: Path) -> None:
+    """The builder writes sorted shard metadata and ignores blank lines."""
+    (tmp_path / "b.jsonl").write_text('{"i": 1}\n\n  \n{"i": 2}\n', encoding="utf-8")
+    _write_jsonl(tmp_path / "a.jsonl", [{"i": 0}])
+
+    result = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    data = json.loads(result.read_text(encoding="utf-8"))
+
+    assert data["format_version"] == 1
+    assert [shard["basename"] for shard in data["shards"]] == [
+        "a.jsonl",
+        "b.jsonl",
+    ]
+    assert [shard["num_rows"] for shard in data["shards"]] == [1, 2]
+    assert [shard["extra"] for shard in data["shards"]] == [{}, {}]
+    assert data["shards"][1]["bytes"] == (tmp_path / "b.jsonl").stat().st_size
+
+
+def test_jsonl_create_index_rejects_empty_directory(tmp_path: Path) -> None:
+    """Building an index requires at least one JSONL shard."""
+    with pytest.raises(ValueError, match=r"No \*\.jsonl.* files found"):
+        JsonlIndexBuilder().create_index(tmp_path, progress=False)
 
 
 def test_jsonl_discover_local(tmp_path: Path) -> None:
@@ -72,6 +99,93 @@ def test_jsonl_discover_assigns_shard_ids_in_sorted_basename_order(
     basenames = [shard_meta[sid]["raw"]["basename"] for sid in sorted(shard_meta)]
     assert basenames == ["a.jsonl", "b.jsonl", "c.jsonl"]
     assert dict(shard_index) == {0: 2, 1: 3, 2: 1}
+
+
+def test_jsonl_discover_and_counts_use_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indexed discovery obtains counts without scanning shard contents again."""
+    _write_jsonl(tmp_path / "a.jsonl", [{"i": 0}, {"i": 1}])
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": 2}])
+    (tmp_path / "c.jsonl").write_text(" \n\t\u00a0", encoding="utf-8")
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    handler = JsonlFormat()
+    monkeypatch.setattr(
+        handler,
+        "_discover_from_files",
+        lambda *_args: pytest.fail("indexed discovery scanned JSONL shards"),
+    )
+    storage = LocalFSBackend(tmp_path)
+
+    shard_index, shard_meta = handler.discover(str(tmp_path), storage)
+    ids, counts = handler.discover_counts(str(tmp_path), storage)
+
+    assert dict(shard_index) == {0: 2, 1: 1, 2: 0}
+    assert ids.tolist() == [0, 1, 2]
+    assert counts.tolist() == [2, 1, 0]
+    assert shard_meta[0]["raw"]["basename"] == "a.jsonl"
+    assert shard_meta[0]["extra"] == {"length": 2}
+
+
+def test_jsonl_discover_ignores_non_jsonl_shard_index(tmp_path: Path) -> None:
+    """An index for another format does not replace JSONL file discovery."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [
+                    {
+                        "basename": "data.parquet",
+                        "bytes": 1,
+                        "num_rows": 99,
+                        "hashes": {},
+                        "extra": {"row_groups": []},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    shard_index, _ = JsonlFormat().discover(str(tmp_path), LocalFSBackend(tmp_path))
+
+    assert dict(shard_index) == {0: 2}
+
+
+def test_jsonl_discover_rescans_when_index_lacks_row_counts(tmp_path: Path) -> None:
+    """An index entry without a usable num_rows falls back to scanning."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    (tmp_path / "index.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "shards": [{"basename": "data.jsonl", "bytes": 1, "hashes": {}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+
+    shard_index, _ = handler.discover(str(tmp_path), storage)
+    _, counts = handler.discover_counts(str(tmp_path), storage)
+
+    assert dict(shard_index) == {0: 2}
+    assert counts.tolist() == [2]
+
+
+def test_jsonl_auto_detects_from_index(tmp_path: Path) -> None:
+    """A Zephon shard index with JSONL basenames identifies the format."""
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    dataset = Dataset.from_path("indexed", str(tmp_path))
+
+    assert dataset.backend["kind"] == "jsonl"
+    assert dataset.ids().tolist() == [0]
+    assert dataset.counts().tolist() == [2]
 
 
 def test_jsonl_build_locators_and_open(tmp_path: Path) -> None:
@@ -202,15 +316,21 @@ def test_jsonl_discover_mixes_plain_and_compressed_shards(tmp_path: Path) -> Non
     assert "zip" not in shard_meta[1]
 
 
-@pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize(
+    "cache_enabled,indexed",
+    [(False, False), (True, False), (False, True), (True, True)],
+)
 def test_compressed_jsonl_reads_through_store(
-    tmp_path: Path, cache_enabled: bool, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, cache_enabled: bool, indexed: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     data = tmp_path / "data"
     data.mkdir()
     rows = [{"i": i} for i in range(6)]
     _write_compressed_jsonl(data / "s0.jsonl.zst", rows[:4], "zstd")
     _write_compressed_jsonl(data / "s1.jsonl.gz", rows[4:], "gzip")
+
+    if indexed:
+        JsonlIndexBuilder().create_index(data, progress=False)
 
     decoded_shards: list[str] = []
 
@@ -252,3 +372,175 @@ def test_compressed_jsonl_reads_through_store(
     )
     # Decoded copies are not shards: rediscovery sees the same dataset.
     assert counts_dict(Dataset.from_path("demo", str(data))) == {0: 4, 1: 2}
+
+
+def test_jsonl_shard_getsamples_uses_logical_indices_across_blank_lines(
+    tmp_path: Path,
+) -> None:
+    """Blank lines do not shift JSONL record indices during bulk reads."""
+    path = tmp_path / "shard.jsonl"
+    path.write_text(
+        '{"v": 0}\n\n  \n{"v": 1}\n{"v": 2}\n',
+        encoding="utf-8",
+    )
+
+    shard = JsonlShard(path, length=3)
+
+    assert shard.getsamples([2, 0, 1]) == [{"v": 2}, {"v": 0}, {"v": 1}]
+
+
+def test_jsonl_shard_getsamples_keeps_null_rows_aligned(tmp_path: Path) -> None:
+    """A JSON ``null`` record keeps its slot instead of shifting later rows."""
+    path = tmp_path / "shard.jsonl"
+    path.write_text('{"v": 0}\nnull\n{"v": 2}\n', encoding="utf-8")
+
+    shard = JsonlShard(path, length=3)
+
+    assert shard.getsamples([2, 1, 0]) == [{"v": 2}, None, {"v": 0}]
+
+
+@pytest.mark.parametrize("compression", sorted(_WRITERS))
+def test_jsonl_index_keeps_compressed_shards(
+    tmp_path: Path, compression: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indexing a mixed dataset keeps its rows and decompression metadata."""
+    name = f"a.jsonl{_SUFFIXES[compression]}"
+    _write_compressed_jsonl(
+        tmp_path / name, [{"i": i} for i in range(3)], compression, blank=True
+    )
+    _write_jsonl(tmp_path / "b.jsonl", [{"i": 3}])
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    expected = handler.discover(str(tmp_path), storage)
+    JsonlIndexBuilder().create_index(tmp_path, progress=False)
+
+    monkeypatch.setattr(
+        JsonlFormat,
+        "_discover_from_files",
+        lambda *_args: pytest.fail("indexed discovery scanned JSONL shards"),
+    )
+    assert handler.discover(str(tmp_path), storage) == expected
+    ids, counts = handler.discover_counts(str(tmp_path), storage)
+    assert ids.tolist() == [0, 1]
+    assert counts.tolist() == [3, 1]
+    dataset = Dataset.from_path("indexed", str(tmp_path))
+    assert dataset.backend["kind"] == "jsonl"
+    assert dataset.counts().tolist() == [3, 1]
+
+
+@pytest.mark.parametrize("raw_size", [None, False, -1, 1 << 63])
+def test_jsonl_index_rescans_invalid_compressed_raw_size(
+    tmp_path: Path, raw_size: object
+) -> None:
+    """Incomplete compression metadata must not bypass file discovery."""
+    _write_compressed_jsonl(tmp_path / "a.jsonl.gz", [{"i": 0}], "gzip")
+    index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    if raw_size is None:
+        del data["shards"][0]["extra"]["raw_bytes"]
+    else:
+        data["shards"][0]["extra"]["raw_bytes"] = raw_size
+    data["shards"][0]["num_rows"] = 99
+    index_path.write_text(json.dumps(data), encoding="utf-8")
+
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    counts, metadata = handler.discover(str(tmp_path), storage)
+    assert dict(counts) == {0: 1}
+    assert metadata[0]["compression"] == "gzip"
+    assert handler.discover_counts(str(tmp_path), storage)[1].tolist() == [1]
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"num_rows": False},
+        {"num_rows": True},
+        {"num_rows": -1},
+        {"num_rows": 1.5},
+        {"num_rows": 1 << 63},
+        {"bytes": None},
+        {"bytes": False},
+        {"hashes": []},
+    ],
+)
+def test_jsonl_index_rescans_invalid_metadata(
+    tmp_path: Path, invalid_fields: dict[str, object]
+) -> None:
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
+    index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    data["shards"][0].update({"num_rows": 99, **invalid_fields})
+    index_path.write_text(json.dumps(data), encoding="utf-8")
+
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    assert dict(handler.discover(str(tmp_path), storage)[0]) == {0: 2}
+    assert handler.discover_counts(str(tmp_path), storage)[1].tolist() == [2]
+
+
+@pytest.mark.parametrize("shards", [{"0": {}}, [None]])
+def test_jsonl_index_rescans_invalid_shard_containers(
+    tmp_path: Path, shards: object
+) -> None:
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}])
+    (tmp_path / "index.json").write_text(
+        json.dumps({"format_version": 1, "shards": shards}), encoding="utf-8"
+    )
+    handler = JsonlFormat()
+    storage = LocalFSBackend(tmp_path)
+    assert dict(handler.discover(str(tmp_path), storage)[0]) == {0: 1}
+    assert handler.discover_counts(str(tmp_path), storage)[1].tolist() == [1]
+
+
+@pytest.mark.parametrize("index_state", ["missing", "invalid", "valid"])
+def test_jsonl_counts_probe_each_index_once(tmp_path: Path, index_state: str) -> None:
+    _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}])
+    if index_state != "missing":
+        index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+        if index_state == "invalid":
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            del data["shards"][0]["num_rows"]
+            index_path.write_text(json.dumps(data), encoding="utf-8")
+
+    storage = LocalFSBackend(tmp_path)
+    with (
+        patch.object(storage, "exists", wraps=storage.exists) as exists,
+        patch.object(storage, "open", wraps=storage.open) as opened,
+    ):
+        assert JsonlFormat().discover_counts(str(tmp_path), storage)[1].tolist() == [1]
+
+    probes = [Path(call.args[0]).name for call in exists.call_args_list]
+    reads = [Path(call.args[0]).name for call in opened.call_args_list]
+    assert probes == (
+        ["index.json", "_index.json"] if index_state == "missing" else ["index.json"]
+    )
+    assert reads.count("index.json") == (0 if index_state == "missing" else 1)
+    assert reads.count("data.jsonl") == (0 if index_state == "valid" else 1)
+
+
+def test_jsonl_getsamples_stops_after_last_requested_record(tmp_path: Path) -> None:
+    lines_read: list[str] = []
+
+    class TrackedStream(io.StringIO):
+        def __next__(self) -> str:
+            line = super().__next__()
+            lines_read.append(line)
+            return line
+
+    stream = TrackedStream(' {"i": 0} \n\nnull\n{"i": 2}\n')
+    with patch.object(Path, "open", return_value=stream):
+        assert JsonlShard(tmp_path / "data.jsonl").getsamples([1, 0, 1]) == [
+            None,
+            {"i": 0},
+            None,
+        ]
+    assert lines_read == [' {"i": 0} \n', "\n", "null\n"]
+
+
+def test_jsonl_getsamples_rejects_known_out_of_bounds_before_open(
+    tmp_path: Path,
+) -> None:
+    shard = JsonlShard(tmp_path / "missing.jsonl", length=2)
+    with pytest.raises(IndexError, match="2"):
+        shard.getsamples([0, 2])

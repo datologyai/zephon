@@ -1,6 +1,8 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import gzip
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +32,21 @@ def test_build_index_delegates(monkeypatch):
     assert str(result) == "/idx/index.json"
 
 
+def test_build_index_imports_jsonl_builder(monkeypatch):
+    """JSONL is registered as an indexable CLI format."""
+    imported: list[str] = []
+    monkeypatch.setattr(bi.importlib, "import_module", lambda m: imported.append(m))
+    monkeypatch.setattr(
+        bi,
+        "_create_index",
+        lambda *_args, **_kwargs: Path("/idx/index.json"),
+    )
+
+    bi.build_index("jsonl", "/data")
+
+    assert imported == ["zephon._internal.io.index.jsonl_index"]
+
+
 def test_build_index_unknown_format_raises():
     with pytest.raises(ValueError):
         bi.build_index("no_such_format", "/data")
@@ -41,3 +58,18 @@ def test_cli_prints_public_usage_and_exits(monkeypatch, capsys):
         bi._cli()
     assert exc.value.code == 1
     assert "python -m zephon.build_index" in capsys.readouterr().out
+
+
+def test_cli_builds_mixed_jsonl_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.jsonl").write_text('{"i":0}\n\nnull', encoding="utf-8")
+    with gzip.open(tmp_path / "b.jsonl.gz", "wt", encoding="utf-8") as stream:
+        stream.write('{"i":1}\n')
+    monkeypatch.setattr(sys, "argv", ["build_index", "jsonl", str(tmp_path)])
+
+    bi._cli()
+
+    data = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert [shard["basename"] for shard in data["shards"]] == ["a.jsonl", "b.jsonl.gz"]
+    assert [shard["num_rows"] for shard in data["shards"]] == [2, 1]
