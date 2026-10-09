@@ -7,19 +7,17 @@ Registers the ``vortex`` ``IndexBuilder`` on import; build an index via the
 ``zephon.build_index`` CLI.
 """
 
+from pathlib import Path
 from typing import Any
 
+from zephon._internal.io.formats.vortex import _read_vortex_row_count
 from zephon._internal.io.index.index_builder import (
     IndexBuilder,
     ShardInfo,
     register_builder,
 )
+from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
-
-try:
-    import vortex as _vortex
-except ImportError:
-    _vortex = None
 
 
 class VortexIndexBuilder(IndexBuilder):
@@ -29,17 +27,8 @@ class VortexIndexBuilder(IndexBuilder):
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract row count and metadata from a Vortex file."""
-        if _vortex is None:
-            raise ImportError(
-                "vortex-data is required for Vortex index building. "
-                'Install with: pip install "zephon[vortex]"'
-            )
+        count = _read_vortex_row_count(path, LocalFSBackend(Path.cwd()), file_size)
 
-        url = f"file://{path}"
-        reader = _vortex.io.read_url(url)
-        count = len(reader)
-
-        # Extract schema info if available
         extra: dict[str, Any] = {"length": count}
 
         return ShardInfo(
