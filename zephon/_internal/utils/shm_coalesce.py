@@ -9,8 +9,8 @@ Supported payload types:
 
 - **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
   views into the SHM buffer.
-- **numpy.ndarray** — converted to torch tensors for SHM transport,
-  restored as numpy array views (zero-copy via ``tensor.numpy()``).
+- **numpy.ndarray** — copied from their original strides directly into
+  Torch-managed SHM buffers and restored as NumPy array views.
 - **bytes / memoryview** — payloads above a size threshold are packed
   into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
 
@@ -41,6 +41,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, cast
 
 import optree
@@ -389,6 +390,36 @@ def _is_leaf(obj: Any) -> bool:
     return False
 
 
+def _memoryview_source(view: memoryview) -> Any:
+    """Return a NumPy source whose C-order bytes match ``view.tobytes()``.
+
+    Contiguous inputs become flat uint8 views; supported strided inputs keep
+    their dtype, shape, and strides for ``np.copyto`` into SHM. These results
+    may alias the source until that copy finishes. Unsupported formats and
+    noncontiguous structured views use owned bytes, preserving padding that
+    NumPy field assignment could omit.
+    """
+    np = _get_numpy()
+    if view.c_contiguous:
+        return np.frombuffer(view, dtype=np.uint8)
+    try:
+        array = np.asarray(view)
+        if not array.dtype.hasobject and array.dtype.fields is None:
+            return array
+    except Exception:  # Any unsupported exporter falls back to a byte copy.
+        pass
+    return np.frombuffer(view.tobytes(), dtype=np.uint8)
+
+
+@cache
+def _torch_dtype_for(dtype: Any) -> Any | None:
+    """Resolve supported NumPy dtypes once; unsupported dtypes remain inline."""
+    try:
+        return _get_torch().from_numpy(_get_numpy().empty(0, dtype=dtype)).dtype
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_leaf(
     leaf: Any,
     collector: dict[str, list[Any]],
@@ -408,24 +439,28 @@ def _extract_leaf(
             fields_dict, collector, offsets, shm_min_size
         )
         return _StructSlot(cls=cls, inner_skeleton=inner_skel)
-    # Numeric lists: promote to tensor so they coalesce into SHM with
-    # other same-dtype tensors.  Restored via .tolist() to preserve the
-    # original Python list contract.
+    # Only lossless built-in numeric lists share buffers with Torch tensors.
     torch = _get_torch()
-    if (
-        torch is not None
-        and isinstance(leaf, list)
-        and len(leaf) > 0
-        and isinstance(leaf[0], (int, float))
-        and isinstance(leaf[-1], (int, float))
-    ):
-        dtype = torch.int64 if isinstance(leaf[0], int) else torch.float64
-        dtype_key = str(dtype)
+    if torch is not None and isinstance(leaf, list) and leaf:
+        kind = type(leaf[0])
+        if (
+            type(leaf) is not list
+            or kind not in (int, float)
+            or set(map(type, leaf)) != {kind}
+        ):
+            return leaf
+        np = _get_numpy()
+        try:
+            array = np.array(leaf, dtype=np.int64 if kind is int else np.float64)
+        except OverflowError:
+            return leaf
+        tensor = torch.from_numpy(array)
+        dtype_key = str(tensor.dtype)
         n = len(leaf)
         offset = offsets.get(dtype_key, 0)
         slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
         offsets[dtype_key] = offset + n
-        collector.setdefault(dtype_key, []).append(torch.tensor(leaf, dtype=dtype))
+        collector.setdefault(dtype_key, []).append(tensor)
         return slot
     if torch is not None and isinstance(leaf, torch.Tensor):
         if leaf.device.type != "cpu":
@@ -441,7 +476,7 @@ def _extract_leaf(
         return slot
     np = _get_numpy()
     if np is not None and torch is not None and isinstance(leaf, np.ndarray):
-        if leaf.dtype.hasobject:
+        if _torch_dtype_for(leaf.dtype) is None:
             return leaf
         dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
         numel = leaf.size
@@ -453,18 +488,18 @@ def _extract_leaf(
             np_dtype_str=str(leaf.dtype),
         )
         offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(
-            torch.from_numpy(np.ascontiguousarray(leaf))
-        )
+        collector.setdefault(dtype_key, []).append(leaf)
         return slot
     if isinstance(leaf, (bytes, memoryview)):
-        nbytes = len(leaf)
-        if nbytes >= shm_min_size and _get_torch() is not None:
+        nbytes = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
+        if nbytes > 0 and nbytes >= shm_min_size and torch is not None:
             offset = offsets.get(_BYTES_DTYPE_KEY, 0)
             slot = _BytesSlot(offset=offset, length=nbytes)
             offsets[_BYTES_DTYPE_KEY] = offset + nbytes
             collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                leaf if isinstance(leaf, bytes) else bytes(leaf)
+                _memoryview_source(leaf)
+                if isinstance(leaf, memoryview)
+                else np.frombuffer(leaf, dtype=np.uint8)
             )
             return slot
         return leaf
@@ -555,9 +590,9 @@ def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
-    Allocates the target directly in shared memory, then copies each
-    sub-tensor (or bytes chunk) into the shared region: **one memcpy per
-    item**, no intermediate staging buffer.
+    Allocates the target directly in shared memory, then writes tensors,
+    strided NumPy arrays, and supported memoryviews into the shared region.
+    Numeric lists are converted before allocation.
 
     If ``/dev/shm`` is exhausted, retries with exponential backoff via
     :func:`_alloc_shm_buffer` instead of propagating the error.
@@ -567,17 +602,40 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     for dtype_key, items in collector.items():
         if dtype_key == _BYTES_DTYPE_KEY:
             # Pack raw bytes into a uint8 tensor.
-            total = sum(len(b) for b in items)
-            if total == 0:
-                continue
+            np = _get_numpy()
+            total = sum(array.nbytes for array in items)
             buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
-            # numpy view for fast memcpy from bytes into SHM
             np_buf = buf.numpy()
             offset = 0
-            for b in items:
-                n = len(b)
+            for array in items:
+                n = array.nbytes
+                np.copyto(
+                    np_buf[offset : offset + n].view(array.dtype).reshape(array.shape),
+                    array,
+                    casting="no",
+                )
+                offset += n
+            buffers[dtype_key] = buf
+        elif dtype_key.startswith(_NDARRAY_PREFIX):
+            # NumPy can read strided, reversed, and read-only sources directly
+            # into the final contiguous destination. No ascontiguousarray copy
+            # or per-array Torch wrapper is needed.
+            np = _get_numpy()
+            total_numel = sum(array.size for array in items)
+            if total_numel == 0:
+                continue
+            dtype = _torch_dtype_for(items[0].dtype)
+            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
+            np_buf = buf.numpy()
+            offset = 0
+            for array in items:
+                n = array.size
                 if n > 0:
-                    np_buf[offset : offset + n] = memoryview(b).cast("B")
+                    np.copyto(
+                        np_buf[offset : offset + n].reshape(array.shape),
+                        array,
+                        casting="no",
+                    )
                 offset += n
             buffers[dtype_key] = buf
         else:
