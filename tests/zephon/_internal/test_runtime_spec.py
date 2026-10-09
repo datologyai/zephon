@@ -291,3 +291,24 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
         shm_min_size=1,
     )
     assert stage_spec.max_worker_retries == 0
+
+
+def test_payload_memory_policy_options_reach_process_stages() -> None:
+    opts = RuntimeOptions(
+        shm_min_size=128,
+        coalesce_tensors=False,
+        shm_max_retained_ratio=4,
+        shm_min_reclaim_bytes=1024,
+        shm_coalesce_max_size=8192,
+    )
+    spec = resolve_runtime_spec(_mk_plan((2, 1, 1)), opts)
+    for stage in spec.stages:
+        assert stage.shm_min_size == 128
+        assert not stage.coalesce_tensors
+        assert stage.shm_max_retained_ratio == 4
+        assert stage.shm_min_reclaim_bytes == 1024
+        assert stage.shm_coalesce_max_size == 8192
+    with pytest.raises(ValueError, match="shm_max_retained_ratio"):
+        resolve_runtime_spec(
+            _mk_plan((1, 1, 1)), RuntimeOptions(shm_max_retained_ratio=0.5)
+        )

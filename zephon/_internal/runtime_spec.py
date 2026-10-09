@@ -23,6 +23,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
+from zephon._internal.utils.shm_coalesce import (
+    DEFAULT_SHM_COALESCE_MAX_SIZE,
+    DEFAULT_SHM_MAX_RETAINED_RATIO,
+    DEFAULT_SHM_MIN_RECLAIM_BYTES,
+    PayloadMemoryPolicy,
+)
 from zephon.options import IpcTransport
 
 if TYPE_CHECKING:
@@ -48,6 +54,9 @@ class StageRuntimeSpec:
     allow_latency_flush: bool
     coalesce_tensors: bool
     shm_min_size: int
+    shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
+    shm_min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
+    shm_coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
     # See RuntimeOptions.ipc_transport / ipc_buffer_bytes; process runners only.
@@ -316,6 +325,13 @@ def resolve_runtime_spec(
         Whether the Engine will run inside a PyTorch DataLoader worker.
         Affects runner type selection (``process`` → ``threads`` demotion).
     """
+    PayloadMemoryPolicy(
+        shm_min_size=opts.shm_min_size,
+        coalesce=opts.coalesce_tensors,
+        max_retained_ratio=opts.shm_max_retained_ratio,
+        min_reclaim_bytes=opts.shm_min_reclaim_bytes,
+        coalesce_max_size=opts.shm_coalesce_max_size,
+    )
     num_stages = len(plan.stages)
     mode = opts.worker_allocation
 
@@ -412,6 +428,9 @@ def resolve_runtime_spec(
                 allow_latency_flush=allow_latency,
                 coalesce_tensors=opts.coalesce_tensors,
                 shm_min_size=opts.shm_min_size,
+                shm_max_retained_ratio=opts.shm_max_retained_ratio,
+                shm_min_reclaim_bytes=opts.shm_min_reclaim_bytes,
+                shm_coalesce_max_size=opts.shm_coalesce_max_size,
                 max_worker_retries=opts.max_worker_retries,
                 ipc_transport=opts.ipc_transport,
                 ipc_buffer_bytes=opts.ipc_buffer_bytes,

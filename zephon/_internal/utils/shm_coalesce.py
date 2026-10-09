@@ -1,51 +1,27 @@
-"""Coalesce per-microbatch tensors, numpy arrays, and large bytes into SHM buffers.
+"""Prepare CPU payloads for process-stage transport with one memory policy.
 
-Reduces the number of POSIX SHM segments (and file descriptors) from
-N-per-microbatch to K-per-microbatch where K = number of distinct
-dtypes (usually 1–2).  Large ``bytes``/``memoryview`` payloads are packed
-into a ``torch.uint8`` buffer so they travel through the same SHM path.
+Type adapters describe values and write them directly into Torch-managed shared
+storage. The common policy chooses inline transport, reuse of existing SHM,
+view compaction, or bounded coalescing. Copies target the final shared buffers;
+Torch owns allocation and lifetime. Unsupported values retain their normal
+serialization.
 
-Supported payload types:
-
-- **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
-  views into the SHM buffer.
-- **numpy.ndarray** — private arrays are coalesced into shared buffers.
-  Arrays backed by Zephon's shared buffers are forwarded by the
-  multiprocessing reducer, preserving their dtype, strides, and writeability.
-- **bytes / memoryview** — payloads above a size threshold are packed
-  into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
-
-Strategy (single memcpy):
-
-1. Describe a leaf payload directly, or flatten a container via
-   ``optree.tree_flatten``. Extract tensors, arrays, and large bytes into
-   lightweight descriptors, retaining a tree spec only for containers.
-2. For each distinct dtype (plus ``torch.uint8`` for raw bytes), allocate
-   storage directly in shared memory and attach a single 1-D ``torch.Tensor``
-   to it, then ``copy_`` each sub-tensor into the shared buffer. Each byte of
-   real data is copied exactly once — straight into SHM.
-3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
-   ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
-   wrappers.  Payloads are restored only when explicitly resolved
-   (typically in the worker process before ``process_many``).
-
-.. rubric:: Future: torch-free support
-
-This module currently requires torch for SHM lifecycle management.  A
-future refactor can replace this with ``shm_open`` / ``mmap`` / ``DupFd``
-to remove the torch dependency entirely and support Python 3.10+ without
-the ``__buffer__`` protocol.
+Descriptors keep both inline data and shared references lazy across forwarding
+hops. Operators receive ordinary payload values after resolve_lazy_payloads.
+The NumPy reducer forwards only Zephon-owned storage; policy configuration is
+scoped to process-stage messages, not installed globally or applied to MTP.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import operator
+import pickle
 import sys
 from dataclasses import dataclass
 from functools import cache
 from multiprocessing.reduction import register
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import optree
@@ -81,9 +57,59 @@ def _get_torch() -> Any:
     return _torch
 
 
-# Default minimum bytes/memoryview size worth sending through SHM.
-# Below this, SHM setup overhead exceeds the copy savings.
-DEFAULT_SHM_MIN_SIZE = 4096  # 4 KiB
+# Defaults are shared by all supported CPU payload types.
+DEFAULT_SHM_MIN_SIZE = 8192
+DEFAULT_SHM_MAX_RETAINED_RATIO = 8.0
+DEFAULT_SHM_MIN_RECLAIM_BYTES = 16 * 1024 * 1024
+DEFAULT_SHM_COALESCE_MAX_SIZE = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadMemoryPolicy:
+    """Choose transport, retention, and coalescing independently of payload type.
+
+    ``shm_min_size`` applies per value, including values already in SHM.
+    Compaction is a per-view heuristic: other references can delay reclamation.
+    Compacted views and large private values receive individual allocations;
+    they are never coalesced straight back into an oversized slab.
+    """
+
+    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    coalesce: bool = True
+    max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
+    min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
+    coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
+
+    def __post_init__(self) -> None:
+        if self.shm_min_size < 0 or self.min_reclaim_bytes < 0:
+            raise ValueError("SHM size thresholds must be non-negative")
+        if self.max_retained_ratio is not None and not (
+            1 <= self.max_retained_ratio < float("inf")
+        ):
+            raise ValueError("shm_max_retained_ratio must be finite and >= 1, or None")
+        if self.coalesce_max_size is not None and self.coalesce_max_size <= 0:
+            raise ValueError("shm_coalesce_max_size must be positive, or None")
+
+    def choose(
+        self, nbytes: int, shared_nbytes: int | None
+    ) -> Literal["inline", "reuse", "separate", "coalesce"]:
+        """Decide from useful bytes and backing size, without inspecting data."""
+        if nbytes == 0 or nbytes < self.shm_min_size:
+            return "inline"
+        if shared_nbytes is not None:
+            if (
+                self.max_retained_ratio is not None
+                and shared_nbytes > nbytes * self.max_retained_ratio
+                and shared_nbytes - nbytes >= self.min_reclaim_bytes
+            ):
+                return "separate"
+            return "reuse"
+        if not self.coalesce or (
+            self.coalesce_max_size is not None and nbytes > self.coalesce_max_size
+        ):
+            return "separate"
+        return "coalesce"
+
 
 # dtype key used for the coalesced raw-bytes buffer
 _BYTES_DTYPE_KEY = "_bytes_uint8"
@@ -114,11 +140,50 @@ class _LeafDescriptor(_PayloadDescriptor):
 
     def bind(self, buffers: dict[str, Any]) -> LazyPayload:
         """Keep a root leaf lazy without adding a singleton tree around it."""
-        return _ShmLeafPayload(self, buffers)
+        return _ShmLeafPayload(self, _used_buffers([self], buffers))
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore this value using its shared buffers."""
         raise NotImplementedError
+
+
+@dataclass(slots=True)
+class _PreparedPayload(LazyPayload):
+    """A payload whose existing reducers already implement the selected policy."""
+
+    value: Any
+    _policy: PayloadMemoryPolicy
+
+    def resolve_payload(self) -> SamplePayload:
+        return self.value
+
+    def __reduce__(self) -> tuple:
+        return type(self), (self.value, self._policy)
+
+
+@dataclass(slots=True)
+class _InlineSlot(_LeafDescriptor):
+    """Keep an inline root lazy without a singleton tree specification."""
+
+    value: Any
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        return self.value
+
+    def __reduce__(self) -> tuple:
+        return type(self), (self.value,)
+
+
+@dataclass(slots=True)
+class _RetainedView:
+    """Preserve an existing view if optional compaction cannot allocate SHM."""
+
+    value: Any
+
+
+def _restore_slot(slot: _LeafDescriptor, buffers: dict[str, Any]) -> Any:
+    buffer = buffers.get(getattr(slot, "buffer_key", None))
+    return buffer.value if isinstance(buffer, _RetainedView) else slot.restore(buffers)
 
 
 @dataclass(slots=True)
@@ -128,13 +193,15 @@ class _TensorSlot(_LeafDescriptor):
     dtype_key: str  # str(tensor.dtype)
     offset: int  # element offset into the per-dtype buffer
     shape: tuple[int, ...]
+    buffer_key: str | None = None
+    requires_grad: bool = False
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a tensor view, preserving the dtype of empty tensors too."""
         numel = 1
         for size in self.shape:
             numel *= size
-        buf = buffers.get(self.dtype_key)
+        buf = buffers.get(self.buffer_key or self.dtype_key)
         if numel == 0 or buf is None:
             torch = _get_torch()
             dtype = (
@@ -142,8 +209,14 @@ class _TensorSlot(_LeafDescriptor):
                 if buf is not None
                 else getattr(torch, self.dtype_key.removeprefix("torch."))
             )
-            return torch.empty(self.shape, dtype=dtype)
-        return buf.narrow(0, self.offset, numel).reshape(self.shape)
+            return torch.empty(
+                self.shape, dtype=dtype, device="cpu", requires_grad=self.requires_grad
+            )
+        return (
+            buf.narrow(0, self.offset, numel)
+            .reshape(self.shape)
+            .requires_grad_(self.requires_grad)
+        )
 
 
 @dataclass(slots=True)
@@ -154,6 +227,8 @@ class _NdarraySlot(_LeafDescriptor):
     offset: int  # element offset into the per-dtype buffer
     shape: tuple[int, ...]
     dtype: np.dtype[Any]
+    buffer_key: str | None = None
+    writable: bool = True
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a NumPy view without intermediate torch tensor views."""
@@ -162,8 +237,11 @@ class _NdarraySlot(_LeafDescriptor):
             numel *= size
         if numel == 0:
             return np.empty(self.shape, dtype=self.dtype)
-        array = _shared_numpy_view(buffers[self.dtype_key])
-        return array[self.offset : self.offset + numel].reshape(self.shape)
+        array = _shared_numpy_view(buffers[self.buffer_key or self.dtype_key])
+        result = array[self.offset : self.offset + numel].reshape(self.shape)
+        if not self.writable:
+            result.flags.writeable = False
+        return result
 
 
 def _shared_numpy_view(buffer: Any) -> np.ndarray[Any, Any]:
@@ -285,10 +363,11 @@ class _NumericListSlot(_LeafDescriptor):
     dtype_key: str
     offset: int
     length: int  # original list length (== numel for 1-D)
+    buffer_key: str | None = None
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore the original Python list contract."""
-        buf = buffers.get(self.dtype_key)
+        buf = buffers.get(self.buffer_key or self.dtype_key)
         if self.length == 0 or buf is None:
             return []
         return buf.narrow(0, self.offset, self.length).tolist()
@@ -300,11 +379,14 @@ class _BytesSlot(_LeafDescriptor):
 
     offset: int  # byte offset into the _BYTES_DTYPE_KEY buffer
     length: int
+    buffer_key: str | None = None
+    mutable: bool = False
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a bytes view backed by the shared uint8 buffer."""
-        buf = buffers[_BYTES_DTYPE_KEY]
-        return _ShmBytes(buf.narrow(0, self.offset, self.length))
+        buf = buffers[self.buffer_key or _BYTES_DTYPE_KEY]
+        view = buf.narrow(0, self.offset, self.length)
+        return bytearray(view.numpy()) if self.mutable else _ShmBytes(view)
 
 
 @dataclass(slots=True)
@@ -333,24 +415,19 @@ class _StructSlot(_LeafDescriptor):
 # ---------------------------------------------------------------------------
 # Structured type detection (dataclasses, pydantic, attrs)
 # ---------------------------------------------------------------------------
-def _is_pydantic_instance(obj: Any) -> bool:
-    """Check if *obj* is an instance of a pydantic ``BaseModel``."""
-    cls = type(obj)
-    return hasattr(cls, "model_fields") and hasattr(cls, "model_construct")
-
-
-def _is_attrs_instance(obj: Any) -> bool:
-    """Check if *obj* is an instance of an attrs-decorated class."""
-    return hasattr(type(obj), "__attrs_attrs__")
+@cache
+def _is_struct_type(cls: type) -> bool:
+    """Cache format detection; the same payload classes recur across records."""
+    return (
+        dataclasses.is_dataclass(cls)
+        or (hasattr(cls, "model_fields") and hasattr(cls, "model_construct"))
+        or hasattr(cls, "__attrs_attrs__")
+    )
 
 
 def _is_struct(obj: Any) -> bool:
     """Return ``True`` for objects we can safely decompose into named fields."""
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return True
-    if _is_pydantic_instance(obj):
-        return True
-    return _is_attrs_instance(obj)
+    return not isinstance(obj, type) and _is_struct_type(type(obj))
 
 
 _struct_info_cache: dict[type, tuple[str, ...]] = {}
@@ -395,7 +472,7 @@ class _FlatSkeleton(_PayloadDescriptor):
 
     def bind(self, buffers: dict[str, Any]) -> LazyPayload:
         """Keep the existing tree lazy payload without retaining this wrapper."""
-        return ShmLazyPayload(self.slots, self.spec, buffers)
+        return ShmLazyPayload(self.slots, self.spec, _used_buffers(self.slots, buffers))
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +485,7 @@ class _ShmBytes312:
 
     def __init__(self, tensor_view: Any) -> None:
         self._tensor_view = tensor_view
-        self._np_view = tensor_view.numpy()
+        self._np_view = _shared_numpy_view(tensor_view)
 
     def __reduce_ex__(self, protocol: int) -> tuple:
         # ForkingPickler handles the tensor via SHM FD passing (zero copy).
@@ -467,11 +544,9 @@ _PRIMITIVE_TYPES = (int, float, str, bool, type(None))
 def _is_leaf(obj: Any) -> bool:
     """Predicate for ``optree.tree_flatten``.
 
-    Treats tuples and structured types (dataclass, pydantic) as leaves.
-    Tuples: ``optree`` flattens them by default but the walker only
-    recurses into dict and list.  Structs: handled in ``_extract_leaf``
-    which decomposes them into a fields dict and recurses via
-    ``_extract_payload_pytree``.
+    Structured types are handled in ``_extract_leaf``, which decomposes them
+    into a fields dict and recurses via ``_extract_payload_pytree``. Ordinary
+    dicts, lists, and tuples use optree's container traversal.
 
     Lists of primitives (int, float, str, …) are also treated as leaves
     to avoid inflating the slot count.  A ``List[int]`` with 500 elements
@@ -482,7 +557,9 @@ def _is_leaf(obj: Any) -> bool:
     only consequence is a missed tensor falling back to pickle (perf,
     not correctness).
     """
-    if isinstance(obj, tuple) or _is_struct(obj):
+    if type(obj) in _PRIMITIVE_TYPES or type(obj) is dict:
+        return False
+    if _is_struct(obj):
         return True
     if (
         isinstance(obj, list)
@@ -523,91 +600,248 @@ def _torch_dtype_for(dtype: Any) -> Any | None:
         return None
 
 
+def _restore_inline_tensor(
+    data: Any, dtype: Any, shape: tuple[int, ...], grad: bool
+) -> Any:
+    torch = _get_torch()
+    if 0 in shape:
+        return torch.empty(shape, dtype=dtype, device="cpu", requires_grad=grad)
+    # Protocol 4 reconstructs bytes; tensors need writable storage.
+    if isinstance(data, bytes):
+        data = bytearray(data)
+    return torch.frombuffer(data, dtype=dtype).reshape(shape).requires_grad_(grad)
+
+
+class _InlineTensor(_LeafDescriptor):
+    """Serialize tensor values without invoking Torch's SHM reducer."""
+
+    def __init__(self, tensor: Any) -> None:
+        self.tensor = tensor
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        return self.tensor
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        tensor = self.tensor.detach().resolve_conj().resolve_neg().contiguous()
+        view = tensor.reshape(-1).view(_get_torch().uint8).numpy()
+        data = pickle.PickleBuffer(view) if protocol >= 5 else bytearray(view)
+        return _InlineTensorData, (
+            data,
+            tensor.dtype,
+            tuple(tensor.shape),
+            self.tensor.requires_grad,
+        )
+
+
+@dataclass(slots=True)
+class _InlineTensorData(_LeafDescriptor):
+    """Keep inline tensor bytes inline across lazy forwarding hops."""
+
+    data: Any
+    dtype: Any
+    shape: tuple[int, ...]
+    requires_grad: bool
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        return _restore_inline_tensor(
+            self.data, self.dtype, self.shape, self.requires_grad
+        )
+
+
+def _restore_inline_numpy(array: Any, writable: bool) -> Any:
+    if not writable:
+        array.flags.writeable = False
+    return array
+
+
+class _InlineNumpy:
+    """Use NumPy's own serialization even for a Zephon-shared source."""
+
+    def __init__(self, array: Any) -> None:
+        self.array = array
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        return _restore_inline_numpy, (
+            _NumpyPickleFallback(self.array),
+            self.array.flags.writeable,
+        )
+
+
+@dataclass(slots=True)
+class _BufferPayload:
+    """Type-specific description; policy and allocation stay format-independent."""
+
+    source: Any
+    slot: Any
+    dtype_key: str
+    numel: int
+    nbytes: int
+    shared_nbytes: int | None = None
+
+
+class _BufferPlan:
+    """Collect writes using a single memory policy and bounded coalescing groups."""
+
+    def __init__(self, policy: PayloadMemoryPolicy) -> None:
+        self.policy = policy
+        self.collector: dict[str, list[Any]] = {}
+        self.offsets: dict[str, int] = {}
+        self.dtype_keys: dict[str, str] = {}
+        self.current: dict[str, str] = {}
+        self.changed = False
+        self.fallbacks: dict[str, Any] = {}
+
+    def add(
+        self, value: _BufferPayload, *, separate: bool, fallback: Any = None
+    ) -> Any:
+        source = value.source
+        if isinstance(value.slot, _NumericListSlot):
+            kind = type(source[0])
+            if set(map(type, source)) != {kind}:
+                return source
+            try:
+                array = np.array(source, dtype=np.int64 if kind is int else np.float64)
+            except OverflowError:
+                return source
+            source = _get_torch().from_numpy(array)
+        elif isinstance(value.slot, _BytesSlot):
+            view = source._np_view if isinstance(source, _ShmBytes312) else source
+            source = (
+                _memoryview_source(view)
+                if isinstance(view, memoryview)
+                else np.frombuffer(view, dtype=np.uint8)
+            )
+        elif isinstance(value.slot, _TensorSlot) and source.requires_grad:
+            source = source.detach()
+        dtype = value.dtype_key
+        key = None if separate else self.current.get(dtype)
+        limit = self.policy.coalesce_max_size
+        if key is not None and limit is not None:
+            itemsize = value.nbytes // value.numel
+            if self.offsets[key] * itemsize + value.nbytes > limit:
+                key = None
+        if key is None:
+            key = (
+                dtype
+                if dtype not in self.collector
+                else f"{dtype}#{len(self.collector)}"
+            )
+            self.collector[key] = []
+            self.offsets[key] = 0
+            self.dtype_keys[key] = dtype
+            if not separate:
+                self.current[dtype] = key
+        if fallback is not None:
+            self.fallbacks[key] = fallback
+        value.slot.buffer_key = key
+        value.slot.offset = self.offsets[key]
+        self.offsets[key] += value.numel
+        self.collector[key].append(source)
+        self.changed = True
+        return value.slot
+
+
+def _describe_buffer(leaf: Any) -> _BufferPayload | None:
+    """Adapt supported CPU payloads to descriptors and direct-copy sources."""
+    torch = _get_torch()
+    if type(leaf) is torch.Tensor:
+        if (
+            leaf.device.type != "cpu"
+            or leaf.layout != torch.strided
+            or leaf.is_quantized
+        ):
+            return None
+        if leaf.requires_grad and not leaf.is_leaf:
+            return None
+        dtype = str(leaf.dtype)
+        return _BufferPayload(
+            leaf,
+            _TensorSlot(dtype, 0, tuple(leaf.shape), requires_grad=leaf.requires_grad),
+            dtype,
+            leaf.numel(),
+            leaf.numel() * leaf.element_size(),
+            leaf.untyped_storage().nbytes() if leaf.is_shared() else None,
+        )
+    if type(leaf) is np.ndarray:
+        if _torch_dtype_for(leaf.dtype) is None:
+            return None
+        storage = _shared_numpy_storage(leaf)
+        dtype = _NDARRAY_PREFIX + str(leaf.dtype)
+        return _BufferPayload(
+            leaf,
+            _NdarraySlot(
+                dtype, 0, tuple(leaf.shape), leaf.dtype, writable=leaf.flags.writeable
+            ),
+            dtype,
+            leaf.size,
+            leaf.nbytes,
+            storage.nbytes() if storage is not None else None,
+        )
+    if isinstance(leaf, (bytes, bytearray, memoryview, _ShmBytes312)):
+        shared = (
+            leaf._tensor_view.untyped_storage().nbytes()
+            if isinstance(leaf, _ShmBytes312)
+            else None
+        )
+        size = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
+        return _BufferPayload(
+            leaf,
+            _BytesSlot(0, size, mutable=isinstance(leaf, bytearray)),
+            _BYTES_DTYPE_KEY,
+            size,
+            size,
+            shared,
+        )
+    if type(leaf) is list and leaf:
+        kind = type(leaf[0])
+        if kind not in (int, float):
+            return None
+        dtype = "torch.int64" if kind is int else "torch.float64"
+        return _BufferPayload(
+            leaf, _NumericListSlot(dtype, 0, len(leaf)), dtype, len(leaf), len(leaf) * 8
+        )
+    return None
+
+
 def _extract_leaf(
     leaf: Any,
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
+    plan: _BufferPlan | None = None,
 ) -> Any:
-    """Replace a single tensor/ndarray/bytes/struct leaf with a slot placeholder.
-
-    Returns the slot if the leaf was extracted, or the original leaf unchanged.
-    Structured types (dataclass, pydantic) are decomposed into a fields dict
-    and recursively extracted via ``_extract_payload_pytree``.
-    """
-    # Structured types: decompose fields → dict, recurse via optree.
-    if _is_struct(leaf):
-        cls, _names, fields_dict = _struct_to_dict(leaf)
-        inner_skel = _extract_payload_pytree(
-            fields_dict, collector, offsets, shm_min_size
-        )
-        return _StructSlot(cls=cls, inner_skeleton=inner_skel)
-    # Only lossless built-in numeric lists share buffers with Torch tensors.
-    torch = _get_torch()
-    if torch is not None and isinstance(leaf, list) and leaf:
-        kind = type(leaf[0])
-        if (
-            type(leaf) is not list
-            or kind not in (int, float)
-            or set(map(type, leaf)) != {kind}
-        ):
-            return leaf
-        try:
-            array = np.array(leaf, dtype=np.int64 if kind is int else np.float64)
-        except OverflowError:
-            return leaf
-        tensor = torch.from_numpy(array)
-        dtype_key = str(tensor.dtype)
-        n = len(leaf)
-        offset = offsets.get(dtype_key, 0)
-        slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
-        offsets[dtype_key] = offset + n
-        collector.setdefault(dtype_key, []).append(tensor)
-        return slot
-    if torch is not None and isinstance(leaf, torch.Tensor):
-        if leaf.device.type != "cpu":
-            return leaf
-        if leaf.is_shared():
-            return leaf
-        dtype_key = str(leaf.dtype)
-        numel = leaf.numel()
-        offset = offsets.get(dtype_key, 0)
-        slot = _TensorSlot(dtype_key=dtype_key, offset=offset, shape=tuple(leaf.shape))
-        offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(leaf)
-        return slot
-    if torch is not None and isinstance(leaf, np.ndarray):
-        if (
-            _shared_numpy_storage(leaf) is not None
-            or _torch_dtype_for(leaf.dtype) is None
-        ):
-            return leaf
-        dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
-        numel = leaf.size
-        offset = offsets.get(dtype_key, 0)
-        slot = _NdarraySlot(
-            dtype_key=dtype_key,
-            offset=offset,
-            shape=tuple(leaf.shape),
-            dtype=leaf.dtype,
-        )
-        offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(leaf)
-        return slot
-    if isinstance(leaf, (bytes, memoryview)):
-        nbytes = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
-        if nbytes > 0 and nbytes >= shm_min_size and torch is not None:
-            offset = offsets.get(_BYTES_DTYPE_KEY, 0)
-            slot = _BytesSlot(offset=offset, length=nbytes)
-            offsets[_BYTES_DTYPE_KEY] = offset + nbytes
-            collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                _memoryview_source(leaf)
-                if isinstance(leaf, memoryview)
-                else np.frombuffer(leaf, dtype=np.uint8)
-            )
-            return slot
+    """Apply one policy after adapting a leaf; never copy into a staging slab."""
+    if plan is None:
+        plan = _BufferPlan(PayloadMemoryPolicy(shm_min_size=shm_min_size))
+        plan.collector, plan.offsets = collector, offsets
+    if type(leaf) in _PRIMITIVE_TYPES:
         return leaf
-    return leaf
+    if _is_struct(leaf):
+        cls, _names, fields = _struct_to_dict(leaf)
+        inner = _extract_payload_pytree(fields, collector, offsets, shm_min_size, plan)
+        return _StructSlot(cls=cls, inner_skeleton=inner)
+    value = _describe_buffer(leaf)
+    if value is None:
+        return leaf
+    choice = plan.policy.choose(value.nbytes, value.shared_nbytes)
+    if choice == "reuse":
+        return leaf
+    if choice == "inline":
+        if isinstance(leaf, _get_torch().Tensor):
+            plan.changed = True
+            return _InlineTensor(leaf)
+        if isinstance(leaf, np.ndarray) and value.shared_nbytes is not None:
+            plan.changed = True
+            return _InlineNumpy(leaf)
+        if isinstance(leaf, (memoryview, _ShmBytes312)):
+            plan.changed = True
+            return leaf.tobytes() if isinstance(leaf, memoryview) else bytes(leaf)
+        return leaf
+    return plan.add(
+        value,
+        separate=choice == "separate",
+        fallback=leaf if value.shared_nbytes is not None else None,
+    )
 
 
 def _extract_payload_pytree(
@@ -615,11 +849,15 @@ def _extract_payload_pytree(
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
+    plan: _BufferPlan | None = None,
 ) -> _FlatSkeleton:
     """Flatten payload via optree and replace tensor/bytes leaves with slots."""
+    if plan is None:
+        plan = _BufferPlan(PayloadMemoryPolicy(shm_min_size=shm_min_size))
+        plan.collector, plan.offsets = collector, offsets
     leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
     for i, leaf in enumerate(leaves):
-        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_size)
+        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_size, plan)
     return _FlatSkeleton(slots=leaves, spec=spec)
 
 
@@ -628,15 +866,28 @@ def _extract_record_payload(
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
-) -> _PayloadDescriptor:
+    plan: _BufferPlan | None = None,
+) -> _PayloadDescriptor | LazyPayload:
     """Describe a root leaf directly; preserve the structure of containers."""
-    # Dictionaries cannot be SHM leaves. Avoid running the leaf classifiers
-    # on this common container before traversing its actual leaves.
+    if isinstance(payload, LazyPayload):
+        if not isinstance(
+            payload, (_ShmLeafPayload, ShmLazyPayload, _PreparedPayload)
+        ) or (plan is not None and payload._policy == plan.policy):
+            return payload
+        payload = payload.resolve_payload()
+        if plan is not None:
+            plan.changed = True
     if not isinstance(payload, dict):
-        descriptor = _extract_leaf(payload, collector, offsets, shm_min_size)
+        descriptor = _extract_leaf(payload, collector, offsets, shm_min_size, plan)
         if isinstance(descriptor, _LeafDescriptor):
             return descriptor
-    return _extract_payload_pytree(payload, collector, offsets, shm_min_size)
+        if (
+            descriptor is not payload
+            or not isinstance(payload, (dict, list, tuple))
+            or _is_leaf(payload)
+        ):
+            return _InlineSlot(descriptor)
+    return _extract_payload_pytree(payload, collector, offsets, shm_min_size, plan)
 
 
 def _extract_from_records(
@@ -644,23 +895,24 @@ def _extract_from_records(
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
     shm_min_size: int,
-) -> list[tuple[SampleRecord, _PayloadDescriptor]]:
+    plan: _BufferPlan | None = None,
+) -> list[tuple[SampleRecord, _PayloadDescriptor | LazyPayload]]:
     """Extract tensors from records without mutating payloads yet.
 
     Returns (record, descriptor) pairs. The caller commits the descriptors
     only after shared-buffer allocation succeeds.
     """
-    descriptors: list[tuple[SampleRecord, _PayloadDescriptor]] = []
+    descriptors: list[tuple[SampleRecord, _PayloadDescriptor | LazyPayload]] = []
     for item in items:
         if isinstance(item, SampleRecord):
             descriptor = _extract_record_payload(
-                item.payload, collector, offsets, shm_min_size
+                item.payload, collector, offsets, shm_min_size, plan
             )
             descriptors.append((item, descriptor))
         elif isinstance(item, SampleBatch):
             for rec in item.records:
                 descriptor = _extract_record_payload(
-                    rec.payload, collector, offsets, shm_min_size
+                    rec.payload, collector, offsets, shm_min_size, plan
                 )
                 descriptors.append((rec, descriptor))
     return descriptors
@@ -669,7 +921,7 @@ def _extract_from_records(
 # ---------------------------------------------------------------------------
 # Build coalesced SHM buffers
 # ---------------------------------------------------------------------------
-def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
+def _alloc_shm_buffer(numel: int, dtype: Any, label: str, *, retry: bool = True) -> Any:
     """Allocate a 1-D tensor directly in shared memory, retrying on ENOSPC.
 
     Transient ``/dev/shm`` exhaustion blocks in :func:`wait_for_shm_space`
@@ -684,14 +936,18 @@ def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
             # it honors torch.multiprocessing.get_sharing_strategy().
             storage = torch.UntypedStorage._new_shared(nbytes, device="cpu")
         except Exception as e:
-            if not is_shm_error(e):
+            if not retry or not is_shm_error(e):
                 raise
             wait_for_shm_space(label)
         else:
             return buf.set_(storage)
 
 
-def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
+def _build_shm_buffers(
+    collector: dict[str, list[Any]],
+    dtype_keys: dict[str, str] | None = None,
+    fallbacks: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
     Allocates the target directly in shared memory, then writes tensors,
@@ -703,58 +959,106 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """
     buffers: dict[str, Any] = {}
     torch = _get_torch()
-    for dtype_key, items in collector.items():
-        if dtype_key == _BYTES_DTYPE_KEY:
-            # Pack raw bytes into a uint8 tensor.
-            total = sum(array.nbytes for array in items)
-            buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
-            np_buf = buf.numpy()
-            offset = 0
-            for array in items:
-                n = array.nbytes
-                np.copyto(
-                    np_buf[offset : offset + n].view(array.dtype).reshape(array.shape),
-                    array,
-                    casting="no",
+    for buffer_key, items in collector.items():
+        dtype_key = dtype_keys[buffer_key] if dtype_keys is not None else buffer_key
+        optional = fallbacks is not None and buffer_key in fallbacks
+
+        def allocate(count: int, dtype: Any) -> Any:
+            if optional:
+                return _alloc_shm_buffer(
+                    count, dtype, f"compact[{dtype_key}]", retry=False
                 )
-                offset += n
-            buffers[dtype_key] = buf
-        elif dtype_key.startswith(_NDARRAY_PREFIX):
-            # NumPy can read strided, reversed, and read-only sources directly
-            # into the final contiguous destination. No ascontiguousarray copy
-            # or per-array Torch wrapper is needed.
-            total_numel = sum(array.size for array in items)
-            if total_numel == 0:
-                continue
-            dtype = _torch_dtype_for(items[0].dtype)
-            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
-            np_buf = buf.numpy()
-            offset = 0
-            for array in items:
-                n = array.size
-                if n > 0:
+            return _alloc_shm_buffer(count, dtype, f"coalesce[{dtype_key}]")
+
+        try:
+            if dtype_key == _BYTES_DTYPE_KEY:
+                # Pack raw bytes into a uint8 tensor.
+                total = sum(array.nbytes for array in items)
+                buf = allocate(total, torch.uint8)
+                np_buf = buf.numpy()
+                if len(items) > 1 and all(a.dtype == np.uint8 for a in items):
+                    np.concatenate(items, axis=None, out=np_buf, casting="no")
+                    buffers[buffer_key] = buf
+                    continue
+                offset = 0
+                for array in items:
+                    n = array.nbytes
                     np.copyto(
-                        np_buf[offset : offset + n].reshape(array.shape),
+                        np_buf[offset : offset + n]
+                        .view(array.dtype)
+                        .reshape(array.shape),
                         array,
                         casting="no",
                     )
-                offset += n
-            buffers[dtype_key] = buf
-        else:
-            total_numel = sum(t.numel() for t in items)
-            if total_numel == 0:
-                continue
-            dtype = items[0].dtype
-            # Allocate directly in SHM, then write sub-tensors in.
-            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
-            offset = 0
-            for t in items:
-                n = t.numel()
-                if n > 0:
-                    buf.narrow(0, offset, n).view(t.shape).copy_(t)
-                offset += n
-            buffers[dtype_key] = buf
+                    offset += n
+                buffers[buffer_key] = buf
+            elif dtype_key.startswith(_NDARRAY_PREFIX):
+                # NumPy can read strided, reversed, and read-only sources directly
+                # into the final contiguous destination. No ascontiguousarray copy
+                # or per-array Torch wrapper is needed.
+                total_numel = sum(array.size for array in items)
+                if total_numel == 0:
+                    continue
+                dtype = _torch_dtype_for(items[0].dtype)
+                buf = allocate(total_numel, dtype)
+                np_buf = buf.numpy()
+                if len(items) > 1:
+                    # concatenate(axis=None, out=...) copies strided sources
+                    # directly into the destination in C order. It avoids
+                    # creating a Python destination view for every source.
+                    np.concatenate(items, axis=None, out=np_buf, casting="no")
+                    buffers[buffer_key] = buf
+                    continue
+                offset = 0
+                for array in items:
+                    n = array.size
+                    if n > 0:
+                        np.copyto(
+                            np_buf[offset : offset + n].reshape(array.shape),
+                            array,
+                            casting="no",
+                        )
+                    offset += n
+                buffers[buffer_key] = buf
+            else:
+                total_numel = sum(t.numel() for t in items)
+                if total_numel == 0:
+                    continue
+                dtype = items[0].dtype
+                # Allocate directly in SHM, then write sub-tensors in.
+                buf = allocate(total_numel, dtype)
+                if len(items) > 1 and all(t.is_contiguous() for t in items):
+                    flat = [t if t.ndim == 1 else t.view(-1) for t in items]
+                    torch.cat(flat, out=buf)
+                    buffers[buffer_key] = buf
+                    continue
+                offset = 0
+                for t in items:
+                    n = t.numel()
+                    if n > 0:
+                        buf.narrow(0, offset, n).view(t.shape).copy_(t)
+                    offset += n
+                buffers[buffer_key] = buf
+        except Exception as exc:
+            if not optional or not is_shm_error(exc):
+                raise
+            assert fallbacks is not None
+            buffers[buffer_key] = _RetainedView(fallbacks[buffer_key])
     return buffers
+
+
+def _used_buffers(slots: list[Any], buffers: dict[str, Any]) -> dict[str, Any]:
+    keys: set[str] = set()
+    for slot in slots:
+        if isinstance(slot, _StructSlot):
+            keys.update(_used_buffers(slot.inner_skeleton.slots, buffers))
+        elif isinstance(slot, (_TensorSlot, _NdarraySlot, _NumericListSlot)):
+            keys.add(slot.buffer_key or slot.dtype_key)
+        elif isinstance(slot, _BytesSlot):
+            keys.add(slot.buffer_key or _BYTES_DTYPE_KEY)
+    if len(keys) == len(buffers) and keys == buffers.keys():
+        return buffers
+    return {key: buffers[key] for key in keys if key in buffers}
 
 
 # ---------------------------------------------------------------------------
@@ -766,14 +1070,15 @@ class _ShmLeafPayload(LazyPayload):
 
     _descriptor: _LeafDescriptor
     _buffers: dict[str, Any]
+    _policy: PayloadMemoryPolicy | None = None
 
     def resolve_payload(self) -> SamplePayload:
         """Restore the leaf using its descriptor's existing type knowledge."""
-        return cast(SamplePayload, self._descriptor.restore(self._buffers))
+        return cast(SamplePayload, _restore_slot(self._descriptor, self._buffers))
 
     def __reduce__(self) -> tuple:
         """Forward the descriptor and buffers without resolving the value."""
-        return (_ShmLeafPayload, (self._descriptor, self._buffers))
+        return (_ShmLeafPayload, (self._descriptor, self._buffers, self._policy))
 
 
 @dataclass(slots=True)
@@ -789,6 +1094,7 @@ class ShmLazyPayload(LazyPayload):
     _slots: list[Any]
     _spec: optree.PyTreeSpec
     _buffers: dict[str, Any]  # shared ref keeps SHM alive via refcounting
+    _policy: PayloadMemoryPolicy | None = None
 
     def resolve_payload(self) -> SamplePayload:
         """Materialize the full payload by replacing slots with SHM views."""
@@ -797,14 +1103,20 @@ class ShmLazyPayload(LazyPayload):
 
     def __reduce__(self) -> tuple:
         """Pickle without resolving — forward (slots, spec, buffers) as-is."""
-        return (_make_shm_lazy_payload, (self._slots, self._spec, self._buffers))
+        return (
+            _make_shm_lazy_payload,
+            (self._slots, self._spec, self._buffers, self._policy),
+        )
 
 
 def _make_shm_lazy_payload(
-    slots: list[Any], spec: optree.PyTreeSpec, buffers: dict[str, Any]
+    slots: list[Any],
+    spec: optree.PyTreeSpec,
+    buffers: dict[str, Any],
+    policy: PayloadMemoryPolicy | None = None,
 ) -> ShmLazyPayload:
     """Unpickle constructor for :class:`ShmLazyPayload`."""
-    return ShmLazyPayload(slots, spec, buffers)
+    return ShmLazyPayload(slots, spec, buffers, policy)
 
 
 def _reconstruct_struct(slot: _StructSlot, fields_dict: dict[str, Any]) -> Any:
@@ -823,7 +1135,7 @@ def _resolve_slots(slots: list[Any], buffers: dict[str, Any]) -> list[Any]:
     SHM buffer, or a reconstructed struct for ``_StructSlot``.
     """
     return [
-        item.restore(buffers) if isinstance(item, _LeafDescriptor) else item
+        _restore_slot(item, buffers) if isinstance(item, _LeafDescriptor) else item
         for item in slots
     ]
 
@@ -833,7 +1145,7 @@ def _resolve_slots(slots: list[Any], buffers: dict[str, Any]) -> list[Any]:
 # ---------------------------------------------------------------------------
 @dataclass(slots=True)
 class CoalescedMicrobatch:
-    """Microbatch with tensors/bytes coalesced into SHM buffers.
+    """Microbatch with prepared inline values and shared buffers.
 
     On unpickle (``__reduce__``), produces ``list[StreamItem]`` where each
     record's payload is a :class:`LazyPayload`. Call
@@ -841,10 +1153,14 @@ class CoalescedMicrobatch:
     """
 
     skeleton: list[StreamItem]
-    buffers: dict[str, Any]  # dtype_key -> torch.Tensor in SHM
+    buffers: dict[str, Any]  # coalescing group -> shared tensor or retained view
+    policy: PayloadMemoryPolicy | None = None
 
     def __reduce__(self) -> tuple:
-        return (_reconstruct_microbatch_lazy, (self.skeleton, self.buffers))
+        return (
+            _reconstruct_microbatch_lazy,
+            (self.skeleton, self.buffers, self.policy),
+        )
 
     def __len__(self) -> int:
         return len(self.skeleton)
@@ -853,37 +1169,69 @@ class CoalescedMicrobatch:
 def coalesce_microbatch(
     items: list[StreamItem],
     shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
+    *,
+    policy: PayloadMemoryPolicy | None = None,
+    copy_records: bool = False,
+    ensure_prepared: bool = False,
 ) -> CoalescedMicrobatch | None:
-    """Extract private payloads from *items* into per-dtype SHM buffers.
+    """Prepare supported values using a common transport and memory policy.
 
-    Returns ``None`` when no new buffers are needed. Shared Torch tensors and
-    NumPy views of Zephon buffers retain their storage through multiprocessing
-    reduction.
-    Bytes and memoryviews smaller than *shm_min_size* are left inline; this
-    threshold does not apply to tensors, NumPy arrays, or numeric lists.
+    The legacy function name is retained, but inline transport and view
+    compaction also apply when coalescing is disabled. ``shm_min_size`` is a
+    shortcut for a default policy; an explicit ``policy`` takes precedence.
 
-    Uses a two-pass approach: extraction first collects descriptors without
-    mutating payloads, then commits only after SHM allocation succeeds.
+    Returns None when values need no preparation, unless ``ensure_prepared``
+    keeps accepted inline values lazy too. ``copy_records`` protects the
+    parent's retry records when preparation runs in a queue feeder.
+
+    Extraction leaves records unchanged until allocation succeeds. Optional
+    view compaction keeps the source on SHM exhaustion instead of waiting for
+    space held by that source. Required allocations retain normal backpressure.
     """
     if _get_torch() is None:
         return None
-    collector: dict[str, list[Any]] = {}
-    offsets: dict[str, int] = {}
-    descriptors = _extract_from_records(items, collector, offsets, shm_min_size)
-    if not collector:
-        return None
+    plan = _BufferPlan(policy or PayloadMemoryPolicy(shm_min_size=shm_min_size))
+    descriptors = _extract_from_records(
+        items, plan.collector, plan.offsets, plan.policy.shm_min_size, plan
+    )
+    if not plan.changed:
+        if not ensure_prepared:
+            return None
+        # Already prepared lazy payloads stay intact. Other inline payloads
+        # need no flattened skeleton once the policy has accepted them.
+        descriptors = [
+            (
+                rec,
+                rec.payload
+                if isinstance(rec.payload, LazyPayload)
+                else _PreparedPayload(rec.payload, plan.policy),
+            )
+            for rec, _ in descriptors
+        ]
+    buffers = _build_shm_buffers(plan.collector, plan.dtype_keys, plan.fallbacks)
 
-    # Build SHM buffers first.  If a non-SHM error propagates, payloads
-    # are still intact.  ENOSPC is retried internally by _build_shm_buffers.
-    buffers = _build_shm_buffers(collector)
-    if not buffers:
-        return None
+    # Only allocate replacement records if preparation changed the message.
+    if copy_records:
+        pending = iter(descriptor for _, descriptor in descriptors)
+        items = [
+            SampleRecord(item.meta, cast(SamplePayload, next(pending)))
+            if isinstance(item, SampleRecord)
+            else SampleBatch(
+                records=tuple(
+                    SampleRecord(r.meta, cast(SamplePayload, next(pending)))
+                    for r in item.records
+                )
+            )
+            if isinstance(item, SampleBatch)
+            else item
+            for item in items
+        ]
+    else:
+        # Commit: metadata stays on each record; only its payload is replaced.
+        for rec, descriptor in descriptors:
+            rec.payload = descriptor  # type: ignore[assignment]
 
-    # Commit: metadata stays on each record; only its payload is replaced.
-    for rec, descriptor in descriptors:
-        rec.payload = descriptor  # type: ignore[assignment]
-
-    return CoalescedMicrobatch(skeleton=items, buffers=buffers)
+    return CoalescedMicrobatch(skeleton=items, buffers=buffers, policy=plan.policy)
 
 
 # ---------------------------------------------------------------------------
@@ -892,8 +1240,17 @@ def coalesce_microbatch(
 def _reconstruct_microbatch_lazy(
     skeleton: list[StreamItem],
     buffers: dict[str, Any],
+    policy: PayloadMemoryPolicy | None = None,
 ) -> list[StreamItem]:
     """Bind each payload descriptor to shared buffers without restoring it."""
+
+    def bind(descriptor: Any) -> Any:
+        if not isinstance(descriptor, _PayloadDescriptor):
+            return descriptor
+        payload = cast(_ShmLeafPayload | ShmLazyPayload, descriptor.bind(buffers))
+        payload._policy = policy
+        return payload
+
     result: list[StreamItem] = []
     for item in skeleton:
         if isinstance(item, SampleRecord):
@@ -901,14 +1258,14 @@ def _reconstruct_microbatch_lazy(
             result.append(
                 SampleRecord(
                     meta=item.meta,
-                    payload=descriptor.bind(buffers),  # type: ignore[assignment]
+                    payload=bind(descriptor),
                 )
             )
         elif isinstance(item, SampleBatch):
             records = tuple(
                 SampleRecord(
                     meta=rec.meta,
-                    payload=cast(_PayloadDescriptor, rec.payload).bind(buffers),  # type: ignore[assignment]
+                    payload=bind(rec.payload),
                 )
                 for rec in item.records
             )
@@ -916,3 +1273,19 @@ def _reconstruct_microbatch_lazy(
         else:
             result.append(item)
     return result
+
+
+@dataclass(slots=True)
+class TransportMicrobatch:
+    """Apply a process-stage policy during serialization, preserving retry inputs."""
+
+    items: list[Any]
+    policy: PayloadMemoryPolicy
+
+    def __reduce__(self) -> tuple:
+        prepared = coalesce_microbatch(
+            self.items, policy=self.policy, copy_records=True
+        )
+        if prepared is not None:
+            return prepared.__reduce__()
+        return list, (self.items,)

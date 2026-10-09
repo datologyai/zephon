@@ -575,6 +575,7 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         deterministic=True,
         stage_output_mode="stream_items",
         coalesce_tensors=True,
+        shm_min_size=0,
     )
 
     # 8 records with max_batch=8 → one microbatch → one coalesced buffer
@@ -2327,7 +2328,7 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
     np = pytest.importorskip("numpy")
     record = _mk_record(0)
     record.payload = np.arange(32)[3:20:2]
-    coalesced = coalesce_microbatch([record])
+    coalesced = coalesce_microbatch([record], shm_min_size=0)
     assert coalesced is not None
     records = pickle.loads(ForkingPickler.dumps(coalesced))
     resolve_lazy_payloads(records)
@@ -2347,6 +2348,7 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         _ctx_services(),
         max_workers=2,
         deterministic=True,
+        shm_min_size=0,
         stage_output_mode="stream_items",
     )
     try:
@@ -2358,3 +2360,58 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         np.testing.assert_array_equal(result.payload, expected)
     finally:
         runner.close()
+
+
+class _InspectPayloadMemory(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage
+
+        for record in elems:
+            payload = record.payload
+            payload["observed"] = (
+                payload["small_t"].is_shared(),
+                _shared_numpy_storage(payload["small_n"]) is not None,
+                payload["large_t"].is_shared(),
+                _shared_numpy_storage(payload["large_n"]) is not None,
+            )
+        return elems
+
+
+def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
+    import numpy as np
+
+    record = _mk_record(0)
+    record.payload = {
+        "small_t": torch.arange(4),
+        "small_n": np.arange(4),
+        "large_t": torch.arange(1024),
+        "large_n": np.arange(1024),
+    }
+    stage = Stage(
+        "memory_policy",
+        [
+            Node("first", _InspectPayloadMemory(), parallelism=1),
+            Node("second", _InspectPayloadMemory(), parallelism=1),
+        ],
+        "auto",
+        "test",
+    )
+    runner = ProcessStageRunner(
+        stage,
+        _ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    [actual] = list(runner.run([record]))
+    assert actual.payload["observed"] == (False, False, True, True)
+    assert not actual.payload["small_t"].is_shared()
+    assert (
+        actual.payload["small_t"].tolist()
+        == actual.payload["small_n"].tolist()
+        == list(range(4))
+    )
+    assert not record.payload["small_t"].is_shared()

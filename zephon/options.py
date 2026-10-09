@@ -12,7 +12,12 @@ from zephon._internal.utils.ipc import (
     DEFAULT_IPC_TRANSPORT,
     DEFAULT_MTP_BUFFER_BYTES,
 )
-from zephon._internal.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
+from zephon._internal.utils.shm_coalesce import (
+    DEFAULT_SHM_COALESCE_MAX_SIZE,
+    DEFAULT_SHM_MAX_RETAINED_RATIO,
+    DEFAULT_SHM_MIN_RECLAIM_BYTES,
+    DEFAULT_SHM_MIN_SIZE,
+)
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.work.base import MixtureReadConfig
@@ -159,11 +164,18 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
 
     # === IPC serialization ===
-    # Coalesce all tensors in a microbatch by dtype into a single SHM
-    # buffer before serialization. Reduces POSIX SHM segments from N to K
-    # (K = number of distinct dtypes). Only consumed by process runners.
+    # Process-stage CPU payload transport (does not configure MTP).
+    # Disabling coalescing still applies the inline and retained-storage policies.
     coalesce_tensors: bool = True
+    # Values smaller than this travel inline, including tensors and arrays.
     shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    # Copy a shared view out when both ratio and absolute savings exceed these
+    # limits. None disables copying views out; other references may delay freeing.
+    shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
+    shm_min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
+    # Bound each coalesced allocation; larger individual values get their own.
+    # None permits unlimited coalescing. Copied-out views always remain separate.
+    shm_coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
 
     # ProcessStageRunner only.  Re-dispatches per crashed seq before
     # giving up; 0 disables.  In non-deterministic mode an exhausted

@@ -114,3 +114,54 @@ As a general approach to measuring and improving execution performance, change o
 at a time and compare the throughput and resource usage over a representative run. Keep
 the sample preparation, shuffle, mixture, and packing settings identical while you are
 doing this, since those settings impact the training data itself.
+
+
+### Process payload memory
+
+Process stages use one policy for supported CPU tensors, NumPy arrays, bytes,
+memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
+`Pipeline.options(...)`:
+
+| Option | Default | Effect |
+|---|---:|---|
+| `shm_min_size` | 8192 bytes | Smaller values travel inline through the IPC connection, including tensors and arrays already in SHM. |
+| `coalesce_tensors` | `True` | Coalesce eligible values of compatible types/dtypes together. Despite its legacy name, this controls all supported payload types. |
+| `shm_coalesce_max_size` | 16 MiB | Maximum coalesced allocation size. Larger individual values still use SHM, in separate allocations. `None` removes the limit. |
+| `shm_max_retained_ratio` | 8 | Copy a shared view into compact storage when its backing allocation is more than this many times larger. `None` disables view compaction. |
+| `shm_min_reclaim_bytes` | 16 MiB | View compaction also requires at least this many unused backing bytes. |
+
+Disabling coalescing leaves the transport threshold and view compaction active.
+Compacted views receive separate allocations and stay there on later hops.
+Values, shapes, dtypes, and container structure are preserved; copying a strided
+view can change its strides and contiguity. Bytearrays remain bytearrays, which
+requires a copy on restoration because a bytearray cannot view external storage.
+Memoryviews use the existing bytes-like transport representation. Unsupported
+array dtypes and tensor layouts retain their normal serialization behavior.
+
+View compaction is a per-view heuristic. Other samples or pending commands may
+still reference the original allocation, delaying its release. It does not track
+or repack the remaining contents of a slab or revisit samples in shuffle buffers.
+If optional compaction cannot allocate SHM, it forwards the original view.
+
+The decisions run in this order: choose inline transport or SHM; reuse or
+compact existing shared storage; coalesce private values up to the allocation
+limit. Compaction requires **both** the relative and absolute conditions:
+`backing_bytes > value_bytes * shm_max_retained_ratio` and
+`backing_bytes - value_bytes >= shm_min_reclaim_bytes`. The relative condition
+limits copying large values for modest savings; the absolute condition avoids
+allocating many small buffers for little potential benefit.
+
+The default compaction minimum equals the coalescing cap, so unchanged views
+of newly coalesced buffers are not immediately copied out again. Raising the
+cap or lowering the compaction minimum can make those views qualify; tune the
+settings together. Compaction can still be useful for large individual values
+that were given their own allocations.
+
+The transport minimum applies per value. Inline values in a microbatch travel
+in one queue message, not one message per value. A large total byte count alone
+does not make coalescing faster: copying and describing each entry still costs
+time. Benchmark representative batch sizes when adjusting the minimum.
+
+These settings apply to process stages in both directions. They do not configure
+the final MTP queue. Inline Torch values use a Zephon transport descriptor; Torch's
+global multiprocessing reducer is unchanged.
