@@ -155,6 +155,7 @@ class TestCoalesceEdgeCases:
     def test_no_tensors_returns_none(self) -> None:
         records = [SampleRecord(meta=_meta(0), payload={"text": "hello", "count": 42})]
         assert coalesce_microbatch(records) is None
+        assert pickle.loads(_forking_round_trip(records)) == records
 
     def test_no_tensors_payloads_unchanged(self) -> None:
         """When coalesce returns None, payloads must not be mutated."""
@@ -613,6 +614,126 @@ np = pytest.importorskip("numpy")
 # Numpy ndarray coalescing
 # ---------------------------------------------------------------------------
 class TestCoalesceNdarray:
+    def test_shared_numpy_reduction_preserves_views_and_reuses_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(24))])
+        assert coalesced is not None
+        base = _round_trip_resolved(coalesced)[0].payload
+        source = shm_coalesce._array_owner(base)
+        array = base.reshape(4, 6)[::-1, ::2]
+        array.flags.writeable = False
+        tiny = base.view(np.uint8)[3:6]
+        structured = base.view(np.dtype([("first", "<i4"), ("second", "<i4")]))
+        payload = {
+            "array": array,
+            "tiny": tiny,
+            "structured": structured,
+            "slice": base[3:9],
+        }
+        records = [SampleRecord(meta=_meta(0), payload=payload)]
+        assert coalesce_microbatch(records) is None
+        assert records[0].payload is payload
+
+        storage_reductions = 0
+        reduce_storage = ForkingPickler._extra_reducers[torch.UntypedStorage]
+
+        def count_storage(storage: object) -> object:
+            nonlocal storage_reductions
+            storage_reductions += 1
+            return reduce_storage(storage)
+
+        monkeypatch.setitem(
+            ForkingPickler._extra_reducers, torch.UntypedStorage, count_storage
+        )
+        [restored] = pickle.loads(_forking_round_trip(records))
+        assert storage_reductions == 1
+        result = restored.payload
+        for name, expected in payload.items():
+            actual = result[name]
+            assert type(actual) is np.ndarray
+            assert actual.dtype == expected.dtype
+            assert actual.strides == expected.strides
+            assert actual.flags.writeable == expected.flags.writeable
+            np.testing.assert_array_equal(actual, expected)
+            owner = shm_coalesce._array_owner(actual)
+            assert (
+                owner.untyped_storage().data_ptr()
+                == source.untyped_storage().data_ptr()
+            )
+        # A small view retains the same storage, as a shared Torch slice does.
+        assert (
+            shm_coalesce._array_owner(result["tiny"]).untyped_storage().nbytes()
+            == source.numel() * source.element_size()
+        )
+        # Restored views retain ownership through another serialization hop.
+        result = pickle.loads(_forking_round_trip(result))
+        assert shm_coalesce._shared_numpy_storage(result["array"]) is not None
+        expected = array.copy()
+        del source, base, array, tiny, structured, records, payload, restored, owner
+        del coalesced
+        gc.collect()
+        np.testing.assert_array_equal(result["array"], expected)
+
+    def test_numpy_reducer_private_fallback(self) -> None:
+        private = torch.arange(8).numpy()[::2]
+        values = {
+            "private": private,
+            "same": private,
+            "empty": np.empty((0, 3)),
+            "object": np.array([{}]),
+        }
+        wire = _forking_round_trip(values)
+        assert b"zephon" not in wire
+        restored = pickle.loads(wire)
+        assert restored["private"] is restored["same"]
+        private[:] = 99
+        np.testing.assert_array_equal(restored["private"], [0, 2, 4, 6])
+        assert restored["empty"].shape == (0, 3)
+        assert restored["object"].tolist() == [{}]
+        cycle = np.empty(1, dtype=object)
+        cycle[0] = cycle
+        restored_cycle = pickle.loads(_forking_round_trip(cycle))
+        assert restored_cycle[0] is restored_cycle
+
+    def test_numpy_reducer_preserves_protocol5_buffers(self) -> None:
+        buffers: list[pickle.PickleBuffer] = []
+        stream = BytesIO()
+        pickler = pickle.Pickler(stream, protocol=5, buffer_callback=buffers.append)
+        pickler.dispatch_table = ForkingPickler._extra_reducers.copy()
+        pickler.dump(np.arange(8))
+        assert len(buffers) == 1
+        assert b"zephon" not in stream.getvalue()
+        np.testing.assert_array_equal(
+            pickle.loads(stream.getvalue(), buffers=buffers), np.arange(8)
+        )
+
+    def test_numpy_pickle_preserves_unrelated_shared_array_copy_semantics(self) -> None:
+        shared = torch.arange(8).share_memory_().numpy()
+        assert shm_coalesce._shared_numpy_storage(shared) is None
+        for wire in (pickle.dumps(shared), _forking_round_trip(shared)):
+            assert b"zephon" not in wire
+            restored = pickle.loads(wire)
+            np.testing.assert_array_equal(restored, shared)
+            assert not np.shares_memory(restored, shared)
+
+    def test_numpy_reducer_rejects_out_of_bounds_views(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(8))])
+        assert coalesced is not None
+        shared = _round_trip_resolved(coalesced)[0].payload
+        assert shm_coalesce._shared_numpy_storage(shared) is not None
+        # Simulate a claimed span outside the owner without accessing invalid memory.
+        start = shared.__array_interface__["data"][0]
+        monkeypatch.setattr(
+            shm_coalesce, "_byte_bounds", lambda _: (start - 1, start + 64)
+        )
+        assert shm_coalesce._shared_numpy_storage(shared) is None
+        copied = pickle.loads(_forking_round_trip(shared))
+        np.testing.assert_array_equal(copied, shared)
+        assert not np.shares_memory(copied, shared)
+
     def test_unsupported_numpy_dtypes_stay_inline(self) -> None:
         values = {
             "text": np.array(["ab", "cd"]),
