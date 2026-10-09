@@ -21,9 +21,8 @@ Strategy (single memcpy):
    ``optree.tree_flatten``. Extract tensors, arrays, and large bytes into
    lightweight descriptors, retaining a tree spec only for containers.
 2. For each distinct dtype (plus ``torch.uint8`` for raw bytes), allocate
-   a single 1-D ``torch.Tensor``, call ``share_memory_()`` to place it
-   in ``/dev/shm`` **before** any data is written, then ``copy_`` each
-   sub-tensor directly into the shared buffer.  This means each byte of
+   storage directly in shared memory and attach a single 1-D ``torch.Tensor``
+   to it, then ``copy_`` each sub-tensor into the shared buffer. Each byte of
    real data is copied exactly once — straight into SHM.
 3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
    ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
@@ -44,6 +43,7 @@ import dataclasses
 import operator
 import sys
 from dataclasses import dataclass
+from functools import cache
 from multiprocessing.reduction import register
 from typing import Any, cast
 
@@ -494,6 +494,35 @@ def _is_leaf(obj: Any) -> bool:
     return False
 
 
+def _memoryview_source(view: memoryview) -> Any:
+    """Return a NumPy source whose C-order bytes match ``view.tobytes()``.
+
+    Contiguous inputs become flat uint8 views; supported strided inputs keep
+    their dtype, shape, and strides for ``np.copyto`` into SHM. These results
+    may alias the source until that copy finishes. Unsupported formats and
+    noncontiguous structured views use owned bytes, preserving padding that
+    NumPy field assignment could omit.
+    """
+    if view.c_contiguous:
+        return np.frombuffer(view, dtype=np.uint8)
+    try:
+        array = np.asarray(view)
+        if not array.dtype.hasobject and array.dtype.fields is None:
+            return array
+    except Exception:  # Any unsupported exporter falls back to a byte copy.
+        pass
+    return np.frombuffer(view.tobytes(), dtype=np.uint8)
+
+
+@cache
+def _torch_dtype_for(dtype: Any) -> Any | None:
+    """Resolve supported NumPy dtypes once; unsupported dtypes remain inline."""
+    try:
+        return _get_torch().from_numpy(np.empty(0, dtype=dtype)).dtype
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_leaf(
     leaf: Any,
     collector: dict[str, list[Any]],
@@ -513,24 +542,27 @@ def _extract_leaf(
             fields_dict, collector, offsets, shm_min_size
         )
         return _StructSlot(cls=cls, inner_skeleton=inner_skel)
-    # Numeric lists: promote to tensor so they coalesce into SHM with
-    # other same-dtype tensors.  Restored via .tolist() to preserve the
-    # original Python list contract.
+    # Only lossless built-in numeric lists share buffers with Torch tensors.
     torch = _get_torch()
-    if (
-        torch is not None
-        and isinstance(leaf, list)
-        and len(leaf) > 0
-        and isinstance(leaf[0], (int, float))
-        and isinstance(leaf[-1], (int, float))
-    ):
-        dtype = torch.int64 if isinstance(leaf[0], int) else torch.float64
-        dtype_key = str(dtype)
+    if torch is not None and isinstance(leaf, list) and leaf:
+        kind = type(leaf[0])
+        if (
+            type(leaf) is not list
+            or kind not in (int, float)
+            or set(map(type, leaf)) != {kind}
+        ):
+            return leaf
+        try:
+            array = np.array(leaf, dtype=np.int64 if kind is int else np.float64)
+        except OverflowError:
+            return leaf
+        tensor = torch.from_numpy(array)
+        dtype_key = str(tensor.dtype)
         n = len(leaf)
         offset = offsets.get(dtype_key, 0)
         slot = _NumericListSlot(dtype_key=dtype_key, offset=offset, length=n)
         offsets[dtype_key] = offset + n
-        collector.setdefault(dtype_key, []).append(torch.tensor(leaf, dtype=dtype))
+        collector.setdefault(dtype_key, []).append(tensor)
         return slot
     if torch is not None and isinstance(leaf, torch.Tensor):
         if leaf.device.type != "cpu":
@@ -545,7 +577,10 @@ def _extract_leaf(
         collector.setdefault(dtype_key, []).append(leaf)
         return slot
     if torch is not None and isinstance(leaf, np.ndarray):
-        if leaf.dtype.hasobject or _shared_numpy_storage(leaf) is not None:
+        if (
+            _shared_numpy_storage(leaf) is not None
+            or _torch_dtype_for(leaf.dtype) is None
+        ):
             return leaf
         dtype_key = _NDARRAY_PREFIX + str(leaf.dtype)
         numel = leaf.size
@@ -557,18 +592,18 @@ def _extract_leaf(
             dtype=leaf.dtype,
         )
         offsets[dtype_key] = offset + numel
-        collector.setdefault(dtype_key, []).append(
-            torch.from_numpy(np.ascontiguousarray(leaf))
-        )
+        collector.setdefault(dtype_key, []).append(leaf)
         return slot
     if isinstance(leaf, (bytes, memoryview)):
-        nbytes = len(leaf)
-        if nbytes >= shm_min_size and _get_torch() is not None:
+        nbytes = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
+        if nbytes > 0 and nbytes >= shm_min_size and torch is not None:
             offset = offsets.get(_BYTES_DTYPE_KEY, 0)
             slot = _BytesSlot(offset=offset, length=nbytes)
             offsets[_BYTES_DTYPE_KEY] = offset + nbytes
             collector.setdefault(_BYTES_DTYPE_KEY, []).append(
-                leaf if isinstance(leaf, bytes) else bytes(leaf)
+                _memoryview_source(leaf)
+                if isinstance(leaf, memoryview)
+                else np.frombuffer(leaf, dtype=np.uint8)
             )
             return slot
         return leaf
@@ -635,30 +670,33 @@ def _extract_from_records(
 # Build coalesced SHM buffers
 # ---------------------------------------------------------------------------
 def _alloc_shm_buffer(numel: int, dtype: Any, label: str) -> Any:
-    """Allocate a 1-D tensor in ``/dev/shm``, retrying with backoff on ENOSPC.
+    """Allocate a 1-D tensor directly in shared memory, retrying on ENOSPC.
 
-    Wraps ``torch.empty(...).share_memory_()`` with the shared
-    :func:`~zephon._internal.utils.shm.wait_for_shm_space` retry so that transient
-    ``/dev/shm`` exhaustion blocks instead of crashing the worker.
+    Transient ``/dev/shm`` exhaustion blocks in :func:`wait_for_shm_space`
+    instead of crashing the worker.
     """
     torch = _get_torch()
-    buf = torch.empty(numel, dtype=dtype)
+    buf = torch.empty(0, dtype=dtype, device="cpu")
+    nbytes = numel * buf.element_size()
     while True:
         try:
-            buf.share_memory_()
-            return buf
+            # Torch's default_collate uses this allocator through typed storage;
+            # it honors torch.multiprocessing.get_sharing_strategy().
+            storage = torch.UntypedStorage._new_shared(nbytes, device="cpu")
         except Exception as e:
             if not is_shm_error(e):
                 raise
             wait_for_shm_space(label)
+        else:
+            return buf.set_(storage)
 
 
 def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     """Concatenate collected tensors/bytes per dtype into SHM-backed tensors.
 
-    Allocates the target in ``/dev/shm`` first (``share_memory_()``), then
-    copies each sub-tensor (or bytes chunk) directly into the shared
-    region — **one memcpy per item**, no intermediate staging buffer.
+    Allocates the target directly in shared memory, then writes tensors,
+    strided NumPy arrays, and supported memoryviews into the shared region.
+    Numeric lists are converted before allocation.
 
     If ``/dev/shm`` is exhausted, retries with exponential backoff via
     :func:`_alloc_shm_buffer` instead of propagating the error.
@@ -668,17 +706,38 @@ def _build_shm_buffers(collector: dict[str, list[Any]]) -> dict[str, Any]:
     for dtype_key, items in collector.items():
         if dtype_key == _BYTES_DTYPE_KEY:
             # Pack raw bytes into a uint8 tensor.
-            total = sum(len(b) for b in items)
-            if total == 0:
-                continue
+            total = sum(array.nbytes for array in items)
             buf = _alloc_shm_buffer(total, torch.uint8, f"coalesce[{dtype_key}]")
-            # numpy view for fast memcpy from bytes into SHM
             np_buf = buf.numpy()
             offset = 0
-            for b in items:
-                n = len(b)
+            for array in items:
+                n = array.nbytes
+                np.copyto(
+                    np_buf[offset : offset + n].view(array.dtype).reshape(array.shape),
+                    array,
+                    casting="no",
+                )
+                offset += n
+            buffers[dtype_key] = buf
+        elif dtype_key.startswith(_NDARRAY_PREFIX):
+            # NumPy can read strided, reversed, and read-only sources directly
+            # into the final contiguous destination. No ascontiguousarray copy
+            # or per-array Torch wrapper is needed.
+            total_numel = sum(array.size for array in items)
+            if total_numel == 0:
+                continue
+            dtype = _torch_dtype_for(items[0].dtype)
+            buf = _alloc_shm_buffer(total_numel, dtype, f"coalesce[{dtype_key}]")
+            np_buf = buf.numpy()
+            offset = 0
+            for array in items:
+                n = array.size
                 if n > 0:
-                    np_buf[offset : offset + n] = memoryview(b).cast("B")
+                    np.copyto(
+                        np_buf[offset : offset + n].reshape(array.shape),
+                        array,
+                        casting="no",
+                    )
                 offset += n
             buffers[dtype_key] = buf
         else:
