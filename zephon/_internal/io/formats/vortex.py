@@ -79,25 +79,23 @@ class VortexShard(RandomAccessShard):
                 + 'Install with: pip install "zephon[vortex]"'
             )
         self._path = path
-        self._file = _vortex.open(str(path))
-        self._scan = self._file.to_repeated_scan()
+        try:
+            self._file = _vortex.open(str(path))
+        except RuntimeError:
+            # Vortex wraps native IO errors. Surface a missing/inaccessible local
+            # file as OSError so ResilientShard can resolve it again after eviction.
+            # If it still exists, preserve the original Vortex error.
+            path.stat()
+            raise
         self._length = length if length is not None else len(self._file)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        if index < 0 or index >= self._length:
-            raise IndexError(index)
-        if self._scan is None:
-            raise RuntimeError("VortexShard has been closed")
-
-        scalar = self._scan.scalar_at(index)
-        result = scalar.as_py()
-        return result  # type: ignore[return-value]
+        return self.getsamples([index])[0]
 
     def __len__(self) -> int:
         return self._length
 
     def close(self) -> None:
-        self._scan = None
         self._file = None
 
     def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
@@ -115,7 +113,12 @@ class VortexShard(RandomAccessShard):
         sorted_unique = sorted(set(indices))
         index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
 
-        batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
+        try:
+            batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
+        except RuntimeError:
+            # Apply the same eviction check if the file disappears during a read.
+            self._path.stat()
+            raise
         arrow_table = batch.to_arrow_table()
         batch_dict = arrow_table.to_pydict()
 
