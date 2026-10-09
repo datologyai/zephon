@@ -30,8 +30,10 @@ jobs:
       with:
         version: "0.11.15"
     - name: Install dependencies
+      # Install the vortex extra. Without it, pyright resolves `import vortex`
+      # to zephon/_internal/io/formats/vortex.py and reports false errors.
       run: |
-        uv sync --group dev
+        uv sync --group dev --extra vortex
     - name: Run ruff format check
       run: |
         uv run ruff format --check . --exclude zephon/_version.py --exclude docs/

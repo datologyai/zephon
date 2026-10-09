@@ -393,11 +393,38 @@ SemaphoreFactory = Callable[..., Semaphore | SafeSemLock]
 ProcessFactory = Callable[..., BaseProcess]
 
 
+def _disinherit_fds() -> None:
+    """Stop programs that this worker starts from keeping its pipes open.
+
+    A daemon that native code starts (such as ``torch_shm_manager``) can keep
+    the sentinel and queue pipes open, which blocks ``join()`` and EOF. Later
+    descriptors are not inheritable (PEP 446), so one call at startup is enough.
+    """
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+
+    try:
+        fds = [int(name) for name in os.listdir(fd_dir)]
+    except OSError:
+        return
+
+    for fd in fds:
+        if fd <= 2:
+            continue
+
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            # The listing opened a descriptor of its own, which is now closed.
+            pass
+
+
 def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     _set_worker_fds_close_on_exec()
     startup_t0 = time.perf_counter_ns()
     rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
+    _disinherit_fds()
+
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)

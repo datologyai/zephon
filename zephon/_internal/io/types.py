@@ -11,7 +11,10 @@ passed between processes safely.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping, TypeAlias
+
+if TYPE_CHECKING:
+    from zephon._internal.io.storage import StorageBackend
 
 
 @dataclass(frozen=True)
@@ -83,9 +86,30 @@ class LocalShardRef:
     cache_hit: bool | None = None
 
 
+@dataclass(frozen=True)
+class RemoteShardRef:
+    """Reference to a shard that is read in place, through storage.
+
+    The direct resolver gives this for a shard under a remote root when the
+    shard cache is disabled. Only formats that read ranges through storage can
+    open it; see :class:`zephon._internal.io.formats.base.RemoteShardOpener`.
+    """
+
+    storage: "StorageBackend"
+    path: str
+    bytes: int
+    extra: Mapping[str, object] | None = None
+    cache_hit: bool | None = None
+
+
+ShardRef: TypeAlias = LocalShardRef | RemoteShardRef
+
+
 __all__ = [
     "LocalShardFile",
     "LocalShardRef",
+    "RemoteShardRef",
+    "ShardRef",
     "ShardFile",
     "ShardLocator",
 ]

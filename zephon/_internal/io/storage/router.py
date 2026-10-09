@@ -137,6 +137,11 @@ class RouterStorageBackend(StorageBackend):
     def mkdir(self, path: str, parents: bool = False, exist_ok: bool = False) -> None:
         return self._backend_for(path).mkdir(path, parents, exist_ok)
 
+    def object_store(self, path: str) -> tuple[Any, str] | None:
+        """Return the obstore store and key of ``path``, if its backend uses obstore."""
+        object_store = getattr(self._backend_for(path), "object_store", None)
+        return object_store(path) if object_store is not None else None
+
     def is_cloud_path(self, path: str) -> bool:
         """Return True if path uses a cloud storage scheme."""
         return self._backend_for(path) is not self._local

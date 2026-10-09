@@ -8,7 +8,7 @@ import pytest
 import zephon._internal.io.resolvers.direct as direct_mod
 from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.storage.local import LocalFSBackend
-from zephon._internal.io.types import ShardFile, ShardLocator
+from zephon._internal.io.types import RemoteShardRef, ShardFile, ShardLocator
 from zephon._internal.utils.compression import zstd
 
 
@@ -287,3 +287,50 @@ def test_direct_resolver_retry_exhaustion_raises(
         _ = resolver.resolve(loc)
     assert "Raw shard empty" in str(excinfo.value)
     assert attempts["count"] == 3
+
+
+class _NoIOBackend(LocalFSBackend):
+    def __getattribute__(self, name: str) -> object:
+        if name in {"open", "read_range", "stat", "exists", "download"}:
+            raise AssertionError(f"Remote resolve did IO through {name}")
+        return super().__getattribute__(name)
+
+
+def test_direct_resolver_gives_remote_ref_without_io() -> None:
+    remote = _NoIOBackend(root=Path("/"))
+    resolver = DirectResolver(LocalFSBackend(root=Path("/")), remote_storage=remote)
+    loc = _mk_locator("s3://bucket/data/", basename="part.bin", bytes=12)
+
+    ref = resolver.resolve(loc)
+    assert isinstance(ref, RemoteShardRef)
+    assert ref.storage is remote
+    assert ref.path == "s3://bucket/data/part.bin"
+    assert ref.bytes == 12
+    assert ref.cache_hit is False
+
+
+def test_direct_resolver_refuses_remote_shards_it_cannot_read_in_place() -> None:
+    local = LocalFSBackend(root=Path("/"))
+    loc = _mk_locator("s3://bucket/data", basename="part.bin", bytes=12)
+    with pytest.raises(ValueError, match="cache.enabled=True"):
+        DirectResolver(local).resolve(loc)
+
+    resolver = DirectResolver(local, remote_storage=local, validate_hash="xxh64")
+    compressed = _mk_locator(
+        "s3://bucket/data",
+        basename="part.bin",
+        bytes=12,
+        zip_meta=ShardFile(basename="part.bin.zstd", bytes=5, hashes={}),
+        compression="zstd",
+    )
+    with pytest.raises(ValueError, match="Compressed"):
+        resolver.resolve(compressed)
+
+    hashed = _mk_locator(
+        "s3://bucket/data", basename="part.bin", bytes=12, hashes={"xxh64": "1"}
+    )
+    with pytest.raises(ValueError, match="validate_hash"):
+        resolver.resolve(hashed)
+
+    # Without a known hash there is nothing to validate.
+    assert isinstance(resolver.resolve(loc), RemoteShardRef)

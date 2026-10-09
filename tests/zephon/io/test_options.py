@@ -1,6 +1,11 @@
 import pytest
 
-from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+from zephon.io.options import (
+    CacheOptions,
+    ParquetRGCacheOptions,
+    StoreOptions,
+    parse_size_bytes,
+)
 
 _CACHE_FIELDS = (
     "enabled",
@@ -305,3 +310,29 @@ def test_store_merge_treats_missing_cache_as_omitted_and_none_as_reset(
 
     assert configured.merge(StoreOptions.from_any({})).cache == configured.cache
     assert configured.merge(StoreOptions.from_any(None)).cache == CacheOptions()
+
+
+def test_vortex_read_concurrency_options_merge_and_reset() -> None:
+    configured = StoreOptions.from_any({"vortex_read_concurrency": 4})
+    assert configured.merge(StoreOptions.from_any({})).vortex_read_concurrency == 4
+    reset = configured.merge(StoreOptions.from_any(None))
+    assert reset.vortex_read_concurrency is None
+    for value in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            StoreOptions.from_any({"vortex_read_concurrency": value})
+
+
+def test_vortex_segment_cache_bytes_options_merge_and_reset() -> None:
+    assert StoreOptions().vortex_segment_cache_bytes == 256 << 20
+
+    configured = StoreOptions.from_any({"vortex_segment_cache_bytes": "1gb"})
+    assert configured.vortex_segment_cache_bytes == parse_size_bytes("1gb")
+    merged = configured.merge(StoreOptions.from_any({}))
+    assert merged.vortex_segment_cache_bytes == parse_size_bytes("1gb")
+    reset = configured.merge(StoreOptions.from_any(None))
+    assert reset.vortex_segment_cache_bytes == 256 << 20
+
+    assert StoreOptions(vortex_segment_cache_bytes=0).vortex_segment_cache_bytes == 0
+    for value in (-1, True, 1.5):
+        with pytest.raises(ValueError, match="non-negative"):
+            StoreOptions.from_any({"vortex_segment_cache_bytes": value})

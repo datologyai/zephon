@@ -426,11 +426,7 @@ def test_vortex_getsamples_all_rows(tmp_path: Path) -> None:
 
 
 def test_vortex_getsamples_contiguous_optimization(tmp_path: Path) -> None:
-    """Test that getsamples handles contiguous indices correctly.
-
-    This exercises the optimized code path that uses a single slice()
-    for contiguous ranges instead of individual scalar_at() calls.
-    """
+    """Test that getsamples handles contiguous indices correctly."""
     rows = [{"id": i, "text": f"row_{i}"} for i in range(50)]
     p = tmp_path / "contiguous.vortex"
     _create_vortex_file(p, rows)
@@ -491,8 +487,8 @@ def test_vortex_getsamples_non_contiguous(tmp_path: Path) -> None:
     shard.close()
 
 
-def test_vortex_getitem_scalar_at(tmp_path: Path) -> None:
-    """Test that __getitem__ works correctly with scalar_at optimization."""
+def test_vortex_getitem(tmp_path: Path) -> None:
+    """Test that __getitem__ reads single rows through the batch path."""
     rows = [{"id": i, "value": i * 1.5, "name": f"item_{i}"} for i in range(20)]
     p = tmp_path / "scalar.vortex"
     _create_vortex_file(p, rows)

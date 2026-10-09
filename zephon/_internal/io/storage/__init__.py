@@ -1,5 +1,6 @@
 """Storage backends available to Zephon IO."""
 
+from ._utils import is_remote_path
 from .azure import AzureBackend
 from .base import StorageBackend
 from .gcs import GCSBackend
@@ -16,4 +17,5 @@ __all__ = [
     "RouterStorageBackend",
     "S3Backend",
     "StorageBackend",
+    "is_remote_path",
 ]

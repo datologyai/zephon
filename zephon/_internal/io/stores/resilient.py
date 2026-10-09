@@ -9,10 +9,10 @@ from tenacity import (
     wait_exponential,
 )
 
-from zephon._internal.io.formats.base import ShardOpener
+from zephon._internal.io.formats.base import RemoteShardOpener, ShardOpener
 from zephon._internal.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon._internal.io.resolvers.base import ShardResolver
-from zephon._internal.io.types import LocalShardRef, ShardLocator
+from zephon._internal.io.types import RemoteShardRef, ShardLocator, ShardRef
 from zephon._internal.observability.stopwatch import Stopwatch
 
 _RESILIENT_RETRY_EXCEPTIONS = (FileNotFoundError, OSError, IOError)
@@ -56,10 +56,23 @@ class ResilientShard(RandomAccessShard):
         # the same shard is used within a certain local window. In a global shuffle, always resolving first would be better.
         # This follows Mosaic StreamingDataset, where a prefetching thread requests sample in advance, and then they optimistically
         # try to open their local ref, and only resolve in case of exception.
-        self._local_ref: LocalShardRef | None = None
+        self._local_ref: ShardRef | None = None
 
     def __len__(self) -> int:
         return self._length
+
+    def _open(self, ref: ShardRef) -> RandomAccessShard:
+        """Open ``ref`` with the opener that its kind of reference needs."""
+        if not isinstance(ref, RemoteShardRef):
+            return self._opener.open_shard(self._locator, ref)
+
+        if not isinstance(self._opener, RemoteShardOpener):
+            raise ValueError(
+                f"{self._locator.format} shards cannot be read in place from "
+                + f"{self._locator.root!r}; set cache.enabled=True"
+            )
+
+        return self._opener.open_remote_shard(self._locator, ref)
 
     def _resolve(self, stats: SampleLoadStats) -> bool:
         """Resolve and store a fresh LocalShardRef; return True if cache hit."""
@@ -101,7 +114,7 @@ class ResilientShard(RandomAccessShard):
             open_start = self.timer.start()
             try:
                 # _local_ref is non-None here.
-                shard = self._opener.open_shard(self._locator, self._local_ref)  # type: ignore[arg-type]
+                shard = self._open(self._local_ref)  # type: ignore[arg-type]
             except _RESILIENT_RETRY_EXCEPTIONS:
                 stats.open_ns += self.timer.elapsed(open_start)
                 if self._resolve(stats):
@@ -198,7 +211,7 @@ class ResilientShard(RandomAccessShard):
                 cache_misses += 1
 
             open_start = self.timer.start()
-            shard = self._opener.open_shard(self._locator, local_ref)
+            shard = self._open(local_ref)
             open_ns_total += self.timer.elapsed(open_start)
 
             try:
