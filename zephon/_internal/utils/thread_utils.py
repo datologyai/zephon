@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 
 # Env vars that suppress internal thread pools in numerical libraries.
 # Shared between suppress_library_threads() (set at runtime) and the
@@ -21,6 +23,34 @@ THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
     "RAYON_NUM_THREADS": "1",
     "ARROW_NUM_THREADS": "1",
 }
+
+_vortex_thread_settings: tuple[int, int] | None = None
+_vortex_thread_lock = threading.Lock()
+
+
+def cap_vortex_threads() -> None:
+    """Cap an imported Vortex runtime once per process and requested setting.
+
+    ``ZEPHON_VORTEX_THREADS`` defaults to one background worker. As with the
+    Arrow cap, zero leaves the library's setting untouched. The Vortex format
+    also calls this before its first read, covering workers that do not call
+    ``suppress_library_threads``. Other formats do not import Vortex here.
+    """
+    global _vortex_thread_settings
+    vortex = sys.modules.get("vortex")
+    if vortex is None:
+        return
+    n = int(os.environ.get("ZEPHON_VORTEX_THREADS", "1"))
+    if n < 0:
+        raise ValueError("ZEPHON_VORTEX_THREADS cannot be negative")
+    if n == 0:
+        return
+    settings = (os.getpid(), n)
+    if _vortex_thread_settings != settings:
+        with _vortex_thread_lock:
+            if _vortex_thread_settings != settings:
+                vortex.set_worker_threads(n)
+                _vortex_thread_settings = settings
 
 
 def cap_arrow_threads() -> None:
@@ -56,6 +86,7 @@ def suppress_library_threads() -> None:
     os.environ.update(THREAD_SUPPRESSION_ENV_VARS)
 
     cap_arrow_threads()
+    cap_vortex_threads()
 
     try:
         import torch

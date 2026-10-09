@@ -210,7 +210,11 @@ def test_vortex_single_and_bulk_reads_agree_after_close(tmp_path: Path) -> None:
     _create_vortex_file(path, rows)
     shard = VortexShard(path)
     try:
-        assert [shard[1], shard[0], shard[1]] == shard.getsamples([1, 0, 1])
+        singles = [shard[1], shard[0], shard[1]]
+        bulk = shard.getsamples([1, 0, 1])
+        for single, batched in zip(singles, bulk):
+            assert single["text"] == batched["text"]
+            np.testing.assert_array_equal(single["tokens"], batched["tokens"])
     finally:
         shard.close()
     with pytest.raises(RuntimeError, match="closed"):
@@ -461,32 +465,28 @@ def test_vortex_getsamples_all_rows(tmp_path: Path) -> None:
     shard.close()
 
 
-def test_vortex_getsamples_contiguous_optimization(tmp_path: Path) -> None:
-    """Test that getsamples handles contiguous indices correctly.
-
-    This exercises the optimized code path that uses a single slice()
-    for contiguous ranges instead of individual scalar_at() calls.
-    """
+def test_vortex_getsamples_contiguous_ranges(tmp_path: Path) -> None:
+    """Test that scanning contiguous indices returns the requested ranges."""
     rows = [{"id": i, "text": f"row_{i}"} for i in range(50)]
     p = tmp_path / "contiguous.vortex"
     _create_vortex_file(p, rows)
 
     shard = VortexShard(p)
 
-    # Contiguous range at start (uses slice optimization)
+    # Contiguous range at start
     result = shard.getsamples(list(range(10)))
     assert [r["id"] for r in result] == list(range(10))
     assert [r["text"] for r in result] == [f"row_{i}" for i in range(10)]
 
-    # Contiguous range in middle (uses slice optimization)
+    # Contiguous range in middle
     result = shard.getsamples(list(range(20, 35)))
     assert [r["id"] for r in result] == list(range(20, 35))
 
-    # Contiguous range at end (uses slice optimization)
+    # Contiguous range at end
     result = shard.getsamples(list(range(40, 50)))
     assert [r["id"] for r in result] == list(range(40, 50))
 
-    # Single element (no contiguity check needed)
+    # Single element
     result = shard.getsamples([25])
     assert result[0]["id"] == 25
 
@@ -527,8 +527,8 @@ def test_vortex_getsamples_non_contiguous(tmp_path: Path) -> None:
     shard.close()
 
 
-def test_vortex_getitem_scalar_at(tmp_path: Path) -> None:
-    """Test that __getitem__ works correctly with scalar_at optimization."""
+def test_vortex_getitem_values(tmp_path: Path) -> None:
+    """Test that __getitem__ returns the same fields throughout a shard."""
     rows = [{"id": i, "value": i * 1.5, "name": f"item_{i}"} for i in range(20)]
     p = tmp_path / "scalar.vortex"
     _create_vortex_file(p, rows)

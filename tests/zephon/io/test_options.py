@@ -1,6 +1,11 @@
 import pytest
 
-from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+from zephon.io.options import (
+    CacheOptions,
+    ParquetRGCacheOptions,
+    StoreOptions,
+    VortexOptions,
+)
 
 _CACHE_FIELDS = (
     "enabled",
@@ -23,6 +28,38 @@ _PARQUET_RG_CACHE_FIELDS = (
     "limit_bytes",
     "min_free_bytes",
 )
+
+
+def test_vortex_options_merge_disable_and_reset() -> None:
+    base = StoreOptions.from_any(
+        {"vortex": {"segment_cache_bytes": "8mb", "metadata_cache_entries": 12}}
+    )
+    assert base.vortex.segment_cache_bytes == 8 * 1024**2
+    assert base.merge(StoreOptions()).vortex == base.vortex
+    disabled = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
+    assert disabled.vortex.segment_cache_bytes == 0
+    assert disabled.vortex.metadata_cache_entries == 12
+    reset = base.merge(StoreOptions.from_any({"vortex": None}))
+    assert reset.vortex == VortexOptions()
+    assert base.merge(StoreOptions.from_any(None)).vortex == VortexOptions()
+    assert VortexOptions.from_any(base.vortex) is base.vortex
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"segment_cache_bytes": -1},
+        {"segment_cache_bytes": 1.5},
+        {"segment_cache_bytes": True},
+        {"segment_cache_bytes": ""},
+        {"segment_cache_bytes": 2**64},
+        {"metadata_cache_entries": -1},
+        {"metadata_cache_entries": 1.5},
+    ],
+)
+def test_vortex_options_reject_invalid_limits(options: dict) -> None:
+    with pytest.raises(ValueError):
+        StoreOptions.from_any({"vortex": options})
 
 
 def _configured_cache(

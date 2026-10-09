@@ -56,3 +56,44 @@ You can then use the `DatasetInspector` to examine the decoded sample payloads:
 Note that Vortex handles compression operations within the file format itself, so Zephon
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
+
+Numeric list columns are returned as read-only NumPy arrays, preserving their numeric
+dtype and fixed-size nested shapes. These views remain valid after the reader closes.
+Call `.copy()` on an array if you need to modify it. Numeric scalars preserve their NumPy
+dtype; strings, bytes and scalar booleans remain Python values. Inner nulls and irregular
+nested values fall back to Python representations so their contents are preserved.
+Ordinary Vortex columns do not identify whether the writer originally used NumPy or
+Torch, so Zephon does not automatically reconstruct Torch tensors.
+
+**Read caches.** Each store retains up to 256 parsed file footers and shares a 64 MiB
+in-memory cache of encoded segments across its Vortex shards. Both caches survive the
+temporary readers used for separate fetch groups and are cleared when the store closes.
+The segment cache saves repeat reads of encoded bytes; it does not cache decoded samples.
+These caches are independent of Zephon's on-disk shard cache.
+
+Configure them through the pipeline's `io_options`:
+
+```python
+from zephon.io import StoreOptions, VortexOptions
+
+io_options = StoreOptions(
+    vortex=VortexOptions(
+        segment_cache_bytes=64 * 1024**2,
+        metadata_cache_entries=256,
+    )
+)
+# Pass io_options to pipeline.options(io_options=io_options).
+```
+
+The equivalent dictionary accepts human-readable sizes, for example
+`{"vortex": {"segment_cache_bytes": "64mb", "metadata_cache_entries": 256}}`.
+Set either limit to zero to disable that cache. The segment budget is per store in each
+process, not shared across worker processes. It accounts for retained segment bytes,
+not total process memory: cache overhead, footers, decoded outputs and in-flight reads
+are additional, and Vortex applies cache evictions asynchronously. The footer limit is
+an entry count, not a byte budget.
+
+Zephon limits Vortex's process-wide runtime to one background worker before its first
+Vortex read. Set `ZEPHON_VORTEX_THREADS` to a positive integer to change that limit, or
+to `0` to leave the runtime setting untouched. This setting applies to discovery as well
+as sample reads.
