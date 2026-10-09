@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Iterator, Mapping, cast
 
@@ -10,9 +11,7 @@ import numpy as np
 from zephon._internal.io.catalog import CatalogSet, ShardCatalog, set_catalog_dir
 from zephon._internal.io.formats import ensure_builtin_formats
 from zephon._internal.io.formats.base import ShardOpener, get_format
-from zephon._internal.io.formats.parquet import ParquetFormat
 from zephon._internal.io.formats.parquet_cache.runtime import (
-    build_parquet_cache_runtime,
     validate_parquet_cache_disk_space,
 )
 from zephon._internal.io.memory import InMemoryDatasetStore
@@ -271,22 +270,12 @@ def build_multi_dataset_store(
     store_opts = StoreOptions.from_any(options)
     catalog_set = build_catalog_set(datasets)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
-    try:
-        parquet_runtime = build_parquet_cache_runtime(catalog_set, store_opts)
-    except Exception:
-        if isinstance(resolver, CacheManager):
-            resolver.close()
-        raise
-
-    def close_resources() -> None:
-        try:
-            parquet_runtime.close()
-        finally:
-            if isinstance(resolver, CacheManager):
-                resolver.close()
-
+    resources = ExitStack()
+    if isinstance(resolver, CacheManager):
+        resources.callback(resolver.close)
+    openers: dict[str, ShardOpener] = {}
     registry = DatasetStoreRegistry(
-        on_close=close_resources,
+        on_close=resources.close,
     )
     try:
         for dataset_id, dataset in datasets.items():
@@ -305,10 +294,11 @@ def build_multi_dataset_store(
                     raise ValueError(
                         f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
                     ) from exc
-                opener: ShardOpener = handler
-                if kind == "parquet":
-                    assert isinstance(handler, ParquetFormat)
-                    opener = parquet_runtime.opener
+                if kind not in openers:
+                    openers[kind] = resources.enter_context(
+                        handler.create_opener(catalog_set, store_opts)
+                    )
+                opener = openers[kind]
                 catalog: ShardCatalog | None = None
                 if catalog_set is not None and dataset._catalog_handle is not None:
                     catalog = catalog_set.catalog_for(dataset.name)
