@@ -19,7 +19,7 @@ from zephon._internal.io.types import (
     ShardFile,
     ShardLocator,
 )
-from zephon.io import Dataset, StoreOptions, VortexOptions
+from zephon.io import CacheOptions, Dataset, StoreOptions, VortexOptions
 
 pytestmark = pytest.mark.integration
 
@@ -46,11 +46,13 @@ def _refs(path: Path) -> tuple[ShardLocator, LocalShardRef]:
 
 @pytest.mark.parametrize("segment_bytes", [0, 4096])
 @pytest.mark.parametrize("metadata_entries", [0, 2])
+@pytest.mark.parametrize("shard_cache", [False, True])
 def test_store_reuses_caches_across_fetch_groups(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     segment_bytes: int,
     metadata_entries: int,
+    shard_cache: bool,
 ) -> None:
     datasets = {}
     for dataset_id in (0, 1):
@@ -71,10 +73,11 @@ def test_store_reuses_caches_across_fetch_groups(
     store = build_multi_dataset_store(
         datasets,
         options=StoreOptions(
+            cache=CacheOptions(enabled=shard_cache, root=tmp_path / "cache"),
             vortex=VortexOptions(
                 segment_cache_bytes=segment_bytes,
                 metadata_cache_entries=metadata_entries,
-            )
+            ),
         ),
     )
     try:

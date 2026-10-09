@@ -3,7 +3,9 @@
 
 """Vortex's runtime cap is lazy and scoped to the current process."""
 
+import os
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -19,12 +21,13 @@ def test_vortex_cap_once_per_process_and_setting(
         sys.modules, "vortex", SimpleNamespace(set_worker_threads=calls.append)
     )
     monkeypatch.setattr(thread_utils, "_vortex_thread_settings", None)
-    monkeypatch.setattr(thread_utils.os, "getpid", lambda: 100)
+    process = SimpleNamespace(environ=os.environ, getpid=lambda: 100)
+    monkeypatch.setattr(thread_utils, "os", process)
     monkeypatch.delenv("ZEPHON_VORTEX_THREADS", raising=False)
     thread_utils.cap_vortex_threads()
     thread_utils.cap_vortex_threads()
     assert calls == [1]
-    monkeypatch.setattr(thread_utils.os, "getpid", lambda: 101)
+    process.getpid = lambda: 101
     thread_utils.cap_vortex_threads()
     monkeypatch.setenv("ZEPHON_VORTEX_THREADS", "2")
     thread_utils.cap_vortex_threads()
@@ -45,3 +48,38 @@ def test_vortex_cap_does_not_import_optional_dependency(
     thread_utils.cap_vortex_threads()
     assert "vortex" not in sys.modules
     assert thread_utils._vortex_thread_settings is None
+
+
+def test_vortex_cap_waits_for_module_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = SimpleNamespace()
+    calls: list[int] = []
+    monkeypatch.setitem(sys.modules, "vortex", module)
+    monkeypatch.setattr(thread_utils, "_vortex_thread_settings", None)
+    monkeypatch.delenv("ZEPHON_VORTEX_THREADS", raising=False)
+    thread_utils.cap_vortex_threads()
+    assert thread_utils._vortex_thread_settings is None
+    module.set_worker_threads = calls.append
+    thread_utils.cap_vortex_threads()
+    assert calls == [1]
+
+
+def test_fork_reset_discards_inherited_locked_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    monkeypatch.setitem(
+        sys.modules, "vortex", SimpleNamespace(set_worker_threads=calls.append)
+    )
+    monkeypatch.delenv("ZEPHON_VORTEX_THREADS", raising=False)
+    inherited_lock = threading.Lock()
+    monkeypatch.setattr(thread_utils, "_vortex_thread_lock", inherited_lock)
+    monkeypatch.setattr(thread_utils, "_vortex_thread_settings", (os.getpid(), 1))
+    with inherited_lock:
+        thread_utils._reset_vortex_threads_after_fork()
+        assert thread_utils._vortex_thread_settings is None
+        assert thread_utils._vortex_thread_lock.acquire(blocking=False)
+        thread_utils._vortex_thread_lock.release()
+        thread_utils.cap_vortex_threads()
+    assert calls == [1]

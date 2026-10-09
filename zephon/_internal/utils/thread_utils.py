@@ -28,6 +28,17 @@ _vortex_thread_settings: tuple[int, int] | None = None
 _vortex_thread_lock = threading.Lock()
 
 
+def _reset_vortex_threads_after_fork() -> None:
+    """Discard a lock that another parent thread may have held during fork."""
+    global _vortex_thread_lock, _vortex_thread_settings
+    _vortex_thread_lock = threading.Lock()
+    _vortex_thread_settings = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_vortex_threads_after_fork)
+
+
 def cap_vortex_threads() -> None:
     """Cap an imported Vortex runtime once per process and requested setting.
 
@@ -38,7 +49,10 @@ def cap_vortex_threads() -> None:
     """
     global _vortex_thread_settings
     vortex = sys.modules.get("vortex")
-    if vortex is None:
+    set_workers = getattr(vortex, "set_worker_threads", None)
+    if set_workers is None:
+        # A concurrent import can register the module before exporting its API.
+        # The Vortex format calls this again once that import has completed.
         return
     n = int(os.environ.get("ZEPHON_VORTEX_THREADS", "1"))
     if n < 0:
@@ -49,7 +63,7 @@ def cap_vortex_threads() -> None:
     if _vortex_thread_settings != settings:
         with _vortex_thread_lock:
             if _vortex_thread_settings != settings:
-                vortex.set_worker_threads(n)
+                set_workers(n)
                 _vortex_thread_settings = settings
 
 
