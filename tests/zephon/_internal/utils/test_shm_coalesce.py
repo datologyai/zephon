@@ -12,6 +12,7 @@ import pytest
 
 from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
+from zephon._internal.utils import shm_coalesce
 from zephon._internal.utils.shm_coalesce import (
     CoalescedMicrobatch,
     ShmLazyPayload,
@@ -251,6 +252,71 @@ class TestCoalesceEdgeCases:
         torch.testing.assert_close(
             restored[0].records[1].payload["t"], torch.tensor([2.0])
         )
+
+
+# ---------------------------------------------------------------------------
+# SHM allocation
+# ---------------------------------------------------------------------------
+class TestAllocShmBuffer:
+    def test_attaches_shared_storage_on_cpu(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allocate = torch.UntypedStorage._new_shared
+        allocations: list[object] = []
+
+        def capture_storage(size: int, *, device: str) -> object:
+            storage = allocate(size, device=device)
+            allocations.append(storage)
+            return storage
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", capture_storage)
+        with torch.device("meta"):
+            buf = shm_coalesce._alloc_shm_buffer(37, torch.int64, "test")
+        assert len(allocations) == 1
+        assert buf.untyped_storage() is allocations[0]
+        assert buf.device.type == "cpu"
+        assert buf.dtype == torch.int64
+        assert buf.shape == (37,)
+        assert buf.is_shared()
+        assert buf.untyped_storage().nbytes() == 37 * 8
+        buf.fill_(3)
+        assert buf.tolist() == [3] * 37
+
+    @pytest.mark.parametrize("message", ["No space left on device (28)", "Success (0)"])
+    def test_retries_shm_exhaustion(
+        self, monkeypatch: pytest.MonkeyPatch, message: str
+    ) -> None:
+        allocate = torch.UntypedStorage._new_shared
+        attempts = 0
+        waits: list[str] = []
+
+        def transient_failure(size: int, *, device: str) -> object:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError(
+                    f"unable to allocate shared memory(shm) for file </torch_1_2_3>: {message}"
+                )
+            return allocate(size, device=device)
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", transient_failure)
+        monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", waits.append)
+        buf = shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
+        assert buf.is_shared()
+        assert attempts == 2
+        assert waits == ["test"]
+
+    def test_propagates_unrelated_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        waits: list[str] = []
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("unexpected allocation error")
+
+        monkeypatch.setattr(torch.UntypedStorage, "_new_shared", fail)
+        monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", waits.append)
+        with pytest.raises(RuntimeError, match="unexpected allocation error"):
+            shm_coalesce._alloc_shm_buffer(8, torch.int64, "test")
+        assert waits == []
 
 
 # ---------------------------------------------------------------------------
