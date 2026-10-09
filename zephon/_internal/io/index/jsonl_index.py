@@ -8,7 +8,8 @@ Registers the ``jsonl`` ``IndexBuilder`` on import; build an index via the
 """
 
 import io
-from pathlib import Path
+from contextlib import ExitStack
+from typing import BinaryIO, cast
 
 from zephon._internal.io.index.index_builder import (
     IndexBuilder,
@@ -28,18 +29,17 @@ class JsonlIndexBuilder(IndexBuilder):
         """Count non-empty JSON Lines records in one shard."""
         compression = compression_for_name(path)
         extra: dict[str, int] = {}
-        stream = (
-            open(path, "rb")
-            if compression is None
-            else open_decompressed(path, compression)
-        )
-        with stream, io.TextIOWrapper(stream, encoding="utf-8") as handle:
+        with ExitStack() as stack:
+            stream = cast(BinaryIO, stack.enter_context(self._storage.open(path, "rb")))
+            if compression is not None:
+                stream = stack.enter_context(open_decompressed(stream, compression))
+            handle = stack.enter_context(io.TextIOWrapper(stream, encoding="utf-8"))
             count = sum(1 for line in handle if not line.isspace())
             if compression is not None:
                 extra["raw_bytes"] = stream.tell()
 
         return ShardInfo(
-            basename=Path(path).name,
+            basename=path.rsplit("/", 1)[-1],
             bytes=file_size,
             num_rows=count,
             extra=extra,

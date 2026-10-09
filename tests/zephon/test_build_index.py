@@ -19,16 +19,30 @@ def test_build_index_delegates(monkeypatch):
 
     seen: dict[str, object] = {}
 
-    def fake_create_index(fmt, dataset_dir, *, output_path=None, progress=True):
-        seen.update(fmt=fmt, dir=dataset_dir, out=output_path, progress=progress)
+    def fake_create_index(
+        fmt, dataset_dir, *, output_path=None, progress=True, max_workers=8
+    ):
+        seen.update(
+            fmt=fmt,
+            dir=dataset_dir,
+            out=output_path,
+            progress=progress,
+            max_workers=max_workers,
+        )
         return Path("/idx/index.json")
 
     monkeypatch.setattr(bi, "_create_index", fake_create_index)
 
-    result = bi.build_index("parquet", "/data")
+    result = bi.build_index("parquet", "/data", max_workers=2)
 
     assert imported == ["zephon._internal.io.index.parquet_index"]
-    assert seen == {"fmt": "parquet", "dir": "/data", "out": None, "progress": True}
+    assert seen == {
+        "fmt": "parquet",
+        "dir": "/data",
+        "out": None,
+        "progress": True,
+        "max_workers": 2,
+    }
     assert str(result) == "/idx/index.json"
 
 
