@@ -29,17 +29,25 @@ def build_index(
     *,
     output_path: str | Path | None = None,
     progress: bool = True,
-) -> Path:
+    max_workers: int = 8,
+) -> Path | str:
     """Build an ``index.json`` for a JSONL, Parquet, or Vortex dataset.
 
     Writes to ``dataset_dir/index.json`` unless *output_path* is given, printing
-    per-file progress when *progress* is true. Returns the written index path.
+    progress when *progress* is true. Local paths and remote roots supported by
+    Zephon's storage backend are accepted. Returns a Path for local output or a
+    URL string for remote output. At most ``max_workers`` shards are inspected
+    concurrently; set it to 1 for sequential indexing.
     """
     module = _FORMAT_INDEX_MODULES.get(format_name)
     if module is not None:
         importlib.import_module(module)
     return _create_index(
-        format_name, dataset_dir, output_path=output_path, progress=progress
+        format_name,
+        dataset_dir,
+        output_path=output_path,
+        progress=progress,
+        max_workers=max_workers,
     )
 
 
