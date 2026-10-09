@@ -19,16 +19,12 @@ from __future__ import annotations
 import math
 import os
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
 from zephon._internal.utils.shm_coalesce import (
-    DEFAULT_SHM_COMPACT_ABOVE_RATIO,
-    DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
-    DEFAULT_SHM_MAX_COALESCED_BYTES,
-    DEFAULT_SHM_MIN_FORWARD_BYTES,
-    DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
+    DEFAULT_SHM_MIN_ITEM_BYTES,
     PayloadMemoryPolicy,
 )
 from zephon.options import IpcTransport
@@ -54,13 +50,9 @@ class StageRuntimeSpec:
     prefetch_capacity: int
     output_mode: str  # "microbatches" | "stream_items"
     allow_latency_flush: bool
-    shm_coalesce: bool
-    shm_min_item_bytes: int
-    shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
-    shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
-    shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
-    shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
-    shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
+    memory_policy: PayloadMemoryPolicy | None = field(
+        default_factory=PayloadMemoryPolicy
+    )
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
     # See RuntimeOptions.ipc_transport / ipc_buffer_bytes; process runners only.
@@ -329,20 +321,24 @@ def resolve_runtime_spec(
         Whether the Engine will run inside a PyTorch DataLoader worker.
         Affects runner type selection (``process`` → ``threads`` demotion).
     """
-    memory_policy = PayloadMemoryPolicy(
-        shm_min_item_bytes=(
-            opts.shm_min_item_bytes if opts.shm_min_size is None else opts.shm_min_size
-        ),
-        min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
-        min_forward_bytes=opts.shm_min_forward_bytes,
-        coalesce=(
-            opts.shm_coalesce
-            if opts.coalesce_tensors is None
-            else opts.coalesce_tensors
-        ),
-        compact_above_ratio=opts.shm_compact_above_ratio,
-        compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
-        max_coalesced_bytes=opts.shm_max_coalesced_bytes,
+    if type(opts.shm_enabled) is not bool:
+        raise ValueError("shm_enabled must be a bool")
+    memory_policy = (
+        None
+        if not opts.shm_enabled
+        else PayloadMemoryPolicy(
+            shm_min_item_bytes=(
+                DEFAULT_SHM_MIN_ITEM_BYTES
+                if opts.shm_min_item_bytes is None
+                else opts.shm_min_item_bytes
+            ),
+            min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
+            min_forward_bytes=opts.shm_min_forward_bytes,
+            coalesce=True if opts.shm_coalesce is None else opts.shm_coalesce,
+            compact_above_ratio=opts.shm_compact_above_ratio,
+            compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
+            max_coalesced_bytes=opts.shm_max_coalesced_bytes,
+        )
     )
     num_stages = len(plan.stages)
     mode = opts.worker_allocation
@@ -438,13 +434,7 @@ def resolve_runtime_spec(
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
                 allow_latency_flush=allow_latency,
-                shm_coalesce=memory_policy.coalesce,
-                shm_min_item_bytes=memory_policy.shm_min_item_bytes,
-                shm_min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
-                shm_min_forward_bytes=opts.shm_min_forward_bytes,
-                shm_compact_above_ratio=opts.shm_compact_above_ratio,
-                shm_compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
-                shm_max_coalesced_bytes=opts.shm_max_coalesced_bytes,
+                memory_policy=memory_policy,
                 max_worker_retries=opts.max_worker_retries,
                 ipc_transport=opts.ipc_transport,
                 ipc_buffer_bytes=opts.ipc_buffer_bytes,

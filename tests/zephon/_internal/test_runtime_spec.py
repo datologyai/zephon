@@ -14,6 +14,7 @@ from zephon._internal.runtime_spec import (
     resolve_runtime_spec,
     stage_parallelism,
 )
+from zephon._internal.utils.shm_coalesce import PayloadMemoryPolicy
 from zephon.options import RuntimeOptions
 
 
@@ -196,7 +197,7 @@ def test_deterministic_flag():
 def test_coalesce_tensors_defaults_on() -> None:
     plan = _mk_simple_plan()
     spec = resolve_runtime_spec(plan, RuntimeOptions())
-    assert spec.stages[0].shm_coalesce is True
+    assert spec.stages[0].memory_policy.coalesce is True
 
 
 def test_final_prefetch():
@@ -287,8 +288,7 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
         prefetch_capacity=0,
         output_mode="microbatches",
         allow_latency_flush=True,
-        shm_coalesce=False,
-        shm_min_item_bytes=1,
+        memory_policy=PayloadMemoryPolicy(coalesce=False, shm_min_item_bytes=1),
     )
     assert stage_spec.max_worker_retries == 0
 
@@ -305,13 +305,14 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
     )
     spec = resolve_runtime_spec(_mk_plan((2, 1, 1)), opts)
     for stage in spec.stages:
-        assert stage.shm_min_item_bytes == 128
-        assert stage.shm_min_new_allocation_bytes == 2048
-        assert stage.shm_min_forward_bytes == 1024
-        assert not stage.shm_coalesce
-        assert stage.shm_compact_above_ratio == 4
-        assert stage.shm_compact_min_savings_bytes == 1024
-        assert stage.shm_max_coalesced_bytes == 8192
+        assert stage.memory_policy is spec.stages[0].memory_policy
+        assert stage.memory_policy.shm_min_item_bytes == 128
+        assert stage.memory_policy.min_new_allocation_bytes == 2048
+        assert stage.memory_policy.min_forward_bytes == 1024
+        assert not stage.memory_policy.coalesce
+        assert stage.memory_policy.compact_above_ratio == 4
+        assert stage.memory_policy.compact_min_savings_bytes == 1024
+        assert stage.memory_policy.max_coalesced_bytes == 8192
     with pytest.raises(ValueError, match="shm_compact_above_ratio"):
         resolve_runtime_spec(
             _mk_plan((1, 1, 1)), RuntimeOptions(shm_compact_above_ratio=0.5)
@@ -322,5 +323,12 @@ def test_legacy_payload_memory_options() -> None:
     spec = resolve_runtime_spec(
         _mk_plan((1, 1, 1)), RuntimeOptions(shm_min_size=123, coalesce_tensors=False)
     )
-    assert spec.stages[0].shm_min_item_bytes == 123
-    assert not spec.stages[0].shm_coalesce
+    assert spec.stages[0].memory_policy.shm_min_item_bytes == 123
+    assert not spec.stages[0].memory_policy.coalesce
+
+
+def test_disabled_shm_bypasses_the_entire_process_policy() -> None:
+    spec = resolve_runtime_spec(
+        _mk_plan((2, 1, 1)), RuntimeOptions(shm_enabled=False, shm_coalesce=True)
+    )
+    assert all(stage.memory_policy is None for stage in spec.stages)

@@ -124,6 +124,7 @@ memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
 
 | Option | Default | Effect |
 |---|---:|---|
+| `shm_enabled` | `True` | Enable Zephon SHM preparation for process stages. `False` bypasses transport planning, coalescing, and view compaction in both directions. |
 | `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for a fresh SHM allocation. Smaller private values travel inline. Existing shared views are considered together first. |
 | `shm_min_new_allocation_bytes` | 2 MiB | Minimum useful bytes per new allocation in the message. Smaller groups travel inline. |
 | `shm_min_forward_bytes` | 128 KiB | Minimum useful bytes per existing shared allocation in the message. Smaller groups travel inline. This considers the combined views of that allocation, not each view separately. |
@@ -132,8 +133,12 @@ memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
 | `shm_compact_above_ratio` | 8 | Copy shared views into compact storage when their backing allocation is more than this many times larger than their combined useful bytes in the message. `None` disables view compaction. |
 | `shm_compact_min_savings_bytes` | 16 MiB | View compaction also requires at least this many potential savings: backing bytes minus useful bytes in this message. |
 
-`shm_min_size` and `coalesce_tensors` remain accepted as keyword aliases for
-`shm_min_item_bytes` and `shm_coalesce`.
+`shm_min_size` and `coalesce_tensors` remain accepted as deprecated keyword aliases
+for `shm_min_item_bytes` and `shm_coalesce`. Conflicting old and new values are rejected.
+
+With `shm_enabled=False`, ordinary multiprocessing serialization applies. Torch's
+own reducer can still use shared memory. This switch disables Zephon's preparation;
+it does not force Torch tensors through the pipe inline.
 
 Disabling coalescing leaves the transport thresholds and view compaction active.
 Private values and compacted views follow the same path: apply the item floor,
@@ -187,14 +192,10 @@ allocation floor amortizes setup and handle transfer across enough data:
 64 eligible 32 KiB values can share a 2 MiB allocation, while a single 32 KiB
 value stays inline. Existing shared allocations use the forwarding minimum;
 forwarding a handle can be worthwhile even when allocating a new buffer is not.
-The defaults balance measurements on Linux and macOS, under pickle protocols
-4 and 5. New 512 KiB and 1 MiB allocations often lost to inline transport on
-Linux; 2 MiB improved the balance. The 4 KiB item floor allows large batches
-of small values to coalesce while avoiding measured Torch regressions at
-1-2 KiB per item. Neither threshold is a universal crossover. In particular,
-macOS can benefit from smaller new allocations. Forwarding many separate
-128 KiB allocations can lose to inline transport on Linux, but raising the
-common forwarding minimum would slow those cases substantially on macOS.
+The crossover depends on payload types, message sizes, and the host. For batches
+of many small values, consider both `shm_min_item_bytes` and
+`shm_min_new_allocation_bytes`. Lowering the coalescing cap limits how much backing
+one retained sample can keep alive, at the cost of more allocations and handles.
 
 Inline values in a microbatch travel in one queue message,
 not one message per value. Benchmark representative batch sizes when tuning.

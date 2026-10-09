@@ -20,6 +20,10 @@ Supported payload types:
 
 Process-stage decisions (also used when forwarding a resolved payload)::
 
+    shm_enabled? -- no --> ordinary multiprocessing serialization
+      |
+      yes
+      |
     Supported, nonempty value
       |
       +-- Already in SHM? -- yes --> Group views by existing allocation
@@ -200,6 +204,9 @@ class PayloadMemoryPolicy:
         ):
             return "fresh"
         return "keep"
+
+
+DEFAULT_PAYLOAD_MEMORY_POLICY = PayloadMemoryPolicy()
 
 
 # dtype key used for the coalesced raw-bytes buffer

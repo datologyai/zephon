@@ -93,12 +93,7 @@ from zephon._internal.stream import (
     resolve_lazy_payloads,
 )
 from zephon._internal.utils.shm_coalesce import (
-    DEFAULT_SHM_COMPACT_ABOVE_RATIO,
-    DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
-    DEFAULT_SHM_MAX_COALESCED_BYTES,
-    DEFAULT_SHM_MIN_FORWARD_BYTES,
-    DEFAULT_SHM_MIN_ITEM_BYTES,
-    DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
+    DEFAULT_PAYLOAD_MEMORY_POLICY,
     PayloadMemoryPolicy,
     TransportMicrobatch,
     coalesce_microbatch,
@@ -273,6 +268,10 @@ class _WorkerCommand:
     memory_policy: PayloadMemoryPolicy | None = None
 
     def __reduce__(self) -> tuple:
+        # Preparation runs in the queue feeder, leaving the pump and retry
+        # records untouched. Each serialization prepares private inputs again.
+        # The received command drops this sender-only policy to avoid applying
+        # it a second time; workers use their configured policy for outputs.
         batch = self.batch
         if self.kind == "batch" and self.memory_policy is not None:
             batch = TransportMicrobatch(batch, self.memory_policy)
@@ -402,7 +401,9 @@ class _ProcessWorkerConfig:
     #: ``mp_context.Array('q', [-1] * parallelism, lock=False)``.
     worker_seq_slots: Any = None
     spawn_wall_ns: int = 0  # Main process wall-clock time at spawn start
-    memory_policy: PayloadMemoryPolicy = field(default_factory=PayloadMemoryPolicy)
+    memory_policy: PayloadMemoryPolicy | None = field(
+        default_factory=PayloadMemoryPolicy
+    )
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
@@ -480,7 +481,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
             # Prepare inline values and shared buffers for process transport.
             # CoalescedMicrobatch.__reduce__ unpickles as Microbatch on the
             # consumer side, so the cast is safe.
-            if outputs:
+            if outputs and config.memory_policy is not None:
                 coalesced = coalesce_microbatch(
                     outputs, policy=config.memory_policy, ensure_prepared=True
                 )
@@ -772,26 +773,12 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         mp_context: BaseContext | None = None,
-        shm_coalesce: bool = True,
-        shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES,
-        shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
-        shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES,
-        shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO,
-        shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
-        shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES,
+        memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY,
         max_worker_retries: int = 0,
         ipc_transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
         ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES,
     ) -> None:
-        self._memory_policy = PayloadMemoryPolicy(
-            shm_min_item_bytes=shm_min_item_bytes,
-            min_new_allocation_bytes=shm_min_new_allocation_bytes,
-            min_forward_bytes=shm_min_forward_bytes,
-            coalesce=shm_coalesce,
-            compact_above_ratio=shm_compact_above_ratio,
-            compact_min_savings_bytes=shm_compact_min_savings_bytes,
-            max_coalesced_bytes=shm_max_coalesced_bytes,
-        )
+        self._memory_policy = memory_policy
         self._max_worker_retries = max(0, int(max_worker_retries))
         self._queue_capacity = max(1, queue_capacity)
         self._ipc_transport = ipc_transport

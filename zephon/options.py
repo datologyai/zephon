@@ -4,6 +4,7 @@
 """Runtime options for ``Pipeline.options()`` (``RuntimeOptions``, ``IpcTransport``)."""
 
 import multiprocessing as mp
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -28,6 +29,32 @@ IpcTransport = Literal["socketpair", "pipe"]
 
 
 DEFAULT_RUN_ID = "default_run_id"
+
+
+_SHM_OPTION_ALIASES = {
+    "shm_min_size": "shm_min_item_bytes",
+    "coalesce_tensors": "shm_coalesce",
+}
+
+
+def _normalize_shm_options(hints: dict[str, Any]) -> dict[str, Any]:
+    """Resolve legacy keyword names consistently at both configuration entry points."""
+    result = hints.copy()
+    for old, new in _SHM_OPTION_ALIASES.items():
+        if old not in result:
+            continue
+        value = result.pop(old)
+        if value is None:
+            continue
+        if result.get(new) is not None and result[new] != value:
+            raise ValueError(f"Conflicting pipeline options: {old} and {new}")
+        warnings.warn(
+            f"{old} is deprecated; use {new} instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        result[new] = value
+    return result
 
 
 @dataclass
@@ -166,13 +193,18 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
 
     # === IPC serialization ===
+    # Disable Zephon SHM preparation in both process directions. Ordinary
+    # multiprocessing reducers still apply; Torch may still use shared storage.
+    shm_enabled: bool = True
     # Coalesce eligible payloads in a microbatch by dtype into SHM buffers
     # before serialization. Reduces POSIX SHM segments from N to K; coalesced
     # groups are split at shm_max_coalesced_bytes. Only consumed by process runners.
     # Disabling coalescing still applies transport thresholds and view compaction.
-    shm_coalesce: bool = True
+    shm_coalesce: bool | None = None  # None resolves to True at construction.
     # Minimum item size eligible for fresh SHM; shared views are grouped first.
-    shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
+    shm_min_item_bytes: int | None = (
+        None  # None resolves to the default at construction.
+    )
     # Minimum useful bytes per new allocation in a message.
     shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
     # Minimum useful bytes per existing shared allocation in a message.
@@ -185,8 +217,8 @@ class RuntimeOptions:
     # None permits unlimited coalescing. Compacted views follow the same rule.
     shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
 
-    # Legacy keyword aliases. When supplied, these override the corresponding
-    # new option at runtime-spec construction.
+    # Deprecated keyword aliases, normalized at construction. Conflicting old
+    # and new names are rejected, including when the new value is its default.
     coalesce_tensors: bool | None = None
     shm_min_size: int | None = None
 
@@ -207,6 +239,26 @@ class RuntimeOptions:
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
+
+    def __post_init__(self) -> None:
+        normalized = _normalize_shm_options(
+            {
+                "shm_coalesce": self.shm_coalesce,
+                "shm_min_item_bytes": self.shm_min_item_bytes,
+                "coalesce_tensors": self.coalesce_tensors,
+                "shm_min_size": self.shm_min_size,
+            }
+        )
+        self.shm_coalesce = (
+            True if normalized["shm_coalesce"] is None else normalized["shm_coalesce"]
+        )
+        self.shm_min_item_bytes = (
+            DEFAULT_SHM_MIN_ITEM_BYTES
+            if normalized["shm_min_item_bytes"] is None
+            else normalized["shm_min_item_bytes"]
+        )
+        self.coalesce_tensors = None
+        self.shm_min_size = None
 
 
 __all__ = [

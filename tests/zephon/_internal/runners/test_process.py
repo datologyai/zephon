@@ -28,6 +28,7 @@ from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.concurrent import WorkerCrashed
 from zephon._internal.runners.process import ProcessStageRunner
+from zephon._internal.utils.shm_coalesce import PayloadMemoryPolicy
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import (
@@ -515,7 +516,7 @@ def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        shm_coalesce=True,
+        memory_policy=PayloadMemoryPolicy(coalesce=True),
     )
 
     data = list(range(30))
@@ -574,10 +575,12 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         max_workers=1,
         deterministic=True,
         stage_output_mode="stream_items",
-        shm_coalesce=True,
-        shm_min_item_bytes=0,
-        shm_min_new_allocation_bytes=0,
-        shm_min_forward_bytes=0,
+        memory_policy=PayloadMemoryPolicy(
+            coalesce=True,
+            shm_min_item_bytes=0,
+            min_new_allocation_bytes=0,
+            min_forward_bytes=0,
+        ),
     )
 
     # 8 records with max_batch=8 → one microbatch → one coalesced buffer
@@ -612,7 +615,7 @@ def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() 
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        shm_coalesce=True,
+        memory_policy=PayloadMemoryPolicy(coalesce=True),
     )
 
     out = list(runner.run(iter(_mk_records(range(7)))))
@@ -2350,9 +2353,9 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         _ctx_services(),
         max_workers=2,
         deterministic=True,
-        shm_min_item_bytes=0,
-        shm_min_new_allocation_bytes=0,
-        shm_min_forward_bytes=0,
+        memory_policy=PayloadMemoryPolicy(
+            shm_min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
         stage_output_mode="stream_items",
     )
     try:
@@ -2389,6 +2392,59 @@ class _InspectPayloadMemory(BaseOp):
         return elems
 
 
+def _unexpected_shm_preparation(*args, **kwargs):
+    raise AssertionError("disabled SHM must bypass preparation")
+
+
+class _InspectDisabledShm(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def setup(self, ctx: OpContext) -> None:
+        from zephon._internal.runners import process
+
+        process.coalesce_microbatch = _unexpected_shm_preparation
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        import numpy as np
+
+        for record in elems:
+            assert type(record.payload["bytes"]) is bytes
+            assert type(record.payload["mutable"]) is bytearray
+            assert type(record.payload["array"]) is np.ndarray
+            record.payload["mutable"][0] = 7
+            record.payload["array"][0] = 7
+        return elems
+
+
+def test_disabled_shm_skips_sender_and_worker_preparation(monkeypatch) -> None:
+    import numpy as np
+
+    from zephon._internal.runners import process
+
+    monkeypatch.setattr(process, "TransportMicrobatch", _unexpected_shm_preparation)
+    stage = Stage(
+        "disabled_shm", [Node("inspect", _InspectDisabledShm())], "auto", "test"
+    )
+    record = _mk_record(0)
+    record.payload = {"bytes": b"abc", "mutable": bytearray(16), "array": np.arange(16)}
+    runner = ProcessStageRunner(
+        stage,
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        memory_policy=None,
+        stage_output_mode="stream_items",
+    )
+    try:
+        [actual] = list(runner.run([record]))
+        assert actual.payload["bytes"] == b"abc"
+        assert actual.payload["mutable"][0] == actual.payload["array"][0] == 7
+        assert record.payload["mutable"][0] == record.payload["array"][0] == 0
+    finally:
+        runner.close()
+
+
 def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
     import numpy as np
 
@@ -2417,9 +2473,9 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         deterministic=True,
         stage_output_mode="stream_items",
         # Exercise both routes without depending on production tuning defaults.
-        shm_min_item_bytes=64,
-        shm_min_new_allocation_bytes=512,
-        shm_min_forward_bytes=256,
+        memory_policy=PayloadMemoryPolicy(
+            shm_min_item_bytes=64, min_new_allocation_bytes=512, min_forward_bytes=256
+        ),
     )
     [actual] = list(runner.run([record]))
     assert actual.payload["observed"] == (False, False, True, True, True, True)
