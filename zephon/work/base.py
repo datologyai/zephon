@@ -73,6 +73,9 @@ class WorkChunk:
     mixture here because their chunks deliberately carry a different sample
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
+    Sources that continue after a component is exhausted must keep it in
+    ``target_mixture``: downstream correctors renormalize the surviving shares
+    while keeping that component's records still buffered upstream on target.
 
     ``source_exhausted`` is cumulative: every chunk must list all components
     whose final source sample has been produced in this or an earlier chunk.
@@ -440,6 +443,21 @@ class WorkSource(ABC):
         non-negative ints, not necessarily dense.
         """
         raise NotImplementedError()
+
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        """Components whose exhaustion allows the source to keep producing.
+
+        A static subset of :meth:`component_ids`, fixed across lanes and
+        checkpoint restores. Operators receive the corresponding component ids
+        as ``ctx.get("continues_after_exhaustion", frozenset())`` during setup
+        and accumulator construction. Notifications still flow for every
+        permanently exhausted component, independently of this policy.
+
+        The default is empty: exhaustion does not relax downstream mixture
+        enforcement. Sources that opt in must retain these components in each
+        chunk's ``target_mixture`` so late records remain on target.
+        """
+        return frozenset()
 
     def chunk_size_hint(self) -> int | None:
         """Return fixed chunk size if constant.

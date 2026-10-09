@@ -632,3 +632,7 @@ def test_worksource_prime_is_a_noop_accepting_keyword_context():
     ws = _PlainWorkSource()
     assert ws.prime(io_options=None, counting_spec=None) is None
     assert ws.prime() is None
+
+
+def test_worksource_continuation_policy_defaults_empty() -> None:
+    assert WorkSource().continues_after_exhaustion() == frozenset()

@@ -47,8 +47,9 @@ class Accumulator(ABC, Generic[T]):
 
         Called both at upstream close (default, ``reset=False``) and
         mid-stream by flush sentinels (``reset=True``).  Mid-stream flushes
-        must fully reset internal state so the accumulator is indistinguishable
-        from a freshly constructed instance.
+        must reset epoch-local state so replay reproduces the same output.
+        Permanent source-exhaustion knowledge is retained: its notification is
+        not repeated after a reset (see :meth:`on_source_exhausted`).
 
         Flush sentinels are injected **per lane**, so a mid-stream flush is
         scoped to ``lane_id``: only that lane's state is emitted and reset,
@@ -91,14 +92,31 @@ class Accumulator(ABC, Generic[T]):
         """
         return False
 
-    def _on_source_exhausted(
+    def on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[T]]:
-        """Internal hint that this lane will receive no new source records.
+        """React to permanent exhaustion of a component's source in this lane.
 
-        Records already buffered upstream may still arrive and must be handled
-        normally. Permanent source knowledge survives epoch resets; consumers
-        must be lane-scoped and idempotent. The default leaves buffers alone.
+        The engine injects this notification once per lane stream and component,
+        immediately after its last source sample in the exhaustion chunk, or
+        before the lane's next chunk if that chunk contains none of it. Replay
+        uses the same point; if exhaustion predates the replayed chunks, the
+        notification precedes the first replayed chunk.
+
+        This is a hint, not a drain barrier: records held upstream (by a shuffle,
+        packer, or stalled batch flush) can arrive later and must be handled
+        normally. Reactions must be lane-scoped, idempotent, and deterministic
+        given input order. Keep any needed exhaustion knowledge across
+        ``flush(reset=True)``: resets do not cause another notification.
+
+        Source policy is separate from this fact. ``setup(OpContext)`` and
+        ``accumulator(ctx=...)`` expose ``ctx.get("continues_after_exhaustion",
+        frozenset())``, a static ``frozenset[int]`` of components whose exhaustion
+        allows the source to continue. Notifications also fire outside that set.
+
+        Returned batches are dispatched like :meth:`push_many` output. The
+        default is a no-op that leaves buffered data alone. See
+        :doc:`/pipelines/user_defined_operators` for the authoring contract.
         """
         return []
 

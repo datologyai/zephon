@@ -363,6 +363,9 @@ class Engine:
             id_to_component[component_id] = name
         self._component_to_id: dict[str, int] = declared
         self._id_to_component = id_to_component
+        base_ctx["continues_after_exhaustion"] = frozenset(
+            self._get_component_id(name) for name in work.continues_after_exhaustion()
+        )
         # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
         self._chunk_mixtures: dict[tuple[LaneId, ChunkId], dict[int, float]] = {}
         self._mixture_lock = threading.Lock()

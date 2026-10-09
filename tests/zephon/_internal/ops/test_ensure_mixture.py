@@ -105,6 +105,7 @@ def _make_accumulator_with_chunk_mixture(
     max_buffer_size: int | None = 1,
     drain_target_ratio: float = 0.8,
     obsolete_drain_rate: float = 0.1,
+    continues_after_exhaustion: frozenset[int] = frozenset(),
 ) -> EnsureMixtureAccumulator:
     """Create a test accumulator with mocked chunk mixture service."""
     config = _make_config(
@@ -114,6 +115,7 @@ def _make_accumulator_with_chunk_mixture(
         drain_target_ratio=drain_target_ratio,
         obsolete_drain_rate=obsolete_drain_rate,
     )
+    config.continues_after_exhaustion = continues_after_exhaustion
     # Pass context services directly to accumulator (not stored in config)
     return EnsureMixtureAccumulator(
         config,
@@ -133,21 +135,25 @@ class TestSourceExhaustion:
         self, limit: int | None
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=limit
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=limit,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
         records = [_rec(i, component_id=1) for i in range(10)]
         assert acc.push_many(records) == []
-        assert _flatten_ready(acc._on_source_exhausted(0, 0)) == records
-        assert acc._on_source_exhausted(0, 0) == []
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == records
+        assert acc.on_source_exhausted(0, 0) == []
         assert not acc.has_pending_data()
 
     def test_local_records_remain_eligible(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=None
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
         a = [_rec(i) for i in range(3)]
         assert _flatten_ready(acc.push_many(a)) == a[:1]
-        assert acc._on_source_exhausted(0, 0) == []
+        assert acc.on_source_exhausted(0, 0) == []
         b = [_rec(i + 10, component_id=1) for i in range(6)]
         out = _flatten_ready(acc.push_many(b))
         assert [r.payload["value"] for r in out] == [10, 1, 11, 2, 12, 13, 14, 15]
@@ -157,9 +163,11 @@ class TestSourceExhaustion:
         self, limit: int | None
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=limit
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=limit,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
-        acc._on_source_exhausted(0, 0)
+        acc.on_source_exhausted(0, 0)
         survivors = [_rec(i, component_id=1) for i in range(8)]
         assert _flatten_ready(acc.push_many(survivors)) == survivors
         late = _rec(10, chunk=1)
@@ -168,11 +176,13 @@ class TestSourceExhaustion:
 
     def test_live_unavailable_component_still_blocks(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.3, 2: 0.2}, max_buffer_size=None
+            {0: 0.5, 1: 0.3, 2: 0.2},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
         c = _rec(0, component_id=2)
         assert acc.push_many([c]) == []
-        assert acc._on_source_exhausted(0, 0) == []
+        assert acc.on_source_exhausted(0, 0) == []
         b = _rec(1, component_id=1)
         assert _flatten_ready(acc.push_many([b])) == [b, c]
 
@@ -181,10 +191,12 @@ class TestSourceExhaustion:
         self, limit: int | None
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=limit
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=limit,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
-        acc._on_source_exhausted(0, 0)
-        acc._on_source_exhausted(0, 1)
+        acc.on_source_exhausted(0, 0)
+        acc.on_source_exhausted(0, 1)
         assert acc.push_many([_rec(0, component_id=2)]) == []
         assert acc.push_many([_rec(1, component_id=2, chunk=1)]) == []
         late = _rec(2, chunk=1)
@@ -192,23 +204,27 @@ class TestSourceExhaustion:
 
     def test_exhaustion_is_lane_scoped_and_survives_reset(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=None
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
         a = _rec(0, component_id=1, lane=0)
         b = _rec(1, component_id=1, lane=1)
         assert acc.push_many([a, b]) == []
-        assert _flatten_ready(acc._on_source_exhausted(0, 0)) == [a]
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == [a]
         assert acc.has_pending_data(lane_id=1)
         acc.flush(reset=True, lane_id=0)
         later = _rec(2, component_id=1, lane=0, chunk=1)
         assert _flatten_ready(acc.push_many([later])) == [later]
-        assert _flatten_ready(acc._on_source_exhausted(1, 0)) == [b]
+        assert _flatten_ready(acc.on_source_exhausted(1, 0)) == [b]
 
     def test_packed_record_keeps_exhausted_contributions(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=None
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
-        acc._on_source_exhausted(0, 0)
+        acc.on_source_exhausted(0, 0)
         acc.push_many([_rec(0, component_id=1)])
         packed = SampleRecord(
             meta=SampleMeta(
@@ -226,9 +242,11 @@ class TestSourceExhaustion:
 
     def test_unequal_surviving_weights_are_renormalized(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.3, 2: 0.2}, max_buffer_size=None
+            {0: 0.5, 1: 0.3, 2: 0.2},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
-        acc._on_source_exhausted(0, 0)
+        acc.on_source_exhausted(0, 0)
         records = [_rec(i, component_id=cid) for cid in (1, 2) for i in range(100)]
         out = _flatten_ready(acc.push_many(records))
         assert sum(_get_component(r.meta) == 1 for r in out[:100]) == 60
@@ -238,13 +256,123 @@ class TestSourceExhaustion:
         self, recwarn: pytest.WarningsRecorder
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
-            {0: 0.5, 1: 0.5}, max_buffer_size=None
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
         )
         acc._config.warn_tolerance = 0.01
         acc._config.warn_warmup = 0
-        acc._on_source_exhausted(0, 0)
+        acc.on_source_exhausted(0, 0)
         acc.push_many([_rec(i, component_id=1) for i in range(5)])
         assert not recwarn
+
+    @pytest.mark.parametrize("limit", [None, 64])
+    @pytest.mark.parametrize("continuing", [frozenset(), frozenset({1})])
+    def test_stop_policy_notification_leaves_buffer_unchanged(
+        self, limit: int | None, continuing: frozenset[int]
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5},
+            max_buffer_size=limit,
+            continues_after_exhaustion=continuing,
+        )
+        b = _rec(0, component_id=1)
+        assert acc.push_many([b]) == []
+        assert acc.on_source_exhausted(0, 0) == []
+        assert acc.has_pending_data()
+        a = _rec(1)
+        assert _flatten_ready(acc.push_many([a])) == [a, b]
+
+    @pytest.mark.parametrize("setup_first", [False, True])
+    def test_source_policy_reaches_accumulator_from_context(
+        self, setup_first: bool
+    ) -> None:
+        op = EnsureMixture(weight_by="samples", max_buffer_size=None)
+        ctx = {
+            "continues_after_exhaustion": frozenset({0}),
+            "get_chunk_mixture": lambda lane, chunk: {0: 0.5, 1: 0.5},
+        }
+        if setup_first:
+            op.setup(OpContext(ctx))
+        acc = op.accumulator(deterministic=True, ctx=ctx)
+        b = _rec(0, component_id=1)
+        assert acc.push_many([b]) == []
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == [b]
+
+    @pytest.mark.parametrize("terminal_flush", [False, True])
+    @pytest.mark.parametrize(
+        "counts,first", [({1: 10, 2: 6, 3: 4}, 2), ({1: 2, 2: 7, 3: 5}, 3)]
+    )
+    def test_forced_drain_normalizes_only_exhausted_unavailable_components(
+        self, terminal_flush: bool, counts: dict[int, int], first: int
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.25, 2: 0.15, 3: 0.1},
+            max_buffer_size=64,
+            continues_after_exhaustion=frozenset({0}),
+        )
+        acc.on_source_exhausted(0, 0)
+        history = SampleRecord(
+            meta=SampleMeta(
+                sample_id=(0, 0, 0),
+                lane_id=0,
+                chunk_id=0,
+                component_sample_counts=counts,
+            ),
+            payload={"value": 0},
+        )
+        assert _flatten_ready(acc.push_many([history])) == [history]
+        c, d = _rec(1000, component_id=2), _rec(1001, component_id=3)
+        expected = [c, d] if first == 2 else [d, c]
+        if terminal_flush:
+            assert acc.push_many([c, d]) == []  # Live B is still owed next.
+            assert _flatten_ready(acc.flush()) == expected
+        else:
+            acc._config.max_buffer_size = 2
+            assert _flatten_ready(acc.push_many([c, d])) == expected[:1]
+        # The first history distinguishes raw deficits; the second distinguishes
+        # incorrectly renormalizing away live, unavailable B as well as dead A.
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    def test_packed_scoring_uses_same_exhaustion_normalization(
+        self, force: bool, weight_by: str
+    ) -> None:
+        # B:C should be 60:40. At 6 B / 2 C, C is owed 1.2 and B -1.2;
+        # the raw target instead scores B -3.6, C -0.4 and picks the wrong pack.
+        target = {0: 0.5, 1: 0.3, 2: 0.2}
+        if force:
+            # D is live and unavailable, forcing the packed fallback (priority 4).
+            target = {0: 0.5, 1: 0.15, 2: 0.1, 3: 0.25}
+        acc = _make_accumulator_with_chunk_mixture(
+            target,
+            weight_by=weight_by,
+            max_buffer_size=64 if force else None,
+            continues_after_exhaustion=frozenset({0}),
+        )
+        acc.on_source_exhausted(0, 0)
+
+        # One indivisible packed record supplies the starting emission history.
+        def pack(i: int, counts: dict[int, int]) -> SampleRecord:
+            return SampleRecord(
+                meta=SampleMeta(
+                    sample_id=(0, 0, i),
+                    lane_id=0,
+                    chunk_id=0,
+                    component_sample_counts=counts,
+                    component_token_counts=counts,
+                ),
+                payload={"value": i},
+            )
+
+        history_counts = {1: 6, 2: 2, 3: 3} if force else {1: 6, 2: 2}
+        assert len(_flatten_ready(acc.push_many([pack(0, history_counts)]))) == 1
+        large = pack(1, {1: 1, 2: 10})
+        small = pack(2, {1: 1, 2: 1})
+        if force:
+            acc._config.max_buffer_size = 2
+        out = _flatten_ready(acc.push_many([small, large]))
+        assert out[0] == large
 
 
 class TestEnsureMixtureAccumulator:

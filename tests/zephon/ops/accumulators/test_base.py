@@ -1,7 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Default accumulator handling of internal source-exhaustion notifications."""
+"""Default accumulator handling of source-exhaustion notifications."""
 
 from collections.abc import Sequence
 
@@ -29,6 +29,6 @@ class _Buffering(Accumulator[int]):
 def test_default_source_exhausted_hook_is_noop() -> None:
     acc = _Buffering()
     acc.push_many([1, 2, 3])
-    assert acc._on_source_exhausted(0, 0) == []
+    assert acc.on_source_exhausted(0, 0) == []
     assert acc.has_pending_data()
     assert acc.flush() == [([1, 2, 3], 0)]

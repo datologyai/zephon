@@ -434,8 +434,12 @@ class TestEnsureMixtureIntegration:
         """The notification releases records that strict mode otherwise withholds."""
         ds_code, ds_text = _prepare_datasets(tmp_path, code_count=3, text_count=1000)
 
+        class _ContinuingSource(StaticMixtureWorkSource):
+            def continues_after_exhaustion(self) -> frozenset[str]:
+                return frozenset({"code"})
+
         def collect() -> list[SampleRecord]:
-            work = StaticMixtureWorkSource(
+            work = _ContinuingSource(
                 [ds_code, ds_text],
                 {"code": 0.05, "text": 0.95},
                 chunk_size=10,

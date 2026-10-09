@@ -190,7 +190,7 @@ class BaseOperatorState:
 
         Sentinel records bypass ``push_many`` and ``process_many`` and are
         emitted as individual ready batches. Source-exhaustion notifications
-        invoke ``_on_source_exhausted`` first, without flushing or resetting
+        invoke ``on_source_exhausted`` first, without flushing or resetting
         the accumulator.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
@@ -269,7 +269,7 @@ class BaseOperatorState:
                 component_id = source_exhausted_component(e)
                 if component_id is not None:
                     ready.extend(
-                        self.accumulator_impl._on_source_exhausted(
+                        self.accumulator_impl.on_source_exhausted(
                             e.meta.lane_id, component_id
                         )
                     )

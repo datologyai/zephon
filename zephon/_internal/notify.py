@@ -144,13 +144,8 @@ def should_notify(item: StreamItem) -> bool:
     """
     if not isinstance(item, SampleRecord):
         return True
-    return (
-        not (
-            item.meta.tags.get("_flush_sentinel")
-            or "_source_exhausted" in item.meta.tags
-        )
-        or item.meta.tombstone
-    )
+    tags = item.meta.tags
+    return not (tags.get("_flush_sentinel") or "_source_exhausted" in tags)
 
 
 def source_exhausted_component(item: StreamItem) -> int | None:

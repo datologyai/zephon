@@ -18,6 +18,13 @@ from zephon.work import StaticMixtureWorkSource
 pytestmark = pytest.mark.integration
 
 
+class _ContinuingSource(StaticMixtureWorkSource):
+    """Opt into continuation handling within the finite fixture's final chunks."""
+
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        return frozenset(self.component_ids())
+
+
 def _make_pipe(
     *,
     runner: str = "inline",
@@ -26,6 +33,7 @@ def _make_pipe(
     flush_every: int = 128,
     shuffle: bool = False,
     limit: int | None = None,
+    continuing: bool = True,
 ) -> Pipeline:
     datasets = [
         Dataset.from_dict(
@@ -33,7 +41,8 @@ def _make_pipe(
         )
         for name, count in [("a", 3), ("b", 1000)]
     ]
-    source = StaticMixtureWorkSource(
+    source_type = _ContinuingSource if continuing else StaticMixtureWorkSource
+    source = source_type(
         datasets,
         {"a": 0.05, "b": 0.95},
         chunk_size=10,
@@ -98,11 +107,11 @@ def test_source_exhaustion_releases_survivors_through_transports(
 class _CaptureExhaustion(EnsureMixtureAccumulator):
     calls: list[tuple[int, int]] = []
 
-    def _on_source_exhausted(
+    def on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[SampleRecord]]:
         self.calls.append((lane_id, component_id))
-        return super()._on_source_exhausted(lane_id, component_id)
+        return super().on_source_exhausted(lane_id, component_id)
 
 
 def test_notification_is_once_per_lane_across_epoch_resets(
@@ -170,7 +179,7 @@ def test_large_shuffle_keeps_exhausted_dataset_records(limit: int | None) -> Non
         )
         for name, count in (("a", 200), ("b", 5000))
     ]
-    source = StaticMixtureWorkSource(
+    source = _ContinuingSource(
         datasets, {"a": 0.5, "b": 0.5}, chunk_size=10, exhausted_policy="stop", seed=0
     )
     pipe = (
@@ -188,3 +197,22 @@ def test_large_shuffle_keeps_exhausted_dataset_records(limit: int | None) -> Non
     values = [_value(r) for r in pipe]
     assert len(values) == len(set(values)) == 400
     assert Counter(text.split("-")[0] for _, text in values) == {"a": 200, "b": 200}
+
+
+@pytest.mark.parametrize("limit", [None, 8, 64])
+def test_stop_policy_output_is_unchanged_by_notifications(
+    limit: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def collect() -> list[tuple[int, str]]:
+        return [_value(r) for r in _make_pipe(limit=limit, continuing=False)]
+
+    enabled = collect()
+    monkeypatch.setattr(
+        StaticMixtureWorkSource, "_source_exhausted_components", lambda self: ()
+    )
+    disabled = collect()
+    assert enabled == disabled
+    if limit is None:
+        assert Counter(text.split("-")[0] for _, text in enabled) == {"a": 3, "b": 3}
+    else:
+        assert Counter(text.split("-")[0] for _, text in enabled) == {"a": 3, "b": 57}

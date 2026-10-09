@@ -16,7 +16,7 @@ from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.runners.inline import InlineStageRunner
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch
-from zephon.ops.base import BaseOp
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -384,7 +384,7 @@ def test_source_exhaustion_bypasses_buffers_without_corrupting_epoch_floor() -> 
     assert state._epoch_floor == 5
 
 
-def test_next_flush_after_source_notification_does_not_prove_drainage() -> None:
+def test_source_notification_bypasses_held_flush() -> None:
     state = _make_batch_runner(batch_size=2).ops[0]
     older = _rec(0, chunk_id=0)
     boundary = _flush_sentinel(boundary_cid=1)
@@ -688,3 +688,46 @@ def test_stalled_batch_sentinel_arrives_after_cross_epoch_output() -> None:
         "with stalling Batch upstream, the downstream op sees post-boundary "
         "records before the sentinel (this is expected behavior)"
     )
+
+
+def test_public_source_hook_dispatches_output_through_operator() -> None:
+    class _HookAccumulator(_FlushTrackingAccumulator):
+        def on_source_exhausted(
+            self, lane_id: int, component_id: int
+        ) -> list[ReadyBatch[SampleRecord]]:
+            assert (lane_id, component_id) == (3, 7)
+            return self.flush(lane_id=lane_id)
+
+    class _HookOp(_StallTrackingOp):
+        def setup(self, ctx: OpContext) -> None:
+            super().setup(ctx)
+            assert ctx.get("continues_after_exhaustion") == frozenset({2})
+
+        def accumulator(
+            self, *, deterministic: bool, ctx: dict[str, Any]
+        ) -> Accumulator[SampleRecord]:
+            assert ctx["continues_after_exhaustion"] == frozenset({2})
+            return _HookAccumulator()
+
+        def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+            for elem in elems:
+                elem.payload = {"processed": elem.payload["value"]}
+            return elems
+
+    node = Node(name="hook", op=_HookOp())
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = InlineStageRunner(
+        stage,
+        ctx_services={**_ctx_services(), "continues_after_exhaustion": frozenset({2})},
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    notice = Engine._make_source_exhausted_sentinel(lane_id=3, component_id=7)
+    record = _rec(5, lane_id=3)
+    # The public hook fires even outside the continuation set. Its output takes
+    # the normal worker path; the control record bypasses process_many.
+    out = runner._apply_operator_state(runner.ops[0], [record, notice], force=False)
+    assert out == [record, notice]
+    assert record.payload == {"processed": 5}
+    assert notice.payload is None

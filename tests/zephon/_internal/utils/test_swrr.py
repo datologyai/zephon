@@ -631,3 +631,30 @@ class TestSWRRTemporarySkip:
         swrr.record_multi({"a": 1, "other": 3})
         assert swrr.total_emitted == 6
         assert swrr.get_actual_ratios() == {"a": 1 / 6, "other": 5 / 6}
+
+    def test_select_and_scores_share_temporary_normalization(self) -> None:
+        swrr = SmoothWeightedRoundRobin(
+            {"a": 0.5, "b": 0.25, "c": 0.15, "d": 0.1}, ["a", "b", "c", "d"]
+        )
+        swrr.record_multi({"a": 20, "b": 10, "c": 6, "d": 4})
+        before = swrr.get_deficits()
+        assert swrr.get_deficits(skip={"a"}) == pytest.approx({"b": 0, "c": 0, "d": 0})
+        assert swrr.peek(skip={"a"}) == "b"
+        # Live B is unavailable, but retains its target share in the fallback.
+        assert swrr.select({"c", "d"}, skip={"a"}) == "c"
+        assert swrr.get_deficits(skip={"a", "b"}) == pytest.approx({"c": 0, "d": 0})
+        assert swrr.get_deficits(skip={"a", "b", "c", "d"}) == {}
+        assert swrr.select({"a"}, skip={"a"}) is None
+        assert swrr.get_deficits(skip={"unknown"}) == before
+        assert swrr.get_deficits() == before
+        assert swrr.total_emitted == 40
+
+    def test_forced_selection_renormalizes_unequal_survivors(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.3, "c": 0.2}, ["a", "b", "c"])
+        counts: Counter[str] = Counter()
+        for _ in range(100):
+            chosen = swrr.select({"b", "c"}, skip={"a"})
+            assert chosen is not None
+            counts[chosen] += 1
+            swrr.record(chosen)
+        assert counts == {"b": 60, "c": 40}
