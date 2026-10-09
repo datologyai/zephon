@@ -124,17 +124,25 @@ memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
 
 | Option | Default | Effect |
 |---|---:|---|
-| `shm_min_size` | 8192 bytes | Smaller values travel inline through the IPC connection, including tensors and arrays already in SHM. |
-| `shm_min_buffer_size` | 512 KiB | Minimum useful bytes per new allocation in the message. Smaller groups travel inline. |
-| `shm_min_reuse_size` | 128 KiB | Minimum useful bytes per existing shared allocation in the message. Smaller groups travel inline. Reusing SHM has a lower setup cost than allocating it. |
-| `coalesce_tensors` | `True` | Coalesce eligible values of compatible types/dtypes together. Despite its legacy name, this controls all supported payload types. |
-| `shm_coalesce_max_size` | 16 MiB | Maximum coalesced allocation size. Larger individual values still use SHM, in separate allocations. `None` removes the limit. |
-| `shm_max_retained_ratio` | 8 | Copy shared views into compact storage when their backing allocation is more than this many times larger than their combined useful bytes in the message. `None` disables view compaction. |
-| `shm_min_reclaim_bytes` | 16 MiB | View compaction also requires at least this many unused backing bytes. |
+| `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for a fresh SHM allocation. Smaller private values travel inline. Existing shared views are considered together first. |
+| `shm_min_new_allocation_bytes` | 2 MiB | Minimum useful bytes per new allocation in the message. Smaller groups travel inline. |
+| `shm_min_forward_bytes` | 128 KiB | Minimum useful bytes per existing shared allocation in the message. Smaller groups travel inline. This considers the combined views of that allocation, not each view separately. |
+| `shm_coalesce` | `True` | Coalesce eligible values of compatible types/dtypes together. Applies to private values and compacted views alike. |
+| `shm_max_coalesced_bytes` | 16 MiB | Maximum coalesced allocation size. Larger individual values still use SHM, in separate allocations. `None` removes the limit. |
+| `shm_compact_above_ratio` | 8 | Copy shared views into compact storage when their backing allocation is more than this many times larger than their combined useful bytes in the message. `None` disables view compaction. |
+| `shm_compact_min_savings_bytes` | 16 MiB | View compaction also requires at least this many potential savings: backing bytes minus useful bytes in this message. |
 
-Disabling coalescing leaves the transport threshold and view compaction active.
-Compacted views below the new-allocation minimum travel inline. Larger
-compacted views receive separate shared allocations and are not recoalesced.
+`shm_min_size` and `coalesce_tensors` remain accepted as keyword aliases for
+`shm_min_item_bytes` and `shm_coalesce`.
+
+Disabling coalescing leaves the transport thresholds and view compaction active.
+Private values and compacted views follow the same path: apply the item floor,
+form compatible groups up to the cap, then apply the new-allocation minimum.
+For example, two compacted 1 MiB views can share one 2 MiB destination.
+With a 512 KiB allocation minimum, two 256 KiB views take the same shared path.
+Each is copied straight from its source view into that final allocation.
+A 64 MiB batch of eligible 1 MiB values forms four 16 MiB allocations. A single
+64 MiB value gets its own allocation; the cap never splits an individual item.
 Array values, shapes and dtypes, and container structure are preserved; copying
 a strided view can change its strides and contiguity. Unsupported array dtypes
 and tensor layouts retain their normal serialization behavior.
@@ -145,22 +153,24 @@ interface, rather than every method of the original type. Converting these
 views with `bytes(value)` makes a copy. Python 3.10 and 3.11 use the existing
 copying `bytes` subclass fallback. Inline bytearrays remain bytearrays.
 
-View compaction considers all eligible views of the same allocation in the
+View compaction considers all supported nonempty views of the same allocation in the
 message. A batch that still uses most of a slab will keep it. Overlapping views
 are counted separately, which can conservatively skip a useful compaction.
 Other samples or pending commands may still reference the original allocation,
 delaying its release. The policy does not track references outside the message,
 repack the contents of a slab, or revisit samples in shuffle buffers.
-If optional compaction cannot allocate SHM, it forwards the original view.
+If a destination containing compacted views cannot allocate SHM, those views
+keep their original backing. Private values in that group travel inline. This
+avoids waiting for space held by the very views being compacted.
 
-The decisions run in this order: keep very small values inline; group the
-remaining values by existing allocation or compatible coalescing dtype; keep
-groups below the applicable allocation/reuse minimum inline; reuse or compact
-existing shared storage; coalesce private values up to the allocation limit.
+Existing shared views are grouped by backing allocation first. A group below
+`shm_min_forward_bytes` travels inline; otherwise it keeps its backing unless
+both compaction conditions hold. Views selected for compaction join the same
+fresh-allocation path as private values, including the per-item floor and cap.
 Compaction requires
 **both** the relative and absolute conditions:
-`backing_bytes > useful_bytes * shm_max_retained_ratio` and
-`backing_bytes - useful_bytes >= shm_min_reclaim_bytes`. The relative condition
+`backing_bytes > useful_bytes * shm_compact_above_ratio` and
+`backing_bytes - useful_bytes >= shm_compact_min_savings_bytes`. The relative condition
 limits copying large values for modest savings; the absolute condition avoids
 allocating many small buffers for little potential benefit.
 
@@ -172,10 +182,20 @@ that were given their own allocations.
 
 The transport minimums serve different purposes. A per-value floor avoids
 copying and describing thousands of tiny entries, even if their total is large.
-The buffer floor amortizes allocation and handle transfer across enough data:
-64 eligible 16 KiB values can share a 1 MiB allocation, while a single 16 KiB
-value stays inline. Existing shared allocations use the lower reuse minimum;
+Passing that floor alone does not make a new allocation worthwhile. The
+allocation floor amortizes setup and handle transfer across enough data:
+64 eligible 32 KiB values can share a 2 MiB allocation, while a single 32 KiB
+value stays inline. Existing shared allocations use the forwarding minimum;
 forwarding a handle can be worthwhile even when allocating a new buffer is not.
+The defaults balance measurements on Linux and macOS, under pickle protocols
+4 and 5. New 512 KiB and 1 MiB allocations often lost to inline transport on
+Linux; 2 MiB improved the balance. The 4 KiB item floor allows large batches
+of small values to coalesce while avoiding measured Torch regressions at
+1-2 KiB per item. Neither threshold is a universal crossover. In particular,
+macOS can benefit from smaller new allocations. Forwarding many separate
+128 KiB allocations can lose to inline transport on Linux, but raising the
+common forwarding minimum would slow those cases substantially on macOS.
+
 Inline values in a microbatch travel in one queue message,
 not one message per value. Benchmark representative batch sizes when tuning.
 

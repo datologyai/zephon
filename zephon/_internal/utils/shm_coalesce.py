@@ -1,16 +1,81 @@
-"""Prepare CPU payloads for process-stage transport with one memory policy.
+"""Coalesce per-microbatch tensors, numpy arrays, and large bytes into SHM buffers.
 
-Type adapters describe values and write them directly into Torch-managed shared
-storage. The common policy chooses inline transport, reuse of existing SHM,
-view compaction, or bounded coalescing. Copies target the final shared buffers;
-Torch owns allocation and lifetime. Unsupported values retain their normal
-serialization.
+Reduces the number of POSIX SHM segments (and file descriptors) from
+N-per-microbatch to a few buffers per dtype, bounded by the coalescing
+limit. Large ``bytes``/``memoryview``/``bytearray`` payloads are packed
+into a ``torch.uint8`` buffer so they travel through the same SHM path.
 
-Descriptors keep both inline data and shared references lazy across forwarding
-hops. Resolution reconstructs operator payloads; shared bytes remain _ShmBytes
-buffer views on Python 3.12+, avoiding a copy into ordinary bytes.
-The NumPy reducer forwards only Zephon-owned storage; policy configuration is
-scoped to process-stage messages, not installed globally or applied to MTP.
+Supported payload types:
+
+- **torch.Tensor** (CPU only) — coalesced by dtype, restored as zero-copy
+  views into the SHM buffer.
+- **numpy.ndarray** — private arrays are coalesced into shared buffers.
+  Arrays backed by Zephon's shared buffers can be forwarded by the
+  multiprocessing reducer, preserving their dtype, strides, and writeability.
+- **bytes / memoryview / bytearray** — payloads above a size threshold are packed
+  into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers.
+- **homogeneous numeric lists** — coalesced as int64/float64 and restored
+  as ordinary lists. Mixed lists and integers outside int64 use pickle.
+
+Process-stage decisions (also used when forwarding a resolved payload)::
+
+    Supported, nonempty value
+      |
+      +-- Already in SHM? -- yes --> Group views by existing allocation
+      |                              |
+      |                              +-- useful < shm_min_forward_bytes
+      |                              |     --> inline
+      |                              |
+      |                              +-- Compact? Both must hold:
+      |                              |     backing > useful * shm_compact_above_ratio
+      |                              |     backing - useful >= shm_compact_min_savings_bytes
+      |                              |     (ratio=None disables compaction)
+      |                              |       no  --> keep existing SHM
+      |                              |       yes --+
+      |                                           |
+      +-- no -------------------------------------+
+                                                  |
+                                      Fresh destination
+                                                  |
+                         item < shm_min_item_bytes? -- yes --> inline
+                                                  |
+                                                  no
+                                                  |
+                           shm_coalesce? -- yes --> Group compatible values,
+                                |                   up to shm_max_coalesced_bytes
+                                no                  (larger items stand alone)
+                                |                         |
+                         One group per item               |
+                                +-------------------------+
+                                                  |
+                         group < shm_min_new_allocation_bytes?
+                              yes --> inline      no --> fresh SHM
+
+Compaction copies directly into the final destination, together with eligible
+private values. Useful bytes count views in this message; other references can
+keep an old allocation alive. Unsupported values use their normal serialization.
+The final MTP queue does not use this policy.
+
+Strategy (single memcpy):
+
+1. Describe a leaf payload directly, or flatten a container via
+   ``optree.tree_flatten``. Extract tensors, arrays, and large bytes into
+   lightweight descriptors, retaining a tree spec only for containers.
+2. For each planned group (plus ``torch.uint8`` for raw bytes), allocate
+   storage directly in shared memory and attach a single 1-D ``torch.Tensor``
+   to it, then write the values into the shared buffer. Each byte of
+   real data selected for a fresh allocation is copied once — straight into SHM.
+3. Wrap the skeleton + shared buffers in a ``CoalescedMicrobatch`` whose
+   ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
+   wrappers.  Payloads are restored only when explicitly resolved
+   (typically in the worker process before ``process_many``).
+
+.. rubric:: Future: torch-free support
+
+This module currently requires torch for SHM lifecycle management.  A
+future refactor can replace this with ``shm_open`` / ``mmap`` / ``DupFd``
+to remove the torch dependency entirely and support Python 3.10+ without
+the ``__buffer__`` protocol.
 """
 
 from __future__ import annotations
@@ -65,82 +130,75 @@ def _get_torch() -> Any:
 
 
 # Defaults are shared by all supported CPU payload types.
-DEFAULT_SHM_MIN_SIZE = 8192
-DEFAULT_SHM_MIN_BUFFER_SIZE = 512 * 1024
-DEFAULT_SHM_MIN_REUSE_SIZE = 128 * 1024
-DEFAULT_SHM_MAX_RETAINED_RATIO = 8.0
-DEFAULT_SHM_MIN_RECLAIM_BYTES = 16 * 1024 * 1024
-DEFAULT_SHM_COALESCE_MAX_SIZE = 16 * 1024 * 1024
+DEFAULT_SHM_MIN_ITEM_BYTES = 4096
+DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES = 2 * 1024 * 1024
+DEFAULT_SHM_MIN_FORWARD_BYTES = 128 * 1024
+DEFAULT_SHM_COMPACT_ABOVE_RATIO = 8.0
+DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES = 16 * 1024 * 1024
+DEFAULT_SHM_MAX_COALESCED_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class PayloadMemoryPolicy:
     """Choose transport, retention, and coalescing independently of payload type.
 
-    ``shm_min_size`` applies per value, including values already in SHM.
-    ``min_buffer_size`` requires enough useful bytes per new allocation;
-    ``min_reuse_size`` applies to existing shared allocations. Compaction accounts
-    for sibling views in that message; references elsewhere can delay reclamation.
-    Compacted views and large private values receive individual allocations;
-    they are never coalesced straight back into an oversized slab.
+    ``shm_min_item_bytes`` selects values eligible for fresh SHM. Existing shared
+    views are considered together using ``min_forward_bytes`` per allocation.
+    Private values and compacted views use the same bounded coalescing path,
+    with ``min_new_allocation_bytes`` applied to each planned destination.
+    References outside this message can delay reclamation after compaction.
     """
 
-    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
     coalesce: bool = True
-    max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
-    min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
-    coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
-    min_buffer_size: int = DEFAULT_SHM_MIN_BUFFER_SIZE
-    min_reuse_size: int = DEFAULT_SHM_MIN_REUSE_SIZE
+    compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
+    compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
+    max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
+    min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
+    min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
 
     def __reduce__(self) -> tuple:
         return type(self), (
-            self.shm_min_size,
+            self.shm_min_item_bytes,
             self.coalesce,
-            self.max_retained_ratio,
-            self.min_reclaim_bytes,
-            self.coalesce_max_size,
-            self.min_buffer_size,
-            self.min_reuse_size,
+            self.compact_above_ratio,
+            self.compact_min_savings_bytes,
+            self.max_coalesced_bytes,
+            self.min_new_allocation_bytes,
+            self.min_forward_bytes,
         )
 
     def __post_init__(self) -> None:
         if (
             min(
-                self.shm_min_size,
-                self.min_reclaim_bytes,
-                self.min_buffer_size,
-                self.min_reuse_size,
+                self.shm_min_item_bytes,
+                self.compact_min_savings_bytes,
+                self.min_new_allocation_bytes,
+                self.min_forward_bytes,
             )
             < 0
         ):
             raise ValueError("SHM size thresholds must be non-negative")
-        if self.max_retained_ratio is not None and not (
-            1 <= self.max_retained_ratio < float("inf")
+        if self.compact_above_ratio is not None and not (
+            1 <= self.compact_above_ratio < float("inf")
         ):
-            raise ValueError("shm_max_retained_ratio must be finite and >= 1, or None")
-        if self.coalesce_max_size is not None and self.coalesce_max_size <= 0:
-            raise ValueError("shm_coalesce_max_size must be positive, or None")
+            raise ValueError("shm_compact_above_ratio must be finite and >= 1, or None")
+        if self.max_coalesced_bytes is not None and self.max_coalesced_bytes <= 0:
+            raise ValueError("shm_max_coalesced_bytes must be positive, or None")
 
-    def choose(
-        self, nbytes: int, shared_nbytes: int | None
-    ) -> Literal["inline", "reuse", "separate", "coalesce"]:
-        """Decide from useful bytes and backing size, without inspecting data."""
-        if nbytes == 0 or nbytes < self.shm_min_size:
+    def shared_action(
+        self, useful_bytes: int, backing_bytes: int
+    ) -> Literal["inline", "keep", "fresh"]:
+        """Decide once per existing allocation using this message's useful bytes."""
+        if useful_bytes < self.min_forward_bytes:
             return "inline"
-        if shared_nbytes is not None:
-            if (
-                self.max_retained_ratio is not None
-                and shared_nbytes > nbytes * self.max_retained_ratio
-                and shared_nbytes - nbytes >= self.min_reclaim_bytes
-            ):
-                return "separate"
-            return "reuse"
-        if not self.coalesce or (
-            self.coalesce_max_size is not None and nbytes > self.coalesce_max_size
+        if (
+            self.compact_above_ratio is not None
+            and backing_bytes > useful_bytes * self.compact_above_ratio
+            and backing_bytes - useful_bytes >= self.compact_min_savings_bytes
         ):
-            return "separate"
-        return "coalesce"
+            return "fresh"
+        return "keep"
 
 
 # dtype key used for the coalesced raw-bytes buffer
@@ -210,15 +268,18 @@ class _InlineSlot(_LeafDescriptor):
 
 
 @dataclass(slots=True)
-class _RetainedView:
-    """Preserve an existing view if optional compaction cannot allocate SHM."""
+class _RetainedViews:
+    """Restore each source if a destination containing compacted views cannot allocate."""
 
-    value: Any
+    values: dict[int, Any]
 
 
 def _restore_slot(slot: _LeafDescriptor, buffers: dict[str, Any]) -> Any:
     buffer = buffers.get(getattr(slot, "buffer_key", None))
-    return buffer.value if isinstance(buffer, _RetainedView) else slot.restore(buffers)
+    if isinstance(buffer, _RetainedViews):
+        value = buffer.values[slot.offset]
+        return value.restore({}) if isinstance(value, _LeafDescriptor) else value
+    return slot.restore(buffers)
 
 
 @dataclass(slots=True)
@@ -751,23 +812,20 @@ class _InlineTensorData(_LeafDescriptor):
         )
 
 
-def _restore_inline_numpy(array: Any, writable: bool) -> Any:
-    if not writable:
-        array.flags.writeable = False
-    return array
+class _InlineNumpy(_LeafDescriptor):
+    """Keep NumPy's inline representation and writeability across forwarding hops."""
 
-
-class _InlineNumpy:
-    """Use NumPy's own serialization even for a Zephon-shared source."""
-
-    def __init__(self, array: Any) -> None:
+    def __init__(self, array: Any, writable: bool | None = None) -> None:
         self.array = array
+        self.writable = array.flags.writeable if writable is None else writable
 
     def __reduce_ex__(self, protocol: int) -> Any:
-        return _restore_inline_numpy, (
-            _NumpyPickleFallback(self.array),
-            self.array.flags.writeable,
-        )
+        return type(self), (_NumpyPickleFallback(self.array), self.writable)
+
+    def restore(self, buffers: dict[str, Any]) -> Any:
+        if not self.writable:
+            self.array.flags.writeable = False
+        return self.array
 
 
 @dataclass(slots=True)
@@ -799,6 +857,16 @@ class _BufferPayload(_LeafDescriptor):
         return _InlineSlot, (value,)
 
 
+def _inline_buffer(source: Any, slot: Any, shared: bool) -> Any:
+    if isinstance(slot, _TensorSlot):
+        return _InlineTensor(source)
+    if isinstance(slot, _NdarraySlot) and (shared or not source.flags.writeable):
+        return _InlineNumpy(source)
+    if isinstance(source, (memoryview, _ShmBytes312)):
+        return source.tobytes() if isinstance(source, memoryview) else bytes(source)
+    return source
+
+
 class _BufferPlan:
     """Collect writes using a single memory policy and bounded coalescing groups."""
 
@@ -812,91 +880,100 @@ class _BufferPlan:
         self.collector: dict[str, list[Any]] = {}
         self.offsets: dict[str, int] = {}
         self.dtype_keys: dict[str, str] = {}
-        self.current: dict[str, str] = {}
+        self.planned_keys: dict[Any, str] = {}
+        self.optional_groups: set[Any] = set()
         self.changed = False
         self.saw_buffer = False
-        self.fallbacks: dict[str, Any] = {}
+        self.fallbacks: dict[str, dict[int, tuple[Any, Any, bool]]] = {}
         self.pending: list[_BufferPayload] = []
         self.group_bytes: dict[Any, int] = {}
         self.private_groups: dict[str, int] = {}
 
-    def collect(self, value: _BufferPayload, choice: str) -> _BufferPayload:
+    def collect(self, value: _BufferPayload) -> _BufferPayload:
         if value.shared_storage is not None:
             group = ("shared", value.shared_storage._cdata)
-        elif choice == "coalesce":
+            value.group = group
+            self.group_bytes[group] = self.group_bytes.get(group, 0) + value.nbytes
+        else:
+            self.group_fresh(value)
+        self.pending.append(value)
+        return value
+
+    def group_fresh(self, value: _BufferPayload) -> None:
+        """Plan the final destination for private data and compacted views alike."""
+        limit = self.policy.max_coalesced_bytes
+        if not self.policy.coalesce or (limit is not None and value.nbytes > limit):
+            group = ("separate", id(value))
+        else:
             index = self.private_groups.get(value.dtype_key, 0)
-            group = ("private", value.dtype_key, index)
-            limit = self.policy.coalesce_max_size
+            group = ("fresh", value.dtype_key, index)
             if (
                 limit is not None
                 and self.group_bytes.get(group, 0) + value.nbytes > limit
             ):
                 index += 1
                 self.private_groups[value.dtype_key] = index
-                group = ("private", value.dtype_key, index)
-        else:
-            group = ("separate", id(value))
+                group = ("fresh", value.dtype_key, index)
         value.group = group
         self.group_bytes[group] = self.group_bytes.get(group, 0) + value.nbytes
-        self.pending.append(value)
-        return value
+        if value.shared_storage is not None:
+            self.optional_groups.add(group)
 
     def inline(self, value: _BufferPayload) -> Any:
-        leaf = value.source
-        if isinstance(value.slot, _TensorSlot):
+        result = _inline_buffer(
+            value.source, value.slot, value.shared_nbytes is not None
+        )
+        if result is not value.source:
             self.changed = True
-            return _InlineTensor(leaf)
-        if isinstance(value.slot, _NdarraySlot) and value.shared_nbytes is not None:
-            self.changed = True
-            return _InlineNumpy(leaf)
-        if isinstance(leaf, (memoryview, _ShmBytes312)):
-            self.changed = True
-            return leaf.tobytes() if isinstance(leaf, memoryview) else bytes(leaf)
-        return leaf
+        return result
 
     def finish(self) -> None:
-        """Amortize transport per buffer, and account for sibling views in this message."""
+        """Select existing backing first, then plan all fresh destinations together."""
+        actions: dict[Any, str] = {}
+        fresh: list[_BufferPayload] = []
         for value in self.pending:
-            useful = self.group_bytes[value.group]
-            minimum = (
-                self.policy.min_reuse_size
-                if value.shared_nbytes is not None
-                else self.policy.min_buffer_size
-            )
-            if useful < minimum:
+            if value.shared_nbytes is None:
+                fresh.append(value)
+                continue
+            group = value.group
+            useful = self.group_bytes[group]
+            action = actions.get(group)
+            if action is None:
+                action = actions[group] = self.policy.shared_action(
+                    useful, value.shared_nbytes
+                )
+            if action == "keep":
+                value.result = (
+                    self.reuse(value) if useful > value.nbytes else value.source
+                )
+            elif action == "inline" or value.nbytes < self.policy.shm_min_item_bytes:
                 value.result = self.inline(value)
-            elif value.shared_nbytes is not None:
-                # Sum logical bytes conservatively. Overlapping views can make
-                # us skip a useful compaction, but never justify an extra copy.
-                if self.policy.choose(useful, value.shared_nbytes) == "reuse":
-                    value.result = (
-                        self.reuse(value) if useful > value.nbytes else value.source
-                    )
-                elif value.nbytes < self.policy.min_buffer_size:
-                    # Compacted views get separate destinations. Apply the new
-                    # allocation minimum to each one, not their old shared slab.
-                    value.result = self.inline(value)
-                else:
-                    value.result = self.add(value, separate=True, fallback=value.source)
             else:
-                choice = self.policy.choose(value.nbytes, None)
-                if (
-                    self.prepare_reused
-                    and useful == value.nbytes
-                    and isinstance(value.slot, _TensorSlot)
-                    and value.source.is_contiguous()
-                    and not value.source.is_conj()
-                    and not value.source.is_neg()
-                    and value.source.untyped_storage().nbytes() == value.nbytes
-                ):
-                    # One tensor using its whole storage needs no coalescing.
-                    # Torch's reducer does not preserve conjugate/negative bits.
-                    # Torch's normal reducer already moves that storage to SHM.
-                    value.result = value.source
-                else:
-                    value.result = self.add(value, separate=choice == "separate")
-            # The copy collector or final descriptor now owns what it needs.
-            # Do not retain original large crops in the serialized skeleton.
+                self.group_fresh(value)
+                fresh.append(value)
+                continue
+            value.source = None
+
+        for value in fresh:
+            useful = self.group_bytes[value.group]
+            if useful < self.policy.min_new_allocation_bytes:
+                value.result = self.inline(value)
+            elif (
+                self.prepare_reused
+                and value.shared_nbytes is None
+                and useful == value.nbytes
+                and isinstance(value.slot, _TensorSlot)
+                and value.source.is_contiguous()
+                and not value.source.is_conj()
+                and not value.source.is_neg()
+                and value.source.untyped_storage().nbytes() == value.nbytes
+            ):
+                # One tensor using its whole storage needs no coalescing.
+                # Torch's reducer does not preserve conjugate/negative bits.
+                value.result = value.source
+            else:
+                value.result = self.add(value)
+            # Keep sources only in the copy collector and optional failure path.
             value.source = None
 
     def reuse(self, value: _BufferPayload) -> Any:
@@ -937,9 +1014,7 @@ class _BufferPlan:
         self.changed = True
         return value.slot
 
-    def add(
-        self, value: _BufferPayload, *, separate: bool, fallback: Any = None
-    ) -> Any:
+    def add(self, value: _BufferPayload) -> Any:
         source = value.source
         if isinstance(value.slot, _NumericListSlot):
             kind = type(source[0])
@@ -960,12 +1035,7 @@ class _BufferPlan:
         elif isinstance(value.slot, _TensorSlot) and source.requires_grad:
             source = source.detach()
         dtype = value.dtype_key
-        key = None if separate else self.current.get(dtype)
-        limit = self.policy.coalesce_max_size
-        if key is not None and limit is not None:
-            itemsize = value.nbytes // value.numel
-            if self.offsets[key] * itemsize + value.nbytes > limit:
-                key = None
+        key = self.planned_keys.get(value.group)
         if key is None:
             key = (
                 dtype
@@ -975,10 +1045,13 @@ class _BufferPlan:
             self.collector[key] = []
             self.offsets[key] = 0
             self.dtype_keys[key] = dtype
-            if not separate:
-                self.current[dtype] = key
-        if fallback is not None:
-            self.fallbacks[key] = fallback
+            self.planned_keys[value.group] = key
+        if value.group in self.optional_groups:
+            self.fallbacks.setdefault(key, {})[self.offsets[key]] = (
+                value.source,
+                value.slot,
+                value.shared_nbytes is not None,
+            )
         value.slot.buffer_key = key
         value.slot.offset = self.offsets[key]
         self.offsets[key] += value.numel
@@ -1058,16 +1131,16 @@ def _extract_leaf(
     leaf: Any,
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
-    shm_min_size: int,
+    shm_min_item_bytes: int,
     plan: _BufferPlan | None = None,
 ) -> Any:
     """Apply one policy after adapting a leaf; never copy into a staging slab."""
     if plan is None:
         plan = _BufferPlan(
             PayloadMemoryPolicy(
-                shm_min_size=shm_min_size,
-                min_buffer_size=shm_min_size,
-                min_reuse_size=shm_min_size,
+                shm_min_item_bytes=shm_min_item_bytes,
+                min_new_allocation_bytes=shm_min_item_bytes,
+                min_forward_bytes=shm_min_item_bytes,
             )
         )
         plan.collector, plan.offsets = collector, offsets
@@ -1075,23 +1148,26 @@ def _extract_leaf(
         return leaf
     if _is_struct(leaf):
         cls, _names, fields = _struct_to_dict(leaf)
-        inner = _extract_payload_pytree(fields, collector, offsets, shm_min_size, plan)
+        inner = _extract_payload_pytree(
+            fields, collector, offsets, shm_min_item_bytes, plan
+        )
         return _StructSlot(cls=cls, inner_skeleton=inner)
     value = _describe_buffer(leaf)
     if value is None:
         return leaf
     plan.saw_buffer = True
-    choice = plan.policy.choose(value.nbytes, value.shared_nbytes)
-    if choice == "inline":
+    if value.nbytes == 0 or (
+        value.shared_nbytes is None and value.nbytes < plan.policy.shm_min_item_bytes
+    ):
         return plan.inline(value)
-    return plan.collect(value, choice)
+    return plan.collect(value)
 
 
 def _extract_payload_pytree(
     payload: Any,
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
-    shm_min_size: int,
+    shm_min_item_bytes: int,
     plan: _BufferPlan | None = None,
 ) -> _FlatSkeleton:
     """Flatten payload via optree and replace tensor/bytes leaves with slots."""
@@ -1099,15 +1175,15 @@ def _extract_payload_pytree(
     if plan is None:
         plan = _BufferPlan(
             PayloadMemoryPolicy(
-                shm_min_size=shm_min_size,
-                min_buffer_size=shm_min_size,
-                min_reuse_size=shm_min_size,
+                shm_min_item_bytes=shm_min_item_bytes,
+                min_new_allocation_bytes=shm_min_item_bytes,
+                min_forward_bytes=shm_min_item_bytes,
             )
         )
         plan.collector, plan.offsets = collector, offsets
     leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
     for i, leaf in enumerate(leaves):
-        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_size, plan)
+        leaves[i] = _extract_leaf(leaf, collector, offsets, shm_min_item_bytes, plan)
     if own_plan:
         plan.finish()
         leaves = [
@@ -1120,7 +1196,7 @@ def _extract_record_payload(
     payload: Any,
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
-    shm_min_size: int,
+    shm_min_item_bytes: int,
     plan: _BufferPlan | None = None,
 ) -> _PayloadDescriptor | LazyPayload:
     """Describe a root leaf directly; preserve the structure of containers."""
@@ -1133,7 +1209,9 @@ def _extract_record_payload(
         if plan is not None:
             plan.changed = True
     if not isinstance(payload, dict):
-        descriptor = _extract_leaf(payload, collector, offsets, shm_min_size, plan)
+        descriptor = _extract_leaf(
+            payload, collector, offsets, shm_min_item_bytes, plan
+        )
         if isinstance(descriptor, _LeafDescriptor):
             return descriptor
         if (
@@ -1142,14 +1220,16 @@ def _extract_record_payload(
             or _is_leaf(payload)
         ):
             return _InlineSlot(descriptor)
-    return _extract_payload_pytree(payload, collector, offsets, shm_min_size, plan)
+    return _extract_payload_pytree(
+        payload, collector, offsets, shm_min_item_bytes, plan
+    )
 
 
 def _extract_from_records(
     items: list[StreamItem],
     collector: dict[str, list[Any]],
     offsets: dict[str, int],
-    shm_min_size: int,
+    shm_min_item_bytes: int,
     plan: _BufferPlan | None = None,
 ) -> list[tuple[SampleRecord, _PayloadDescriptor | LazyPayload]]:
     """Extract tensors from records without mutating payloads yet.
@@ -1161,13 +1241,13 @@ def _extract_from_records(
     for item in items:
         if isinstance(item, SampleRecord):
             descriptor = _extract_record_payload(
-                item.payload, collector, offsets, shm_min_size, plan
+                item.payload, collector, offsets, shm_min_item_bytes, plan
             )
             descriptors.append((item, descriptor))
         elif isinstance(item, SampleBatch):
             for rec in item.records:
                 descriptor = _extract_record_payload(
-                    rec.payload, collector, offsets, shm_min_size, plan
+                    rec.payload, collector, offsets, shm_min_item_bytes, plan
                 )
                 descriptors.append((rec, descriptor))
     return descriptors
@@ -1298,7 +1378,12 @@ def _build_shm_buffers(
             if not optional or not is_shm_error(exc):
                 raise
             assert fallbacks is not None
-            buffers[buffer_key] = _RetainedView(fallbacks[buffer_key])
+            buffers[buffer_key] = _RetainedViews(
+                {
+                    offset: source if shared else _inline_buffer(source, slot, False)
+                    for offset, (source, slot, shared) in fallbacks[buffer_key].items()
+                }
+            )
     return buffers
 
 
@@ -1482,7 +1567,7 @@ class CoalescedMicrobatch:
 
 def coalesce_microbatch(
     items: list[StreamItem],
-    shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
+    shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES,
     *,
     policy: PayloadMemoryPolicy | None = None,
     copy_records: bool = False,
@@ -1491,7 +1576,7 @@ def coalesce_microbatch(
     """Prepare supported values using a common transport and memory policy.
 
     The legacy function name is retained, but inline transport and view
-    compaction also apply when coalescing is disabled. ``shm_min_size`` is a
+    compaction also apply when coalescing is disabled. ``shm_min_item_bytes`` is a
     shortcut setting all inline minimums; an explicit ``policy`` takes precedence.
 
     Returns None when values need no preparation, unless ``ensure_prepared``
@@ -1507,14 +1592,14 @@ def coalesce_microbatch(
     plan = _BufferPlan(
         policy
         or PayloadMemoryPolicy(
-            shm_min_size=shm_min_size,
-            min_buffer_size=shm_min_size,
-            min_reuse_size=shm_min_size,
+            shm_min_item_bytes=shm_min_item_bytes,
+            min_new_allocation_bytes=shm_min_item_bytes,
+            min_forward_bytes=shm_min_item_bytes,
         ),
         prepare_reused=ensure_prepared,
     )
     descriptors = _extract_from_records(
-        items, plan.collector, plan.offsets, plan.policy.shm_min_size, plan
+        items, plan.collector, plan.offsets, plan.policy.shm_min_item_bytes, plan
     )
     plan.finish()
     if not plan.changed:

@@ -196,7 +196,7 @@ def test_deterministic_flag():
 def test_coalesce_tensors_defaults_on() -> None:
     plan = _mk_simple_plan()
     spec = resolve_runtime_spec(plan, RuntimeOptions())
-    assert spec.stages[0].coalesce_tensors is True
+    assert spec.stages[0].shm_coalesce is True
 
 
 def test_final_prefetch():
@@ -287,32 +287,40 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
         prefetch_capacity=0,
         output_mode="microbatches",
         allow_latency_flush=True,
-        coalesce_tensors=False,
-        shm_min_size=1,
+        shm_coalesce=False,
+        shm_min_item_bytes=1,
     )
     assert stage_spec.max_worker_retries == 0
 
 
 def test_payload_memory_policy_options_reach_process_stages() -> None:
     opts = RuntimeOptions(
-        shm_min_size=128,
-        shm_min_buffer_size=2048,
-        shm_min_reuse_size=1024,
-        coalesce_tensors=False,
-        shm_max_retained_ratio=4,
-        shm_min_reclaim_bytes=1024,
-        shm_coalesce_max_size=8192,
+        shm_min_item_bytes=128,
+        shm_min_new_allocation_bytes=2048,
+        shm_min_forward_bytes=1024,
+        shm_coalesce=False,
+        shm_compact_above_ratio=4,
+        shm_compact_min_savings_bytes=1024,
+        shm_max_coalesced_bytes=8192,
     )
     spec = resolve_runtime_spec(_mk_plan((2, 1, 1)), opts)
     for stage in spec.stages:
-        assert stage.shm_min_size == 128
-        assert stage.shm_min_buffer_size == 2048
-        assert stage.shm_min_reuse_size == 1024
-        assert not stage.coalesce_tensors
-        assert stage.shm_max_retained_ratio == 4
-        assert stage.shm_min_reclaim_bytes == 1024
-        assert stage.shm_coalesce_max_size == 8192
-    with pytest.raises(ValueError, match="shm_max_retained_ratio"):
+        assert stage.shm_min_item_bytes == 128
+        assert stage.shm_min_new_allocation_bytes == 2048
+        assert stage.shm_min_forward_bytes == 1024
+        assert not stage.shm_coalesce
+        assert stage.shm_compact_above_ratio == 4
+        assert stage.shm_compact_min_savings_bytes == 1024
+        assert stage.shm_max_coalesced_bytes == 8192
+    with pytest.raises(ValueError, match="shm_compact_above_ratio"):
         resolve_runtime_spec(
-            _mk_plan((1, 1, 1)), RuntimeOptions(shm_max_retained_ratio=0.5)
+            _mk_plan((1, 1, 1)), RuntimeOptions(shm_compact_above_ratio=0.5)
         )
+
+
+def test_legacy_payload_memory_options() -> None:
+    spec = resolve_runtime_spec(
+        _mk_plan((1, 1, 1)), RuntimeOptions(shm_min_size=123, coalesce_tensors=False)
+    )
+    assert spec.stages[0].shm_min_item_bytes == 123
+    assert not spec.stages[0].shm_coalesce

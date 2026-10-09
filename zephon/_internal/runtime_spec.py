@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING
 
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
 from zephon._internal.utils.shm_coalesce import (
-    DEFAULT_SHM_COALESCE_MAX_SIZE,
-    DEFAULT_SHM_MAX_RETAINED_RATIO,
-    DEFAULT_SHM_MIN_BUFFER_SIZE,
-    DEFAULT_SHM_MIN_RECLAIM_BYTES,
-    DEFAULT_SHM_MIN_REUSE_SIZE,
+    DEFAULT_SHM_COMPACT_ABOVE_RATIO,
+    DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
+    DEFAULT_SHM_MAX_COALESCED_BYTES,
+    DEFAULT_SHM_MIN_FORWARD_BYTES,
+    DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
     PayloadMemoryPolicy,
 )
 from zephon.options import IpcTransport
@@ -54,13 +54,13 @@ class StageRuntimeSpec:
     prefetch_capacity: int
     output_mode: str  # "microbatches" | "stream_items"
     allow_latency_flush: bool
-    coalesce_tensors: bool
-    shm_min_size: int
-    shm_min_buffer_size: int = DEFAULT_SHM_MIN_BUFFER_SIZE
-    shm_min_reuse_size: int = DEFAULT_SHM_MIN_REUSE_SIZE
-    shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
-    shm_min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
-    shm_coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
+    shm_coalesce: bool
+    shm_min_item_bytes: int
+    shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
+    shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
+    shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
+    shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
+    shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
     # See RuntimeOptions.ipc_transport / ipc_buffer_bytes; process runners only.
@@ -329,14 +329,20 @@ def resolve_runtime_spec(
         Whether the Engine will run inside a PyTorch DataLoader worker.
         Affects runner type selection (``process`` → ``threads`` demotion).
     """
-    PayloadMemoryPolicy(
-        shm_min_size=opts.shm_min_size,
-        min_buffer_size=opts.shm_min_buffer_size,
-        min_reuse_size=opts.shm_min_reuse_size,
-        coalesce=opts.coalesce_tensors,
-        max_retained_ratio=opts.shm_max_retained_ratio,
-        min_reclaim_bytes=opts.shm_min_reclaim_bytes,
-        coalesce_max_size=opts.shm_coalesce_max_size,
+    memory_policy = PayloadMemoryPolicy(
+        shm_min_item_bytes=(
+            opts.shm_min_item_bytes if opts.shm_min_size is None else opts.shm_min_size
+        ),
+        min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
+        min_forward_bytes=opts.shm_min_forward_bytes,
+        coalesce=(
+            opts.shm_coalesce
+            if opts.coalesce_tensors is None
+            else opts.coalesce_tensors
+        ),
+        compact_above_ratio=opts.shm_compact_above_ratio,
+        compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
+        max_coalesced_bytes=opts.shm_max_coalesced_bytes,
     )
     num_stages = len(plan.stages)
     mode = opts.worker_allocation
@@ -432,13 +438,13 @@ def resolve_runtime_spec(
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
                 allow_latency_flush=allow_latency,
-                coalesce_tensors=opts.coalesce_tensors,
-                shm_min_size=opts.shm_min_size,
-                shm_min_buffer_size=opts.shm_min_buffer_size,
-                shm_min_reuse_size=opts.shm_min_reuse_size,
-                shm_max_retained_ratio=opts.shm_max_retained_ratio,
-                shm_min_reclaim_bytes=opts.shm_min_reclaim_bytes,
-                shm_coalesce_max_size=opts.shm_coalesce_max_size,
+                shm_coalesce=memory_policy.coalesce,
+                shm_min_item_bytes=memory_policy.shm_min_item_bytes,
+                shm_min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
+                shm_min_forward_bytes=opts.shm_min_forward_bytes,
+                shm_compact_above_ratio=opts.shm_compact_above_ratio,
+                shm_compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
+                shm_max_coalesced_bytes=opts.shm_max_coalesced_bytes,
                 max_worker_retries=opts.max_worker_retries,
                 ipc_transport=opts.ipc_transport,
                 ipc_buffer_bytes=opts.ipc_buffer_bytes,

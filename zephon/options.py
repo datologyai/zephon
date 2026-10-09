@@ -13,12 +13,12 @@ from zephon._internal.utils.ipc import (
     DEFAULT_MTP_BUFFER_BYTES,
 )
 from zephon._internal.utils.shm_coalesce import (
-    DEFAULT_SHM_COALESCE_MAX_SIZE,
-    DEFAULT_SHM_MAX_RETAINED_RATIO,
-    DEFAULT_SHM_MIN_BUFFER_SIZE,
-    DEFAULT_SHM_MIN_RECLAIM_BYTES,
-    DEFAULT_SHM_MIN_REUSE_SIZE,
-    DEFAULT_SHM_MIN_SIZE,
+    DEFAULT_SHM_COMPACT_ABOVE_RATIO,
+    DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
+    DEFAULT_SHM_MAX_COALESCED_BYTES,
+    DEFAULT_SHM_MIN_FORWARD_BYTES,
+    DEFAULT_SHM_MIN_ITEM_BYTES,
+    DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
 )
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
@@ -168,20 +168,25 @@ class RuntimeOptions:
     # === IPC serialization ===
     # Process-stage CPU payload transport (does not configure MTP).
     # Disabling coalescing still applies the inline and retained-storage policies.
-    coalesce_tensors: bool = True
-    # Values smaller than this travel inline, including tensors and arrays.
-    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    shm_coalesce: bool = True
+    # Minimum item size eligible for fresh SHM; shared views are grouped first.
+    shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
     # Minimum useful bytes per new allocation in a message.
-    shm_min_buffer_size: int = DEFAULT_SHM_MIN_BUFFER_SIZE
+    shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
     # Minimum useful bytes per existing shared allocation in a message.
-    shm_min_reuse_size: int = DEFAULT_SHM_MIN_REUSE_SIZE
+    shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
     # Copy a shared view out when both ratio and absolute savings exceed these
     # limits. None disables copying views out; other references may delay freeing.
-    shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO
-    shm_min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES
+    shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
+    shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
     # Bound each coalesced allocation; larger individual values get their own.
-    # None permits unlimited coalescing. Copied-out views always remain separate.
-    shm_coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE
+    # None permits unlimited coalescing. Compacted views follow the same rule.
+    shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
+
+    # Legacy keyword aliases. When supplied, these override the corresponding
+    # new option at runtime-spec construction.
+    coalesce_tensors: bool | None = None
+    shm_min_size: int | None = None
 
     # ProcessStageRunner only.  Re-dispatches per crashed seq before
     # giving up; 0 disables.  In non-deterministic mode an exhausted

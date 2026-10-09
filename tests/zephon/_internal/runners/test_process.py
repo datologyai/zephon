@@ -515,7 +515,7 @@ def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
+        shm_coalesce=True,
     )
 
     data = list(range(30))
@@ -574,10 +574,10 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         max_workers=1,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
-        shm_min_size=0,
-        shm_min_buffer_size=0,
-        shm_min_reuse_size=0,
+        shm_coalesce=True,
+        shm_min_item_bytes=0,
+        shm_min_new_allocation_bytes=0,
+        shm_min_forward_bytes=0,
     )
 
     # 8 records with max_batch=8 → one microbatch → one coalesced buffer
@@ -612,7 +612,7 @@ def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() 
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
+        shm_coalesce=True,
     )
 
     out = list(runner.run(iter(_mk_records(range(7)))))
@@ -2330,7 +2330,7 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
     np = pytest.importorskip("numpy")
     record = _mk_record(0)
     record.payload = np.arange(32)[3:20:2]
-    coalesced = coalesce_microbatch([record], shm_min_size=0)
+    coalesced = coalesce_microbatch([record], shm_min_item_bytes=0)
     assert coalesced is not None
     records = pickle.loads(ForkingPickler.dumps(coalesced))
     resolve_lazy_payloads(records)
@@ -2350,9 +2350,9 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         _ctx_services(),
         max_workers=2,
         deterministic=True,
-        shm_min_size=0,
-        shm_min_buffer_size=0,
-        shm_min_reuse_size=0,
+        shm_min_item_bytes=0,
+        shm_min_new_allocation_bytes=0,
+        shm_min_forward_bytes=0,
         stage_output_mode="stream_items",
     )
     try:
