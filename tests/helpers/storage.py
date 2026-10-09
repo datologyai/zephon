@@ -157,6 +157,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     Returns a state dict that can be used to configure mock behavior:
     - state["objects"]: dict mapping (bucket, key) -> bytes
     - state["configs"]: list of configs passed to from_url
+    - state["client_options"]: list of S3 client_options passed to from_url
     - state["store_type"]: list of store types used ("s3", "gcs" or "azure")
     """
     from datetime import datetime, timezone
@@ -168,6 +169,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     state = {
         "objects": {},  # (bucket, key) -> bytes
         "configs": [],  # track configs passed to from_url
+        "client_options": [],  # track client_options passed to from_url
         "store_type": [],  # track which store type was used
         "range_calls": [],  # track byte-range reads
     }
@@ -180,6 +182,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
             store._url = url
             store._client_options = client_options or {}
             state["configs"].append(config or {})
+            state["client_options"].append(client_options or {})
             state["store_type"].append("s3")
             return store
 
