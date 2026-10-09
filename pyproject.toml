@@ -43,7 +43,7 @@ parquet = [
     "pyarrow>=8.0.0",  # For Parquet format support
 ]
 vortex = [
-    "vortex-data>=0.52.1; python_version >= '3.11'",
+    "vortex-data>=0.88.0; python_version >= '3.11'",
 ]
 cloud = [
     "obstore>=0.11.0",

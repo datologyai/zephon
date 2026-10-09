@@ -7,18 +7,17 @@ Vortex is a next-generation columnar file format designed for high-performance
 data processing with zero-copy Arrow integration and GPU-friendly design.
 """
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
 from zephon._internal.io.formats.base import FormatHandler, register_format
-from zephon._internal.io.index import find_and_load_index, warn_missing_index
+from zephon._internal.io.formats.vortex_metadata import scan_vortex_shard_metadata
+from zephon._internal.io.index import find_and_load_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
-from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
@@ -137,45 +136,25 @@ class VortexFormat(FormatHandler):
     def _discover_by_scanning(
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
-        """Scan directory and open each file to get metadata."""
+        """Discover row counts through the supplied storage backend."""
         if _vortex is None:
             raise RuntimeError(
                 "Discovering Vortex datasets requires the 'vortex-data' package. "
                 + 'Install with: pip install "zephon[vortex]"'
             )
 
-        entries = [
-            name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
-        ]
-        if not entries:
-            raise ValueError(f"No .vortex shards found under {path}")
-        warn_missing_index(path, self.kind, num_shards=len(entries))
-
+        shards = scan_vortex_shard_metadata(path, storage, warn_if_unindexed=True)
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}
-
-        for shard_id, name in enumerate(sorted(entries)):
-            full = os.path.join(path, name)
-            stats = storage.stat(full)
-            size = int(stats.get("size", 0))
-
-            # Read the Vortex file to get row count
-            # Use file:// URL for local paths
-            try:
-                url = f"file://{full}"
-                reader = _vortex.io.read_url(url)
-                count = len(reader)
-            except Exception as exc:
-                raise ValueError(f"Failed to read Vortex shard {full}: {exc}") from exc
-
-            shard_index[shard_id] = count
+        for shard_id, shard in enumerate(shards):
+            shard_index[shard_id] = shard.num_rows
             shard_meta[shard_id] = {
                 "raw": {
-                    "basename": name,
-                    "bytes": size,
-                    "hashes": {},
+                    "basename": shard.basename,
+                    "bytes": shard.bytes,
+                    "hashes": shard.hashes,
                 },
-                "extra": {"length": count},
+                "extra": shard.extra,
             }
 
         return shard_index, shard_meta
