@@ -363,15 +363,10 @@ class _NdarraySlot(_LeafDescriptor):
 
 def _shared_numpy_view(buffer: Any) -> np.ndarray[Any, Any]:
     """Expose a Zephon buffer with an owner recognizable by the reducer."""
-    cached = getattr(buffer, "_zephon_numpy_view", None)
-    if cached is not None:
-        return cached
     array = buffer.numpy()
     # numpy() creates a detached Tensor owner; attributes on buffer do not carry
     # over. Tag that owner so ordinary NumPy views retain Zephon's provenance.
     array.base._zephon_shm = True
-    # numpy() has a separate Tensor owner, so this cache does not form a cycle.
-    buffer._zephon_numpy_view = array
     return array
 
 
@@ -706,7 +701,7 @@ def _is_leaf(obj: Any) -> bool:
     via ``_extract_payload_pytree``. Ordinary dicts, lists, and tuples use
     optree's container traversal.
 
-    Lists of primitives (int, float, str, …) are also treated as leaves
+    Lists and tuples of primitives (int, float, str, …) are also treated as leaves
     to avoid inflating the slot count.  A ``List[int]`` with 500 elements
     would otherwise become 500 individual int leaves — catastrophic for
     pickle size and restore time at high DOP.  We check the first and
@@ -719,8 +714,12 @@ def _is_leaf(obj: Any) -> bool:
         return False
     if _is_struct(obj):
         return True
+    # Tuple subclasses can customize construction and pickling. Keep their
+    # existing reduction rather than reconstructing them through optree.
+    if isinstance(obj, tuple) and type(obj) is not tuple:
+        return True
     if (
-        isinstance(obj, list)
+        isinstance(obj, (list, tuple))
         and len(obj) > 0
         and isinstance(obj[0], _PRIMITIVE_TYPES)
         and isinstance(obj[-1], _PRIMITIVE_TYPES)
@@ -875,10 +874,14 @@ class _BufferPlan:
     """Collect writes using a single memory policy and bounded coalescing groups."""
 
     def __init__(
-        self, policy: PayloadMemoryPolicy, prepare_reused: bool = False
+        self,
+        policy: PayloadMemoryPolicy,
+        prepare_reused: bool = False,
+        copy_records: bool = False,
     ) -> None:
         self.policy = policy
         self.prepare_reused = prepare_reused
+        self.copy_records = copy_records
         self.reused: dict[str, Any] = {}
         self.reused_keys: dict[tuple[int, str], str] = {}
         self.collector: dict[str, list[Any]] = {}
@@ -964,6 +967,7 @@ class _BufferPlan:
                 value.result = self.inline(value)
             elif (
                 self.prepare_reused
+                and not self.copy_records
                 and value.shared_nbytes is None
                 and useful == value.nbytes
                 and isinstance(value.slot, _TensorSlot)
@@ -972,7 +976,9 @@ class _BufferPlan:
                 and not value.source.is_neg()
                 and value.source.untyped_storage().nbytes() == value.nbytes
             ):
-                # One tensor using its whole storage needs no coalescing.
+                # One output tensor using its whole storage needs no coalescing.
+                # Inputs must keep private retry storage: Torch's reducer moves
+                # its source into SHM in place.
                 # Torch's reducer does not preserve conjugate/negative bits.
                 value.result = value.source
             else:
@@ -1067,7 +1073,7 @@ class _BufferPlan:
 def _describe_buffer(leaf: Any) -> _BufferPayload | None:
     """Adapt supported CPU payloads to descriptors and direct-copy sources."""
     torch = _get_torch()
-    if type(leaf) is torch.Tensor:
+    if isinstance(leaf, torch.Tensor):
         if (
             leaf.device.type != "cpu"
             or leaf.layout != torch.strided
@@ -1089,7 +1095,7 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
             storage.nbytes() if shared else None,
             storage if shared else None,
         )
-    if type(leaf) is np.ndarray:
+    if isinstance(leaf, np.ndarray):
         if _torch_dtype_for(leaf.dtype) is None:
             return None
         storage = _shared_numpy_storage(leaf)
@@ -1610,6 +1616,7 @@ def coalesce_microbatch(
             min_forward_bytes=shm_min_item_bytes,
         ),
         prepare_reused=ensure_prepared,
+        copy_records=copy_records,
     )
     descriptors = _extract_from_records(
         items, plan.collector, plan.offsets, plan.policy.shm_min_item_bytes, plan

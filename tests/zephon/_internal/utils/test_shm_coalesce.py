@@ -2418,7 +2418,7 @@ def test_bulk_writes_target_final_shared_storage(
         assert bytes(actual.payload["b"]) == expected["b"]
 
 
-def test_single_tensor_uses_torch_transport_only_when_it_covers_the_full_storage(
+def test_single_tensor_transport_preserves_private_input_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     allocations = []
@@ -2448,4 +2448,76 @@ def test_single_tensor_uses_torch_transport_only_when_it_covers_the_full_storage
         torch.testing.assert_close(actual[0].payload, tensor)
         assert actual[0].payload.is_shared()
         assert actual[0].payload.untyped_storage().nbytes() == 256
-    assert allocations == [32, 32]
+        assert not tensor.is_shared()
+    assert allocations == [32, 32, 32]
+
+
+def test_primitive_tuples_stay_whole_beside_shared_tensors() -> None:
+    tokens = tuple(range(2048))
+    payload = {"tokens": tokens, "tensors": (torch.arange(8), torch.arange(8))}
+    prepared = coalesce_microbatch(
+        [SampleRecord(_meta(0), payload)], shm_min_item_bytes=0
+    )
+    assert len(prepared.skeleton[0].payload.slots) == 3
+    actual = _round_trip_resolved(prepared)[0].payload
+    assert actual["tokens"] == tokens
+    assert type(actual["tokens"]) is tuple
+    assert all(tensor.is_shared() for tensor in actual["tensors"])
+
+
+@pytest.mark.parametrize("memmap", [False, True], ids=["subclass", "memmap"])
+def test_numpy_subclasses_use_shared_transport(tmp_path, memmap: bool) -> None:
+    class Array(np.ndarray):
+        pass
+
+    if memmap:
+        path = tmp_path / "tokens.npy"
+        np.save(path, np.arange(8192))
+        source = np.load(path, mmap_mode="r")[::2]
+    else:
+        source = np.arange(8192).view(Array)[::2]
+    policy = shm_coalesce.PayloadMemoryPolicy(
+        shm_min_item_bytes=0, min_new_allocation_bytes=0
+    )
+    encoded = _forking_round_trip(
+        shm_coalesce.TransportMicrobatch([SampleRecord(_meta(0), source)], policy)
+    )
+    assert len(encoded) < source.nbytes // 2
+    [record] = pickle.loads(encoded)
+    resolve_lazy_payloads([record])
+    assert type(record.payload) is np.ndarray
+    assert record.payload.flags.writeable == source.flags.writeable
+    assert shm_coalesce._shared_numpy_storage(record.payload) is not None
+    np.testing.assert_array_equal(record.payload, source)
+
+
+@pytest.mark.parametrize("shared", [False, True], ids=["inline", "shm"])
+def test_parameter_transport_preserves_values_grad_and_retry_storage(
+    shared: bool,
+) -> None:
+    source = torch.nn.Parameter(torch.arange(16, dtype=torch.float32))
+    address = source.data_ptr()
+    policy = shm_coalesce.PayloadMemoryPolicy(
+        shm_min_item_bytes=0, min_new_allocation_bytes=0 if shared else 1024
+    )
+    encoded = _forking_round_trip(
+        shm_coalesce.TransportMicrobatch([SampleRecord(_meta(0), source)], policy)
+    )
+    [record] = pickle.loads(encoded)
+    resolve_lazy_payloads([record])
+    actual = record.payload
+    torch.testing.assert_close(actual, source)
+    assert actual.requires_grad
+    assert actual.is_leaf
+    assert actual.is_shared() == shared
+    assert not source.is_shared()
+    assert source.data_ptr() == address
+
+
+def test_numpy_view_does_not_duplicate_storage_in_plain_tensor_pickle() -> None:
+    buffer = torch.arange(65536, dtype=torch.uint8).share_memory_()
+    array = shm_coalesce._shared_numpy_view(buffer)
+    encoded = pickle.dumps(buffer)
+    assert len(encoded) < buffer.numel() + 4096
+    assert shm_coalesce._shared_numpy_storage(array) is not None
+    torch.testing.assert_close(pickle.loads(encoded), buffer)
