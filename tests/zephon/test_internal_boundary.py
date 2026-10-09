@@ -107,6 +107,29 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_vortex_discovery.py": frozenset(
         {"zephon._internal.io.formats:vortex"}
     ),
+    # Exercise cache ownership and file replacement through the real store.
+    "tests/integration/test_vortex_fetch.py": frozenset(
+        {
+            "zephon._internal.io.formats.vortex:VortexShardOpener",
+            "zephon._internal.io.stores.multi:build_multi_dataset_store",
+            "zephon._internal.io.types:LocalShardFile",
+            "zephon._internal.io.types:LocalShardRef",
+            "zephon._internal.io.types:ShardFile",
+            "zephon._internal.io.types:ShardLocator",
+        }
+    ),
+    # Reproduce eviction between resolution and native open without a benchmark.
+    "tests/integration/test_vortex_retries.py": frozenset(
+        {
+            "zephon._internal.io.formats.vortex:VortexFormat",
+            "zephon._internal.io.resolvers.base:ShardResolver",
+            "zephon._internal.io.stores.resilient:ResilientShard",
+            "zephon._internal.io.types:LocalShardFile",
+            "zephon._internal.io.types:LocalShardRef",
+            "zephon._internal.io.types:ShardFile",
+            "zephon._internal.io.types:ShardLocator",
+        }
+    ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(
         {"zephon._internal.io.resolvers:CacheManager"}
