@@ -23,6 +23,7 @@ class ParquetIndexBuilder(IndexBuilder):
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract row count and metadata from a Parquet file."""
+        # Read metadata only (footer), not the full file
         metadata = _read_parquet_metadata(path, self._storage, size=file_size)
 
         # Extract row group information
