@@ -200,6 +200,56 @@ class ParquetRGCacheOptions:
 
 
 @dataclass
+class VortexOptions:
+    """Process-local Vortex caches shared by the shards in one store.
+
+    ``segment_cache_bytes`` budgets retained encoded segment bytes, not total
+    memory: decoded outputs, metadata and in-flight reads are additional.
+    Each worker/store owns its budget; it is not shared across processes.
+    ``metadata_cache_entries`` bounds the number of parsed footers retained.
+    Set either limit to zero to disable that cache.
+    """
+
+    segment_cache_bytes: int = _option(64 * 1024**2)
+    metadata_cache_entries: int = _option(256)
+    _provided_fields: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
+        for name in ("segment_cache_bytes", "metadata_cache_entries"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"vortex.{name} must be a non-negative integer")
+        if self.segment_cache_bytes > 2**64 - 1:
+            raise ValueError("vortex.segment_cache_bytes exceeds Vortex's byte limit")
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "VortexOptions":
+        """Normalize Vortex options, accepting byte sizes such as ``'64mb'``."""
+        if obj is None:
+            return _default_options(cls)
+        if isinstance(obj, VortexOptions):
+            return obj
+        if isinstance(obj, dict):
+            data = dict(obj)
+            if isinstance(data.get("segment_cache_bytes"), str):
+                parsed = parse_size_bytes(data["segment_cache_bytes"])
+                if parsed is None:
+                    raise ValueError("vortex.segment_cache_bytes must not be empty")
+                data["segment_cache_bytes"] = parsed
+            return cls(**data)
+        raise TypeError(f"Cannot interpret Vortex options from {obj!r}")
+
+    def merge(self, other: "VortexOptions") -> "VortexOptions":
+        """Overlay fields supplied by ``other`` onto ``self``."""
+        return VortexOptions(**_merged_options(self, other))
+
+
+@dataclass
 class StoreOptions:
     """Top-level IO store options passed to FetchOp."""
 
@@ -207,6 +257,7 @@ class StoreOptions:
     parquet_rg_cache: ParquetRGCacheOptions = field(
         default_factory=ParquetRGCacheOptions
     )
+    vortex: VortexOptions = field(default_factory=VortexOptions)
 
     def __post_init__(self) -> None:
         legacy_limit = self.cache.rg_cache_bytes
@@ -262,6 +313,7 @@ class StoreOptions:
             return cls(
                 cache=CacheOptions.from_any(None),
                 parquet_rg_cache=ParquetRGCacheOptions.from_any(None),
+                vortex=VortexOptions.from_any(None),
             )
         if isinstance(obj, StoreOptions):
             return obj
@@ -276,7 +328,12 @@ class StoreOptions:
                 if "parquet_rg_cache" in obj
                 else ParquetRGCacheOptions()
             )
-            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache)
+            vortex = (
+                VortexOptions.from_any(obj["vortex"])
+                if "vortex" in obj
+                else VortexOptions()
+            )
+            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache, vortex=vortex)
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 
     def merge(self, other: "StoreOptions") -> "StoreOptions":
@@ -284,6 +341,7 @@ class StoreOptions:
         return StoreOptions(
             cache=self.cache.merge(other.cache),
             parquet_rg_cache=self.parquet_rg_cache.merge(other.parquet_rg_cache),
+            vortex=self.vortex.merge(other.vortex),
         )
 
 
@@ -291,5 +349,6 @@ __all__ = [
     "CacheOptions",
     "ParquetRGCacheOptions",
     "StoreOptions",
+    "VortexOptions",
     "parse_size_bytes",
 ]
