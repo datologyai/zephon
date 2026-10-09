@@ -103,6 +103,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
     ),
+    # Disable Vortex internally to verify indexed discovery needs no dependency.
+    "tests/integration/test_vortex_discovery.py": frozenset(
+        {"zephon._internal.io.formats:vortex"}
+    ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(
         {"zephon._internal.io.resolvers:CacheManager"}
