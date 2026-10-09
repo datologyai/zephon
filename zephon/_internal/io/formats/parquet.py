@@ -17,8 +17,7 @@ import bisect
 import logging
 import os
 import struct
-import threading
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from numbers import Integral
@@ -33,6 +32,7 @@ from zephon._internal.io.formats.base import (
     FormatHandler,
     register_format,
 )
+from zephon._internal.io.formats.metadata_cache import MetadataCache
 from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
@@ -525,8 +525,7 @@ class ParquetShardOpener:
             raise ValueError("Decoded RG cache and index must be provided together")
         self._decoded_cache = decoded_cache
         self._index = index
-        self._metadata_cache: OrderedDict[Path, Any] = OrderedDict()
-        self._metadata_lock = threading.Lock()
+        self._metadata_cache = MetadataCache[Path, Any](self._METADATA_CACHE_MAX_SIZE)
 
     def open_shard(
         self,
@@ -556,24 +555,11 @@ class ParquetShardOpener:
         )
 
     def _get_cached_metadata(self, path: Path) -> Any:
-        with self._metadata_lock:
-            metadata = self._metadata_cache.get(path)
-            if metadata is not None:
-                self._metadata_cache.move_to_end(path)
-                return metadata
+        def load() -> Any:
+            _, pq = _ensure_pyarrow()
+            return pq.read_metadata(path)
 
-        _, pq = _ensure_pyarrow()
-        metadata = pq.read_metadata(path)
-
-        with self._metadata_lock:
-            existing = self._metadata_cache.get(path)
-            if existing is not None:
-                self._metadata_cache.move_to_end(path)
-                return existing
-            self._metadata_cache[path] = metadata
-            while len(self._metadata_cache) > self._METADATA_CACHE_MAX_SIZE:
-                self._metadata_cache.popitem(last=False)
-            return metadata
+        return self._metadata_cache.get_or_load(path, load)
 
 
 class _ParquetExtraCodec:
