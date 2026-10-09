@@ -3,7 +3,8 @@
 
 """Base interfaces and registry for shard formats."""
 
-from typing import TYPE_CHECKING, Mapping, Protocol
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Iterator, Mapping, Protocol
 
 import numpy as np
 
@@ -12,7 +13,9 @@ from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.types import LocalShardRef, ShardLocator
 
 if TYPE_CHECKING:
+    from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 
 class ShardOpener(Protocol):
@@ -31,6 +34,19 @@ class FormatHandler(ShardOpener, Protocol):
     """Format-specific discovery and shard-reading behavior."""
 
     kind: str
+
+    @contextmanager
+    def create_opener(
+        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+    ) -> Iterator[ShardOpener]:
+        """Provide one opener shared by this format's datasets in a store.
+
+        Stateful formats override this hook to create and clean up resources
+        that outlive individual shard reads. Stateless formats use the handler
+        itself. The store owns this context; shard readers keep their existing
+        open/read/close lifetime.
+        """
+        yield self
 
     def discover(
         self, path: str, storage: StorageBackend

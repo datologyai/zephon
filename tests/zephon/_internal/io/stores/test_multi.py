@@ -1,8 +1,13 @@
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import pytest
 
+from zephon._internal.io.catalog import CatalogSet
+from zephon._internal.io.formats.base import ShardOpener
+from zephon._internal.io.formats.jsonl import JsonlFormat
 from zephon._internal.io.resolvers.cache.manager import CacheManager
 from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
@@ -237,3 +242,66 @@ def test_jsonl_store_ignores_parquet_cache_root(tmp_path: Path) -> None:
         ),
     )
     store.close()
+
+
+def test_format_opener_shared_and_closed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _mk_jsonl_dataset(tmp_path / "first", name="first")
+    second = _mk_jsonl_dataset(tmp_path / "second", name="second")
+    events: list[str] = []
+
+    @contextmanager
+    def create_opener(
+        self: JsonlFormat, catalog_set: CatalogSet | None, options: StoreOptions
+    ) -> Iterator[ShardOpener]:
+        assert catalog_set is not None
+        events.append("open")
+        try:
+            yield self
+        finally:
+            events.append("close")
+
+    monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
+    store = build_multi_dataset_store({0: first, 1: second})
+    try:
+        assert events == ["open"]
+        for dataset_id in (0, 1):
+            shard, _ = store.for_dataset(dataset_id).open(0)
+            rows, _ = shard.getsamples([1, 0, 1])
+            assert rows == [{"a": 2}, {"a": 1}, {"a": 2}]
+        assert events == ["open"]
+    finally:
+        store.close()
+        store.close()
+    assert events == ["open", "close"]
+
+
+def test_failed_opener_initialization_closes_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _mk_jsonl_dataset(tmp_path / "dataset")
+    closed: list[CacheManager] = []
+    close = CacheManager.close
+
+    def record_close(self: CacheManager) -> None:
+        closed.append(self)
+        close(self)
+
+    @contextmanager
+    def create_opener(
+        self: JsonlFormat, catalog_set: CatalogSet | None, options: StoreOptions
+    ) -> Iterator[ShardOpener]:
+        raise RuntimeError("opener initialization failed")
+        yield self
+
+    monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
+    monkeypatch.setattr(CacheManager, "close", record_close)
+    with pytest.raises(RuntimeError, match="opener initialization failed"):
+        build_multi_dataset_store(
+            {0: dataset},
+            options=StoreOptions(
+                cache=CacheOptions(enabled=True, root=tmp_path / "cache")
+            ),
+        )
+    assert len(closed) == 1
