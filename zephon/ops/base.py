@@ -78,6 +78,8 @@ class BaseOp(ABC):
     lineage with helpers from :mod:`zephon.ops.children`. This preserves
     deterministic ordering and replay.
 
+    Worker retries do not roll back in-place changes to shared inputs.
+
     Lifecycle: ``__init__`` vs ``setup``
     ------------------------------------
     ``__init__`` runs **once on the user's main process**: store config
