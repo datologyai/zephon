@@ -296,6 +296,8 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
 def test_payload_memory_policy_options_reach_process_stages() -> None:
     opts = RuntimeOptions(
         shm_min_size=128,
+        shm_min_buffer_size=2048,
+        shm_min_reuse_size=1024,
         coalesce_tensors=False,
         shm_max_retained_ratio=4,
         shm_min_reclaim_bytes=1024,
@@ -304,6 +306,8 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
     spec = resolve_runtime_spec(_mk_plan((2, 1, 1)), opts)
     for stage in spec.stages:
         assert stage.shm_min_size == 128
+        assert stage.shm_min_buffer_size == 2048
+        assert stage.shm_min_reuse_size == 1024
         assert not stage.coalesce_tensors
         assert stage.shm_max_retained_ratio == 4
         assert stage.shm_min_reclaim_bytes == 1024

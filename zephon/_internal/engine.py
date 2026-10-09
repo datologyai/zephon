@@ -767,6 +767,8 @@ class Engine:
                         mp_context=self._mp_context,
                         coalesce_tensors=spec.coalesce_tensors,
                         shm_min_size=spec.shm_min_size,
+                        shm_min_buffer_size=spec.shm_min_buffer_size,
+                        shm_min_reuse_size=spec.shm_min_reuse_size,
                         shm_max_retained_ratio=spec.shm_max_retained_ratio,
                         shm_min_reclaim_bytes=spec.shm_min_reclaim_bytes,
                         shm_coalesce_max_size=spec.shm_coalesce_max_size,

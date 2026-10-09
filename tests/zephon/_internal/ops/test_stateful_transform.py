@@ -73,6 +73,7 @@ class TestStatefulTransformAccumulator:
             flush_fn=None,
             should_flush_fn=None,
         )
+        assert acc.reads_payload
 
         records = [_rec({"value": i}) for i in range(3)]
         batches = acc.push_many(records)

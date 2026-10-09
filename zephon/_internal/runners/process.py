@@ -95,7 +95,9 @@ from zephon._internal.stream import (
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_SHM_COALESCE_MAX_SIZE,
     DEFAULT_SHM_MAX_RETAINED_RATIO,
+    DEFAULT_SHM_MIN_BUFFER_SIZE,
     DEFAULT_SHM_MIN_RECLAIM_BYTES,
+    DEFAULT_SHM_MIN_REUSE_SIZE,
     DEFAULT_SHM_MIN_SIZE,
     PayloadMemoryPolicy,
     TransportMicrobatch,
@@ -772,6 +774,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         mp_context: BaseContext | None = None,
         coalesce_tensors: bool = True,
         shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
+        shm_min_buffer_size: int = DEFAULT_SHM_MIN_BUFFER_SIZE,
+        shm_min_reuse_size: int = DEFAULT_SHM_MIN_REUSE_SIZE,
         shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO,
         shm_min_reclaim_bytes: int = DEFAULT_SHM_MIN_RECLAIM_BYTES,
         shm_coalesce_max_size: int | None = DEFAULT_SHM_COALESCE_MAX_SIZE,
@@ -781,6 +785,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     ) -> None:
         self._memory_policy = PayloadMemoryPolicy(
             shm_min_size=shm_min_size,
+            min_buffer_size=shm_min_buffer_size,
+            min_reuse_size=shm_min_reuse_size,
             coalesce=coalesce_tensors,
             max_retained_ratio=shm_max_retained_ratio,
             min_reclaim_bytes=shm_min_reclaim_bytes,

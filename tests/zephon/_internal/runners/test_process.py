@@ -576,6 +576,8 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         stage_output_mode="stream_items",
         coalesce_tensors=True,
         shm_min_size=0,
+        shm_min_buffer_size=0,
+        shm_min_reuse_size=0,
     )
 
     # 8 records with max_batch=8 → one microbatch → one coalesced buffer
@@ -2349,6 +2351,8 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         max_workers=2,
         deterministic=True,
         shm_min_size=0,
+        shm_min_buffer_size=0,
+        shm_min_reuse_size=0,
         stage_output_mode="stream_items",
     )
     try:
@@ -2367,7 +2371,7 @@ class _InspectPayloadMemory(BaseOp):
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage
+        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage, _ShmBytes
 
         for record in elems:
             payload = record.payload
@@ -2376,7 +2380,12 @@ class _InspectPayloadMemory(BaseOp):
                 _shared_numpy_storage(payload["small_n"]) is not None,
                 payload["large_t"].is_shared(),
                 _shared_numpy_storage(payload["large_n"]) is not None,
+                isinstance(payload["large_b"], _ShmBytes),
+                isinstance(payload["large_ba"], _ShmBytes),
             )
+            for key in ("large_b", "large_ba"):
+                assert bytes(payload[key]) == b"x" * (512 * 1024)
+                assert isinstance(payload[key], _ShmBytes)
         return elems
 
 
@@ -2387,8 +2396,10 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
     record.payload = {
         "small_t": torch.arange(4),
         "small_n": np.arange(4),
-        "large_t": torch.arange(1024),
-        "large_n": np.arange(1024),
+        "large_t": torch.arange(65536),
+        "large_n": np.arange(65536),
+        "large_b": b"x" * (512 * 1024),
+        "large_ba": bytearray(b"x" * (512 * 1024)),
     }
     stage = Stage(
         "memory_policy",
@@ -2407,7 +2418,7 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         stage_output_mode="stream_items",
     )
     [actual] = list(runner.run([record]))
-    assert actual.payload["observed"] == (False, False, True, True)
+    assert actual.payload["observed"] == (False, False, True, True, True, True)
     assert not actual.payload["small_t"].is_shared()
     assert (
         actual.payload["small_t"].tolist()

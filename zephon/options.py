@@ -15,7 +15,9 @@ from zephon._internal.utils.ipc import (
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_SHM_COALESCE_MAX_SIZE,
     DEFAULT_SHM_MAX_RETAINED_RATIO,
+    DEFAULT_SHM_MIN_BUFFER_SIZE,
     DEFAULT_SHM_MIN_RECLAIM_BYTES,
+    DEFAULT_SHM_MIN_REUSE_SIZE,
     DEFAULT_SHM_MIN_SIZE,
 )
 from zephon.io.options import StoreOptions
@@ -169,6 +171,10 @@ class RuntimeOptions:
     coalesce_tensors: bool = True
     # Values smaller than this travel inline, including tensors and arrays.
     shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    # Minimum useful bytes per new allocation in a message.
+    shm_min_buffer_size: int = DEFAULT_SHM_MIN_BUFFER_SIZE
+    # Minimum useful bytes per existing shared allocation in a message.
+    shm_min_reuse_size: int = DEFAULT_SHM_MIN_REUSE_SIZE
     # Copy a shared view out when both ratio and absolute savings exceed these
     # limits. None disables copying views out; other references may delay freeing.
     shm_max_retained_ratio: float | None = DEFAULT_SHM_MAX_RETAINED_RATIO

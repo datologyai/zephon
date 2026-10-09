@@ -54,11 +54,10 @@ class StatefulTransformAccumulator(Accumulator[SampleRecord], Generic[S]):
         self._pending: set[int] = set()
         self._flushed = False
 
-    # TODO: StatefulTransformAccumulator delegates to a user-supplied push_fn
-    # which *may* read payload. For now we default to False (no eager resolution)
-    # so that metadata-only push_fns don't pay the cost. If a push_fn touches
-    # payload it will fail on a LazyPayload — the caller should set
-    # reads_payload=True at construction time or resolve manually.
+    @property
+    def reads_payload(self) -> bool:
+        """Give user callbacks ordinary payloads regardless of transport format."""
+        return True
 
     def push_many(
         self, items: Sequence[SampleRecord]
