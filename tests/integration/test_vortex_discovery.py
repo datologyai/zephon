@@ -10,7 +10,6 @@ import pytest
 vortex = pytest.importorskip("vortex", reason="vortex-data not installed")
 
 from zephon._internal.io.formats import vortex as vortex_format
-from zephon._internal.io.formats import vortex_metadata
 from zephon.build_index import build_index
 from zephon.io.dataset import Dataset
 
@@ -32,7 +31,6 @@ def test_vortex_discovery_index_roundtrip(
     assert build_index("vortex", tmp_path, progress=False) == tmp_path / "index.json"
 
     monkeypatch.setattr(vortex_format, "_vortex", None)
-    monkeypatch.setattr(vortex_metadata, "_vortex", None)
     indexed = Dataset.from_path("indexed", str(tmp_path), fmt="vortex")
     assert indexed.shard_count() == discovered.shard_count()
     assert indexed.total() == discovered.total()

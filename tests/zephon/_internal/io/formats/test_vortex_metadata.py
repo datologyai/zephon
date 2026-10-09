@@ -14,10 +14,8 @@ import pytest
 
 vortex = pytest.importorskip("vortex", reason="vortex-data not installed")
 
-from zephon._internal.io.formats import vortex_metadata
+from zephon._internal.io.formats import vortex as vortex_format
 from zephon._internal.io.formats.vortex import VortexFormat
-from zephon._internal.io.index import ShardInfo
-from zephon._internal.io.index.vortex_index import VortexIndexBuilder
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon.build_index import build_index
@@ -135,17 +133,17 @@ def test_parallel_discovery_keeps_filename_order(
     files.update({f"{name}.vortex": files["b.vortex"] for name in "cdef"})
     storage = _RangeOnlyStorage("custom://parallel", files)
     second_finished = Event()
-    read_info = vortex_metadata.read_vortex_shard_info
+    read_count = vortex_format._read_vortex_row_count
 
-    def read_out_of_order(path: str, backend: StorageBackend) -> ShardInfo:
+    def read_out_of_order(path: str, backend: StorageBackend, size: int) -> int:
         if path.endswith("/a.vortex"):
             assert second_finished.wait(timeout=5), "The second shard did not finish"
-        result = read_info(path, backend)
+        result = read_count(path, backend, size)
         if path.endswith("/b.vortex"):
             second_finished.set()
         return result
 
-    monkeypatch.setattr(vortex_metadata, "read_vortex_shard_info", read_out_of_order)
+    monkeypatch.setattr(vortex_format, "_read_vortex_row_count", read_out_of_order)
     counts, metadata = VortexFormat().discover(storage.root, storage)
     assert counts == {0: 2, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3}
     assert [metadata[i]["raw"]["basename"] for i in counts] == sorted(files)
@@ -168,35 +166,11 @@ def test_discovery_preserves_storage_errors(
     assert "test backend denied access" in str(error.value)
 
 
-def test_remote_index_reuses_discovery_metadata(
-    shard_files: dict[str, bytes], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The remote index round-trips and then avoids all shard reads."""
-    storage = _RangeOnlyStorage("custom://data", shard_files)
-    expected_counts, expected_metadata = VortexFormat().discover(storage.root, storage)
-    builder = VortexIndexBuilder(storage)
-    target = builder.create_index(storage.root, progress=False)
-    assert target == "custom://data/index.json"
-    index = json.loads(storage.files[target])
-    assert [shard["num_rows"] for shard in index["shards"]] == [2, 3]
-
-    storage.reads.clear()
-    monkeypatch.setattr(vortex_metadata, "_vortex", None)
-    assert VortexFormat().discover(storage.root, storage) == (
-        expected_counts,
-        expected_metadata,
-    )
-    ids, counts = VortexFormat().discover_counts(storage.root, storage)
-    assert ids.tolist() == [0, 1]
-    assert counts.tolist() == [2, 3]
-    assert storage.reads == []
-
-
 def test_local_build_index_entrypoint(
     tmp_path: Path, shard_files: dict[str, bytes]
 ) -> None:
     """The public index builder keeps local Path results and explicit output paths."""
-    target = tmp_path / "metadata" / "index.json"
+    target = tmp_path / "custom-index.json"
     assert build_index("vortex", tmp_path, output_path=target, progress=False) == target
     index = json.loads(target.read_text())
     assert [shard["basename"] for shard in index["shards"]] == sorted(shard_files)

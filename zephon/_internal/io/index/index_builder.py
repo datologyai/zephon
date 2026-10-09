@@ -131,7 +131,7 @@ class IndexBuilder(ABC):
         *,
         output_path: str | Path | None = None,
         progress: bool = True,
-    ) -> Path | str:
+    ) -> Path:
         """Build and write index.json for a dataset.
 
         Args:
@@ -140,7 +140,7 @@ class IndexBuilder(ABC):
             progress: Whether to print progress messages
 
         Returns:
-            Path to a local index or URL string to a remote index.
+            Path to the created index.json file
         """
         dataset_dir = Path(dataset_dir)
         index = self.build(dataset_dir, progress=progress)
@@ -192,7 +192,7 @@ def create_index(
     *,
     output_path: str | Path | None = None,
     progress: bool = True,
-) -> Path | str:
+) -> Path:
     """Create index.json for a dataset using the appropriate builder.
 
     Args:
@@ -202,7 +202,7 @@ def create_index(
         progress: Whether to print progress messages
 
     Returns:
-        Path to a local index or URL string to a remote index.
+        Path to the created index.json file
     """
     builder = get_builder(format_name)
     return builder.create_index(dataset_dir, output_path=output_path, progress=progress)

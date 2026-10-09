@@ -7,17 +7,20 @@ Vortex is a next-generation columnar file format designed for high-performance
 data processing with zero-copy Arrow integration and GPU-friendly design.
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
 from zephon._internal.io.formats.base import FormatHandler, register_format
-from zephon._internal.io.formats.vortex_metadata import scan_vortex_shard_metadata
-from zephon._internal.io.index import find_and_load_index
+from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
+from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
@@ -27,6 +30,43 @@ try:
     import vortex as _vortex
 except ImportError:
     _vortex = None
+
+
+@dataclass(frozen=True)
+class _VortexReader:
+    """Adapt an existing backend to Vortex's ``ReadBytesAt`` protocol.
+
+    No file handle or client is created here: the supplied backend owns path
+    resolution and authentication, just as it does for Parquet footer reads.
+    """
+
+    storage: StorageBackend
+    path: str
+    file_size: int
+
+    def size(self) -> int:
+        """Return the size already obtained during discovery."""
+        return self.file_size
+
+    def read_at(self, offset: int, length: int) -> bytes | memoryview:
+        """Read a positional range without sharing a mutable seek position."""
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        length = min(length, max(0, self.file_size - offset))
+        if length == 0:
+            return b""
+        return self.storage.read_range(self.path, offset, length=length)
+
+
+def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int:
+    """Read the row count from Vortex metadata through the supplied backend."""
+    if _vortex is None:
+        raise ImportError(
+            "Vortex discovery requires vortex-data; "
+            + 'install it with: pip install "zephon[vortex]"'
+        )
+    reader = _VortexReader(storage, path, size)
+    return len(_vortex.open_readable(reader, without_segment_cache=True))
 
 
 class VortexShard(RandomAccessShard):
@@ -143,19 +183,34 @@ class VortexFormat(FormatHandler):
                 + 'Install with: pip install "zephon[vortex]"'
             )
 
-        shards = scan_vortex_shard_metadata(path, storage, warn_if_unindexed=True)
+        entries = sorted(
+            name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
+        )
+        if not entries:
+            raise ValueError(f"No .vortex shards found under {path}")
+        warn_missing_index(path, self.kind, num_shards=len(entries))
+
+        def read_metadata(name: str) -> tuple[int, int]:
+            full = os.path.join(path, name)
+            try:
+                size = int(storage.stat(full)["size"])
+                return size, _read_vortex_row_count(full, storage, size)
+            except Exception as exc:
+                raise ValueError(f"Failed to read Vortex shard {full}: {exc}") from exc
+
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}
-        for shard_id, shard in enumerate(shards):
-            shard_index[shard_id] = shard.num_rows
-            shard_meta[shard_id] = {
-                "raw": {
-                    "basename": shard.basename,
-                    "bytes": shard.bytes,
-                    "hashes": shard.hashes,
-                },
-                "extra": shard.extra,
-            }
+        max_workers = min(32, max(1, (len(entries) + 4) // 5))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # map keeps filename order even when later reads finish first.
+            for shard_id, (size, count) in enumerate(
+                executor.map(read_metadata, entries)
+            ):
+                shard_index[shard_id] = count
+                shard_meta[shard_id] = {
+                    "raw": {"basename": entries[shard_id], "bytes": size, "hashes": {}},
+                    "extra": {"length": count},
+                }
 
         return shard_index, shard_meta
 
