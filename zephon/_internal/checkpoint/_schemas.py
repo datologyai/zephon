@@ -220,7 +220,7 @@ class CursorStateV1(CheckpointMixin):
 # Component: WorkChunk
 # ---------------------------------------------------------------------------
 
-WORK_CHUNK_VERSION = 2
+WORK_CHUNK_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -289,6 +289,40 @@ class WorkChunkStateV2(WorkChunkStateV1):
         if errors:
             raise ValueError(
                 "WorkChunkStateV2 invariants violated:\n  - " + "\n  - ".join(errors)
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class WorkChunkStateV3(WorkChunkStateV2):
+    """Persist cumulative source exhaustion with each chunk for deterministic replay.
+
+    Names identify components whose final source sample was produced in this
+    or an earlier chunk. The engine uses the same persisted stamp for live
+    and replayed chunks, recovering notifications at the appropriate source
+    positions. Required; the v2->v3 migration fills ``[]``.
+    """
+
+    version: int = 3
+    source_exhausted: list[str]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        names = self.source_exhausted
+        errors: list[str] = []
+        if not isinstance(names, list) or any(
+            not isinstance(n, str) or not n for n in names
+        ):
+            errors.append(
+                "source_exhausted must be a list of non-empty component names"
+            )
+        else:
+            if len(set(names)) != len(names):
+                errors.append("source_exhausted must not contain duplicate components")
+            if names != sorted(names):
+                errors.append("source_exhausted must be sorted")
+        if errors:
+            raise ValueError(
+                "WorkChunkStateV3 invariants violated:\n  - " + "\n  - ".join(errors)
             )
 
 

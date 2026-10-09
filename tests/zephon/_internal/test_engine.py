@@ -801,6 +801,9 @@ def test_component_ids_follow_worksource_vocabulary(
         def component_ids(self) -> dict[str, int]:
             return {"rare": 0, "common": 7}
 
+        def continues_after_exhaustion(self) -> frozenset[str]:
+            return frozenset({"common"})
+
     monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
     g = Graph()
     g.add("noop", DelayById(max_delay_ms=0.0))
@@ -809,6 +812,7 @@ def test_component_ids_follow_worksource_vocabulary(
     spec = resolve_runtime_spec(plan, opts)
     eng = Engine(plan, opts, _VocabWorkSource(), spec)
     try:
+        assert eng._ctx["continues_after_exhaustion"] == frozenset({7})
         # Lookup order does not affect declared ids; sparse ids remain valid.
         assert eng._get_component_id("common") == 7
         assert eng._get_component_id("rare") == 0
@@ -847,3 +851,20 @@ def test_component_ids_reject_invalid_vocabulary(
     spec = resolve_runtime_spec(plan, opts)
     with pytest.raises(ValueError, match="unique non-negative"):
         Engine(plan, opts, _InvalidVocab(), spec)
+
+
+def test_continuation_policy_rejects_undeclared_component(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _InvalidPolicy(_DummyWorkSource):
+        def continues_after_exhaustion(self) -> frozenset[str]:
+            return frozenset({"undeclared"})
+
+    monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
+    g = Graph()
+    g.add("noop", DelayById(max_delay_ms=0.0))
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(aggregate_dir=str(tmp_path))
+    spec = resolve_runtime_spec(plan, opts)
+    with pytest.raises(ValueError, match="not in the work source's"):
+        Engine(plan, opts, _InvalidPolicy(), spec)

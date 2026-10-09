@@ -173,6 +173,32 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `batch_shape_sensitive` indicates your output depends on how records were grouped, which
   disables latency-based grouping.
 
+**Reacting to Source Exhaustion.** Custom accumulators can override
+`on_source_exhausted(lane_id, component_id)` to react when a dataset will supply no more
+source samples. The engine injects this notification once per lane stream and component,
+immediately after its last sample in the exhaustion chunk, or before the lane's next
+chunk if that chunk contains none of the component. A restored stream re-sends it at the
+same point: before the first replayed chunk if exhaustion came earlier, otherwise after
+the last source sample in the replayed exhaustion chunk.
+
+This is a hint, not a drain barrier. A shuffle, packer, or held batch flush can let the
+notification overtake records buffered upstream. Handle those records normally when they
+arrive; do not discard them as late stragglers. The notification is permanent and is not
+re-sent after `flush(reset=True)`, so retain any exhaustion knowledge you need across
+resets. Reactions must be lane-scoped, idempotent, and deterministic given input order so
+replay reproduces them. Return `ReadyBatch` values exactly as from `push_many`; the
+runner dispatches them through `process_many`. The default hook leaves buffers alone
+and returns no batches.
+
+Operators that need the source's policy can read
+`ctx.get("continues_after_exhaustion", frozenset())` in `setup(OpContext)` or
+`accumulator(ctx=...)`. This static `frozenset[int]` contains the component ids the source
+keeps producing past once exhausted, mapped from `WorkSource.continues_after_exhaustion()`.
+It defaults to empty. Notifications are delivered for every permanently exhausted
+component, including those outside this set; the set controls the operator's reaction.
+For example, `ensure_mixture` stops waiting only for components in this set. Keep any
+cross-call state in the accumulator, not in `process_many`.
+
 **Operator Validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and
 the source of a test suite of a few small synthetic records. Besides checking for

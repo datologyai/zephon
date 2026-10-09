@@ -79,6 +79,7 @@ from zephon._internal.notify import (
     _apply_notify_args,
     _extract_notify_args,
     is_sentinel,
+    should_notify,
 )
 from zephon._internal.runners.queue import NamedQueue, QueueFeederError
 from zephon._internal.utils.fault_handling import setup_faulthandler
@@ -86,7 +87,7 @@ from zephon._internal.utils.ipc import DEFAULT_IPC_TRANSPORT, DEFAULT_MTP_BUFFER
 from zephon._internal.utils.rank import rank_ctx
 from zephon.observability.mtp_stats import MTPQueueStats
 from zephon.options import IpcTransport
-from zephon.types import SampleRecord, StreamItem
+from zephon.types import StreamItem
 
 
 def _resolve_mp_context(spec: BaseContext | str | None) -> BaseContext:
@@ -330,13 +331,11 @@ def _mtp_worker(
             # scope), so pending never holds full payloads.  All items
             # including tombstones go through the ACK path to preserve
             # notification ordering.
-            # Flush sentinels carry dummy cursor data — skip tracking to
-            # avoid corrupting engine state.  When the consumer ACKs a
+            # Flush and source-exhaustion sentinels have dummy cursors — skip
+            # tracking to avoid corrupting engine state. When the consumer ACKs a
             # sentinel's seq, pending.pop returns None and the notify is
             # simply skipped.
-            if isinstance(item, SampleRecord) and item.meta.is_flush_sentinel:
-                pass  # don't add to pending
-            else:
+            if should_notify(item):
                 pending[seq] = _extract_notify_args(item, use_monotone)
 
             # Put item on queue, draining ctrl while waiting if queue is full

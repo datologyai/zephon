@@ -19,7 +19,7 @@ applies with weights accumulated per emission.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Generic, Iterator, Sequence, TypeVar
+from typing import Collection, Generic, Iterator, Sequence, TypeVar
 
 K = TypeVar("K")  # Component key type (str for WorkChunk, int for EnsureMixture)
 T = TypeVar("T")  # Item type
@@ -81,12 +81,16 @@ class SmoothWeightedRoundRobin(Generic[K]):
         self._emitted: dict[K, float] = defaultdict(float)
         self._total: float = 0.0
 
-    def peek(self) -> K | None:
-        """Return the ideal component (highest deficit) ignoring availability.
+    def peek(self, *, skip: Collection[K] = ()) -> K | None:
+        """Return the highest-deficit component, temporarily excluding ``skip``.
 
         This is used for adaptive buffering: if the ideal component is available
         in the buffer, we can emit immediately. If not, we should buffer until
         it becomes available or max_buffer_size is reached.
+
+        Skipped components keep their targets and emission history. Selection
+        renormalizes the other targets against their remaining emitted mass;
+        merely ignoring skipped keys would distort unequal surviving weights.
 
         Returns:
             The component key with highest deficit, or None if no targets.
@@ -94,41 +98,38 @@ class SmoothWeightedRoundRobin(Generic[K]):
         if not self._target or not self._order:
             return None
 
-        effective_total = max(1.0, self._total)
-        deficits = {
-            k: self._target[k] * effective_total - self._emitted[k]
-            for k in self._target
-        }
-
         # Return highest deficit component, tie-break by original order
         # Only consider components in current target (filter out obsolete)
-        active = [k for k in self._order if k in self._target]
+        active = [k for k in self._order if k in self._target and k not in skip]
         if not active:
             return None
+        deficits = self.get_deficits(skip=skip)
         return max(active, key=lambda k: (deficits[k], -self._index[k]))
 
-    def select(self, available: set[K]) -> K | None:
+    def select(self, available: set[K], *, skip: Collection[K] = ()) -> K | None:
         """Select the next component from the available set.
 
         Args:
             available: Set of components that have items ready to emit.
+            skip: Temporarily excluded components, with surviving shares
+                renormalized as in :meth:`peek`. Other unavailable components
+                keep their share.
 
         Returns:
             The selected component key, or None if no valid selection.
         """
         # Filter to components that are both available and have positive target weight
-        active = [k for k in self._order if k in available and k in self._target]
+        active = [
+            k
+            for k in self._order
+            if k in available and k in self._target and k not in skip
+        ]
         if not active:
             return None
         if len(active) == 1:
             return active[0]
 
-        # Calculate deficit: target * total - emitted
-        # Use max(1.0, total) to handle the initial case when total=0
-        effective_total = max(1.0, self._total)
-        deficits = {
-            k: self._target[k] * effective_total - self._emitted[k] for k in active
-        }
+        deficits = self.get_deficits(skip=skip)
 
         # Select highest deficit, tie-break by original order (smaller index wins)
         return max(active, key=lambda k: (deficits[k], -self._index[k]))
@@ -158,20 +159,34 @@ class SmoothWeightedRoundRobin(Generic[K]):
             self._emitted[component] += weight
             self._total += weight
 
-    def get_deficits(self) -> dict[K, float]:
+    def get_deficits(self, *, skip: Collection[K] = ()) -> dict[K, float]:
         """Get current deficit per component for benefit scoring.
 
         Deficit = target * total_emitted - emitted. Positive deficit means the
         component is "owed" more emissions. Used by ensure_mixture to score
         multi-component samples by how well they reduce overall deficit.
 
+        ``skip`` excludes only those targets and their emitted mass, without
+        changing the stored target or history. With no excluded target, all
+        accounting (including off-target emissions) stays unchanged.
+
         Returns:
             Dict mapping component -> deficit (positive = underserved).
         """
-        effective_total = max(1.0, self._total)
+        active_share = 1.0
+        total = self._total
+        if skip:
+            excluded = [k for k in self._target if k in skip]
+            if excluded:
+                active_share = sum(w for k, w in self._target.items() if k not in skip)
+                if not active_share:
+                    return {}
+                total -= sum(self._emitted[k] for k in excluded)
+        effective_total = max(1.0, total)
         return {
-            k: self._target[k] * effective_total - self._emitted[k]
+            k: self._target[k] / active_share * effective_total - self._emitted[k]
             for k in self._target
+            if k not in skip
         }
 
     def update_target(self, new_target: dict[K, float]) -> None:

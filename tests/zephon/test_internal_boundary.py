@@ -21,6 +21,13 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
+    # Observe per-lane exhaustion delivery to the real mixture accumulator.
+    "tests/integration/test_source_exhaustion.py": frozenset(
+        {
+            "zephon._internal.ops.ensure_mixture:EnsureMixtureAccumulator",
+            "zephon._internal.ops.ensure_mixture",
+        }
+    ),
     # Control-service crash/startup tests require real internal runners and stages.
     "tests/integration/test_process_control_services.py": frozenset(
         {

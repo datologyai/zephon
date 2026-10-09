@@ -67,3 +67,32 @@ lost data and more memory use):
 :language: python
 :caption: examples/guide/pipelines/ensure_mixture_unbounded_buffer.py
 ```
+
+**When a Dataset Runs Out.** When a non-repeating dataset contributes its last source
+sample, Zephon inserts a source-exhaustion notification immediately after that sample.
+The same happens on the final allowed pass of a dataset with `max_repeats`. An ordinary
+repeat boundary does not trigger this notification.
+
+The notification is a source fact; how `ensure_mixture` reacts depends on the source's
+policy. `WorkSource.continues_after_exhaustion()` declares the components whose exhaustion
+allows the source to keep producing. For those components, both bounded and strict modes
+stop waiting when no contributing records are available locally and renormalize the
+surviving target shares. For example, if A runs out in a 50:30:20 A/B/C target, the
+remaining B/C target is 60:40. Custom sources can opt in now; `StaticMixtureWorkSource`
+currently declares no such components. A source that opts in must retain the exhausted
+components in `WorkChunk.target_mixture` so their late records remain on target.
+
+For components outside that set, the notification does not change mixture enforcement.
+Strict mode (`max_buffer_size=None`) still drops surplus it cannot place on target at
+flush boundaries, including end of stream. Bounded mode still drains its remaining
+buffer at the final flush. This preserves the behavior of the existing
+[stop and repeat policies](../worksources/shuffling_and_repeating_samples.md).
+An ordinary repeat boundary or the `stop_after_passes` run boundary does not announce
+permanent exhaustion of repeating datasets.
+
+The notification can arrive before records held by an upstream shuffle or packer.
+Those records remain on target and are handled normally when they arrive; exhaustion
+does not make them obsolete. When the source continues, ratios are approximate during
+this transition, even in strict mode. The notification is not proof that processing has
+finished, and observing the next flush is not a general substitute: a notification can
+pass a stalled batch flush while records from later chunks are still buffered upstream.

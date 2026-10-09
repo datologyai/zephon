@@ -2321,14 +2321,20 @@ class StaticMixtureWorkSource(WorkSource):
             "Please assign lane for WorkSource before requesting chunk."
         )
         while True:
-            chunk = self._next_chunk()
-            if chunk is None:
+            components = self._strategy.produce(self._cursors)
+            if not components:
                 return None
+            self._recompute_total_samples()
             g = self._global_chunk_index
             self._global_chunk_index += 1
             if self._lane_for_chunk(g) != (self._lane % self._canon):
                 continue
-            return chunk
+            return WorkChunk(
+                components=components,
+                seed=self._seed,
+                target_mixture=self._strategy.target_mixture(),
+                source_exhausted=self._source_exhausted_components(),
+            )
 
     def _lane_for_chunk(self, g: int) -> int:
         """Map global chunk index ``g`` to a canonical lane.
@@ -2359,17 +2365,19 @@ class StaticMixtureWorkSource(WorkSource):
             self._perm_order = order
         return self._perm_order[slot]
 
-    def _next_chunk(self) -> WorkChunk | None:
-        components = self._strategy.produce(self._cursors)
-        if not components:
-            return None
+    def _source_exhausted_components(self) -> tuple[str, ...]:
+        """Derive permanent exhaustion from the committed, checkpointed cursors.
 
-        self._recompute_total_samples()
-
-        return WorkChunk(
-            components=components,
-            seed=self._seed,
-            target_mixture=self._strategy.target_mixture(),
+        Called only for successfully produced chunks assigned to this lane.
+        The cumulative stamp lets a restored stream recover source facts.
+        Ordinary repeat boundaries (including stop_after_passes) do not imply
+        permanent exhaustion.
+        """
+        cfg = self._alloc_config
+        return tuple(
+            name
+            for name in cfg.component_order
+            if _effective_remaining_samples(cfg, name, self._cursors[name]) == 0
         )
 
     # ------------------------------------------------------------------

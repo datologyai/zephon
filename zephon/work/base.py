@@ -13,7 +13,7 @@ from zephon._internal.checkpoint import (
     WORK_CHUNK_VERSION as _WORK_CHUNK_VERSION,
 )
 from zephon._internal.checkpoint import (
-    WorkChunkStateV2 as _WorkChunkStateV2,
+    WorkChunkStateV3 as _WorkChunkStateV3,
 )
 from zephon._internal.utils.swrr import swrr_iterate as _swrr_iterate
 from zephon.io.dataset import Dataset
@@ -73,11 +73,20 @@ class WorkChunk:
     mixture here because their chunks deliberately carry a different sample
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
+    Sources that continue after a component is exhausted must keep it in
+    ``target_mixture``: downstream correctors renormalize the surviving shares
+    while keeping that component's records still buffered upstream on target.
+
+    ``source_exhausted`` is cumulative: every chunk must list all components
+    whose final source sample has been produced in this or an earlier chunk.
+    The engine notifies downstream operators immediately after the component's
+    last sample, or before this chunk if absent, including on replay.
     """
 
     components: SamplesPerComponent
     seed: int | None = None
     target_mixture: Mapping[str, float] | None = None
+    source_exhausted: tuple[str, ...] = ()
 
     ### INTERNAL ATTRIBUTES ###
     _order_cache: list[SourcedSampleId] | None = field(
@@ -88,6 +97,14 @@ class WorkChunk:
     _total_samples: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        names = self.source_exhausted
+        if (
+            not isinstance(names, (tuple, list))
+            or any(not isinstance(n, str) or not n for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("source_exhausted must contain unique non-empty names")
+        self.source_exhausted = tuple(sorted(names))
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
         if self.target_mixture is not None:
@@ -267,12 +284,13 @@ class WorkChunk:
             items = self.components.get(name, [])
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        state = _WorkChunkStateV2(
+        state = _WorkChunkStateV3(
             version=_WORK_CHUNK_VERSION,
             seed=None if self.seed is None else int(self.seed),
             components=comps_serial,
             component_order=list(self._component_order),
             total_samples=int(self._total_samples),
+            source_exhausted=list(self.source_exhausted),
             target_mixture=(
                 None
                 if self.target_mixture is None
@@ -284,7 +302,7 @@ class WorkChunk:
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        ckpt = _WorkChunkStateV2.load(payload)
+        ckpt = _WorkChunkStateV3.load(payload)
 
         comps: dict[str, list[SampleId]] = {}
         for name, items in ckpt.components:
@@ -300,6 +318,7 @@ class WorkChunk:
             components=comps,
             seed=ckpt.seed,
             target_mixture=ckpt.target_mixture,
+            source_exhausted=tuple(ckpt.source_exhausted),
         )
 
         if (
@@ -424,6 +443,21 @@ class WorkSource(ABC):
         non-negative ints, not necessarily dense.
         """
         raise NotImplementedError()
+
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        """Components whose exhaustion allows the source to keep producing.
+
+        A static subset of :meth:`component_ids`, fixed across lanes and
+        checkpoint restores. Operators receive the corresponding component ids
+        as ``ctx.get("continues_after_exhaustion", frozenset())`` during setup
+        and accumulator construction. Notifications still flow for every
+        permanently exhausted component, independently of this policy.
+
+        The default is empty: exhaustion does not relax downstream mixture
+        enforcement. Sources that opt in must retain these components in each
+        chunk's ``target_mixture`` so late records remain on target.
+        """
+        return frozenset()
 
     def chunk_size_hint(self) -> int | None:
         """Return fixed chunk size if constant.

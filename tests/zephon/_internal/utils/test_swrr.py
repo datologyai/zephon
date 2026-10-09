@@ -6,6 +6,8 @@
 import math
 from collections import Counter
 
+import pytest
+
 from zephon._internal.utils.swrr import SmoothWeightedRoundRobin, swrr_iterate
 
 # ----------------------------
@@ -594,3 +596,65 @@ class TestSwrrIterateWithIntegerKeys:
 
         result = list(swrr_iterate(components, weights, order))
         assert len(result) == 4
+
+
+class TestSWRRTemporarySkip:
+    """Temporary exclusions preserve the target and account for survivor weights."""
+
+    @pytest.mark.parametrize("weight", [1.0, 7.0])
+    def test_unequal_survivors_keep_relative_proportions(self, weight: float) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.3, "c": 0.2}, ["a", "b", "c"])
+        counts: Counter[str] = Counter()
+        for _ in range(100):
+            chosen = swrr.peek(skip={"a"})
+            assert chosen is not None
+            counts[chosen] += 1
+            swrr.record(chosen, weight)
+        assert counts == {"b": 60, "c": 40}
+        assert swrr.target_ratios == {"a": 0.5, "b": 0.3, "c": 0.2}
+        assert swrr.peek() == "a"  # Its full-mixture deficit is retained.
+        assert swrr.total_emitted == 100 * weight
+
+    def test_skip_preserves_history_and_tie_order(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 2, "b": 1, "c": 1}, ["a", "c", "b"])
+        swrr.record_multi({"a": 10, "b": 3, "c": 3})
+        before = swrr.get_actual_ratios()
+        assert swrr.peek(skip={"a"}) == "c"
+        assert swrr.peek(skip={"a", "b", "c"}) is None
+        assert swrr.get_actual_ratios() == before
+        assert swrr.total_emitted == 16
+        assert swrr.peek(skip={"unknown"}) == swrr.peek()
+
+    def test_off_target_record_accounting_is_unchanged(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 1}, ["a"])
+        swrr.record("other", 2)
+        swrr.record_multi({"a": 1, "other": 3})
+        assert swrr.total_emitted == 6
+        assert swrr.get_actual_ratios() == {"a": 1 / 6, "other": 5 / 6}
+
+    def test_select_and_scores_share_temporary_normalization(self) -> None:
+        swrr = SmoothWeightedRoundRobin(
+            {"a": 0.5, "b": 0.25, "c": 0.15, "d": 0.1}, ["a", "b", "c", "d"]
+        )
+        swrr.record_multi({"a": 20, "b": 10, "c": 6, "d": 4})
+        before = swrr.get_deficits()
+        assert swrr.get_deficits(skip={"a"}) == pytest.approx({"b": 0, "c": 0, "d": 0})
+        assert swrr.peek(skip={"a"}) == "b"
+        # Live B is unavailable, but retains its target share in the fallback.
+        assert swrr.select({"c", "d"}, skip={"a"}) == "c"
+        assert swrr.get_deficits(skip={"a", "b"}) == pytest.approx({"c": 0, "d": 0})
+        assert swrr.get_deficits(skip={"a", "b", "c", "d"}) == {}
+        assert swrr.select({"a"}, skip={"a"}) is None
+        assert swrr.get_deficits(skip={"unknown"}) == before
+        assert swrr.get_deficits() == before
+        assert swrr.total_emitted == 40
+
+    def test_forced_selection_renormalizes_unequal_survivors(self) -> None:
+        swrr = SmoothWeightedRoundRobin({"a": 0.5, "b": 0.3, "c": 0.2}, ["a", "b", "c"])
+        counts: Counter[str] = Counter()
+        for _ in range(100):
+            chosen = swrr.select({"b", "c"}, skip={"a"})
+            assert chosen is not None
+            counts[chosen] += 1
+            swrr.record(chosen)
+        assert counts == {"b": 60, "c": 40}

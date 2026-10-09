@@ -427,3 +427,74 @@ class TestEnsureMixtureIntegration:
 
         # ...by dropping the code surplus it could not place on-target.
         assert 0 < total(strict) < total(baseline)
+
+    def test_source_exhaustion_strict_mode_releases_surplus(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The notification releases records that strict mode otherwise withholds."""
+        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=3, text_count=1000)
+
+        class _ContinuingSource(StaticMixtureWorkSource):
+            def continues_after_exhaustion(self) -> frozenset[str]:
+                return frozenset({"code"})
+
+        def collect() -> list[SampleRecord]:
+            work = _ContinuingSource(
+                [ds_code, ds_text],
+                {"code": 0.05, "text": 0.95},
+                chunk_size=10,
+                seed=42,
+                exhausted_policy="stop",
+            )
+            pipe = (
+                Pipeline(work)
+                .decode_text()
+                .ensure_mixture(
+                    max_buffer_size=None,
+                    weight_by="samples",
+                    mixture={"code": 0.5, "text": 0.5},
+                )
+                .options(
+                    runner="inline",
+                    deterministic=True,
+                    max_workers=1,
+                    canonical_replicas=1,
+                    flush_every_k_chunks=128,
+                )
+            )
+            return _collect_records(pipe)
+
+        enabled = collect()
+        monkeypatch.setattr(
+            StaticMixtureWorkSource, "_source_exhausted_components", lambda self: ()
+        )
+        disabled = collect()
+        assert _count_components(enabled) == {"code": 3, "text": 57}
+        assert _count_components(disabled) == {"code": 3, "text": 3}
+        assert all(not r.meta.is_sentinel for r in enabled)
+        assert len({r.meta.sample_id for r in enabled}) == len(enabled)
+
+    def test_source_exhaustion_bounded_mode_lossless(self, tmp_path: Path) -> None:
+        """Bounded mode is lossless across source exhaustion: every sample the smaller
+        (stop) dataset produced before exhausting is delivered."""
+        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=20, text_count=400)
+
+        work = StaticMixtureWorkSource(
+            [ds_code, ds_text],
+            {"code": 0.5, "text": 0.5},
+            chunk_size=10,
+            seed=42,
+            exhausted_policy="stop",
+        )
+
+        pipe = (
+            Pipeline(work)
+            .decode_text()
+            .ensure_mixture(max_buffer_size=64, weight_by="samples")
+            .options(deterministic=True, max_workers=2)
+        )
+
+        records = _collect_records(pipe)
+        counts = _count_components(records)
+        # Bounded mode loses nothing: all 20 code samples are delivered.
+        assert counts["code"] == 20

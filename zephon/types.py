@@ -285,7 +285,11 @@ class SampleMeta:
     @property
     def is_sentinel(self) -> bool:
         """True if this record is a control signal (tombstone, flush, etc.)."""
-        return self.tombstone or self.is_flush_sentinel
+        return bool(
+            self.tags.get("_tombstone")
+            or self.tags.get("_flush_sentinel")
+            or "_source_exhausted" in self.tags
+        )
 
     @property
     def is_flush_sentinel(self) -> bool:

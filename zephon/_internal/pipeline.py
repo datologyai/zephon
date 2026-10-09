@@ -973,14 +973,20 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
+        When the source continues without an exhausted component, both modes
+        stop waiting for it while retaining late records on target. See
+        :doc:`/pipelines/shuffling_and_maintaining_mixtures` for the semantics.
+
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
                 target mixture needs next. Default 1000; when the buffer fills, the
                 operator emits what it has, so the output mixture may drift if a
                 component stays scarce. Pass ``None`` to instead **drop** the surplus
                 it cannot place on-target — at every epoch boundary and at end of
-                stream. This makes the mixture exact but discards data, so use it only
-                when an exact mixture matters more than keeping every sample. How much
+                stream. This enforces the mixture at the cost of dropping data.
+                If the source continues without an exhausted component, enforce
+                the renormalized surviving target instead. Use strict mode when
+                an exact mixture matters more than keeping every sample. How much
                 is dropped depends on the stream's skew and on ``flush_every_k_chunks``
                 (smaller → more dropped). ensure_mixture is always non-monotonic, so
                 that cadence defaults to 8; in strict mode the buffer is then discarded
@@ -1793,12 +1799,12 @@ class Pipeline:
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            # Flush sentinels carry dummy cursor data — skip notification to
-            # avoid corrupting offset_done bitmaps and cursor pinning.
-            if not (isinstance(item, SampleRecord) and item.meta.is_flush_sentinel):
-                _notify_item(engine, item, use_monotone)
-            if not is_sentinel(item):
-                yield item
+            if is_sentinel(item):
+                if isinstance(item, SampleRecord) and item.meta.tombstone:
+                    _notify_item(engine, item, use_monotone)
+                continue
+            _notify_item(engine, item, use_monotone)
+            yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,
         # notify() pins the record_cursor's chunk to keep it in inflight
