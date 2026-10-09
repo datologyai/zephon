@@ -785,7 +785,9 @@ class _InlineTensor(_LeafDescriptor):
     def __reduce_ex__(self, protocol: int) -> Any:
         tensor = self.tensor.detach().resolve_conj().resolve_neg().contiguous()
         view = tensor.reshape(-1).view(_get_torch().uint8).numpy()
-        data = pickle.PickleBuffer(view) if protocol >= 5 else bytearray(view)
+        # Protocol 4 reduces bytearray through another bytes copy. Send bytes
+        # directly; restoration gives the tensor writable storage.
+        data = pickle.PickleBuffer(view) if protocol >= 5 else view.tobytes()
         return _InlineTensorData, (
             data,
             tensor.dtype,

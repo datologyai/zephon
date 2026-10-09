@@ -2384,7 +2384,7 @@ class _InspectPayloadMemory(BaseOp):
                 isinstance(payload["large_ba"], _ShmBytes),
             )
             for key in ("large_b", "large_ba"):
-                assert bytes(payload[key]) == b"x" * (512 * 1024)
+                assert bytes(payload[key]) == b"x" * 512
                 assert isinstance(payload[key], _ShmBytes)
         return elems
 
@@ -2396,10 +2396,10 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
     record.payload = {
         "small_t": torch.arange(4),
         "small_n": np.arange(4),
-        "large_t": torch.arange(65536),
-        "large_n": np.arange(65536),
-        "large_b": b"x" * (512 * 1024),
-        "large_ba": bytearray(b"x" * (512 * 1024)),
+        "large_t": torch.arange(64),
+        "large_n": np.arange(64),
+        "large_b": b"x" * 512,
+        "large_ba": bytearray(b"x" * 512),
     }
     stage = Stage(
         "memory_policy",
@@ -2416,6 +2416,10 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         max_workers=2,
         deterministic=True,
         stage_output_mode="stream_items",
+        # Exercise both routes without depending on production tuning defaults.
+        shm_min_item_bytes=64,
+        shm_min_new_allocation_bytes=512,
+        shm_min_forward_bytes=256,
     )
     [actual] = list(runner.run([record]))
     assert actual.payload["observed"] == (False, False, True, True, True, True)

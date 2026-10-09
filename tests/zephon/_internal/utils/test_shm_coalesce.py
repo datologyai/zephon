@@ -2288,6 +2288,8 @@ def test_transport_policy_preserves_retry_records_and_inline_tensors() -> None:
         actual = result[0].payload["tensor"]
         assert not actual.is_shared()
         torch.testing.assert_close(actual, tensor)
+        actual[0, 0] = -1
+        assert tensor[0, 0].item() == 0
         assert records[0].payload["tensor"] is tensor
         assert not tensor.is_shared()
         actual_array = result[0].payload["array"]
