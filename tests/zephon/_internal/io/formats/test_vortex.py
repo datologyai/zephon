@@ -203,6 +203,42 @@ def test_vortex_import_error_handling() -> None:
             vortex_module._vortex = original_vortex
 
 
+def test_vortex_single_and_bulk_reads_agree_after_close(tmp_path: Path) -> None:
+    """Single rows and batches have the same values and closed-reader behavior."""
+    path = tmp_path / "rows.vortex"
+    rows = [{"tokens": [1, 2], "text": "a"}, {"tokens": [], "text": "b"}]
+    _create_vortex_file(path, rows)
+    shard = VortexShard(path)
+    try:
+        assert [shard[1], shard[0], shard[1]] == shard.getsamples([1, 0, 1])
+    finally:
+        shard.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        shard[0]
+    with pytest.raises(RuntimeError, match="closed"):
+        shard.getsamples([0, 1])
+
+
+def test_vortex_read_failure_preserves_error_unless_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Only a filesystem failure makes a native read error retryable."""
+    path = tmp_path / "rows.vortex"
+    _create_vortex_file(path, [{"value": 1}])
+    shard = VortexShard(path)
+    failure = RuntimeError("invalid encoded data")
+    try:
+        with mock.patch.object(shard._file, "scan", side_effect=failure):
+            with pytest.raises(RuntimeError) as caught:
+                shard[0]
+            assert caught.value is failure
+            path.unlink()
+            with pytest.raises(FileNotFoundError):
+                shard[0]
+    finally:
+        shard.close()
+
+
 def test_vortex_discover_no_shards(tmp_path: Path) -> None:
     """Test that discover raises ValueError when no .vortex files found."""
     # Create a directory with no .vortex files
