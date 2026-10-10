@@ -2530,6 +2530,42 @@ def test_numpy_view_does_not_duplicate_storage_in_plain_tensor_pickle() -> None:
     torch.testing.assert_close(pickle.loads(encoded), buffer)
 
 
+def test_shared_logical_tensor_views_keep_values_on_allocation_fallback(
+    monkeypatch,
+) -> None:
+    shared_complex = torch.tensor([1 + 2j, 3 - 4j]).share_memory_()
+    shared_real = torch.arange(4, dtype=torch.float32).share_memory_()
+    policy = shm_coalesce.PayloadMemoryPolicy(
+        min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+    )
+
+    def no_space(*args, **kwargs):
+        raise RuntimeError("No space left on device")
+
+    for fail_allocation in (False, True):
+        if fail_allocation:
+            monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", no_space)
+        for protocol in (4, 5):
+            # Exercise both a singleton backing and several views of one backing.
+            values = [
+                shared_complex.conj(),
+                torch._neg_view(shared_real[:2]),
+                torch._neg_view(shared_real[2:]),
+            ]
+            expected = [value.clone() for value in values]
+            prepared = prepare_microbatch(
+                [
+                    SampleRecord(_meta(i), {"x": value})
+                    for i, value in enumerate(values)
+                ],
+                policy,
+            )
+            restored = pickle.loads(ForkingPickler.dumps(prepared, protocol))
+            resolve_lazy_payloads(restored)
+            for record, value in zip(restored, expected):
+                torch.testing.assert_close(record.payload["x"], value)
+
+
 def test_policy_rejects_non_integral_sizes_and_invalid_flags() -> None:
     for name in (
         "min_item_bytes",
@@ -2561,9 +2597,16 @@ def test_descriptor_reducers_keep_nondefault_fields() -> None:
         sc._BytesSlot(3, 5, "group-d"),
         sc._StructSlot(DCSample, flat),
         flat,
-        sc._ValueSlot({"message": "kept"}),
         sc._InlineTensorData(bytearray(8), torch.float64, (1,), True),
-        sc.PayloadMemoryPolicy(17, False, 2.5, 31, 4096, 1024, 512),
+        sc.PayloadMemoryPolicy(
+            min_item_bytes=17,
+            min_new_allocation_bytes=1024,
+            min_forward_bytes=512,
+            coalesce=False,
+            max_coalesced_bytes=4096,
+            compact_above_ratio=2.5,
+            compact_min_savings_bytes=31,
+        ),
     ]
     for descriptor in descriptors:
         assert pickle.loads(pickle.dumps(descriptor)) == descriptor, type(descriptor)

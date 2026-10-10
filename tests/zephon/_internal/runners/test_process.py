@@ -2333,14 +2333,13 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
     np = pytest.importorskip("numpy")
     record = _mk_record(0)
     record.payload = np.arange(32)[3:20:2]
-    coalesced = prepare_microbatch(
+    prepared = prepare_microbatch(
         [record],
         PayloadMemoryPolicy(
             min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
         ),
     )
-    assert coalesced is not None
-    records = pickle.loads(ForkingPickler.dumps(coalesced))
+    records = pickle.loads(ForkingPickler.dumps(prepared))
     resolve_lazy_payloads(records)
     [record] = records
     array = record.payload
@@ -2482,12 +2481,15 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
             min_item_bytes=64, min_new_allocation_bytes=512, min_forward_bytes=256
         ),
     )
-    [actual] = list(runner.run([record]))
-    assert actual.payload["observed"] == (False, False, True, True, True, True)
-    assert not actual.payload["small_t"].is_shared()
-    assert (
-        actual.payload["small_t"].tolist()
-        == actual.payload["small_n"].tolist()
-        == list(range(4))
-    )
-    assert not record.payload["small_t"].is_shared()
+    try:
+        [actual] = list(runner.run([record]))
+        assert actual.payload["observed"] == (False, False, True, True, True, True)
+        assert not actual.payload["small_t"].is_shared()
+        assert (
+            actual.payload["small_t"].tolist()
+            == actual.payload["small_n"].tolist()
+            == list(range(4))
+        )
+        assert not record.payload["small_t"].is_shared()
+    finally:
+        runner.close()

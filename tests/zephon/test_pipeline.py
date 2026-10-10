@@ -698,7 +698,8 @@ def test_payload_memory_option_aliases() -> None:
     pipe = PublicPipeline(
         FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}]))
     )
-    pipe.options(shm_min_size=123, coalesce_tensors=False)
+    with pytest.deprecated_call():
+        pipe.options(shm_min_size=123, coalesce_tensors=False)
     assert pipe._options.shm_min_item_bytes == 123
     assert not pipe._options.shm_coalesce
     pipe.options(shm_min_item_bytes=456, shm_coalesce=True)
@@ -706,3 +707,5 @@ def test_payload_memory_option_aliases() -> None:
     assert pipe._options.shm_coalesce
     with pytest.raises(ValueError, match="Conflicting pipeline options"):
         pipe.options(shm_min_item_bytes=456, shm_min_size=123)
+    with pytest.raises(ValueError, match="shm_coalesce cannot be None"):
+        pipe.options(shm_coalesce=None)

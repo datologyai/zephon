@@ -320,9 +320,11 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
 
 
 def test_legacy_payload_memory_options() -> None:
-    spec = resolve_runtime_spec(
-        _mk_plan((1, 1, 1)), RuntimeOptions(shm_min_size=123, coalesce_tensors=False)
-    )
+    with pytest.deprecated_call():
+        spec = resolve_runtime_spec(
+            _mk_plan((1, 1, 1)),
+            RuntimeOptions(shm_min_size=123, coalesce_tensors=False),
+        )
     assert spec.stages[0].memory_policy.min_item_bytes == 123
     assert not spec.stages[0].memory_policy.coalesce
 

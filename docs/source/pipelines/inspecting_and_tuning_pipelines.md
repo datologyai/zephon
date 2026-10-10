@@ -118,88 +118,34 @@ doing this, since those settings impact the training data itself.
 
 ## Process payload memory
 
-Process stages use one policy for supported CPU tensors, NumPy arrays, bytes,
-memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
-`Pipeline.options(...)`:
+Process stages send supported CPU payloads (Torch tensors, NumPy arrays,
+bytes-like values and homogeneous numeric lists) either inline in the queue
+message or through shared memory (SHM). Values that are large enough are copied
+once into shared buffers, coalesced by compatible type/dtype. Views of existing
+shared buffers can be forwarded by handle. When a message uses only a small
+part of a large buffer, those views can be copied out ("compacted") to reduce
+how much memory a retained sample keeps alive.
 
 | Option | Default | Effect |
 |---|---:|---|
-| `shm_enabled` | `True` | Enable Zephon SHM preparation for process stages. `False` bypasses transport planning, coalescing, and view compaction in both directions. |
-| `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for a fresh SHM allocation. Smaller private values travel inline. Existing shared views are considered together first. |
-| `shm_min_new_allocation_bytes` | 2 MiB | Minimum useful bytes per new allocation in the message. Smaller groups travel inline. |
-| `shm_min_forward_bytes` | 128 KiB | Minimum useful bytes per existing shared allocation in the message. Smaller groups travel inline. This considers the combined views of that allocation, not each view separately. |
-| `shm_coalesce` | `True` | Coalesce eligible values of compatible types/dtypes together. Applies to private values and compacted views alike. |
-| `shm_max_coalesced_bytes` | 16 MiB | Maximum coalesced allocation size. Larger individual values are not split; the transport minimum still applies. `None` removes the limit. |
-| `shm_compact_above_ratio` | 8 | Copy shared views into compact storage when their backing allocation is more than this many times larger than their combined useful bytes in the message. `None` disables view compaction. |
-| `shm_compact_min_savings_bytes` | 16 MiB | View compaction also requires at least this many potential savings: backing bytes minus useful bytes in this message. |
+| `shm_enabled` | `True` | `False` disables Zephon's SHM preparation. Ordinary multiprocessing pickling still applies, so Torch may still share tensor storage. |
+| `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for fresh SHM. Existing shared views are considered together first. |
+| `shm_min_new_allocation_bytes` | 1 MiB | Create a shared buffer only if its group reaches this size; smaller groups travel inline. |
+| `shm_min_forward_bytes` | 128 KiB | Forward an existing shared buffer only if the message uses at least this much of it; otherwise send those views inline. |
+| `shm_coalesce` | `True` | Combine compatible values into common buffers. `False` considers each value separately; transport thresholds still apply. |
+| `shm_max_coalesced_bytes` | 64 MiB | Upper bound for a coalesced buffer (`None`: no bound). Larger single values remain unsplit, subject to the transport minimum. |
+| `shm_compact_above_ratio` | 8 | Compact views when their buffer is more than this many times larger than the bytes the message uses (`None` disables compaction) … |
+| `shm_compact_min_savings_bytes` | 16 MiB | … and compaction would save at least this many bytes of backing. Other references can keep the original buffer alive. |
 
-`shm_min_size` and `coalesce_tensors` remain accepted as deprecated keyword aliases
-for `shm_min_item_bytes` and `shm_coalesce`. Conflicting old and new values are rejected.
+The best thresholds depend on payload types, batch sizes and the host, so
+benchmark representative batches before changing them. Lowering
+`shm_max_coalesced_bytes` reduces how much memory one retained sample can keep
+alive, at the cost of more allocations. Compaction applies at process transport
+boundaries; it does not revisit samples already held in shuffle buffers.
 
-With `shm_enabled=False`, ordinary multiprocessing serialization applies. Torch's
-own reducer can still use shared memory. This switch disables Zephon's preparation;
-it does not force Torch tensors through the pipe inline.
-
-Disabling coalescing leaves the transport thresholds and view compaction active.
-Private values and compacted views follow the same path: apply the item floor,
-form compatible groups up to the cap, then apply the new-allocation minimum.
-For example, two compacted 1 MiB views can share one 2 MiB destination.
-With a 512 KiB allocation minimum, two 256 KiB views take the same shared path.
-Each is copied straight from its source view into that final allocation.
-A 64 MiB batch of eligible 1 MiB values forms four 16 MiB allocations. A single
-64 MiB value gets its own allocation; the cap never splits an individual item.
-Array values, shapes and dtypes, and container structure are preserved; copying
-a strided view can change its strides and contiguity. Unsupported array dtypes
-and tensor layouts retain their normal serialization behavior.
-Bytes, memoryviews and bytearrays selected for SHM use the same bytes-like
-representation. On Python 3.12+, operators receive SHM-backed buffer views,
-including after lazy payload resolution. This preserves the contents and buffer
-interface, rather than every method of the original type. Converting these
-views with `bytes(value)` makes a copy. Python 3.10 and 3.11 use the existing
-copying `bytes` subclass fallback. Inline bytearrays remain bytearrays.
-
-View compaction considers all supported nonempty views of the same allocation in the
-message. A batch that still uses most of a slab will keep it. Overlapping views
-are counted separately, which can conservatively skip a useful compaction.
-Other samples or pending commands may still reference the original allocation,
-delaying its release. The policy does not track references outside the message,
-repack the contents of a slab, or revisit samples in shuffle buffers.
-If a destination containing compacted views cannot allocate SHM, those views
-keep their original backing. Private values in that group travel inline. This
-avoids waiting for space held by the very views being compacted.
-
-Existing shared views are grouped by backing allocation first. A group below
-`shm_min_forward_bytes` travels inline; otherwise it keeps its backing unless
-both compaction conditions hold. Views selected for compaction join the same
-fresh-allocation path as private values, including the per-item floor and cap.
-Compaction requires
-**both** the relative and absolute conditions:
-`backing_bytes > useful_bytes * shm_compact_above_ratio` and
-`backing_bytes - useful_bytes >= shm_compact_min_savings_bytes`. The relative condition
-limits copying large values for modest savings; the absolute condition avoids
-allocating many small buffers for little potential benefit.
-
-The default compaction minimum equals the coalescing cap, so unchanged views
-of newly coalesced buffers are not immediately copied out again. Raising the
-cap or lowering the compaction minimum can make those views qualify; tune the
-settings together. Compaction can still be useful for large individual values
-that were given their own allocations.
-
-The transport minimums serve different purposes. A per-value floor avoids
-copying and describing thousands of tiny entries, even if their total is large.
-Passing that floor alone does not make a new allocation worthwhile. The
-allocation floor amortizes setup and handle transfer across enough data:
-64 eligible 32 KiB values can share a 2 MiB allocation, while a single 32 KiB
-value stays inline. Existing shared allocations use the forwarding minimum;
-forwarding a handle can be worthwhile even when allocating a new buffer is not.
-The crossover depends on payload types, message sizes, and the host. For batches
-of many small values, consider both `shm_min_item_bytes` and
-`shm_min_new_allocation_bytes`. Lowering the coalescing cap limits how much backing
-one retained sample can keep alive, at the cost of more allocations and handles.
-
-Inline values in a microbatch travel in one queue message,
-not one message per value. Benchmark representative batch sizes when tuning.
-
-These settings apply to process stages in both directions. They do not configure
-the final MTP queue. Inline Torch values use a Zephon transport descriptor; Torch's
-global multiprocessing reducer is unchanged.
+On Python 3.12+, bytes-like values sent through SHM arrive as read-only,
+zero-copy buffer views; on 3.10 and 3.11 they arrive as `bytes` subclasses.
+A `bytearray` sent through SHM therefore loses its mutability. Inline bytearrays
+remain bytearrays. `shm_min_size` and `coalesce_tensors` are deprecated aliases
+for `shm_min_item_bytes` and `shm_coalesce`. These options apply in both process-stage
+directions and do not configure the final queue to the training process (MTP).

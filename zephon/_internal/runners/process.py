@@ -33,6 +33,7 @@ Set ZEPHON_WATCHDOG_POLL_S=<seconds> to override the resilient-worker watchdog p
 from __future__ import annotations
 
 import copy
+import dataclasses
 import gc
 import multiprocessing as mp
 import os
@@ -275,15 +276,13 @@ class _WorkerCommand:
         batch = self.batch
         if self.kind == "batch" and self.memory_policy is not None:
             batch = TransportMicrobatch(batch, self.memory_policy)
-        return type(self), (
-            self.kind,
-            self.seq,
-            batch,
-            self.wait_ns,
-            self.consumed_elements,
-            self.consumed_bytes,
-            self.queue_depth_snapshot,
-            self.collect_metrics,
+        return type(self), tuple(
+            batch
+            if f.name == "batch"
+            else None
+            if f.name == "memory_policy"
+            else getattr(self, f.name)
+            for f in dataclasses.fields(self)
         )
 
 
@@ -401,9 +400,7 @@ class _ProcessWorkerConfig:
     #: ``mp_context.Array('q', [-1] * parallelism, lock=False)``.
     worker_seq_slots: Any = None
     spawn_wall_ns: int = 0  # Main process wall-clock time at spawn start
-    memory_policy: PayloadMemoryPolicy | None = field(
-        default_factory=PayloadMemoryPolicy
-    )
+    memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
@@ -482,8 +479,8 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
             # PreparedMicrobatch.__reduce__ unpickles as Microbatch on the
             # consumer side, so the cast is safe.
             if outputs and config.memory_policy is not None:
-                coalesced = prepare_microbatch(outputs, config.memory_policy)
-                outputs = cast(Microbatch, coalesced)
+                prepared = prepare_microbatch(outputs, config.memory_policy)
+                outputs = cast(Microbatch, prepared)
 
             config.backpressure.acquire()
             result = RunnerResult(
