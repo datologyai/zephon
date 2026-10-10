@@ -327,7 +327,7 @@ def resolve_runtime_spec(
         None
         if not opts.shm_enabled
         else PayloadMemoryPolicy(
-            shm_min_item_bytes=(
+            min_item_bytes=(
                 DEFAULT_SHM_MIN_ITEM_BYTES
                 if opts.shm_min_item_bytes is None
                 else opts.shm_min_item_bytes

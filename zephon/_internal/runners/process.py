@@ -96,7 +96,7 @@ from zephon._internal.utils.shm_coalesce import (
     DEFAULT_PAYLOAD_MEMORY_POLICY,
     PayloadMemoryPolicy,
     TransportMicrobatch,
-    coalesce_microbatch,
+    prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.ops.base import OpContext, StageInfo
@@ -479,14 +479,11 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 )
 
             # Prepare inline values and shared buffers for process transport.
-            # CoalescedMicrobatch.__reduce__ unpickles as Microbatch on the
+            # PreparedMicrobatch.__reduce__ unpickles as Microbatch on the
             # consumer side, so the cast is safe.
             if outputs and config.memory_policy is not None:
-                coalesced = coalesce_microbatch(
-                    outputs, policy=config.memory_policy, ensure_prepared=True
-                )
-                if coalesced is not None:
-                    outputs = cast(Microbatch, coalesced)
+                coalesced = prepare_microbatch(outputs, config.memory_policy)
+                outputs = cast(Microbatch, coalesced)
 
             config.backpressure.acquire()
             result = RunnerResult(

@@ -288,7 +288,7 @@ def test_stage_runtime_spec_default_max_worker_retries_is_zero() -> None:
         prefetch_capacity=0,
         output_mode="microbatches",
         allow_latency_flush=True,
-        memory_policy=PayloadMemoryPolicy(coalesce=False, shm_min_item_bytes=1),
+        memory_policy=PayloadMemoryPolicy(coalesce=False, min_item_bytes=1),
     )
     assert stage_spec.max_worker_retries == 0
 
@@ -306,7 +306,7 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
     spec = resolve_runtime_spec(_mk_plan((2, 1, 1)), opts)
     for stage in spec.stages:
         assert stage.memory_policy is spec.stages[0].memory_policy
-        assert stage.memory_policy.shm_min_item_bytes == 128
+        assert stage.memory_policy.min_item_bytes == 128
         assert stage.memory_policy.min_new_allocation_bytes == 2048
         assert stage.memory_policy.min_forward_bytes == 1024
         assert not stage.memory_policy.coalesce
@@ -323,7 +323,7 @@ def test_legacy_payload_memory_options() -> None:
     spec = resolve_runtime_spec(
         _mk_plan((1, 1, 1)), RuntimeOptions(shm_min_size=123, coalesce_tensors=False)
     )
-    assert spec.stages[0].memory_policy.shm_min_item_bytes == 123
+    assert spec.stages[0].memory_policy.min_item_bytes == 123
     assert not spec.stages[0].memory_policy.coalesce
 
 

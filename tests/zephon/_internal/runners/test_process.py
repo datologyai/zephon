@@ -577,7 +577,7 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         stage_output_mode="stream_items",
         memory_policy=PayloadMemoryPolicy(
             coalesce=True,
-            shm_min_item_bytes=0,
+            min_item_bytes=0,
             min_new_allocation_bytes=0,
             min_forward_bytes=0,
         ),
@@ -2328,12 +2328,17 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
     from multiprocessing.reduction import ForkingPickler
 
     from zephon._internal.stream import resolve_lazy_payloads
-    from zephon._internal.utils.shm_coalesce import coalesce_microbatch
+    from zephon._internal.utils.shm_coalesce import prepare_microbatch
 
     np = pytest.importorskip("numpy")
     record = _mk_record(0)
     record.payload = np.arange(32)[3:20:2]
-    coalesced = coalesce_microbatch([record], shm_min_item_bytes=0)
+    coalesced = prepare_microbatch(
+        [record],
+        PayloadMemoryPolicy(
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
+    )
     assert coalesced is not None
     records = pickle.loads(ForkingPickler.dumps(coalesced))
     resolve_lazy_payloads(records)
@@ -2354,7 +2359,7 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         max_workers=2,
         deterministic=True,
         memory_policy=PayloadMemoryPolicy(
-            shm_min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
         ),
         stage_output_mode="stream_items",
     )
@@ -2403,7 +2408,7 @@ class _InspectDisabledShm(BaseOp):
     def setup(self, ctx: OpContext) -> None:
         from zephon._internal.runners import process
 
-        process.coalesce_microbatch = _unexpected_shm_preparation
+        process.prepare_microbatch = _unexpected_shm_preparation
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         import numpy as np
@@ -2474,7 +2479,7 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         stage_output_mode="stream_items",
         # Exercise both routes without depending on production tuning defaults.
         memory_policy=PayloadMemoryPolicy(
-            shm_min_item_bytes=64, min_new_allocation_bytes=512, min_forward_bytes=256
+            min_item_bytes=64, min_new_allocation_bytes=512, min_forward_bytes=256
         ),
     )
     [actual] = list(runner.run([record]))
