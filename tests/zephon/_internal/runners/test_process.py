@@ -28,6 +28,7 @@ from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.concurrent import WorkerCrashed
 from zephon._internal.runners.process import ProcessStageRunner
+from zephon._internal.utils.shm_coalesce import PayloadMemoryPolicy
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import (
@@ -515,7 +516,7 @@ def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
+        memory_policy=PayloadMemoryPolicy(coalesce=True),
     )
 
     data = list(range(30))
@@ -574,7 +575,12 @@ def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
         max_workers=1,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
+        memory_policy=PayloadMemoryPolicy(
+            coalesce=True,
+            min_item_bytes=0,
+            min_new_allocation_bytes=0,
+            min_forward_bytes=0,
+        ),
     )
 
     # 8 records with max_batch=8 → one microbatch → one coalesced buffer
@@ -609,7 +615,7 @@ def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() 
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        coalesce_tensors=True,
+        memory_policy=PayloadMemoryPolicy(coalesce=True),
     )
 
     out = list(runner.run(iter(_mk_records(range(7)))))
@@ -2322,14 +2328,18 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
     from multiprocessing.reduction import ForkingPickler
 
     from zephon._internal.stream import resolve_lazy_payloads
-    from zephon._internal.utils.shm_coalesce import coalesce_microbatch
+    from zephon._internal.utils.shm_coalesce import prepare_microbatch
 
     np = pytest.importorskip("numpy")
     record = _mk_record(0)
     record.payload = np.arange(32)[3:20:2]
-    coalesced = coalesce_microbatch([record])
-    assert coalesced is not None
-    records = pickle.loads(ForkingPickler.dumps(coalesced))
+    prepared = prepare_microbatch(
+        [record],
+        PayloadMemoryPolicy(
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
+    )
+    records = pickle.loads(ForkingPickler.dumps(prepared))
     resolve_lazy_payloads(records)
     [record] = records
     array = record.payload
@@ -2347,6 +2357,9 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         _ctx_services(),
         max_workers=2,
         deterministic=True,
+        memory_policy=PayloadMemoryPolicy(
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
         stage_output_mode="stream_items",
     )
     try:
@@ -2356,5 +2369,127 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         expected = array.copy()
         expected[0] += 2
         np.testing.assert_array_equal(result.payload, expected)
+    finally:
+        runner.close()
+
+
+class _InspectPayloadMemory(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage, _ShmBytes
+
+        for record in elems:
+            payload = record.payload
+            payload["observed"] = (
+                payload["small_t"].is_shared(),
+                _shared_numpy_storage(payload["small_n"]) is not None,
+                payload["large_t"].is_shared(),
+                _shared_numpy_storage(payload["large_n"]) is not None,
+                isinstance(payload["large_b"], _ShmBytes),
+                isinstance(payload["large_ba"], _ShmBytes),
+            )
+            for key in ("large_b", "large_ba"):
+                assert bytes(payload[key]) == b"x" * 512
+                assert isinstance(payload[key], _ShmBytes)
+        return elems
+
+
+def _unexpected_shm_preparation(*args, **kwargs):
+    raise AssertionError("disabled SHM must bypass preparation")
+
+
+class _InspectDisabledShm(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def setup(self, ctx: OpContext) -> None:
+        from zephon._internal.runners import process
+
+        process.prepare_microbatch = _unexpected_shm_preparation
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        import numpy as np
+
+        for record in elems:
+            assert type(record.payload["bytes"]) is bytes
+            assert type(record.payload["mutable"]) is bytearray
+            assert type(record.payload["array"]) is np.ndarray
+            record.payload["mutable"][0] = 7
+            record.payload["array"][0] = 7
+        return elems
+
+
+def test_disabled_shm_skips_sender_and_worker_preparation(monkeypatch) -> None:
+    import numpy as np
+
+    from zephon._internal.runners import process
+
+    monkeypatch.setattr(process, "TransportMicrobatch", _unexpected_shm_preparation)
+    stage = Stage(
+        "disabled_shm", [Node("inspect", _InspectDisabledShm())], "auto", "test"
+    )
+    record = _mk_record(0)
+    record.payload = {"bytes": b"abc", "mutable": bytearray(16), "array": np.arange(16)}
+    runner = ProcessStageRunner(
+        stage,
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        memory_policy=None,
+        stage_output_mode="stream_items",
+    )
+    try:
+        [actual] = list(runner.run([record]))
+        assert actual.payload["bytes"] == b"abc"
+        assert actual.payload["mutable"][0] == actual.payload["array"][0] == 7
+        assert record.payload["mutable"][0] == record.payload["array"][0] == 0
+    finally:
+        runner.close()
+
+
+def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
+    import numpy as np
+
+    record = _mk_record(0)
+    record.payload = {
+        "small_t": torch.arange(4),
+        "small_n": np.arange(4),
+        "large_t": torch.arange(64),
+        "large_n": np.arange(64),
+        "large_b": b"x" * 512,
+        "large_ba": bytearray(b"x" * 512),
+    }
+    stage = Stage(
+        "memory_policy",
+        [
+            Node("first", _InspectPayloadMemory(), parallelism=1),
+            Node("second", _InspectPayloadMemory(), parallelism=1),
+        ],
+        "auto",
+        "test",
+    )
+    runner = ProcessStageRunner(
+        stage,
+        _ctx_services(),
+        max_workers=2,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        # Exercise both routes without depending on production tuning defaults.
+        memory_policy=PayloadMemoryPolicy(
+            min_item_bytes=64, min_new_allocation_bytes=512, min_forward_bytes=256
+        ),
+    )
+    try:
+        [actual] = list(runner.run([record]))
+        assert actual.payload["observed"] == (False, False, True, True, True, True)
+        assert not actual.payload["small_t"].is_shared()
+        assert (
+            actual.payload["small_t"].tolist()
+            == actual.payload["small_n"].tolist()
+            == list(range(4))
+        )
+        assert not record.payload["small_t"].is_shared()
     finally:
         runner.close()

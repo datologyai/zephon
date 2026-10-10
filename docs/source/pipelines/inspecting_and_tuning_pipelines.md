@@ -114,3 +114,38 @@ As a general approach to measuring and improving execution performance, change o
 at a time and compare the throughput and resource usage over a representative run. Keep
 the sample preparation, shuffle, mixture, and packing settings identical while you are
 doing this, since those settings impact the training data itself.
+
+
+## Process payload memory
+
+Process stages send supported CPU payloads (Torch tensors, NumPy arrays,
+bytes-like values and homogeneous numeric lists) either inline in the queue
+message or through shared memory (SHM). Values that are large enough are copied
+once into shared buffers, coalesced by compatible type/dtype. Views of existing
+shared buffers can be forwarded by handle. When a message uses only a small
+part of a large buffer, those views can be copied out ("compacted") to reduce
+how much memory a retained sample keeps alive.
+
+| Option | Default | Effect |
+|---|---:|---|
+| `shm_enabled` | `True` | `False` disables Zephon's SHM preparation. Ordinary multiprocessing pickling still applies, so Torch may still share tensor storage. |
+| `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for fresh SHM. Existing shared views are considered together first. |
+| `shm_min_new_allocation_bytes` | 1 MiB | Create a shared buffer only if its group reaches this size; smaller groups travel inline. |
+| `shm_min_forward_bytes` | 128 KiB | Forward an existing shared buffer only if the message uses at least this much of it; otherwise send those views inline. |
+| `shm_coalesce` | `True` | Combine compatible values into common buffers. `False` considers each value separately; transport thresholds still apply. |
+| `shm_max_coalesced_bytes` | 64 MiB | Upper bound for a coalesced buffer (`None`: no bound). Larger single values remain unsplit, subject to the transport minimum. |
+| `shm_compact_above_ratio` | 8 | Compact views when their buffer is more than this many times larger than the bytes the message uses (`None` disables compaction) … |
+| `shm_compact_min_savings_bytes` | 16 MiB | … and compaction would save at least this many bytes of backing. Other references can keep the original buffer alive. |
+
+The best thresholds depend on payload types, batch sizes and the host, so
+benchmark representative batches before changing them. Lowering
+`shm_max_coalesced_bytes` reduces how much memory one retained sample can keep
+alive, at the cost of more allocations. Compaction applies at process transport
+boundaries; it does not revisit samples already held in shuffle buffers.
+
+On Python 3.12+, bytes-like values sent through SHM arrive as read-only,
+zero-copy buffer views; on 3.10 and 3.11 they arrive as `bytes` subclasses.
+A `bytearray` sent through SHM therefore loses its mutability. Inline bytearrays
+remain bytearrays. `shm_min_size` and `coalesce_tensors` are deprecated aliases
+for `shm_min_item_bytes` and `shm_coalesce`. These options apply in both process-stage
+directions and do not configure the final queue to the training process (MTP).

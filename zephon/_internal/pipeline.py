@@ -66,7 +66,7 @@ from zephon.ops.config import (
 )
 from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
-from zephon.options import RuntimeOptions
+from zephon.options import RuntimeOptions, _normalize_shm_options
 from zephon.types import SampleBatch, SampleId, SamplePayload, SampleRecord, StreamItem
 from zephon.validation import ValidationError, preflight_tokenizers
 from zephon.work import WorkSource
@@ -1377,7 +1377,7 @@ class Pipeline:
 
     def options(self, **hints: Any) -> "Pipeline":
         # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
-        for key, value in hints.items():
+        for key, value in _normalize_shm_options(hints).items():
             if not hasattr(self._options, key):
                 warnings.warn(
                     f"Unknown pipeline option '{key}' ignored. "

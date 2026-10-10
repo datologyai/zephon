@@ -33,6 +33,7 @@ Set ZEPHON_WATCHDOG_POLL_S=<seconds> to override the resilient-worker watchdog p
 from __future__ import annotations
 
 import copy
+import dataclasses
 import gc
 import multiprocessing as mp
 import os
@@ -93,8 +94,10 @@ from zephon._internal.stream import (
     resolve_lazy_payloads,
 )
 from zephon._internal.utils.shm_coalesce import (
-    DEFAULT_SHM_MIN_SIZE,
-    coalesce_microbatch,
+    DEFAULT_PAYLOAD_MEMORY_POLICY,
+    PayloadMemoryPolicy,
+    TransportMicrobatch,
+    prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.ops.base import OpContext, StageInfo
@@ -263,6 +266,24 @@ class _WorkerCommand:
     consumed_bytes: int
     queue_depth_snapshot: int
     collect_metrics: bool
+    memory_policy: PayloadMemoryPolicy | None = None
+
+    def __reduce__(self) -> tuple:
+        # Preparation runs in the queue feeder, leaving the pump and retry
+        # records untouched. Each serialization prepares private inputs again.
+        # The received command drops this sender-only policy to avoid applying
+        # it a second time; workers use their configured policy for outputs.
+        batch = self.batch
+        if self.kind == "batch" and self.memory_policy is not None:
+            batch = TransportMicrobatch(batch, self.memory_policy)
+        return type(self), tuple(
+            batch
+            if f.name == "batch"
+            else None
+            if f.name == "memory_policy"
+            else getattr(self, f.name)
+            for f in dataclasses.fields(self)
+        )
 
 
 @dataclass(frozen=True)
@@ -379,13 +400,7 @@ class _ProcessWorkerConfig:
     #: ``mp_context.Array('q', [-1] * parallelism, lock=False)``.
     worker_seq_slots: Any = None
     spawn_wall_ns: int = 0  # Main process wall-clock time at spawn start
-    #: When True, coalesce all tensors in the microbatch into per-dtype SHM
-    #: buffers before serialization.  Reduces N POSIX SHM segments to K
-    #: (K = distinct dtypes, usually 1–2).
-    coalesce_tensors: bool = True
-    #: Minimum payload size in bytes for SHM coalescing.  Payloads smaller
-    #: than this are left inline in the pickle stream.
-    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY
 
 
 QueueFactory = Callable[..., _ClosableQueue[Any]]
@@ -460,13 +475,12 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                     time.perf_counter_ns() - start_ns if command.collect_metrics else 0
                 )
 
-            # Optionally coalesce tensors into per-dtype SHM buffers.
-            # CoalescedMicrobatch.__reduce__ unpickles as Microbatch on the
+            # Prepare inline values and shared buffers for process transport.
+            # PreparedMicrobatch.__reduce__ unpickles as Microbatch on the
             # consumer side, so the cast is safe.
-            if config.coalesce_tensors and outputs:
-                coalesced = coalesce_microbatch(outputs, config.shm_min_size)
-                if coalesced is not None:
-                    outputs = cast(Microbatch, coalesced)
+            if outputs and config.memory_policy is not None:
+                prepared = prepare_microbatch(outputs, config.memory_policy)
+                outputs = cast(Microbatch, prepared)
 
             config.backpressure.acquire()
             result = RunnerResult(
@@ -753,14 +767,12 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         mp_context: BaseContext | None = None,
-        coalesce_tensors: bool = True,
-        shm_min_size: int = DEFAULT_SHM_MIN_SIZE,
+        memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY,
         max_worker_retries: int = 0,
         ipc_transport: IpcTransport = DEFAULT_IPC_TRANSPORT,
         ipc_buffer_bytes: int = DEFAULT_IPC_BUFFER_BYTES,
     ) -> None:
-        self._coalesce_tensors = coalesce_tensors
-        self._shm_min_size = shm_min_size
+        self._memory_policy = memory_policy
         self._max_worker_retries = max(0, int(max_worker_retries))
         self._queue_capacity = max(1, queue_capacity)
         self._ipc_transport = ipc_transport
@@ -1642,8 +1654,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             backpressure=semaphore,
             worker_seq_slots=state.worker_seq_slots,
             spawn_wall_ns=spawn_wall_ns,
-            coalesce_tensors=self._coalesce_tensors,
-            shm_min_size=self._shm_min_size,
+            memory_policy=self._memory_policy,
         )
         proc: BaseProcess = self._process_factory(
             target=_process_worker_main,
@@ -2136,6 +2147,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             consumed_bytes=consumed_bytes,
             queue_depth_snapshot=queue_depth_snapshot,
             collect_metrics=collect_stats,
+            memory_policy=self._memory_policy,
         )
         # Record for the watchdog BEFORE putting on the task queue so a
         # worker that picks up, crashes, and gets observed by the watchdog
