@@ -129,7 +129,7 @@ memoryviews, bytearrays, and homogeneous numeric lists. Configure it with
 | `shm_min_new_allocation_bytes` | 2 MiB | Minimum useful bytes per new allocation in the message. Smaller groups travel inline. |
 | `shm_min_forward_bytes` | 128 KiB | Minimum useful bytes per existing shared allocation in the message. Smaller groups travel inline. This considers the combined views of that allocation, not each view separately. |
 | `shm_coalesce` | `True` | Coalesce eligible values of compatible types/dtypes together. Applies to private values and compacted views alike. |
-| `shm_max_coalesced_bytes` | 16 MiB | Maximum coalesced allocation size. Larger individual values still use SHM, in separate allocations. `None` removes the limit. |
+| `shm_max_coalesced_bytes` | 16 MiB | Maximum coalesced allocation size. Larger individual values are not split; the transport minimum still applies. `None` removes the limit. |
 | `shm_compact_above_ratio` | 8 | Copy shared views into compact storage when their backing allocation is more than this many times larger than their combined useful bytes in the message. `None` disables view compaction. |
 | `shm_compact_min_savings_bytes` | 16 MiB | View compaction also requires at least this many potential savings: backing bytes minus useful bytes in this message. |
 

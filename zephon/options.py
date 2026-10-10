@@ -213,7 +213,7 @@ class RuntimeOptions:
     # limits. None disables copying views out; other references may delay freeing.
     shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
     shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
-    # Bound each coalesced allocation; larger individual values get their own.
+    # Bound coalesced allocations; do not split larger individual values.
     # None permits unlimited coalescing. Compacted views follow the same rule.
     shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
 
