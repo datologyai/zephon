@@ -754,7 +754,10 @@ def _restore_inline_tensor(
     # Protocol 4 reconstructs bytes; tensors need writable storage.
     if isinstance(data, bytes):
         data = bytearray(data)
-    return torch.frombuffer(data, dtype=dtype).reshape(shape).requires_grad_(grad)
+    tensor = torch.frombuffer(data, dtype=dtype)
+    if len(shape) != 1:
+        tensor = tensor.reshape(shape)
+    return tensor.requires_grad_(True) if grad else tensor
 
 
 class _InlineTensor(_LeafDescriptor):
@@ -769,15 +772,24 @@ class _InlineTensor(_LeafDescriptor):
         return self.tensor
 
     def __reduce_ex__(self, protocol: int) -> Any:
-        tensor = self.tensor.detach().resolve_conj().resolve_neg().contiguous()
-        view = tensor.reshape(-1).view(_get_torch().uint8).numpy()
+        tensor = self.tensor
+        if tensor.requires_grad:
+            tensor = tensor.detach()
+        tensor = tensor.resolve_conj().resolve_neg().contiguous()
+        if tensor.ndim != 1:
+            tensor = tensor.reshape(-1)
+        if tensor.stride(0) != 1:
+            # Empty/singleton tensors can be contiguous with a non-unit stride,
+            # but dtype reinterpretation still requires a unit last stride.
+            tensor = tensor.as_strided((tensor.numel(),), (1,))
+        view = tensor.view(_get_torch().uint8).numpy()
         # Protocol 4 reduces bytearray through another bytes copy. Send bytes
         # directly; restoration gives the tensor writable storage.
         data = pickle.PickleBuffer(view) if protocol >= 5 else view.tobytes()
         return _InlineTensorData, (
             data,
             tensor.dtype,
-            tuple(tensor.shape),
+            tuple(self.tensor.shape),
             self.tensor.requires_grad,
         )
 

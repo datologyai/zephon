@@ -2639,3 +2639,21 @@ def test_optional_allocation_fallback_keeps_root_and_struct_sources_independent(
     assert restored[1].payload.image.untyped_storage().data_ptr() == source.data_ptr()
     assert restored[1].payload.label == "kept"
     assert not restored[2].payload.is_shared()
+
+
+def test_inline_empty_and_singleton_tensors_with_nonunit_strides() -> None:
+    policy = shm_coalesce.PayloadMemoryPolicy()
+    for size in (0, 1):
+        source = torch.arange(2, dtype=torch.bfloat16)[::2][:size]
+        for protocol in (4, 5):
+            [record] = pickle.loads(
+                ForkingPickler.dumps(
+                    shm_coalesce.TransportMicrobatch(
+                        [SampleRecord(_meta(0), source)], policy
+                    ),
+                    protocol,
+                )
+            )
+            resolve_lazy_payloads([record])
+            torch.testing.assert_close(record.payload, source)
+            assert not record.payload.is_shared()
