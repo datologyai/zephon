@@ -28,8 +28,8 @@ def cap_vortex_threads() -> None:
 
     ``ZEPHON_VORTEX_THREADS`` defaults to one background worker. As with the
     Arrow cap, zero leaves the library's setting untouched. The Vortex format
-    also calls this before opening files, covering direct reads and discovery
-    that do not go through ``suppress_library_threads``.
+    also calls this when its dependency is initialized, covering direct reads
+    and discovery that do not go through ``suppress_library_threads``.
     """
     n = int(os.environ.get("ZEPHON_VORTEX_THREADS", "1"))
     if n < 0:

@@ -1,4 +1,6 @@
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +25,44 @@ def _create_vortex_file(path: Path, rows: list[dict[str, object]]) -> None:
     # Create vortex array directly from list of dicts and write to file
     vortex_array = vortex.array(rows)
     vortex.io.write(vortex_array, str(path))
+
+
+def test_vortex_caps_threads_at_initialization_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery and repeated reads retain the cap applied during format loading."""
+    _create_vortex_file(tmp_path / "data.vortex", [{"value": 1}, {"value": 2}])
+    monkeypatch.setenv("ZEPHON_VORTEX_THREADS", "1")
+    monkeypatch.setenv("VORTEX_MAX_THREADS", "1")
+    script = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import vortex
+
+        with patch.object(vortex, "set_worker_threads", wraps=vortex.set_worker_threads) as cap:
+            from zephon._internal.io.formats.vortex import VortexFormat, VortexShard
+            from zephon._internal.io.storage.local import LocalFSBackend
+
+            cap.assert_called_once_with(1)
+            root = Path(sys.argv[1])
+            counts, _ = VortexFormat().discover(str(root), LocalFSBackend(root))
+            assert sum(counts.values()) == 2
+            for _ in range(2):
+                shard = VortexShard(root / "data.vortex")
+                try:
+                    assert shard[0]["value"] == 1
+                finally:
+                    shard.close()
+            cap.assert_called_once_with(1)
+            assert vortex.worker_threads() == 1
+        """
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], check=True, timeout=30
+    )
 
 
 def test_vortex_discover_local(tmp_path: Path) -> None:

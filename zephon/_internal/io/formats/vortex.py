@@ -37,6 +37,8 @@ try:
     import vortex as _vortex
 except ImportError:
     _vortex = None
+else:
+    cap_vortex_threads()
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,6 @@ def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int
             + 'install it with: pip install "zephon[vortex]"'
         )
     reader = _VortexReader(storage, path, size)
-    cap_vortex_threads()
     return len(_vortex.open_readable(reader, without_segment_cache=True))
 
 
@@ -100,7 +101,6 @@ def _open_vortex_file(
     """Reuse immutable metadata and encoded segments without retaining readers."""
     vortex = _vortex
     assert vortex is not None
-    cap_vortex_threads()
     options: dict[str, Any] = {"without_segment_cache": segment_cache is None}
     key = (
         _file_cache_key(path)

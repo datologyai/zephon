@@ -98,7 +98,8 @@ not total process memory: cache overhead, footers, decoded outputs and in-flight
 are additional, and Vortex applies cache evictions asynchronously. The footer limit is
 an entry count, not a byte budget.
 
-Zephon limits Vortex's process-wide runtime to one background worker before its first
-Vortex read. Set `ZEPHON_VORTEX_THREADS` to a positive integer to change that limit, or
-to `0` to leave the runtime setting untouched. This setting applies to discovery as well
-as sample reads.
+Zephon limits Vortex's process-wide runtime to one background worker when the Vortex
+format is first loaded. Set `ZEPHON_VORTEX_THREADS` before using the format: a positive
+integer changes that limit, and `0` leaves the runtime setting untouched. The cap applies
+to discovery and sample reads without being reapplied for each file open. General worker
+initialization also applies the configured limit through Zephon's thread suppression.
