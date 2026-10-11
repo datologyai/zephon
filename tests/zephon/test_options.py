@@ -19,7 +19,7 @@ def test_shm_aliases_warn_and_reject_conflicting_canonical_values() -> None:
     with pytest.warns(DeprecationWarning, match="shm_coalesce"):
         options = RuntimeOptions(coalesce_tensors=False)
     assert options.shm_coalesce is False
-    # Aliases can override canonical defaults without Optional public fields.
+    # Legacy aliases override canonical defaults.
     with pytest.deprecated_call():
         assert (
             RuntimeOptions(shm_min_size=123, shm_min_item_bytes=4096).shm_min_item_bytes

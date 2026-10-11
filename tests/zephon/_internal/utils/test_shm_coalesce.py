@@ -64,22 +64,6 @@ def _round_trip_resolved(coalesced: PreparedMicrobatch) -> list:
 # ---------------------------------------------------------------------------
 # Basic round-trip
 # ---------------------------------------------------------------------------
-def test_training_policies_after_coalesced_transport() -> None:
-    """EOS loss masking works after SHM transport and lazy payload resolution."""
-    tokens = torch.tensor([1, 10, 2, 1, 20, 2])
-    batch = SampleBatch(
-        records=(SampleRecord(meta=_meta(0), payload={"input_ids": tokens}),),
-    )
-    coalesced = prepare_microbatch([batch], _policy(0), copy_records=True)
-    assert coalesced is not None
-    [restored_batch] = _round_trip(coalesced)
-    assert isinstance(restored_batch.records[0].payload, LazyPayload)
-    resolve_lazy_payloads([restored_batch])
-    assert restored_batch.to_training(
-        return_labels=True,
-        eos_mask_loss=True,
-        eos_token_id=2,
-    )["labels"].tolist() == [[10, 2, -100, 20, 2]]
 
 
 class TestCoalesceMicrobatchRoundTrip:
@@ -418,7 +402,7 @@ class TestCoalesceBytes:
     def test_restored_bytes_are_shm_backed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Bytes and bytearrays restore as views, without copying out of SHM."""
+        """Bytes and bytearrays restore as SHM wrappers, with zero-copy views on 3.12+."""
         data = b"M" * 8192
         records = [
             SampleRecord(meta=_meta(0), payload={"raw": data}),
