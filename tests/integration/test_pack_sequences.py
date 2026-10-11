@@ -398,7 +398,7 @@ def test_capped_training_microbatch_checkpoint_resume(
             mtp_mode=False,
             canonical_replicas=2,
             # These tiny batches test packing/replay, not shared-memory transport.
-            shm_coalesce=False,
+            shm_enabled=False,
         )
 
     def convert(batch: SampleBatch) -> tuple[Any, Any]:

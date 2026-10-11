@@ -373,6 +373,7 @@ def test_disabled_shm_skips_sender_and_worker_preparation(monkeypatch) -> None:
     from zephon._internal.runners import process
 
     monkeypatch.setattr(process, "TransportMicrobatch", _unexpected_shm_preparation)
+    monkeypatch.setattr(process, "prepare_microbatch", _unexpected_shm_preparation)
     stage = Stage(
         "disabled_shm", [Node("inspect", _InspectDisabledShm())], "auto", "test"
     )
