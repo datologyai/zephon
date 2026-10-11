@@ -21,8 +21,6 @@ from zephon._internal.io.types import (
 )
 from zephon.io import CacheOptions, Dataset, StoreOptions, VortexOptions
 
-pytestmark = pytest.mark.integration
-
 
 def _write(path: Path, start: int = 0) -> None:
     vortex.io.write(

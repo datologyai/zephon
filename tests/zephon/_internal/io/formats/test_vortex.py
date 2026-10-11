@@ -16,7 +16,7 @@ from zephon.io.dataset import Dataset
 
 # Skip vortex tests if vortex-data is not available (requires Python 3.11+)
 # Note: there's a different "vortex" package on PyPI, so we check for vortex.io
-vortex = pytest.importorskip("vortex.io", reason="vortex-data not installed")
+pytest.importorskip("vortex.io", reason="vortex-data not installed")
 import vortex
 
 
@@ -33,7 +33,7 @@ def test_vortex_caps_threads_at_initialization_only(
     """Discovery and repeated reads retain the cap applied during format loading."""
     _create_vortex_file(tmp_path / "data.vortex", [{"value": 1}, {"value": 2}])
     monkeypatch.setenv("ZEPHON_VORTEX_THREADS", "1")
-    monkeypatch.setenv("VORTEX_MAX_THREADS", "1")
+    monkeypatch.setenv("VORTEX_MAX_THREADS", "2")
     script = textwrap.dedent(
         """
         import sys
@@ -42,6 +42,7 @@ def test_vortex_caps_threads_at_initialization_only(
 
         import vortex
 
+        assert vortex.worker_threads() == 2
         with patch.object(vortex, "set_worker_threads", wraps=vortex.set_worker_threads) as cap:
             from zephon._internal.io.formats.vortex import VortexFormat, VortexShard
             from zephon._internal.io.storage.local import LocalFSBackend
@@ -236,7 +237,7 @@ def test_vortex_import_error_handling() -> None:
         vortex_module._vortex = None
 
         try:
-            with pytest.raises(RuntimeError, match="vortex-data"):
+            with pytest.raises(ImportError, match="Vortex support requires"):
                 VortexShard(Path("/fake/path.vortex"))
         finally:
             # Restore original value

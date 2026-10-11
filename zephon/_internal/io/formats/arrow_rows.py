@@ -27,8 +27,8 @@ def require_pyarrow() -> Any:
                     import pyarrow as pa
                 except ImportError as exc:
                     raise ImportError(
-                        "pyarrow is required for Parquet format support. "
-                        + 'Install with: pip install "zephon[parquet]"'
+                        "pyarrow is required for Arrow row conversion. "
+                        + "Install the matching zephon[parquet] or zephon[vortex] extra."
                     ) from exc
                 cap_arrow_threads()
                 _pa = pa

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 # Env vars that suppress internal thread pools in numerical libraries.
 # Shared between suppress_library_threads() (set at runtime) and the
@@ -26,19 +27,26 @@ THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
 def cap_vortex_threads() -> None:
     """Pin Vortex's process-wide background worker pool.
 
-    ``ZEPHON_VORTEX_THREADS`` defaults to one background worker. As with the
-    Arrow cap, zero leaves the library's setting untouched. The Vortex format
-    also calls this when its dependency is initialized, covering direct reads
-    and discovery that do not go through ``suppress_library_threads``.
+    An explicit ``ZEPHON_VORTEX_THREADS`` overrides ``VORTEX_MAX_THREADS``;
+    otherwise the native setting is respected, with one worker as the default.
+    As with the Arrow cap, non-positive values leave the library untouched.
+    Only an already imported Vortex is configured: the format also calls this
+    after importing its dependency, covering direct reads and discovery without
+    loading Vortex in workers that do not use it.
     """
-    n = int(os.environ.get("ZEPHON_VORTEX_THREADS", "1"))
-    if n < 0:
-        raise ValueError("ZEPHON_VORTEX_THREADS cannot be negative")
-    if n == 0:
+    configured = os.environ.get("ZEPHON_VORTEX_THREADS")
+    if configured is None and "VORTEX_MAX_THREADS" in os.environ:
         return
     try:
-        import vortex
-
+        n = int(configured if configured is not None else "1")
+    except ValueError as exc:
+        raise ValueError("ZEPHON_VORTEX_THREADS must be an integer") from exc
+    if n <= 0:
+        return
+    vortex = sys.modules.get("vortex")
+    if vortex is None:
+        return
+    try:
         vortex.set_worker_threads(n)
     except Exception:
         pass

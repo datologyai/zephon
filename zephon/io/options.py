@@ -201,13 +201,19 @@ class ParquetRGCacheOptions:
 
 @dataclass
 class VortexOptions:
-    """Process-local Vortex caches shared by the shards in one store.
+    """Vortex caches shared by the shards in one fetch replica's store.
 
     ``segment_cache_bytes`` budgets retained encoded segment bytes, not total
     memory: decoded outputs, metadata and in-flight reads are additional.
-    Each worker/store owns its budget; it is not shared across processes.
+    Each FetchOp replica owns its budget, including replicas in the same process:
+    four replicas can retain four times the configured segment bytes and footers.
+    Caches are not shared across replicas or processes.
     ``metadata_cache_entries`` bounds the number of parsed footers retained.
     Set either limit to zero to disable that cache.
+
+    Numeric list outputs are read-only NumPy views where possible; duplicate
+    samples may share buffers. Use ``array.copy()`` before mutation or conversion
+    to a writable tensor. Process transport may copy them into writable storage.
     """
 
     segment_cache_bytes: int = _option(64 * 1024**2)
@@ -251,7 +257,11 @@ class VortexOptions:
 
 @dataclass
 class StoreOptions:
-    """Top-level IO store options passed to FetchOp."""
+    """Top-level IO store options passed to FetchOp.
+
+    Vortex cache budgets apply per fetch replica. Its numeric list outputs use
+    read-only NumPy views; see ``VortexOptions`` for ownership details.
+    """
 
     cache: CacheOptions = field(default_factory=CacheOptions)
     parquet_rg_cache: ParquetRGCacheOptions = field(

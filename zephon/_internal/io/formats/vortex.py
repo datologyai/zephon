@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 import numpy as np
 
@@ -26,12 +27,11 @@ from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 from zephon._internal.utils.thread_utils import cap_vortex_threads
-from zephon.io.options import VortexOptions
 
 if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
-    from zephon.io.options import StoreOptions
+    from zephon.io.options import StoreOptions, VortexOptions
 
 try:
     import vortex as _vortex
@@ -39,6 +39,13 @@ except ImportError:
     _vortex = None
 else:
     cap_vortex_threads()
+
+
+def _require_vortex() -> ModuleType:
+    """Return the optional Vortex dependency with a consistent install hint."""
+    if _vortex is None:
+        raise ImportError('Vortex support requires: pip install "zephon[vortex]"')
+    return _vortex
 
 
 @dataclass(frozen=True)
@@ -69,17 +76,17 @@ class _VortexReader:
 
 def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int:
     """Read the row count from Vortex metadata through the supplied backend."""
-    if _vortex is None:
-        raise ImportError(
-            "Vortex discovery requires vortex-data; "
-            + 'install it with: pip install "zephon[vortex]"'
-        )
     reader = _VortexReader(storage, path, size)
-    return len(_vortex.open_readable(reader, without_segment_cache=True))
+    return len(_require_vortex().open_readable(reader, without_segment_cache=True))
 
 
 def _file_cache_key(path: Path) -> str:
-    """Identify an unchanged local file, including replacements at the same path."""
+    """Invalidate reuse for file changes completed before this stat.
+
+    This is not a snapshot: shard contents must remain immutable during reads.
+    Eviction may replace a shard atomically with identical bytes, but concurrent
+    replacement with different contents between stat and open is unsupported.
+    """
     stat = path.stat()
     return repr(
         (
@@ -99,16 +106,15 @@ def _open_vortex_file(
     segment_cache: Any | None,
 ) -> Any:
     """Reuse immutable metadata and encoded segments without retaining readers."""
-    vortex = _vortex
-    assert vortex is not None
-    options: dict[str, Any] = {"without_segment_cache": segment_cache is None}
-    key = (
-        _file_cache_key(path)
-        if metadata_cache is not None or segment_cache is not None
-        else None
+    vortex = _require_vortex()
+    if metadata_cache is None and segment_cache is None:
+        return vortex.open(str(path), without_segment_cache=True)
+    key = _file_cache_key(path)
+    options: dict[str, Any] = (
+        {"segment_cache": segment_cache, "cache_key": key}
+        if segment_cache is not None
+        else {"without_segment_cache": True}
     )
-    if segment_cache is not None:
-        options.update(segment_cache=segment_cache, cache_key=key)
     if metadata_cache is None:
         return vortex.open(str(path), **options)
 
@@ -119,12 +125,26 @@ def _open_vortex_file(
         file = vortex.open(str(path), **options)
         return file.footer
 
-    assert key is not None
     footer = metadata_cache.get_or_load(key, load_footer)
     # A miss already opened the file to obtain its footer; keep that reader.
     return (
         file if file is not None else vortex.open(str(path), footer=footer, **options)
     )
+
+
+@contextmanager
+def _local_io_errors(path: Path) -> Iterator[None]:
+    """Expose missing/inaccessible shards to the existing eviction retry path."""
+    try:
+        yield
+    except RuntimeError as exc:
+        # Native Vortex wraps IO errors. Preserve corruption/scan errors when
+        # the local file is still accessible instead of retrying them as eviction.
+        try:
+            path.stat()
+        except OSError as io_error:
+            raise io_error from exc
+        raise
 
 
 class VortexShard(RandomAccessShard):
@@ -138,20 +158,9 @@ class VortexShard(RandomAccessShard):
         metadata_cache: MetadataCache[str, Any] | None = None,
         segment_cache: Any | None = None,
     ) -> None:
-        if _vortex is None:
-            raise RuntimeError(
-                "Opening Vortex shards requires the 'vortex-data' package. "
-                + 'Install with: pip install "zephon[vortex]"'
-            )
         self._path = path
-        try:
+        with _local_io_errors(path):
             self._file = _open_vortex_file(path, metadata_cache, segment_cache)
-        except RuntimeError:
-            # Vortex wraps native IO errors. Surface a missing/inaccessible local
-            # file as OSError so ResilientShard can resolve it again after eviction.
-            # If it still exists, preserve the original Vortex error.
-            path.stat()
-            raise
         self._length = length if length is not None else len(self._file)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
@@ -170,37 +179,56 @@ class VortexShard(RandomAccessShard):
         for i in indices:
             if i < 0 or i >= self._length:
                 raise IndexError(i)
-        if self._file is None or _vortex is None:
+        if self._file is None:
             raise RuntimeError("VortexShard has been closed")
 
         # Vortex scans require strictly increasing indices, even when callers
         # request rows out of order or more than once.
-        sorted_unique = sorted(set(indices))
-        index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
+        positions: Iterable[int]
+        if all(a < b for a, b in zip(indices, indices[1:])):
+            sorted_unique = indices
+            positions = range(len(indices))
+        else:
+            sorted_unique = sorted(set(indices))
+            index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
+            positions = map(index_to_pos.__getitem__, indices)
 
-        try:
-            batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
+        with _local_io_errors(self._path):
+            batch = self._file.scan(
+                indices=_require_vortex().array(sorted_unique)
+            ).read_all()
             arrow_table = batch.to_arrow_table()
-        except RuntimeError:
-            # Apply the same eviction check if the file disappears during a read.
-            self._path.stat()
-            raise
-        batch_dict: dict[str, list[Any]] = {}
-        for name in arrow_table.column_names:
-            values: list[Any] = []
-            for chunk in arrow_table.column(name).chunks:
-                values.extend(_column_values(chunk))
-            batch_dict[name] = values
-
-        # Restore the caller's order and duplicate rows.
-        return [
-            {k: v[index_to_pos[idx]] for k, v in batch_dict.items()} for idx in indices
-        ]
+        return _rows_from_table(arrow_table, positions)
 
 
-def _numeric_values(array: Any) -> np.ndarray | None:
-    """Expose numeric buffers and nested fixed-size shapes without Python boxing."""
+def _rows_from_table(table: Any, positions: Iterable[int]) -> list[dict[str, Any]]:
+    """Materialize selected table positions without copying numeric row buffers."""
     pa = require_pyarrow()
+    columns: dict[str, list[Any] | np.ndarray] = {}
+    for name in table.column_names:
+        column = table.column(name)
+        if column.num_chunks == 1:
+            columns[name] = _column_values(column.chunk(0), pa)
+        else:
+            columns[name] = [
+                value for chunk in column.chunks for value in _column_values(chunk, pa)
+            ]
+    return [
+        {name: values[pos] for name, values in columns.items()} for pos in positions
+    ]
+
+
+def _is_numeric_type(kind: Any, pa: Any) -> bool:
+    return (
+        pa.types.is_integer(kind)
+        or pa.types.is_floating(kind)
+        or pa.types.is_boolean(kind)
+        or (pa.types.is_fixed_size_list(kind) and _is_numeric_type(kind.value_type, pa))
+    )
+
+
+def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
+    """Expose numeric buffers and nested fixed-size shapes without Python boxing."""
     if array.null_count:
         return None
     kind = array.type
@@ -217,13 +245,13 @@ def _numeric_values(array: Any) -> np.ndarray | None:
     if pa.types.is_fixed_size_list(kind):
         size = kind.list_size
         child = array.values.slice(array.offset * size, len(array) * size)
-        values = _numeric_values(child)
+        values = _numeric_values(child, pa)
         if values is not None:
             return values.reshape((len(array), size, *values.shape[1:]))
     return None
 
 
-def _column_values(array: Any) -> list[Any] | np.ndarray:
+def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
     """Return numeric rows as typed NumPy arrays where possible.
 
     Null-free numeric lists preserve dtype and fixed-size nested shapes, using
@@ -233,7 +261,6 @@ def _column_values(array: Any) -> list[Any] | np.ndarray:
     nesting without coercing numeric values or creating NumPy object arrays.
     A null row stays None. Strings, bytes, and scalar booleans stay Python values.
     """
-    pa = require_pyarrow()
     kind = array.type
     is_fixed = pa.types.is_fixed_size_list(kind)
     is_view = pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind)
@@ -242,12 +269,21 @@ def _column_values(array: Any) -> list[Any] | np.ndarray:
     )
     if not is_list:
         if pa.types.is_integer(kind) or pa.types.is_floating(kind):
-            numbers = _numeric_values(array)
-            if numbers is not None:
-                return numbers
+            if not array.null_count:
+                return array.to_numpy(zero_copy_only=False)
+            # Filling only nullable scalar columns preserves dtype without NumPy's
+            # usual integer-to-float/null coercion. Validity restores None per row.
+            numbers = array.fill_null(0).to_numpy(zero_copy_only=False)
+            valid = array.is_valid().to_numpy(zero_copy_only=False)
+            return [
+                number if present else None for number, present in zip(numbers, valid)
+            ]
         return array.to_pylist()
 
-    numbers = _numeric_values(array.values)
+    if not _is_numeric_type(kind.value_type, pa):
+        return array.to_pylist()
+
+    numbers = _numeric_values(array.values, pa)
     if numbers is None:
         # Null parents can have null child slots even when every valid row is
         # numeric. Convert those rows independently rather than boxing them all.
@@ -256,7 +292,7 @@ def _column_values(array: Any) -> list[Any] | np.ndarray:
             if not scalar.is_valid:
                 rows.append(None)
                 continue
-            values = _numeric_values(scalar.values)
+            values = _numeric_values(scalar.values, pa)
             rows.append(values if values is not None else scalar.as_py())
         return rows
 
@@ -301,18 +337,15 @@ def _shard_length(local_ref: LocalShardRef) -> int | None:
 class VortexShardOpener:
     """Own bounded caches shared by the Vortex shards in one process-local store."""
 
-    def __init__(self, options: VortexOptions) -> None:
-        if _vortex is None:
-            raise RuntimeError(
-                'Opening Vortex shards requires: pip install "zephon[vortex]"'
-            )
+    def __init__(self, options: "VortexOptions") -> None:
+        vortex = _require_vortex()
         self._metadata_cache = (
             MetadataCache[str, Any](options.metadata_cache_entries)
             if options.metadata_cache_entries
             else None
         )
         self._segment_cache = (
-            _vortex.SegmentCache(options.segment_cache_bytes)
+            vortex.SegmentCache(options.segment_cache_bytes)
             if options.segment_cache_bytes
             else None
         )
@@ -399,11 +432,7 @@ class VortexFormat(FormatHandler):
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
         """Discover row counts through the supplied storage backend."""
-        if _vortex is None:
-            raise RuntimeError(
-                "Discovering Vortex datasets requires the 'vortex-data' package. "
-                + 'Install with: pip install "zephon[vortex]"'
-            )
+        _require_vortex()
 
         entries = sorted(
             name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)

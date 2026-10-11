@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-vortex = pytest.importorskip("vortex.io", reason="vortex-data not installed")
+pytest.importorskip("vortex.io", reason="vortex-data not installed")
 import vortex
 
 from zephon._internal.io.formats.vortex import VortexFormat
@@ -20,8 +20,6 @@ from zephon._internal.io.types import (
     ShardFile,
     ShardLocator,
 )
-
-pytestmark = pytest.mark.integration
 
 
 @pytest.mark.parametrize("indices", [[1], [1, 0, 1]])
@@ -47,7 +45,8 @@ def test_vortex_retries_eviction_but_not_corrupt_data(
     ref = LocalShardRef(raw=LocalShardFile(path=path, bytes=len(data)))
 
     class Resolver(ShardResolver):
-        calls = 0
+        def __init__(self) -> None:
+            self.calls = 0
 
         def resolve(
             self, locator: ShardLocator, *, blocking: bool = True

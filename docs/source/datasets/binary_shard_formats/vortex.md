@@ -60,8 +60,11 @@ shard to be created.
 Numeric lists without null elements are returned as read-only NumPy arrays, preserving
 their dtype and fixed-size nested shapes. They share Arrow buffers where possible;
 boolean arrays require unpacking. Returned arrays remain valid after the reader closes.
-Call `.copy()` on an array if you need to modify it. Numeric scalar columns without nulls
-preserve their NumPy dtype; strings, bytes and scalar booleans remain Python values.
+Call `.copy()` on an array if you need to modify it or pass it to `torch.from_numpy`
+as a writable tensor. Duplicate rows can share read-only buffers; process transport
+may copy those buffers into writable shared memory, so writability after transport
+is not guaranteed either way. Numeric scalar values preserve their NumPy dtype even
+alongside null rows; strings, bytes and scalar booleans remain Python values.
 Lists containing null elements or nested variable-length lists use Python lists:
 `[1, None]` retains the missing element, and `[[1, 2], [3]]` retains the uneven nesting.
 Neither fits a plain numeric NumPy array without changing its representation. A null
@@ -70,7 +73,7 @@ the numeric dtype and avoids creating a Python object for each element.
 Ordinary Vortex columns do not identify whether the writer originally used NumPy or
 Torch, so Zephon does not automatically reconstruct Torch tensors.
 
-**Read caches.** Each store retains up to 256 parsed file footers and shares a 64 MiB
+**Read caches.** Each fetch replica's store retains up to 256 parsed file footers and shares a 64 MiB
 in-memory cache of encoded segments across its Vortex shards. Both caches survive the
 temporary readers used for separate fetch groups and are cleared when the store closes.
 The segment cache saves repeat reads of encoded bytes; it does not cache decoded samples.
@@ -92,14 +95,23 @@ io_options = StoreOptions(
 
 The equivalent dictionary accepts human-readable sizes, for example
 `{"vortex": {"segment_cache_bytes": "64mb", "metadata_cache_entries": 256}}`.
-Set either limit to zero to disable that cache. The segment budget is per store in each
-process, not shared across worker processes. It accounts for retained segment bytes,
+Set either limit to zero to disable that cache. Each `FetchOp` replica has its own store,
+including replicas in the same process: four replicas can retain 256 MiB of encoded
+segments and 1,024 footers with the defaults. Replicas do not share cache hits or budgets.
+The segment limit accounts for retained segment bytes,
 not total process memory: cache overhead, footers, decoded outputs and in-flight reads
 are additional, and Vortex applies cache evictions asynchronously. The footer limit is
 an entry count, not a byte budget.
 
+Shard contents must remain immutable during reads. Cache keys detect changes completed
+before a reader opens; they do not provide an atomic snapshot across `stat` and native
+open. Eviction can atomically replace a shard with identical bytes. Replacing it with
+different content while a store is reading it is unsupported.
+
 Zephon limits Vortex's process-wide runtime to one background worker when the Vortex
-format is first loaded. Set `ZEPHON_VORTEX_THREADS` before using the format: a positive
-integer changes that limit, and `0` leaves the runtime setting untouched. The cap applies
+format is first loaded unless `VORTEX_MAX_THREADS` is explicitly set. Set
+`ZEPHON_VORTEX_THREADS` before using the format to override either default: a positive
+integer changes the limit, and a non-positive value leaves the runtime untouched. The cap applies
 to discovery and sample reads without being reapplied for each file open. General worker
-initialization also applies the configured limit through Zephon's thread suppression.
+initialization also applies the configured limit when Vortex is already loaded, without
+importing this optional dependency into workers that do not use it.
