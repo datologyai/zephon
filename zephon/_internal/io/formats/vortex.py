@@ -224,11 +224,14 @@ def _numeric_values(array: Any) -> np.ndarray | None:
 
 
 def _column_values(array: Any) -> list[Any] | np.ndarray:
-    """Return numeric row arrays as views; preserve nulls and nonnumeric values.
+    """Return numeric rows as typed NumPy arrays where possible.
 
-    Views keep their Arrow buffers alive after the shard closes. Scalars such
-    as strings and booleans retain their Python representation. Inner nulls or
-    irregular nested data use Arrow's lossless Python representation.
+    Null-free numeric lists preserve dtype and fixed-size nested shapes, using
+    views of Arrow buffers when possible; boolean buffers require unpacking.
+    Views remain valid after the shard closes. Rows containing null elements
+    or nested variable-length lists use Python lists to preserve None and
+    nesting without coercing numeric values or creating NumPy object arrays.
+    A null row stays None. Strings, bytes, and scalar booleans stay Python values.
     """
     pa = require_pyarrow()
     kind = array.type
@@ -303,7 +306,6 @@ class VortexShardOpener:
             raise RuntimeError(
                 'Opening Vortex shards requires: pip install "zephon[vortex]"'
             )
-        cap_vortex_threads()
         self._metadata_cache = (
             MetadataCache[str, Any](options.metadata_cache_entries)
             if options.metadata_cache_entries

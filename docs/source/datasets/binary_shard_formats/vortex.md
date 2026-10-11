@@ -57,11 +57,16 @@ Note that Vortex handles compression operations within the file format itself, s
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
 
-Numeric list columns are returned as read-only NumPy arrays, preserving their numeric
-dtype and fixed-size nested shapes. These views remain valid after the reader closes.
-Call `.copy()` on an array if you need to modify it. Numeric scalars preserve their NumPy
-dtype; strings, bytes and scalar booleans remain Python values. Inner nulls and irregular
-nested values fall back to Python representations so their contents are preserved.
+Numeric lists without null elements are returned as read-only NumPy arrays, preserving
+their dtype and fixed-size nested shapes. They share Arrow buffers where possible;
+boolean arrays require unpacking. Returned arrays remain valid after the reader closes.
+Call `.copy()` on an array if you need to modify it. Numeric scalar columns without nulls
+preserve their NumPy dtype; strings, bytes and scalar booleans remain Python values.
+Lists containing null elements or nested variable-length lists use Python lists:
+`[1, None]` retains the missing element, and `[[1, 2], [3]]` retains the uneven nesting.
+Neither fits a plain numeric NumPy array without changing its representation. A null
+row remains `None`. Both conversion paths preserve values; the NumPy path also retains
+the numeric dtype and avoids creating a Python object for each element.
 Ordinary Vortex columns do not identify whether the writer originally used NumPy or
 Torch, so Zephon does not automatically reconstruct Torch tensors.
 

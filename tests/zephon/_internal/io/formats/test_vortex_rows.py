@@ -54,7 +54,7 @@ def test_fixed_size_slice_uses_only_selected_rows() -> None:
     assert not rows.flags.writeable
 
 
-def test_inner_nulls_and_nonnumeric_lists_are_lossless() -> None:
+def test_inner_nulls_and_nonnumeric_lists_preserve_values() -> None:
     numbers = _column_values(pa.array([[1, None], [2, 3]], type=pa.list_(pa.int16())))
     assert numbers[0] == [1, None]
     assert numbers[1].tolist() == [2, 3]

@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import os
-import sys
-import threading
 
 # Env vars that suppress internal thread pools in numerical libraries.
 # Shared between suppress_library_threads() (set at runtime) and the
@@ -24,47 +22,26 @@ THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
     "ARROW_NUM_THREADS": "1",
 }
 
-_vortex_thread_settings: tuple[int, int] | None = None
-_vortex_thread_lock = threading.Lock()
-
-
-def _reset_vortex_threads_after_fork() -> None:
-    """Discard a lock that another parent thread may have held during fork."""
-    global _vortex_thread_lock, _vortex_thread_settings
-    _vortex_thread_lock = threading.Lock()
-    _vortex_thread_settings = None
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_vortex_threads_after_fork)
-
 
 def cap_vortex_threads() -> None:
-    """Cap an imported Vortex runtime once per process and requested setting.
+    """Pin Vortex's process-wide background worker pool.
 
     ``ZEPHON_VORTEX_THREADS`` defaults to one background worker. As with the
     Arrow cap, zero leaves the library's setting untouched. The Vortex format
-    also calls this before its first read, covering workers that do not call
-    ``suppress_library_threads``. Other formats do not import Vortex here.
+    also calls this before opening files, covering direct reads and discovery
+    that do not go through ``suppress_library_threads``.
     """
-    global _vortex_thread_settings
-    vortex = sys.modules.get("vortex")
-    set_workers = getattr(vortex, "set_worker_threads", None)
-    if set_workers is None:
-        # A concurrent import can register the module before exporting its API.
-        # The Vortex format calls this again once that import has completed.
-        return
     n = int(os.environ.get("ZEPHON_VORTEX_THREADS", "1"))
     if n < 0:
         raise ValueError("ZEPHON_VORTEX_THREADS cannot be negative")
     if n == 0:
         return
-    settings = (os.getpid(), n)
-    if _vortex_thread_settings != settings:
-        with _vortex_thread_lock:
-            if _vortex_thread_settings != settings:
-                set_workers(n)
-                _vortex_thread_settings = settings
+    try:
+        import vortex
+
+        vortex.set_worker_threads(n)
+    except Exception:
+        pass
 
 
 def cap_arrow_threads() -> None:
