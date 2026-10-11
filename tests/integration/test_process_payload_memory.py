@@ -440,31 +440,3 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         assert not record.payload["small_t"].is_shared()
     finally:
         runner.close()
-
-
-def test_training_policies_after_coalesced_transport() -> None:
-    """EOS loss masking works after SHM transport and lazy payload resolution."""
-    import pickle
-    from multiprocessing.reduction import ForkingPickler
-
-    from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
-    from zephon._internal.utils.shm_coalesce import prepare_microbatch
-    from zephon.types import SampleBatch
-
-    tokens = torch.tensor([1, 10, 2, 1, 20, 2])
-    batch = SampleBatch(
-        records=(SampleRecord(meta=_mk_record(0).meta, payload={"input_ids": tokens}),),
-    )
-    coalesced = prepare_microbatch(
-        [batch],
-        PayloadMemoryPolicy(min_item_bytes=0, min_new_allocation_bytes=0),
-        copy_records=True,
-    )
-    [restored_batch] = pickle.loads(ForkingPickler.dumps(coalesced))
-    assert isinstance(restored_batch.records[0].payload, LazyPayload)
-    resolve_lazy_payloads([restored_batch])
-    assert restored_batch.to_training(
-        return_labels=True,
-        eos_mask_loss=True,
-        eos_token_id=2,
-    )["labels"].tolist() == [[10, 2, -100, 20, 2]]

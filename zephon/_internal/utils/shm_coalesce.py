@@ -142,6 +142,8 @@ DEFAULT_SHM_COMPACT_ABOVE_RATIO = 8.0
 DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES = 16 * 1024 * 1024
 DEFAULT_SHM_MAX_COALESCED_BYTES = 64 * 1024 * 1024
 
+_TORCH_COPY_LOOP_MIN_MEAN_BYTES = 256 * 1024
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PayloadMemoryPolicy:
@@ -823,7 +825,7 @@ class _BufferPayload(_LeafDescriptor):
     dtype_key: str
     numel: int
     nbytes: int
-    shared_nbytes: int | None = None
+    shared: bool = False
     shared_storage: Any = None  # Forwardable backing; logical Torch views must copy.
     result: Any = None
     copy_source: Any = None
@@ -903,9 +905,7 @@ class _BufferPlan:
 
     def inline(self, value: _BufferPayload) -> Any:
         """Choose ordinary serialization or a descriptor that bypasses SHM reduction."""
-        result = _inline_buffer(
-            value.source, value.slot, value.shared_nbytes is not None
-        )
+        result = _inline_buffer(value.source, value.slot, value.shared)
         if result is not value.source:
             self.changed = True
         return result
@@ -993,7 +993,7 @@ class _BufferPlan:
             if (
                 len(values) == 1
                 and not self.copy_records
-                and value.shared_nbytes is None
+                and not value.shared
                 and isinstance(value.slot, _TensorSlot)
                 and value.source.is_contiguous()
                 and not value.source.is_conj()
@@ -1017,7 +1017,7 @@ class _BufferPlan:
         """
         leaf, storage = value.source, value.shared_storage
         if isinstance(value.slot, _TensorSlot):
-            if not leaf.is_contiguous() or leaf.is_conj() or leaf.is_neg():
+            if not leaf.is_contiguous():
                 return leaf
             offset, dtype = leaf.storage_offset(), leaf.dtype
         elif isinstance(value.slot, _NdarraySlot):
@@ -1068,7 +1068,7 @@ class _BufferPlan:
                 source = source.detach()
             items.append(source)
         dtype = values[0].dtype_key
-        optional = any(value.shared_nbytes is not None for value in values)
+        optional = any(value.shared for value in values)
         try:
             buffer = _build_shm_buffer(items, dtype, retry=not optional)
         except Exception as exc:
@@ -1117,7 +1117,7 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
             dtype,
             numel,
             numel * leaf.element_size(),
-            storage.nbytes() if shared else None,
+            shared,
             storage if forwardable else None,
         )
     if isinstance(leaf, np.ndarray):
@@ -1133,14 +1133,13 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
             dtype,
             leaf.size,
             leaf.nbytes,
-            storage.nbytes() if storage is not None else None,
+            storage is not None,
             storage,
         )
     if isinstance(leaf, (bytes, bytearray, memoryview, _ShmBytes312)):
         storage = (
             leaf._buffer.untyped_storage() if isinstance(leaf, _ShmBytes312) else None
         )
-        shared = storage.nbytes() if storage is not None else None
         size = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
         return _BufferPayload(
             leaf,
@@ -1148,7 +1147,7 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
             _BYTES_DTYPE_KEY,
             size,
             size,
-            shared,
+            storage is not None,
             storage,
         )
     if type(leaf) is list and leaf:
@@ -1312,11 +1311,12 @@ def _build_shm_buffer(items: list[Any], dtype_key: str, *, retry: bool = True) -
         dtype = items[0].dtype
         # Allocate directly in SHM, then write sub-tensors in.
         buf = allocate(total_numel, dtype)
-        # cat amortizes per-tensor overhead for small copies. Individual copy_
-        # calls speed up large first writes into freshly allocated SHM on Linux.
+        # cat amortizes per-tensor overhead for small copies. The copy_ threshold
+        # is tuned for large first writes into fresh SHM on Linux.
         if (
             len(items) > 1
-            and total_numel * items[0].element_size() < len(items) * 256 * 1024
+            and total_numel * items[0].element_size()
+            < len(items) * _TORCH_COPY_LOOP_MIN_MEAN_BYTES
             and all(t.is_contiguous() for t in items)
         ):
             flat = [t if t.ndim == 1 else t.view(-1) for t in items]

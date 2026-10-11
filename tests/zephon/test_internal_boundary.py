@@ -29,7 +29,6 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.delay:DelayById",
             "zephon._internal.runners.process:ProcessStageRunner",
             "zephon._internal.runners:process",
-            "zephon._internal.stream:LazyPayload",
             "zephon._internal.stream:resolve_lazy_payloads",
             "zephon._internal.utils.shm_coalesce:PayloadMemoryPolicy",
             "zephon._internal.utils.shm_coalesce:_ShmBytes",

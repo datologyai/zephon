@@ -2684,3 +2684,24 @@ def test_inline_empty_and_singleton_tensors_with_nonunit_strides() -> None:
             resolve_lazy_payloads([record])
             torch.testing.assert_close(record.payload, source)
             assert not record.payload.is_shared()
+
+
+def test_training_policies_after_coalesced_transport() -> None:
+    """EOS loss masking works after SHM transport and lazy payload resolution."""
+    tokens = torch.tensor([1, 10, 2, 1, 20, 2])
+    batch = SampleBatch(
+        records=(SampleRecord(meta=_meta(0), payload={"input_ids": tokens}),),
+    )
+    coalesced = prepare_microbatch(
+        [batch],
+        shm_coalesce.PayloadMemoryPolicy(min_item_bytes=0, min_new_allocation_bytes=0),
+        copy_records=True,
+    )
+    [restored_batch] = pickle.loads(ForkingPickler.dumps(coalesced))
+    assert isinstance(restored_batch.records[0].payload, LazyPayload)
+    resolve_lazy_payloads([restored_batch])
+    assert restored_batch.to_training(
+        return_labels=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+    )["labels"].tolist() == [[10, 2, -100, 20, 2]]
