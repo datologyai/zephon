@@ -1312,7 +1312,13 @@ def _build_shm_buffer(items: list[Any], dtype_key: str, *, retry: bool = True) -
         dtype = items[0].dtype
         # Allocate directly in SHM, then write sub-tensors in.
         buf = allocate(total_numel, dtype)
-        if len(items) > 1 and all(t.is_contiguous() for t in items):
+        # cat amortizes per-tensor overhead for small copies; copy_ is faster
+        # for large first writes into freshly allocated SHM.
+        if (
+            len(items) > 1
+            and total_numel * items[0].element_size() < len(items) * 256 * 1024
+            and all(t.is_contiguous() for t in items)
+        ):
             flat = [t if t.ndim == 1 else t.view(-1) for t in items]
             torch.cat(flat, out=buf)
             return buf
