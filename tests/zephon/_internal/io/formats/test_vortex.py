@@ -192,11 +192,13 @@ def test_vortex_shard_getsamples_random_order(
     rows = [{"v": i, "text": f"row_{i}"} for i in range(5000)]
     path = tmp_path / "shard.vortex"
     write_vortex(path, rows)
-    indices = list(range(len(rows)))
-    random.Random(0).shuffle(indices)
+    indices = random.Random(0).choices(range(len(rows)), k=64)
+    # Include distant boundaries and guarantee non-consecutive duplicates.
+    indices.extend([len(rows) - 1, 0, indices[0]])
     shard = VortexShard(path)
     try:
-        assert shard.getsamples(indices) == [rows[i] for i in indices]
+        for requested in (sorted(indices), indices):
+            assert shard.getsamples(requested) == [rows[i] for i in requested]
     finally:
         shard.close()
 
@@ -481,6 +483,7 @@ class _RangeOnlyStorage(StorageBackend):
 
     def listdir(self, path: str) -> list[str]:
         assert path == self.root
+        # Unsorted on purpose: discovery must sort.
         return [key.rsplit("/", 1)[-1] for key in reversed(self.files)]
 
     def stat(self, path: str) -> dict[str, int]:
