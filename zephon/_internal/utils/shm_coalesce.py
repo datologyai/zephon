@@ -59,7 +59,7 @@ Process-stage decisions (also used when forwarding a resolved payload)::
 Compaction copies directly into the final destination, together with eligible
 private values. Useful bytes count views in this message; other references can
 keep an old allocation alive. Unsupported values use their normal serialization.
-The final MTP queue does not use this policy.
+The final MTP queue does not use this policy at the moment.
 
 Strategy (single memcpy):
 
