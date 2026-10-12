@@ -1407,276 +1407,114 @@ if _has_attrs:
         label: str
 
 
+@pytest.mark.parametrize(
+    "struct_type",
+    [
+        DCSample,
+        pytest.param(
+            PydSample if _has_pydantic else None,
+            marks=pytest.mark.skipif(
+                not _has_pydantic, reason="pydantic not installed"
+            ),
+        ),
+        pytest.param(
+            AttrsSample if _has_attrs else None,
+            marks=pytest.mark.skipif(not _has_attrs, reason="attrs not installed"),
+        ),
+    ],
+    ids=["dataclass", "pydantic", "attrs"],
+)
+class TestStructRoundTrip:
+    def test_root_and_dict_payloads(self, struct_type: type[Any]) -> None:
+        tensor = torch.arange(6, dtype=torch.float32)
+        root, nested = _transport(
+            struct_type(image=tensor, label="root"),
+            {"sample": struct_type(image=tensor + 1, label="nested"), "extra": 42},
+        )
+        assert nested["extra"] == 42
+        for actual, expected, label in (
+            (root, tensor, "root"),
+            (nested["sample"], tensor + 1, "nested"),
+        ):
+            assert isinstance(actual, struct_type)
+            torch.testing.assert_close(actual.image, expected)
+            assert actual.label == label
+            assert actual.image.is_shared()
+
+    def test_no_tensors_stays_inline(self, struct_type: type[Any]) -> None:
+        prepared = _prepare(struct_type(image="not_a_tensor", label="text"))
+        assert not prepared.buffers
+
+    def test_multiple_records_survive_lazy_forwarding(
+        self, struct_type: type[Any]
+    ) -> None:
+        prepared = _prepare(
+            *(
+                struct_type(
+                    image=(torch.arange(5, dtype=torch.float32) + i)[:4], label=f"s{i}"
+                )
+                for i in range(5)
+            )
+        )
+        assert len(prepared.buffers) == 1
+        restored = prepared
+        for _ in range(2):
+            restored = _round_trip(restored)
+            assert all(isinstance(r.payload, LazyPayload) for r in restored)
+        resolve_lazy_payloads(restored)
+        assert len(restored) == 5
+        for i, record in enumerate(restored):
+            assert isinstance(record.payload, struct_type)
+            torch.testing.assert_close(record.payload.image, torch.arange(4.0) + i)
+            assert record.payload.label == f"s{i}"
+            assert record.payload.image.is_shared()
+
+
 class TestStructDataclass:
-    """Dataclass payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_dataclass_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="cat")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, DCSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-        assert restored[0].payload.image.is_shared()
-
-    def test_dataclass_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": DCSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], DCSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["sample"].label == "dog"
-        assert restored[0].payload["extra"] == 42
-        assert restored[0].payload["sample"].image.is_shared()
-
     def test_nested_dataclasses(self) -> None:
-        t = torch.tensor([1.0, 2.0, 3.0])
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=DCNested(inner=DCSample(image=t, label="nested"), score=0.95),
-            ),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, DCNested)
-        assert isinstance(p.inner, DCSample)
-        torch.testing.assert_close(p.inner.image, t)
-        assert p.inner.label == "nested"
-        assert p.score == 0.95
-        assert p.inner.image.is_shared()
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        [actual] = _transport(
+            DCNested(inner=DCSample(image=tensor, label="nested"), score=0.95)
+        )
+        assert isinstance(actual, DCNested)
+        assert isinstance(actual.inner, DCSample)
+        torch.testing.assert_close(actual.inner.image, tensor)
+        assert actual.inner.label == "nested"
+        assert actual.score == 0.95
+        assert actual.inner.image.is_shared()
 
     def test_dataclass_with_post_init(self) -> None:
-        t = torch.tensor([10.0, 20.0])
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCWithPostInit(values=t, tag="test")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, DCWithPostInit)
-        torch.testing.assert_close(p.values, t)
-        assert p.tag == "test"
-        assert p.description == "tag=test"
-        assert p.values.is_shared()
-
-    def test_dataclass_no_tensors_stays_inline(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=DCSample(image="not_a_tensor", label="text"),
-            ),
-        ]
-        assert not prepare_microbatch(records, _policy()).buffers
-
-    def test_dataclass_multiple_records(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(i),
-                payload=DCSample(
-                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
-                ),
-            )
-            for i in range(5)
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-        assert len(coalesced.buffers) == 1
-
-        restored = _round_trip_resolved(coalesced)
-        assert len(restored) == 5
-        for i, rec in enumerate(restored):
-            assert isinstance(rec.payload, DCSample)
-            torch.testing.assert_close(
-                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
-            )
-            assert rec.payload.label == f"s{i}"
-
-    def test_dataclass_lazy_payload_survives_repickling(self) -> None:
-        t = torch.arange(5, dtype=torch.float32)[:4]
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="re")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-        assert coalesced.buffers
-
-        # Hop 1
-        restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
-
-        # Hop 2
-        blob2 = _forking_round_trip(restored1)
-        restored2 = pickle.loads(blob2)
-        assert isinstance(restored2[0].payload, LazyPayload)
-
-        # Resolve
-        resolve_lazy_payloads(restored2)
-        assert isinstance(restored2[0].payload, DCSample)
-        torch.testing.assert_close(restored2[0].payload.image, t)
-        assert restored2[0].payload.image.is_shared()
+        tensor = torch.tensor([10.0, 20.0])
+        [actual] = _transport(DCWithPostInit(values=tensor, tag="test"))
+        assert isinstance(actual, DCWithPostInit)
+        torch.testing.assert_close(actual.values, tensor)
+        assert actual.tag == "test"
+        assert actual.description == "tag=test"
+        assert actual.values.is_shared()
 
 
 @pytest.mark.skipif(not _has_pydantic, reason="pydantic not installed")
 class TestStructPydantic:
-    """Pydantic model payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_pydantic_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="cat")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, PydSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-        assert restored[0].payload.image.is_shared()
-
-    def test_pydantic_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": PydSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], PydSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["extra"] == 42
-        assert restored[0].payload["sample"].image.is_shared()
-
     def test_nested_pydantic(self) -> None:
-        t = torch.tensor([1.0, 2.0, 3.0])
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=PydNested(inner=PydSample(image=t, label="nested"), score=0.95),
-            ),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, PydNested)
-        assert isinstance(p.inner, PydSample)
-        torch.testing.assert_close(p.inner.image, t)
-        assert p.inner.label == "nested"
-        assert p.score == 0.95
-        assert p.inner.image.is_shared()
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        [actual] = _transport(
+            PydNested(inner=PydSample(image=tensor, label="nested"), score=0.95)
+        )
+        assert isinstance(actual, PydNested)
+        assert isinstance(actual.inner, PydSample)
+        torch.testing.assert_close(actual.inner.image, tensor)
+        assert actual.inner.label == "nested"
+        assert actual.score == 0.95
+        assert actual.inner.image.is_shared()
 
     def test_pydantic_with_computed_field(self) -> None:
-        t = torch.tensor([10.0, 20.0])
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydWithComputed(values=t, tag="test")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, PydWithComputed)
-        torch.testing.assert_close(p.values, t)
-        assert p.tag == "test"
-        assert p.description == "tag=test"
-        assert p.values.is_shared()
-
-    def test_pydantic_no_tensors_stays_inline(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=PydSample(image="not_a_tensor", label="text"),
-            ),
-        ]
-        assert not prepare_microbatch(records, _policy()).buffers
-
-    def test_pydantic_multiple_records(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(i),
-                payload=PydSample(
-                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
-                ),
-            )
-            for i in range(5)
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-        assert coalesced.buffers
-
-        restored = _round_trip_resolved(coalesced)
-        assert len(restored) == 5
-        for i, rec in enumerate(restored):
-            assert isinstance(rec.payload, PydSample)
-            torch.testing.assert_close(
-                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
-            )
-
-    def test_pydantic_lazy_payload_survives_repickling(self) -> None:
-        t = torch.arange(5, dtype=torch.float32)[:4]
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="re")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-        assert coalesced.buffers
-
-        restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
-
-        blob2 = _forking_round_trip(restored1)
-        restored2 = pickle.loads(blob2)
-        resolve_lazy_payloads(restored2)
-        assert isinstance(restored2[0].payload, PydSample)
-        torch.testing.assert_close(restored2[0].payload.image, t)
-        assert restored2[0].payload.image.is_shared()
-
-
-@pytest.mark.skipif(not _has_attrs, reason="attrs not installed")
-class TestStructAttrs:
-    """Attrs class payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_attrs_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=AttrsSample(image=t, label="cat")),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, AttrsSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-        assert restored[0].payload.image.is_shared()
-
-    def test_attrs_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": AttrsSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = prepare_microbatch(records, _policy(0))
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], AttrsSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["extra"] == 42
-        assert restored[0].payload["sample"].image.is_shared()
+        tensor = torch.tensor([10.0, 20.0])
+        [actual] = _transport(PydWithComputed(values=tensor, tag="test"))
+        assert isinstance(actual, PydWithComputed)
+        torch.testing.assert_close(actual.values, tensor)
+        assert actual.tag == "test"
+        assert actual.description == "tag=test"
+        assert actual.values.is_shared()
 
 
 @pytest.mark.skipif(

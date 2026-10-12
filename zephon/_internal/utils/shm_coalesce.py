@@ -1345,16 +1345,8 @@ def _build_shm_buffer(items: list[Any], dtype_key: str, *, retry: bool = True) -
             # creating a Python destination view for every source.
             np.concatenate(items, axis=None, out=np_buf, casting="no")
             return buf
-        offset = 0
-        for array in items:
-            n = array.size
-            if n > 0:
-                np.copyto(
-                    np_buf[offset : offset + n].reshape(array.shape),
-                    array,
-                    casting="no",
-                )
-            offset += n
+        array = items[0]
+        np.copyto(np_buf.reshape(array.shape), array, casting="no")
         return buf
     else:
         total_numel = sum(t.numel() for t in items)
