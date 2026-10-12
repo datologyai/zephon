@@ -57,21 +57,11 @@ Note that Vortex handles compression operations within the file format itself, s
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
 
-Numeric lists without null elements are returned as read-only NumPy arrays, preserving
-their dtype and fixed-size nested shapes. They share Arrow buffers where possible;
-boolean arrays require unpacking. Returned arrays remain valid after the reader closes.
-Call `.copy()` on an array if you need to modify it or pass it to `torch.from_numpy`
-as a writable tensor. Duplicate rows can share read-only buffers; process transport
-may copy those buffers into writable shared memory, so writability after transport
-is not guaranteed either way. Numeric scalar values preserve their NumPy dtype even
-alongside null rows; strings, bytes and scalar booleans remain Python values.
-Lists containing null elements or nested variable-length lists use Python lists:
-`[1, None]` retains the missing element, and `[[1, 2], [3]]` retains the uneven nesting.
-Neither fits a plain numeric NumPy array without changing its representation. A null
-row remains `None`. Both conversion paths preserve values; the NumPy path also retains
-the numeric dtype and avoids creating a Python object for each element.
-Ordinary Vortex columns do not identify whether the writer originally used NumPy or
-Torch, so Zephon does not automatically reconstruct Torch tensors.
+Vortex and Parquet share the same [sample payload contract](../parquet.md#sample-payloads).
+A single top-level column returns its value directly; multiple columns return a
+dictionary. Numeric arrays are read-only NumPy arrays with their original dtype and
+fixed-size shape, and remain valid after the reader closes. Numeric lists containing
+null elements use a Python-list fallback. Call `.copy()` before mutating an array.
 
 **Read caches.** Each fetch replica's store retains up to 256 parsed file footers and shares a 64 MiB
 in-memory cache of encoded segments across its Vortex shards. Both caches survive the

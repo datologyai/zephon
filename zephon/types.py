@@ -63,12 +63,14 @@ from zephon._internal.utils.tensor_utils import (
 )
 
 if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type checker.
+    from numpy import generic as _NumpyScalar
     from numpy.typing import NDArray
     from torch import Tensor
 
     SamplePayloadArray: TypeAlias = NDArray[Any] | Tensor
 else:  # Runtime fallback keeps optional dependencies optional.
     SamplePayloadArray = Any  # type: ignore[assignment]
+    _NumpyScalar = Any  # type: ignore[assignment]
 
 DatasetId = int
 ShardId = int
@@ -930,7 +932,7 @@ class SampleBatch:
 SampleNumeric: TypeAlias = int | float | complex
 
 SamplePayloadAtom: TypeAlias = (
-    bytes | memoryview | str | SampleNumeric | SamplePayloadArray
+    bytes | memoryview | str | SampleNumeric | _NumpyScalar | SamplePayloadArray | None
 )
 SamplePayload: TypeAlias = (
     SamplePayloadAtom | list["SamplePayload"] | dict[Any, "SamplePayload"]

@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 import numpy as np
 
-from zephon._internal.io.formats.arrow_rows import require_pyarrow
+from zephon._internal.io.formats.arrow_rows import (
+    arrow_table_to_samples,
+    require_pyarrow,
+    samples_from_columns,
+)
 from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
 from zephon._internal.io.formats.metadata_cache import MetadataCache
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
@@ -32,6 +36,7 @@ if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
     from zephon.io.options import StoreOptions, VortexOptions
+    from zephon.types import SamplePayload
 
 try:
     import vortex as _vortex
@@ -165,7 +170,7 @@ class VortexShard(RandomAccessShard):
         self._export_type: Any | None = None
         self._text_only = False
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def __getitem__(self, index: int) -> "SamplePayload":
         return self.getsamples([index])[0]
 
     def __len__(self) -> int:
@@ -175,7 +180,7 @@ class VortexShard(RandomAccessShard):
         self._file = None
         self._export_type = None
 
-    def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
+    def getsamples(self, indices: list[int]) -> list["SamplePayload"]:
         """Bulk read rows in request order, preserving duplicate indices."""
         if not indices:
             return []
@@ -225,7 +230,9 @@ class VortexShard(RandomAccessShard):
                     # avoids exporting an entire compressed string dictionary.
                     row = batch.scalar_at(0).as_py()
                     if row is not None:
-                        return [dict(row) for _ in positions]
+                        return samples_from_columns(
+                            {name: [value] for name, value in row.items()}, positions
+                        )
                     # A null struct still needs Arrow's table row semantics.
                 # List slices can retain a whole compressed child column. Vortex's
                 # ListView exporter trims unused values before decoding, without
@@ -235,7 +242,7 @@ class VortexShard(RandomAccessShard):
                 )
             else:
                 arrow_table = batch.to_arrow_table()
-        return _rows_from_table(arrow_table, positions)
+        return arrow_table_to_samples(arrow_table, positions)
 
 
 def _list_view_type(kind: Any, pa: Any) -> Any:
@@ -255,126 +262,6 @@ def _list_view_type(kind: Any, pa: Any) -> Any:
             kind.list_size,
         )
     return kind
-
-
-def _rows_from_table(table: Any, positions: Iterable[int]) -> list[dict[str, Any]]:
-    """Materialize selected table positions without copying numeric row buffers."""
-    pa = require_pyarrow()
-    columns: dict[str, list[Any] | np.ndarray] = {}
-    for name in table.column_names:
-        column = table.column(name)
-        if column.num_chunks == 1:
-            columns[name] = _column_values(column.chunk(0), pa)
-        else:
-            columns[name] = [
-                value for chunk in column.chunks for value in _column_values(chunk, pa)
-            ]
-    return [
-        {name: values[pos] for name, values in columns.items()} for pos in positions
-    ]
-
-
-def _is_numeric_type(kind: Any, pa: Any) -> bool:
-    return (
-        pa.types.is_integer(kind)
-        or pa.types.is_floating(kind)
-        or pa.types.is_boolean(kind)
-        or (pa.types.is_fixed_size_list(kind) and _is_numeric_type(kind.value_type, pa))
-    )
-
-
-def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
-    """Expose numeric buffers and nested fixed-size shapes without Python boxing."""
-    if array.null_count:
-        return None
-    kind = array.type
-    if (
-        pa.types.is_integer(kind)
-        or pa.types.is_floating(kind)
-        or pa.types.is_boolean(kind)
-    ):
-        values = array.to_numpy(zero_copy_only=False)
-        # Boolean buffers need unpacking. Keep their mutability consistent with
-        # zero-copy numeric views, including when duplicate rows share a view.
-        values.setflags(write=False)
-        return values
-    if pa.types.is_fixed_size_list(kind):
-        size = kind.list_size
-        child = array.values.slice(array.offset * size, len(array) * size)
-        values = _numeric_values(child, pa)
-        if values is not None:
-            return values.reshape((len(array), size, *values.shape[1:]))
-    return None
-
-
-def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
-    """Return numeric rows as typed NumPy arrays where possible.
-
-    Null-free numeric lists preserve dtype and fixed-size nested shapes, using
-    views of Arrow buffers when possible; boolean buffers require unpacking.
-    Views remain valid after the shard closes. Rows containing null elements
-    or nested variable-length lists use Python lists to preserve None and
-    nesting without coercing numeric values or creating NumPy object arrays.
-    A null row stays None. Strings, bytes, and scalar booleans stay Python values.
-    """
-    kind = array.type
-    is_fixed = pa.types.is_fixed_size_list(kind)
-    is_view = pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind)
-    is_list = (
-        is_fixed or is_view or pa.types.is_list(kind) or pa.types.is_large_list(kind)
-    )
-    if not is_list:
-        if pa.types.is_integer(kind) or pa.types.is_floating(kind):
-            if not array.null_count:
-                return array.to_numpy(zero_copy_only=False)
-            # Filling only nullable scalar columns preserves dtype without NumPy's
-            # usual integer-to-float/null coercion. Validity restores None per row.
-            numbers = array.fill_null(0).to_numpy(zero_copy_only=False)
-            valid = array.is_valid().to_numpy(zero_copy_only=False)
-            return [
-                number if present else None for number, present in zip(numbers, valid)
-            ]
-        return array.to_pylist()
-
-    if not _is_numeric_type(kind.value_type, pa):
-        return array.to_pylist()
-
-    numbers = _numeric_values(array.values, pa)
-    if numbers is None:
-        # Null parents can have null child slots even when every valid row is
-        # numeric. Convert those rows independently rather than boxing them all.
-        rows: list[Any] = []
-        for scalar in array:
-            if not scalar.is_valid:
-                rows.append(None)
-                continue
-            values = _numeric_values(scalar.values, pa)
-            rows.append(values if values is not None else scalar.as_py())
-        return rows
-
-    if is_fixed and not array.null_count:
-        start = array.offset * kind.list_size
-        return numbers[start : start + len(array) * kind.list_size].reshape(
-            (len(array), kind.list_size, *numbers.shape[1:])
-        )
-    valid = (
-        array.is_valid().to_numpy(zero_copy_only=False) if array.null_count else None
-    )
-    if is_fixed:
-        starts = (np.arange(len(array)) + array.offset) * kind.list_size
-        ends = starts + kind.list_size
-    else:
-        offsets = array.offsets.to_numpy(zero_copy_only=False)
-        starts = offsets if is_view else offsets[:-1]
-        ends = (
-            starts + array.sizes.to_numpy(zero_copy_only=False)
-            if is_view
-            else offsets[1:]
-        )
-    return [
-        numbers[start:end] if valid is None or valid[row] else None
-        for row, (start, end) in enumerate(zip(starts, ends))
-    ]
 
 
 def _shard_length(local_ref: LocalShardRef) -> int | None:

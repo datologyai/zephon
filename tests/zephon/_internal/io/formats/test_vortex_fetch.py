@@ -83,9 +83,7 @@ def test_store_reuses_caches_across_fetch_groups(
             shard, _ = store.for_dataset(dataset_id).open(0)
             for indices in ([2, 0, 2], [1], [3, 1]):
                 rows, _ = shard.getsamples(indices)
-                assert [row["value"] for row in rows] == [
-                    dataset_id * 10 + index for index in indices
-                ]
+                assert rows == [dataset_id * 10 + index for index in indices]
         assert len(calls) == 6  # Readers are still temporary; their caches persist.
         assert ["footer" in call for call in calls] == (
             [False, True, True, False, True, True] if metadata_entries else [False] * 6
@@ -128,7 +126,7 @@ def test_footer_eviction_and_replaced_file_invalidate_reuse(
     def read(path: Path) -> int:
         reader = opener.open_shard(*_refs(path))
         try:
-            return reader[0]["value"]
+            return reader[0]
         finally:
             reader.close()
 

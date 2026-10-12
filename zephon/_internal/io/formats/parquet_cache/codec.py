@@ -9,9 +9,12 @@ import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
+
+if TYPE_CHECKING:
+    from zephon.types import SamplePayload
 
 _IDENTITY_METADATA_KEY = b"zephon.decoded_rg.identity"
 _VERSION_METADATA_KEY = b"zephon.decoded_rg.payload_version"
@@ -52,7 +55,7 @@ class ArrowRGHandle:
     def take_and_materialize(
         self,
         local_indices: list[int],
-    ) -> list[dict[str, object]]:
+    ) -> list[SamplePayload]:
         if self._closed:
             raise RuntimeError("Decoded RG payload mapping is closed")
         return take_and_materialize(self._table, local_indices)

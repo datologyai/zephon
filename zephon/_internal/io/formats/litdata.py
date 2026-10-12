@@ -53,6 +53,7 @@ def _ensure_litdata_support():
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
+    from zephon.types import SamplePayload
 
 
 class _StreamingTemplateDict(dict[str, Any]):
@@ -565,7 +566,7 @@ class _LitDataShard(RandomAccessShard):
             self._chunk_bytes,
         )
 
-    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+    def getsamples(self, indices: list[int]) -> list["SamplePayload"]:
         if not indices:
             return []
         # Validate indices
@@ -582,7 +583,7 @@ class _LitDataShard(RandomAccessShard):
             self._interval.chunk_start,
             self._chunk_bytes,
         )
-        return [cast(dict[str, object], item) for item in items]
+        return cast(list["SamplePayload"], items)
 
     def close(self) -> None:
         close = getattr(self._loader, "close", None)

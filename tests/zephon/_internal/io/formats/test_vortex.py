@@ -54,7 +54,7 @@ def test_vortex_caps_threads_at_initialization_only(
             for _ in range(2):
                 shard = VortexShard(root / "data.vortex")
                 try:
-                    assert shard[0]["value"] == 1
+                    assert shard[0] == 1
                 finally:
                     shard.close()
             cap.assert_called_once_with(1)
@@ -406,12 +406,12 @@ def test_vortex_single_row_shard(tmp_path: Path) -> None:
 
     shard = VortexShard(p)
     assert len(shard) == 1
-    assert shard[0]["only"] == "row"
+    assert shard[0] == "row"
 
     # getsamples with single item
     result = shard.getsamples([0])
     assert len(result) == 1
-    assert result[0]["only"] == "row"
+    assert result[0] == "row"
 
     # Out of bounds
     with pytest.raises(IndexError):
@@ -459,12 +459,12 @@ def test_vortex_unicode_strings(tmp_path: Path) -> None:
 
     shard = VortexShard(p)
     assert len(shard) == 4
-    assert shard[0]["text"] == "Hello, 世界!"
-    assert shard[2]["text"] == "🎉🚀🔥"
+    assert shard[0] == "Hello, 世界!"
+    assert shard[2] == "🎉🚀🔥"
 
     samples = shard.getsamples([1, 3])
-    assert samples[0]["text"] == "Привет мир"
-    assert samples[1]["text"] == "café résumé naïve"
+    assert samples[0] == "Привет мир"
+    assert samples[1] == "café résumé naïve"
 
     shard.close()
 
@@ -497,11 +497,11 @@ def test_vortex_getsamples_all_rows(tmp_path: Path) -> None:
 
     # Forward order
     forward = shard.getsamples(list(range(100)))
-    assert [r["v"] for r in forward] == list(range(100))
+    assert forward == list(range(100))
 
     # Every other row
     evens = shard.getsamples(list(range(0, 100, 2)))
-    assert [r["v"] for r in evens] == list(range(0, 100, 2))
+    assert evens == list(range(0, 100, 2))
 
     shard.close()
 

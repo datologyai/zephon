@@ -1,6 +1,9 @@
 """Resilient shard wrapper that retries around cache evictions."""
 
+from __future__ import annotations
+
 import contextlib
+from typing import TYPE_CHECKING
 
 from tenacity import (
     Retrying,
@@ -14,6 +17,9 @@ from zephon._internal.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.types import LocalShardRef, ShardLocator
 from zephon._internal.observability.stopwatch import Stopwatch
+
+if TYPE_CHECKING:
+    from zephon.types import SamplePayload
 
 _RESILIENT_RETRY_EXCEPTIONS = (FileNotFoundError, OSError, IOError)
 
@@ -73,7 +79,7 @@ class ResilientShard(RandomAccessShard):
         )
         return cache_hit
 
-    def __getitem__(self, index: int) -> tuple[dict[str, object], SampleLoadStats]:
+    def __getitem__(self, index: int) -> tuple[SamplePayload, SampleLoadStats]:
         if index < 0:
             raise IndexError(index)
         if self._length and index >= self._length:
@@ -86,7 +92,7 @@ class ResilientShard(RandomAccessShard):
         # local ref and never had to resolve at any point (including retries).
         resolved_any = False
 
-        def _load_sample() -> dict[str, object]:
+        def _load_sample() -> SamplePayload:
             nonlocal attempts, cache_hits, cache_misses, optimistic_reuses, resolved_any
             attempts += 1
             # Optimistic path: only resolve if we don't have a ref yet.
@@ -150,9 +156,7 @@ class ResilientShard(RandomAccessShard):
 
     def getsamples(
         self, indices: list[int]
-    ) -> (
-        list[dict[str, object]] | tuple[list[dict[str, object]], list[SampleLoadStats]]
-    ):
+    ) -> list[SamplePayload] | tuple[list[SamplePayload], list[SampleLoadStats]]:
         if not indices:
             return []
 
@@ -178,7 +182,7 @@ class ResilientShard(RandomAccessShard):
         close_ns_total = 0
         touch_ns_total = 0
 
-        def _load_many() -> list[dict[str, object]]:
+        def _load_many() -> list[SamplePayload]:
             nonlocal attempts, cache_hits, cache_misses
             nonlocal \
                 resolve_ns_total, \

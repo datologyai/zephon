@@ -117,8 +117,8 @@ def test_parquet_datasets_share_one_store_opener(tmp_path: Path) -> None:
         second_shard, _ = second_view.open(0)
         first_rows, _ = first_shard.getsamples([0])
         second_rows, _ = second_shard.getsamples([1])
-        assert int(first_rows[0]["value"]) == 10
-        assert int(second_rows[0]["value"]) == 20
+        assert int(first_rows[0]) == 10
+        assert int(second_rows[0]) == 20
     finally:
         store.close()
 
@@ -148,8 +148,8 @@ def test_shard_cache_enables_and_locates_decoded_cache(tmp_path: Path) -> None:
         first_rows, _ = shard.getsamples([2, 0])
         second_rows, _ = shard.getsamples([1])
 
-        assert [int(row["value"]) for row in first_rows] == [30, 10]
-        assert [int(row["value"]) for row in second_rows] == [20]
+        assert [int(row) for row in first_rows] == [30, 10]
+        assert [int(row) for row in second_rows] == [20]
         stats = decoded_cache.stats()
         assert stats["publications"] == 1
         assert stats["hits"] == 1
@@ -183,8 +183,8 @@ def test_explicit_root_works_without_shard_cache(tmp_path: Path) -> None:
         shard, _ = view.open(0)
         first_rows, _ = shard.getsamples([2])
         second_rows, _ = shard.getsamples([1])
-        assert int(first_rows[0]["value"]) == 30
-        assert int(second_rows[0]["value"]) == 20
+        assert int(first_rows[0]) == 30
+        assert int(second_rows[0]) == 20
         assert decoded_cache.stats()["publications"] == 1
         assert decoded_cache.stats()["hits"] == 1
     finally:

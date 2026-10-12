@@ -545,7 +545,7 @@ def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
 
 
 def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
-    """Take-based decode keeps variable-length list cells as writable numpy
+    """Take-based decode keeps variable-length list cells as read-only numpy
     arrays (not Python lists), including across a row-group boundary."""
     import numpy as np
 
@@ -569,7 +569,7 @@ def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
     row = shard[1]
     assert isinstance(row["tok"], np.ndarray)
     assert row["tok"].dtype == np.int64
-    assert row["tok"].flags.writeable  # Materialization copies list cells
+    assert not row["tok"].flags.writeable
     np.testing.assert_array_equal(row["tok"], [3, 4, 5])
 
     # getsamples spanning both row groups, arbitrary order.

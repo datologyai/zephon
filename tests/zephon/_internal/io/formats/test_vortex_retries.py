@@ -86,7 +86,7 @@ def test_vortex_retries_eviction_but_not_corrupt_data(
     )
     if evicted:
         actual, stats = shard.getsamples(indices)
-        assert actual == [rows[index] for index in indices]
+        assert actual == [rows[index]["value"] for index in indices]
         assert all(item.retries == 1 for item in stats)
         assert resolver.calls == opens == 2
     else:

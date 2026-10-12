@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zephon._internal.io.formats.arrow_rows import take_and_materialize
 from zephon._internal.io.formats.parquet_cache.admission import (
@@ -28,6 +28,9 @@ from zephon._internal.io.formats.parquet_cache.control import DecodedRGState
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.formats.parquet_cache.session import ParquetRGSession
 from zephon._internal.io.ofd_lock import OFDLease
+
+if TYPE_CHECKING:
+    from zephon.types import SamplePayload
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +107,7 @@ class ParquetRGCache:
         slot: int,
         local_indices: list[int],
         decode: Callable[[], Any],
-    ) -> list[dict[str, object]]:
+    ) -> list[SamplePayload]:
         """Read a mapped hit or decode once, always returning owned rows."""
         self._check_usable()
         if not local_indices:
@@ -199,7 +202,7 @@ class ParquetRGCache:
         self,
         slot: int,
         local_indices: list[int],
-    ) -> list[dict[str, object]] | None:
+    ) -> list[SamplePayload] | None:
         lease = self._admission.try_ready_shared(slot)
         if lease is None:
             return None
@@ -226,7 +229,7 @@ class ParquetRGCache:
         self,
         slot: int,
         local_indices: list[int],
-    ) -> list[dict[str, object]]:
+    ) -> list[SamplePayload]:
         snapshot = self._session.control.slot(slot)
         if snapshot.state is not DecodedRGState.READY:
             raise RuntimeError(f"Decoded RG slot {slot} is no longer READY")

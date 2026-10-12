@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from zephon._internal.io.protocols import DatasetShardView as _DatasetShardView
 from zephon._internal.io.protocols import RandomAccessShard as _RandomAccessShard
@@ -84,10 +84,10 @@ class DatasetInspector:
         )
         got = shard.getsamples([index for _, index in indexed_indices])
         rows = got[0] if isinstance(got, tuple) else got
-        result: list[SamplePayload | None] = [None] * len(sample_indices)
+        result: list[SamplePayload] = [None] * len(sample_indices)
         for (position, _), row in zip(indexed_indices, rows, strict=True):
-            result[position] = cast(SamplePayload, row)
-        return cast(list[SamplePayload], result)
+            result[position] = row
+        return result
 
     def close(self) -> None:
         """Close every shard opened by this inspector.

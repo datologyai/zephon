@@ -13,6 +13,8 @@ Key features:
 - Dual discovery: index.json (fast) or direct metadata reads (fallback)
 """
 
+from __future__ import annotations
+
 import bisect
 import logging
 import os
@@ -23,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, cast
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 import numpy as np
 
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
     from zephon.io.options import StoreOptions
+    from zephon.types import SamplePayload
 
 logger = logging.getLogger(__name__)
 
@@ -119,14 +122,14 @@ class ParquetShard(RandomAccessShard):
         local_idx = index - self._rg_boundaries[rg_id]
         return rg_id, local_idx
 
-    def __getitem__(self, index: int) -> dict[str, object]:
+    def __getitem__(self, index: int) -> SamplePayload:
         """Single record random access.
 
         Args:
             index: Record index (0-based)
 
         Returns:
-            Record as dictionary
+            Single-column value or dictionary of column values
 
         Raises:
             IndexError: If index is out of bounds
@@ -136,7 +139,7 @@ class ParquetShard(RandomAccessShard):
 
         return self.getsamples([index])[0]
 
-    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+    def getsamples(self, indices: list[int]) -> list[SamplePayload]:
         """Bulk read one RG at a time, restoring original ordering/duplicates."""
         if not indices:
             return []
@@ -164,7 +167,7 @@ class ParquetShard(RandomAccessShard):
                 pq_file = pq.ParquetFile(self._path, metadata=metadata)
             return pq_file.read_row_group(rg_id, use_threads=False)
 
-        results: list[dict[str, object] | None] = [None] * len(indices)
+        results: list[SamplePayload] = [None] * len(indices)
         for rg_id, items in rg_groups.items():
             local_indices = [local_idx for _, local_idx in items]
             if self._decoded_cache is None:
@@ -176,11 +179,10 @@ class ParquetShard(RandomAccessShard):
                     local_indices=local_indices,
                     decode=lambda rg_id=rg_id: decode(rg_id),
                 )
-            for (orig_pos, _), row in zip(items, rows):
+            for (orig_pos, _), row in zip(items, rows, strict=True):
                 results[orig_pos] = row
 
-        assert all(row is not None for row in results)
-        return cast(list[dict[str, object]], results)
+        return results
 
     def __len__(self) -> int:
         """Return total number of records in shard."""
