@@ -38,7 +38,7 @@ def _require_vortex() -> ModuleType:
     if _vortex is None or not hasattr(_vortex, "open_readable"):
         raise ImportError(
             "Vortex support requires vortex-data>=0.88.0; "
-            'install or upgrade with: pip install -U "zephon[vortex]"'
+            + 'install or upgrade with: pip install -U "zephon[vortex]"'
         )
     return _vortex
 
