@@ -1,16 +1,16 @@
 # Records and Sample Lifecycles
 
-A sample starts as three integers and ends as a row in a tensor. In between it may be
-split into four sequences, three of which are packed with fragments of other documents and
-one of which is thrown away by a filter. This page is about how Zephon keeps track of all
-of that, because the bookkeeping is what makes checkpointing possible at all.
+A sample starts as three integers and ends as a row in a tensor. On the way it may be
+split into four sequences, three of which get packed with fragments of other documents
+while a filter throws the fourth away. This page is about how Zephon keeps track of all
+that, because the bookkeeping is what makes checkpointing possible at all.
 
-**From a pointer to data.** A `WorkSource` does not hand out samples; it hands out
-pointers, each a `(dataset_id, shard_id, sample_idx)` triple, grouped into work chunks.
-The built-in fetch operator is the boundary. Everything before it operates on pointers,
-and everything after it operates on a `SampleRecord`, which pairs a **payload** (usually a
-dict of fields) with the tracking metadata in `SampleMeta`. The rest of this page is about
-what happens after that transition.
+**From a pointer to data.** A `WorkSource` does not hand out samples, it hands out
+pointers, each a `(dataset_id, shard_id, sample_idx)` triple grouped into work chunks. The
+built-in `fetch` operator is the boundary: everything before it works on pointers, and
+everything after it works on a `SampleRecord`, which pairs a **payload** (usually a dict
+of fields) with the tracking metadata in `SampleMeta`. The rest of this page is about what
+happens after that transition.
 
 **The identity of a record.** Every record carries a `SampleCursor`, which is the thing
 that makes it addressable. It has four components, and it sorts on them in a different
@@ -30,14 +30,14 @@ the last two so that children of the same offset sort next to each other rather 
 scattered by sample ID. If you are reading `zephon/types.py` and the two orders look like
 a mistake, that is why.
 
-Think of the cursor as a passport. It records where the record was born (`chunk_id`,
-`chunk_offset`, `sample_id`) and what happened to it on the way (`lineage`). It is
-deterministic, so the same pipeline configuration and the same inputs always produce the
-same cursor for the same record. That determinism is load-bearing in two places. On
-restore, the replay filter uses cursor **equality** to find the boundary between records
-the training loop has already consumed and records it has not. And during a run, the
-engine uses the `(chunk_id, chunk_offset)` prefix, known as the **base offset**, to decide
-when a chunk has been fully consumed and its memory can be released.
+You can think of the cursor as a passport: it records where the record was born
+(`chunk_id`, `chunk_offset`, `sample_id`) and what happened to it on the way (`lineage`).
+It is deterministic, so the same `Pipeline` definition and the same inputs always produce
+the same cursor for the same record, and we lean on that in two places. On restore, the
+replay filter uses cursor **equality** to find the boundary between the records your
+training loop has already consumed and the ones it has not. During a run, Zephon uses the
+`(chunk_id, chunk_offset)` prefix, which we call the **base offset**, to decide when a
+chunk has been fully consumed and its memory can be released.
 
 **Fan-out: one sample, many records.** Operators that produce several outputs from one
 input need to give each output its own identity, and they do it through **lineage**: a
@@ -68,20 +68,20 @@ The invariant that matters for fan-out is this one:
 > For each base offset in a lane, **exactly one** record (or tombstone) must eventually
 > signal that it is the last one.
 
-That signal is the `is_last_child` flag on a `ContributorRef`. It tells the engine that
-nothing further will arrive for that base offset, so the corresponding slot in the chunk
-can be marked closed. `spawn_child` does this bookkeeping for you, and raises if you try
-to close a base offset that is already closed. That is a cheap guard against the most
-damaging mistake in this area, which is closing an offset twice.
+That signal is the `is_last_child` flag on a `ContributorRef`, which tells Zephon that
+nothing further will arrive for that base offset and the corresponding slot in the chunk
+can be marked closed. `spawn_child` does this bookkeeping for you, and it raises if you
+try to close a base offset that is already closed, which guards you against the most
+damaging mistake available here.
 
 **Fan-in: many records, one output.** Two built-in operations go the other way.
 
-Packing (`pack_sequences` and `pack_flat`) combines fragments from *different* base
-offsets into one record. The packed record gets a fresh **primary cursor**, which is its
-own replay identity and must be unique within the lane, and carries a list of
+Packing (`pack_sequences` and `pack_flat`) combines fragments from different base offsets
+into one record. The packed record gets a fresh **primary cursor**, which is its own
+replay identity and has to be unique within the lane, and it carries a list of
 `ContributorRef` entries remembering every base offset that went into it. One packed
 record can therefore close several base offsets at once, including offsets from different
-chunks, and the engine processes each contributor independently:
+chunks, and Zephon processes each contributor independently:
 
 ```
 child (7, 2, (0,))  ─┐
@@ -109,18 +109,18 @@ and metadata. The batch is a grouping for the training loop, not a new identity.
 **Contributors and tombstones.** Contributors are the accounting system that answers one
 question: *has the pipeline finished with base offset `(chunk_id, chunk_offset)`?*
 
-Every record carries contributor information. It is either explicit, set by the fan-out or
-packing helpers, or implicit, since a record that sets nothing is treated as having a
-single contributor pointing at its own cursor with `is_last_child=True`. For a 1:1
-operator that neither splits nor drops anything, the defaults are correct and you never
-have to think about this. Contributors become your problem in exactly three situations: a
-fan-out operator creating several children from one base offset, a packing operator
-merging contributors from several offsets, and a filter dropping the last record standing
-for an offset.
+Every record carries contributor information, either explicitly, set by the fan-out or
+packing helpers, or implicitly, since a record that sets nothing is treated as having a
+single contributor pointing at its own cursor with `is_last_child=True`. If you write a
+1:1 operator that neither splits nor drops anything, the defaults are already correct and
+you never have to think about this. Contributors become your problem in exactly three
+situations: a fan-out operator creating several children from one base offset, a packing
+operator merging contributors from several offsets, and a filter dropping the last record
+standing for an offset.
 
-That third case is where **tombstones** come in. Consider a deduplication filter that
-drops a document. If that record was the last one for its base offset, no closing
-contributor will ever reach the engine, the offset never closes, the chunk never evicts,
+That third case is where **tombstones** come in. Say you write a deduplication filter and
+it drops a document. If that record was the last one for its base offset, no closing
+contributor will ever reach Zephon, so the offset never closes, the chunk never evicts,
 and memory grows without bound for the rest of the run. A tombstone is a record with no
 payload whose entire purpose is to carry the closing `ContributorRef` that the dropped
 record owed:
@@ -134,25 +134,24 @@ Without a tombstone:              With a tombstone:
   ✗ unbounded memory                chunk 10 evicts once its other offsets close
 ```
 
-Tombstones are tagged in the metadata and flow through the pipeline like ordinary records,
-but the engine strips them at the delivery boundary, after they have been counted. They
-participate in eviction and are invisible to your model.
+Tombstones are tagged in the metadata and flow through the `Pipeline` like ordinary
+records, but Zephon strips them at the delivery boundary once they have been counted, so
+they take part in eviction and your model never sees them.
 
-The rule for operator authors is to **always emit tombstones when dropping records**,
-regardless of what else the pipeline contains. Whether a pipeline uses the monotone or the
-epoch-based eviction path is decided at compile time from operator traits, and your
-operator has no way of knowing which path it will end up on. Tombstones are harmless on
-the monotone path and mandatory on the epoch-based one, so emitting them unconditionally
-is the only choice that is correct in both cases.
+The rule, then, is to **always emit tombstones when you drop records**, regardless of what
+else the `Pipeline` contains. Zephon decides at compile time whether a `Pipeline` uses the
+monotone or the epoch-based eviction path, based on operator traits, and your operator has
+no way of knowing which one it will end up on. Tombstones are harmless on the monotone
+path and mandatory on the epoch-based one, so emitting them unconditionally is the only
+choice that is correct in both cases.
 
 (chunks-are-the-unit-of-state)=
 
-**Chunks are the unit of state.** Putting it together: the **chunk** is the unit in which
-Zephon holds and checkpoints state. The engine keeps a small set of **inflight chunks**
-per lane, meaning chunks whose samples have entered the pipeline but whose outputs have
-not all been delivered. As contributors and tombstones close offsets, fully consumed
-chunks leave the inflight set, and at checkpoint time only what remains has to be written
-down.
+**Chunks are the unit of state.** Putting it together, the **chunk** is the unit in which
+Zephon holds and checkpoints state. It keeps a small set of **inflight chunks** per lane,
+meaning chunks whose samples have entered the `Pipeline` but whose outputs have not all
+been delivered, and as contributors and tombstones close offsets the fully consumed chunks
+leave that set. At checkpoint time only what remains has to be written down.
 
 ```
 WorkSource           Engine                       Operators            Training loop
@@ -173,11 +172,12 @@ WorkSource           Engine                       Operators            Training 
     │                   │                             │ (tombstones stripped)│
 ```
 
-This is why checkpoint size does not grow with training time. It is proportional to the
-number of inflight chunks per lane, which is a handful, rather than to the number of
-samples consumed. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers
-how the engine decides that a chunk is safe to drop, which is considerably more subtle
-than "all its offsets are closed" once packing and shuffling are in the pipeline.
+This is why your checkpoint size does not grow with training time. It is proportional to
+the number of inflight chunks per lane, which is a handful, rather than to the number of
+samples you have consumed. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md)
+covers how Zephon decides that a chunk is safe to drop, which turns out to be considerably
+more subtle than "all its offsets are closed" once packing and shuffling are in the
+`Pipeline`.
 
 **Writing operators that respect all this.** [User-Defined
 Operators](../pipelines/user_defined_operators.md) covers the ways to add your own code to
@@ -203,10 +203,10 @@ for i, sequence in enumerate(sequences):
 ```
 
 `pack_meta(primary_cursor, contributors, *, lane_id, component_sample_counts, ...)` builds
-the metadata for a packed record. The `primary_cursor` is the packed record's replay
-identity and must be unique within the lane, and a reliable pattern is
-`first_input.meta.cursor.child(0)`. The `contributors` argument gathers every input's
-`contribution_refs()` so the engine learns which base offsets the packed record closes.
+the metadata for a packed record. The `primary_cursor` is that record's replay identity
+and has to be unique within the lane; `first_input.meta.cursor.child(0)` is a reliable
+pattern. The `contributors` argument gathers every input's `contribution_refs()` so that
+Zephon learns which base offsets the packed record closes.
 
 `tombstone_meta(ref, lane_id)` builds a single tombstone from a closing contributor, and
 `tombstones_for_record(record)` wraps the loop you would otherwise write by hand,
@@ -242,17 +242,17 @@ needs to know:
 | `indexable` | `True` | The operator preserves indexability through the plan. |
 | `parallelism` | `1` | Suggested worker count, used when the plan does not override it. |
 
-`preserves_cursor_order` has no default on purpose. Every operator author has to make the
-call consciously, because getting it wrong is the most expensive mistake available here.
-An operator that reorders records but claims to preserve cursor order puts the pipeline on
-the monotone eviction path, which will evict chunks that replay still needs. Claiming
-`False` when you did not need to is merely a little slower.
+We gave `preserves_cursor_order` no default on purpose, so that you have to make the call
+consciously, because getting it wrong is the most expensive mistake available here. An
+operator that reorders records while claiming to preserve cursor order puts the `Pipeline`
+on the monotone eviction path, which will happily evict chunks that replay still needs.
+Claiming `False` when you did not have to is merely a little slower.
 
 **The pitfalls, in order of how much they hurt.** The worst is closing a base offset
-twice, meaning two records with `is_last_child=True` for the same offset. That
-double-counts in the engine's bitmap and can evict a chunk early. `spawn_child` raises on
-the obvious version of this, but a hand-rolled operator can still do it. A
+twice, meaning two records with `is_last_child=True` for the same offset, which
+double-counts in Zephon's bitmap and can evict a chunk early. `spawn_child` raises on the
+obvious version of this, but a hand-rolled operator can still manage it. A
 non-deterministic `primary_cursor` on a packed record means replay cannot find its target
-on resume. Dropping tombstones inside a custom operator before they reach the engine
-stalls eviction silently. And claiming the wrong `preserves_cursor_order`, as above, loses
-data outright.
+on resume. Dropping tombstones inside your operator before they reach Zephon stalls
+eviction silently. And claiming the wrong `preserves_cursor_order`, as above, loses data
+outright.
