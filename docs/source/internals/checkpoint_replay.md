@@ -24,11 +24,11 @@ and seed. On restore these are deserialized directly and the `WorkSource` is nev
 to regenerate them. These are the only chunks that get replayed through the operator
 pipeline.
 
-**Epoch boundaries**, for pipelines that need them: the list of sentinel `chunk_id` s
-marking flush points. This can include a trailing boundary just past the last inflight
-chunk, which preserves the flush point between replayed data and newly fetched data. On
-restore the sentinels are re-injected at these positions so accumulators flush where they
-flushed originally.
+**Epoch boundaries**, for pipelines that need them: the list of sentinel chunk IDs marking
+flush points. This can include a trailing boundary just past the last inflight chunk,
+which preserves the flush point between replayed data and newly fetched data. On restore
+the sentinels are re-injected at these positions so accumulators flush where they flushed
+originally.
 
 **WorkSource state**, so `next_chunk()` can resume producing *new* chunks from the right
 place. The `WorkSource` is not replayed and not re-advanced, because `load_state_dict()`
@@ -53,7 +53,7 @@ are rebuilt as the replayed chunks flow through the pipeline and re-trigger cont
 tracking. That keeps checkpoints small at the cost of making restore time proportional to
 the number of inflight chunks.
 
-**Eviction.** Eviction is what keeps the inflight set small. Once every sample derived
+**Eviction.** What keeps the inflight set small is eviction. Once every sample derived
 from a chunk has been delivered, the chunk leaves the set, and a checkpoint taken
 afterwards neither stores nor replays it.
 
@@ -133,7 +133,8 @@ shuffle buffer emits a smaller window and randomises less, and the mixture corre
 drains mid-rebalance. `flush_every_k_chunks` is the dial on that trade, and it is
 genuinely three-way. Smaller K means faster resume, since fewer chunks are in flight to
 replay. Larger K means fewer interruptions and better output. And memory scales with K,
-since at least a full epoch stays inflight until it can be evicted. The default is 8.
+since at least a full epoch stays inflight until it can be evicted. For a pipeline that
+needs sentinels at all, the default is 8.
 
 For a non-monotonic pipeline, setting `flush_every_k_chunks=0` is an error. Without
 sentinels, accumulator state depends on unbounded history and safe eviction is impossible.
@@ -277,8 +278,8 @@ operator is still holding. Concretely:
 - Propagate contributor metadata, and set `is_last_child` correctly.
 - Emit tombstones for dropped final fragments.
 - Implement `flush(reset=True, lane_id=...)` so that it fully resets that lane's state.
-After a mid-stream flush the accumulator must report no pending data for that lane. The
-runner treats anything else as a contract violation and raises.
+  After a mid-stream flush the accumulator must report no pending data for that lane. The
+  runner treats anything else as a contract violation and raises.
 - Do not plan on stalling. It is supported for `batch(drop_last=True)` and nothing else.
 
 **Multi-Rank Aggregation.** Each rank's engine owns a subset of lanes, but a complete

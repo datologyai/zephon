@@ -182,7 +182,7 @@ than "all its offsets are closed" once packing and shuffling are in the pipeline
 
 **Writing Operators That Respect All This.** [User-Defined
 Operators](../pipelines/user_defined_operators.md) covers the ways to add your own code to
-a pipeline. This section covers what that code owes the bookkeeping above. Four builders
+a pipeline. What follows covers what that code owes the bookkeeping above. Four builders
 in `zephon.ops.children` do the fiddly parts.
 
 `spawn_child(parent, child_idx, *, is_last_child=False, tags=None)` builds the metadata

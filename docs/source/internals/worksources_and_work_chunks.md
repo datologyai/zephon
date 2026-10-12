@@ -11,9 +11,9 @@ rests on. Every claim about reproducible data order reduces, eventually, to the 
 a `WorkSource` bound to a given lane produces the same pointers in the same order for a
 given seed. Everything downstream is a deterministic function of that.
 
-`WorkSource` and `WorkChunk` live in `zephon.work`, and unlike most of what this section
-describes, they are an interface you are meant to implement against. You need them if you
-want a curriculum that the built-in static mixture cannot express.
+`WorkSource` and `WorkChunk` live in `zephon.work`. Unlike most of what the Internals
+section describes, they are an interface you are meant to implement against, and you need
+them if you want a curriculum that the built-in static mixture cannot express.
 
 **The Contract.** The engine only ever calls a handful of methods, and they fall into four
 groups.
@@ -219,7 +219,7 @@ Changing the rank count does not require recomputing a global permutation. The l
 abstraction absorbs it, because the per-lane sequences are unchanged, and only the
 question of which group owns which lane has a new answer.
 
-Memory does not scale with the sample count, per the cursor model above.
+Memory does not scale with the sample count, for the reasons the cursor model above gives.
 
 The cost is the operation that a materialized permutation makes trivial. There is no
 global index to seek to, so progress is tracked through opaque cursors inside the source,

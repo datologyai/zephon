@@ -118,7 +118,7 @@ The bins are also per-lane, which is what connects this to [elastic
 determinism](elastic_determinism.md): samples from different lanes are never packed
 together, so each lane's packing decisions are independent of how many GPUs are running.
 
-**The interface** is four methods and a flag, defined in `zephon.ops.accumulators`:
+**The interface.** Four methods and a flag, defined in `zephon.ops.accumulators`:
 
 `push_many(elems)` consumes elements from upstream, buffers them, and returns zero or more
 ready micro-batches.
@@ -150,9 +150,9 @@ elements the accumulator has seen, never on timing.
 **The built-ins.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
 lane and emits when a lane reaches `max_batch`, and is what most operators use: fetch,
-decode, tokenize, map transforms, and batching, which uses a subclass that adds
-`drop_last`. Lane keying lives in `CountingAccumulator` itself, which is what makes a
-per-lane flush sentinel able to reset one lane alone.
+decode, tokenize, map transforms, and batching, which uses a `CountingAccumulator`
+subclass that adds `drop_last`. Lane keying lives in `CountingAccumulator` itself, which
+is what makes a per-lane flush sentinel able to reset one lane alone.
 
 In non-deterministic mode `CountingAccumulator` can also flush on a latency bound
 (`max_latency_ms`), emitting a partial micro-batch rather than waiting for a bursty stream
@@ -206,7 +206,7 @@ same result regardless of how they were grouped or which restart they turn up on
 correction use **flush sentinels** to create epoch boundaries that make checkpoint
 eviction safe. Every `flush_every_k_chunks` chunks per lane, the engine injects a sentinel
 that triggers `flush(reset=True, lane_id=lane)` on each accumulator as it passes.
-[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers why. This section
+[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers why. What follows
 covers what it means for an accumulator.
 
 **What gets flushed.** Every accumulator, scoped to the sentinel's lane, with one
