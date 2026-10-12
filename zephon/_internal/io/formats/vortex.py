@@ -7,10 +7,11 @@ Vortex is a next-generation columnar file format designed for high-performance
 data processing with zero-copy Arrow integration and GPU-friendly design.
 """
 
-import os
+import posixpath
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
@@ -32,17 +33,28 @@ except ImportError:
     _vortex = None
 
 
-@dataclass(frozen=True)
+def _require_vortex() -> ModuleType:
+    """Return Vortex with custom-reader support or explain how to upgrade."""
+    if _vortex is None or not hasattr(_vortex, "open_readable"):
+        raise ImportError(
+            "Vortex support requires vortex-data>=0.88.0; "
+            'install or upgrade with: pip install -U "zephon[vortex]"'
+        )
+    return _vortex
+
+
+@dataclass(slots=True)
 class _VortexReader:
     """Adapt an existing backend to Vortex's ``ReadBytesAt`` protocol.
 
-    No file handle or client is created here: the supplied backend owns path
-    resolution and authentication, just as it does for Parquet footer reads.
+    The backend owns path resolution and authentication. Vortex can call
+    ``read_at`` concurrently, so its ``read_range`` must be safe across threads.
     """
 
     storage: StorageBackend
     path: str
     file_size: int
+    error: Exception | None = field(default=None, init=False)
 
     def size(self) -> int:
         """Return the size already obtained during discovery."""
@@ -50,36 +62,36 @@ class _VortexReader:
 
     def read_at(self, offset: int, length: int) -> bytes | memoryview:
         """Read a positional range without sharing a mutable seek position."""
-        if offset < 0 or length < 0:
-            raise ValueError("offset and length must be non-negative")
-        length = min(length, max(0, self.file_size - offset))
+        # Some backends (including obstore) reject empty range requests.
         if length == 0:
             return b""
-        return self.storage.read_range(self.path, offset, length=length)
+        try:
+            return self.storage.read_range(self.path, offset, length=length)
+        except Exception as exc:
+            # Vortex's native bridge otherwise retains only the error's text.
+            self.error = exc
+            raise
 
 
-def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int:
+def _read_vortex_row_count(path: str, storage: StorageBackend, file_size: int) -> int:
     """Read the row count from Vortex metadata through the supplied backend."""
-    if _vortex is None:
-        raise ImportError(
-            "Vortex discovery requires vortex-data; "
-            + 'install it with: pip install "zephon[vortex]"'
-        )
-    reader = _VortexReader(storage, path, size)
-    return len(_vortex.open_readable(reader, without_segment_cache=True))
+    vortex = _require_vortex()
+    reader = _VortexReader(storage=storage, path=path, file_size=file_size)
+    try:
+        return len(vortex.open_readable(reader, without_segment_cache=True))
+    except Exception:
+        if reader.error is not None:
+            raise reader.error
+        raise
 
 
 class VortexShard(RandomAccessShard):
     """Random access shard backed by a Vortex file."""
 
     def __init__(self, path: Path, *, length: int | None = None) -> None:
-        if _vortex is None:
-            raise RuntimeError(
-                "Opening Vortex shards requires the 'vortex-data' package. "
-                + 'Install with: pip install "zephon[vortex]"'
-            )
+        vortex = _require_vortex()
         self._path = path
-        self._file = _vortex.open(str(path))
+        self._file = vortex.open(str(path))
         self._scan = self._file.to_repeated_scan()
         self._length = length if length is not None else len(self._file)
 
@@ -154,7 +166,7 @@ class VortexFormat(FormatHandler):
         """Load shard metadata from pre-built index data."""
         shards = index.get("shards", [])
         if not shards:
-            raise ValueError(f"index.json contains no shards")
+            raise ValueError("index.json contains no shards")
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}
@@ -177,11 +189,7 @@ class VortexFormat(FormatHandler):
         self, path: str, storage: StorageBackend
     ) -> tuple[Mapping[int, int], Mapping[int, Mapping[str, Any]]]:
         """Discover row counts through the supplied storage backend."""
-        if _vortex is None:
-            raise RuntimeError(
-                "Discovering Vortex datasets requires the 'vortex-data' package. "
-                + 'Install with: pip install "zephon[vortex]"'
-            )
+        _require_vortex()
 
         entries = sorted(
             name for name in storage.listdir(path) if name.endswith(VORTEX_SUFFIXES)
@@ -191,7 +199,7 @@ class VortexFormat(FormatHandler):
         warn_missing_index(path, self.kind, num_shards=len(entries))
 
         def read_metadata(name: str) -> tuple[int, int]:
-            full = os.path.join(path, name)
+            full = posixpath.join(path, name)
             try:
                 size = int(storage.stat(full)["size"])
                 return size, _read_vortex_row_count(full, storage, size)
@@ -200,15 +208,15 @@ class VortexFormat(FormatHandler):
 
         shard_index: dict[int, int] = {}
         shard_meta: dict[int, dict[str, Any]] = {}
-        max_workers = min(32, max(1, (len(entries) + 4) // 5))
+        max_workers = min(32, (len(entries) + 4) // 5)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # map keeps filename order even when later reads finish first.
-            for shard_id, (size, count) in enumerate(
-                executor.map(read_metadata, entries)
+            for shard_id, (name, (size, count)) in enumerate(
+                zip(entries, executor.map(read_metadata, entries))
             ):
                 shard_index[shard_id] = count
                 shard_meta[shard_id] = {
-                    "raw": {"basename": entries[shard_id], "bytes": size, "hashes": {}},
+                    "raw": {"basename": name, "bytes": size, "hashes": {}},
                     "extra": {"length": count},
                 }
 

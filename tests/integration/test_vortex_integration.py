@@ -5,6 +5,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,6 @@ pytest.importorskip("vortex.io", reason="vortex-data not installed")
 import vortex
 
 from zephon import Pipeline
-from zephon._internal.io.formats import vortex as vortex_format
 from zephon.build_index import build_index
 from zephon.io import Dataset
 from zephon.work import StaticMixtureWorkSource
@@ -51,7 +51,7 @@ def test_vortex_pipeline_preserves_fields_and_nested_metadata(tmp_path: Path) ->
         .decode_text()
         .batch(microbatch_size=2, drop_last=False)
         .options(
-            runner="threads",
+            runner="process",
             max_workers=2,
             deterministic=True,
             io_options={"cache": {"enabled": False}},
@@ -87,13 +87,21 @@ def test_vortex_discovery_index_roundtrip(
     assert build_index("vortex", tmp_path, output_path=target, progress=False) == target
     index = json.loads(target.read_text())
     assert [shard["basename"] for shard in index["shards"]] == ["a.vortex", "b.vortex"]
+    assert [shard["num_rows"] for shard in index["shards"]] == [2, 3]
+    assert [shard["bytes"] for shard in index["shards"]] == [
+        (tmp_path / name).stat().st_size for name in ("a.vortex", "b.vortex")
+    ]
     assert [shard["extra"] for shard in index["shards"]] == [
         {"length": 2},
         {"length": 3},
     ]
     target.rename(tmp_path / "index.json")
 
-    monkeypatch.setattr(vortex_format, "_vortex", None)
+    def reject_shard_read(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Indexed discovery must not open a shard")
+
+    monkeypatch.setattr(vortex, "open_readable", reject_shard_read)
+    monkeypatch.setattr(vortex, "open", reject_shard_read)
     indexed = Dataset.from_path("indexed", str(tmp_path), fmt="vortex")
     assert indexed.shard_count() == discovered.shard_count()
     assert indexed.total() == discovered.total()
