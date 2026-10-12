@@ -94,13 +94,10 @@ def parse_size_bytes(value: str | int | None) -> int | None:
 
 @dataclass
 class CacheOptions:
-    """User-configurable knobs that control cache behaviour.
+    """Shard-cache and parsed-footer cache configuration.
 
-    ``enabled`` controls the on-disk shard cache. Independently,
-    ``metadata_cache_entries`` limits each format's parsed-footer LRU in one
-    fetch replica's store. Parquet and Vortex use the same limit; zero disables
-    footer retention. It counts entries, not bytes, and is not shared across
-    formats or fetch replicas.
+    ``enabled`` controls the on-disk shard cache. ``metadata_cache_entries``
+    sets the footer limit per format and fetch replica; zero disables retention.
     """
 
     enabled: bool = _option(False)
@@ -217,21 +214,10 @@ class ParquetRGCacheOptions:
 
 @dataclass
 class VortexOptions:
-    """Vortex caches shared by the shards in one fetch replica's store.
+    """Vortex read-cache configuration.
 
-    ``segment_cache_bytes`` is Vortex's best-effort budget for encoded segment
-    bytes. Eviction is asynchronous, and buffer views can retain larger backing
-    allocations. It is not a strict memory limit: decoded outputs, metadata and
-    in-flight reads are additional.
-    Each FetchOp replica owns its budget, including replicas in the same process:
-    four replicas can retain four times the configured segment bytes and footers.
-    Caches are not shared across replicas or processes.
-    Set ``segment_cache_bytes`` to zero to disable the segment cache. Footer
-    retention uses the shared ``cache.metadata_cache_entries`` option.
-
-    Numeric list outputs are read-only NumPy views where possible; duplicate
-    samples may share buffers. Use ``array.copy()`` before mutation or conversion
-    to a writable tensor. Process transport may copy them into writable storage.
+    ``segment_cache_bytes`` sets the encoded-segment cache's target size per
+    fetch replica. Zero disables it. The target is not a strict memory bound.
     """
 
     segment_cache_bytes: int = _option(64 * 1024**2)
@@ -273,11 +259,7 @@ class VortexOptions:
 
 @dataclass
 class StoreOptions:
-    """Top-level IO store options passed to FetchOp.
-
-    Vortex cache budgets apply per fetch replica. Its numeric list outputs use
-    read-only NumPy views; see ``VortexOptions`` for ownership details.
-    """
+    """Top-level IO store options passed to FetchOp."""
 
     cache: CacheOptions = field(default_factory=CacheOptions)
     parquet_rg_cache: ParquetRGCacheOptions = field(

@@ -546,8 +546,7 @@ def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
 
 
 def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
-    """Take-based decode keeps variable-length list cells as read-only numpy
-    arrays (not Python lists), including across a row-group boundary."""
+    """Variable-length numeric lists return read-only arrays across row groups."""
     import numpy as np
 
     list_arr = pa.array(

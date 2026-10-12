@@ -1,11 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vortex shard format integration.
-
-Vortex is a next-generation columnar file format designed for high-performance
-data processing with zero-copy Arrow integration and GPU-friendly design.
-"""
+"""Vortex shard discovery and indexed sample reads."""
 
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -47,7 +43,7 @@ else:
 
 
 def _require_vortex() -> ModuleType:
-    """Return the optional Vortex dependency with a consistent install hint."""
+    """Return Vortex or raise an installation error."""
     if _vortex is None:
         raise ImportError('Vortex support requires: pip install "zephon[vortex]"')
     return _vortex
@@ -55,11 +51,7 @@ def _require_vortex() -> ModuleType:
 
 @dataclass(frozen=True)
 class _VortexReader:
-    """Adapt an existing backend to Vortex's ``ReadBytesAt`` protocol.
-
-    No file handle or client is created here: the supplied backend owns path
-    resolution and authentication, just as it does for Parquet footer reads.
-    """
+    """Expose a storage backend through Vortex's ``ReadBytesAt`` protocol."""
 
     storage: StorageBackend
     path: str
@@ -90,7 +82,7 @@ def _open_vortex_file(
     metadata_cache: MetadataCache[str, Any] | None,
     segment_cache: Any | None,
 ) -> Any:
-    """Reuse immutable metadata and encoded segments without retaining readers."""
+    """Open a reader using the store's footer and segment caches."""
     vortex = _require_vortex()
     if metadata_cache is None and segment_cache is None:
         return vortex.open(str(path), without_segment_cache=True)
@@ -111,7 +103,7 @@ def _open_vortex_file(
         return file.footer
 
     footer = metadata_cache.get_or_load(key, load_footer)
-    # A miss already opened the file to obtain its footer; keep that reader.
+    # Reuse the reader opened on a footer-cache miss.
     return (
         file if file is not None else vortex.open(str(path), footer=footer, **options)
     )
@@ -119,12 +111,11 @@ def _open_vortex_file(
 
 @contextmanager
 def _local_io_errors(path: Path) -> Iterator[None]:
-    """Expose missing/inaccessible shards to the existing eviction retry path."""
+    """Expose filesystem errors for missing or inaccessible shards."""
     try:
         yield
     except RuntimeError as exc:
-        # Native Vortex wraps IO errors. Preserve corruption/scan errors when
-        # the local file is still accessible instead of retrying them as eviction.
+        # Vortex wraps IO errors in RuntimeError; only path failures are retryable.
         try:
             path.stat()
         except OSError as io_error:
@@ -206,17 +197,14 @@ class VortexShard(RandomAccessShard):
                         for field in export_type
                     )
                 if self._text_only and len(sorted_unique) == 1:
-                    # Text/binary rows already return Python values. A scalar
-                    # avoids exporting an entire compressed string dictionary.
+                    # Scalar access avoids exporting a whole string dictionary.
                     row = batch.scalar_at(0).as_py()
                     if row is not None:
                         return samples_from_columns(
                             {name: [value] for name, value in row.items()}, positions
                         )
-                    # A null struct still needs Arrow's table row semantics.
-                # List slices can retain a whole compressed child column. Vortex's
-                # ListView exporter trims unused values before decoding, without
-                # gathering/copying already uncompressed image buffers.
+                    # Null structs need Arrow's per-field null conversion.
+                # ListView export trims unselected child values before decoding.
                 arrow_table = pa.Table.from_struct_array(
                     batch.to_arrow_array(arrow_type=self._export_type)
                 )
@@ -226,7 +214,7 @@ class VortexShard(RandomAccessShard):
 
 
 def _list_view_type(kind: Any, pa: Any) -> Any:
-    """Request bounded list decoding while preserving field and shape metadata."""
+    """Use ListView for variable-length lists, preserving fields and fixed shapes."""
     if pa.types.is_struct(kind):
         return pa.struct(
             [field.with_type(_list_view_type(field.type, pa)) for field in kind]
@@ -258,7 +246,7 @@ def _shard_length(local_ref: LocalShardRef) -> int | None:
 
 
 class VortexShardOpener:
-    """Own bounded caches shared by the Vortex shards in one process-local store."""
+    """Share footer and segment caches across a store's Vortex readers."""
 
     def __init__(self, options: "StoreOptions") -> None:
         vortex = _require_vortex()
@@ -276,7 +264,7 @@ class VortexShardOpener:
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
-        """Open a temporary reader with the store's retained caches."""
+        """Open a shard with this store's caches."""
         return VortexShard(
             local_ref.raw.path,
             length=_shard_length(local_ref),
@@ -285,7 +273,7 @@ class VortexShardOpener:
         )
 
     def close(self) -> None:
-        """Release cache contents when the store closes."""
+        """Clear the store's Vortex caches."""
         if self._metadata_cache is not None:
             self._metadata_cache.clear()
         if self._segment_cache is not None:
@@ -301,7 +289,7 @@ class VortexFormat(FormatHandler):
     def create_opener(
         self, catalog_set: "CatalogSet | None", options: "StoreOptions"
     ) -> Iterator[ShardOpener]:
-        """Create caches once per store and retain them across fetch groups."""
+        """Provide a store-scoped opener and clear its caches on exit."""
         opener = VortexShardOpener(options)
         try:
             yield opener

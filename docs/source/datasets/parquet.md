@@ -65,9 +65,8 @@ Parquet and Vortex use the same Arrow-to-sample conversion. A file with one top-
 column returns that column's value directly: a `tokens` column returns an array,
 and a `text` column returns a string. Two or more columns return a dictionary keyed
 by column name. Adding a second column therefore changes the payload structure.
-Code that previously read `sample["tokens"]` from a single-column file should use
-`sample` directly. Operations requiring named fields can wrap the payload explicitly
-with a transform, such as `lambda tokens: {"tokens": tokens}`.
+Operations requiring named fields can wrap the payload explicitly with a transform,
+such as `lambda tokens: {"tokens": tokens}`.
 
 Numeric lists without null elements return read-only NumPy arrays, preserving dtype
 and fixed-size nested shapes. Conversion shares Arrow buffers where possible; boolean
@@ -82,8 +81,5 @@ Lists containing null elements or variable-length nesting return Python lists:
 `[1, None]` preserves missingness and `[[1, 2], [3]]` preserves uneven nesting.
 Mutable fallback containers are independent for duplicate requests.
 
-The converter processes Arrow chunks separately instead of concatenating their numeric
-buffers. Parquet still gathers requested rows from decoded row groups before conversion;
-read-only NumPy views avoid the additional copy previously made to provide writable arrays.
 Neither format generally records whether a column originated in NumPy or Torch, so
 numeric arrays are returned as NumPy arrays rather than reconstructed Torch tensors.

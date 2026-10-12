@@ -1,7 +1,32 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert Arrow columns into typed, read-only Zephon sample payloads."""
+"""Convert Arrow tables to Zephon sample payloads.
+
+Conversion decisions, applied to each column chunk independently::
+
+    Arrow value
+    +-- Null -> None
+    +-- Integer / float scalar -> NumPy scalar with the same dtype
+    +-- List / ListView / fixed-size list
+    |   +-- Integer / float / bool elements (including fixed-size nesting)
+    |   |   +-- No null elements -> read-only NumPy array
+    |   |   `-- Null elements -> Python list, preserving None
+    |   `-- Other elements / variable-size nesting -> Python list
+    `-- Other types -> Arrow's Python values (str, bytes, bool, dict, ...)
+
+    Assemble each requested row
+    +-- One column -> value directly
+    `-- Multiple columns -> {column_name: value}
+
+Chunks are converted separately to avoid concatenating numeric buffers. Numeric
+arrays use read-only NumPy views where possible, avoiding Python objects for each
+element. Views retain their backing buffers after reader closure; mutation needs
+an explicit copy. Boolean unpacking, nullable scalar conversion and Python
+fallbacks allocate. Parquet's row gather copies selected values before conversion;
+Vortex supplies an indexed selection. Process transport may make a further SHM
+copy. Duplicate rows share read-only arrays but own their mutable Python containers.
+"""
 
 from __future__ import annotations
 
@@ -41,11 +66,9 @@ def require_pyarrow() -> Any:
 def arrow_table_to_samples(
     table: Any, positions: Iterable[int] | None = None
 ) -> list[SamplePayload]:
-    """Convert rows, sharing numeric buffers without concatenating chunks.
+    """Convert selected table rows; omitted positions return all rows.
 
-    A single column becomes the sample payload directly; multiple columns
-    become dictionaries. Numeric arrays are read-only and keep their backing
-    buffers alive. Each column may have different chunk boundaries.
+    Columns may have different chunk boundaries.
     """
     pa = require_pyarrow()
     columns: dict[str, list[Any] | np.ndarray] = {}
@@ -65,8 +88,8 @@ def arrow_table_to_samples(
 def samples_from_columns(
     columns: ArrowColumns, positions: Iterable[int]
 ) -> list[SamplePayload]:
-    """Build payloads with the same shape for Arrow and native scalar reads."""
-    # A range has no duplicates. Only reordered/repeated requests need tracking.
+    """Assemble payloads in position order with independent mutable containers."""
+    # Ranges cannot repeat positions.
     if not isinstance(positions, range):
         positions = list(positions)
     if len(columns) == 1:
@@ -80,14 +103,13 @@ def samples_from_columns(
         seen: set[int] = set()
         for output, pos in enumerate(positions):
             if pos in seen:
-                # Numeric views may alias. Mutable Python fallbacks must not.
                 samples[output] = _copy_containers(samples[output])
             seen.add(pos)
     return cast("list[SamplePayload]", samples)
 
 
 def _copy_containers(value: Any) -> Any:
-    """Copy fallback container structure while retaining immutable leaves/views."""
+    """Copy container structure, retaining array views and scalar values."""
     if isinstance(value, dict):
         return {key: _copy_containers(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -107,7 +129,7 @@ def _is_numeric_type(kind: Any, pa: Any) -> bool:
 
 
 def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
-    """Expose numeric buffers and nested fixed-size shapes without Python boxing."""
+    """Return a read-only numeric array, or None for nulls or unsupported types."""
     if array.null_count:
         return None
     kind = array.type
@@ -117,8 +139,7 @@ def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
         or pa.types.is_boolean(kind)
     ):
         values = array.to_numpy(zero_copy_only=False)
-        # Boolean buffers need unpacking. Keep their mutability consistent with
-        # zero-copy numeric views, including when duplicate rows share a view.
+        # Unpacked boolean buffers must also be read-only.
         values.setflags(write=False)
         return values
     if pa.types.is_fixed_size_list(kind):
@@ -131,15 +152,7 @@ def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
 
 
 def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
-    """Return numeric rows as typed NumPy arrays where possible.
-
-    Null-free numeric lists preserve dtype and fixed-size nested shapes, using
-    views of Arrow buffers when possible; boolean buffers require unpacking.
-    Views remain valid after the shard closes. Rows containing null elements
-    or nested variable-length lists use Python lists to preserve None and
-    nesting without coercing numeric values or creating NumPy object arrays.
-    A null row stays None. Strings, bytes, and scalar booleans stay Python values.
-    """
+    """Convert one Arrow chunk to per-row values."""
     kind = array.type
     is_fixed = pa.types.is_fixed_size_list(kind)
     is_view = pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind)
@@ -150,8 +163,7 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
         if pa.types.is_integer(kind) or pa.types.is_floating(kind):
             if not array.null_count:
                 return array.to_numpy(zero_copy_only=False)
-            # Filling only nullable scalar columns preserves dtype without NumPy's
-            # usual integer-to-float/null coercion. Validity restores None per row.
+            # Fill before conversion to preserve dtype; restore nulls per row.
             numbers = array.fill_null(0).to_numpy(zero_copy_only=False)
             valid = array.is_valid().to_numpy(zero_copy_only=False)
             return [
@@ -164,8 +176,7 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
 
     numbers = _numeric_values(array.values, pa)
     if numbers is None:
-        # Null parents can have null child slots even when every valid row is
-        # numeric. Convert those rows independently rather than boxing them all.
+        # Nulls elsewhere in the chunk need not force Python lists for every row.
         rows: list[Any] = []
         for scalar in array:
             if not scalar.is_valid:
@@ -204,7 +215,7 @@ def take_and_materialize(
     table: Any,
     local_indices: list[int],
 ) -> list[SamplePayload]:
-    """Gather Parquet rows before exposing read-only views of selected buffers."""
+    """Gather requested rows, then convert them to sample payloads."""
     pa = require_pyarrow()
     selected = table.take(pa.array(local_indices, type=pa.int64()))
     return arrow_table_to_samples(selected)

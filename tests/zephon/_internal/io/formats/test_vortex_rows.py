@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Typed row conversion, null preservation, and buffer ownership."""
+"""Vortex export layouts, scalar reads and output lifetime."""
 
 import gc
 from pathlib import Path

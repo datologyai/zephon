@@ -35,8 +35,7 @@ class RandomAccessShard(Protocol):
     ``getsamples`` accepts indices in arbitrary order, including duplicates.
     Returned rows (and per-sample stats, when present) must preserve that order
     and include one entry per requested index without modifying ``indices``.
-    A sample payload may be a scalar, array, container, or None; it need not
-    be a dictionary.
+    Rows follow ``SamplePayload``, including scalar and array payloads.
     """
 
     def __getitem__(

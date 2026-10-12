@@ -507,7 +507,7 @@ def test_vortex_getsamples_all_rows(tmp_path: Path) -> None:
 
 
 def test_vortex_getsamples_contiguous_ranges(tmp_path: Path) -> None:
-    """Test that scanning contiguous indices returns the requested ranges."""
+    """Contiguous scans return the requested rows."""
     rows = [{"id": i, "text": f"row_{i}"} for i in range(50)]
     p = tmp_path / "contiguous.vortex"
     _create_vortex_file(p, rows)
@@ -569,7 +569,7 @@ def test_vortex_getsamples_non_contiguous(tmp_path: Path) -> None:
 
 
 def test_vortex_getitem_values(tmp_path: Path) -> None:
-    """Test that __getitem__ returns the same fields throughout a shard."""
+    """Single-row reads preserve all fields throughout a shard."""
     rows = [{"id": i, "value": i * 1.5, "name": f"item_{i}"} for i in range(20)]
     p = tmp_path / "scalar.vortex"
     _create_vortex_file(p, rows)

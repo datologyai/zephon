@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vortex cache ownership through real store fetches and local re-downloads."""
+"""Vortex cache reuse across store reads and shard re-downloads."""
 
 from pathlib import Path
 from typing import Any
@@ -85,7 +85,7 @@ def test_store_reuses_caches_across_fetch_groups(
             for indices in ([2, 0, 2], [1], [3, 1]):
                 rows, _ = shard.getsamples(indices)
                 assert rows == [dataset_id * 10 + index for index in indices]
-        assert len(calls) == 6  # Readers are still temporary; their caches persist.
+        assert len(calls) == 6  # Separate readers share caches.
         assert ["footer" in call for call in calls] == (
             [False, True, True, False, True, True] if metadata_entries else [False] * 6
         )

@@ -14,7 +14,7 @@ _Value = TypeVar("_Value")
 
 
 def file_cache_key(path: Path) -> str:
-    """Identify an immutable local shard across reader opens and re-downloads."""
+    """Return the absolute-path cache key for an immutable shard."""
     return str(path.absolute())
 
 

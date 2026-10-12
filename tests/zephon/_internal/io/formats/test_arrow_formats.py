@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""The two Arrow-backed formats expose the same sample contract."""
+"""Parquet and Vortex sample conversion parity."""
 
 import gc
 from pathlib import Path

@@ -63,11 +63,10 @@ dictionary. Numeric arrays are read-only NumPy arrays with their original dtype 
 fixed-size shape, and remain valid after the reader closes. Numeric lists containing
 null elements use a Python-list fallback. Call `.copy()` before mutating an array.
 
-**Read caches.** Each fetch replica's store retains up to 256 parsed file footers and shares a 64 MiB
-in-memory cache of encoded segments across its Vortex shards. Both caches survive the
-temporary readers used for separate fetch groups and are cleared when the store closes.
-The segment cache saves repeat reads of encoded bytes; it does not cache decoded samples.
-These caches are independent of Zephon's on-disk shard cache.
+**Read caches.** Each fetch replica has a footer cache (256 entries by default) and an
+encoded-segment cache (64 MiB target), shared across its Vortex readers. These are
+independent of Zephon's on-disk shard cache. The segment cache reuses encoded bytes;
+it does not retain decoded samples.
 
 Configure them through the pipeline's `io_options`:
 
@@ -76,32 +75,25 @@ from zephon.io import CacheOptions, StoreOptions, VortexOptions
 
 io_options = StoreOptions(
     cache=CacheOptions(metadata_cache_entries=256),
-    vortex=VortexOptions(
-        segment_cache_bytes=64 * 1024**2,
-    )
+    vortex=VortexOptions(segment_cache_bytes=64 * 1024**2),
 )
 # Pass io_options to pipeline.options(io_options=io_options).
 ```
 
 The equivalent dictionary accepts human-readable sizes, for example
 `{"cache": {"metadata_cache_entries": 256}, "vortex": {"segment_cache_bytes": "64mb"}}`.
-The footer limit is the same option used by Parquet and applies independently to each
-format's LRU, whether or not the on-disk shard cache is enabled.
-Set either limit to zero to disable that cache. Each `FetchOp` replica has its own store,
-including replicas in the same process: four replicas can retain 256 MiB of encoded
-segments and 1,024 footers with the defaults. Replicas do not share cache hits or budgets.
-The segment limit accounts for retained segment bytes,
-not total process memory: cache overhead, footers, decoded outputs and in-flight reads
-are additional, and Vortex applies cache evictions asynchronously. The footer limit is
-an entry count, not a byte budget.
+The footer limit applies independently to Parquet and Vortex, whether or not the on-disk
+shard cache is enabled. Set either limit to zero to disable that cache. Replicas have
+separate caches and budgets, including when they share a process.
 
-Like Parquet, Vortex identifies immutable shards by their local path. Evicting and
-downloading the same bytes again preserves footer and segment cache reuse.
+Segment-cache memory can exceed its byte target because eviction is asynchronous and
+views can retain larger buffers. Metadata, decoded output, in-flight reads and cache
+overhead consume additional memory. The footer limit counts entries rather than bytes.
 
-Zephon limits Vortex's process-wide runtime to one background worker when the Vortex
-format is first loaded unless `VORTEX_MAX_THREADS` is explicitly set. Set
-`ZEPHON_VORTEX_THREADS` before using the format to override either default: a positive
-integer changes the limit, and a non-positive value leaves the runtime untouched. The cap applies
-to discovery and sample reads without being reapplied for each file open. General worker
-initialization also applies the configured limit when Vortex is already loaded, without
-importing this optional dependency into workers that do not use it.
+Cache keys use the local shard path, which must identify the same contents throughout
+the store's lifetime. Eviction and re-download of identical bytes preserve cache reuse.
+
+**Threads.** Zephon defaults to one Vortex background worker per process and respects an
+explicit `VORTEX_MAX_THREADS`. Set `ZEPHON_VORTEX_THREADS` before using the format to
+override either setting: a positive integer sets the worker count, and a non-positive
+value leaves the runtime unchanged. This applies to discovery and sample reads.

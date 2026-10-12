@@ -25,14 +25,10 @@ THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
 
 
 def cap_vortex_threads() -> None:
-    """Pin Vortex's process-wide background worker pool.
+    """Limit an already-loaded Vortex runtime's worker pool.
 
-    An explicit ``ZEPHON_VORTEX_THREADS`` overrides ``VORTEX_MAX_THREADS``;
-    otherwise the native setting is respected, with one worker as the default.
-    As with the Arrow cap, non-positive values leave the library untouched.
-    Only an already imported Vortex is configured: the format also calls this
-    after importing its dependency, covering direct reads and discovery without
-    loading Vortex in workers that do not use it.
+    ``ZEPHON_VORTEX_THREADS`` overrides ``VORTEX_MAX_THREADS``; the default
+    is one worker. A non-positive override leaves the runtime unchanged.
     """
     configured = os.environ.get("ZEPHON_VORTEX_THREADS")
     if configured is None and "VORTEX_MAX_THREADS" in os.environ:

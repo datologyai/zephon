@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vortex thread limits follow the optional library suppression helpers."""
+"""Vortex worker limits and environment overrides."""
 
 import builtins
 import sys
