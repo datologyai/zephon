@@ -203,8 +203,10 @@ class ParquetRGCacheOptions:
 class VortexOptions:
     """Vortex caches shared by the shards in one fetch replica's store.
 
-    ``segment_cache_bytes`` budgets retained encoded segment bytes, not total
-    memory: decoded outputs, metadata and in-flight reads are additional.
+    ``segment_cache_bytes`` is Vortex's best-effort budget for encoded segment
+    bytes. Eviction is asynchronous, and buffer views can retain larger backing
+    allocations. It is not a strict memory limit: decoded outputs, metadata and
+    in-flight reads are additional.
     Each FetchOp replica owns its budget, including replicas in the same process:
     four replicas can retain four times the configured segment bytes and footers.
     Caches are not shared across replicas or processes.

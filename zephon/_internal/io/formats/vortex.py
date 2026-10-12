@@ -162,6 +162,8 @@ class VortexShard(RandomAccessShard):
         with _local_io_errors(path):
             self._file = _open_vortex_file(path, metadata_cache, segment_cache)
         self._length = length if length is not None else len(self._file)
+        self._export_type: Any | None = None
+        self._text_only = False
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         return self.getsamples([index])[0]
@@ -171,6 +173,7 @@ class VortexShard(RandomAccessShard):
 
     def close(self) -> None:
         self._file = None
+        self._export_type = None
 
     def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
         """Bulk read rows in request order, preserving duplicate indices."""
@@ -193,12 +196,65 @@ class VortexShard(RandomAccessShard):
             index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
             positions = map(index_to_pos.__getitem__, indices)
 
+        contiguous = sorted_unique[-1] - sorted_unique[0] + 1 == len(sorted_unique)
+        selected = (
+            range(sorted_unique[0], sorted_unique[-1] + 1)
+            if contiguous
+            else sorted_unique
+        )
         with _local_io_errors(self._path):
             batch = self._file.scan(
-                indices=_require_vortex().array(sorted_unique)
+                indices=_require_vortex().array(selected)
             ).read_all()
-            arrow_table = batch.to_arrow_table()
+            if contiguous:
+                pa = require_pyarrow()
+                if self._export_type is None:
+                    export_type = _list_view_type(self._file.dtype.to_arrow_type(), pa)
+                    self._export_type = export_type
+                    self._text_only = all(
+                        pa.types.is_string(field.type)
+                        or pa.types.is_large_string(field.type)
+                        or pa.types.is_string_view(field.type)
+                        or pa.types.is_binary(field.type)
+                        or pa.types.is_large_binary(field.type)
+                        or pa.types.is_binary_view(field.type)
+                        for field in export_type
+                    )
+                if self._text_only and len(sorted_unique) == 1:
+                    # Text/binary rows already return Python values. A scalar
+                    # avoids exporting an entire compressed string dictionary.
+                    row = batch.scalar_at(0).as_py()
+                    if row is not None:
+                        return [dict(row) for _ in positions]
+                    # A null struct still needs Arrow's table row semantics.
+                # List slices can retain a whole compressed child column. Vortex's
+                # ListView exporter trims unused values before decoding, without
+                # gathering/copying already uncompressed image buffers.
+                arrow_table = pa.Table.from_struct_array(
+                    batch.to_arrow_array(arrow_type=self._export_type)
+                )
+            else:
+                arrow_table = batch.to_arrow_table()
         return _rows_from_table(arrow_table, positions)
+
+
+def _list_view_type(kind: Any, pa: Any) -> Any:
+    """Request bounded list decoding while preserving field and shape metadata."""
+    if pa.types.is_struct(kind):
+        return pa.struct(
+            [field.with_type(_list_view_type(field.type, pa)) for field in kind]
+        )
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        child = kind.value_field.with_type(_list_view_type(kind.value_type, pa))
+        return (
+            pa.list_view(child) if pa.types.is_list(kind) else pa.large_list_view(child)
+        )
+    if pa.types.is_fixed_size_list(kind):
+        return pa.list_(
+            kind.value_field.with_type(_list_view_type(kind.value_type, pa)),
+            kind.list_size,
+        )
+    return kind
 
 
 def _rows_from_table(table: Any, positions: Iterable[int]) -> list[dict[str, Any]]:
