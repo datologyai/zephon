@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING
 
 from tenacity import (
     Retrying,
@@ -17,9 +16,7 @@ from zephon._internal.io.protocols import RandomAccessShard, SampleLoadStats
 from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.types import LocalShardRef, ShardLocator
 from zephon._internal.observability.stopwatch import Stopwatch
-
-if TYPE_CHECKING:
-    from zephon.types import SamplePayload
+from zephon.types import SamplePayload
 
 _RESILIENT_RETRY_EXCEPTIONS = (FileNotFoundError, OSError, IOError)
 

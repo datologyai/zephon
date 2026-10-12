@@ -27,6 +27,7 @@ from zephon._internal.io.suffixes import (
     LITDATA_COMPRESSED_CHUNK_SUFFIX,
 )
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon.types import SamplePayload
 
 # Shared metadata support requires optree; payload readers load optional deps lazily.
 # Defer the import so that registering the format handler does not pull in
@@ -53,7 +54,6 @@ def _ensure_litdata_support():
 
 if TYPE_CHECKING:
     from zephon.io.dataset import Dataset
-    from zephon.types import SamplePayload
 
 
 class _StreamingTemplateDict(dict[str, Any]):

@@ -45,12 +45,12 @@ from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
     from zephon.io.options import StoreOptions
-    from zephon.types import SamplePayload
 
 logger = logging.getLogger(__name__)
 

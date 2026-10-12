@@ -31,14 +31,12 @@ copy. Duplicate rows share read-only arrays but own their mutable Python contain
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, cast
+from typing import Any, Iterable, Mapping, cast
 
 import numpy as np
 
 from zephon._internal.utils.thread_utils import cap_arrow_threads
-
-if TYPE_CHECKING:
-    from zephon.types import SamplePayload
+from zephon.types import SamplePayload
 
 ArrowColumns = Mapping[str, list[Any] | np.ndarray]
 _pa: Any | None = None

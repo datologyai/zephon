@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-if TYPE_CHECKING:
-    from zephon.types import SamplePayload
+from zephon.types import SamplePayload
 
 
 @dataclass(slots=True)

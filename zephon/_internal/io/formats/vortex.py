@@ -27,12 +27,12 @@ from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 from zephon._internal.utils.thread_utils import cap_vortex_threads
+from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
     from zephon.io.options import StoreOptions
-    from zephon.types import SamplePayload
 
 try:
     import vortex as _vortex

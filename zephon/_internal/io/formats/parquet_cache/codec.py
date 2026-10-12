@@ -9,12 +9,10 @@ import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
-
-if TYPE_CHECKING:
-    from zephon.types import SamplePayload
+from zephon.types import SamplePayload
 
 _IDENTITY_METADATA_KEY = b"zephon.decoded_rg.identity"
 _VERSION_METADATA_KEY = b"zephon.decoded_rg.payload_version"

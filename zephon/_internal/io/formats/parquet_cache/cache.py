@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from zephon._internal.io.formats.arrow_rows import take_and_materialize
 from zephon._internal.io.formats.parquet_cache.admission import (
@@ -28,9 +28,7 @@ from zephon._internal.io.formats.parquet_cache.control import DecodedRGState
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.formats.parquet_cache.session import ParquetRGSession
 from zephon._internal.io.ofd_lock import OFDLease
-
-if TYPE_CHECKING:
-    from zephon.types import SamplePayload
+from zephon.types import SamplePayload
 
 logger = logging.getLogger(__name__)
 
