@@ -1,9 +1,8 @@
 """Cross-rank checkpoint aggregation.
 
-The engine builds each rank's local state, merges the shards, and validates the
-result; a :class:`CheckpointCoordinator` only moves state between ranks for one
-checkpoint round. :class:`FileCoordinator` is the original protocol over a
-shared ``aggregate_dir``.
+The engine builds local snapshots and supplies the merge and validation logic.
+A :class:`CheckpointCoordinator` exchanges those snapshots and the merged result
+between participants. :class:`FileCoordinator` uses a shared ``aggregate_dir``.
 """
 
 from __future__ import annotations
@@ -29,10 +28,10 @@ _RELOAD_SUFFIX = re.compile(r"-(\d+)$")
 
 @dataclass(frozen=True)
 class AggregationRound:
-    """What one rank contributes to a checkpoint round, and what completes it."""
+    """One rank/worker's snapshot and the required rank and lane coverage."""
 
     local: dict[str, Any]
-    """This rank's local engine state."""
+    """This rank/worker's local engine state."""
 
     is_leader: bool
     """Whether this process merges the round (global rank 0, worker 0)."""
@@ -45,37 +44,63 @@ class AggregationRound:
 
 
 class CheckpointCoordinator(Protocol):
-    """Moves engine state between ranks for one checkpoint round."""
+    """Coordinate checkpoint rounds across active rank/worker processes.
+
+    Callers share a run-specific namespace, topology, and codec settings. Each
+    active rank/worker snapshots the same logical training step and enters rounds
+    in the same order, with exactly one leader and serialized calls per instance.
+
+    Implementations isolate runs, restore generations, and rounds. Publish
+    shards and results atomically as complete values, keep them immutable, and
+    retain them until their required consumers finish. Transport must preserve
+    checkpoint values and produce the same decoded representation everywhere.
+    """
 
     last_round_id: str | None
-    """The most recent round this process took part in; saved in checkpoints."""
+    """Last joined round ID, initially None; the engine saves and restores it."""
 
     reload_count: int
-    """How many times this stream has been restored; saved in checkpoints."""
+    """Restore generation, initially zero; set by the engine before preparation."""
 
     def aggregate(
         self,
         round_: AggregationRound,
         merge: Callable[[list[dict[str, Any]]], dict[str, Any]],
     ) -> dict[str, Any]:
-        """Return the merged state of every rank, identical on every rank."""
+        """Exchange this round's shards and return the same merged state to all.
+
+        Update ``last_round_id`` when joining and publish one shard per
+        rank/worker. Collect the participating shards with ``expected_ranks``
+        and ``expected_lanes`` coverage, then call ``merge`` once on the leader
+        and publish its result for every caller. Bound waits by the configured
+        timeout and raise on transport, codec, merge, or timeout failures.
+        """
         ...
 
     def prepare_restore(self) -> None:
-        """Get ready for rounds after a checkpoint restore."""
+        """Prepare an isolated namespace for the restored stream's rounds.
+
+        The engine has restored ``last_round_id`` and set ``reload_count`` to
+        the saved count plus one. Preserve both values; repeated preparation
+        with the same values must be safe.
+        """
         ...
 
     def cleanup(self) -> None:
-        """Release anything kept between rounds, such as the last merged state."""
+        """Idempotently release this coordinator's retained round resources.
+
+        Callers must ensure every participant has finished reading shared
+        results before cleanup. Leave other runs' resources intact.
+        """
         ...
 
 
 class FileCoordinator:
-    """The original aggregation protocol over files in a shared ``aggregate_dir``.
+    """Aggregate checkpoints through files in a shared ``aggregate_dir``.
 
-    The leader publishes a round ID, every rank writes its state, the leader
-    lists the state files until every rank and lane is covered, merges them and
-    writes the merged state, and the other ranks read it back.
+    The leader publishes a round ID, each active rank/worker writes its state,
+    and the leader collects shards until the required ranks and lanes are
+    covered. It merges and publishes the result for the other participants.
     """
 
     def __init__(
@@ -97,7 +122,7 @@ class FileCoordinator:
 
         self._using_fresh_tmp = False
         if world_size == 1:
-            # Single-node: auto if not provided
+            # Single rank: use a temporary directory if none is provided.
             base = opts.aggregate_dir or os.path.join(
                 tempfile.gettempdir(), f"zephon_state_r{global_rank}"
             )
@@ -105,7 +130,7 @@ class FileCoordinator:
                 opts.aggregate_dir is None or opts.aggregate_dir == ""
             )
         else:
-            # Multi-node: must be provided (shared FS or cloud storage)
+            # Multiple ranks require shared filesystem or cloud storage.
             if not opts.aggregate_dir:
                 raise RuntimeError(
                     "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
@@ -168,7 +193,7 @@ class FileCoordinator:
         if run_id.startswith(DEFAULT_RUN_ID):
             existing_subdir_names = self.backend.listdir(self._base)
             using_default = True
-            # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
+            # Scope the default run ID to the pipeline and topology.
             run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world_size}-{self._plan_id}"
 
         # Avoid having to use a new run id with every reload
@@ -187,7 +212,7 @@ class FileCoordinator:
                 _normalize_run_dir_name(name) for name in existing_subdir_names
             }
             if existing_norms != {cur_norm}:
-                # Potentially we can also only warn if the plan id or canonical replicas change since that probably really causes a semantic change but we better just tell the user early this is not the. best idea.
+                # Warn when the base directory contains a different run identity.
                 print(
                     f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {existing_subdir_names}",
                     file=sys.stderr,
@@ -262,7 +287,7 @@ class FileCoordinator:
     # ---------- Rounds ----------
 
     def _publish_new_round_id(self) -> str:
-        rid = str(int(time.time() * 1e9))  # monotonic-ish
+        rid = str(int(time.time() * 1e9))  # Wall-clock timestamp in nanoseconds.
         self.backend.put(self.round_file, rid.encode("utf-8"))
         self.last_round_id = rid
         return rid
@@ -272,7 +297,7 @@ class FileCoordinator:
         if not rid:
             return None
 
-        # This is a practically relevant guard in case users do neither supply a run id nor a fresh aggregate directory. With this check we at least avoid stale state if it is obviously old.
+        # Reject old markers when a run ID or aggregation directory is reused.
         try:
             stat = self.backend.stat(self.round_file)
             age_s = time.time() - stat["mtime"]
@@ -373,15 +398,14 @@ class FileCoordinator:
             assert not self.backend.exists(merged_path)
             merged_bytes = self._codec.encode(merged)
             self.backend.put(merged_path, merged_bytes)
-            # Roundtrip so the leader's return value is byte-identical to
-            # what followers read back (json would otherwise stringify keys).
+            # Decode on the leader too so all callers receive the same key types
+            # and values (JSON stringifies dictionary keys).
             merged = self._codec.decode(merged_bytes)
             self.backend.delete(my_path)
             if self._previous_merged_file is not None:
                 self.backend.delete(self._previous_merged_file)
             self._previous_merged_file = merged_path
-            # Safe: by the coverage check above every rank has already read
-            # round.current and is now waiting on merged_path.
+            # Shard publishers have read round.current and can await merged_path.
             self.backend.delete(self.round_file)
             return merged
 
