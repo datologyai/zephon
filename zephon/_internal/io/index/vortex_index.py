@@ -26,6 +26,7 @@ class VortexIndexBuilder(IndexBuilder):
 
     def extract_shard_info(self, path: str, file_size: int) -> ShardInfo:
         """Extract row count and metadata from a Vortex file."""
+        # The local builder supplies paths relative to the process cwd.
         count = _read_vortex_row_count(path, LocalFSBackend(Path.cwd()), file_size)
 
         return ShardInfo(
