@@ -45,24 +45,14 @@ yet, and it is a throughput limitation on our side rather than something the des
 requires. What the design does require is that any logic needing to see elements in stream
 order lives in the accumulator.
 
-**Micro-batches.** When an operator runs with several workers, Zephon does not hand out
-elements one at a time. It groups them into micro-batches that are processed together in a
-single `process_many` call, which amortises the dispatch overhead and lets your operator
-use batch-level optimisations, such as a tokenizer encoding sixty-four texts in one call
-rather than sixty-four calls.
-
-The sizes are per-operator and chosen for the work involved: fetching and tokenization use
-64, text decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and
-`batch` uses whatever `microbatch_size` you asked for. With four workers on a tokenizer,
-four micro-batches of 64 are in flight at once, so 256 samples are being tokenized
-concurrently while each call still sees a sensible 64.
-
-:::{note}
-**Two kinds of batch.** Micro-batches here are the internal groups of elements
-dispatched to operator workers. They are not the training batches that `batch()`
-produces, and the two sizes have nothing to do with each other. The name collision is
-unfortunate and ours.
-:::
+**Micro-batch sizes.** [How Pipelines Run](../pipelines/how_pipelines_run.md) introduces
+the micro-batch as the small group of elements Zephon hands to a worker for a single
+`process_many` call. What it does not say is how big they are, and the sizes are
+per-operator, chosen for the work involved: fetching and tokenization use 64, text
+decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and `batch` uses
+whatever `microbatch_size` you asked for. With four workers on a tokenizer, four
+micro-batches of 64 are in flight at once, so 256 samples are being tokenized concurrently
+while each call still sees a sensible 64.
 
 Who decides the boundaries? That is the accumulator's entire job.
 
@@ -177,20 +167,17 @@ target ratios. `shuffle` has two, picked by its `algorithm` argument: a reservoi
 accumulator for the default `"streaming"`, and a block accumulator for `"block"` and
 `"block_warmup"`.
 
-**How runners keep the order.** Zephon ships three runner types for local execution,
-namely `inline`, `threads` and `process`, which [How Pipelines
-Run](../pipelines/how_pipelines_run.md) describes. There is also a Ray-backed `remote`
-runner for stages you add with `placement="remote"`. From the accumulator's point of view
-they all behave identically.
+**How runners keep the order.** Beyond the `inline`, `threads` and `process` runners that
+[How Pipelines Run](../pipelines/how_pipelines_run.md) describes, there is a Ray-backed
+`remote` runner for stages you add with `placement="remote"`. From the accumulator's point
+of view all four behave identically.
 
-When parallelism is greater than one, workers finish in whatever order they finish, and a
-slow micro-batch can complete after a fast one that was dispatched later. In deterministic
-mode Zephon tags each micro-batch with a monotonically increasing **sequence number**
-before dispatch, holds out-of-order completions in a reorder buffer, and forwards a result
-only once every preceding sequence number has gone out, so the downstream operator sees
-exactly what a single-threaded execution would have produced. In non-deterministic mode
-the runner skips the reordering and forwards results in completion order, trading
-reproducibility for latency.
+The mechanism behind that is a reorder buffer. Zephon tags each micro-batch with a
+monotonically increasing **sequence number** before dispatch, holds out-of-order
+completions back, and forwards a result only once every preceding sequence number has gone
+out, so a slow micro-batch that completes after a fast one dispatched later cannot get
+ahead of it. In non-deterministic mode the runner skips the reordering and forwards
+results in completion order, trading reproducibility for latency.
 
 Accumulator-defined boundaries plus sequence-number reordering are, together, the reason
 the execution parameters are

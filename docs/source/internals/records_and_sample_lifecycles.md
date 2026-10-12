@@ -147,11 +147,11 @@ choice that is correct in both cases.
 
 (chunks-are-the-unit-of-state)=
 
-**Chunks are the unit of state.** Putting it together, the **chunk** is the unit in which
-Zephon holds and checkpoints state. It keeps a small set of **inflight chunks** per lane,
-meaning chunks whose samples have entered the `Pipeline` but whose outputs have not all
-been delivered, and as contributors and tombstones close offsets the fully consumed chunks
-leave that set. At checkpoint time only what remains has to be written down.
+**Chunks are the unit of state.** [How Pipelines Run](../pipelines/how_pipelines_run.md)
+explains that Zephon tracks progress by chunk and that a chunk is complete once every
+record derived from it has been delivered. The bookkeeping above is how it knows:
+contributors and tombstones close offsets, and a chunk whose offsets are all closed leaves
+the per-lane set of **inflight chunks**.
 
 ```
 WorkSource           Engine                       Operators            Training loop
@@ -172,12 +172,9 @@ WorkSource           Engine                       Operators            Training 
     │                   │                             │ (tombstones stripped)│
 ```
 
-This is why your checkpoint size does not grow with training time. It is proportional to
-the number of inflight chunks per lane, which is a handful, rather than to the number of
-samples you have consumed. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md)
-covers how Zephon decides that a chunk is safe to drop, which turns out to be considerably
-more subtle than "all its offsets are closed" once packing and shuffling are in the
-`Pipeline`.
+[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers how Zephon decides
+that a chunk is safe to drop, which turns out to be considerably more subtle than "all its
+offsets are closed" once packing and shuffling are in the `Pipeline`.
 
 **Writing operators that respect all this.** [User-Defined
 Operators](../pipelines/user_defined_operators.md) covers the ways to add your own code to

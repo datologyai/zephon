@@ -56,11 +56,6 @@ Alongside these sit the replay cursor per lane, the lane progress pointers, and 
 round-robin position discussed in
 {ref}`Elastic Determinism <what-actually-survives-a-topology-change>`.
 
-Chunks you have already fully consumed are not in the checkpoint, because they are gone,
-and chunks that have not been fetched yet are not in it either, because the `WorkSource`
-will produce them. This is why checkpoint size is bounded by the inflight chunks per lane
-rather than by how far you have trained.
-
 One thing is deliberately absent. The per-offset completion bitmaps are runtime-only, and
 Zephon rebuilds them as the replayed chunks flow through the `Pipeline` and re-trigger
 contributor tracking. That keeps your checkpoints small, at the cost of making restore
@@ -141,14 +136,11 @@ Epoch 0          Epoch 1          Epoch 2
            (flush)          (flush)
 ```
 
-This buys replay safety by spending a little output quality, because each flush interrupts
-the accumulator mid-stride: the packer emits partially filled bins and pays for them in
-padding, the shuffle buffer emits a smaller window and randomises less, and the mixture
-corrector drains mid-rebalance. `flush_every_k_chunks` is the dial on that trade, and it
-is genuinely three-way. A smaller K means a faster resume, since fewer chunks are in
-flight to replay; a larger K means fewer interruptions and better output; and memory
-scales with K, since at least a full epoch stays inflight until it can be evicted. For a
-`Pipeline` that needs sentinels at all, the default is 8.
+[How Pipelines Run](../pipelines/how_pipelines_run.md) covers the trade that
+`flush_every_k_chunks` controls. What that page leaves implicit is what a flush costs at
+the operator level, since each one interrupts an accumulator mid-stride: the packer emits
+partially filled bins and pays for them in padding, the shuffle buffer emits a smaller
+window and randomises less, and the mixture corrector drains mid-rebalance.
 
 On a non-monotonic `Pipeline`, setting `flush_every_k_chunks=0` is an error, because
 without sentinels the accumulator state depends on unbounded history and we cannot evict
@@ -286,7 +278,8 @@ unique identity rather than an ordinal position.
 
 **What a custom operator owes replay.** If your operator buffers across chunk boundaries
 it has to cooperate with all of the above, or Zephon will evict a chunk whose data your
-operator is still holding. Concretely:
+operator is still holding. The obligations are spelled out on the two pages before this
+one; gathered together, they are:
 
 - Set `preserves_cursor_order=False` in `OpTraits` if your operator reorders anything.
 - Propagate contributor metadata, and set `is_last_child` correctly.

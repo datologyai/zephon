@@ -19,11 +19,9 @@ same global sample order, as long as the `Pipeline` definition stays the same: t
 the operators, the mixture weights, and the number of lanes. The induction does not care
 which machine runs which step.
 
-Determinism is on by default, and you can turn it off with
-`Pipeline.options(deterministic=False)`, which lets each stage forward results in whatever
-order they finish rather than in input order. That can shave latency off a serving-style
-workload, but it also means elastic determinism no longer holds, because the per-lane
-ordering that the rest of this page depends on is exactly what gets relaxed.
+Turning determinism off with `Pipeline.options(deterministic=False)` therefore costs you
+more than the ordering guarantee it names. Elastic determinism goes with it, because the
+per-lane ordering that the rest of this page depends on is exactly what gets relaxed.
 
 (execution-parameters-are-not-data-parameters)=
 
@@ -34,13 +32,9 @@ parallelism of each operator, the queue depths, the prefetch settings, and the p
 microbatch size. You can tune a `Pipeline` for a week and the experiment you ran on the
 first day is still comparable to the one you run on the last.
 
-Two mechanisms buy you this, and [Operators and Runners](operators_and_runners.md) covers
-both in detail. Micro-batches get a sequence number before Zephon dispatches them and are
-put back in order before they are forwarded, so parallelism cannot reorder anything. And
-every decision that depends on more than one record lives in a single-threaded accumulator
-that sees records in stream order, so parallelism cannot change the decisions either,
-whether that is which sequences get packed together or which records a shuffle buffer
-holds back.
+The two mechanisms that buy you this, sequence-number reordering and the single-threaded
+accumulator, are the ones [How Pipelines Run](../pipelines/how_pipelines_run.md)
+introduces and [Operators and Runners](operators_and_runners.md) takes apart.
 
 This is less common than you might expect, because most loaders do couple the two.
 [Megatron Energon](https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html)
@@ -62,16 +56,12 @@ hardware. Mosaic Streaming calls its version **canonical nodes**, a fixed number
 logical partitions that are mapped onto physical nodes at runtime. Keep the number of
 canonical nodes constant and the global sample order survives a change in node count.
 
-**Zephon's version: lanes.** A **lane** is a logical, deterministic sub-stream of the
-global sample order, and it is the natural equivalent of a canonical node for an iterable
-pipeline. You fix the number of lanes for the lifetime of a run with the
-`canonical_replicas` option, and Zephon partitions those lanes among whatever
-data-parallel groups the current run happens to have.
-
-Because every data-parallel group must own at least one lane, `canonical_replicas` is a
-hard upper bound on `dp_degree`. Set it to 32 and you can run on anything from 1 to 32
-groups, but not on 64. The per-lane sample streams are identical in every one of those
-cases, and the only thing that changes is which group owns which lane:
+**Zephon's version: lanes.** {ref}`Planning for elasticity <planning-for-elasticity>`
+introduces the **lane** as the fixed logical data stream you size with
+`canonical_replicas`, which is the natural equivalent of a canonical node for an iterable
+pipeline. What matters here is the consequence: the per-lane sample streams are identical
+at every `dp_degree`, and the only thing a topology change moves is which group owns which
+lane.
 
 ```
 canonical_replicas = 8, dp_degree = 2
