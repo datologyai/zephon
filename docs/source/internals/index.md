@@ -12,14 +12,13 @@ knobs exist and what they do, [How Pipelines Run](../pipelines/how_pipelines_run
 [Inspecting and Tuning Pipelines](../pipelines/inspecting_and_tuning_pipelines.md) are
 where you want to be.
 
-**A Warning About Stability.** These pages describe machinery that lives in
-`zephon/_internal/`, which is explicitly not part of the public API. The layout and the
-signatures in there change without notice, and we will not keep them stable for you. What
-*is* stable is the contract that the machinery implements, and that is what we have tried
-to write down here. Where a page names a class or a function inside `_internal`, treat it
-as a pointer to the code rather than as something to import. The exception is [WorkSources
-and Work Chunks](worksources_and_work_chunks.md), which documents a public interface,
-because `zephon.work` is something you are meant to implement against.
+**A Warning About Stability.** These pages describe behaviour rather than implementation.
+Most of the machinery involved lives in private modules whose layout and signatures change
+without notice, so we have tried to write down the contract it implements and to name
+things the way you would reach them: the operator you called, the option you set, the
+class you would subclass. What is stable is that contract. If a mechanism here is ever
+reworked, the guarantees described should survive it even though the code will not look
+the same.
 
 The five pages build on each other in order. [WorkSources and Work
 Chunks](worksources_and_work_chunks.md) explains where the data order comes from in the

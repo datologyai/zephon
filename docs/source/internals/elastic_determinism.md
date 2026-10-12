@@ -127,9 +127,8 @@ through 3 might see batches finish as lane 2, lane 0, lane 2, lane 1, and so on.
 
 The training loop needs better than that. Each optimizer step has to contain a whole
 number of round-robin cycles across the lanes, or the step composition depends on the
-topology. So the engine ends every pipeline with a **tail multiplexer** (`_lane_rr_iter`
-in `zephon/_internal/engine.py`) that buffers output per lane and emits in strict
-round-robin:
+topology. So the engine ends every pipeline with a **tail multiplexer** that buffers
+output per lane and emits in strict round-robin:
 
 ```
 Raw pipeline output (arrival order varies with processing time):

@@ -205,7 +205,7 @@ Checkpoint
 │  fetch → tokenize → pack → ensure_mixture → ...       │
 └────────────────────────┬─────────────────────────────┘
                          v  records
-┌─── ReplayFilter ─────────────────────────────────────┐
+┌─── Replay filter ────────────────────────────────────┐
 │  Per lane: drop until cursor == target, then emit     │
 └────────────────────────┬─────────────────────────────┘
                          v  new records only
@@ -221,7 +221,7 @@ the pipeline is deterministic they produce the same records and rebuild the same
 accumulator state as a side effect. Finally the replay filter drops the prefix the
 training loop already consumed.
 
-**The ReplayFilter.** The planner inserts a `ReplayFilter` into every pipeline
+**The Replay Filter.** The planner inserts a replay filter into every pipeline
 automatically, so you never add one. If the pipeline has a `batch` operator it goes
 immediately before it, otherwise it is appended at the tail, and it takes its name from
 the operator it sits next to. You can see it in `Pipeline.explain()`:
@@ -238,7 +238,7 @@ Stage[1] place=local runner=inline cap=1 mode=stream_items
 On a fresh run it is a no-op that passes everything through. It only does anything on
 resume.
 
-Its placement before `batch` is what makes `Batch(drop_last=True)` the one operator
+Its placement before `batch` is what makes `batch(drop_last=True)` the one operator
 allowed to stall at an epoch boundary. Because batching only emits complete batches, the
 consumer-visible checkpoint cut falls between whole batches. On resume the prefix is
 dropped *before* batching, and batching rebuilds the suffix from an empty buffer at the
@@ -279,7 +279,7 @@ operator is still holding. Concretely:
 - Implement `flush(reset=True, lane_id=...)` so that it fully resets that lane's state.
 After a mid-stream flush the accumulator must report no pending data for that lane. The
 runner treats anything else as a contract violation and raises.
-- Do not plan on stalling. It is supported for `Batch(drop_last=True)` and nothing else.
+- Do not plan on stalling. It is supported for `batch(drop_last=True)` and nothing else.
 
 **Multi-Rank Aggregation.** Each rank's engine owns a subset of lanes, but a complete
 checkpoint has to cover all of them, so the ranks merge their states through a shared

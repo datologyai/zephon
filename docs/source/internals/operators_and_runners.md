@@ -150,23 +150,23 @@ elements the accumulator has seen, never on timing.
 **The built-ins.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
 lane and emits when a lane reaches `max_batch`, and is what most operators use: fetch,
-decode, tokenize, map transforms, and batching, which goes through the `BatchAccumulator`
-subclass that adds `drop_last`. Lane keying lives in `CountingAccumulator` itself, which
-is what makes a per-lane flush sentinel able to reset one lane alone.
+decode, tokenize, map transforms, and batching, which uses a subclass that adds
+`drop_last`. Lane keying lives in `CountingAccumulator` itself, which is what makes a
+per-lane flush sentinel able to reset one lane alone.
 
 In non-deterministic mode `CountingAccumulator` can also flush on a latency bound
 (`max_latency_ms`), emitting a partial micro-batch rather than waiting for a bursty stream
 to fill one. In deterministic mode that is disabled, so micro-batch boundaries depend only
 on counts and never on the clock.
 
-The specialised ones live beside their operators in `zephon/_internal/ops/`.
-`PackingAccumulator` keeps per-lane bins and emits when a bin's remaining capacity drops
-below the minimum useful sequence length or when too many bins are open.
-`EnsureMixtureAccumulator` keeps per-lane buffers grouped by mixture component and uses
-smooth weighted round-robin to emit in the order that best tracks the target ratios.
-Shuffling has two, picked by the `algorithm` argument: `StreamingShuffleAccumulator` for
-the default reservoir-style shuffle, and `WarmupBlockAccumulator` for the tumbling-block
-variants.
+The specialised ones ship with the operators that need them, and you never construct one
+yourself. The accumulator behind `pack_sequences` keeps per-lane bins and emits when a
+bin's remaining capacity drops below the minimum useful sequence length or when too many
+bins are open. The one behind `ensure_mixture` keeps per-lane buffers grouped by mixture
+component and uses smooth weighted round-robin to emit in the order that best tracks the
+target ratios. `shuffle` has two, picked by its `algorithm` argument: a reservoir
+accumulator for the default `"streaming"`, and a block accumulator for `"block"` and
+`"block_warmup"`.
 
 **How Runners Keep The Order.** Zephon ships three runner types for local execution,
 namely `inline`, `threads`, and `process`, which [How Pipelines
@@ -214,15 +214,15 @@ exception noted below. For history-dependent accumulators (`preserves_cursor_ord
 the reset is the load-bearing part. For order-preserving ones the flush is harmless, being
 either a no-op or a trivial drain, and only the bookkeeping differs:
 
-| Accumulator | At a sentinel | Why |
+| Operator | At a sentinel | Why |
 |---|---|---|
-| `PackingAccumulator` | Flushes: emits padded partial bins, resets all bin state | Bin state depends on the full input history |
-| `EnsureMixtureAccumulator` | Flushes | Round-robin deficit state depends on emission history |
-| Shuffle accumulators | Flush: drain the buffer | Buffer contents span chunk boundaries |
-| `CountingAccumulator` | Flushes (returns whatever is buffered) | Harmless, because grouping is stateless |
-| `BatchAccumulator`, `drop_last=False` | Flushes: emits the partial batch | Harmless, because a partial batch is acceptable |
-| `BatchAccumulator`, `drop_last=True` | **Stalls** | Cannot emit a partial batch |
-| `PassthroughAccumulator` | Flushes (no-op) | No state to reset |
+| `pack_sequences`, `pack_flat` | Flush: emit padded partial bins, reset all bin state | Bin state depends on the full input history |
+| `ensure_mixture` | Flushes | Round-robin deficit state depends on emission history |
+| `shuffle` | Flushes: drains the buffer | Buffer contents span chunk boundaries |
+| `fetch`, `decode_text`, `tokenize`, `map_transform` | Flush, returning whatever is buffered | Harmless, because grouping is stateless |
+| `batch(drop_last=False)` | Flushes: emits the partial batch | Harmless, because a partial batch is acceptable |
+| `batch(drop_last=True)` | **Stalls** | Cannot emit a partial batch |
+| The replay filter | Flushes, as a no-op | No state to reset |
 
 **What "fully reset" means.** After `flush(reset=True, lane_id=lane)`, that lane must be
 indistinguishable from a freshly constructed accumulator, with its buffers, counters, and
@@ -236,7 +236,7 @@ while `has_pending_data(lane)` is still true, the runner raises. Leaving residua
 cross-boundary state would break replay silently, so it fails loudly instead.
 
 **Stalling is deliberately narrow.** Exactly one built-in is allowed to hold a sentinel
-back instead of flushing: `Batch(drop_last=True)`, because it cannot emit a partial batch
+back instead of flushing: `batch(drop_last=True)`, because it cannot emit a partial batch
 without changing its output. The runner derives this from the operator instance rather
 than from a trait, which is a signal that it is a special case and not an extension point.
 
@@ -247,7 +247,7 @@ checkpoints inflight chunks, epoch boundaries, and replay cursors, but it does n
 checkpoint a general operator replay capsule. An operator that both reorders and stalls
 would need one.
 
-`Batch(drop_last=True)` escapes this because it preserves input order, emits only complete
+`batch(drop_last=True)` escapes this because it preserves input order, emits only complete
 batches, and has the replay filter inserted immediately before it by the planner. The
 consumer-visible checkpoint cut therefore falls between complete batches, so the batch
 buffer is empty at the replay cursor and nothing extra needs saving. Live execution can

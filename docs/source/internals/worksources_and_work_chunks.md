@@ -11,9 +11,9 @@ rests on. Every claim about reproducible data order reduces, eventually, to the 
 a `WorkSource` bound to a given lane produces the same pointers in the same order for a
 given seed. Everything downstream is a deterministic function of that.
 
-Unlike most of what this section covers, `WorkSource` and `WorkChunk` are public API. They
-live in `zephon.work`, not in `zephon/_internal/`. You need them if you want a curriculum
-that the built-in static mixture cannot express.
+`WorkSource` and `WorkChunk` live in `zephon.work`, and unlike most of what this section
+describes, they are an interface you are meant to implement against. You need them if you
+want a curriculum that the built-in static mixture cannot express.
 
 **The Contract.** The engine only ever calls a handful of methods, and they fall into four
 groups.
