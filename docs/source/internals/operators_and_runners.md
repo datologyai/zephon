@@ -21,8 +21,7 @@ micro-batch — a list of {py:class}`~zephon.types.SampleRecord` objects, or
 of the *same* element types. To transform a sample you rebuild its `payload` while
 preserving its `meta`, which carries the identity and ordering that [Records and Sample
 Lifecycles](records_and_sample_lifecycles.md) describes. Returning a bare dict or a raw
-payload gets you a
-`TypeError: Unsupported element type`.
+payload gets you a `TypeError: Unsupported element type`.
 
 `traits()` declares the {py:class}`~zephon.ops.OpTraits` that guide compilation and
 scheduling, including the all-important `preserves_cursor_order`.
@@ -51,11 +50,12 @@ logic needing to see elements in stream order lives in the accumulator.
 
 ## Micro-Batches
 
-```{note}
-Micro-batches here are the internal groups of elements dispatched to operator workers.
-They are not the training batches that `batch()` produces, and the two sizes have nothing
-to do with each other. The name collision is unfortunate and ours.
-```
+:::{note}
+**Two kinds of batch.** Micro-batches here are the internal groups of elements
+dispatched to operator workers. They are not the training batches that `batch()`
+produces, and the two sizes have nothing to do with each other. The name collision is
+unfortunate and ours.
+:::
 
 When an operator runs with several workers, the runner does not hand out elements one at a
 time. It groups them into micro-batches processed together in a single `process_many`
@@ -122,7 +122,7 @@ determinism](elastic_determinism.md): samples from different lanes are never
 packed together, so each lane's packing decisions are independent of how many GPUs are
 running.
 
-**The interface** is four methods, defined in `zephon.ops.accumulators`:
+**The interface** is four methods and a flag, defined in `zephon.ops.accumulators`:
 
 `push_many(elems)` consumes elements from upstream, buffers them, and returns zero or more
 ready micro-batches.
@@ -141,6 +141,12 @@ runner uses to avoid terminating early and to detect stalling.
 released — whether the accumulator's future output is equivalent to a fresh instance fed
 only the records still buffered. The default implementation is conservative and says yes
 only when nothing is pending.
+
+`reads_payload` is the flag. It defaults to `False`, which declares that the accumulator
+only ever looks at metadata — `lane_id`, cursors — and lets the runner leave payloads as
+unresolved shared-memory handles. Set it to `True` if `push_many` inspects payloads, and
+the runner resolves them first; forget to, and you get a lazy handle where you expected a
+dict.
 
 `flush()` is deterministic in the sense that matters: its output depends only on the
 elements the accumulator has seen, never on timing.
@@ -168,8 +174,10 @@ variants.
 
 ## How Runners Keep The Order
 
-Zephon ships three runner types — inline, threads, and processes — and from the
-accumulator's point of view they behave identically.
+Zephon ships three runner types for local execution — `inline`, `threads`, and
+`process`, described in [How Pipelines Run](../pipelines/how_pipelines_run.md) — plus a
+Ray-backed `remote` runner for stages added with `placement="remote"`. From the
+accumulator's point of view they all behave identically.
 
 When parallelism is greater than one, workers finish in whatever order they finish: a slow
 micro-batch can complete after a fast one dispatched later. In deterministic mode the

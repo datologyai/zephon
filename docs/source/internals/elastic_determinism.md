@@ -111,7 +111,9 @@ work each. Keeping the lanes mixed means one pool, sized once, shared across all
 The engine feeds the pipeline in fair round-robin across the lanes the group owns: one
 sample from lane 0, one from lane 1, and so on, skipping lanes that have finished. That
 keeps the lanes progressing at roughly the same rate, which matters because the output end
-has to pull one batch from each lane in turn.
+has to pull one batch from each lane in turn. How a lane works out which chunks belong to
+it in the first place — without asking any other rank — is covered in [Chunk-To-Lane
+Routing](worksources_and_work_chunks.md#chunk-to-lane-routing).
 
 The cost of mixing is that any operator holding per-record state has to be **lane-aware**,
 or it will mix data across lanes and destroy the per-lane determinism that the whole

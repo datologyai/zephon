@@ -38,7 +38,9 @@ its position directly. What goes in is up to the implementation — for
 {py:class}`~zephon.work.StaticMixtureWorkSource` the sample sequence is fully determined
 by the datasets, the seed, the shuffle knobs, and the lane, so the state is a compact set
 of per-dataset cursor positions plus mixture bookkeeping, and restoring it is
-instantaneous no matter how far into training you are.
+instantaneous no matter how far into training you are. [WorkSources and Work
+Chunks](worksources_and_work_chunks.md) covers what those cursors are and what the rest of
+the contract requires of a source you write yourself.
 
 Alongside these sit the replay cursor per lane, the lane progress pointers, and the
 round-robin position discussed in [Elastic
@@ -155,9 +157,8 @@ offsets into one packed record. An offset closes only when all of its children h
 delivered, which the engine learns from the `is_last_child` flags on contributor metadata,
 and from tombstones when a filter drops the last child standing — see [Records and Sample
 Lifecycles](records_and_sample_lifecycles.md#contributors-and-tombstones). A bitmap per
-chunk records which
-offsets are closed, with a popcount alongside so that "is this chunk complete?" stays
-O(1).
+chunk records which offsets are closed, with a popcount alongside so that "is this chunk
+complete?" stays O(1).
 
 ```
 Chunk 5 (4 offsets):  [x] [x] [ ] [x]    3 of 4 closed
@@ -292,9 +293,8 @@ or the engine will evict a chunk whose data the operator is still holding. Concr
 - Propagate contributor metadata, and set `is_last_child` correctly.
 - Emit tombstones for dropped final fragments.
 - Implement `flush(reset=True, lane_id=...)` so that it fully resets that lane's state.
-  After
-  a mid-stream flush the accumulator must report no pending data for that lane; the runner
-  treats anything else as a contract violation and raises.
+  After a mid-stream flush the accumulator must report no pending data for that lane; the
+  runner treats anything else as a contract violation and raises.
 - Do not plan on stalling. It is supported for `Batch(drop_last=True)` and nothing else.
 
 ## Multi-Rank Aggregation

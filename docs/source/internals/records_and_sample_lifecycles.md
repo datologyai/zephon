@@ -182,9 +182,8 @@ WorkSource           Engine                       Operators            Training 
 This is why checkpoint size does not grow with training time. It is proportional to the
 number of inflight chunks per lane — a handful — rather than to the number of samples
 consumed. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers how the
-engine decides that
-a chunk is safe to drop, which is considerably more subtle than "all its offsets are
-closed" once packing and shuffling are in the pipeline.
+engine decides that a chunk is safe to drop, which is considerably more subtle than "all
+its offsets are closed" once packing and shuffling are in the pipeline.
 
 ## Writing Operators That Respect All This
 
@@ -248,6 +247,7 @@ carries what the planner needs to know:
 | `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the planner forces its parallelism to 1. |
 | `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Disables time-based flushing in deterministic mode. |
 | `indexable` | `True` | The operator preserves indexability through the plan. |
+| `parallelism` | `1` | Suggested worker count, used when the plan does not override it. |
 
 `preserves_cursor_order` has no default on purpose: every operator author has to make the
 call consciously, because getting it wrong is the most expensive mistake available here.
