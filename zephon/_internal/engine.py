@@ -154,7 +154,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
     checks for leaks, even in free-threaded Python where GC is deferred.
 
     Calls close() first (to clean up runners, queues, and semaphores),
-    then _clean_merged() (to clean up temporary files).
+    then _clean_merged() (to release retained checkpoint coordinator resources).
     """
     try:
         engine = engine_ref()
@@ -166,7 +166,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
             if callable(close_fn):
                 close_fn()
         finally:
-            # Always clean merged files, even if close() fails
+            # Always release checkpoint coordinator resources, even if close() fails
             cm = getattr(engine, "_clean_merged", None)
             if callable(cm):
                 cm()
@@ -190,7 +190,7 @@ _DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_ne
 # Zephon separates two orthogonal concerns for distributed training:
 #
 # 1. GLOBAL COORDINATION (world_size, global_rank)
-#    - Used for: leader election, checkpoint aggregation, state file naming
+#    - Used for: leader election, checkpoint aggregation, state shard identification
 #    - global_rank must be unique per rank
 #    - Leader is global_rank == 0
 #
@@ -422,7 +422,8 @@ class Engine:
         )
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
+        # This calls close() to clean up runners/queues/semaphores, then
+        # _clean_merged() to release retained checkpoint coordinator resources.
         self._closed = False
 
         self._cleanup_finalizer = weakref.finalize(
@@ -1700,19 +1701,26 @@ class Engine:
         # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
         if len(self._owned_lanes) == 0:
-            # Idle workers just return their local state
-            # In the best case, they would also read the aggregate checkpoint to have a complete return
-            # The problem is that we cannot ensure this:
-            # Leader (rank 0, worker 0) publishes round_id
-            # Worker 0 & 1 successfully read the round_id, write their state files
-            # Leader sees all lanes covered, merges states, writes merged file, deletes round file
-            # Worker 2 (slow to call state_dict()) tries to read round_id, but:
-            # The round file might be deleted already, OR
-            # The round file exists but the merged file ALSO exists, causing _read_open_round_id() to return None due to this check:
+            # Idle workers return their local state. Ideally they would also
+            # receive the merged checkpoint, but the coordinator only guarantees
+            # participation for active workers. For example, if idle workers joined:
+            # - The leader (rank 0, worker 0) opens a round.
+            # - Active workers 0 and 1 join it and publish their state shards.
+            # - Once the required ranks and lanes are covered, the leader merges
+            #   the shards, publishes the result, and can close the round to joins.
+            # - Idle worker 2, slow to call state_dict(), tries to join, but the
+            #   round announcement may no longer be available, or the coordinator
+            #   may reject joins because the round has already completed.
+            # It could then time out waiting for a round to join. Returning the
+            # merged checkpoint here would require explicit coordinator support
+            # for late idle readers, beyond the active participants in the round.
             #
-            # The thing is that for torchdata in the end we only return worker 0 results anyways due to our torchdata_compat.py
-            # so it doesn't really matter. For regular torch dataloader, state_dict() does not work anyways by design (it does not forward to workers)
-            # And in regular Zephon without a DL, we don't have multiple workers per rank. Hence, this is fine, but if there is a better solution we should improve this.
+            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
+            # snapshot for all workers, so idle workers' local results do not
+            # replace the merged checkpoint. Regular PyTorch DataLoader does not
+            # forward state_dict() calls to workers, and Zephon without a DataLoader
+            # has no multiple workers per rank. These consumers therefore do not
+            # require an idle worker to return the merged checkpoint.
             return local
 
         lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
@@ -1744,7 +1752,7 @@ class Engine:
         """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
-        group owns the same canonical lanes and writes a state file; their
+        group owns the same canonical lanes and contributes a state shard; their
         lane-keyed entries would collide in the downstream merge. One rep
         per ``(dp_group_id, owned-lane-set)`` group survives, with
         ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
@@ -1758,7 +1766,7 @@ class Engine:
         Why the lane-set component (not just ``dp_group_id``): with
         ``workers_per_rank > 1`` multiple DataLoader workers on the same
         rank split their DP group's lanes into disjoint subsets (see
-        ``_owned_lanes``); those state files are complementary partitions,
+        ``_owned_lanes``); those state shards are complementary partitions,
         not duplicates, and must not be collapsed. At
         ``workers_per_rank=1`` the lane-set is redundant and grouping
         collapses to ``dp_group_id``.
