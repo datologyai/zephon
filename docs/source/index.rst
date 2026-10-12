@@ -23,6 +23,25 @@ reference documents the public classes and functions that the guide refers to.
    training_integrations
 
 .. toctree::
+   :maxdepth: 2
+   :caption: Understanding Zephon
+
+   understanding/worksources
+   understanding/sample_lifecycle
+   understanding/checkpointing
+   understanding/distributed_training
+   understanding/determinism
+   understanding/accumulators_operators
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Resources
+
+   guides/dev_guide
+   guides/prefetch_op
+   guides/sample_lifecycle
+
+.. toctree::
    :maxdepth: 1
    :caption: API reference
 
