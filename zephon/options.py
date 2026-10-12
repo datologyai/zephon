@@ -189,11 +189,12 @@ class RuntimeOptions:
     # groups are split at shm_max_coalesced_bytes. Only consumed by process runners.
     # Disabling coalescing still applies transport thresholds and view compaction.
     shm_coalesce: bool = True
-    # Minimum item size eligible for fresh SHM; shared views are grouped first.
+    # Minimum item size eligible for new SHM; forwarding existing SHM bypasses it.
     shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
     # Minimum useful bytes per new allocation in a message (default: 1 MiB).
     shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
-    # Minimum useful bytes per existing shared allocation in a message.
+    # Minimum summed view bytes per existing allocation in this message to keep
+    # that allocation. Smaller totals enter the same allocation path as private data.
     shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
     # Compact shared views when the backing/useful ratio exceeds the ratio limit
     # and savings reach the byte minimum. A None ratio disables compaction.

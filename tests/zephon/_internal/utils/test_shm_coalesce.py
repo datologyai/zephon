@@ -2176,6 +2176,61 @@ def test_memory_policy_accounts_for_other_values_using_the_same_buffer() -> None
         )
 
 
+def test_small_shared_backings_join_private_values_on_the_fresh_path() -> None:
+    policy = shm_coalesce.PayloadMemoryPolicy(
+        min_item_bytes=64,
+        min_new_allocation_bytes=256,
+        min_forward_bytes=256,
+        compact_above_ratio=None,
+    )
+    payloads = []
+    for shared in (True, True, False):
+        tensor, array, raw = (
+            torch.arange(16),
+            torch.arange(16),
+            torch.arange(128, dtype=torch.uint8),
+        )
+        if shared:
+            tensor.share_memory_()
+            array = shm_coalesce._shared_numpy_view(array.share_memory_())
+            raw = _ShmBytes(raw.share_memory_())
+        else:
+            array, raw = array.numpy(), bytes(raw.numpy())
+        payloads.append({"t": tensor, "n": array, "b": raw})
+    payloads.append(
+        {"t": payloads[0]["t"][:4], "n": payloads[0]["n"][:4], "b": b"tiny"}
+    )
+    records = [SampleRecord(_meta(i), payload) for i, payload in enumerate(payloads)]
+
+    prepared = prepare_microbatch(records, policy, copy_records=True)
+    assert len(prepared.buffers) == 3
+    # Shared views and private values use one fresh allocation per type. Tiny
+    # views stay below the item floor even when the rest of their group qualifies.
+    assert all(
+        buffer.untyped_storage().nbytes() == 384 for buffer in prepared.buffers.values()
+    )
+    restored = _round_trip_resolved(prepared)
+    for record, expected in zip(restored, payloads, strict=True):
+        torch.testing.assert_close(record.payload["t"], expected["t"])
+        np.testing.assert_array_equal(record.payload["n"], expected["n"])
+        assert bytes(record.payload["b"]) == bytes(expected["b"])
+    assert not restored[-1].payload["t"].is_shared()
+    assert shm_coalesce._shared_numpy_storage(restored[-1].payload["n"]) is None
+    assert restored[0].payload["t"].data_ptr() != payloads[0]["t"].data_ptr()
+    assert records[0].payload is payloads[0]
+
+    # A small group remains inline; disabling coalescing applies the allocation
+    # floor to each value, including values already backed by SHM.
+    for selected, coalesce in ((records[:1], True), (records, False)):
+        active_policy = dataclasses.replace(policy, coalesce=coalesce)
+        inline = prepare_microbatch(selected, active_policy, copy_records=True)
+        assert not inline.buffers
+        for record in _round_trip_resolved(inline):
+            assert not record.payload["t"].is_shared()
+            assert shm_coalesce._shared_numpy_storage(record.payload["n"]) is None
+            assert isinstance(record.payload["b"], bytes)
+
+
 def test_view_compaction_is_shared_by_numpy_and_torch_and_does_not_repeat() -> None:
     source = prepare_microbatch(
         [SampleRecord(_meta(0), {"t": torch.arange(8192), "n": np.arange(8192)})],
@@ -2345,16 +2400,19 @@ def test_prepared_shared_views_reuse_descriptors_without_reducing_numpy_again(
     )
 
 
-def test_view_compaction_does_not_wait_for_its_own_shared_allocation(
+@pytest.mark.parametrize("compact", [True, False], ids=["compaction", "regrouping"])
+def test_replacing_views_does_not_wait_for_its_own_shared_allocation(
     monkeypatch: pytest.MonkeyPatch,
+    compact: bool,
 ) -> None:
     source = torch.arange(8192).share_memory_()
     views = [source[:16], source[32:48], torch.arange(16)]
     policy = shm_coalesce.PayloadMemoryPolicy(
         min_item_bytes=0,
         min_new_allocation_bytes=0,
-        min_forward_bytes=0,
+        min_forward_bytes=0 if compact else 512,
         compact_min_savings_bytes=1024,
+        compact_above_ratio=8 if compact else None,
     )
 
     def full(*args, **kwargs):
@@ -2363,7 +2421,7 @@ def test_view_compaction_does_not_wait_for_its_own_shared_allocation(
         )
 
     def unexpected_wait(*args):
-        raise AssertionError("optional view compaction must not wait for SHM")
+        raise AssertionError("optional replacement must not wait for SHM")
 
     monkeypatch.setattr(torch.UntypedStorage, "_new_shared", full)
     monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", unexpected_wait)

@@ -26,21 +26,28 @@ Process-stage decisions (also used when forwarding a resolved payload)::
       |
     Supported, nonempty value
       |
-      +-- Already in SHM? -- yes --> Group views by existing allocation
-      |                              |
-      |                              +-- useful < shm_min_forward_bytes
-      |                              |     --> inline
-      |                              |
-      |                              +-- Compact? Both must hold:
-      |                              |     backing > useful * shm_compact_above_ratio
-      |                              |     backing - useful >= shm_compact_min_savings_bytes
-      |                              |     (ratio=None disables compaction)
-      |                              |       no  --> keep existing SHM
-      |                              |       yes --+
-      |                                           |
-      +-- no -------------------------------------+
-                                                  |
-                                      Fresh destination
+    Already in SHM? -- no ---------------------------------------------+
+      |                                                               |
+      yes                                                             |
+      |                                                               |
+    Group views by existing allocation                                |
+      |                                                               |
+    useful < shm_min_forward_bytes? -- yes ----------------------------+
+      |                                                               |
+      no                                                              |
+      |                                                               |
+    Compact? Both must hold:                                           |
+      backing > useful * shm_compact_above_ratio                       |
+      backing - useful >= shm_compact_min_savings_bytes                |
+      (ratio=None disables compaction)                                |
+      |                                                               |
+      +-- yes --------------------------------------------------------+
+      |                                                               |
+      no                                                              |
+      |                                                               |
+    Keep existing SHM                                                 |
+                                                                      |
+                                     Fresh destination <--------------+
                                                   |
                          item < shm_min_item_bytes? -- yes --> inline
                                                   |
@@ -56,9 +63,21 @@ Process-stage decisions (also used when forwarding a resolved payload)::
                          group < shm_min_new_allocation_bytes?
                               yes --> inline      no --> fresh SHM
 
-Compaction copies directly into the final destination, together with eligible
-private values. Useful bytes count views in this message; other references can
-keep an old allocation alive. Unsupported values use their normal serialization.
+A view exposes both its own size and its backing storage. Useful bytes are the
+sum of view sizes referencing one allocation in this microbatch, not the size
+of that allocation or a count across other microbatches. The forwarding minimum
+controls per-allocation transport overhead; compaction controls retained memory.
+Forwarding can be worthwhile below the minimum for creating a new allocation,
+because it avoids allocating and filling a new buffer.
+
+Values below the forwarding minimum and values selected for compaction use the
+same fresh-destination path as private values. Disabling compaction leaves the
+forwarding minimum active. Eligible values can coalesce across old allocations
+and with private values.
+The item minimum applies only on this path, not when keeping existing SHM; the
+allocation minimum applies to each resulting group. Copies go directly into the
+final destination. Other references can keep an old allocation alive.
+Unsupported values use their normal serialization.
 The final MTP queue does not use this policy at the moment.
 
 Strategy (single memcpy):
@@ -149,10 +168,11 @@ _TORCH_COPY_LOOP_MIN_MEAN_BYTES = 256 * 1024
 class PayloadMemoryPolicy:
     """Choose transport, retention, and coalescing independently of payload type.
 
-    ``min_item_bytes`` selects values eligible for fresh SHM. Existing shared
-    views are considered together using ``min_forward_bytes`` per allocation.
-    Private values and compacted views use the same bounded coalescing path,
-    with ``min_new_allocation_bytes`` applied to each planned destination.
+    ``min_forward_bytes`` applies to the sum of view sizes per existing
+    allocation in this microbatch. Views below it or selected for compaction
+    join private values on the fresh-destination path. ``min_item_bytes``
+    selects eligible values there, and ``min_new_allocation_bytes`` applies
+    to each planned destination after grouping compatible values.
     References outside this message can delay reclamation after compaction.
     """
 
@@ -189,10 +209,10 @@ class PayloadMemoryPolicy:
 
     def shared_action(
         self, useful_bytes: int, backing_bytes: int
-    ) -> Literal["inline", "keep", "fresh"]:
-        """Decide once per existing allocation using this message's useful bytes."""
+    ) -> Literal["keep", "fresh"]:
+        """Keep this backing or pass its views through the fresh-destination rules."""
         if useful_bytes < self.min_forward_bytes:
-            return "inline"
+            return "fresh"
         if (
             self.compact_above_ratio is not None
             and backing_bytes > useful_bytes * self.compact_above_ratio
@@ -911,7 +931,7 @@ class _BufferPlan:
         return result
 
     def _select_shared(self) -> list[_BufferPayload]:
-        """Decide once per backing allocation; return private and compacted values."""
+        """Select existing backing; return private and remaining shared values to group."""
         fresh: list[_BufferPayload] = []
         shared: dict[int, list[_BufferPayload]] = {}
         for value in self.pending:
@@ -935,7 +955,7 @@ class _BufferPlan:
                     ):
                         value.result = np.asarray(value.result)
                         self.changed = True
-                elif action == "inline" or value.nbytes < self.policy.min_item_bytes:
+                elif value.nbytes < self.policy.min_item_bytes:
                     value.result = self.inline(value)
                 else:
                     fresh.append(value)
@@ -978,9 +998,9 @@ class _BufferPlan:
     def finish(self) -> None:
         """Select backing, validate fresh values, then allocate each final group.
 
-        Private values and compacted views take the same grouping path. Sources
-        remain available for optional-allocation fallback until all results are
-        chosen; they are then released from the temporary descriptions.
+        Private values and views not kept in place take the same grouping path.
+        Sources remain available for optional-allocation fallback until all
+        results are chosen; they are then released from the descriptions.
         """
         fresh = self._check_numeric_lists(self._select_shared())
         for values in _fresh_groups(fresh, self.policy):
@@ -1252,7 +1272,7 @@ def _build_shm_buffer(items: list[Any], dtype_key: str, *, retry: bool = True) -
     Numeric lists are converted before allocation.
 
     Required allocations retry on SHM exhaustion via ``_alloc_shm_buffer``.
-    Optional compaction returns the error to the planner for per-value fallback.
+    Replacing existing SHM is optional and returns the error for per-value fallback.
     """
     torch = _get_torch()
 
@@ -1508,12 +1528,12 @@ def prepare_microbatch(
     """Prepare payloads from *items* as per-dtype SHM buffers or inline values.
 
     Shared Torch tensors and NumPy views of Zephon buffers retain their storage
-    through multiprocessing reduction, unless the policy selects inline
-    transport or view compaction. Existing lazy payloads are already prepared.
+    through multiprocessing reduction, unless the policy selects a fresh
+    destination. Existing lazy payloads are already prepared.
 
     Uses a two-pass approach: extraction first collects descriptors without
     mutating payloads, then commits only after SHM allocation succeeds or
-    optional compaction falls back to the source views. ``copy_records`` keeps
+    optional replacement falls back to the source views. ``copy_records`` keeps
     the sender's retry records private and unchanged during queue preparation.
     """
     if _get_torch() is None:

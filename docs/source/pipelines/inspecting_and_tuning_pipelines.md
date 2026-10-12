@@ -131,11 +131,13 @@ how much memory a retained sample keeps alive.
 | `shm_enabled` | `True` | `False` disables Zephon's SHM preparation. Ordinary multiprocessing pickling still applies, so Torch may still share tensor storage. |
 | `shm_min_item_bytes` | 4 KiB | Minimum item size eligible for a new SHM allocation, including when compacting existing shared data. Does not affect forwarding an existing allocation. |
 | `shm_min_new_allocation_bytes` | 1 MiB | Create a shared buffer only if its group reaches this size; smaller groups travel inline. |
-| `shm_min_forward_bytes` | 128 KiB | Forward an existing shared buffer only if the message uses at least this much of it; otherwise send those views inline. |
+| `shm_min_forward_bytes` | 128 KiB | Minimum summed view sizes per existing allocation in this message to forward it; smaller totals follow the same allocation rules as private data. |
 | `shm_coalesce` | `True` | Combine compatible values into common buffers. `False` considers each value separately; transport thresholds still apply. |
 | `shm_max_coalesced_bytes` | 64 MiB | Upper bound for a coalesced buffer (`None`: no bound). Larger single values remain unsplit. |
 | `shm_compact_above_ratio` | 8 | Compact views when their buffer is more than this many times larger than the bytes the message uses (`None` disables compaction) … |
 | `shm_compact_min_savings_bytes` | 16 MiB | … and compaction would save at least this many bytes of backing. |
+
+Views below the forwarding minimum or selected for compaction can coalesce with compatible values from other allocations and private memory in the same microbatch.
 
 `shm_min_size` and `coalesce_tensors` are no longer supported. Use
 `shm_min_item_bytes` and `shm_coalesce`, respectively. Both `RuntimeOptions(...)`
