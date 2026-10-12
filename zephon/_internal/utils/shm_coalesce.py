@@ -260,7 +260,7 @@ class _LeafDescriptor(_PayloadDescriptor):
 
     def bind(self, buffers: dict[str, Any]) -> LazyPayload:
         """Keep a root leaf lazy without retaining unrelated buffers."""
-        return _ShmLeafPayload(self, _used_buffers([self], buffers))
+        return _ShmLeafPayload(self, _referenced_buffers([self], buffers))
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore this value using its shared buffers."""
@@ -269,7 +269,7 @@ class _LeafDescriptor(_PayloadDescriptor):
 
 @dataclass(slots=True)
 class _TensorSlot(_LeafDescriptor):
-    """Lightweight stand-in for a tensor extracted into a coalesced buffer."""
+    """Lightweight stand-in for a tensor view into a new or existing SHM buffer."""
 
     dtype_key: str  # str(tensor.dtype)
     offset: int  # element offset into the per-dtype buffer
@@ -313,7 +313,7 @@ class _TensorSlot(_LeafDescriptor):
 
 @dataclass(slots=True)
 class _NdarraySlot(_LeafDescriptor):
-    """Lightweight stand-in for a numpy array extracted into a coalesced buffer."""
+    """Lightweight stand-in for a NumPy view into a new or existing SHM buffer."""
 
     dtype_key: str  # _NDARRAY_PREFIX + str(ndarray.dtype)
     offset: int  # element offset into the per-dtype buffer
@@ -440,6 +440,7 @@ def _reduce_numpy(array: np.ndarray[Any, Any]) -> str | tuple[Any, ...]:
             # Object arrays use NumPy's legacy reduction even with protocol 5.
             # Keep its memoization order so self-references still round-trip.
             return array.__reduce__()
+        # Unwrap the value after the wrapper's protocol-aware reduction runs.
         return operator.getitem, ((_NumpyPickleFallback(array),), 0)
     offset = array.__array_interface__["data"][0] - storage.data_ptr()
     return (
@@ -490,7 +491,7 @@ class _NumericListSlot(_LeafDescriptor):
 
 @dataclass(slots=True)
 class _BytesSlot(_LeafDescriptor):
-    """Lightweight stand-in for a bytes payload moved to the uint8 SHM buffer."""
+    """Lightweight stand-in for a bytes view into a new or existing uint8 buffer."""
 
     offset: int  # byte offset into the _BYTES_DTYPE_KEY buffer
     length: int
@@ -605,11 +606,18 @@ class _FlatSkeleton(_PayloadDescriptor):
     spec: optree.PyTreeSpec  # structure recipe for tree_unflatten
 
     def __reduce__(self) -> tuple:
-        return type(self), (self.slots, self.spec)
+        # Serialize final values directly, without reducing each planning wrapper.
+        slots = [
+            slot.transport_value if isinstance(slot, _BufferPayload) else slot
+            for slot in self.slots
+        ]
+        return type(self), (slots, self.spec)
 
     def bind(self, buffers: dict[str, Any]) -> LazyPayload:
         """Keep the existing tree lazy payload without retaining this wrapper."""
-        return ShmLazyPayload(self.slots, self.spec, _used_buffers(self.slots, buffers))
+        return ShmLazyPayload(
+            self.slots, self.spec, _referenced_buffers(self.slots, buffers)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -679,7 +687,7 @@ _ShmBytes = _make_shm_bytes_class(sys.version_info[:3])
 
 
 # ---------------------------------------------------------------------------
-# pytree-based leaf extraction (replaces recursive _extract_payload)
+# pytree-based leaf collection
 # ---------------------------------------------------------------------------
 _PRIMITIVE_TYPES = (int, float, str, bool, type(None))
 
@@ -695,11 +703,10 @@ def _is_leaf(obj: Any) -> bool:
     Lists and tuples of primitives (int, float, str, …) are also treated as leaves
     to avoid inflating the slot count.  A ``List[int]`` with 500 elements
     would otherwise become 500 individual int leaves — catastrophic for
-    pickle size and restore time at high DOP.  We check the first and
-    last element as an O(1) heuristic; typed fields (pydantic, dataclass)
-    guarantee homogeneity so this is safe in practice.  If wrong, the
-    only consequence is a missed tensor falling back to pickle (perf,
-    not correctness).
+    pickle size and restore time at high DOP. We check the first and
+    last element as an O(1) heuristic. Numeric lists selected for SHM are
+    checked for homogeneity before conversion. Other sequences use ordinary
+    pickle, including any buffer values between primitive endpoints.
     """
     if type(obj) in _PRIMITIVE_TYPES or type(obj) is dict:
         return False
@@ -842,8 +849,16 @@ class _InlineNumpy(_LeafDescriptor):
 class _BufferPayload(_LeafDescriptor):
     """Buffer candidate shared by a record description and its preparation.
 
-    Destination preparation fills ``result`` with an inline value or a shared
-    slot. Reduction emits that result, leaving this temporary candidate behind.
+    ``source`` holds the original value; ``slot`` describes its shape and dtype
+    and receives an offset if SHM is selected. ``copy_source`` optionally holds
+    a numeric list converted for the final write. Destination preparation fills
+    ``transport_value`` with the original value, an inline descriptor, or the
+    shared slot, then releases the source references. Reduction emits that
+    selected value, leaving this temporary candidate behind.
+
+    ``source_is_shared`` records where the source lives. ``forwardable_storage``
+    is its backing only when forwarding preserves its values; shared Torch
+    conjugate/negative views need copying and have no forwardable storage.
     """
 
     source: Any
@@ -851,30 +866,31 @@ class _BufferPayload(_LeafDescriptor):
     dtype_key: str
     numel: int
     nbytes: int
-    shared: bool = False
-    shared_storage: Any = None  # Forwardable backing; logical Torch views must copy.
-    result: Any = None
+    source_is_shared: bool = False
+    forwardable_storage: Any = None
+    transport_value: Any = None
     copy_source: Any = None
 
     def buffer_keys(self) -> tuple[str, ...]:
         return (
-            self.result.buffer_keys()
-            if isinstance(self.result, _LeafDescriptor)
+            self.transport_value.buffer_keys()
+            if isinstance(self.transport_value, _LeafDescriptor)
             else ()
         )
 
     def restore(self, buffers: dict[str, Any]) -> Any:
-        value = self.result
+        value = self.transport_value
         return value.restore(buffers) if isinstance(value, _LeafDescriptor) else value
 
     def __reduce_ex__(self, protocol: int) -> Any:
-        value = self.result
+        value = self.transport_value
         if value is None:
             raise RuntimeError(
                 "Buffer payload was serialized before preparation finished"
             )
         if isinstance(value, _LeafDescriptor):
             return value.__reduce_ex__(protocol)
+        # Reconstruct the value through its normal reducer, without this wrapper.
         return operator.getitem, ((value,), 0)
 
 
@@ -888,10 +904,10 @@ def _inline_buffer(source: Any, slot: Any, shared: bool) -> Any:
     return source
 
 
-def _fresh_groups(
+def _group_fresh_destinations(
     values: list[_BufferPayload], policy: PayloadMemoryPolicy
 ) -> list[list[_BufferPayload]]:
-    """Group all fresh destinations by dtype, respecting the allocation cap."""
+    """Group fresh destinations by dtype and cap; small groups later go inline."""
     groups: list[list[_BufferPayload]] = []
     current: dict[str, int] = {}
     sizes: list[int] = []
@@ -954,16 +970,16 @@ class _PayloadPreparation:
         """
         fresh = self._retain_shared_or_collect_fresh()
         fresh = self._convert_eligible_numeric_lists(fresh)
-        for values in _fresh_groups(fresh, self.policy):
+        for values in _group_fresh_destinations(fresh, self.policy):
             useful = sum(value.nbytes for value in values)
             if useful < self.policy.min_new_allocation_bytes:
                 for value in values:
-                    value.result = self._inline_value(value)
+                    value.transport_value = self._inline_value(value)
                 continue
             value = values[0]
             if (
                 len(values) == 1
-                and not value.shared
+                and not value.source_is_shared
                 and isinstance(value.slot, _TensorSlot)
                 and value.source.is_contiguous()
                 and not value.source.is_conj()
@@ -972,7 +988,7 @@ class _PayloadPreparation:
             ):
                 # One whole-storage output tensor needs no coalescing;
                 # Torch's reducer moves its storage into SHM.
-                value.result = value.source
+                value.transport_value = value.source
             else:
                 self._allocate_and_copy_group(values)
         for value in self._pending:
@@ -984,7 +1000,11 @@ class _PayloadPreparation:
         """Install completed descriptions if needed; keep each record's metadata."""
         if self._needs_payload_replacement:
             for record, payload in self._record_payloads:
-                record.payload = payload
+                record.payload = (
+                    payload.transport_value
+                    if isinstance(payload, _BufferPayload)
+                    else payload
+                )
 
     def _collect_leaf(self, leaf: Any) -> Any:
         """Replace a single tensor/ndarray/bytes/struct leaf with a descriptor.
@@ -1002,10 +1022,6 @@ class _PayloadPreparation:
         value = _describe_buffer(leaf)
         if value is None:
             return leaf
-        if value.nbytes == 0 or (
-            value.shared_storage is None and value.nbytes < self.policy.min_item_bytes
-        ):
-            return self._inline_value(value)
         self._pending.append(value)
         return value
 
@@ -1026,7 +1042,7 @@ class _PayloadPreparation:
 
     def _inline_value(self, value: _BufferPayload) -> Any:
         """Choose ordinary serialization or a descriptor that bypasses SHM reduction."""
-        result = _inline_buffer(value.source, value.slot, value.shared)
+        result = _inline_buffer(value.source, value.slot, value.source_is_shared)
         if result is not value.source:
             self._needs_payload_replacement = True
         return result
@@ -1036,30 +1052,35 @@ class _PayloadPreparation:
         fresh: list[_BufferPayload] = []
         shared: dict[int, list[_BufferPayload]] = {}
         for value in self._pending:
-            if value.shared_storage is None:
+            if value.nbytes == 0 or (
+                value.forwardable_storage is None
+                and value.nbytes < self.policy.min_item_bytes
+            ):
+                value.transport_value = self._inline_value(value)
+            elif value.forwardable_storage is None:
                 fresh.append(value)
             else:
-                shared.setdefault(value.shared_storage._cdata, []).append(value)
+                shared.setdefault(value.forwardable_storage._cdata, []).append(value)
         for values in shared.values():
             useful = sum(value.nbytes for value in values)
             action = self.policy.shared_action(
-                useful, values[0].shared_storage.nbytes()
+                useful, values[0].forwardable_storage.nbytes()
             )
             for value in values:
                 if action == "keep":
-                    value.result = (
+                    value.transport_value = (
                         self._reference_shared_storage(value)
                         if len(values) > 1
                         else value.source
                     )
                     if (
-                        isinstance(value.result, np.ndarray)
-                        and type(value.result) is not np.ndarray
+                        isinstance(value.transport_value, np.ndarray)
+                        and type(value.transport_value) is not np.ndarray
                     ):
-                        value.result = np.asarray(value.result)
+                        value.transport_value = np.asarray(value.transport_value)
                         self._needs_payload_replacement = True
                 elif value.nbytes < self.policy.min_item_bytes:
-                    value.result = self._inline_value(value)
+                    value.transport_value = self._inline_value(value)
                 else:
                     fresh.append(value)
         return fresh
@@ -1085,14 +1106,14 @@ class _PayloadPreparation:
                 source = value.source
                 kind = type(source[0])
                 if set(map(type, source)) != {kind}:
-                    value.result = source
+                    value.transport_value = source
                     continue
                 try:
                     array = np.array(
                         source, dtype=np.int64 if kind is int else np.float64
                     )
                 except OverflowError:
-                    value.result = source
+                    value.transport_value = source
                     continue
                 value.copy_source = _get_torch().from_numpy(array)
             eligible.append(value)
@@ -1104,7 +1125,7 @@ class _PayloadPreparation:
         Strided or unaligned views keep their existing reducer, which preserves
         the view's layout without copying into another allocation.
         """
-        leaf, storage = value.source, value.shared_storage
+        leaf, storage = value.source, value.forwardable_storage
         if isinstance(value.slot, _TensorSlot):
             if not leaf.is_contiguous():
                 return leaf
@@ -1157,16 +1178,16 @@ class _PayloadPreparation:
                 source = source.detach()
             items.append(source)
         dtype = values[0].dtype_key
-        optional = any(value.shared for value in values)
+        optional = any(value.source_is_shared for value in values)
         try:
             buffer = _build_shm_buffer(items, dtype, retry=not optional)
         except Exception as exc:
             if not optional or not is_shm_error(exc):
                 raise
             for value in values:
-                value.result = (
+                value.transport_value = (
                     value.source
-                    if value.shared_storage is not None
+                    if value.forwardable_storage is not None
                     else self._inline_value(value)
                 )
             return
@@ -1177,7 +1198,7 @@ class _PayloadPreparation:
             value.slot.buffer_key = key
             value.slot.offset = offset
             offset += value.numel
-            value.result = value.slot
+            value.transport_value = value.slot
         self._needs_payload_replacement = True
 
 
@@ -1362,7 +1383,8 @@ def _build_shm_buffer(items: list[Any], dtype_key: str, *, retry: bool = True) -
         return buf
 
 
-def _used_buffers(slots: list[Any], buffers: dict[str, Any]) -> dict[str, Any]:
+def _referenced_buffers(slots: list[Any], buffers: dict[str, Any]) -> dict[str, Any]:
+    """Keep only allocations referenced by this payload's descriptors."""
     keys = {
         key
         for slot in slots
@@ -1472,10 +1494,15 @@ class _MetadataWire:
         return SampleMeta, _metadata_values(self.value)
 
 
+_WIRE_RECORD = 0
+_WIRE_BATCH = 1
+_WIRE_PASSTHROUGH = 2
+
+
 def _wire_records(items: list[StreamItem]) -> list[Any]:
     """Encode records as tuples inside the process transport envelope.
 
-    Tags distinguish records (0), batches (1), and untouched stream items (2).
+    Tags distinguish records, batches, and untouched stream items.
     This avoids a Python pickle reduction for every record and batch.
     """
     metadata: dict[int, _MetadataWire] = {}
@@ -1490,29 +1517,30 @@ def _wire_records(items: list[StreamItem]) -> list[Any]:
             return wrapped, value.payload
         return meta, value.payload
 
-    return [
-        (0, record(item))
-        if type(item) is SampleRecord
-        else (1, tuple(record(rec) for rec in item.records))
-        if type(item) is SampleBatch
-        else (2, item)
-        for item in items
-    ]
+    wire: list[tuple[int, Any]] = []
+    for item in items:
+        if type(item) is SampleRecord:
+            wire.append((_WIRE_RECORD, record(item)))
+        elif type(item) is SampleBatch:
+            wire.append((_WIRE_BATCH, tuple(record(rec) for rec in item.records)))
+        else:
+            wire.append((_WIRE_PASSTHROUGH, item))
+    return wire
 
 
 def _reconstruct_wire_microbatch(
     wire: list[tuple[int, Any]],
     buffers: dict[str, Any],
 ) -> list[StreamItem]:
-    skeleton = [
-        SampleRecord(*value)
-        if tag == 0
-        else SampleBatch(tuple(SampleRecord(*record) for record in value))
-        if tag == 1
-        else value
-        for tag, value in wire
-    ]
-    return _reconstruct_microbatch_lazy(skeleton, buffers)
+    items: list[StreamItem] = []
+    for tag, value in wire:
+        if tag == _WIRE_RECORD:
+            items.append(SampleRecord(*value))
+        elif tag == _WIRE_BATCH:
+            items.append(SampleBatch(tuple(SampleRecord(*record) for record in value)))
+        else:
+            items.append(value)
+    return _reconstruct_microbatch_lazy(items, buffers)
 
 
 @dataclass(slots=True)
@@ -1525,17 +1553,17 @@ class MicrobatchEnvelope:
     encoding when no payload preparation is needed.
     """
 
-    skeleton: list[StreamItem]
+    items: list[StreamItem]
     buffers: dict[str, Any]  # group/reuse key -> shared tensor covering its storage
 
     def __reduce__(self) -> tuple:
         return (
             _reconstruct_wire_microbatch,
-            (_wire_records(self.skeleton), self.buffers),
+            (_wire_records(self.items), self.buffers),
         )
 
     def __len__(self) -> int:
-        return len(self.skeleton)
+        return len(self.items)
 
 
 def prepare_microbatch(

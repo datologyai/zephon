@@ -144,6 +144,37 @@ class TestCoalesceMicrobatchRoundTrip:
 # Edge cases
 # ---------------------------------------------------------------------------
 class TestCoalesceEdgeCases:
+    def test_collection_defers_inline_conversion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even small memoryviews are copied only during destination preparation."""
+        view = memoryview(bytearray(b"abcdef"))[::2]
+        payload = {"view": view, "tensor": torch.arange(3), "array": np.arange(3)}
+        records = [SampleRecord(_meta(0), payload)]
+        inline_buffer = shm_coalesce._inline_buffer
+        converted: list[Any] = []
+
+        def track_conversion(source: Any, slot: Any, shared: bool) -> Any:
+            converted.append(source)
+            return inline_buffer(source, slot, shared)
+
+        monkeypatch.setattr(shm_coalesce, "_inline_buffer", track_conversion)
+        preparation = shm_coalesce._PayloadPreparation.collect(records, _policy())
+        assert not converted
+        assert records[0].payload is payload
+
+        buffers = preparation.prepare_destinations()
+        assert any(source is view for source in converted)
+        assert records[0].payload is payload
+        assert not buffers
+
+        preparation.replace_record_payloads()
+        [restored] = _round_trip_resolved(MicrobatchEnvelope(records, buffers))
+        assert restored.payload["view"] == b"ace"
+        torch.testing.assert_close(restored.payload["tensor"], payload["tensor"])
+        np.testing.assert_array_equal(restored.payload["array"], payload["array"])
+        assert not restored.payload["tensor"].is_shared()
+
     def test_allocation_failure_preserves_original_record_payloads(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1862,10 +1893,10 @@ class TestPrimitiveListAsLeaf:
         int_slots = [
             s
             for s in skel.slots
-            if isinstance(getattr(s, "result", s), _NumericListSlot)
+            if isinstance(getattr(s, "transport_value", s), _NumericListSlot)
         ]
         assert len(int_slots) == 1
-        assert int_slots[0].result.length == 500
+        assert int_slots[0].transport_value.length == 500
         # The list lands in the int64 buffer alongside other int64 tensors.
         assert str(torch.int64) in preparation.buffers
 
@@ -1908,7 +1939,8 @@ class TestPrimitiveListAsLeaf:
         preparation.prepare_destinations()
         # String list should be inline, not a _NumericListSlot
         assert not any(
-            isinstance(getattr(s, "result", s), _NumericListSlot) for s in skel.slots
+            isinstance(getattr(s, "transport_value", s), _NumericListSlot)
+            for s in skel.slots
         )
 
         records = [SampleRecord(meta=_meta(0), payload=payload)]
@@ -2503,7 +2535,7 @@ def test_primitive_tuples_stay_whole_beside_shared_tensors() -> None:
     tokens = tuple(range(2048))
     payload = {"tokens": tokens, "tensors": (torch.arange(8), torch.arange(8))}
     prepared = prepare_microbatch([SampleRecord(_meta(0), payload)], _policy(0))
-    assert len(prepared.skeleton[0].payload.slots) == 3
+    assert len(prepared.items[0].payload.slots) == 3
     actual = _round_trip_resolved(prepared)[0].payload
     assert actual["tokens"] == tokens
     assert type(actual["tokens"]) is tuple
