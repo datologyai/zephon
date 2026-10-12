@@ -137,6 +137,10 @@ how much memory a retained sample keeps alive.
 | `shm_compact_above_ratio` | 8 | Compact views when their buffer is more than this many times larger than the bytes the message uses (`None` disables compaction) … |
 | `shm_compact_min_savings_bytes` | 16 MiB | … and compaction would save at least this many bytes of backing. |
 
+`shm_min_size` and `coalesce_tensors` are no longer supported. Use
+`shm_min_item_bytes` and `shm_coalesce`, respectively. Both `RuntimeOptions(...)`
+and `Pipeline.options(...)` raise an error for the old names.
+
 The best thresholds depend on payload types, batch sizes and the host, so
 benchmark representative batches before changing them. Lowering
 `shm_max_coalesced_bytes` reduces how much memory one retained sample can keep

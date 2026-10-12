@@ -194,7 +194,7 @@ def test_deterministic_flag():
     assert spec2.deterministic is False
 
 
-def test_coalesce_tensors_defaults_on() -> None:
+def test_shm_coalescing_defaults_on() -> None:
     plan = _mk_simple_plan()
     spec = resolve_runtime_spec(plan, RuntimeOptions())
     assert spec.stages[0].memory_policy.coalesce is True
@@ -317,16 +317,6 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
         resolve_runtime_spec(
             _mk_plan((1, 1, 1)), RuntimeOptions(shm_compact_above_ratio=0.5)
         )
-
-
-def test_legacy_payload_memory_options() -> None:
-    with pytest.deprecated_call():
-        spec = resolve_runtime_spec(
-            _mk_plan((1, 1, 1)),
-            RuntimeOptions(shm_min_size=123, coalesce_tensors=False),
-        )
-    assert spec.stages[0].memory_policy.min_item_bytes == 123
-    assert not spec.stages[0].memory_policy.coalesce
 
 
 def test_disabled_shm_bypasses_the_entire_process_policy() -> None:
