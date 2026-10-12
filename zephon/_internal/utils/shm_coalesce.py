@@ -91,7 +91,7 @@ Strategy (single memcpy):
    storage directly in shared memory and attach a single 1-D ``torch.Tensor``
    to it, then write the values into the shared buffer. Each byte of
    real data selected for a fresh allocation is copied once — straight into SHM.
-3. Wrap the skeleton + shared buffers in a ``PreparedMicrobatch`` whose
+3. Wrap the skeleton + shared buffers in a ``MicrobatchEnvelope`` whose
    ``__reduce__`` produces ``list[StreamItem]`` with ``LazyPayload``
    wrappers.  Payloads are restored only when explicitly resolved
    (typically in the worker process before ``process_many``).
@@ -688,9 +688,9 @@ def _is_leaf(obj: Any) -> bool:
     """Predicate for ``optree.tree_flatten``.
 
     Treats structured types (dataclass, pydantic) as leaves. These are handled
-    in ``_extract_leaf``, which decomposes them into a fields dict and recurses
-    via ``_extract_payload_pytree``. Ordinary dicts, lists, and tuples use
-    optree's container traversal.
+    in ``_PayloadPreparation._collect_leaf``, which decomposes them into a fields
+    dict and recurses via ``_collect_tree``. Ordinary dicts, lists, and tuples
+    use optree's container traversal.
 
     Lists and tuples of primitives (int, float, str, …) are also treated as leaves
     to avoid inflating the slot count.  A ``List[int]`` with 500 elements
@@ -840,7 +840,11 @@ class _InlineNumpy(_LeafDescriptor):
 
 @dataclass(slots=True)
 class _BufferPayload(_LeafDescriptor):
-    """Type-specific description; policy and allocation stay format-independent."""
+    """Buffer candidate shared by a record description and its preparation.
+
+    Destination preparation fills ``result`` with an inline value or a shared
+    slot. Reduction emits that result, leaving this temporary candidate behind.
+    """
 
     source: Any
     slot: Any
@@ -907,33 +911,131 @@ def _fresh_groups(
     return groups
 
 
-class _BufferPlan:
-    """Describe values, select existing backing, then group and write fresh buffers."""
+class _PayloadPreparation:
+    """Collect payloads, prepare their destinations, then replace record payloads.
+
+    Collection owns the candidate descriptions used in both the record trees
+    and the pending buffer list. Destination preparation fills their results;
+    only ``replace_record_payloads`` changes the original records.
+    """
 
     def __init__(self, policy: PayloadMemoryPolicy) -> None:
         self.policy = policy
-        self.pending: list[_BufferPayload] = []
+        self._pending: list[_BufferPayload] = []
         self.buffers: dict[str, Any] = {}
         self.reused_keys: dict[tuple[int, str], str] = {}
-        self.changed = False
+        self._needs_payload_replacement = False
+        self._record_payloads: list[tuple[SampleRecord, Any]] = []
 
-    def collect(self, value: _BufferPayload) -> _BufferPayload:
-        """Retain a description without assigning destinations or copying data."""
-        self.pending.append(value)
+    @classmethod
+    def collect(
+        cls, items: list[StreamItem], policy: PayloadMemoryPolicy
+    ) -> _PayloadPreparation:
+        """Collect candidates and record descriptions without replacing payloads."""
+        preparation = cls(policy)
+        for item in items:
+            if isinstance(item, SampleRecord):
+                preparation._record_payloads.append(
+                    (item, preparation._collect_record_payload(item.payload))
+                )
+            elif isinstance(item, SampleBatch):
+                for record in item.records:
+                    preparation._record_payloads.append(
+                        (record, preparation._collect_record_payload(record.payload))
+                    )
+        return preparation
+
+    def prepare_destinations(self) -> dict[str, Any]:
+        """Select backing, validate fresh values, then allocate each final group.
+
+        Private values and views not kept in place take the same grouping path.
+        Sources remain available for optional-allocation fallback until all
+        results are chosen; they are then released from the descriptions.
+        """
+        fresh = self._retain_shared_or_collect_fresh()
+        fresh = self._convert_eligible_numeric_lists(fresh)
+        for values in _fresh_groups(fresh, self.policy):
+            useful = sum(value.nbytes for value in values)
+            if useful < self.policy.min_new_allocation_bytes:
+                for value in values:
+                    value.result = self._inline_value(value)
+                continue
+            value = values[0]
+            if (
+                len(values) == 1
+                and not value.shared
+                and isinstance(value.slot, _TensorSlot)
+                and value.source.is_contiguous()
+                and not value.source.is_conj()
+                and not value.source.is_neg()
+                and value.source.untyped_storage().nbytes() == value.nbytes
+            ):
+                # One whole-storage output tensor needs no coalescing;
+                # Torch's reducer moves its storage into SHM.
+                value.result = value.source
+            else:
+                self._allocate_and_copy_group(values)
+        for value in self._pending:
+            value.source = None
+            value.copy_source = None
+        return self.buffers
+
+    def replace_record_payloads(self) -> None:
+        """Install completed descriptions if needed; keep each record's metadata."""
+        if self._needs_payload_replacement:
+            for record, payload in self._record_payloads:
+                record.payload = payload
+
+    def _collect_leaf(self, leaf: Any) -> Any:
+        """Replace a single tensor/ndarray/bytes/struct leaf with a descriptor.
+
+        Returns a descriptor if the leaf needs preparation, or the original leaf
+        unchanged. Structured types (dataclass, pydantic) are decomposed into a
+        fields dict and recursively extracted via ``_collect_tree``.
+        """
+        if type(leaf) in _PRIMITIVE_TYPES:
+            return leaf
+        if _is_struct(leaf):
+            cls, _names, fields = _struct_to_dict(leaf)
+            inner = self._collect_tree(fields)
+            return _StructSlot(cls=cls, inner_skeleton=inner)
+        value = _describe_buffer(leaf)
+        if value is None:
+            return leaf
+        if value.nbytes == 0 or (
+            value.shared_storage is None and value.nbytes < self.policy.min_item_bytes
+        ):
+            return self._inline_value(value)
+        self._pending.append(value)
         return value
 
-    def inline(self, value: _BufferPayload) -> Any:
+    def _collect_tree(self, payload: Any) -> _FlatSkeleton:
+        """Flatten payload via optree and replace tensor/bytes leaves with slots."""
+        leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
+        for i, leaf in enumerate(leaves):
+            leaves[i] = self._collect_leaf(leaf)
+        return _FlatSkeleton(slots=leaves, spec=spec)
+
+    def _collect_record_payload(self, payload: Any) -> Any:
+        """Describe a root leaf directly; preserve the structure of containers."""
+        if isinstance(payload, LazyPayload):
+            return payload
+        if not isinstance(payload, (dict, list, tuple)) or _is_leaf(payload):
+            return self._collect_leaf(payload)
+        return self._collect_tree(payload)
+
+    def _inline_value(self, value: _BufferPayload) -> Any:
         """Choose ordinary serialization or a descriptor that bypasses SHM reduction."""
         result = _inline_buffer(value.source, value.slot, value.shared)
         if result is not value.source:
-            self.changed = True
+            self._needs_payload_replacement = True
         return result
 
-    def _select_shared(self) -> list[_BufferPayload]:
+    def _retain_shared_or_collect_fresh(self) -> list[_BufferPayload]:
         """Select existing backing; return private and remaining shared values to group."""
         fresh: list[_BufferPayload] = []
         shared: dict[int, list[_BufferPayload]] = {}
-        for value in self.pending:
+        for value in self._pending:
             if value.shared_storage is None:
                 fresh.append(value)
             else:
@@ -946,21 +1048,23 @@ class _BufferPlan:
             for value in values:
                 if action == "keep":
                     value.result = (
-                        self.reuse(value) if len(values) > 1 else value.source
+                        self._reference_shared_storage(value)
+                        if len(values) > 1
+                        else value.source
                     )
                     if (
                         isinstance(value.result, np.ndarray)
                         and type(value.result) is not np.ndarray
                     ):
                         value.result = np.asarray(value.result)
-                        self.changed = True
+                        self._needs_payload_replacement = True
                 elif value.nbytes < self.policy.min_item_bytes:
-                    value.result = self.inline(value)
+                    value.result = self._inline_value(value)
                 else:
                     fresh.append(value)
         return fresh
 
-    def _check_numeric_lists(
+    def _convert_eligible_numeric_lists(
         self, values: list[_BufferPayload]
     ) -> list[_BufferPayload]:
         """Exclude lists that cannot use lossless SHM before counting final groups.
@@ -994,40 +1098,7 @@ class _BufferPlan:
             eligible.append(value)
         return eligible
 
-    def finish(self) -> None:
-        """Select backing, validate fresh values, then allocate each final group.
-
-        Private values and views not kept in place take the same grouping path.
-        Sources remain available for optional-allocation fallback until all
-        results are chosen; they are then released from the descriptions.
-        """
-        fresh = self._check_numeric_lists(self._select_shared())
-        for values in _fresh_groups(fresh, self.policy):
-            useful = sum(value.nbytes for value in values)
-            if useful < self.policy.min_new_allocation_bytes:
-                for value in values:
-                    value.result = self.inline(value)
-                continue
-            value = values[0]
-            if (
-                len(values) == 1
-                and not value.shared
-                and isinstance(value.slot, _TensorSlot)
-                and value.source.is_contiguous()
-                and not value.source.is_conj()
-                and not value.source.is_neg()
-                and value.source.untyped_storage().nbytes() == value.nbytes
-            ):
-                # One whole-storage output tensor needs no coalescing;
-                # Torch's reducer moves its storage into SHM.
-                value.result = value.source
-            else:
-                self.materialize(values)
-        for value in self.pending:
-            value.source = None
-            value.copy_source = None
-
-    def reuse(self, value: _BufferPayload) -> Any:
+    def _reference_shared_storage(self, value: _BufferPayload) -> Any:
         """Share one descriptor buffer across contiguous views of the same storage.
 
         Strided or unaligned views keep their existing reducer, which preserves
@@ -1065,10 +1136,10 @@ class _BufferPlan:
             )
         value.slot.buffer_key = key
         value.slot.offset = offset
-        self.changed = True
+        self._needs_payload_replacement = True
         return value.slot
 
-    def materialize(self, values: list[_BufferPayload]) -> None:
+    def _allocate_and_copy_group(self, values: list[_BufferPayload]) -> None:
         """Write a group once, or retain each source independently on SHM exhaustion."""
         items: list[Any] = []
         for value in values:
@@ -1096,7 +1167,7 @@ class _BufferPlan:
                 value.result = (
                     value.source
                     if value.shared_storage is not None
-                    else self.inline(value)
+                    else self._inline_value(value)
                 )
             return
         key = dtype if dtype not in self.buffers else f"{dtype}#{len(self.buffers)}"
@@ -1107,7 +1178,7 @@ class _BufferPlan:
             value.slot.offset = offset
             offset += value.numel
             value.result = value.slot
-        self.changed = True
+        self._needs_payload_replacement = True
 
 
 def _describe_buffer(leaf: Any) -> _BufferPayload | None:
@@ -1177,65 +1248,6 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
             leaf, _NumericListSlot(dtype, 0, len(leaf)), dtype, len(leaf), len(leaf) * 8
         )
     return None
-
-
-def _extract_leaf(leaf: Any, plan: _BufferPlan) -> Any:
-    """Replace a single tensor/ndarray/bytes/struct leaf with a descriptor.
-
-    Returns a descriptor if the leaf needs preparation, or the original leaf
-    unchanged. Structured types (dataclass, pydantic) are decomposed into a
-    fields dict and recursively extracted via ``_extract_payload_pytree``.
-    """
-    if type(leaf) in _PRIMITIVE_TYPES:
-        return leaf
-    if _is_struct(leaf):
-        cls, _names, fields = _struct_to_dict(leaf)
-        inner = _extract_payload_pytree(fields, plan)
-        return _StructSlot(cls=cls, inner_skeleton=inner)
-    value = _describe_buffer(leaf)
-    if value is None:
-        return leaf
-    if value.nbytes == 0 or (
-        value.shared_storage is None and value.nbytes < plan.policy.min_item_bytes
-    ):
-        return plan.inline(value)
-    return plan.collect(value)
-
-
-def _extract_payload_pytree(payload: Any, plan: _BufferPlan) -> _FlatSkeleton:
-    """Flatten payload via optree and replace tensor/bytes leaves with slots."""
-    leaves, spec = optree.tree_flatten(payload, is_leaf=_is_leaf)
-    for i, leaf in enumerate(leaves):
-        leaves[i] = _extract_leaf(leaf, plan)
-    return _FlatSkeleton(slots=leaves, spec=spec)
-
-
-def _extract_record_payload(payload: Any, plan: _BufferPlan) -> Any:
-    """Describe a root leaf directly; preserve the structure of containers."""
-    if isinstance(payload, LazyPayload):
-        return payload
-    if not isinstance(payload, (dict, list, tuple)) or _is_leaf(payload):
-        return _extract_leaf(payload, plan)
-    return _extract_payload_pytree(payload, plan)
-
-
-def _extract_from_records(
-    items: list[StreamItem], plan: _BufferPlan
-) -> list[tuple[SampleRecord, Any]]:
-    """Extract payload descriptors from records without mutating payloads yet.
-
-    Returns (record, descriptor) pairs. The caller commits the descriptors
-    after the buffer plan finishes preparing inline values and shared
-    storage, including any allocation fallback.
-    """
-    descriptors: list[tuple[SampleRecord, Any]] = []
-    for item in items:
-        if isinstance(item, SampleRecord):
-            descriptors.append((item, _extract_record_payload(item.payload, plan)))
-        elif isinstance(item, SampleBatch):
-            for rec in item.records:
-                descriptors.append((rec, _extract_record_payload(rec.payload, plan)))
-    return descriptors
 
 
 # ---------------------------------------------------------------------------
@@ -1504,12 +1516,13 @@ def _reconstruct_wire_microbatch(
 
 
 @dataclass(slots=True)
-class PreparedMicrobatch:
-    """Microbatch with prepared inline values and shared buffers.
+class MicrobatchEnvelope:
+    """Process-transport envelope for records and their shared-buffer references.
 
     On unpickle (``__reduce__``), produces ``list[StreamItem]`` where
-    prepared payloads are :class:`LazyPayload` instances. Unchanged inline
-    payloads stay raw. Call :func:`resolve_lazy_payloads` before use.
+    payload descriptions become :class:`LazyPayload` instances. Existing payloads
+    pass through unchanged. The envelope also provides compact record metadata
+    encoding when no payload preparation is needed.
     """
 
     skeleton: list[StreamItem]
@@ -1527,29 +1540,24 @@ class PreparedMicrobatch:
 
 def prepare_microbatch(
     items: list[StreamItem], policy: PayloadMemoryPolicy
-) -> PreparedMicrobatch:
+) -> MicrobatchEnvelope:
     """Prepare worker outputs in *items* as per-dtype SHM buffers or inline values.
 
     Shared Torch tensors and NumPy views of Zephon buffers retain their storage
     through multiprocessing reduction, unless the policy selects a fresh
     destination. Existing lazy payloads are already prepared.
 
-    Uses a two-pass approach: extraction first collects descriptors without
-    mutating payloads, then commits after the buffer plan completes. Values
+    Collection leaves the records intact. Destination preparation chooses
+    buffers and inline values; only then are record payloads replaced. Values
     may travel inline, use new SHM allocations, or retain existing storage
     when optional replacement fails.
     """
     if _get_torch() is None:
-        return PreparedMicrobatch(items, {})
-    plan = _BufferPlan(policy)
-    descriptors = _extract_from_records(items, plan)
-    plan.finish()
-    if not plan.changed:
-        return PreparedMicrobatch(items, plan.buffers)
-    # Commit: metadata stays on each record; only its payload is replaced.
-    for rec, descriptor in descriptors:
-        rec.payload = descriptor  # type: ignore[assignment]
-    return PreparedMicrobatch(items, plan.buffers)
+        return MicrobatchEnvelope(items, {})
+    preparation = _PayloadPreparation.collect(items, policy)
+    buffers = preparation.prepare_destinations()
+    preparation.replace_record_payloads()
+    return MicrobatchEnvelope(items, buffers)
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import pickle
 import sys
 from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
 from zephon._internal.utils import shm_coalesce
 from zephon._internal.utils.shm_coalesce import (
-    PreparedMicrobatch,
+    MicrobatchEnvelope,
     ShmLazyPayload,
     _ShmBytes,
     _ShmBytesLegacy,
@@ -46,7 +47,7 @@ def _meta(i: int) -> SampleMeta:
     return SampleMeta(sample_id=(0, 0, i), lane_id=0, chunk_id=0, chunk_offset=i)
 
 
-def _round_trip(coalesced: PreparedMicrobatch) -> list:
+def _round_trip(coalesced: MicrobatchEnvelope) -> list:
     """ForkingPickler round-trip — returns records with unresolved LazyPayloads."""
     blob = _forking_round_trip(coalesced)
     restored = pickle.loads(blob)
@@ -54,7 +55,7 @@ def _round_trip(coalesced: PreparedMicrobatch) -> list:
     return restored
 
 
-def _round_trip_resolved(coalesced: PreparedMicrobatch) -> list:
+def _round_trip_resolved(coalesced: MicrobatchEnvelope) -> list:
     """Full round-trip simulating worker → pump → worker resolve."""
     restored = _round_trip(coalesced)
     resolve_lazy_payloads(restored)
@@ -82,7 +83,7 @@ class TestCoalesceMicrobatchRoundTrip:
             for i in range(4)
         ]
         coalesced = prepare_microbatch(records, _policy(0))
-        assert isinstance(coalesced, PreparedMicrobatch)
+        assert isinstance(coalesced, MicrobatchEnvelope)
 
         # Only 1 dtype → 1 SHM buffer
         assert len(coalesced.buffers) == 1
@@ -143,6 +144,34 @@ class TestCoalesceMicrobatchRoundTrip:
 # Edge cases
 # ---------------------------------------------------------------------------
 class TestCoalesceEdgeCases:
+    def test_allocation_failure_preserves_original_record_payloads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later allocation failure leaves even already-prepared records intact."""
+        first = {"array": np.arange(8, dtype=np.float32)}
+        second = DCSample(torch.arange(9)[:8], "kept")
+        records = [SampleRecord(_meta(0), first), SampleRecord(_meta(1), second)]
+        items = [records[0], SampleBatch(records=(records[1],))]
+        allocate = shm_coalesce._alloc_shm_buffer
+        allocations = 0
+
+        def fail_second(*args: Any, **kwargs: Any) -> Any:
+            nonlocal allocations
+            allocations += 1
+            if allocations == 2:
+                raise RuntimeError("unexpected allocation failure")
+            return allocate(*args, **kwargs)
+
+        monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", fail_second)
+        with pytest.raises(RuntimeError, match="unexpected allocation failure"):
+            prepare_microbatch(items, _policy(0))
+        assert allocations == 2
+        assert records[0].payload is first
+        assert records[1].payload is second
+        np.testing.assert_array_equal(first["array"], np.arange(8, dtype=np.float32))
+        torch.testing.assert_close(second.image, torch.arange(8))
+        assert not second.image.is_shared()
+
     def test_no_tensors_stay_raw(self) -> None:
         records = [SampleRecord(meta=_meta(0), payload={"text": "hello", "count": 42})]
         assert not prepare_microbatch(records, _policy()).buffers
@@ -501,7 +530,7 @@ class TestCoalesceBytes:
         """Full round-trip: worker→pump→worker2, bytes stay in SHM throughout.
 
         Simulates the real pipeline path:
-          1. Worker coalesces bytes into SHM, puts PreparedMicrobatch on queue
+          1. Worker coalesces bytes into SHM, puts MicrobatchEnvelope on queue
           2. Pump thread unpickles (hop 1) → gets list[StreamItem] with ShmLazyPayload
           3. Pump thread re-pickles records to next worker (hop 2) — ShmLazyPayload
              forwards SHM refs without resolving
@@ -511,7 +540,7 @@ class TestCoalesceBytes:
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
         coalesced = prepare_microbatch(records, _policy())
 
-        # Hop 1: worker → pump thread (PreparedMicrobatch → ShmLazyPayload)
+        # Hop 1: worker → pump thread (MicrobatchEnvelope → ShmLazyPayload)
         restored = _round_trip(coalesced)
         assert isinstance(restored[0].payload, ShmLazyPayload)
 
@@ -1148,7 +1177,7 @@ class TestShmLazyPayload:
         coalesced = prepare_microbatch(records, _policy())
         assert not coalesced.buffers
 
-        # Hop 1: PreparedMicrobatch → list with ShmLazyPayload
+        # Hop 1: MicrobatchEnvelope → list with ShmLazyPayload
         restored1 = _round_trip(coalesced)
         assert isinstance(restored1[0].payload, ShmLazyPayload)
 
@@ -1820,15 +1849,14 @@ class TestPrimitiveListAsLeaf:
     def test_list_of_ints_becomes_numeric_list_slot(self) -> None:
         """A numeric list becomes a single _NumericListSlot, coalesced into SHM."""
         from zephon._internal.utils.shm_coalesce import (
-            _extract_payload_pytree,
             _NumericListSlot,
         )
 
         token_ids = list(range(500))
         payload = {"ids": token_ids, "tensor": torch.randn(4)}
-        plan = shm_coalesce._BufferPlan(_policy(0))
-        skel = _extract_payload_pytree(payload, plan)
-        plan.finish()
+        preparation = shm_coalesce._PayloadPreparation(_policy(0))
+        skel = preparation._collect_tree(payload)
+        preparation.prepare_destinations()
         # dict with 2 keys → 2 leaves (the list as 1 + the tensor slot as 1)
         assert len(skel.slots) == 2
         int_slots = [
@@ -1839,7 +1867,7 @@ class TestPrimitiveListAsLeaf:
         assert len(int_slots) == 1
         assert int_slots[0].result.length == 500
         # The list lands in the int64 buffer alongside other int64 tensors.
-        assert str(torch.int64) in plan.buffers
+        assert str(torch.int64) in preparation.buffers
 
     def test_list_of_tensors_still_recurses(self) -> None:
         """Lists starting with a tensor must NOT be treated as leaf."""
@@ -1871,14 +1899,13 @@ class TestPrimitiveListAsLeaf:
     def test_list_of_strings_is_leaf_not_coalesced(self) -> None:
         """String lists are treated as leaves but NOT promoted to SHM."""
         from zephon._internal.utils.shm_coalesce import (
-            _extract_payload_pytree,
             _NumericListSlot,
         )
 
         payload = {"roles": ["system", "user", "assistant"], "t": torch.ones(2)}
-        plan = shm_coalesce._BufferPlan(_policy(0))
-        skel = _extract_payload_pytree(payload, plan)
-        plan.finish()
+        preparation = shm_coalesce._PayloadPreparation(_policy(0))
+        skel = preparation._collect_tree(payload)
+        preparation.prepare_destinations()
         # String list should be inline, not a _NumericListSlot
         assert not any(
             isinstance(getattr(s, "result", s), _NumericListSlot) for s in skel.slots

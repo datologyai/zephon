@@ -94,8 +94,8 @@ from zephon._internal.stream import (
 )
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_PAYLOAD_MEMORY_POLICY,
+    MicrobatchEnvelope,
     PayloadMemoryPolicy,
-    PreparedMicrobatch,
     prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
@@ -271,7 +271,7 @@ class _WorkerCommand:
             self.kind,
             self.seq,
             # Use cached metadata field access without preparing payloads.
-            PreparedMicrobatch(self.batch, {}),
+            MicrobatchEnvelope(self.batch, {}),
             self.wait_ns,
             self.consumed_elements,
             self.consumed_bytes,
@@ -470,7 +470,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 )
 
             # Prepare inline values and shared buffers for process transport.
-            # PreparedMicrobatch.__reduce__ unpickles as Microbatch on the
+            # MicrobatchEnvelope.__reduce__ unpickles as Microbatch on the
             # consumer side, so the cast is safe.
             if outputs and config.memory_policy is not None:
                 prepared = prepare_microbatch(outputs, config.memory_policy)
