@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vortex cache ownership through real store fetches and file replacements."""
+"""Vortex cache ownership through real store fetches and local re-downloads."""
 
 from pathlib import Path
 from typing import Any
@@ -71,11 +71,12 @@ def test_store_reuses_caches_across_fetch_groups(
     store = build_multi_dataset_store(
         datasets,
         options=StoreOptions(
-            cache=CacheOptions(enabled=shard_cache, root=tmp_path / "cache"),
-            vortex=VortexOptions(
-                segment_cache_bytes=segment_bytes,
+            cache=CacheOptions(
+                enabled=shard_cache,
+                root=tmp_path / "cache",
                 metadata_cache_entries=metadata_entries,
             ),
+            vortex=VortexOptions(segment_cache_bytes=segment_bytes),
         ),
     )
     try:
@@ -105,8 +106,9 @@ def test_store_reuses_caches_across_fetch_groups(
         assert calls[0]["segment_cache"].size_bytes == 0
 
 
-def test_footer_eviction_and_replaced_file_invalidate_reuse(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("segment_bytes", [1, 4096])
+def test_footer_eviction_and_identical_replacement_reuses_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, segment_bytes: int
 ) -> None:
     first, second = tmp_path / "first.vortex", tmp_path / "second.vortex"
     _write(first)
@@ -120,7 +122,10 @@ def test_footer_eviction_and_replaced_file_invalidate_reuse(
 
     monkeypatch.setattr(vortex, "open", record_open)
     opener = VortexShardOpener(
-        VortexOptions(metadata_cache_entries=1, segment_cache_bytes=1)
+        StoreOptions(
+            cache=CacheOptions(metadata_cache_entries=1),
+            vortex=VortexOptions(segment_cache_bytes=segment_bytes),
+        )
     )
 
     def read(path: Path) -> int:
@@ -137,13 +142,12 @@ def test_footer_eviction_and_replaced_file_invalidate_reuse(
         assert ["footer" in call for call in calls] == [False, True, False, False]
         old_key = calls[-1]["cache_key"]
         replacement = tmp_path / "replacement.vortex"
-        _write(replacement, 20)
+        replacement.write_bytes(first.read_bytes())
         replacement.replace(first)
-        assert read(first) == 20
-        assert calls[-1]["cache_key"] != old_key
-        assert "footer" not in calls[-1]
-        assert read(first) == 20
+        assert read(first) == 0
+        assert calls[-1]["cache_key"] == old_key
+        assert "footer" in calls[-1]
         # Segments larger than the configured byte budget are not retained.
-        assert calls[-1]["segment_cache"].size_bytes <= 1
+        assert calls[-1]["segment_cache"].size_bytes <= segment_bytes
     finally:
         opener.close()

@@ -103,14 +103,22 @@ def build_parquet_cache_runtime(
     decoded = options.resolved_parquet_rg_cache()
     if decoded.enabled is not True or catalog_set is None:
         return ParquetCacheRuntime(
-            opener=ParquetShardOpener(decoded_cache=None, index=None),
+            opener=ParquetShardOpener(
+                decoded_cache=None,
+                index=None,
+                metadata_cache_entries=options.cache.metadata_cache_entries,
+            ),
             cache=None,
         )
 
     index = ParquetRGIndex(catalog_set)
     if index.num_row_groups == 0:
         return ParquetCacheRuntime(
-            opener=ParquetShardOpener(decoded_cache=None, index=None),
+            opener=ParquetShardOpener(
+                decoded_cache=None,
+                index=None,
+                metadata_cache_entries=options.cache.metadata_cache_entries,
+            ),
             cache=None,
         )
 
@@ -161,7 +169,11 @@ def build_parquet_cache_runtime(
         index = None
 
     return ParquetCacheRuntime(
-        opener=ParquetShardOpener(decoded_cache=cache, index=index),
+        opener=ParquetShardOpener(
+            decoded_cache=cache,
+            index=index,
+            metadata_cache_entries=options.cache.metadata_cache_entries,
+        ),
         cache=cache,
     )
 

@@ -72,19 +72,21 @@ These caches are independent of Zephon's on-disk shard cache.
 Configure them through the pipeline's `io_options`:
 
 ```python
-from zephon.io import StoreOptions, VortexOptions
+from zephon.io import CacheOptions, StoreOptions, VortexOptions
 
 io_options = StoreOptions(
+    cache=CacheOptions(metadata_cache_entries=256),
     vortex=VortexOptions(
         segment_cache_bytes=64 * 1024**2,
-        metadata_cache_entries=256,
     )
 )
 # Pass io_options to pipeline.options(io_options=io_options).
 ```
 
 The equivalent dictionary accepts human-readable sizes, for example
-`{"vortex": {"segment_cache_bytes": "64mb", "metadata_cache_entries": 256}}`.
+`{"cache": {"metadata_cache_entries": 256}, "vortex": {"segment_cache_bytes": "64mb"}}`.
+The footer limit is the same option used by Parquet and applies independently to each
+format's LRU, whether or not the on-disk shard cache is enabled.
 Set either limit to zero to disable that cache. Each `FetchOp` replica has its own store,
 including replicas in the same process: four replicas can retain 256 MiB of encoded
 segments and 1,024 footers with the defaults. Replicas do not share cache hits or budgets.
@@ -93,10 +95,8 @@ not total process memory: cache overhead, footers, decoded outputs and in-flight
 are additional, and Vortex applies cache evictions asynchronously. The footer limit is
 an entry count, not a byte budget.
 
-Shard contents must remain immutable during reads. Cache keys detect changes completed
-before a reader opens; they do not provide an atomic snapshot across `stat` and native
-open. Eviction can atomically replace a shard with identical bytes. Replacing it with
-different content while a store is reading it is unsupported.
+Like Parquet, Vortex identifies immutable shards by their local path. Evicting and
+downloading the same bytes again preserves footer and segment cache reuse.
 
 Zephon limits Vortex's process-wide runtime to one background worker when the Vortex
 format is first loaded unless `VORTEX_MAX_THREADS` is explicitly set. Set

@@ -42,6 +42,16 @@ If you have existing infrastructure for writing out Parquet files using distribu
 processing frameworks like Spark or Ray, you might want to write out an `index.json` file
 while creating the dataset.
 
+**Footer cache.** Each fetch replica's store retains up to 256 parsed Parquet footers
+across reads. Configure this through
+`StoreOptions(cache=CacheOptions(metadata_cache_entries=256))` or
+`{"cache": {"metadata_cache_entries": 256}}`; zero disables retention. This is the
+same option used by Vortex, applied independently to each format's LRU. The limit
+counts entries, not bytes, and applies even when the on-disk shard cache is disabled.
+Both formats identify immutable shards by their local path, preserving metadata reuse
+when the same bytes are evicted and downloaded again. The decoded Parquet row-group
+cache has its own configuration and budget.
+
 **Reading Parquet in Zephon**
 
 ```{literalinclude} ../../../examples/guide/datasets/parquet_dataset.py

@@ -36,7 +36,7 @@ from zephon._internal.io.formats.base import (
     ShardOpener,
     register_format,
 )
-from zephon._internal.io.formats.metadata_cache import MetadataCache
+from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
@@ -534,19 +534,18 @@ class ParquetShardOpener:
     Parquet shards. The cache and index are owned by the surrounding store.
     """
 
-    _METADATA_CACHE_MAX_SIZE = 256
-
     def __init__(
         self,
         *,
         decoded_cache: ParquetRGCache | None,
         index: ParquetRGIndex | None,
+        metadata_cache_entries: int,
     ) -> None:
         if (decoded_cache is None) != (index is None):
             raise ValueError("Decoded RG cache and index must be provided together")
         self._decoded_cache = decoded_cache
         self._index = index
-        self._metadata_cache = MetadataCache[Path, Any](self._METADATA_CACHE_MAX_SIZE)
+        self._metadata_cache = MetadataCache[str, Any](metadata_cache_entries)
 
     def open_shard(
         self,
@@ -580,7 +579,7 @@ class ParquetShardOpener:
             _, pq = _ensure_pyarrow()
             return pq.read_metadata(path)
 
-        return self._metadata_cache.get_or_load(path, load)
+        return self._metadata_cache.get_or_load(file_cache_key(path), load)
 
 
 class _ParquetExtraCodec:

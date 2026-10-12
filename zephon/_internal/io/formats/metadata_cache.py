@@ -6,10 +6,16 @@
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
+from pathlib import Path
 from typing import Generic, TypeVar
 
 _Key = TypeVar("_Key", bound=Hashable)
 _Value = TypeVar("_Value")
+
+
+def file_cache_key(path: Path) -> str:
+    """Identify an immutable local shard across reader opens and re-downloads."""
+    return str(path.absolute())
 
 
 class MetadataCache(Generic[_Key, _Value]):

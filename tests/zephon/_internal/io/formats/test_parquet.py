@@ -488,6 +488,7 @@ class TestParquetMetadataLifecycle:
         opener = ParquetShardOpener(
             decoded_cache=None,
             index=None,
+            metadata_cache_entries=256,
         )
         calls = 0
         read_metadata = pq.read_metadata

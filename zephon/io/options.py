@@ -65,6 +65,11 @@ def _default_options(option_type: Any) -> Any:
     return option_type(**values)
 
 
+def _validate_non_negative_int(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+
+
 def parse_size_bytes(value: str | int | None) -> int | None:
     """Parse a human-readable size like ``"750gb"`` into a byte count.
 
@@ -89,7 +94,14 @@ def parse_size_bytes(value: str | int | None) -> int | None:
 
 @dataclass
 class CacheOptions:
-    """User-configurable knobs that control cache behaviour."""
+    """User-configurable knobs that control cache behaviour.
+
+    ``enabled`` controls the on-disk shard cache. Independently,
+    ``metadata_cache_entries`` limits each format's parsed-footer LRU in one
+    fetch replica's store. Parquet and Vortex use the same limit; zero disables
+    footer retention. It counts entries, not bytes, and is not shared across
+    formats or fetch replicas.
+    """
 
     enabled: bool = _option(False)
     root: str | Path = _option(Path("~/.cache/zephon").expanduser())
@@ -106,6 +118,7 @@ class CacheOptions:
     open_retry_max_backoff: float = _option(2.0)
     min_slack_bytes: int = _option(512 * 1024)  # 512 KiB minimum slack
     max_slack_bytes: int = _option(64 * 1024 * 1024)  # 64 MiB maximum slack
+    metadata_cache_entries: int = _option(256)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
@@ -114,6 +127,9 @@ class CacheOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
+        _validate_non_negative_int(
+            "cache.metadata_cache_entries", self.metadata_cache_entries
+        )
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
@@ -210,8 +226,8 @@ class VortexOptions:
     Each FetchOp replica owns its budget, including replicas in the same process:
     four replicas can retain four times the configured segment bytes and footers.
     Caches are not shared across replicas or processes.
-    ``metadata_cache_entries`` bounds the number of parsed footers retained.
-    Set either limit to zero to disable that cache.
+    Set ``segment_cache_bytes`` to zero to disable the segment cache. Footer
+    retention uses the shared ``cache.metadata_cache_entries`` option.
 
     Numeric list outputs are read-only NumPy views where possible; duplicate
     samples may share buffers. Use ``array.copy()`` before mutation or conversion
@@ -219,7 +235,6 @@ class VortexOptions:
     """
 
     segment_cache_bytes: int = _option(64 * 1024**2)
-    metadata_cache_entries: int = _option(256)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
@@ -228,10 +243,9 @@ class VortexOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
-        for name in ("segment_cache_bytes", "metadata_cache_entries"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"vortex.{name} must be a non-negative integer")
+        _validate_non_negative_int(
+            "vortex.segment_cache_bytes", self.segment_cache_bytes
+        )
         if self.segment_cache_bytes > 2**64 - 1:
             raise ValueError("vortex.segment_cache_bytes exceeds Vortex's byte limit")
 

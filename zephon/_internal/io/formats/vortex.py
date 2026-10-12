@@ -23,7 +23,7 @@ from zephon._internal.io.formats.arrow_rows import (
     samples_from_columns,
 )
 from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
-from zephon._internal.io.formats.metadata_cache import MetadataCache
+from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
@@ -35,7 +35,7 @@ from zephon._internal.utils.thread_utils import cap_vortex_threads
 if TYPE_CHECKING:
     from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
-    from zephon.io.options import StoreOptions, VortexOptions
+    from zephon.io.options import StoreOptions
     from zephon.types import SamplePayload
 
 try:
@@ -85,26 +85,6 @@ def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int
     return len(_require_vortex().open_readable(reader, without_segment_cache=True))
 
 
-def _file_cache_key(path: Path) -> str:
-    """Invalidate reuse for file changes completed before this stat.
-
-    This is not a snapshot: shard contents must remain immutable during reads.
-    Eviction may replace a shard atomically with identical bytes, but concurrent
-    replacement with different contents between stat and open is unsupported.
-    """
-    stat = path.stat()
-    return repr(
-        (
-            str(path.absolute()),
-            stat.st_dev,
-            stat.st_ino,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
-        )
-    )
-
-
 def _open_vortex_file(
     path: Path,
     metadata_cache: MetadataCache[str, Any] | None,
@@ -114,7 +94,7 @@ def _open_vortex_file(
     vortex = _require_vortex()
     if metadata_cache is None and segment_cache is None:
         return vortex.open(str(path), without_segment_cache=True)
-    key = _file_cache_key(path)
+    key = file_cache_key(path)
     options: dict[str, Any] = (
         {"segment_cache": segment_cache, "cache_key": key}
         if segment_cache is not None
@@ -280,16 +260,16 @@ def _shard_length(local_ref: LocalShardRef) -> int | None:
 class VortexShardOpener:
     """Own bounded caches shared by the Vortex shards in one process-local store."""
 
-    def __init__(self, options: "VortexOptions") -> None:
+    def __init__(self, options: "StoreOptions") -> None:
         vortex = _require_vortex()
         self._metadata_cache = (
-            MetadataCache[str, Any](options.metadata_cache_entries)
-            if options.metadata_cache_entries
+            MetadataCache[str, Any](options.cache.metadata_cache_entries)
+            if options.cache.metadata_cache_entries
             else None
         )
         self._segment_cache = (
-            vortex.SegmentCache(options.segment_cache_bytes)
-            if options.segment_cache_bytes
+            vortex.SegmentCache(options.vortex.segment_cache_bytes)
+            if options.vortex.segment_cache_bytes
             else None
         )
 
@@ -322,7 +302,7 @@ class VortexFormat(FormatHandler):
         self, catalog_set: "CatalogSet | None", options: "StoreOptions"
     ) -> Iterator[ShardOpener]:
         """Create caches once per store and retain them across fetch groups."""
-        opener = VortexShardOpener(options.vortex)
+        opener = VortexShardOpener(options)
         try:
             yield opener
         finally:

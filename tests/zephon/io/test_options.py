@@ -21,6 +21,7 @@ _CACHE_FIELDS = (
     "open_retry_max_backoff",
     "min_slack_bytes",
     "max_slack_bytes",
+    "metadata_cache_entries",
 )
 _PARQUET_RG_CACHE_FIELDS = (
     "enabled",
@@ -31,14 +32,11 @@ _PARQUET_RG_CACHE_FIELDS = (
 
 
 def test_vortex_options_merge_disable_and_reset() -> None:
-    base = StoreOptions.from_any(
-        {"vortex": {"segment_cache_bytes": "8mb", "metadata_cache_entries": 12}}
-    )
+    base = StoreOptions.from_any({"vortex": {"segment_cache_bytes": "8mb"}})
     assert base.vortex.segment_cache_bytes == 8 * 1024**2
     assert base.merge(StoreOptions()).vortex == base.vortex
     disabled = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
     assert disabled.vortex.segment_cache_bytes == 0
-    assert disabled.vortex.metadata_cache_entries == 12
     reset = base.merge(StoreOptions.from_any({"vortex": None}))
     assert reset.vortex == VortexOptions()
     assert base.merge(StoreOptions.from_any(None)).vortex == VortexOptions()
@@ -53,13 +51,31 @@ def test_vortex_options_merge_disable_and_reset() -> None:
         {"segment_cache_bytes": True},
         {"segment_cache_bytes": ""},
         {"segment_cache_bytes": 2**64},
-        {"metadata_cache_entries": -1},
-        {"metadata_cache_entries": 1.5},
     ],
 )
 def test_vortex_options_reject_invalid_limits(options: dict) -> None:
     with pytest.raises(ValueError):
         StoreOptions.from_any({"vortex": options})
+
+
+def test_shared_metadata_cache_option_merge_disable_and_reset() -> None:
+    base = StoreOptions.from_any({"cache": {"metadata_cache_entries": 12}})
+    assert not base.cache.enabled
+    assert base.merge(StoreOptions()).cache.metadata_cache_entries == 12
+    disabled = base.merge(
+        StoreOptions.from_any({"cache": {"metadata_cache_entries": 0}})
+    )
+    assert disabled.cache.metadata_cache_entries == 0
+    reset = base.merge(
+        StoreOptions.from_any({"cache": {"metadata_cache_entries": None}})
+    )
+    assert reset.cache.metadata_cache_entries == 256
+
+
+@pytest.mark.parametrize("limit", [-1, 1.5, True, "256"])
+def test_metadata_cache_rejects_invalid_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="cache.metadata_cache_entries"):
+        StoreOptions.from_any({"cache": {"metadata_cache_entries": limit}})
 
 
 def _configured_cache(
@@ -81,6 +97,7 @@ def _configured_cache(
         open_retry_max_backoff=3.0,
         min_slack_bytes=30,
         max_slack_bytes=40,
+        metadata_cache_entries=12,
     )
 
 
