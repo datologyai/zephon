@@ -77,6 +77,3 @@ Set either limit to zero to disable that cache. The metadata limit counts footer
 segment size is a memory target that Vortex can exceed. Decoded samples and other memory
 use are additional, so allow some headroom when planning memory usage.
 
-**Configuring Threads.** Zephon uses one Vortex background worker per process unless
-`VORTEX_MAX_THREADS` is set. To override this, set `ZEPHON_VORTEX_THREADS` to a positive
-worker count before using the format.
