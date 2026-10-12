@@ -267,10 +267,10 @@ class _WorkerCommand:
     collect_metrics: bool
 
     def __reduce__(self) -> tuple:
-        # Encode record metadata compactly; payloads use their existing reducers.
         return type(self), (
             self.kind,
             self.seq,
+            # Use cached metadata field access without preparing payloads.
             PreparedMicrobatch(self.batch, {}),
             self.wait_ns,
             self.consumed_elements,
