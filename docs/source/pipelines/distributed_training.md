@@ -157,7 +157,7 @@ With `canonical_replicas=8`, a run with 8 data-parallel groups assigns one lane 
 group, while a run with 4 data-parallel groups assigns two lanes to each of them. As long
 as `canonical_replicas` stays the same, the run can be restored on a different `dp_degree`
 and each global training step will contain the same samples.
-{ref}`Elastic Resumption <elastic-resumption>` covers the restore
+{ref}`Elastic resumption <elastic-resumption>` covers the restore
 process itself; here we will only focus on the settings that you need to choose at the
 start of a run because they cannot be changed later.
 

@@ -15,54 +15,50 @@ given seed. Everything downstream is a deterministic function of that.
 section describes, they are an interface you are meant to implement against, and you need
 them if you want a curriculum that the built-in static mixture cannot express.
 
-**The Contract.** The engine only ever calls a handful of methods, and they fall into four
-groups.
+**The contract.** The engine only ever calls a handful of methods, and they fall into four
+groups:
 
-**Chunk production.** `next_chunk()` returns the next `WorkChunk` for this source's lane,
-or `None` when the source is exhausted. Everything else in the interface exists to support
-this one method. The engine calls it on a per-lane clone, in a loop, and it is the only
-method that is allowed to advance any internal position.
+- **Chunk production.** `next_chunk()` returns the next `WorkChunk` for this source's
+  lane, or `None` when the source is exhausted. Everything else in the interface exists to
+  support this one method. The engine calls it on a per-lane clone, in a loop, and it is
+  the only method that is allowed to advance any internal position.
+- **Component vocabulary.** `component_ids()` publishes the source's static mixture
+  vocabulary: every component name the source will *ever* emit, including components that
+  a curriculum only activates later, mapped to a unique non-negative integer. The ids need
+  not be dense. The engine stamps these ids onto every sample, so publishing them as a
+  pure function of configuration is what keeps component ids identical across ranks,
+  topology changes, and resumes. The alternative, assigning ids in encounter order, would
+  produce a different numbering on a rank that happens to see a rare component later.
+  Emitting a component that was never declared raises.
+- **Lane binding.** Before pulling any chunks, the engine clones the source once per lane
+  it owns with `clone_for_lane(lane_id, canonical_replicas)`, and each clone produces only
+  the chunks assigned to its lane. The default implementation deep-copies, so a subclass
+  has to be deepcopy-safe or override the method. The clone is bound once and refuses to
+  be cloned again, and the original instance is never used to produce chunks.
+- **Checkpointing.** `state_dict()` and `load_state_dict()` serialize whatever drives
+  `next_chunk()`. What goes in is entirely up to the implementation. The one hard
+  requirement is that restoring from a saved state and then calling `next_chunk()`
+  produces the same sequence as if the source had never been interrupted. The base class
+  stores the lane identity and refuses a restore whose `lane_id` or `canonical_replicas`
+  does not match, which is the first line of defence against the silent curriculum change
+  that [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) describes.
 
-**Component vocabulary.** `component_ids()` publishes the source's static mixture
-vocabulary. That means every component name the source will *ever* emit, including
-components that a curriculum only activates later, mapped to a unique non-negative
-integer. The ids need not be dense. The engine stamps these ids onto every sample, so
-publishing them as a pure function of configuration is what keeps component ids identical
-across ranks, topology changes, and resumes. The alternative, assigning ids in encounter
-order, would produce a different numbering on a rank that happens to see a rare component
-later. Emitting a component that was never declared raises.
+Three further hooks are optional, and the built-in source implements all of them:
 
-**Lane binding.** Before pulling any chunks, the engine clones the source once per lane it
-owns with `clone_for_lane(lane_id, canonical_replicas)`, and each clone produces only the
-chunks assigned to its lane. The default implementation deep-copies, so a subclass has to
-be deepcopy-safe or override the method. The clone is bound once and refuses to be cloned
-again, and the original instance is never used to produce chunks.
+- `chunk_size_hint()` returns a fixed chunk size when the source has one. The engine
+  asserts it is present whenever the plan carries a batch-size hint, because deterministic
+  batch composition needs to know how many samples a chunk holds.
+- `requires_token_priming` and `prime()` give a source a driver-side calibration pass
+  before the workers are forked. The token-aware mixture uses it to measure a
+  tokens-per-byte ratio by actually tokenizing a sample of the data. A restore skips the
+  measurement and keeps the checkpointed ratios, so a tokenizer upgrade cannot silently
+  shift the mixture mid-run.
+- `supports_indexing()`, `__len__()` and `sample_id_at(index)` let a source back a
+  map-style dataset. Together with a plan whose operators are all `indexable`, they are
+  what `Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves them
+  raising `NotImplementedError`, and `Pipeline.is_indexable` reports `False`.
 
-**Checkpointing.** `state_dict()` and `load_state_dict()` serialize whatever drives
-`next_chunk()`. What goes in is entirely up to the implementation. The one hard
-requirement is that restoring from a saved state and then calling `next_chunk()` produces
-the same sequence as if the source had never been interrupted. The base class stores the
-lane identity and refuses a restore whose `lane_id` or `canonical_replicas` does not
-match, which is the first line of defence against the silent curriculum change that
-[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) describes.
-
-Three further hooks are optional, and the built-in source implements all of them.
-
-`chunk_size_hint()` returns a fixed chunk size when the source has one. The engine asserts
-it is present whenever the plan carries a batch-size hint, because deterministic batch
-composition needs to know how many samples a chunk holds.
-
-`requires_token_priming` and `prime()` give a source a driver-side calibration pass before
-the workers are forked. The token-aware mixture uses it to measure a tokens-per-byte ratio
-by actually tokenizing a sample of the data. A restore skips the measurement and keeps the
-checkpointed ratios, so a tokenizer upgrade cannot silently shift the mixture mid-run.
-
-`supports_indexing()`, `__len__()` and `sample_id_at(index)` let a source back a map-style
-dataset. Together with a plan whose operators are all `indexable`, they are what
-`Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves them raising
-`NotImplementedError`, and `Pipeline.is_indexable` reports `False`.
-
-**Work Chunks.** A `WorkChunk` is the unit of work that travels from the source to the
+**Work chunks.** A `WorkChunk` is the unit of work that travels from the source to the
 engine. It is a bundle of sample *pointers* grouped by mixture component, with no payloads
 and nothing read from storage yet:
 
@@ -105,16 +101,16 @@ contribute fewer pointers for the same token share.
 
 Chunks are also the granularity at which the engine tracks progress, which is what keeps
 checkpoints small. Only the chunks currently in flight are saved and replayed, never the
-whole history. {ref}`Chunks Are The Unit Of State <chunks-are-the-unit-of-state>` covers
+whole history. {ref}`Chunks are the unit of state <chunks-are-the-unit-of-state>` covers
 that side of it.
 
-**Filling A Chunk.** `StaticMixtureWorkSource` is the only implementation that ships with
+**Filling a chunk.** `StaticMixtureWorkSource` is the only implementation that ships with
 Zephon. Filling a chunk is two steps: decide how many pointers each component contributes,
 then pull that many from each component's cursor.
 
-**Quota allocation** is the first step, and the default strategy is incremental rather
-than fixed. Each component carries an accumulator. Every chunk adds `weight * chunk_size`
-to it, takes the integer part as that component's base quota, and leaves the fractional
+Quota allocation is the first step, and the default strategy is incremental rather than
+fixed. Each component carries an accumulator. Every chunk adds `weight * chunk_size` to
+it, takes the integer part as that component's base quota, and leaves the fractional
 remainder behind. A largest-remainder correction then forces the quotas to sum to exactly
 `chunk_size`. The part that matters is what happens next: each correction is debited back
 into the accumulator, so a component that got rounded up this chunk is correspondingly
@@ -133,7 +129,7 @@ share of *tokens* each component contributes rather than the share of documents.
 least one slot per chunk, and distributes the remainder by largest remainder. It exists so
 that checkpoints written before the accumulator strategy still restore.
 
-**Per-dataset cursors** are the second step. Each dataset has a cursor that walks a
+Per-dataset cursors are the second step. Each dataset has a cursor that walks a
 deterministic traversal of its shards, and the chunk pulls `quota[component]` pointers
 from each. The cursor is where the three shuffle levels described in [Shuffling and
 Repeating Samples](../worksources/shuffling_and_repeating_samples.md) are applied, namely
@@ -154,7 +150,7 @@ catalogue without a materialization step.
 
 (chunk-to-lane-routing)=
 
-**Chunk-To-Lane Routing.** Each lane's clone has to work out which chunks are *its*
+**Chunk-to-lane routing.** Each lane's clone has to work out which chunks are *its*
 chunks, and it does this without asking anyone. The clone enumerates the **global** chunk
 schedule, the same sequence every other lane enumerates, assigns each global chunk index
 to a lane, keeps the chunks that map to its own lane, and discards the rest.
@@ -203,7 +199,7 @@ hitting the same few. The block seed composes integers rather than hashing a tup
 because `hash()` is not stable across processes unless `PYTHONHASHSEED` is pinned, and a
 data order that depends on an environment variable is not a data order.
 
-**Why The Schedule Is Not Pre-Computed.** Most distributed loaders materialize the full
+**Why the schedule is not pre-computed.** Most distributed loaders materialize the full
 sample order up front: build a permutation of every index, shard it across ranks, iterate.
 That works when the dataset size and the rank count are both known before training starts,
 and it makes "skip to 73% of the epoch" a one-line operation.

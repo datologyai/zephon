@@ -12,7 +12,7 @@ knobs exist and what they do, [How Pipelines Run](../pipelines/how_pipelines_run
 [Inspecting and Tuning Pipelines](../pipelines/inspecting_and_tuning_pipelines.md) are
 where you want to be.
 
-**A Warning About Stability.** These pages describe behaviour rather than implementation.
+**A warning about stability.** These pages describe behaviour rather than implementation.
 Most of the machinery involved lives in private modules whose layout and signatures change
 without notice, so we have tried to write down the contract it implements and to name
 things the way you would reach them: the operator you called, the option you set, the

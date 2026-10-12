@@ -5,24 +5,22 @@ worth taking seriously: an operator running across sixteen workers makes exactly
 decisions it would have made on one. This page explains the two pieces of machinery that
 deliver that, and what they ask of an operator in return.
 
-**The Operator Contract.** An operator is a unit of transformation (tokenizing, packing,
+**The operator contract.** An operator is a unit of transformation (tokenizing, packing,
 batching, shuffling) and it neither knows nor cares how it is executed. Five methods make
-up the contract, of which three matter most.
+up the contract, of which three matter most:
 
-`accumulator(*, deterministic, ctx)` returns the {ref}`accumulator <accumulators>` that
-decides how incoming elements are grouped into micro-batches. The `deterministic` flag
-comes from the runner and controls whether time-based flushing is allowed.
-
-`process_many(elems)` is the workhorse, and the part that runs in parallel. It takes a
-micro-batch and returns a list of the *same* element types. The elements are
-`SampleRecord` objects, or `SampleBatch` objects downstream of `batch()`. To transform a
-sample you rebuild its `payload` while preserving its `meta`, which carries the identity
-and ordering that [Records and Sample Lifecycles](records_and_sample_lifecycles.md)
-describes. Returning a bare dict or a raw payload gets you a
-`TypeError: Unsupported element type`.
-
-`traits()` declares the `OpTraits` that guide compilation and scheduling, including the
-all-important `preserves_cursor_order`.
+- `accumulator(*, deterministic, ctx)` returns the {ref}`accumulator <accumulators>` that
+  decides how incoming elements are grouped into micro-batches. The `deterministic` flag
+  comes from the runner and controls whether time-based flushing is allowed.
+- `process_many(elems)` is the workhorse, and the part that runs in parallel. It takes a
+  micro-batch and returns a list of the *same* element types. The elements are
+  `SampleRecord` objects, or `SampleBatch` objects downstream of `batch()`. To transform a
+  sample you rebuild its `payload` while preserving its `meta`, which carries the identity
+  and ordering that [Records and Sample Lifecycles](records_and_sample_lifecycles.md)
+  describes. Returning a bare dict or a raw payload gets you a
+  `TypeError: Unsupported element type`.
+- `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
+  all-important `preserves_cursor_order`.
 
 Two more round it out. `setup(ctx)` runs once before any data arrives, receiving an
 `OpContext` with runtime services and plan metadata. `process_one(elem)` handles a single
@@ -46,7 +44,7 @@ is stateless in principle and could move onto the workers. It has not, and that 
 throughput limitation rather than a design requirement. What *is* a design requirement is
 that any logic needing to see elements in stream order lives in the accumulator.
 
-**Micro-Batches.** When an operator runs with several workers, the runner does not hand
+**Micro-batches.** When an operator runs with several workers, the runner does not hand
 out elements one at a time. It groups them into micro-batches processed together in a
 single `process_many` call. That amortises dispatch overhead and lets operators use
 batch-level optimisations, such as a tokenizer encoding sixty-four texts in one call
@@ -120,32 +118,29 @@ together, so each lane's packing decisions are independent of how many GPUs are 
 
 **The interface.** Four methods and a flag, defined in `zephon.ops.accumulators`:
 
-`push_many(elems)` consumes elements from upstream, buffers them, and returns zero or more
-ready micro-batches.
+- `push_many(elems)` consumes elements from upstream, buffers them, and returns zero or
+  more ready micro-batches.
+- `flush(*, reset=False, lane_id=None)` emits what is still buffered, in one of two
+  contexts. At end of stream (`reset=False`, `lane_id=None`) every lane is finished and
+  any remaining partial micro-batches go out. Mid-stream (`reset=True`, with a `lane_id`)
+  a flush sentinel has arrived, and the accumulator must emit **and fully reset** that one
+  lane's state while leaving every other lane untouched. Flush sentinels are injected per
+  lane, so flushing every lane at one lane's boundary corrupts the others and breaks
+  replay.
+- `has_pending_data(lane_id=None)` reports whether a flush would produce anything, which
+  the runner uses to avoid terminating early and to detect stalling.
+- `try_epoch_reset(boundary_chunk_id, lane_id)` asks whether a stalled sentinel can now be
+  released. The question it answers is whether the accumulator's future output is
+  equivalent to that of a fresh instance fed only the records still buffered. The default
+  implementation is conservative and says yes only when nothing is pending.
+- `reads_payload` is the flag. It defaults to `False`, which declares that the accumulator
+  only ever looks at metadata (the `lane_id`, cursors, and so on) and lets the runner
+  leave payloads as unresolved shared-memory handles. Set it to `True` if `push_many`
+  inspects payloads, and the runner resolves them first. Forget to, and you get a lazy
+  handle where you expected a dict.
 
-`flush(*, reset=False, lane_id=None)` emits what is still buffered, in one of two
-contexts. At end of stream (`reset=False`, `lane_id=None`) every lane is finished and any
-remaining partial micro-batches go out. Mid-stream (`reset=True`, with a `lane_id`) a
-flush sentinel has arrived, and the accumulator must emit **and fully reset** that one
-lane's state while leaving every other lane untouched. Flush sentinels are injected per
-lane, so flushing every lane at one lane's boundary corrupts the others and breaks replay.
-
-`has_pending_data(lane_id=None)` reports whether a flush would produce anything, which the
-runner uses to avoid terminating early and to detect stalling.
-
-`try_epoch_reset(boundary_chunk_id, lane_id)` asks whether a stalled sentinel can now be
-released. The question it answers is whether the accumulator's future output is equivalent
-to that of a fresh instance fed only the records still buffered. The default
-implementation is conservative and says yes only when nothing is pending.
-
-`reads_payload` is the flag. It defaults to `False`, which declares that the accumulator
-only ever looks at metadata (the `lane_id`, cursors, and so on) and lets the runner leave
-payloads as unresolved shared-memory handles. Set it to `True` if `push_many` inspects
-payloads, and the runner resolves them first. Forget to, and you get a lazy handle where
-you expected a dict.
-
-`flush()` is deterministic in the sense that matters. Its output depends only on the
-elements the accumulator has seen, never on timing.
+Note that `flush()` is deterministic in the sense that matters. Its output depends only on
+the elements the accumulator has seen, never on timing.
 
 **The built-ins.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
@@ -168,7 +163,7 @@ target ratios. `shuffle` has two, picked by its `algorithm` argument: a reservoi
 accumulator for the default `"streaming"`, and a block accumulator for `"block"` and
 `"block_warmup"`.
 
-**How Runners Keep The Order.** Zephon ships three runner types for local execution,
+**How runners keep the order.** Zephon ships three runner types for local execution,
 namely `inline`, `threads`, and `process`, which [How Pipelines
 Run](../pipelines/how_pipelines_run.md) describes. There is also a Ray-backed `remote`
 runner for stages added with `placement="remote"`. From the accumulator's point of view
@@ -188,7 +183,7 @@ Accumulator-defined boundaries plus sequence-number reordering are, together, th
 execution parameters are
 {ref}`pure performance knobs <execution-parameters-are-not-data-parameters>`.
 
-**Data-Derived Randomness.** The shuffle buffer needs randomness, and the obvious approach
+**Data-derived randomness.** The shuffle buffer needs randomness, and the obvious approach
 would be wrong. An RNG advanced once per micro-batch ties the permutation to micro-batch
 boundaries, and those boundaries shift across a restart because replay starts from a
 different point. The same data would shuffle differently after a resume.
@@ -202,7 +197,7 @@ same result regardless of how they were grouped or which restart they turn up on
 
 (flush-sentinels-and-stalling)=
 
-**Flush Sentinels And Stalling.** Pipelines containing packing, shuffling, or mixture
+**Flush sentinels and stalling.** Pipelines containing packing, shuffling, or mixture
 correction use **flush sentinels** to create epoch boundaries that make checkpoint
 eviction safe. Every `flush_every_k_chunks` chunks per lane, the engine injects a sentinel
 that triggers `flush(reset=True, lane_id=lane)` on each accumulator as it passes.

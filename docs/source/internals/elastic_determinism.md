@@ -6,7 +6,7 @@ Training](../pipelines/distributed_training.md) tells you which options to set i
 get that. This page explains the mechanism that makes the claim true. It also explains the
 boundaries of it, which matter just as much.
 
-**Determinism By Induction.** Zephon's determinism guarantee is compositional, which is a
+**Determinism by induction.** Zephon's determinism guarantee is compositional, which is a
 grand way of saying that it is proven the boring way. The `WorkSource` produces pointers
 in a fixed order for a given seed and lane. Each operator is deterministic given its
 inputs. By induction over the operator chain, the whole pipeline therefore produces the
@@ -28,7 +28,7 @@ that the rest of this page depends on is exactly what gets relaxed.
 
 (execution-parameters-are-not-data-parameters)=
 
-**Execution Parameters Are Not Data Parameters.** The single most useful property Zephon
+**Execution parameters are not data parameters.** The single most useful property Zephon
 has is a negative one: **changing how a pipeline runs never changes what it produces.**
 None of the execution settings appear anywhere in the data path, including the runner
 type, the parallelism of each operator, the queue depths, the prefetch settings, and the
@@ -52,7 +52,7 @@ Streaming](https://docs.mosaicml.com/projects/streaming/en/latest/distributed_tr
 avoids that with a careful partitioning algorithm, but requires a constant global batch
 size across runs. In both cases a knob you would like to treat as free is not free.
 
-**The Problem With Partitioning By GPU.** The naive way to distribute data is to partition
+**The problem with partitioning by GPU.** The naive way to distribute data is to partition
 it across the physical GPU count: with 8 GPUs, GPU *k* takes every eighth sample. Resume
 that run on 4 GPUs and every GPU's stream changes completely, because the partition
 function changed. The run is not a continuation of the old one in any meaningful sense. It
@@ -63,7 +63,7 @@ hardware. Mosaic Streaming calls its version **canonical nodes**, a fixed number
 logical partitions that are mapped onto physical nodes at runtime. Keep the number of
 canonical nodes constant and the global sample order survives a change in node count.
 
-**Zephon's Version: Lanes.** A **lane** is a logical, deterministic sub-stream of the
+**Zephon's version: lanes.** A **lane** is a logical, deterministic sub-stream of the
 global sample order, and it is the natural equivalent of a canonical node for an iterable
 pipeline. The number of lanes is fixed for the lifetime of a run by the
 `canonical_replicas` option, and the lanes are partitioned among whatever data-parallel
@@ -94,9 +94,9 @@ produces a different global schedule, and Zephon refuses to restore a checkpoint
 `canonical_replicas` does not match. Everything else is free, including the parallelism,
 the runner type, the prefetch depth, and the per-device microbatch size. The one
 qualification is the batches-per-step rule in
-{ref}`Planning for Elasticity <planning-for-elasticity>`.
+{ref}`planning for elasticity <planning-for-elasticity>`.
 
-**Samples Do Not Travel In Separate Lane Streams.** A design choice that surprises people:
+**Samples do not travel in separate lane streams.** A design choice that surprises people:
 Zephon does **not** physically separate the data into one stream per lane. Every record
 carries its `lane_id` in its metadata, and operators process records from every owned lane
 together, through the same queues and the same worker pools.
@@ -111,7 +111,7 @@ sample from lane 0, one from lane 1, and so on, skipping lanes that have finishe
 keeps the lanes progressing at roughly the same rate, which matters because the output end
 has to pull one batch from each lane in turn. How a lane works out which chunks belong to
 it in the first place, without asking any other rank, is covered in
-{ref}`Chunk-To-Lane Routing <chunk-to-lane-routing>`.
+{ref}`Chunk-to-lane routing <chunk-to-lane-routing>`.
 
 The cost of mixing is that any operator holding per-record state has to be **lane-aware**,
 or it will mix data across lanes and destroy the per-lane determinism that the whole
@@ -120,7 +120,7 @@ packed together with one from lane 3. Batching fills separate per-lane buffers. 
 shuffle buffer keeps separate reservoirs. Stateless operators never have to think about
 lanes at all, which covers maps, tokenization, filters, and most of the rest.
 
-**The Tail Multiplexer.** Because lanes are interleaved on the way in and operators like
+**The tail multiplexer.** Because lanes are interleaved on the way in and operators like
 packing and filtering change the rate at which each lane produces output, the raw output
 of the pipeline does not emit lanes in any predictable order. A group that owns lanes 0
 through 3 might see batches finish as lane 2, lane 0, lane 2, lane 1, and so on.
@@ -152,25 +152,24 @@ through without consuming a turn, since they are bookkeeping rather than data.
 
 (what-actually-survives-a-topology-change)=
 
-**What Actually Survives A Topology Change.** The guarantee rests on two pieces of state
+**What actually survives a topology change.** The guarantee rests on two pieces of state
 that behave very differently, and the difference is the thing most worth understanding on
-this page.
+this page:
 
-**Per-lane progress is the source of truth.** Each lane independently records how far it
-has advanced, as a chunk ID and an offset within that chunk. This state is durable,
-topology-independent, and checkpointed. It is what guarantees that no sample is ever
-skipped or delivered twice, no matter how the lanes are redistributed. This guarantee is
-unconditional.
-
-**The round-robin pointer is a physical detail.** It records which lane the tail
-multiplexer should emit from next. It is keyed by the DataLoader worker, the number of
-active workers, and the exact list of owned lanes, deliberately not by rank, so that peers
-inside a data-parallel group own identical lanes and share one entry. When the topology is
-unchanged, the key still matches on restore, the pointer is restored exactly, and the
-per-group output is identical sample for sample to an uninterrupted run. When the topology
-changes, no saved key matches the new ownership, so the engine recomputes a starting point
-from per-lane progress instead, picking the least-advanced owned lane ordered by
-`(chunk_id, offset, lane_id)`.
+- **Per-lane progress is the source of truth.** Each lane independently records how far it
+  has advanced, as a chunk ID and an offset within that chunk. This state is durable,
+  topology-independent, and checkpointed. It is what guarantees that no sample is ever
+  skipped or delivered twice, no matter how the lanes are redistributed. This guarantee is
+  unconditional.
+- **The round-robin pointer is a physical detail.** It records which lane the tail
+  multiplexer should emit from next. It is keyed by the DataLoader worker, the number of
+  active workers, and the exact list of owned lanes, deliberately not by rank, so that
+  peers inside a data-parallel group own identical lanes and share one entry. When the
+  topology is unchanged, the key still matches on restore, the pointer is restored
+  exactly, and the per-group output is identical sample for sample to an uninterrupted
+  run. When the topology changes, no saved key matches the new ownership, so the engine
+  recomputes a starting point from per-lane progress instead, picking the least-advanced
+  owned lane ordered by `(chunk_id, offset, lane_id)`.
 
 That recomputation is why checkpoints belong at global step boundaries. At the end of a
 step every lane has contributed exactly once per cycle, so every lane is at the same
@@ -188,7 +187,7 @@ samples, different machines. The same holds when the per-device microbatch size 
 different microbatch size changes how many samples a lane puts in one local batch, but the
 round-robin still cycles the same lanes producing the same data.
 
-**Mapping Strategies.** When a group owns several lanes, something has to decide which
+**Mapping strategies.** When a group owns several lanes, something has to decide which
 ones. Two strategies are available through `Pipeline.options(mapping_strategy=...)`. Both
 are deterministic and produce identical global batches, so they only decide which group
 does which work.
@@ -204,6 +203,6 @@ heterogeneous shards more evenly and tends to reduce tail variance between group
 
 Note the uneven split in both examples. Eight lanes across three groups has to leave
 somebody short. That is the reason for the divisibility advice in
-{ref}`Planning for Elasticity <planning-for-elasticity>`: a lane count that is not
+{ref}`planning for elasticity <planning-for-elasticity>`: a lane count that is not
 divisible by the group count means some groups own more lanes than others, and therefore
 more work per step.
