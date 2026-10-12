@@ -13,7 +13,7 @@ import sys
 import textwrap
 from pathlib import Path
 from threading import Event
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import IO, Any, Callable
 from unittest import mock
 
@@ -41,6 +41,7 @@ from zephon.io.dataset import Dataset
 
 @pytest.fixture
 def vortex() -> Any:
+    # The unrelated PyPI package named "vortex" does not provide vortex.io.
     pytest.importorskip("vortex.io", reason="vortex-data not installed")
     return importlib.import_module("vortex")
 
@@ -161,6 +162,7 @@ def test_vortex_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) 
     [
         pytest.param([], id="empty"),
         pytest.param([3], id="single"),
+        pytest.param([3, 3, 3], id="all-identical"),
         pytest.param([0, 1, 4, 5], id="sorted"),
         pytest.param([3, 2, 3], id="contiguous-duplicates"),
         pytest.param([4, 1, 4, 0, 1, 5, 0], id="unsorted-duplicates"),
@@ -183,8 +185,26 @@ def test_vortex_shard_getsamples(
         shard.close()
 
 
+def test_vortex_shard_getsamples_random_order(
+    tmp_path: Path, write_vortex: Any
+) -> None:
+    """Regression for #302: a shuffled bulk read preserves order on a larger shard."""
+    rows = [{"v": i, "text": f"row_{i}"} for i in range(5000)]
+    path = tmp_path / "shard.vortex"
+    write_vortex(path, rows)
+    indices = random.Random(0).choices(range(len(rows)), k=64)
+    # Include distant boundaries and guarantee non-consecutive duplicates.
+    indices.extend([len(rows) - 1, 0, indices[0]])
+    shard = VortexShard(path)
+    try:
+        for requested in (sorted(indices), indices):
+            assert shard.getsamples(requested) == [rows[i] for i in requested]
+    finally:
+        shard.close()
+
+
 @pytest.mark.parametrize("indices", [[4, -1, 0], [4, 6, 0]])
-def test_vortex_shard_getsamples_out_of_bounds(
+def test_vortex_shard_out_of_bounds(
     tmp_path: Path, indices: list[int], write_vortex: Any
 ) -> None:
     """Reject invalid indices before passing the request to Vortex."""
@@ -194,15 +214,27 @@ def test_vortex_shard_getsamples_out_of_bounds(
     try:
         with pytest.raises(IndexError):
             shard.getsamples(indices)
+        with pytest.raises(IndexError):
+            shard[indices[1]]
     finally:
         shard.close()
 
 
-def test_vortex_import_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that VortexShard raises helpful error when vortex not installed."""
-    monkeypatch.setattr(vortex_format, "_vortex", None)
-    with pytest.raises(ImportError, match="Vortex support requires"):
+@pytest.mark.parametrize(
+    "installed", [None, ModuleType("vortex")], ids=["missing", "old"]
+)
+def test_vortex_import_error_handling(
+    monkeypatch: pytest.MonkeyPatch, installed: ModuleType | None
+) -> None:
+    """Missing and outdated installations fail before touching storage."""
+    monkeypatch.setattr(vortex_format, "_vortex", installed)
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0.*pip install -U"):
         VortexShard(Path("/fake/path.vortex"))
+    storage = _RangeOnlyStorage("custom://data", {})
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0"):
+        VortexFormat().discover(storage.root, storage)
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0"):
+        vortex_format._read_vortex_row_count("missing.vortex", storage, 1)
 
 
 def test_vortex_read_failure_preserves_error_unless_file_is_missing(
@@ -454,6 +486,7 @@ class _RangeOnlyStorage(StorageBackend):
 
     def listdir(self, path: str) -> list[str]:
         assert path == self.root
+        # Unsorted on purpose: discovery must sort.
         return [key.rsplit("/", 1)[-1] for key in reversed(self.files)]
 
     def stat(self, path: str) -> dict[str, int]:
@@ -482,6 +515,19 @@ class _RangeOnlyStorage(StorageBackend):
 
     def put(self, path: str, data: bytes) -> None:
         self.files[path] = data
+
+
+def test_vortex_reader_forwards_ranges_and_skips_empty_reads() -> None:
+    """Keep backend buffers intact and avoid unsupported empty range requests."""
+    storage = _RangeOnlyStorage("custom://data", {"a.vortex": b"abcdef"})
+    reader = vortex_format._VortexReader(storage, "custom://data/a.vortex", 6)
+    assert reader.size() == 6
+    assert reader.read_at(3, 0) == b""
+    assert storage.reads == []
+    result = reader.read_at(2, 3)
+    assert isinstance(result, memoryview)
+    assert result == b"cde"
+    assert storage.reads == [(reader.path, 2, 3)]
 
 
 @pytest.fixture
@@ -538,7 +584,7 @@ def test_discovery_honors_local_backend_root(
 
 
 def test_metadata_reader_accepts_short_reads(shard_files: dict[str, bytes]) -> None:
-    """Vortex completes short range reads without a whole-file fallback."""
+    """Vortex retries short reads; the adapter need not loop or fetch whole files."""
     storage = _RangeOnlyStorage("custom://data", shard_files)
     storage.max_read = 127
     counts, _ = VortexFormat().discover(storage.root, storage)
@@ -550,6 +596,7 @@ def test_parallel_discovery_keeps_filename_order(
 ) -> None:
     """A slower first shard must retain its ID when later reads finish first."""
     files = dict(shard_files)
+    # Six files enable two workers under the shared Parquet/Vortex heuristic.
     files.update({f"{name}.vortex": files["b.vortex"] for name in "cdef"})
     storage = _RangeOnlyStorage("custom://parallel", files)
     second_finished = Event()
@@ -574,9 +621,10 @@ def test_discovery_preserves_storage_errors(
 ) -> None:
     """Failed backend reads report the shard path instead of bypassing its auth."""
     storage = _RangeOnlyStorage("custom://data", shard_files)
+    denied = PermissionError("test backend denied access")
 
     def deny_read(*args: Any, **kwargs: Any) -> bytes:
-        raise PermissionError("test backend denied access")
+        raise denied
 
     monkeypatch.setattr(storage, "read_range", deny_read)
     with pytest.raises(
@@ -584,6 +632,7 @@ def test_discovery_preserves_storage_errors(
     ) as error:
         VortexFormat().discover(storage.root, storage)
     assert "test backend denied access" in str(error.value)
+    assert error.value.__cause__ is denied
 
 
 @pytest.mark.usefixtures("vortex")
