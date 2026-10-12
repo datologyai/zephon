@@ -154,7 +154,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
     checks for leaks, even in free-threaded Python where GC is deferred.
 
     Calls close() first (to clean up runners, queues, and semaphores),
-    then _clean_merged() (to release coordinator resources).
+    then _clean_merged() (to clean up temporary files).
     """
     try:
         engine = engine_ref()
@@ -166,7 +166,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
             if callable(close_fn):
                 close_fn()
         finally:
-            # Release coordinator resources even if close() fails.
+            # Always clean merged files, even if close() fails
             cm = getattr(engine, "_clean_merged", None)
             if callable(cm):
                 cm()
@@ -422,7 +422,7 @@ class Engine:
         )
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        # Close runners/queues/semaphores before releasing coordinator resources.
+        # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
         self._closed = False
 
         self._cleanup_finalizer = weakref.finalize(
@@ -1697,10 +1697,22 @@ class Engine:
             return state.to_dict()
 
     def state_dict(self) -> dict[str, Any]:
+        # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
         if len(self._owned_lanes) == 0:
-            # Idle workers do not participate in aggregation and may miss its
-            # round. TorchData's adapter uses worker 0's checkpoint result.
+            # Idle workers just return their local state
+            # In the best case, they would also read the aggregate checkpoint to have a complete return
+            # The problem is that we cannot ensure this:
+            # Leader (rank 0, worker 0) publishes round_id
+            # Worker 0 & 1 successfully read the round_id, write their state files
+            # Leader sees all lanes covered, merges states, writes merged file, deletes round file
+            # Worker 2 (slow to call state_dict()) tries to read round_id, but:
+            # The round file might be deleted already, OR
+            # The round file exists but the merged file ALSO exists, causing _read_open_round_id() to return None due to this check:
+            #
+            # The thing is that for torchdata in the end we only return worker 0 results anyways due to our torchdata_compat.py
+            # so it doesn't really matter. For regular torch dataloader, state_dict() does not work anyways by design (it does not forward to workers)
+            # And in regular Zephon without a DL, we don't have multiple workers per rank. Hence, this is fine, but if there is a better solution we should improve this.
             return local
 
         lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
@@ -1714,6 +1726,7 @@ class Engine:
             )
             return local
 
+        # Round setup
         is_leader = self._world.global_rank == 0 and worker_id == 0
         return self._coordinator.aggregate(
             AggregationRound(
