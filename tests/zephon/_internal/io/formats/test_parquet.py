@@ -479,16 +479,18 @@ class TestParquetMetadataLifecycle:
 
         assert calls == 0
 
+    @pytest.mark.parametrize("metadata_entries", [0, 1])
     def test_parquet_misses_reuse_lazily_loaded_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        metadata_entries: int,
     ) -> None:
         local_ref, locator = _metadata_lifecycle_refs(tmp_path)
         opener = ParquetShardOpener(
             decoded_cache=None,
             index=None,
-            metadata_cache_entries=256,
+            metadata_cache_entries=metadata_entries,
         )
         calls = 0
         read_metadata = pq.read_metadata
@@ -501,10 +503,38 @@ class TestParquetMetadataLifecycle:
         monkeypatch.setattr(pq, "read_metadata", counting_read_metadata)
         first = opener.open_shard(locator, local_ref)
         first.getsamples([0])
+        first.close()
+        path = local_ref.raw.path
+        replacement = path.with_suffix(".replacement")
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
         second = opener.open_shard(locator, local_ref)
         second.getsamples([1])
+        second.close()
 
-        assert calls == 1
+        assert calls == (1 if metadata_entries else 2)
+
+
+def test_single_column_samples_survive_close(tmp_path: Path) -> None:
+    import numpy as np
+
+    path = tmp_path / "tokens.parquet"
+    array = pa.array([[1, 2], None, [], [3]], type=pa.list_(pa.uint32()))
+    pq.write_table(pa.table({"tokens": array}), path, row_group_size=2)
+    shard = ParquetShard(path, [{"num_rows": 2}, {"num_rows": 2}])
+    try:
+        single = shard[0]
+        rows = shard.getsamples([3, 1, 0, 3, 2])
+    finally:
+        shard.close()
+    assert single.tolist() == [1, 2]
+    assert rows[1] is None
+    for row, expected in zip(
+        (rows[0], rows[2], rows[3], rows[4]), ([3], [1, 2], [3], []), strict=True
+    ):
+        assert row.dtype == np.uint32
+        assert not row.flags.writeable
+        assert row.tolist() == expected
 
 
 def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:

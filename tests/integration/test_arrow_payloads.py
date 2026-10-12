@@ -17,17 +17,15 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.parametrize("fmt", ["parquet", "vortex"])
 @pytest.mark.parametrize("runner", ["threads", "process"])
-@pytest.mark.parametrize("kind", ["tokens", "nullable"])
 def test_single_column_payloads_through_fetch_and_transport(
-    tmp_path: Path, fmt: str, runner: str, kind: str
+    tmp_path: Path, fmt: str, runner: str
 ) -> None:
     pa = pytest.importorskip("pyarrow")
-    if kind == "tokens":
-        values = [np.arange(i, i + 2048, dtype=np.int32) for i in range(8)]
-        array = pa.array(values, type=pa.list_(pa.int32()))
-    else:
-        values = [1, None, 3, 4, None, 6, 7, 8]
-        array = pa.array(values, type=pa.int32())
+    # One representative schema covers views, missing values, and SHM transport.
+    values = [
+        None if i == 1 else np.arange(i, i + 2048, dtype=np.int32) for i in range(8)
+    ]
+    array = pa.array(values, type=pa.list_(pa.int32()))
     table = pa.table({"value": array})
     root = tmp_path / "data"
     root.mkdir()
@@ -64,14 +62,11 @@ def test_single_column_payloads_through_fetch_and_transport(
     assert len(records) == len(values)
     for record in records:
         expected = values[record.meta.sample_id[2]]
-        if kind == "tokens":
+        if expected is None:
+            assert record.payload is None
+        else:
             assert isinstance(record.payload, np.ndarray)
             assert record.payload.dtype == np.int32
             np.testing.assert_array_equal(record.payload, expected)
             if runner == "threads":
                 assert not record.payload.flags.writeable
-        elif expected is None:
-            assert record.payload is None
-        else:
-            assert type(record.payload) is np.int32
-            assert record.payload == expected

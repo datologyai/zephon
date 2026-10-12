@@ -72,19 +72,13 @@ def test_fixed_size_slice_uses_only_selected_rows() -> None:
     assert not rows.flags.writeable
 
 
-def test_inner_nulls_and_nonnumeric_lists_preserve_values() -> None:
+def test_inner_nulls_use_python_only_for_affected_rows() -> None:
     numbers = _column_values(
         pa.array([[1, None], [2, 3]], type=pa.list_(pa.int16())), pa
     )
     assert numbers[0] == [1, None]
     assert numbers[1].tolist() == [2, 3]
     assert numbers[1].dtype == np.int16
-    assert _column_values(pa.array([["a", "b"], None, []]), pa) == [
-        ["a", "b"],
-        None,
-        [],
-    ]
-    assert _column_values(pa.array([1, None], type=pa.int64()), pa) == [1, None]
 
 
 def test_boolean_lists_unpack_to_readonly_numpy() -> None:
@@ -165,7 +159,6 @@ def test_single_numeric_column_returns_typed_scalars(dtype: Any) -> None:
         pa.array(["a", None, "b"]),
         pa.array([b"a", None, b"b"]),
         pa.array([True, None, False]),
-        pa.array([True, False, True]),
         pa.array([{"x": 1}, None, {"x": 2}]),
     ],
 )

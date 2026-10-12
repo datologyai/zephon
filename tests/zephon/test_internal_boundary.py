@@ -21,14 +21,6 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
-    # In-memory backends keep index tests independent of cloud services.
-    "tests/helpers/storage.py": frozenset(
-        {"zephon._internal.io.storage:StorageBackend"}
-    ),
-    # Route public index/discovery calls to controlled remote backends.
-    "tests/integration/test_build_index.py": frozenset(
-        {"zephon._internal.io.storage:router"}
-    ),
     # Control-service crash/startup tests require real internal runners and stages.
     "tests/integration/test_process_control_services.py": frozenset(
         {
@@ -111,9 +103,19 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
     ),
-    # Disable Vortex internally to verify indexed discovery needs no dependency.
+    # Verify native cache sharing and deterministic eviction recovery across the store.
     "tests/integration/test_vortex_integration.py": frozenset(
-        {"zephon._internal.io.formats:vortex"}
+        {
+            "zephon._internal.io.formats:vortex",
+            "zephon._internal.io.formats.vortex:VortexFormat",
+            "zephon._internal.io.resolvers.base:ShardResolver",
+            "zephon._internal.io.stores.multi:build_multi_dataset_store",
+            "zephon._internal.io.stores.resilient:ResilientShard",
+            "zephon._internal.io.types:LocalShardFile",
+            "zephon._internal.io.types:LocalShardRef",
+            "zephon._internal.io.types:ShardFile",
+            "zephon._internal.io.types:ShardLocator",
+        }
     ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(

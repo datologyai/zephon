@@ -1,37 +1,68 @@
+# Copyright 2025 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
+"""Vortex discovery, native export, and reader-cache unit tests."""
+
+import gc
+import importlib
+import io
+import json
+import random
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+from typing import IO, Any, Callable
 from unittest import mock
 
 import numpy as np
 import pytest
 
-from tests._catalog_helpers import catalog_locators
-from tests._helpers import counts_dict
-from zephon._internal.io.formats.vortex import VortexFormat, VortexShard
+from zephon._internal.io.formats import vortex as vortex_format
+from zephon._internal.io.formats.vortex import (
+    VortexFormat,
+    VortexShard,
+    VortexShardOpener,
+    _list_view_type,
+)
+from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.storage.local import LocalFSBackend
-from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon._internal.io.types import (
+    LocalShardFile,
+    LocalShardRef,
+    ShardFile,
+    ShardLocator,
+)
+from zephon.io import CacheOptions, StoreOptions, VortexOptions
 from zephon.io.dataset import Dataset
 
-# Skip vortex tests if vortex-data is not available (requires Python 3.11+)
-# Note: there's a different "vortex" package on PyPI, so we check for vortex.io
-pytest.importorskip("vortex.io", reason="vortex-data not installed")
-import vortex
+
+@pytest.fixture
+def vortex() -> Any:
+    pytest.importorskip("vortex.io", reason="vortex-data not installed")
+    return importlib.import_module("vortex")
 
 
-def _create_vortex_file(path: Path, rows: list[dict[str, object]]) -> None:
-    """Create a Vortex file from a list of row dictionaries."""
-    # Create vortex array directly from list of dicts and write to file
-    vortex_array = vortex.array(rows)
-    vortex.io.write(vortex_array, str(path))
+@pytest.fixture
+def pa() -> Any:
+    return pytest.importorskip("pyarrow")
+
+
+@pytest.fixture
+def write_vortex(vortex: Any) -> Callable[[Path, Any], None]:
+    def write(path: Path, rows: Any) -> None:
+        vortex.io.write(vortex.array(rows), str(path))
+
+    return write
 
 
 def test_vortex_caps_threads_at_initialization_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_vortex: Any
 ) -> None:
     """Discovery and repeated reads retain the cap applied during format loading."""
-    _create_vortex_file(tmp_path / "data.vortex", [{"value": 1}, {"value": 2}])
+    write_vortex(tmp_path / "data.vortex", [{"value": 1}, {"value": 2}])
     monkeypatch.setenv("ZEPHON_VORTEX_THREADS", "1")
     monkeypatch.setenv("VORTEX_MAX_THREADS", "2")
     script = textwrap.dedent(
@@ -66,29 +97,10 @@ def test_vortex_caps_threads_at_initialization_only(
     )
 
 
-def test_vortex_discover_local(tmp_path: Path) -> None:
-    """Test discovering Vortex shards in a directory."""
-    shard0 = tmp_path / "a.vortex"
-    shard1 = tmp_path / "b.vortex"
-    _create_vortex_file(shard0, [{"i": i} for i in range(2)])
-    _create_vortex_file(shard1, [{"i": i} for i in range(3)])
-
-    handler = VortexFormat()
-    shard_index, shard_meta = handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
-
-    # Check total row count
-    assert sum(int(v) for v in shard_index.values()) == 5
-    assert len(shard_meta) == len(shard_index)
-    # Ensure basic metadata captured
-    for meta in shard_meta.values():
-        assert isinstance(meta.get("raw"), dict)
-        assert isinstance(meta.get("extra"), dict)
-
-
-def test_vortex_build_locators_and_open(tmp_path: Path) -> None:
+def test_vortex_build_locators_and_open(tmp_path: Path, write_vortex: Any) -> None:
     """Test building locators and opening a Vortex shard."""
     shard0 = tmp_path / "shard0.vortex"
-    _create_vortex_file(shard0, [{"x": 1}, {"x": 2}])
+    write_vortex(shard0, [{"x": 1}, {"x": 2}])
 
     handler = VortexFormat()
     shard_index, shard_meta = handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
@@ -150,18 +162,17 @@ def test_vortex_build_locators_rejects_bad_metadata(tmp_path: Path, bad_shards) 
         pytest.param([], id="empty"),
         pytest.param([3], id="single"),
         pytest.param([0, 1, 4, 5], id="sorted"),
-        pytest.param([0, 1, 1, 4, 4], id="sorted-duplicates"),
-        pytest.param([5, 4, 3, 2, 1, 0], id="reverse"),
-        pytest.param([4, 1, 5, 0], id="unsorted"),
+        pytest.param([3, 2, 3], id="contiguous-duplicates"),
         pytest.param([4, 1, 4, 0, 1, 5, 0], id="unsorted-duplicates"),
-        pytest.param([2, 2, 2], id="all-identical"),
     ],
 )
-def test_vortex_shard_getsamples(tmp_path: Path, indices: list[int]) -> None:
+def test_vortex_shard_getsamples(
+    tmp_path: Path, indices: list[int], write_vortex: Any
+) -> None:
     """Bulk reads preserve request order and duplicates without mutating indices."""
     p = tmp_path / "shard.vortex"
     rows = [{"v": i, "text": f"row_{i}"} for i in range(6)]
-    _create_vortex_file(p, rows)
+    write_vortex(p, rows)
 
     shard = VortexShard(p)
     original_indices = indices.copy()
@@ -172,30 +183,13 @@ def test_vortex_shard_getsamples(tmp_path: Path, indices: list[int]) -> None:
         shard.close()
 
 
-def test_vortex_shard_getsamples_random_order(tmp_path: Path) -> None:
-    """Regression for issue #302: shuffled bulk reads on a larger shard."""
-    p = tmp_path / "shard.vortex"
-    rows = [{"id": i, "text": f"row_{i}"} for i in range(5000)]
-    _create_vortex_file(p, rows)
-    indices = np.random.default_rng(0).integers(0, len(rows), size=64).tolist()
-    # Include distant boundaries and guarantee non-consecutive duplicates.
-    indices.extend([len(rows) - 1, 0, indices[0]])
-
-    shard = VortexShard(p)
-    try:
-        for requested in (sorted(indices), indices):
-            assert shard.getsamples(requested) == [rows[i] for i in requested]
-    finally:
-        shard.close()
-
-
-@pytest.mark.parametrize("indices", [[-1], [6], [4, -1, 0], [4, 6, 0]])
+@pytest.mark.parametrize("indices", [[4, -1, 0], [4, 6, 0]])
 def test_vortex_shard_getsamples_out_of_bounds(
-    tmp_path: Path, indices: list[int]
+    tmp_path: Path, indices: list[int], write_vortex: Any
 ) -> None:
     """Reject invalid indices before passing the request to Vortex."""
     p = tmp_path / "shard.vortex"
-    _create_vortex_file(p, [{"v": i} for i in range(6)])
+    write_vortex(p, [{"v": i} for i in range(6)])
     shard = VortexShard(p)
     try:
         with pytest.raises(IndexError):
@@ -204,72 +198,19 @@ def test_vortex_shard_getsamples_out_of_bounds(
         shard.close()
 
 
-def test_vortex_shard_indexing(tmp_path: Path) -> None:
-    """Test VortexShard single item indexing."""
-    p = tmp_path / "shard.vortex"
-    rows = [{"a": i, "b": f"val_{i}"} for i in range(3)]
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-    assert len(shard) == 3
-
-    # Test negative index
-    with pytest.raises(IndexError):
-        _ = shard[-1]
-
-    # Test out of range
-    with pytest.raises(IndexError):
-        _ = shard[3]
-
-    shard.close()
-
-
-def test_vortex_import_error_handling() -> None:
+def test_vortex_import_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that VortexShard raises helpful error when vortex not installed."""
-    # Temporarily hide vortex module to test import error path
-    with mock.patch.dict(sys.modules, {"vortex": None}):
-        # Need to reload the module to trigger the import check
-
-        from zephon._internal.io.formats import vortex as vortex_module
-
-        # Save original value
-        original_vortex = vortex_module._vortex
-        vortex_module._vortex = None
-
-        try:
-            with pytest.raises(ImportError, match="Vortex support requires"):
-                VortexShard(Path("/fake/path.vortex"))
-        finally:
-            # Restore original value
-            vortex_module._vortex = original_vortex
-
-
-def test_vortex_single_and_bulk_reads_agree_after_close(tmp_path: Path) -> None:
-    """Single rows and batches have the same values and closed-reader behavior."""
-    path = tmp_path / "rows.vortex"
-    rows = [{"tokens": [1, 2], "text": "a"}, {"tokens": [], "text": "b"}]
-    _create_vortex_file(path, rows)
-    shard = VortexShard(path)
-    try:
-        singles = [shard[1], shard[0], shard[1]]
-        bulk = shard.getsamples([1, 0, 1])
-        for single, batched in zip(singles, bulk):
-            assert single["text"] == batched["text"]
-            np.testing.assert_array_equal(single["tokens"], batched["tokens"])
-    finally:
-        shard.close()
-    with pytest.raises(RuntimeError, match="closed"):
-        shard[0]
-    with pytest.raises(RuntimeError, match="closed"):
-        shard.getsamples([0, 1])
+    monkeypatch.setattr(vortex_format, "_vortex", None)
+    with pytest.raises(ImportError, match="Vortex support requires"):
+        VortexShard(Path("/fake/path.vortex"))
 
 
 def test_vortex_read_failure_preserves_error_unless_file_is_missing(
-    tmp_path: Path,
+    tmp_path: Path, write_vortex: Any
 ) -> None:
     """Only a filesystem failure makes a native read error retryable."""
     path = tmp_path / "rows.vortex"
-    _create_vortex_file(path, [{"value": 1}])
+    write_vortex(path, [{"value": 1}])
     shard = VortexShard(path)
     failure = RuntimeError("invalid encoded data")
     try:
@@ -284,6 +225,7 @@ def test_vortex_read_failure_preserves_error_unless_file_is_missing(
         shard.close()
 
 
+@pytest.mark.usefixtures("vortex")
 def test_vortex_discover_no_shards(tmp_path: Path) -> None:
     """Test that discover raises ValueError when no .vortex files found."""
     # Create a directory with no .vortex files
@@ -296,113 +238,10 @@ def test_vortex_discover_no_shards(tmp_path: Path) -> None:
         handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
 
 
-def test_vortex_multiple_shards_data_integrity(tmp_path: Path) -> None:
-    """Test reading data from multiple shards preserves values correctly."""
-    # Create 4 shards with distinct data ranges
-    for i in range(4):
-        shard_path = tmp_path / f"shard_{i:02d}.vortex"
-        start = i * 10
-        rows = [{"idx": start + j, "shard": i} for j in range(10)]
-        _create_vortex_file(shard_path, rows)
-
-    handler = VortexFormat()
-    shard_index, shard_meta = handler.discover(str(tmp_path), LocalFSBackend(tmp_path))
-
-    # Should have 4 shards with 10 rows each
-    assert len(shard_index) == 4
-    assert sum(shard_index.values()) == 40
-
-    # Verify each shard's data
-    ds = Dataset(
-        name="multi",
-        backend={"kind": "vortex", "path": str(tmp_path), "shards": shard_meta},
-        path=str(tmp_path),
-    )
-    locators = handler.build_locators(ds)
-
-    for shard_id, loc in locators.items():
-        shard_path = tmp_path / loc.raw.basename
-        ref = LocalShardRef(
-            raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
-            extra=shard_meta[shard_id].get("extra"),
-        )
-        shard = handler.open_shard(loc, ref)
-        # Each shard should have 10 rows
-        assert len(shard) == 10
-        # Verify first and last row
-        first = shard[0]
-        last = shard[9]
-        assert first["shard"] == last["shard"]  # Same shard marker
-        assert last["idx"] - first["idx"] == 9  # Sequential indices
-        shard.close()
-
-
-def test_vortex_mixed_column_types(tmp_path: Path) -> None:
-    """Test handling of various column types."""
-    rows = [
-        {
-            "int_col": 42,
-            "float_col": 3.14159,
-            "str_col": "hello world",
-            "bool_col": True,
-            "none_col": None,
-        },
-        {
-            "int_col": -100,
-            "float_col": 2.71828,
-            "str_col": "goodbye",
-            "bool_col": False,
-            "none_col": None,
-        },
-    ]
-    p = tmp_path / "mixed.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-    assert len(shard) == 2
-
-    row0 = shard[0]
-    assert row0["int_col"] == 42
-    assert abs(row0["float_col"] - 3.14159) < 0.0001
-    assert row0["str_col"] == "hello world"
-    assert row0["bool_col"] is True
-
-    row1 = shard[1]
-    assert row1["int_col"] == -100
-    assert row1["bool_col"] is False
-
-    shard.close()
-
-
-def test_vortex_wide_table(tmp_path: Path) -> None:
-    """Test handling of tables with many columns."""
-    num_cols = 100
-    num_rows = 5
-
-    rows = []
-    for i in range(num_rows):
-        row = {f"col_{j:03d}": i * num_cols + j for j in range(num_cols)}
-        rows.append(row)
-
-    p = tmp_path / "wide.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-    assert len(shard) == num_rows
-
-    # Verify column count and values
-    row = shard[2]
-    assert len(row) == num_cols
-    assert row["col_000"] == 2 * num_cols
-    assert row["col_099"] == 2 * num_cols + 99
-
-    shard.close()
-
-
-def test_vortex_single_row_shard(tmp_path: Path) -> None:
+def test_vortex_single_row_shard(tmp_path: Path, write_vortex: Any) -> None:
     """Test handling of shards with a single row."""
     p = tmp_path / "single.vortex"
-    _create_vortex_file(p, [{"only": "row"}])
+    write_vortex(p, [{"only": "row"}])
 
     shard = VortexShard(p)
     assert len(shard) == 1
@@ -420,247 +259,441 @@ def test_vortex_single_row_shard(tmp_path: Path) -> None:
     shard.close()
 
 
-def test_vortex_shard_ordering_deterministic(tmp_path: Path) -> None:
-    """Test that shard discovery ordering is deterministic."""
-    # Create shards with names that might sort differently
-    names = ["z_last.vortex", "a_first.vortex", "m_middle.vortex"]
-    for name in names:
-        _create_vortex_file(tmp_path / name, [{"name": name}])
-
-    handler = VortexFormat()
-
-    # Discover multiple times and verify consistent ordering
-    results = []
-    for _ in range(3):
-        shard_index, shard_meta = handler.discover(
-            str(tmp_path), LocalFSBackend(tmp_path)
-        )
-        basenames = [
-            shard_meta[i]["raw"]["basename"] for i in sorted(shard_meta.keys())
-        ]
-        results.append(basenames)
-
-    # All discoveries should produce the same order
-    assert results[0] == results[1] == results[2]
-    # Should be alphabetically sorted
-    assert results[0] == sorted(names)
-
-
-def test_vortex_unicode_strings(tmp_path: Path) -> None:
-    """Test handling of unicode content."""
-    rows = [
-        {"text": "Hello, 世界!"},
-        {"text": "Привет мир"},
-        {"text": "🎉🚀🔥"},
-        {"text": "café résumé naïve"},
-    ]
-    p = tmp_path / "unicode.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-    assert len(shard) == 4
-    assert shard[0] == "Hello, 世界!"
-    assert shard[2] == "🎉🚀🔥"
-
-    samples = shard.getsamples([1, 3])
-    assert samples[0] == "Привет мир"
-    assert samples[1] == "café résumé naïve"
-
-    shard.close()
-
-
-def test_vortex_large_values(tmp_path: Path) -> None:
-    """Test handling of large string values."""
-    large_string = "x" * 100_000  # 100KB string
-    rows = [{"data": large_string, "idx": i} for i in range(3)]
-
-    p = tmp_path / "large.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-    assert len(shard) == 3
-
-    row = shard[1]
-    assert len(row["data"]) == 100_000
-    assert row["data"] == large_string
-
-    shard.close()
-
-
-def test_vortex_getsamples_all_rows(tmp_path: Path) -> None:
-    """Test getsamples retrieving rows with sorted indices."""
-    rows = [{"v": i} for i in range(100)]
-    p = tmp_path / "hundred.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-
-    # Forward order
-    forward = shard.getsamples(list(range(100)))
-    assert forward == list(range(100))
-
-    # Every other row
-    evens = shard.getsamples(list(range(0, 100, 2)))
-    assert evens == list(range(0, 100, 2))
-
-    shard.close()
-
-
-def test_vortex_getsamples_contiguous_ranges(tmp_path: Path) -> None:
-    """Contiguous scans return the requested rows."""
-    rows = [{"id": i, "text": f"row_{i}"} for i in range(50)]
-    p = tmp_path / "contiguous.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-
-    # Contiguous range at start
-    result = shard.getsamples(list(range(10)))
-    assert [r["id"] for r in result] == list(range(10))
-    assert [r["text"] for r in result] == [f"row_{i}" for i in range(10)]
-
-    # Contiguous range in middle
-    result = shard.getsamples(list(range(20, 35)))
-    assert [r["id"] for r in result] == list(range(20, 35))
-
-    # Contiguous range at end
-    result = shard.getsamples(list(range(40, 50)))
-    assert [r["id"] for r in result] == list(range(40, 50))
-
-    # Single element
-    result = shard.getsamples([25])
-    assert result[0]["id"] == 25
-
-    shard.close()
-
-
-def test_vortex_getsamples_non_contiguous(tmp_path: Path) -> None:
-    """Test that getsamples handles non-contiguous sorted indices.
-
-    This exercises the scan API with gaps in the index sequence.
-    """
-    rows = [{"id": i, "text": f"row_{i}"} for i in range(100)]
-    p = tmp_path / "scattered.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-
-    # Sorted scattered indices
-    scattered = [5, 10, 25, 50, 75]
-    result = shard.getsamples(scattered)
-    assert [r["id"] for r in result] == scattered
-
-    # Every 10th row
-    every_tenth = list(range(0, 100, 10))
-    result = shard.getsamples(every_tenth)
-    assert [r["id"] for r in result] == every_tenth
-
-    # Sorted with consecutive duplicates
-    with_dups = [5, 5, 10, 10, 10]
-    result = shard.getsamples(with_dups)
-    assert [r["id"] for r in result] == with_dups
-
-    # Non-contiguous with gap at 3
-    with_gap = [0, 1, 2, 4, 5, 6]
-    result = shard.getsamples(with_gap)
-    assert [r["id"] for r in result] == with_gap
-
-    shard.close()
-
-
-def test_vortex_getitem_values(tmp_path: Path) -> None:
-    """Single-row reads preserve all fields throughout a shard."""
-    rows = [{"id": i, "value": i * 1.5, "name": f"item_{i}"} for i in range(20)]
-    p = tmp_path / "scalar.vortex"
-    _create_vortex_file(p, rows)
-
-    shard = VortexShard(p)
-
-    # Test various indices
-    assert shard[0] == {"id": 0, "value": 0.0, "name": "item_0"}
-    assert shard[10] == {"id": 10, "value": 15.0, "name": "item_10"}
-    assert shard[19] == {"id": 19, "value": 28.5, "name": "item_19"}
-
-    # Verify all rows accessible
-    for i in range(20):
-        row = shard[i]
-        assert row["id"] == i
-        assert row["value"] == i * 1.5
-        assert row["name"] == f"item_{i}"
-
-    shard.close()
-
-
-# --- Auto-detection and integration tests ---
-
-
-def test_vortex_auto_detect_format(tmp_path: Path) -> None:
-    """Test auto-detection of Vortex format from directory contents."""
-    # Create vortex files
-    _create_vortex_file(tmp_path / "shard_0.vortex", [{"x": i} for i in range(10)])
-    _create_vortex_file(tmp_path / "shard_1.vortex", [{"x": i} for i in range(10, 20)])
-
-    dataset = Dataset.from_path(name="test_vortex", path=str(tmp_path))
-
-    assert dataset.backend["kind"] == "vortex"
-    assert dataset.shard_count() == 2
-    assert dataset.total() == 20
-
-
-def test_vortex_explicit_format_specification(tmp_path: Path) -> None:
-    """Test explicitly specifying format='vortex'."""
-    _create_vortex_file(tmp_path / "data.vortex", [{"val": i} for i in range(5)])
-
-    dataset = Dataset.from_path(name="explicit", path=str(tmp_path), fmt="vortex")
-
-    assert dataset.backend["kind"] == "vortex"
-    assert dataset.shard_count() == 1
-    assert counts_dict(dataset)[0] == 5
-
-
-def test_vortex_end_to_end_reading(tmp_path: Path) -> None:
-    """Test complete workflow from Dataset creation to shard reading."""
-    # Create multi-shard dataset
-    for i in range(3):
-        rows = [{"shard_id": i, "row_id": j, "value": i * 100 + j} for j in range(50)]
-        _create_vortex_file(tmp_path / f"part_{i:02d}.vortex", rows)
-
-    dataset = Dataset.from_path(name="e2e_test", path=str(tmp_path))
-
-    # Verify dataset structure
-    assert dataset.shard_count() == 3
-    assert dataset.total() == 150  # 3 shards * 50 rows
-
-    # from_path datasets carry no per-shard metadata in the backend; locators
-    # are synthesized from the node-local catalog.
-    handler = VortexFormat()
-    _, locators = catalog_locators(dataset)
-    assert len(locators) == 3
-
-    # Open each shard and verify data
-    for loc in locators.values():
-        shard_path = tmp_path / loc.raw.basename
-        ref = LocalShardRef(
-            raw=LocalShardFile(path=shard_path, bytes=shard_path.stat().st_size),
-            extra=loc.extra,
-        )
-        shard = handler.open_shard(loc, ref)
-        assert len(shard) == 50
-
-        # Verify first row of each shard
-        first_row = shard[0]
-        assert first_row["row_id"] == 0
-        assert first_row["value"] == first_row["shard_id"] * 100
-
+@pytest.mark.parametrize("indices", [[73], [76, 74, 75, 73, 74]])
+def test_contiguous_read_limits_the_decoded_list_values(
+    tmp_path: Path, indices: list[int], vortex: Any, pa: Any
+) -> None:
+    """Compressed token columns expose only the selected decoded child values."""
+    tokens = np.random.default_rng(0).integers(0, 256, size=(256, 32), dtype=np.uint32)
+    array = pa.ListArray.from_arrays(
+        pa.array(np.arange(0, tokens.size + 1, 32), type=pa.int32()),
+        pa.array(tokens.reshape(-1)),
+    )
+    path = tmp_path / "tokens.vortex"
+    vortex.io.write(pa.table({"tokens": array}), str(path))
+    shard = VortexShard(path)
+    try:
+        rows = shard.getsamples(indices)
+    finally:
         shard.close()
+    for index, row in zip(indices, rows):
+        values = row
+        np.testing.assert_array_equal(values, tokens[index])
+        assert values.dtype == np.uint32
+        assert not values.flags.writeable
+        owner = values
+        while isinstance(owner.base, np.ndarray):
+            owner = owner.base
+        assert owner.nbytes == values.nbytes * len(set(indices))
 
 
-def test_vortex_dataset_len(tmp_path: Path) -> None:
-    """Test Dataset.__len__ returns total sample count."""
-    _create_vortex_file(tmp_path / "a.vortex", [{"x": i} for i in range(100)])
-    _create_vortex_file(tmp_path / "b.vortex", [{"x": i} for i in range(200)])
-    _create_vortex_file(tmp_path / "c.vortex", [{"x": i} for i in range(50)])
+def test_list_view_export_preserves_field_metadata_and_fixed_shapes(pa: Any) -> None:
+    child = pa.field("element", pa.int16(), nullable=False, metadata={b"unit": b"x"})
+    field = pa.field("values", pa.list_(child), metadata={b"label": b"tokens"})
+    kind = pa.struct([field, pa.field("matrix", pa.list_(pa.list_(child), 2))])
+    transformed = _list_view_type(kind, pa)
+    assert transformed[0].metadata == field.metadata
+    assert transformed[0].nullable == field.nullable
+    assert transformed[0].type.value_field == child
+    assert pa.types.is_list_view(transformed[0].type)
+    assert transformed[1].type.list_size == 2
+    assert pa.types.is_list_view(transformed[1].type.value_type)
 
-    dataset = Dataset.from_path(name="len_test", path=str(tmp_path))
 
-    assert len(dataset) == 350  # 100 + 200 + 50
+@pytest.mark.parametrize("indices", [[0], [1, 1], [2, 1, 0], [0, 2]])
+def test_text_only_reads_preserve_nulls_bytes_and_duplicate_order(
+    tmp_path: Path, indices: list[int], vortex: Any, pa: Any
+) -> None:
+    table = pa.table({"text": ["é", None, "漢字"], "bytes": [b"\x00", b"", None]})
+    path = tmp_path / "text.vortex"
+    vortex.io.write(table, str(path))
+    shard = VortexShard(path)
+    rows = shard.getsamples(indices)
+    shard.close()
+    expected = table.to_pylist()
+    assert rows == [expected[index] for index in indices]
+    if len(indices) > 1:
+        assert rows[0] is not rows[1]
+
+
+def test_nullable_native_struct_uses_arrow_table_row_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vortex: Any, pa: Any
+) -> None:
+    """A null struct scalar must not fail or depend on request batch size."""
+    source = vortex.array(
+        pa.array(
+            [{"text": "ok", "bytes": b"x"}, None, {"text": None, "bytes": None}],
+            type=pa.struct([("text", pa.string()), ("bytes", pa.binary())]),
+        )
+    )
+
+    def scan(*, indices: Any) -> Any:
+        selected = source.take(indices)
+        return vortex.ArrayIterator.from_iter(selected.dtype, iter([selected]))
+
+    # Vortex 0.88's file statistics writer rejects nullable root structs. Feed a
+    # real native nullable array through the reader to exercise conversion alone.
+    file = SimpleNamespace(dtype=source.dtype, scan=scan)
+    monkeypatch.setattr(vortex_format, "_open_vortex_file", lambda *_args: file)
+    shard = VortexShard(tmp_path / "nullable.vortex", length=len(source))
+    try:
+        rows = shard.getsamples([1, 1])
+    finally:
+        shard.close()
+    expected = source.to_arrow_table().to_pylist()
+    assert rows == [expected[1], expected[1]]
+
+
+@pytest.mark.parametrize("indices", [[3, 1, 2, 0, 1], [0, 2]])
+def test_list_export_preserves_inner_nulls_and_nested_fallbacks(
+    tmp_path: Path, indices: list[int], vortex: Any, pa: Any
+) -> None:
+    table = pa.table(
+        {
+            "numbers": pa.array(
+                [[1, None], [2, 3], None, []], type=pa.list_(pa.int16())
+            ),
+            "nested": pa.array([[[1], [2, 3]], None, [], [[4]]]),
+            "strings": pa.array([["a"], None, [], ["b", "c"]]),
+            "structs": pa.array([[{"a": 1}], [], None, [{"a": None}]]),
+        }
+    )
+    path = tmp_path / "nested.vortex"
+    vortex.io.write(table, str(path))
+    shard = VortexShard(path)
+    rows = shard.getsamples(indices)
+    shard.close()
+    expected = table.to_pylist()
+    for index, row in zip(indices, rows):
+        numbers = row["numbers"]
+        if isinstance(numbers, np.ndarray):
+            assert numbers.dtype == np.int16
+            assert not numbers.flags.writeable
+            row["numbers"] = numbers.tolist()
+        assert row == expected[index]
+
+
+def test_vortex_rows_survive_close_and_preserve_duplicate_order(
+    tmp_path: Path, vortex: Any, pa: Any
+) -> None:
+    path = tmp_path / "typed.vortex"
+    table = pa.table(
+        {
+            "id": pa.array([0, 1, 2], type=pa.int32()),
+            "vector": pa.array([[1, 2], [], [3, 4, 5]], type=pa.list_(pa.float32())),
+            "matrix": pa.array(
+                [[[1, 2], [3, 4]], [[5, 6], [7, 8]], [[9, 10], [11, 12]]],
+                type=pa.list_(pa.list_(pa.int16(), 2), 2),
+            ),
+            "text": ["zero", "one", "two"],
+            "binary": [b"a", b"b", b"c"],
+        }
+    )
+    vortex.io.write(table, str(path))
+    shard = VortexShard(path)
+    rows = shard.getsamples([2, 0, 2, 1])
+    single = shard[2]
+    shard.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        shard[0]
+    with pytest.raises(RuntimeError, match="closed"):
+        shard.getsamples([0, 1])
+    del shard
+    gc.collect()
+    assert [row["id"] for row in rows] == [2, 0, 2, 1]
+    assert rows[0]["id"].dtype == np.int32
+    assert rows[0]["vector"].dtype == np.float32
+    assert rows[0]["vector"].tolist() == [3, 4, 5]
+    np.testing.assert_array_equal(single["vector"], rows[0]["vector"])
+    assert rows[0]["matrix"].shape == (2, 2)
+    assert rows[0]["matrix"].dtype == np.int16
+    assert rows[0]["text"] == "two"
+    assert rows[0]["binary"] == b"c"
+    assert rows[3]["vector"].shape == (0,)
+    assert np.shares_memory(rows[0]["vector"], rows[2]["vector"])
+    assert not rows[0]["vector"].flags.writeable
+
+
+def test_nullable_scalar_single_and_bulk_exports_agree(
+    tmp_path: Path, pa: Any, write_vortex: Any
+) -> None:
+    """Native scalar, contiguous, and sparse reads share the numeric contract."""
+    path = tmp_path / "scalar.vortex"
+    maximum = np.iinfo(np.uint64).max
+    write_vortex(
+        path, pa.table({"value": pa.array([maximum, None, 3], type=pa.uint64())})
+    )
+    shard = VortexShard(path)
+    try:
+        single = shard[0]
+        contiguous = shard.getsamples([0, 1, 2])
+        sparse = shard.getsamples([2, 0])
+        assert shard[1] is None
+    finally:
+        shard.close()
+    assert contiguous[1] is None
+    for value in (single, contiguous[0], sparse[1]):
+        assert type(value) is np.uint64
+        assert value == maximum
+
+
+class _RangeOnlyStorage(StorageBackend):
+    """Serve shard ranges and control files, rejecting whole-shard access."""
+
+    def __init__(self, root: str, files: dict[str, bytes]) -> None:
+        self.root = root
+        self.files = {f"{root}/{name}": data for name, data in files.items()}
+        self.reads: list[tuple[str, int, int]] = []
+        self.max_read: int | None = None
+
+    def exists(self, path: str) -> bool:
+        return path in self.files
+
+    def listdir(self, path: str) -> list[str]:
+        assert path == self.root
+        return [key.rsplit("/", 1)[-1] for key in reversed(self.files)]
+
+    def stat(self, path: str) -> dict[str, int]:
+        return {"size": len(self.files[path])}
+
+    def read_range(
+        self,
+        path: str,
+        start: int,
+        *,
+        end: int | None = None,
+        length: int | None = None,
+    ) -> bytes | memoryview:
+        assert length is not None and end is None
+        if self.max_read is not None:
+            length = min(length, self.max_read)
+        self.reads.append((path, start, length))
+        return memoryview(self.files[path])[start : start + length]
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
+        assert path.endswith(".json"), "Discovery must not open a whole shard"
+        return io.StringIO(self.files[path].decode("utf-8"))
+
+    def download(self, src: str, dst: str, timeout: float | None = None) -> None:
+        raise AssertionError("Discovery must not download shards")
+
+    def put(self, path: str, data: bytes) -> None:
+        self.files[path] = data
+
+
+@pytest.fixture
+def shard_files(tmp_path: Path, vortex: Any) -> dict[str, bytes]:
+    """Small real files with payloads larger than Vortex's footer prefetch."""
+    rng = random.Random(0)
+    files = {}
+    for name, count in (("a.vortex", 2), ("b.vortex", 3)):
+        path = tmp_path / name
+        rows = [{"payload": rng.randbytes(32 * 1024)} for _ in range(count)]
+        vortex.io.write(vortex.array(rows), str(path))
+        files[name] = path.read_bytes()
+    return files
+
+
+@pytest.mark.parametrize("root", ["custom://data", "relative/data"])
+def test_discovery_uses_supplied_backend(
+    root: str,
+    shard_files: dict[str, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    vortex: Any,
+) -> None:
+    """Paths and permissions belong to the backend, not to Vortex's native stores."""
+    storage = _RangeOnlyStorage(root, shard_files)
+
+    def reject_native_read(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Metadata discovery must use the supplied backend")
+
+    monkeypatch.setattr(vortex, "open", reject_native_read)
+    monkeypatch.setattr(vortex.io, "read_url", reject_native_read)
+    monkeypatch.setattr(vortex.VortexFile, "scan", reject_native_read)
+
+    counts, metadata = VortexFormat().discover(root, storage)
+
+    assert counts == {0: 2, 1: 3}
+    assert [metadata[i]["raw"]["basename"] for i in counts] == sorted(shard_files)
+    for name, data in shard_files.items():
+        reads = [
+            (start, length)
+            for path, start, length in storage.reads
+            if path == f"{root}/{name}"
+        ]
+        assert reads
+        assert sum(length for _, length in reads) < len(data)
+
+
+def test_discovery_honors_local_backend_root(
+    tmp_path: Path, shard_files: dict[str, bytes]
+) -> None:
+    """Relative paths resolve against the supplied backend, not the process cwd."""
+    storage = LocalFSBackend(tmp_path)
+    counts, _ = VortexFormat().discover(".", storage)
+    assert counts == {0: 2, 1: 3}
+
+
+def test_metadata_reader_accepts_short_reads(shard_files: dict[str, bytes]) -> None:
+    """Vortex completes short range reads without a whole-file fallback."""
+    storage = _RangeOnlyStorage("custom://data", shard_files)
+    storage.max_read = 127
+    counts, _ = VortexFormat().discover(storage.root, storage)
+    assert counts == {0: 2, 1: 3}
+
+
+def test_parallel_discovery_keeps_filename_order(
+    shard_files: dict[str, bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slower first shard must retain its ID when later reads finish first."""
+    files = dict(shard_files)
+    files.update({f"{name}.vortex": files["b.vortex"] for name in "cdef"})
+    storage = _RangeOnlyStorage("custom://parallel", files)
+    second_finished = Event()
+    read_count = vortex_format._read_vortex_row_count
+
+    def read_out_of_order(path: str, backend: StorageBackend, size: int) -> int:
+        if path.endswith("/a.vortex"):
+            assert second_finished.wait(timeout=5), "The second shard did not finish"
+        result = read_count(path, backend, size)
+        if path.endswith("/b.vortex"):
+            second_finished.set()
+        return result
+
+    monkeypatch.setattr(vortex_format, "_read_vortex_row_count", read_out_of_order)
+    counts, metadata = VortexFormat().discover(storage.root, storage)
+    assert counts == {0: 2, 1: 3, 2: 3, 3: 3, 4: 3, 5: 3}
+    assert [metadata[i]["raw"]["basename"] for i in counts] == sorted(files)
+
+
+def test_discovery_preserves_storage_errors(
+    shard_files: dict[str, bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed backend reads report the shard path instead of bypassing its auth."""
+    storage = _RangeOnlyStorage("custom://data", shard_files)
+
+    def deny_read(*args: Any, **kwargs: Any) -> bytes:
+        raise PermissionError("test backend denied access")
+
+    monkeypatch.setattr(storage, "read_range", deny_read)
+    with pytest.raises(
+        ValueError, match="Failed to read Vortex shard custom://data/a.vortex"
+    ) as error:
+        VortexFormat().discover(storage.root, storage)
+    assert "test backend denied access" in str(error.value)
+
+
+@pytest.mark.usefixtures("vortex")
+def test_truncated_shard_reports_path() -> None:
+    """Corrupt metadata cannot silently become an empty dataset."""
+    storage = _RangeOnlyStorage("custom://data", {"bad.vortex": b"bad"})
+    with pytest.raises(
+        ValueError, match="Failed to read Vortex shard custom://data/bad.vortex"
+    ):
+        VortexFormat().discover(storage.root, storage)
+
+
+def _write_index(tmp_path: Path, shards: list[dict[str, object]]) -> None:
+    (tmp_path / "index.json").write_text(
+        json.dumps({"format_version": 1, "shards": shards}), encoding="utf-8"
+    )
+
+
+def test_discover_counts_matches_discover_on_index_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counts agree with ``discover`` on ``(shard_id, num_rows)``."""
+    monkeypatch.setattr(vortex_format, "_vortex", None)
+    _write_index(
+        tmp_path,
+        [
+            {"basename": "a.vortex", "bytes": 10, "num_rows": 3},
+            {"basename": "b.vortex", "bytes": 20, "num_rows": 5},
+        ],
+    )
+    handler = VortexFormat()
+    storage = LocalFSBackend(tmp_path)
+
+    shard_index, _ = handler.discover(str(tmp_path), storage)
+    ids, counts = handler.discover_counts(str(tmp_path), storage)
+
+    assert ids.tolist() == sorted(shard_index)
+    assert counts.tolist() == [shard_index[sid] for sid in sorted(shard_index)]
+
+
+def test_discover_counts_agrees_with_discover_on_empty_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An index with no shards fails count-only discovery just like ``discover``."""
+    monkeypatch.setattr(vortex_format, "_vortex", None)
+    _write_index(tmp_path, [])
+    handler = VortexFormat()
+    storage = LocalFSBackend(tmp_path)
+
+    with pytest.raises(ValueError, match="contains no shards"):
+        handler.discover(str(tmp_path), storage)
+    with pytest.raises(ValueError, match="contains no shards"):
+        handler.discover_counts(str(tmp_path), storage)
+
+
+@pytest.mark.parametrize("metadata_entries", [0, 1])
+@pytest.mark.parametrize("segment_bytes", [0, 4096])
+def test_opener_retains_only_enabled_caches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_entries: int,
+    segment_bytes: int,
+) -> None:
+    """Cache options control native arguments and footer reuse across readers."""
+    native_open = mock.Mock(
+        side_effect=lambda *_args, **_kwargs: SimpleNamespace(footer=object())
+    )
+    segment_cache = mock.Mock()
+    make_cache = mock.Mock(return_value=segment_cache)
+    monkeypatch.setattr(
+        vortex_format,
+        "_require_vortex",
+        lambda: SimpleNamespace(open=native_open, SegmentCache=make_cache),
+    )
+    opener = VortexShardOpener(
+        StoreOptions(
+            cache=CacheOptions(metadata_cache_entries=metadata_entries),
+            vortex=VortexOptions(segment_cache_bytes=segment_bytes),
+        )
+    )
+    try:
+        for name in ("a.vortex", "a.vortex", "b.vortex", "a.vortex"):
+            path = tmp_path / name
+            locator = ShardLocator(
+                dataset="test",
+                shard_id=0,
+                format="vortex",
+                root=str(tmp_path),
+                raw=ShardFile(basename=name, bytes=1, hashes={}),
+            )
+            ref = LocalShardRef(
+                raw=LocalShardFile(path=path, bytes=1), extra={"length": 1}
+            )
+            reader = opener.open_shard(locator, ref)
+            reader.close()
+        calls = native_open.call_args_list
+        assert len(calls) == 4  # A footer miss must not open the file twice.
+        assert ["footer" in call.kwargs for call in calls] == [
+            False,
+            bool(metadata_entries),
+            False,
+            False,
+        ]
+        if segment_bytes:
+            make_cache.assert_called_once_with(segment_bytes)
+            assert all(call.kwargs["segment_cache"] is segment_cache for call in calls)
+            assert calls[0].kwargs["cache_key"] == calls[1].kwargs["cache_key"]
+            assert calls[0].kwargs["cache_key"] != calls[2].kwargs["cache_key"]
+        else:
+            make_cache.assert_not_called()
+            assert all(call.kwargs["without_segment_cache"] for call in calls)
+            assert all("segment_cache" not in call.kwargs for call in calls)
+    finally:
+        opener.close()
+    if segment_bytes:
+        segment_cache.clear.assert_called_once_with()

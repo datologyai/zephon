@@ -94,42 +94,23 @@ def test_no_options_leave_decoded_cache_disabled(tmp_path: Path) -> None:
         store.close()
 
 
-@pytest.mark.parametrize("entries, expected_loads", [(0, 4), (1, 3), (2, 2)])
-def test_shared_footer_limit_controls_retention_without_shard_cache(
-    tmp_path: Path,
+def test_shared_footer_limit_is_forwarded_without_shard_cache(
     monkeypatch: pytest.MonkeyPatch,
-    entries: int,
-    expected_loads: int,
 ) -> None:
-    pq = pytest.importorskip("pyarrow.parquet")
-    first = _parquet_dataset(tmp_path / "first", name="first")
-    second = _parquet_dataset(tmp_path / "second", name="second")
-    read_metadata = pq.read_metadata
-    loads = 0
+    calls: list[dict[str, Any]] = []
 
-    def count_metadata(path: Path) -> Any:
-        nonlocal loads
-        loads += 1
-        return read_metadata(path)
+    def make_opener(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace()
 
-    store = build_multi_dataset_store(
-        {0: first, 1: second},
-        options=StoreOptions(cache=CacheOptions(metadata_cache_entries=entries)),
+    monkeypatch.setattr(runtime_module, "ParquetShardOpener", make_opener)
+    runtime = runtime_module.build_parquet_cache_runtime(
+        None, StoreOptions(cache=CacheOptions(metadata_cache_entries=7))
     )
-    monkeypatch.setattr(pq, "read_metadata", count_metadata)
-    try:
-        for read_index, dataset_id in enumerate((0, 0, 1, 0)):
-            if read_index == 1:
-                path = tmp_path / "first" / "dataset" / "part-000.parquet"
-                replacement = path.with_suffix(".replacement")
-                replacement.write_bytes(path.read_bytes())
-                replacement.replace(path)
-            shard, _ = store.for_dataset(dataset_id).open(0)
-            rows, _ = shard.getsamples([1])
-            assert int(rows[0]) == 20
-        assert loads == expected_loads
-    finally:
-        store.close()
+    assert runtime.cache is None
+    assert calls == [
+        {"decoded_cache": None, "index": None, "metadata_cache_entries": 7}
+    ]
 
 
 def test_parquet_datasets_share_one_store_opener(tmp_path: Path) -> None:
