@@ -7,8 +7,6 @@ Registers the ``vortex`` ``IndexBuilder`` on import; build an index via the
 ``zephon.build_index`` CLI.
 """
 
-from typing import Any
-
 from zephon._internal.io.formats.vortex import _read_vortex_row_count
 from zephon._internal.io.index.index_builder import (
     IndexBuilder,
@@ -27,13 +25,11 @@ class VortexIndexBuilder(IndexBuilder):
         """Extract row count and metadata from a Vortex file."""
         count = _read_vortex_row_count(path, self._storage, file_size)
 
-        extra: dict[str, Any] = {"length": count}
-
         return ShardInfo(
             basename=path.rsplit("/", 1)[-1],
             bytes=file_size,
             num_rows=count,
-            extra=extra,
+            extra={"length": count},
         )
 
 

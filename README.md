@@ -61,7 +61,7 @@ Most of what Zephon can read is behind optional extras, so you only install what
 | `zephon[parquet]` | Parquet shards |
 | `zephon[streaming]` | MosaicML Streaming / MDS shards |
 | `zephon[litdata]` | LitData shards |
-| `zephon[vortex]` | Vortex shards (Python 3.11+) |
+| `zephon[vortex]` | Vortex shards (Python 3.11+, vortex-data 0.88.0+) |
 | `zephon[ray]` | The experimental Ray runner |
 
 For example, to train on Parquet data in S3: `uv pip install "zephon[cloud,parquet]"`.
