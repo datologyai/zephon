@@ -24,8 +24,7 @@ def test_shm_options_store_only_canonical_fields() -> None:
     options = RuntimeOptions(shm_min_item_bytes=123, shm_coalesce=False)
     assert options.shm_min_item_bytes == 123
     assert options.shm_coalesce is False
-    assert replace(options).shm_min_item_bytes == 123
-    assert replace(options).shm_coalesce is False
+    assert replace(options) == options
     assert {"shm_min_size", "coalesce_tensors"}.isdisjoint(
         f.name for f in fields(options)
     )
