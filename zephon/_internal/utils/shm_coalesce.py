@@ -78,7 +78,7 @@ The item minimum applies only on this path, not when keeping existing SHM; the
 allocation minimum applies to each resulting group. Copies go directly into the
 final destination. Other references can keep an old allocation alive.
 Unsupported values use their normal serialization.
-Parent-to-worker messages use ordinary multiprocessing reducers, which forward
+Parent-to-worker payloads use ordinary multiprocessing reducers, which forward
 existing shared buffers without reapplying this policy. The final MTP queue
 does not use this policy at the moment.
 
@@ -1447,7 +1447,7 @@ _metadata_values = operator.attrgetter(
 
 @dataclass(slots=True)
 class _MetadataWire:
-    """Avoid frozen-dataclass field discovery on every worker-output message."""
+    """Avoid frozen-dataclass field discovery on every process-stage message."""
 
     value: SampleMeta
 

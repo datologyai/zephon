@@ -1,6 +1,7 @@
 import multiprocessing
 import multiprocessing.context
 import os
+import pickle
 import signal
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from multiprocessing.connection import wait
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,8 @@ from tests.zephon._internal.runners._helpers import (
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.concurrent import WorkerCrashed
-from zephon._internal.runners.process import ProcessStageRunner
+from zephon._internal.runners.process import ProcessStageRunner, _WorkerCommand
+from zephon._internal.utils import shm_coalesce
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import (
@@ -47,6 +50,22 @@ def _collect(runner: ProcessStageRunner, data: list[int]) -> list[int]:
 
 
 torch = pytest.importorskip("torch")
+
+
+def test_worker_command_serializes_without_preparing_payloads(monkeypatch) -> None:
+    def unexpected_preparation(*args, **kwargs):
+        raise AssertionError("worker commands must not prepare payloads")
+
+    monkeypatch.setattr(shm_coalesce, "prepare_microbatch", unexpected_preparation)
+    records = _mk_records([1, 2])
+    records[1].meta = records[0].meta
+    command = _WorkerCommand("batch", 7, records, 11, 2, 13, 17, True)
+    for protocol in (4, 5):
+        restored = pickle.loads(ForkingPickler.dumps(command, protocol))
+        assert restored == command
+        assert restored.batch[0].meta is restored.batch[1].meta
+        assert restored.batch is not records
+    assert records[0].payload == {"value": 1}
 
 
 def test_process_runner_emits_in_input_order_when_deterministic() -> None:

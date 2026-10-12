@@ -95,6 +95,7 @@ from zephon._internal.stream import (
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_PAYLOAD_MEMORY_POLICY,
     PayloadMemoryPolicy,
+    PreparedMicrobatch,
     prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
@@ -264,6 +265,19 @@ class _WorkerCommand:
     consumed_bytes: int
     queue_depth_snapshot: int
     collect_metrics: bool
+
+    def __reduce__(self) -> tuple:
+        # Encode record metadata compactly; payloads use their existing reducers.
+        return type(self), (
+            self.kind,
+            self.seq,
+            PreparedMicrobatch(self.batch, {}),
+            self.wait_ns,
+            self.consumed_elements,
+            self.consumed_bytes,
+            self.queue_depth_snapshot,
+            self.collect_metrics,
+        )
 
 
 @dataclass(frozen=True)

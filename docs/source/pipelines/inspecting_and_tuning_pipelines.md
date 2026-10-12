@@ -151,7 +151,7 @@ outputs; it does not revisit samples already held in shuffle buffers.
 
 On Python 3.12+, bytes-like values sent through SHM arrive as read-only,
 zero-copy buffer views; on 3.10 and 3.11 they arrive as `bytes` subclasses.
-These options apply to worker outputs. Parent-to-worker messages use ordinary
+These options apply to worker outputs. Parent-to-worker payloads use ordinary
 multiprocessing serialization: existing shared Torch tensors and Zephon-backed
 NumPy arrays retain their backing without reapplying the policy. The final queue
 to the training process (MTP) is configured separately.
