@@ -25,10 +25,6 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/helpers/storage.py": frozenset(
         {"zephon._internal.io.storage:StorageBackend"}
     ),
-    # Route public index/discovery calls to controlled remote backends.
-    "tests/integration/test_build_index.py": frozenset(
-        {"zephon._internal.io.storage:router"}
-    ),
     # Control-service crash/startup tests require real internal runners and stages.
     "tests/integration/test_process_control_services.py": frozenset(
         {
