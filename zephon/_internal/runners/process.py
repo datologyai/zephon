@@ -33,7 +33,6 @@ Set ZEPHON_WATCHDOG_POLL_S=<seconds> to override the resilient-worker watchdog p
 from __future__ import annotations
 
 import copy
-import dataclasses
 import gc
 import multiprocessing as mp
 import os
@@ -96,7 +95,6 @@ from zephon._internal.stream import (
 from zephon._internal.utils.shm_coalesce import (
     DEFAULT_PAYLOAD_MEMORY_POLICY,
     PayloadMemoryPolicy,
-    TransportMicrobatch,
     prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
@@ -266,24 +264,6 @@ class _WorkerCommand:
     consumed_bytes: int
     queue_depth_snapshot: int
     collect_metrics: bool
-    memory_policy: PayloadMemoryPolicy | None = None
-
-    def __reduce__(self) -> tuple:
-        # Preparation runs in the queue feeder, leaving the pump and retry
-        # records untouched. Each serialization prepares private inputs again.
-        # The received command drops this sender-only policy to avoid applying
-        # it a second time; workers use their configured policy for outputs.
-        batch = self.batch
-        if self.kind == "batch" and self.memory_policy is not None:
-            batch = TransportMicrobatch(batch, self.memory_policy)
-        return type(self), tuple(
-            batch
-            if f.name == "batch"
-            else None
-            if f.name == "memory_policy"
-            else getattr(self, f.name)
-            for f in dataclasses.fields(self)
-        )
 
 
 @dataclass(frozen=True)
@@ -2147,7 +2127,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             consumed_bytes=consumed_bytes,
             queue_depth_snapshot=queue_depth_snapshot,
             collect_metrics=collect_stats,
-            memory_policy=self._memory_policy,
         )
         # Record for the watchdog BEFORE putting on the task queue so a
         # worker that picks up, crashes, and gets observed by the watchdog

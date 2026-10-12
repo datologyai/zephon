@@ -18,7 +18,7 @@ Supported payload types:
 - **homogeneous numeric lists** — coalesced as int64/float64 and restored
   as ordinary lists. Mixed lists and integers outside int64 use pickle.
 
-Process-stage decisions (also used when forwarding a resolved payload)::
+Worker-output decisions::
 
     shm_enabled? -- no --> ordinary multiprocessing serialization
       |
@@ -78,7 +78,9 @@ The item minimum applies only on this path, not when keeping existing SHM; the
 allocation minimum applies to each resulting group. Copies go directly into the
 final destination. Other references can keep an old allocation alive.
 Unsupported values use their normal serialization.
-The final MTP queue does not use this policy at the moment.
+Parent-to-worker messages use ordinary multiprocessing reducers, which forward
+existing shared buffers without reapplying this policy. The final MTP queue
+does not use this policy at the moment.
 
 Strategy (single memcpy):
 
@@ -908,11 +910,8 @@ def _fresh_groups(
 class _BufferPlan:
     """Describe values, select existing backing, then group and write fresh buffers."""
 
-    def __init__(
-        self, policy: PayloadMemoryPolicy, *, copy_records: bool = False
-    ) -> None:
+    def __init__(self, policy: PayloadMemoryPolicy) -> None:
         self.policy = policy
-        self.copy_records = copy_records
         self.pending: list[_BufferPayload] = []
         self.buffers: dict[str, Any] = {}
         self.reused_keys: dict[tuple[int, str], str] = {}
@@ -1012,7 +1011,6 @@ class _BufferPlan:
             value = values[0]
             if (
                 len(values) == 1
-                and not self.copy_records
                 and not value.shared
                 and isinstance(value.slot, _TensorSlot)
                 and value.source.is_contiguous()
@@ -1020,8 +1018,8 @@ class _BufferPlan:
                 and not value.source.is_neg()
                 and value.source.untyped_storage().nbytes() == value.nbytes
             ):
-                # One output tensor needs no coalescing. Inputs keep private
-                # retry storage; Torch's reducer moves its source into SHM.
+                # One whole-storage output tensor needs no coalescing;
+                # Torch's reducer moves its storage into SHM.
                 value.result = value.source
             else:
                 self.materialize(values)
@@ -1449,7 +1447,7 @@ _metadata_values = operator.attrgetter(
 
 @dataclass(slots=True)
 class _MetadataWire:
-    """Avoid frozen-dataclass field discovery on every process-stage message."""
+    """Avoid frozen-dataclass field discovery on every worker-output message."""
 
     value: SampleMeta
 
@@ -1523,9 +1521,9 @@ class PreparedMicrobatch:
 
 
 def prepare_microbatch(
-    items: list[StreamItem], policy: PayloadMemoryPolicy, *, copy_records: bool = False
+    items: list[StreamItem], policy: PayloadMemoryPolicy
 ) -> PreparedMicrobatch:
-    """Prepare payloads from *items* as per-dtype SHM buffers or inline values.
+    """Prepare worker outputs in *items* as per-dtype SHM buffers or inline values.
 
     Shared Torch tensors and NumPy views of Zephon buffers retain their storage
     through multiprocessing reduction, unless the policy selects a fresh
@@ -1533,35 +1531,18 @@ def prepare_microbatch(
 
     Uses a two-pass approach: extraction first collects descriptors without
     mutating payloads, then commits only after SHM allocation succeeds or
-    optional replacement falls back to the source views. ``copy_records`` keeps
-    the sender's retry records private and unchanged during queue preparation.
+    optional replacement falls back to the source views.
     """
     if _get_torch() is None:
         return PreparedMicrobatch(items, {})
-    plan = _BufferPlan(policy, copy_records=copy_records)
+    plan = _BufferPlan(policy)
     descriptors = _extract_from_records(items, plan)
     plan.finish()
     if not plan.changed:
         return PreparedMicrobatch(items, plan.buffers)
-    if copy_records:
-        pending = iter(descriptor for _, descriptor in descriptors)
-        items = [
-            SampleRecord(item.meta, cast(SamplePayload, next(pending)))
-            if isinstance(item, SampleRecord)
-            else SampleBatch(
-                records=tuple(
-                    SampleRecord(r.meta, cast(SamplePayload, next(pending)))
-                    for r in item.records
-                )
-            )
-            if isinstance(item, SampleBatch)
-            else item
-            for item in items
-        ]
-    else:
-        # Commit: metadata stays on each record; only its payload is replaced.
-        for rec, descriptor in descriptors:
-            rec.payload = descriptor  # type: ignore[assignment]
+    # Commit: metadata stays on each record; only its payload is replaced.
+    for rec, descriptor in descriptors:
+        rec.payload = descriptor  # type: ignore[assignment]
     return PreparedMicrobatch(items, plan.buffers)
 
 
@@ -1586,16 +1567,3 @@ def _reconstruct_microbatch_lazy(
             for rec in item.records:
                 rec.payload = bind(rec.payload)
     return skeleton
-
-
-@dataclass(slots=True)
-class TransportMicrobatch:
-    """Apply a process-stage policy during serialization, preserving retry inputs."""
-
-    items: list[Any]
-    policy: PayloadMemoryPolicy
-
-    def __reduce__(self) -> tuple:
-        return prepare_microbatch(
-            self.items, self.policy, copy_records=True
-        ).__reduce__()

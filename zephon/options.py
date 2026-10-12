@@ -179,10 +179,10 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
 
     # === IPC serialization ===
-    # Disable Zephon SHM preparation in both process directions. Ordinary
+    # Disable Zephon SHM preparation for process-worker outputs. Ordinary
     # multiprocessing reducers still apply; Torch may still use shared storage.
     shm_enabled: bool = True
-    # Coalesce eligible payloads in a microbatch by dtype into SHM buffers
+    # Coalesce eligible output payloads in a microbatch by dtype into SHM buffers
     # before serialization. Reduces POSIX SHM segments from N to K; coalesced
     # groups are split at shm_max_coalesced_bytes. Only consumed by process runners.
     # Disabling coalescing still applies transport thresholds and view compaction.

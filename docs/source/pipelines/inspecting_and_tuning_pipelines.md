@@ -118,7 +118,7 @@ doing this, since those settings impact the training data itself.
 
 ## Process payload memory
 
-Operators running on a process runner send supported CPU payloads (Torch tensors, NumPy arrays,
+Operators running on a process runner send supported CPU output payloads (Torch tensors, NumPy arrays,
 bytes-like values and homogeneous numeric lists) either inline in the IPC queue
 message or through shared memory (SHM). Values that are large enough are copied
 once into shared buffers, coalesced by compatible type/dtype to minimize overhead. Views of existing
@@ -146,9 +146,12 @@ and `Pipeline.options(...)` raise an error for the old names.
 The best thresholds depend on payload types, batch sizes and the host, so
 benchmark representative batches before changing them. Lowering
 `shm_max_coalesced_bytes` reduces how much memory one retained sample can keep
-alive, at the cost of more allocations. Compaction applies at process transport
-boundaries; it does not revisit samples already held in shuffle buffers.
+alive, at the cost of more allocations. Compaction applies when workers prepare
+outputs; it does not revisit samples already held in shuffle buffers.
 
 On Python 3.12+, bytes-like values sent through SHM arrive as read-only,
 zero-copy buffer views; on 3.10 and 3.11 they arrive as `bytes` subclasses.
-All options apply in both process-stage directions and do not configure the final queue to the training process (MTP).
+These options apply to worker outputs. Parent-to-worker messages use ordinary
+multiprocessing serialization: existing shared Torch tensors and Zephon-backed
+NumPy arrays retain their backing without reapplying the policy. The final queue
+to the training process (MTP) is configured separately.

@@ -3,6 +3,7 @@
 
 """Process transport, shared payloads, and downstream operator integration."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -319,22 +320,68 @@ def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
         runner.close()
 
 
-class _InspectPayloadMemory(BaseOp):
+class _CreatePayloadMemory(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        import numpy as np
+
+        return [
+            SampleRecord(
+                record.meta,
+                {
+                    "small_t": torch.arange(4),
+                    "small_n": np.arange(4),
+                    "large_t": torch.arange(64),
+                    "large_n": np.arange(64),
+                    "large_b": b"x" * 512,
+                    "large_ba": bytearray(b"x" * 512),
+                },
+            )
+            for record in elems
+        ]
+
+
+class _CropSharedViews(PassthroughAccumulator[SampleRecord]):
+    @property
+    def reads_payload(self) -> bool:
+        return True
+
+    def push_many(
+        self, elems: Sequence[SampleRecord]
+    ) -> list[tuple[list[SampleRecord], int]]:
+        for record in elems:
+            for key in ("large_t", "large_n"):
+                record.payload[key] = record.payload[key][:4]
+        return super().push_many(elems)
+
+
+class _InspectPayloadMemory(BaseOp):
+    def __init__(self, *, crop: bool = False) -> None:
+        super().__init__()
+        self.crop = crop
+
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return _CropSharedViews() if self.crop else PassthroughAccumulator()
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         from zephon._internal.utils.shm_coalesce import _shared_numpy_storage, _ShmBytes
 
         for record in elems:
             payload = record.payload
-            payload["observed"] = (
-                payload["small_t"].is_shared(),
-                _shared_numpy_storage(payload["small_n"]) is not None,
-                payload["large_t"].is_shared(),
-                _shared_numpy_storage(payload["large_n"]) is not None,
-                isinstance(payload["large_b"], _ShmBytes),
-                isinstance(payload["large_ba"], _ShmBytes),
+            assert payload["large_t"].is_shared()
+            assert payload["large_t"].untyped_storage().nbytes() == 512
+            assert _shared_numpy_storage(payload["large_n"]).nbytes() == 512
+            assert (
+                len(payload["large_t"])
+                == len(payload["large_n"])
+                == (4 if self.crop else 64)
             )
             for key in ("large_b", "large_ba"):
                 assert bytes(payload[key]) == b"x" * 512
@@ -343,7 +390,7 @@ class _InspectPayloadMemory(BaseOp):
 
 
 def _unexpected_shm_preparation(*args, **kwargs):
-    raise AssertionError("disabled SHM must bypass preparation")
+    raise AssertionError("unexpected SHM preparation")
 
 
 class _InspectDisabledShm(BaseOp):
@@ -367,12 +414,11 @@ class _InspectDisabledShm(BaseOp):
         return elems
 
 
-def test_disabled_shm_skips_sender_and_worker_preparation(monkeypatch) -> None:
+def test_disabled_shm_skips_worker_preparation(monkeypatch) -> None:
     import numpy as np
 
     from zephon._internal.runners import process
 
-    monkeypatch.setattr(process, "TransportMicrobatch", _unexpected_shm_preparation)
     monkeypatch.setattr(process, "prepare_microbatch", _unexpected_shm_preparation)
     stage = Stage(
         "disabled_shm", [Node("inspect", _InspectDisabledShm())], "auto", "test"
@@ -396,23 +442,20 @@ def test_disabled_shm_skips_sender_and_worker_preparation(monkeypatch) -> None:
         runner.close()
 
 
-def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
-    import numpy as np
+def test_worker_output_policy_and_parent_forwarding_after_resolution(
+    monkeypatch,
+) -> None:
+    from zephon._internal.runners import process
+    from zephon._internal.utils.shm_coalesce import _shared_numpy_storage
 
-    record = _mk_record(0)
-    record.payload = {
-        "small_t": torch.arange(4),
-        "small_n": np.arange(4),
-        "large_t": torch.arange(64),
-        "large_n": np.arange(64),
-        "large_b": b"x" * 512,
-        "large_ba": bytearray(b"x" * 512),
-    }
+    # Spawned workers prepare outputs; the parent only forwards them.
+    monkeypatch.setattr(process, "prepare_microbatch", _unexpected_shm_preparation)
     stage = Stage(
         "memory_policy",
         [
-            Node("first", _InspectPayloadMemory(), parallelism=1),
-            Node("second", _InspectPayloadMemory(), parallelism=1),
+            Node("create", _CreatePayloadMemory(), parallelism=1),
+            Node("lazy", _InspectPayloadMemory(), parallelism=1),
+            Node("resolved", _InspectPayloadMemory(crop=True), parallelism=1),
         ],
         "auto",
         "test",
@@ -420,7 +463,7 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
     runner = ProcessStageRunner(
         stage,
         _ctx_services(),
-        max_workers=2,
+        max_workers=3,
         deterministic=True,
         stage_output_mode="stream_items",
         # Exercise both routes without depending on production tuning defaults.
@@ -429,14 +472,11 @@ def test_process_memory_policy_applies_on_input_and_across_lazy_hops() -> None:
         ),
     )
     try:
-        [actual] = list(runner.run([record]))
-        assert actual.payload["observed"] == (False, False, True, True, True, True)
-        assert not actual.payload["small_t"].is_shared()
-        assert (
-            actual.payload["small_t"].tolist()
-            == actual.payload["small_n"].tolist()
-            == list(range(4))
-        )
-        assert not record.payload["small_t"].is_shared()
+        [actual] = list(runner.run([_mk_record(0)]))
+        # The next worker's output policy sends the small crops inline.
+        for key in ("small_t", "small_n", "large_t", "large_n"):
+            assert actual.payload[key].tolist() == list(range(4))
+        assert not actual.payload["large_t"].is_shared()
+        assert _shared_numpy_storage(actual.payload["large_n"]) is None
     finally:
         runner.close()
