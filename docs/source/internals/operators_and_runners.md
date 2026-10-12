@@ -103,6 +103,17 @@ Upstream elements
                    Downstream
 ```
 
+<figure class="zephon-post zephon-embed">
+  <iframe src="../_static/embeds/operator-detail.html" height="551" loading="lazy"
+          title="Inside one operator"></iframe>
+  <figcaption>
+    <strong>Inside one operator.</strong> The same structure with the work drawn in, for
+    the fetch operator. The accumulator takes sample pointers in stream order and cuts
+    them into micro-batches, the workers fetch the payloads and finish out of order, and
+    the reorder buffer puts the results back into the order the accumulator chose.
+  </figcaption>
+</figure>
+
 **Why this buys determinism.** Take sequence packing. The packer keeps open bins, which
 are partially filled sequences waiting for short samples to complete them, and which bin a
 given sequence lands in depends on what is already in the bins. If each worker kept its

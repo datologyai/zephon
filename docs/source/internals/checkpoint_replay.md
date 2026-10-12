@@ -14,6 +14,18 @@ strawman alternative is to replay the whole pipeline from the start on every res
 is correct and useless, because crashing at step 100,000 means redoing 100,000 steps of
 data processing before producing one new batch.
 
+<figure class="zephon-post zephon-embed">
+  <iframe src="../_static/embeds/nonindexable-packing.html" height="371" loading="lazy"
+          title="One document, three output IDs"></iframe>
+  <figcaption>
+    <strong>One document, three output IDs.</strong> Four documents are tokenized, split,
+    and first-fit packed. Document A ends up spread across three different packed outputs,
+    C overtakes B on the way through, and when the input runs out two bins are still part
+    full. There is no index into that, and no way to reconstruct it other than replaying
+    what came before.
+  </figcaption>
+</figure>
+
 Zephon sits in between. The goal is to **replay only the chunks that were still in flight
 at checkpoint time**, which is a handful regardless of how far into training you are.
 

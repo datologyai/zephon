@@ -187,6 +187,18 @@ samples, different machines. The same holds when the per-device microbatch size 
 different microbatch size changes how many samples a lane puts in one local batch, but the
 round-robin still cycles the same lanes producing the same data.
 
+<figure class="zephon-post zephon-embed">
+  <iframe src="../_static/embeds/lane-multiplexing.html" height="414" loading="lazy"
+          title="Multiplex lanes, accumulate gradients"></iframe>
+  <figcaption>
+    <strong>The same global batch on two GPUs and on four.</strong> A global batch of 16
+    samples drawn from four fixed lanes, at a per-device microbatch of 4. On two groups
+    each one accumulates gradients over a microbatch from each of its two lanes; on four
+    groups each takes one microbatch from its single lane. Either way the step contains
+    the next four samples from every lane.
+  </figcaption>
+</figure>
+
 **Mapping strategies.** When a group owns several lanes, something has to decide which
 ones. Two strategies are available through `Pipeline.options(mapping_strategy=...)`. Both
 are deterministic and produce identical global batches, so they only decide which group
