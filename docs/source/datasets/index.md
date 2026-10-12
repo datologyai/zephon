@@ -56,13 +56,6 @@ Zephon's storage backends and their configured credentials. The output backend
 must support writes; for a read-only source, the Python API accepts an
 `output_path` pointing to a writable location.
 
-Parquet and Vortex read file metadata. JSONL must read each file's contents to
-count records, including decompressing supported compressed files. Indexing
-inspects up to eight shards concurrently. With the Python API,
-`build_index(..., max_workers=1)` makes those reads sequential; another positive
-value sets a different concurrency limit. Existing indexes are replaced only
-after every shard has been inspected successfully.
-
 **Inspecting a `Dataset`.** A `Dataset` is a lightweight descriptor of the collection and
 its metadata; it does not provide methods for reading samples directly. You can use the
 `DatasetInspector` class if you need to examine the raw samples inside of a `Dataset`

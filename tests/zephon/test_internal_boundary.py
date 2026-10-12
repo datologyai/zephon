@@ -110,7 +110,6 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Verify native cache sharing and deterministic eviction recovery across the store.
     "tests/integration/test_vortex_integration.py": frozenset(
         {
-            "zephon._internal.io.formats:vortex",
             "zephon._internal.io.formats.vortex:VortexFormat",
             "zephon._internal.io.resolvers.base:ShardResolver",
             "zephon._internal.io.stores.multi:build_multi_dataset_store",
