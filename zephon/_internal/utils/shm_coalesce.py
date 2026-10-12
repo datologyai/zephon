@@ -607,10 +607,15 @@ class _FlatSkeleton(_PayloadDescriptor):
 
     def __reduce__(self) -> tuple:
         # Serialize final values directly, without reducing each planning wrapper.
-        slots = [
-            slot.transport_value if isinstance(slot, _BufferPayload) else slot
-            for slot in self.slots
-        ]
+        slots = []
+        for slot in self.slots:
+            if isinstance(slot, _BufferPayload):
+                if slot.transport_value is None:
+                    raise RuntimeError(
+                        "Buffer payload was serialized before preparation finished"
+                    )
+                slot = slot.transport_value
+            slots.append(slot)
         return type(self), (slots, self.spec)
 
     def bind(self, buffers: dict[str, Any]) -> LazyPayload:
@@ -846,15 +851,15 @@ class _InlineNumpy(_LeafDescriptor):
 
 
 @dataclass(slots=True)
-class _BufferPayload(_LeafDescriptor):
+class _BufferPayload:
     """Buffer candidate shared by a record description and its preparation.
 
     ``source`` holds the original value; ``slot`` describes its shape and dtype
     and receives an offset if SHM is selected. ``copy_source`` optionally holds
     a numeric list converted for the final write. Destination preparation fills
     ``transport_value`` with the original value, an inline descriptor, or the
-    shared slot, then releases the source references. Reduction emits that
-    selected value, leaving this temporary candidate behind.
+    shared slot, then releases the source references. Record replacement and
+    skeleton reduction substitute that value for this temporary candidate.
 
     ``source_is_shared`` records where the source lives. ``forwardable_storage``
     is its backing only when forwarding preserves its values; shared Torch
@@ -871,27 +876,8 @@ class _BufferPayload(_LeafDescriptor):
     transport_value: Any = None
     copy_source: Any = None
 
-    def buffer_keys(self) -> tuple[str, ...]:
-        return (
-            self.transport_value.buffer_keys()
-            if isinstance(self.transport_value, _LeafDescriptor)
-            else ()
-        )
-
-    def restore(self, buffers: dict[str, Any]) -> Any:
-        value = self.transport_value
-        return value.restore(buffers) if isinstance(value, _LeafDescriptor) else value
-
     def __reduce_ex__(self, protocol: int) -> Any:
-        value = self.transport_value
-        if value is None:
-            raise RuntimeError(
-                "Buffer payload was serialized before preparation finished"
-            )
-        if isinstance(value, _LeafDescriptor):
-            return value.__reduce_ex__(protocol)
-        # Reconstruct the value through its normal reducer, without this wrapper.
-        return operator.getitem, ((value,), 0)
+        raise RuntimeError("Buffer payload was serialized before preparation finished")
 
 
 def _inline_buffer(source: Any, slot: Any, shared: bool) -> Any:

@@ -4,7 +4,8 @@
 """Runtime options for ``Pipeline.options()`` (``RuntimeOptions``, ``IpcTransport``)."""
 
 import multiprocessing as mp
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any, Literal
 
 from zephon._internal.utils.ipc import (
@@ -30,16 +31,13 @@ IpcTransport = Literal["socketpair", "pipe"]
 DEFAULT_RUN_ID = "default_run_id"
 
 
-_UNSET_SHM_OPTION = object()
-
-
 def _reject_removed_shm_options(hints: dict[str, Any]) -> None:
     """Reject removed SHM option names with their replacements."""
     for old, new in (
         ("shm_min_size", "shm_min_item_bytes"),
         ("coalesce_tensors", "shm_coalesce"),
     ):
-        if hints.get(old, _UNSET_SHM_OPTION) is not _UNSET_SHM_OPTION:
+        if old in hints:
             raise TypeError(f"'{old}' is no longer supported. Use '{new}' instead.")
 
 
@@ -202,11 +200,6 @@ class RuntimeOptions:
     # None permits unlimited coalescing. Compacted views follow the same rule.
     shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
 
-    # Init-only inputs provide replacement names in errors for removed options.
-    # The sentinel distinguishes omission from an explicit None.
-    coalesce_tensors: InitVar[object] = _UNSET_SHM_OPTION
-    shm_min_size: InitVar[object] = _UNSET_SHM_OPTION
-
     # ProcessStageRunner only.  Re-dispatches per crashed seq before
     # giving up; 0 disables.  In non-deterministic mode an exhausted
     # seq is dropped instead of failing the pipeline.
@@ -225,13 +218,18 @@ class RuntimeOptions:
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
 
-    def __post_init__(self, coalesce_tensors: object, shm_min_size: object) -> None:
-        _reject_removed_shm_options(
-            {
-                "coalesce_tensors": coalesce_tensors,
-                "shm_min_size": shm_min_size,
-            }
-        )
+
+_runtime_options_init = RuntimeOptions.__init__
+
+
+@wraps(_runtime_options_init)
+def _init_runtime_options(self: RuntimeOptions, *args: Any, **kwargs: Any) -> None:
+    """Report removed names without exposing them in the dataclass signature."""
+    _reject_removed_shm_options(kwargs)
+    _runtime_options_init(self, *args, **kwargs)
+
+
+RuntimeOptions.__init__ = _init_runtime_options
 
 
 __all__ = [

@@ -2487,8 +2487,10 @@ def test_descriptor_reducers_keep_nondefault_fields() -> None:
     for descriptor in descriptors:
         assert pickle.loads(pickle.dumps(descriptor)) == descriptor, type(descriptor)
     unfinished = sc._describe_buffer(torch.arange(3))
-    with pytest.raises(RuntimeError, match="before preparation finished"):
-        pickle.dumps(unfinished)
+    tree = sc._FlatSkeleton([unfinished, "label"], spec)
+    for value in (unfinished, tree, sc._StructSlot(DCSample, tree)):
+        with pytest.raises(RuntimeError, match="before preparation finished"):
+            pickle.dumps(value)
 
 
 def test_mixed_numeric_list_does_not_count_towards_fresh_allocation() -> None:
