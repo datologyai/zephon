@@ -161,6 +161,94 @@ def test_s3_custom_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     backend.exists("s3://bucket/file.bin")
 
     assert state["configs"][0].get("aws_endpoint") == "http://localhost:9000"
+    assert state["client_options"][0].get("allow_http") is True
+
+
+def test_s3_https_endpoint_does_not_allow_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """allow_http stays unset for HTTPS endpoints and AWS defaults."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.delenv("AWS_ALLOW_HTTP", raising=False)
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    monkeypatch.setenv("S3_ENDPOINT_URL", "https://minio.example.com")
+    S3Backend()._get_store("bucket")
+    monkeypatch.delenv("S3_ENDPOINT_URL")
+    S3Backend()._get_store("bucket")
+
+    assert [opts.get("allow_http") for opts in state["client_options"]] == [
+        None,
+        None,
+    ]
+    assert all(opts.get("timeout") == "120s" for opts in state["client_options"])
+
+
+def test_s3_unsigned_store_allows_http_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unsigned (public-bucket) store also accepts http:// endpoints."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://localhost:9000")
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    S3Backend()._get_unsigned_store("bucket")
+
+    assert state["configs"][0].get("skip_signature") is True
+    assert state["client_options"][0].get("allow_http") is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("1", True), ("TRUE", True), ("false", None), ("", None)],
+)
+def test_s3_aws_allow_http_env(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool | None
+) -> None:
+    """AWS_ALLOW_HTTP enables allow_http even without an http:// endpoint."""
+    state = _install_obstore_stubs(monkeypatch)
+    monkeypatch.delenv("S3_ENDPOINT_URL", raising=False)
+    monkeypatch.setenv("AWS_ALLOW_HTTP", value)
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    S3Backend()._get_store("bucket")
+
+    assert state["client_options"][0].get("allow_http") is expected
+
+
+def test_s3_real_obstore_accepts_http_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real obstore builds a store for an http:// endpoint.
+
+    Without allow_http, obstore fails every request with a builder error. With
+    it, a request to a closed port gets past the builder and fails to connect.
+    """
+    pytest.importorskip("obstore")
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]  # closed once the socket is released
+
+    monkeypatch.setenv("S3_ENDPOINT_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.delenv("AWS_ALLOW_HTTP", raising=False)
+
+    import obstore as obs
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    store = S3Backend()._get_store("bucket")
+    with pytest.raises(Exception) as excinfo:
+        obs.head(store, "missing.bin")
+
+    assert "builder error" not in str(excinfo.value).lower()
 
 
 def test_s3_put_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
