@@ -42,15 +42,11 @@ If you have existing infrastructure for writing out Parquet files using distribu
 processing frameworks like Spark or Ray, you might want to write out an `index.json` file
 while creating the dataset.
 
-**Footer cache.** Each fetch replica's store retains up to 256 parsed Parquet footers
-across reads. Configure this through
-`StoreOptions(cache=CacheOptions(metadata_cache_entries=256))` or
-`{"cache": {"metadata_cache_entries": 256}}`; zero disables retention. This is the
-same option used by Vortex, applied independently to each format's LRU. The limit
-counts entries, not bytes, and applies even when the on-disk shard cache is disabled.
-Both formats identify immutable shards by their local path, preserving metadata reuse
-when the same bytes are evicted and downloaded again. The decoded Parquet row-group
-cache has its own configuration and budget.
+**Caching Metadata.** Zephon caches up to 256 Parquet footers per fetch replica to avoid
+rereading metadata. You can change this with
+`pipeline.options(io_options={"cache": {"metadata_cache_entries": 256}})`; set the limit
+to zero to disable it. The same setting applies independently to Vortex. This cache is
+separate from the shard and row-group caches.
 
 **Reading Parquet in Zephon**
 
@@ -61,24 +57,11 @@ cache has its own configuration and budget.
 
 ## Sample payloads
 
-Parquet and Vortex use the same Arrow-to-sample conversion. Each sample is a dictionary
-keyed by column name, including files with only one column. A missing value stays within
-its field, for example `{"tokens": None}`.
+Parquet and Vortex return each sample as a dictionary keyed by column name, even for
+single-column files. Missing values are represented by `None`.
 
-Numeric lists without null elements return read-only NumPy arrays, preserving dtype
-and fixed-size nested shapes. Conversion shares Arrow buffers where possible; boolean
-arrays require unpacking. Arrays remain valid after the reader closes. Call `.copy()`
-before modifying an array or exposing it to in-place tensor operations. Duplicate
-samples may share read-only numeric buffers. Process transport can create writable SHM
-copies, so consumers must not rely on writability after transport.
-
-Present numeric scalars retain their NumPy dtype even alongside null values. Strings,
-bytes, and scalar booleans are Python values. A missing value remains `None`.
-Other scalar types follow Arrow's Python conversion; for example, `timestamp[us]`
-values become `datetime.datetime` objects.
-Lists containing null elements or variable-length nesting return Python lists:
-`[1, None]` preserves missingness and `[[1, 2], [3]]` preserves uneven nesting.
-Mutable fallback containers are independent for duplicate requests.
-
-Neither format generally records whether a column originated in NumPy or Torch, so
-numeric arrays are returned as NumPy arrays rather than reconstructed Torch tensors.
+Numeric lists become NumPy arrays, preserving their dtype and fixed-size nested shapes.
+These arrays may be read-only, so call `.copy()` if you need to modify them. Lists with
+null elements or variable-length nesting remain Python lists, such as `[1, None]` or
+`[[1, 2], [3]]`. Numeric scalars retain their NumPy dtype; other values use Python types,
+such as `str`, `bytes`, `bool`, and `datetime.datetime`.

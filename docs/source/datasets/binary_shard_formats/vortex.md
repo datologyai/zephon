@@ -57,44 +57,26 @@ Note that Vortex handles compression operations within the file format itself, s
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
 
-Vortex and Parquet share the same [sample payload contract](../parquet.md#sample-payloads).
-Each sample is a dictionary keyed by column name, including single-column files.
-Numeric arrays are read-only NumPy arrays with their original dtype and
-fixed-size shape, and remain valid after the reader closes. Numeric lists containing
-null elements use a Python-list fallback. Call `.copy()` before mutating an array.
+Vortex returns samples in the [same form as Parquet](../parquet.md#sample-payloads).
 
-**Read caches.** Each fetch replica has a footer cache (256 entries by default) and an
-encoded-segment cache (64 MiB target), shared across its Vortex readers. These are
-independent of Zephon's on-disk shard cache. Footer entries also retain the derived
-Arrow export schema. The segment cache reuses encoded bytes;
-it does not retain decoded samples.
-
-Configure them through the pipeline's `io_options`:
+**Caching Reads.** Zephon caches Vortex metadata and encoded file segments in memory to
+speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
+shard cache. You can adjust their sizes through the pipeline's `io_options`; these are
+the defaults:
 
 ```python
-from zephon.io import CacheOptions, StoreOptions, VortexOptions
-
-io_options = StoreOptions(
-    cache=CacheOptions(metadata_cache_entries=256),
-    vortex=VortexOptions(segment_cache_bytes=64 * 1024**2),
+pipeline.options(
+    io_options={
+        "cache": {"metadata_cache_entries": 256},
+        "vortex": {"segment_cache_bytes": "64mb"},
+    }
 )
-# Pass io_options to pipeline.options(io_options=io_options).
 ```
 
-The equivalent dictionary accepts human-readable sizes, for example
-`{"cache": {"metadata_cache_entries": 256}, "vortex": {"segment_cache_bytes": "64mb"}}`.
-The footer limit applies independently to Parquet and Vortex, whether or not the on-disk
-shard cache is enabled. Set either limit to zero to disable that cache. Replicas have
-separate caches and budgets, including when they share a process.
+Set either limit to zero to disable that cache. The metadata limit counts footers; the
+segment size is a memory target that Vortex can exceed. Decoded samples and other memory
+use are additional, so allow some headroom when planning memory usage.
 
-Segment-cache memory can exceed its byte target because eviction is asynchronous and
-views can retain larger buffers. Metadata, decoded output, in-flight reads and cache
-overhead consume additional memory. The footer limit counts entries rather than bytes.
-
-Cache keys use the local shard path, which must identify the same contents throughout
-the store's lifetime. Eviction and re-download of identical bytes preserve cache reuse.
-
-**Threads.** Zephon defaults to one Vortex background worker per process and respects an
-explicit `VORTEX_MAX_THREADS`. Set `ZEPHON_VORTEX_THREADS` before using the format to
-override either setting: a positive integer sets the worker count, and a non-positive
-value leaves the runtime unchanged. This applies to discovery and sample reads.
+**Configuring Threads.** Zephon uses one Vortex background worker per process unless
+`VORTEX_MAX_THREADS` is set. To override this, set `ZEPHON_VORTEX_THREADS` to a positive
+worker count before using the format.
