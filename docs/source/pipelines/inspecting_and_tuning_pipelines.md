@@ -139,10 +139,6 @@ how much memory a retained sample keeps alive.
 
 Views below the forwarding minimum or selected for compaction can coalesce with compatible values from other allocations and private memory in the same microbatch.
 
-`shm_min_size` and `coalesce_tensors` are no longer supported. Use
-`shm_min_item_bytes` and `shm_coalesce`, respectively. Both `RuntimeOptions(...)`
-and `Pipeline.options(...)` raise an error for the old names.
-
 The best thresholds depend on payload types, batch sizes and the host, so
 benchmark representative batches before changing them. Lowering
 `shm_max_coalesced_bytes` reduces how much memory one retained sample can keep
@@ -151,7 +147,5 @@ outputs; it does not revisit samples already held in shuffle buffers.
 
 On Python 3.12+, bytes-like values sent through SHM arrive as read-only,
 zero-copy buffer views; on 3.10 and 3.11 they arrive as `bytes` subclasses.
-These options apply to worker outputs. Parent-to-worker payloads use ordinary
-multiprocessing serialization: existing shared Torch tensors and Zephon-backed
-NumPy arrays retain their backing without reapplying the policy. The final queue
+These options apply to worker outputs. The final queue
 to the training process (MTP) is configured separately.
