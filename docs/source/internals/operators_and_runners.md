@@ -5,26 +5,24 @@ worth taking seriously: an operator running across sixteen workers makes exactly
 decisions it would have made on one. This page explains the two pieces of machinery that
 deliver that, and what they ask of an operator in return.
 
-## The Operator Contract
+**The Operator Contract.** An operator is a unit of transformation (tokenizing, packing,
+batching, shuffling) and it neither knows nor cares how it is executed. Five methods make
+up the contract, of which three matter most.
 
-An operator is a unit of transformation (tokenizing, packing, batching, shuffling) and it
-neither knows nor cares how it is executed. Five methods make up the contract, of which
-three matter most.
-
-`accumulator(*, deterministic, ctx)` returns the [accumulator](#accumulators) that decides
-how incoming elements are grouped into micro-batches. The `deterministic` flag comes from
-the runner and controls whether time-based flushing is allowed.
+`accumulator(*, deterministic, ctx)` returns the {ref}`accumulator <accumulators>` that
+decides how incoming elements are grouped into micro-batches. The `deterministic` flag
+comes from the runner and controls whether time-based flushing is allowed.
 
 `process_many(elems)` is the workhorse, and the part that runs in parallel. It takes a
 micro-batch and returns a list of the *same* element types. The elements are
-`SampleRecord` objects, or `SampleBatch` objects downstream of `batch()` . To transform a
-sample you rebuild its `payload` while preserving its `meta` , which carries the identity
+`SampleRecord` objects, or `SampleBatch` objects downstream of `batch()`. To transform a
+sample you rebuild its `payload` while preserving its `meta`, which carries the identity
 and ordering that [Records and Sample Lifecycles](records_and_sample_lifecycles.md)
 describes. Returning a bare dict or a raw payload gets you a
-`TypeError: Unsupported element type` .
+`TypeError: Unsupported element type`.
 
 `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
-all-important `preserves_cursor_order` .
+all-important `preserves_cursor_order`.
 
 Two more round it out. `setup(ctx)` runs once before any data arrives, receiving an
 `OpContext` with runtime services and plan metadata. `process_one(elem)` handles a single
@@ -48,7 +46,17 @@ is stateless in principle and could move onto the workers. It has not, and that 
 throughput limitation rather than a design requirement. What *is* a design requirement is
 that any logic needing to see elements in stream order lives in the accumulator.
 
-## Micro-Batches
+**Micro-Batches.** When an operator runs with several workers, the runner does not hand
+out elements one at a time. It groups them into micro-batches processed together in a
+single `process_many` call. That amortises dispatch overhead and lets operators use
+batch-level optimisations, such as a tokenizer encoding sixty-four texts in one call
+rather than sixty-four calls.
+
+The sizes are per-operator and chosen for the work involved: fetching and tokenization use
+64, text decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and
+`batch` uses whatever `microbatch_size` you asked for. With four workers on a tokenizer,
+four micro-batches of 64 are in flight at once. That is 256 samples being tokenized
+concurrently, with each call still seeing a sensible 64.
 
 :::{note}
 **Two kinds of batch.** Micro-batches here are the internal groups of elements
@@ -57,29 +65,18 @@ produces, and the two sizes have nothing to do with each other. The name collisi
 unfortunate and ours.
 :::
 
-When an operator runs with several workers, the runner does not hand out elements one at a
-time. It groups them into micro-batches processed together in a single `process_many`
-call. That amortises dispatch overhead and lets operators use batch-level optimisations,
-such as a tokenizer encoding sixty-four texts in one call rather than sixty-four calls.
-
-The sizes are per-operator and chosen for the work involved: fetching and tokenization use
-64, text decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and
-`batch` uses whatever `microbatch_size` you asked for. With four workers on a tokenizer,
-four micro-batches of 64 are in flight at once. That is 256 samples being tokenized
-concurrently, with each call still seeing a sensible 64.
-
 Who decides the boundaries? That is the accumulator's entire job.
 
-## Accumulators
+(accumulators)=
 
-An accumulator is a small, single-threaded object sitting between an operator's input
-stream and its worker pool. It receives elements from upstream in order, decides when
-enough of them are ready, and hands a micro-batch off to be dispatched.
+**Accumulators.** An accumulator is a small, single-threaded object sitting between an
+operator's input stream and its worker pool. It receives elements from upstream in order,
+decides when enough of them are ready, and hands a micro-batch off to be dispatched.
 
 The guarantee is that it runs **serially**. The runner never calls into it from two
 threads at once, and elements always arrive in upstream order. In the current runners this
 is a dedicated pump thread per operator, but the architectural contract is just the
-serialness. Workers run the stateless `process_many` , and the accumulator decides what
+serialness. Workers run the stateless `process_many`, and the accumulator decides what
 each worker sees.
 
 ```
@@ -121,15 +118,15 @@ The bins are also per-lane, which is what connects this to [elastic
 determinism](elastic_determinism.md): samples from different lanes are never packed
 together, so each lane's packing decisions are independent of how many GPUs are running.
 
-**The interface** is four methods and a flag, defined in `zephon.ops.accumulators` :
+**The interface** is four methods and a flag, defined in `zephon.ops.accumulators`:
 
 `push_many(elems)` consumes elements from upstream, buffers them, and returns zero or more
 ready micro-batches.
 
 `flush(*, reset=False, lane_id=None)` emits what is still buffered, in one of two
-contexts. At end of stream ( `reset=False` , `lane_id=None` ) every lane is finished and
-any remaining partial micro-batches go out. Mid-stream ( `reset=True` , with a `lane_id` )
-a flush sentinel has arrived, and the accumulator must emit **and fully reset** that one
+contexts. At end of stream (`reset=False`, `lane_id=None`) every lane is finished and any
+remaining partial micro-batches go out. Mid-stream (`reset=True`, with a `lane_id`) a
+flush sentinel has arrived, and the accumulator must emit **and fully reset** that one
 lane's state while leaving every other lane untouched. Flush sentinels are injected per
 lane, so flushing every lane at one lane's boundary corrupts the others and breaks replay.
 
@@ -141,8 +138,8 @@ released. The question it answers is whether the accumulator's future output is 
 to that of a fresh instance fed only the records still buffered. The default
 implementation is conservative and says yes only when nothing is pending.
 
-`reads_payload` is the flag. It defaults to `False` , which declares that the accumulator
-only ever looks at metadata (the `lane_id` , cursors, and so on) and lets the runner leave
+`reads_payload` is the flag. It defaults to `False`, which declares that the accumulator
+only ever looks at metadata (the `lane_id`, cursors, and so on) and lets the runner leave
 payloads as unresolved shared-memory handles. Set it to `True` if `push_many` inspects
 payloads, and the runner resolves them first. Forget to, and you get a lazy handle where
 you expected a dict.
@@ -152,17 +149,17 @@ elements the accumulator has seen, never on timing.
 
 **The built-ins.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
-lane and emits when a lane reaches `max_batch` , and is what most operators use: fetch,
+lane and emits when a lane reaches `max_batch`, and is what most operators use: fetch,
 decode, tokenize, map transforms, and batching, which goes through the `BatchAccumulator`
-subclass that adds `drop_last` . Lane keying lives in `CountingAccumulator` itself, which
+subclass that adds `drop_last`. Lane keying lives in `CountingAccumulator` itself, which
 is what makes a per-lane flush sentinel able to reset one lane alone.
 
-In non-deterministic mode `CountingAccumulator` can also flush on a latency bound (
-`max_latency_ms` ), emitting a partial micro-batch rather than waiting for a bursty stream
+In non-deterministic mode `CountingAccumulator` can also flush on a latency bound
+(`max_latency_ms`), emitting a partial micro-batch rather than waiting for a bursty stream
 to fill one. In deterministic mode that is disabled, so micro-batch boundaries depend only
 on counts and never on the clock.
 
-The specialised ones live beside their operators in `zephon/_internal/ops/` .
+The specialised ones live beside their operators in `zephon/_internal/ops/`.
 `PackingAccumulator` keeps per-lane bins and emits when a bin's remaining capacity drops
 below the minimum useful sequence length or when too many bins are open.
 `EnsureMixtureAccumulator` keeps per-lane buffers grouped by mixture component and uses
@@ -171,12 +168,11 @@ Shuffling has two, picked by the `algorithm` argument: `StreamingShuffleAccumula
 the default reservoir-style shuffle, and `WarmupBlockAccumulator` for the tumbling-block
 variants.
 
-## How Runners Keep The Order
-
-Zephon ships three runner types for local execution, namely `inline` , `threads` , and
-`process` , which [How Pipelines Run](../pipelines/how_pipelines_run.md) describes. There
-is also a Ray-backed `remote` runner for stages added with `placement="remote"` . From the
-accumulator's point of view they all behave identically.
+**How Runners Keep The Order.** Zephon ships three runner types for local execution,
+namely `inline`, `threads`, and `process`, which [How Pipelines
+Run](../pipelines/how_pipelines_run.md) describes. There is also a Ray-backed `remote`
+runner for stages added with `placement="remote"`. From the accumulator's point of view
+they all behave identically.
 
 When parallelism is greater than one, workers finish in whatever order they finish, and a
 slow micro-batch can complete after a fast one dispatched later. In deterministic mode the
@@ -189,15 +185,13 @@ In non-deterministic mode the runner skips the reordering and forwards in comple
 order, trading reproducibility for latency.
 
 Accumulator-defined boundaries plus sequence-number reordering are, together, the reason
-execution parameters are [pure performance
-knobs](elastic_determinism.md#execution-parameters-are-not-data-parameters).
+execution parameters are
+{ref}`pure performance knobs <execution-parameters-are-not-data-parameters>`.
 
-## Data-Derived Randomness
-
-The shuffle buffer needs randomness, and the obvious approach would be wrong. An RNG
-advanced once per micro-batch ties the permutation to micro-batch boundaries, and those
-boundaries shift across a restart because replay starts from a different point. The same
-data would shuffle differently after a resume.
+**Data-Derived Randomness.** The shuffle buffer needs randomness, and the obvious approach
+would be wrong. An RNG advanced once per micro-batch ties the permutation to micro-batch
+boundaries, and those boundaries shift across a restart because replay starts from a
+different point. The same data would shuffle differently after a resume.
 
 So the shuffle derives its randomness from the **data itself**. The block algorithms hash
 the cursor keys of every element in the batch together with the user's base seed. The
@@ -206,19 +200,19 @@ with the seed, the lane, an emission counter, and the reservoir size to pick a
 deterministic victim on each arrival. Either way the same set of elements produces the
 same result regardless of how they were grouped or which restart they turn up on.
 
-## Flush Sentinels And Stalling
+(flush-sentinels-and-stalling)=
 
-Pipelines containing packing, shuffling, or mixture correction use **flush sentinels** to
-create epoch boundaries that make checkpoint eviction safe. Every `flush_every_k_chunks`
-chunks per lane, the engine injects a sentinel that triggers
-`flush(reset=True, lane_id=lane)` on each accumulator as it passes. [Checkpoint Replay and
-Bounded Recovery](checkpoint_replay.md) covers why. This section covers what it means for
-an accumulator.
+**Flush Sentinels And Stalling.** Pipelines containing packing, shuffling, or mixture
+correction use **flush sentinels** to create epoch boundaries that make checkpoint
+eviction safe. Every `flush_every_k_chunks` chunks per lane, the engine injects a sentinel
+that triggers `flush(reset=True, lane_id=lane)` on each accumulator as it passes.
+[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers why. This section
+covers what it means for an accumulator.
 
 **What gets flushed.** Every accumulator, scoped to the sentinel's lane, with one
-exception noted below. For history-dependent accumulators ( `preserves_cursor_order=False`
-) the reset is the load-bearing part. For order-preserving ones the flush is harmless,
-being either a no-op or a trivial drain, and only the bookkeeping differs:
+exception noted below. For history-dependent accumulators (`preserves_cursor_order=False`)
+the reset is the load-bearing part. For order-preserving ones the flush is harmless, being
+either a no-op or a trivial drain, and only the bookkeeping differs:
 
 | Accumulator | At a sentinel | Why |
 |---|---|---|
@@ -230,7 +224,7 @@ being either a no-op or a trivial drain, and only the bookkeeping differs:
 | `BatchAccumulator`, `drop_last=True` | **Stalls** | Cannot emit a partial batch |
 | `PassthroughAccumulator` | Flushes (no-op) | No state to reset |
 
-**What "fully reset" means.** After `flush(reset=True, lane_id=lane)` , that lane must be
+**What "fully reset" means.** After `flush(reset=True, lane_id=lane)`, that lane must be
 indistinguishable from a freshly constructed accumulator, with its buffers, counters, and
 derived state cleared and every other lane untouched. For the packer that means the lane's
 bins are emptied and partial bins emitted with padding. For the mixture corrector, that
@@ -242,7 +236,7 @@ while `has_pending_data(lane)` is still true, the runner raises. Leaving residua
 cross-boundary state would break replay silently, so it fails loudly instead.
 
 **Stalling is deliberately narrow.** Exactly one built-in is allowed to hold a sentinel
-back instead of flushing: `Batch(drop_last=True)` , because it cannot emit a partial batch
+back instead of flushing: `Batch(drop_last=True)`, because it cannot emit a partial batch
 without changing its output. The runner derives this from the operator instance rather
 than from a trait, which is a signal that it is a special case and not an extension point.
 

@@ -17,9 +17,7 @@ data processing before producing one new batch.
 Zephon sits in between. The goal is to **replay only the chunks that were still in flight
 at checkpoint time**, which is a handful regardless of how far into training you are.
 
-## What A Checkpoint Holds
-
-Per lane, three things.
+**What A Checkpoint Holds.** Per lane, three things.
 
 **Inflight chunks**, serialized in full, meaning their sample pointers, component order,
 and seed. On restore these are deserialized directly and the `WorkSource` is never asked
@@ -43,8 +41,8 @@ covers what those cursors are and what the rest of the contract requires of a so
 write yourself.
 
 Alongside these sit the replay cursor per lane, the lane progress pointers, and the
-round-robin position discussed in [Elastic
-Determinism](elastic_determinism.md#what-actually-survives-a-topology-change).
+round-robin position discussed in
+{ref}`Elastic Determinism <what-actually-survives-a-topology-change>`.
 
 Chunks already fully consumed are not in the checkpoint, because they are gone. Chunks not
 yet fetched are not in it either, because the `WorkSource` will produce them. This is why
@@ -55,11 +53,9 @@ are rebuilt as the replayed chunks flow through the pipeline and re-trigger cont
 tracking. That keeps checkpoints small at the cost of making restore time proportional to
 the number of inflight chunks.
 
-## Eviction
-
-**Eviction** is what keeps the inflight set small. Once every sample derived from a chunk
-has been delivered, the chunk leaves the set, and a checkpoint taken afterwards neither
-stores nor replays it.
+**Eviction.** Eviction is what keeps the inflight set small. Once every sample derived
+from a chunk has been delivered, the chunk leaves the set, and a checkpoint taken
+afterwards neither stores nor replays it.
 
 ```
 Lane 0 inflight chunks over time:
@@ -87,17 +83,13 @@ Pipeline compiled
   eviction  eviction
 ```
 
-### Monotone Eviction
+**Monotone Eviction.** When every operator preserves cursor order, records emerge in the
+same chunk order they entered. If the most recently delivered record belongs to chunk *N*,
+everything from chunks below *N* has already gone out, and those chunks evict immediately.
+A simple watermark is enough. Most pipelines without shuffling or packing take this path.
 
-When every operator preserves cursor order, records emerge in the same chunk order they
-entered. If the most recently delivered record belongs to chunk *N*, everything from
-chunks below *N* has already gone out, and those chunks evict immediately. A simple
-watermark is enough. Most pipelines without shuffling or packing take this path.
-
-### Epoch-Based Eviction
-
-Packing, shuffling, and mixture correction break the watermark in two ways, and the second
-is much worse than the first.
+**Epoch-Based Eviction.** Packing, shuffling, and mixture correction break the watermark
+in two ways, and the second is much worse than the first.
 
 The obvious problem is reordering. A packed record can combine fragments from chunks 5 and
 7, and chunk 5's last sample can be delivered *after* something from chunk 7. A rule of
@@ -109,7 +101,7 @@ which bins exist and how full they are, depends on the entire history of what it
 rather than just on what is currently in the bins. After a chunk's samples have all left
 the bins, their influence on where subsequent samples land persists. Two packers starting
 from different states and fed identical input may *never* converge. With two bins of
-capacity 10 and an input stream of `[3, 3, 3, …]` , starting from `(10, 10)` versus
+capacity 10 and an input stream of `[3, 3, 3, …]`, starting from `(10, 10)` versus
 `(10, 5)` gives the same periodic emission cycle, permanently phase-shifted.
 
 That creates a direct conflict. Eviction wants to discard consumed chunks to free memory.
@@ -122,8 +114,8 @@ and to shuffling, whose buffers span chunk boundaries.
 
 **Flush sentinels** resolve it. Every `flush_every_k_chunks` chunks per lane, the engine
 injects a sentinel that forces history-dependent accumulators to emit everything and reset
-to a clean state, as described in [Operators and
-Runners](operators_and_runners.md#flush-sentinels-and-stalling). The sentinel divides the
+to a clean state, as described in
+{ref}`Operators and Runners <flush-sentinels-and-stalling>`. The sentinel divides the
 stream into **epochs**, and each epoch starts from a state that replay can reproduce
 without any of the preceding chunks:
 
@@ -149,16 +141,14 @@ For a monotone pipeline, setting a positive value gets you a warning and the val
 forced back to 0, since sentinels there buy nothing and would perturb batch boundaries for
 free.
 
-### Per-Offset Tracking
-
-Within an epoch, completion is tracked per offset. Each sample occupies a position in its
-chunk, and operators may split it into several children or merge children from different
-offsets into one packed record. An offset closes only when all of its children have been
-delivered, which the engine learns from the `is_last_child` flags on contributor metadata,
-and from tombstones when a filter drops the last child standing (see [Records and Sample
-Lifecycles](records_and_sample_lifecycles.md#contributors-and-tombstones)). A bitmap per
-chunk records which offsets are closed, with a popcount alongside so that "is this chunk
-complete?" stays O(1).
+**Per-Offset Tracking.** Within an epoch, completion is tracked per offset. Each sample
+occupies a position in its chunk, and operators may split it into several children or
+merge children from different offsets into one packed record. An offset closes only when
+all of its children have been delivered, which the engine learns from the `is_last_child`
+flags on contributor metadata, and from tombstones when a filter drops the last child
+standing (see {ref}`Records and Sample Lifecycles <contributors-and-tombstones>`). A
+bitmap per chunk records which offsets are closed, with a popcount alongside so that "is
+this chunk complete?" stays O(1).
 
 ```
 Chunk 5 (4 offsets):  [x] [x] [ ] [x]    3 of 4 closed
@@ -168,12 +158,10 @@ Chunk 7 (4 offsets):  [ ] [ ] [ ] [ ]    none closed
 → Nothing is evicted: 5 and 6 are in the same epoch, and 5 is incomplete.
 ```
 
-### Atomic Per-Epoch Eviction
-
-Chunks within an epoch share accumulator history, since where chunk 1's samples landed in
-the bins depends on what chunk 0 put there. Evicting chunk 0 while chunk 1 is still
-inflight would break replay for exactly the reason above. So an epoch evicts
-**atomically**: all of its chunks or none of them.
+**Atomic Per-Epoch Eviction.** Chunks within an epoch share accumulator history, since
+where chunk 1's samples landed in the bins depends on what chunk 0 put there. Evicting
+chunk 0 while chunk 1 is still inflight would break replay for exactly the reason above.
+So an epoch evicts **atomically**: all of its chunks or none of them.
 
 The engine walks a lane's recorded boundaries in ascending order and evicts contiguously
 from the bottom, stopping at the first epoch that is incomplete. Epoch boundaries are what
@@ -200,9 +188,8 @@ replay filter cannot find its target on resume. If the cursor sits in an epoch t
 otherwise eligible, the engine stops there and leaves it alone. This resolves on its own
 within a few deliveries, as soon as a post-sentinel record goes out.
 
-## Replay On Resume
-
-Restoring and then iterating runs the saved state back through the full pipeline:
+**Replay On Resume.** Restoring and then iterating runs the saved state back through the
+full pipeline:
 
 ```
 Checkpoint
@@ -234,12 +221,10 @@ the pipeline is deterministic they produce the same records and rebuild the same
 accumulator state as a side effect. Finally the replay filter drops the prefix the
 training loop already consumed.
 
-### The ReplayFilter
-
-The planner inserts a `ReplayFilter` into every pipeline automatically, so you never add
-one. If the pipeline has a `batch` operator it goes immediately before it, otherwise it is
-appended at the tail, and it takes its name from the operator it sits next to. You can see
-it in `Pipeline.explain()` :
+**The ReplayFilter.** The planner inserts a `ReplayFilter` into every pipeline
+automatically, so you never add one. If the pipeline has a `batch` operator it goes
+immediately before it, otherwise it is appended at the tail, and it takes its name from
+the operator it sits next to. You can see it in `Pipeline.explain()`:
 
 ```
 Stage[0] place=local runner=threads cap=8 mode=microbatches
@@ -284,10 +269,9 @@ consumed. The equality rule simply waits for C3 to reappear in the deterministic
 and forwards everything after it, which is correct regardless of output ordering. It works
 because a cursor is a unique identity rather than an ordinal position.
 
-### What A Custom Operator Owes Replay
-
-An operator that buffers across chunk boundaries has to cooperate with all of the above,
-or the engine will evict a chunk whose data the operator is still holding. Concretely:
+**What A Custom Operator Owes Replay.** An operator that buffers across chunk boundaries
+has to cooperate with all of the above, or the engine will evict a chunk whose data the
+operator is still holding. Concretely:
 
 - Set `preserves_cursor_order=False` in `OpTraits` if the operator reorders anything.
 - Propagate contributor metadata, and set `is_last_child` correctly.
@@ -297,11 +281,10 @@ After a mid-stream flush the accumulator must report no pending data for that la
 runner treats anything else as a contract violation and raises.
 - Do not plan on stalling. It is supported for `Batch(drop_last=True)` and nothing else.
 
-## Multi-Rank Aggregation
-
-Each rank's engine owns a subset of lanes, but a complete checkpoint has to cover all of
-them, so the ranks merge their states through a shared directory using a leader-follower
-protocol. The leader is global rank 0, DataLoader worker 0.
+**Multi-Rank Aggregation.** Each rank's engine owns a subset of lanes, but a complete
+checkpoint has to cover all of them, so the ranks merge their states through a shared
+directory using a leader-follower protocol. The leader is global rank 0, DataLoader worker
+0.
 
 ```
 Leader                     aggregate_dir                   Followers
@@ -325,7 +308,7 @@ state file from every rank in the `world_size` **and** the union of their lane p
 covers every one of the `canonical_replicas` lanes. Both conditions have to hold, so a
 rank that reports in with no lanes does not satisfy the coverage check on its own. If
 `aggregate_timeout_s` expires first the error names the missing ranks and the missing
-lanes, which is usually enough to find the rank that forgot to call `checkpoint()` .
+lanes, which is usually enough to find the rank that forgot to call `checkpoint()`.
 
 The current round's merged file is left in place until the next checkpoint round, so a
 straggler can still read it, and the leader deletes the *previous* round's merged file

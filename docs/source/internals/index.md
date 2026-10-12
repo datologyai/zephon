@@ -13,10 +13,10 @@ knobs exist and what they do, [How Pipelines Run](../pipelines/how_pipelines_run
 where you want to be.
 
 **A Warning About Stability.** These pages describe machinery that lives in
-`zephon/_internal/` , which is explicitly not part of the public API. The layout and the
+`zephon/_internal/`, which is explicitly not part of the public API. The layout and the
 signatures in there change without notice, and we will not keep them stable for you. What
 *is* stable is the contract that the machinery implements, and that is what we have tried
-to write down here. Where a page names a class or a function inside `_internal` , treat it
+to write down here. Where a page names a class or a function inside `_internal`, treat it
 as a pointer to the code rather than as something to import. The exception is [WorkSources
 and Work Chunks](worksources_and_work_chunks.md), which documents a public interface,
 because `zephon.work` is something you are meant to implement against.

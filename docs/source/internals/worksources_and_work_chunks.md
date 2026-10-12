@@ -12,12 +12,11 @@ a `WorkSource` bound to a given lane produces the same pointers in the same orde
 given seed. Everything downstream is a deterministic function of that.
 
 Unlike most of what this section covers, `WorkSource` and `WorkChunk` are public API. They
-live in `zephon.work` , not in `zephon/_internal/` . You need them if you want a
-curriculum that the built-in static mixture cannot express.
+live in `zephon.work`, not in `zephon/_internal/`. You need them if you want a curriculum
+that the built-in static mixture cannot express.
 
-## The Contract
-
-The engine only ever calls a handful of methods, and they fall into four groups.
+**The Contract.** The engine only ever calls a handful of methods, and they fall into four
+groups.
 
 **Chunk production.** `next_chunk()` returns the next `WorkChunk` for this source's lane,
 or `None` when the source is exhausted. Everything else in the interface exists to support
@@ -34,13 +33,13 @@ order, would produce a different numbering on a rank that happens to see a rare 
 later. Emitting a component that was never declared raises.
 
 **Lane binding.** Before pulling any chunks, the engine clones the source once per lane it
-owns with `clone_for_lane(lane_id, canonical_replicas)` , and each clone produces only the
+owns with `clone_for_lane(lane_id, canonical_replicas)`, and each clone produces only the
 chunks assigned to its lane. The default implementation deep-copies, so a subclass has to
 be deepcopy-safe or override the method. The clone is bound once and refuses to be cloned
 again, and the original instance is never used to produce chunks.
 
 **Checkpointing.** `state_dict()` and `load_state_dict()` serialize whatever drives
-`next_chunk()` . What goes in is entirely up to the implementation. The one hard
+`next_chunk()`. What goes in is entirely up to the implementation. The one hard
 requirement is that restoring from a saved state and then calling `next_chunk()` produces
 the same sequence as if the source had never been interrupted. The base class stores the
 lane identity and refuses a restore whose `lane_id` or `canonical_replicas` does not
@@ -58,16 +57,14 @@ the workers are forked. The token-aware mixture uses it to measure a tokens-per-
 by actually tokenizing a sample of the data. A restore skips the measurement and keeps the
 checkpointed ratios, so a tokenizer upgrade cannot silently shift the mixture mid-run.
 
-`supports_indexing()` , `__len__()` and `sample_id_at(index)` let a source back a
-map-style dataset. Together with a plan whose operators are all `indexable` , they are
-what `Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves them
-raising `NotImplementedError` , and `Pipeline.is_indexable` reports `False` .
+`supports_indexing()`, `__len__()` and `sample_id_at(index)` let a source back a map-style
+dataset. Together with a plan whose operators are all `indexable`, they are what
+`Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves them raising
+`NotImplementedError`, and `Pipeline.is_indexable` reports `False`.
 
-## Work Chunks
-
-A `WorkChunk` is the unit of work that travels from the source to the engine. It is a
-bundle of sample *pointers* grouped by mixture component, with no payloads and nothing
-read from storage yet:
+**Work Chunks.** A `WorkChunk` is the unit of work that travels from the source to the
+engine. It is a bundle of sample *pointers* grouped by mixture component, with no payloads
+and nothing read from storage yet:
 
 ```python
 WorkChunk(
@@ -89,10 +86,10 @@ emitter tracks a per-component deficit and always emits from whichever component
 furthest behind its target share. The point is that the mixture holds not just across the
 chunk as a whole but approximately across every prefix of it. A consumer that stops early,
 or a chunk that is only partly delivered before a checkpoint, therefore still sees roughly
-the right proportions. The alternative mode, `weighted_random` , samples a component per
+the right proportions. The alternative mode, `weighted_random`, samples a component per
 draw instead and gets the ratio right only in expectation.
 
-The traversal is described by `MixtureReadConfig` : the mode, a seed, whether to shuffle
+The traversal is described by `MixtureReadConfig`: the mode, a seed, whether to shuffle
 within a component, and whether to materialize the whole order up front instead of
 streaming it. The engine iterates chunks with the defaults, which are smooth weighted
 round robin, the chunk's own seed, components in their stored order, and streaming rather
@@ -108,21 +105,18 @@ contribute fewer pointers for the same token share.
 
 Chunks are also the granularity at which the engine tracks progress, which is what keeps
 checkpoints small. Only the chunks currently in flight are saved and replayed, never the
-whole history. [Chunks Are The Unit Of
-State](records_and_sample_lifecycles.md#chunks-are-the-unit-of-state) covers that side of
-it.
+whole history. {ref}`Chunks Are The Unit Of State <chunks-are-the-unit-of-state>` covers
+that side of it.
 
-## Filling A Chunk
-
-`StaticMixtureWorkSource` is the only implementation that ships with Zephon. Filling a
-chunk is two steps: decide how many pointers each component contributes, then pull that
-many from each component's cursor.
+**Filling A Chunk.** `StaticMixtureWorkSource` is the only implementation that ships with
+Zephon. Filling a chunk is two steps: decide how many pointers each component contributes,
+then pull that many from each component's cursor.
 
 **Quota allocation** is the first step, and the default strategy is incremental rather
 than fixed. Each component carries an accumulator. Every chunk adds `weight * chunk_size`
 to it, takes the integer part as that component's base quota, and leaves the fractional
 remainder behind. A largest-remainder correction then forces the quotas to sum to exactly
-`chunk_size` . The part that matters is what happens next: each correction is debited back
+`chunk_size`. The part that matters is what happens next: each correction is debited back
 into the accumulator, so a component that got rounded up this chunk is correspondingly
 behind on the next one. Accumulators may go briefly negative after a `+1` correction and
 recover as the next chunk's share is added. Negative accumulators sort last in the
@@ -133,7 +127,7 @@ with weight 0.001 and `chunk_size=16384` draws 16 pointers from most chunks and 
 some, instead of being rounded to a fixed 16 forever and drifting from its target.
 
 Two other strategies exist. A **token-aware** strategy replaces sample quotas with token
-quotas when the source is built with a `TokenEstimation` , so the weights describe the
+quotas when the source is built with a `TokenEstimation`, so the weights describe the
 share of *tokens* each component contributes rather than the share of documents. A
 **legacy fixed** strategy computes quotas once at construction, gives every component at
 least one slot per chunk, and distributes the remainder by largest remainder. It exists so
@@ -158,12 +152,12 @@ active, a block-sized buffer is added on top. Nothing anywhere scales with the t
 sample count, which is the property that lets a run start against a multi-billion-sample
 catalogue without a materialization step.
 
-## Chunk-To-Lane Routing
+(chunk-to-lane-routing)=
 
-Each lane's clone has to work out which chunks are *its* chunks, and it does this without
-asking anyone. The clone enumerates the **global** chunk schedule, the same sequence every
-other lane enumerates, assigns each global chunk index to a lane, keeps the chunks that
-map to its own lane, and discards the rest.
+**Chunk-To-Lane Routing.** Each lane's clone has to work out which chunks are *its*
+chunks, and it does this without asking anyone. The clone enumerates the **global** chunk
+schedule, the same sequence every other lane enumerates, assigns each global chunk index
+to a lane, keeps the chunks that map to its own lane, and discards the rest.
 
 ```python
 # The shape of StaticMixtureWorkSource.next_chunk()
@@ -184,14 +178,14 @@ same answer locally. Coordination happens only at checkpoint time, through the a
 directory.
 
 **The mapping is permuted, not modular.** The obvious assignment is
-`g % canonical_replicas` , and it is available as `lane_assignment="modulo"` , but it is
-not the default, because it resonates badly with the allocator. A rare component is
-emitted roughly every `1 / weight` chunks, and when that period shares a factor with
+`g % canonical_replicas`, and it is available as `lane_assignment="modulo"`, but it is not
+the default, because it resonates badly with the allocator. A rare component is emitted
+roughly every `1 / weight` chunks, and when that period shares a factor with
 `canonical_replicas` the component lands on only `gcd(period, canonical_replicas)` of the
 lanes, so the rest never see it at all. A downstream gate waiting on that component, such
-as a strict `ensure_mixture` , then stalls on the starved lanes.
+as a strict `ensure_mixture`, then stalls on the starved lanes.
 
-`lane_assignment="permute"` , the default, routes each block of `canonical_replicas`
+`lane_assignment="permute"`, the default, routes each block of `canonical_replicas`
 consecutive chunks through a seeded permutation of the lanes:
 
 ```
@@ -203,18 +197,16 @@ canonical_replicas = 4, modulo:          canonical_replicas = 4, permute:
 ```
 
 Every block still hands each lane exactly one chunk, so load balance and the exactly-once
-property are untouched, and the permutation is a pure function of `(seed, block)` , so
+property are untouched, and the permutation is a pure function of `(seed, block)`, so
 replay is unaffected. A periodic emitter now sprays the lanes roughly uniformly instead of
 hitting the same few. The block seed composes integers rather than hashing a tuple,
 because `hash()` is not stable across processes unless `PYTHONHASHSEED` is pinned, and a
 data order that depends on an environment variable is not a data order.
 
-## Why The Schedule Is Not Pre-Computed
-
-Most distributed loaders materialize the full sample order up front: build a permutation
-of every index, shard it across ranks, iterate. That works when the dataset size and the
-rank count are both known before training starts, and it makes "skip to 73% of the epoch"
-a one-line operation.
+**Why The Schedule Is Not Pre-Computed.** Most distributed loaders materialize the full
+sample order up front: build a permutation of every index, shard it across ranks, iterate.
+That works when the dataset size and the rank count are both known before training starts,
+and it makes "skip to 73% of the epoch" a one-line operation.
 
 A `WorkSource` is a streaming generator instead. It produces chunks on demand and never
 holds the whole sequence, and three things follow from that.
