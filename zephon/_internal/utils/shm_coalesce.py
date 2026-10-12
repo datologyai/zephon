@@ -1222,10 +1222,11 @@ def _extract_record_payload(payload: Any, plan: _BufferPlan) -> Any:
 def _extract_from_records(
     items: list[StreamItem], plan: _BufferPlan
 ) -> list[tuple[SampleRecord, Any]]:
-    """Extract tensors from records without mutating payloads yet.
+    """Extract payload descriptors from records without mutating payloads yet.
 
     Returns (record, descriptor) pairs. The caller commits the descriptors
-    only after shared-buffer allocation succeeds.
+    after the buffer plan finishes preparing inline values and shared
+    storage, including any allocation fallback.
     """
     descriptors: list[tuple[SampleRecord, Any]] = []
     for item in items:
@@ -1382,9 +1383,12 @@ class _ShmLeafPayload(LazyPayload):
 
 @dataclass(slots=True)
 class ShmLazyPayload(LazyPayload):
-    """SHM-backed deferred payload — flat slots + pytree spec + SHM buffer refs.
+    """Deferred payload — flat slots + pytree spec + referenced SHM buffers.
 
-    Created on unpickle (main process).  Resolved explicitly via
+    Slots hold inline values or shared-buffer descriptors. Inline-only
+    payloads have no SHM buffer refs.
+
+    Created on unpickle. Resolved explicitly via
     :func:`resolve_lazy_payloads` in the worker process before
     ``process_many()``, or on the pump thread for accumulators that
     declare ``reads_payload = True``.
@@ -1395,7 +1399,7 @@ class ShmLazyPayload(LazyPayload):
     _buffers: dict[str, Any]  # shared ref keeps SHM alive via refcounting
 
     def resolve_payload(self) -> SamplePayload:
-        """Materialize the full payload by replacing slots with SHM views."""
+        """Materialize the full payload from inline values and shared-buffer slots."""
         restored = _resolve_slots(self._slots, self._buffers)
         return cast(SamplePayload, optree.tree_unflatten(self._spec, restored))
 
@@ -1426,10 +1430,11 @@ def _reconstruct_struct(slot: _StructSlot, fields_dict: dict[str, Any]) -> Any:
 
 
 def _resolve_slots(slots: list[Any], buffers: dict[str, Any]) -> list[Any]:
-    """Replace slot placeholders with zero-copy views into SHM buffers.
+    """Restore slot placeholders from inline data or shared buffers.
 
-    Each slot becomes a tensor/ndarray/bytes view backed by the coalesced
-    SHM buffer, or a reconstructed struct for ``_StructSlot``.
+    Shared slots use views where supported; inline slots reconstruct their
+    stored values. Structured slots rebuild their fields, and ordinary leaves
+    pass through unchanged.
     """
     return [
         item.restore(buffers) if isinstance(item, _LeafDescriptor) else item
@@ -1530,8 +1535,9 @@ def prepare_microbatch(
     destination. Existing lazy payloads are already prepared.
 
     Uses a two-pass approach: extraction first collects descriptors without
-    mutating payloads, then commits only after SHM allocation succeeds or
-    optional replacement falls back to the source views.
+    mutating payloads, then commits after the buffer plan completes. Values
+    may travel inline, use new SHM allocations, or retain existing storage
+    when optional replacement fails.
     """
     if _get_torch() is None:
         return PreparedMicrobatch(items, {})

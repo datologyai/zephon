@@ -112,10 +112,13 @@ class _DecodeAndAnnotateBatchOp(BaseOp):
         )
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        from zephon._internal.utils.shm_coalesce import _ShmBytes
+
         batch_size = len(elems)
         out: list[SampleRecord] = []
         for elem in elems:
             payload = dict(elem.payload)
+            assert isinstance(payload["text"], _ShmBytes)
             payload["text"] = payload["text"].decode("utf-8")
             payload["batch_size"] = batch_size
             out.append(SampleRecord(meta=elem.meta, payload=payload))
@@ -138,13 +141,16 @@ def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        memory_policy=PayloadMemoryPolicy(coalesce=True),
+        memory_policy=PayloadMemoryPolicy(
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
     )
     try:
         data = list(range(30))
         out = list(runner.run(iter(_mk_records(data))))
         assert _extract_values(out) == data
         for expected, rec in zip(data, out, strict=True):
+            assert rec.payload["tensor"].is_shared()
             assert int(rec.payload["tensor"][0]) == expected
     finally:
         runner.close()
@@ -241,7 +247,9 @@ def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() 
         max_workers=4,
         deterministic=True,
         stage_output_mode="stream_items",
-        memory_policy=PayloadMemoryPolicy(coalesce=True),
+        memory_policy=PayloadMemoryPolicy(
+            min_item_bytes=0, min_new_allocation_bytes=0, min_forward_bytes=0
+        ),
     )
     try:
         out = list(runner.run(iter(_mk_records(range(7)))))
