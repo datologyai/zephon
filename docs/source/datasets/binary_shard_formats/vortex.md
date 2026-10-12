@@ -10,7 +10,8 @@ read more about the Vortex format's structure in the
 [project's documentation](https://docs.vortex.dev/).
 
 **Preparing Vortex Shards.** To use the Vortex format with Zephon, install the project
-with the `vortex` extra, which requires `vortex-data>=0.88.0` and Python >= 3.11:
+with the `vortex` extra which includes the `vortex-data` dependency (note that Vortex
+requires Python >= 3.11):
 
 ```{literalinclude} ../../../../examples/guide/datasets/vortex_install.sh
 :language: bash
@@ -41,10 +42,6 @@ without requiring Zephon to load each Vortex shard individually:
 :language: bash
 :caption: examples/guide/datasets/vortex_index.sh
 ```
-
-Without an index, Zephon reads each shard's footer through the configured storage
-backend, including for remote paths, using the backend's existing credentials. Small
-files may fit entirely in the footer read, but discovery never scans sample rows.
 
 **Reading Vortex Shards in Zephon.** Once the Vortex files have been written, you can
 define a `Dataset` object by passing the dataset location and the `fmt="vortex"` argument
