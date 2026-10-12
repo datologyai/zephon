@@ -172,6 +172,7 @@ class VortexShard(RandomAccessShard):
             index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
             positions = map(index_to_pos.__getitem__, indices)
 
+        # Native ranges avoid converting Python index lists through Arrow.
         contiguous = sorted_unique[-1] - sorted_unique[0] + 1 == len(sorted_unique)
         selected = (
             range(sorted_unique[0], sorted_unique[-1] + 1)
@@ -182,34 +183,31 @@ class VortexShard(RandomAccessShard):
             batch = self._file.scan(
                 indices=_require_vortex().array(selected)
             ).read_all()
-            if contiguous:
-                pa = require_pyarrow()
-                if self._export_type is None:
-                    export_type = _list_view_type(self._file.dtype.to_arrow_type(), pa)
-                    self._export_type = export_type
-                    self._text_only = all(
-                        pa.types.is_string(field.type)
-                        or pa.types.is_large_string(field.type)
-                        or pa.types.is_string_view(field.type)
-                        or pa.types.is_binary(field.type)
-                        or pa.types.is_large_binary(field.type)
-                        or pa.types.is_binary_view(field.type)
-                        for field in export_type
-                    )
-                if self._text_only and len(sorted_unique) == 1:
-                    # Scalar access avoids exporting a whole string dictionary.
-                    row = batch.scalar_at(0).as_py()
-                    if row is not None:
-                        return samples_from_columns(
-                            {name: [value] for name, value in row.items()}, positions
-                        )
-                    # Null structs need Arrow's per-field null conversion.
-                # ListView export trims unselected child values before decoding.
-                arrow_table = pa.Table.from_struct_array(
-                    batch.to_arrow_array(arrow_type=self._export_type)
+            pa = require_pyarrow()
+            if self._export_type is None:
+                export_type = _list_view_type(self._file.dtype.to_arrow_type(), pa)
+                self._export_type = export_type
+                self._text_only = all(
+                    pa.types.is_string(field.type)
+                    or pa.types.is_large_string(field.type)
+                    or pa.types.is_string_view(field.type)
+                    or pa.types.is_binary(field.type)
+                    or pa.types.is_large_binary(field.type)
+                    or pa.types.is_binary_view(field.type)
+                    for field in export_type
                 )
-            else:
-                arrow_table = batch.to_arrow_table()
+            if self._text_only and len(sorted_unique) == 1:
+                # Scalar access avoids exporting a whole string dictionary.
+                row = batch.scalar_at(0).as_py()
+                if row is not None:
+                    return samples_from_columns(
+                        {name: [value] for name, value in row.items()}, positions
+                    )
+                # Null structs need Arrow's per-field null conversion.
+            # ListView export can trim unselected child values before decoding.
+            arrow_table = pa.Table.from_struct_array(
+                batch.to_arrow_array(arrow_type=self._export_type)
+            )
         return arrow_table_to_samples(arrow_table, positions)
 
 
