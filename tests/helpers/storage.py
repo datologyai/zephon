@@ -293,13 +293,11 @@ def _install_obstore_stubs(monkeypatch) -> dict:
 
 
 class MemoryStorage(StorageBackend):
-    """An authenticated backend stand-in; no native format reader can access it."""
+    """In-memory files for isolated index-builder tests."""
 
     def __init__(self, root: str, files: dict[str, bytes]) -> None:
         self.root = root
         self.files = {f"{root}/{name}": data for name, data in files.items()}
-        self.read_bytes = 0
-        self.opened: list[str] = []
 
     def walk(self, path: str) -> Iterator[tuple[str, int]]:
         prefix = path.rstrip("/") + "/"
@@ -307,34 +305,9 @@ class MemoryStorage(StorageBackend):
             if name.startswith(prefix):
                 yield name[len(prefix) :], len(data)
 
-    def exists(self, path: str) -> bool:
-        return path in self.files
-
-    def canonical_root(self, path: str, fmt: str | None = None) -> str:
-        return path
-
-    def listdir(self, path: str) -> list[str]:
-        return [name for name, _ in self.walk(path) if "/" not in name]
-
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
-        self.opened.append(path)
         data = self.files[path]
         return io.BytesIO(data) if "b" in mode else io.StringIO(data.decode("utf-8"))
-
-    def read_range(
-        self,
-        path: str,
-        start: int,
-        *,
-        end: int | None = None,
-        length: int | None = None,
-    ) -> bytes:
-        if length is not None:
-            assert end is None
-            end = start + length
-        data = self.files[path][start:end]
-        self.read_bytes += len(data)
-        return data
 
     def put(self, path: str, data: bytes) -> None:
         self.files[path] = data
