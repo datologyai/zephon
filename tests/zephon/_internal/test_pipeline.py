@@ -24,5 +24,3 @@ def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
     assert pipe._options.max_workers is None
     assert pipe._options.shm_min_item_bytes == 456
     assert pipe._options.shm_coalesce
-    with pytest.raises(ValueError, match="shm_coalesce cannot be None"):
-        pipe.options(shm_coalesce=None)

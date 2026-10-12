@@ -33,16 +33,14 @@ DEFAULT_RUN_ID = "default_run_id"
 _UNSET_SHM_OPTION = object()
 
 
-def _validate_shm_options(hints: dict[str, Any]) -> None:
-    """Validate SHM keywords for ``RuntimeOptions()`` and ``Pipeline.options()``."""
+def _reject_removed_shm_options(hints: dict[str, Any]) -> None:
+    """Reject removed SHM option names with their replacements."""
     for old, new in (
         ("shm_min_size", "shm_min_item_bytes"),
         ("coalesce_tensors", "shm_coalesce"),
     ):
         if hints.get(old, _UNSET_SHM_OPTION) is not _UNSET_SHM_OPTION:
             raise TypeError(f"'{old}' is no longer supported. Use '{new}' instead.")
-        if new in hints and hints[new] is None:
-            raise ValueError(f"{new} cannot be None")
 
 
 @dataclass
@@ -228,10 +226,8 @@ class RuntimeOptions:
     metrics_sink_config: MetricsSinkConfig | None = None
 
     def __post_init__(self, coalesce_tensors: object, shm_min_size: object) -> None:
-        _validate_shm_options(
+        _reject_removed_shm_options(
             {
-                "shm_coalesce": self.shm_coalesce,
-                "shm_min_item_bytes": self.shm_min_item_bytes,
                 "coalesce_tensors": coalesce_tensors,
                 "shm_min_size": shm_min_size,
             }

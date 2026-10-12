@@ -313,10 +313,18 @@ def test_payload_memory_policy_options_reach_process_stages() -> None:
         assert stage.memory_policy.compact_above_ratio == 4
         assert stage.memory_policy.compact_min_savings_bytes == 1024
         assert stage.memory_policy.max_coalesced_bytes == 8192
-    with pytest.raises(ValueError, match="shm_compact_above_ratio"):
-        resolve_runtime_spec(
-            _mk_plan((1, 1, 1)), RuntimeOptions(shm_compact_above_ratio=0.5)
-        )
+
+
+def test_payload_memory_policy_values_are_validated_at_resolution() -> None:
+    plan = _mk_plan((1, 1, 1))
+    for name, value in (
+        ("shm_min_item_bytes", None),
+        ("shm_coalesce", None),
+        ("shm_compact_above_ratio", 0.5),
+    ):
+        opts = RuntimeOptions(**{name: value})
+        with pytest.raises(ValueError, match=name):
+            resolve_runtime_spec(plan, opts)
 
 
 def test_disabled_shm_bypasses_the_entire_process_policy() -> None:

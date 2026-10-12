@@ -29,6 +29,3 @@ def test_shm_options_store_only_canonical_fields() -> None:
     assert {"shm_min_size", "coalesce_tensors"}.isdisjoint(
         f.name for f in fields(options)
     )
-    for name in ("shm_min_item_bytes", "shm_coalesce"):
-        with pytest.raises(ValueError, match=f"{name} cannot be None"):
-            RuntimeOptions(**{name: None})
