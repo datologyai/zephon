@@ -95,9 +95,30 @@ def test_boolean_lists_unpack_to_readonly_numpy() -> None:
         pa.array([[{"a": 1, "b": "x"}], None, []]),
         pa.array([[[1, 2], [3]], None, []]),
         pa.array([["a", "b"], None, ["c", "d"]], type=pa.list_(pa.string(), 2)),
+        pa.array([["a", "b"], None, []], type=pa.list_view(pa.string())),
+        pa.array(
+            [[{"a": 1}], None, []],
+            type=pa.large_list_view(pa.struct([("a", pa.int32())])),
+        ),
+        pa.array(
+            [[[1, None], [2]], None, []], type=pa.list_view(pa.list_view(pa.int64()))
+        ),
+        pa.array([[[1], [2]], None, []], type=pa.list_(pa.list_view(pa.int64()))),
+        pa.array(
+            [[[1], [2]], None, [[3], []]], type=pa.list_(pa.list_view(pa.int64()), 2)
+        ),
+        pa.ListViewArray.from_arrays([2, 0, 1], [2, 2, 2], ["a", "b", "c", "d"]),
+        pa.array(
+            [{"items": ["a", None]}, None, {"items": []}],
+            type=pa.struct([("items", pa.list_view(pa.string()))]),
+        ),
+        pa.array(
+            [[[0], [0]], [[1], [2]], None, [[3], []]],
+            type=pa.list_(pa.list_view(pa.int64()), 2),
+        ).slice(1),
     ],
 )
-def test_nonnumeric_lists_skip_per_row_numeric_conversion(
+def test_nonnumeric_columns_skip_per_row_numeric_conversion(
     array: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def reject_numeric(*_args: Any) -> None:
@@ -145,12 +166,13 @@ def test_row_order_across_different_column_chunk_boundaries() -> None:
 @pytest.mark.parametrize("dtype", [pa.int16(), pa.uint64(), pa.float32()])
 def test_single_numeric_column_returns_typed_scalars(dtype: Any) -> None:
     rows = arrow_table_to_samples(pa.table({"value": pa.array([1, 2], type=dtype)}))
-    assert all(isinstance(value, np.generic) for value in rows)
+    assert all(isinstance(row["value"], np.generic) for row in rows)
     assert all(
-        value.dtype == pa.array([], type=dtype).to_numpy(zero_copy_only=False).dtype
-        for value in rows
+        row["value"].dtype
+        == pa.array([], type=dtype).to_numpy(zero_copy_only=False).dtype
+        for row in rows
     )
-    assert rows == [1, 2]
+    assert rows == [{"value": 1}, {"value": 2}]
 
 
 @pytest.mark.parametrize(
@@ -162,11 +184,11 @@ def test_single_numeric_column_returns_typed_scalars(dtype: Any) -> None:
         pa.array([{"x": 1}, None, {"x": 2}]),
     ],
 )
-def test_single_column_returns_its_value(array: Any) -> None:
+def test_single_column_preserves_field_name(array: Any) -> None:
     rows = arrow_table_to_samples(pa.table({"value": array}))
     expected = array.to_pylist()
-    assert rows == expected
-    assert [type(value) for value in rows] == [type(value) for value in expected]
+    assert rows == [{"value": value} for value in expected]
+    assert [type(row["value"]) for row in rows] == [type(value) for value in expected]
 
 
 def test_single_numeric_list_column_keeps_readonly_views_after_table_release() -> None:
@@ -176,25 +198,27 @@ def test_single_numeric_list_column_keeps_readonly_views_after_table_release() -
     rows = arrow_table_to_samples(table, [2, 0, 2, 1])
     del table, array
     gc.collect()
-    assert [row.tolist() for row in rows] == [[3], [1, 2], [3], []]
-    assert all(row.dtype == np.uint32 and not row.flags.writeable for row in rows)
-    assert np.shares_memory(rows[0], source)
-    assert np.shares_memory(rows[0], rows[2])
+    assert [row["tokens"].tolist() for row in rows] == [[3], [1, 2], [3], []]
+    assert all(
+        row["tokens"].dtype == np.uint32 and not row["tokens"].flags.writeable
+        for row in rows
+    )
+    assert np.shares_memory(rows[0]["tokens"], source)
+    assert np.shares_memory(rows[0]["tokens"], rows[2]["tokens"])
 
 
-@pytest.mark.parametrize("multiple_columns", [False, True])
-def test_duplicate_mutable_fallbacks_are_independent(multiple_columns: bool) -> None:
-    fields = {"nested": pa.array([[{"x": [1, None]}], [{"x": [2]}]])}
-    if multiple_columns:
-        fields["tokens"] = pa.array([[1, 2], [3]], type=pa.list_(pa.int32()))
+def test_duplicate_mutable_fallbacks_are_independent() -> None:
+    fields = {
+        "nested": pa.array([[{"x": [1, None]}], [{"x": [2]}]]),
+        "tokens": pa.array([[1, 2], [3]], type=pa.list_(pa.int32())),
+    }
     rows = arrow_table_to_samples(pa.table(fields), [0, 1, 0])
-    first = rows[0]["nested"] if multiple_columns else rows[0]
-    duplicate = rows[2]["nested"] if multiple_columns else rows[2]
+    first = rows[0]["nested"]
+    duplicate = rows[2]["nested"]
     first[0]["x"][0] = 99
     assert duplicate == [{"x": [1, None]}]
-    if multiple_columns:
-        assert np.shares_memory(rows[0]["tokens"], rows[2]["tokens"])
-        assert not rows[2]["tokens"].flags.writeable
+    assert np.shares_memory(rows[0]["tokens"], rows[2]["tokens"])
+    assert not rows[2]["tokens"].flags.writeable
 
 
 def test_nullable_integers_never_pass_through_float() -> None:
@@ -216,11 +240,13 @@ def test_nullable_integers_never_pass_through_float() -> None:
 def test_parquet_take_retains_selection_but_returns_readonly_arrays() -> None:
     table = pa.table({"tokens": pa.array([[1, 2], [3, 4]], type=pa.list_(pa.int32()))})
     rows = take_and_materialize(table, [1, 0, 1])
-    assert [row.tolist() for row in rows] == [[3, 4], [1, 2], [3, 4]]
-    assert all(not row.flags.writeable for row in rows)
-    assert not np.shares_memory(rows[0], table.column(0).chunk(0).values.to_numpy())
+    assert [row["tokens"].tolist() for row in rows] == [[3, 4], [1, 2], [3, 4]]
+    assert all(not row["tokens"].flags.writeable for row in rows)
+    assert not np.shares_memory(
+        rows[0]["tokens"], table.column(0).chunk(0).values.to_numpy()
+    )
     with pytest.raises(ValueError, match="read-only"):
-        rows[0][0] = 99
+        rows[0]["tokens"][0] = 99
 
 
 def test_empty_column_and_empty_selection() -> None:

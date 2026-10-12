@@ -80,7 +80,7 @@ def _read_shared_payload_in_child(
             local_indices=[2, 0],
             decode=forbidden_decode,
         )
-        output.put(([int(row) for row in rows], cache.stats()["hits"]))
+        output.put(([int(row["value"]) for row in rows], cache.stats()["hits"]))
 
 
 def test_build_then_call_scoped_mmap_hit_avoids_decode(tmp_path: Path) -> None:
@@ -137,7 +137,7 @@ def test_unreadable_ready_payload_warns_and_rebuilds(
         rows = cache.get_or_decode(slot=0, local_indices=[1], decode=decode)
         stats = cache.stats()
 
-    assert int(rows[0]) == 20
+    assert int(rows[0]["value"]) == 20
     assert decodes == 2
     assert stats["corruptions"] == 1
     assert any(
@@ -182,7 +182,7 @@ def test_same_rg_waiter_reuses_one_publisher(
                         slot=0,
                         local_indices=[0],
                         decode=decode,
-                    )[0]
+                    )[0]["value"]
                 )
             )
         )
@@ -203,7 +203,7 @@ def test_same_rg_waiter_reuses_one_publisher(
                         slot=0,
                         local_indices=[1],
                         decode=decode,
-                    )[0]
+                    )[0]["value"]
                 )
             )
         )

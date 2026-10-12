@@ -85,7 +85,7 @@ def test_vortex_caps_threads_at_initialization_only(
             for _ in range(2):
                 shard = VortexShard(root / "data.vortex")
                 try:
-                    assert shard[0] == 1
+                    assert shard[0] == {"value": 1}
                 finally:
                     shard.close()
             cap.assert_called_once_with(1)
@@ -245,12 +245,12 @@ def test_vortex_single_row_shard(tmp_path: Path, write_vortex: Any) -> None:
 
     shard = VortexShard(p)
     assert len(shard) == 1
-    assert shard[0] == "row"
+    assert shard[0] == {"only": "row"}
 
     # getsamples with single item
     result = shard.getsamples([0])
     assert len(result) == 1
-    assert result[0] == "row"
+    assert result[0] == {"only": "row"}
 
     # Out of bounds
     with pytest.raises(IndexError):
@@ -277,7 +277,7 @@ def test_contiguous_read_limits_the_decoded_list_values(
     finally:
         shard.close()
     for index, row in zip(indices, rows):
-        values = row
+        values = row["tokens"]
         np.testing.assert_array_equal(values, tokens[index])
         assert values.dtype == np.uint32
         assert not values.flags.writeable
@@ -334,7 +334,10 @@ def test_nullable_native_struct_uses_arrow_table_row_semantics(
     # Vortex 0.88's file statistics writer rejects nullable root structs. Feed a
     # real native nullable array through the reader to exercise conversion alone.
     file = SimpleNamespace(dtype=source.dtype, scan=scan)
-    monkeypatch.setattr(vortex_format, "_open_vortex_file", lambda *_args: file)
+    metadata = vortex_format._VortexMetadata(None, source.dtype.to_arrow_type(), True)
+    monkeypatch.setattr(
+        vortex_format, "_open_vortex_file", lambda *_args: (file, metadata)
+    )
     shard = VortexShard(tmp_path / "nullable.vortex", length=len(source))
     try:
         rows = shard.getsamples([1, 1])
@@ -428,13 +431,13 @@ def test_nullable_scalar_single_and_bulk_exports_agree(
         single = shard[0]
         contiguous = shard.getsamples([0, 1, 2])
         sparse = shard.getsamples([2, 0])
-        assert shard[1] is None
+        assert shard[1] == {"value": None}
     finally:
         shard.close()
-    assert contiguous[1] is None
+    assert contiguous[1] == {"value": None}
     for value in (single, contiguous[0], sparse[1]):
-        assert type(value) is np.uint64
-        assert value == maximum
+        assert type(value["value"]) is np.uint64
+        assert value["value"] == maximum
 
 
 class _RangeOnlyStorage(StorageBackend):
@@ -643,10 +646,14 @@ def test_opener_retains_only_enabled_caches(
     monkeypatch: pytest.MonkeyPatch,
     metadata_entries: int,
     segment_bytes: int,
+    pa: Any,
 ) -> None:
-    """Cache options control native arguments and footer reuse across readers."""
+    """Cache options control footer/schema reuse and native segment arguments."""
+    to_arrow_type = mock.Mock(return_value=pa.struct([("value", pa.int64())]))
     native_open = mock.Mock(
-        side_effect=lambda *_args, **_kwargs: SimpleNamespace(footer=object())
+        side_effect=lambda *_args, **_kwargs: SimpleNamespace(
+            footer=object(), dtype=SimpleNamespace(to_arrow_type=to_arrow_type)
+        )
     )
     segment_cache = mock.Mock()
     make_cache = mock.Mock(return_value=segment_cache)
@@ -678,6 +685,7 @@ def test_opener_retains_only_enabled_caches(
             reader.close()
         calls = native_open.call_args_list
         assert len(calls) == 4  # A footer miss must not open the file twice.
+        assert to_arrow_type.call_count == (3 if metadata_entries else 4)
         assert ["footer" in call.kwargs for call in calls] == [
             False,
             bool(metadata_entries),

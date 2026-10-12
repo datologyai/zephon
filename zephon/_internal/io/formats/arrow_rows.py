@@ -15,9 +15,7 @@ Conversion decisions, applied to each column chunk independently::
     |   `-- Other elements / variable-size nesting -> Python list
     `-- Other types -> Arrow's Python values (str, bytes, bool, dict, ...)
 
-    Assemble each requested row
-    +-- One column -> value directly
-    `-- Multiple columns -> {column_name: value}
+    Assemble each requested row -> {column_name: value}
 
 Chunks are converted separately to avoid concatenating numeric buffers. Numeric
 arrays use read-only NumPy views where possible, avoiding Python objects for each
@@ -31,7 +29,7 @@ copy. Duplicate rows share read-only arrays but own their mutable Python contain
 from __future__ import annotations
 
 import threading
-from typing import Any, Iterable, Mapping, cast
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
@@ -90,20 +88,18 @@ def samples_from_columns(
     # Ranges cannot repeat positions.
     if not isinstance(positions, range):
         positions = list(positions)
-    if len(columns) == 1:
-        values = next(iter(columns.values()))
-        samples = [values[pos] for pos in positions]
-    else:
-        samples = [
-            {name: values[pos] for name, values in columns.items()} for pos in positions
-        ]
+    # TODO(MaxiBoether): Consider unwrapping single-column payloads once packing
+    # and other downstream ops support bare values.
+    samples: list[SamplePayload] = [
+        {name: values[pos] for name, values in columns.items()} for pos in positions
+    ]
     if not isinstance(positions, range):
         seen: set[int] = set()
         for output, pos in enumerate(positions):
             if pos in seen:
                 samples[output] = _copy_containers(samples[output])
             seen.add(pos)
-    return cast("list[SamplePayload]", samples)
+    return samples
 
 
 def _copy_containers(value: Any) -> Any:
@@ -149,6 +145,66 @@ def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
     return None
 
 
+def _lists_for_python(array: Any, pa: Any) -> Any:
+    """Compact list views into ordinary lists for Arrow's Python conversion."""
+    kind = array.type
+    mask = array.is_null() if array.null_count else None
+    if pa.types.is_struct(kind):
+        children = [_lists_for_python(array.field(i), pa) for i in range(len(kind))]
+        if all(child.type == field.type for child, field in zip(children, kind)):
+            return array
+        return pa.StructArray.from_arrays(
+            children,
+            fields=[
+                field.with_type(child.type) for field, child in zip(kind, children)
+            ],
+            mask=mask,
+        )
+    if pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind):
+        # Flatten follows sizes and offsets, including gaps, overlaps and nulls.
+        values = _lists_for_python(array.flatten(), pa)
+        sizes = array.sizes.to_numpy(zero_copy_only=False)
+        if mask is not None:
+            sizes = np.where(mask.to_numpy(zero_copy_only=False), 0, sizes)
+        offsets = np.empty(len(array) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(sizes, dtype=np.int64, out=offsets[1:])
+        return pa.LargeListArray.from_arrays(
+            offsets,
+            values,
+            type=pa.large_list(kind.value_field.with_type(values.type)),
+            mask=mask,
+        )
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        values = _lists_for_python(array.values, pa)
+        if values.type == kind.value_type:
+            return array
+        large = pa.types.is_large_list(kind)
+        return (pa.LargeListArray if large else pa.ListArray).from_arrays(
+            array.offsets,
+            values,
+            type=(pa.large_list if large else pa.list_)(
+                kind.value_field.with_type(values.type)
+            ),
+            mask=mask,
+        )
+    if pa.types.is_fixed_size_list(kind):
+        values = _lists_for_python(
+            array.values.slice(
+                array.offset * kind.list_size, len(array) * kind.list_size
+            ),
+            pa,
+        )
+        if values.type == kind.value_type:
+            return array
+        return pa.FixedSizeListArray.from_arrays(
+            values,
+            type=pa.list_(kind.value_field.with_type(values.type), kind.list_size),
+            mask=mask,
+        )
+    return array
+
+
 def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
     """Convert one Arrow chunk to per-row values."""
     kind = array.type
@@ -167,10 +223,13 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
             return [
                 number if present else None for number, present in zip(numbers, valid)
             ]
+        if pa.types.is_struct(kind):
+            array = _lists_for_python(array, pa)
         return array.to_pylist()
 
     if not _is_numeric_type(kind.value_type, pa):
-        return array.to_pylist()
+        # Arrow converts ordinary lists to Python much faster than list views.
+        return _lists_for_python(array, pa).to_pylist()
 
     numbers = _numeric_values(array.values, pa)
     if numbers is None:

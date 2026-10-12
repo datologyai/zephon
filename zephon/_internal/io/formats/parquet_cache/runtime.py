@@ -100,13 +100,14 @@ def build_parquet_cache_runtime(
     """Build the cache and shared opener used by one multi-dataset store."""
     global _legacy_environment_warned
 
+    entries = options.cache.metadata_cache_entries
     decoded = options.resolved_parquet_rg_cache()
     if decoded.enabled is not True or catalog_set is None:
         return ParquetCacheRuntime(
             opener=ParquetShardOpener(
                 decoded_cache=None,
                 index=None,
-                metadata_cache_entries=options.cache.metadata_cache_entries,
+                metadata_cache_entries=entries,
             ),
             cache=None,
         )
@@ -117,7 +118,7 @@ def build_parquet_cache_runtime(
             opener=ParquetShardOpener(
                 decoded_cache=None,
                 index=None,
-                metadata_cache_entries=options.cache.metadata_cache_entries,
+                metadata_cache_entries=entries,
             ),
             cache=None,
         )
@@ -172,7 +173,7 @@ def build_parquet_cache_runtime(
         opener=ParquetShardOpener(
             decoded_cache=cache,
             index=index,
-            metadata_cache_entries=options.cache.metadata_cache_entries,
+            metadata_cache_entries=entries,
         ),
         cache=cache,
     )

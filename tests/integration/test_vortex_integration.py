@@ -75,7 +75,7 @@ def test_store_reuses_caches_across_fetch_groups(
             shard, _ = store.for_dataset(dataset_id).open(0)
             for indices in ([2, 0, 2], [1]):
                 rows, _ = shard.getsamples(indices)
-                assert rows == [dataset_id * 10 + index for index in indices]
+                assert rows == [{"value": dataset_id * 10 + index} for index in indices]
                 if len(indices) > 1:
                     # Re-downloading identical bytes keeps the immutable shard's key.
                     path = paths[-1]
@@ -152,7 +152,7 @@ def test_native_open_eviction_is_retried(
     try:
         indices = [1, 0, 1]
         actual, stats = shard.getsamples(indices)
-        assert actual == [rows[index]["value"] for index in indices]
+        assert actual == [rows[index] for index in indices]
         assert all(item.retries == 1 for item in stats)
         assert resolver.calls == opens == 2
     finally:

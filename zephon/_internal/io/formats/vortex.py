@@ -77,36 +77,51 @@ def _read_vortex_row_count(path: str, storage: StorageBackend, size: int) -> int
     return len(_require_vortex().open_readable(reader, without_segment_cache=True))
 
 
+@dataclass(frozen=True)
+class _VortexMetadata:
+    """Footer and Arrow export schema shared across readers of one file."""
+
+    footer: Any
+    export_type: Any
+    text_only: bool
+
+
 def _open_vortex_file(
     path: Path,
-    metadata_cache: MetadataCache[str, Any] | None,
+    metadata_cache: MetadataCache[str, _VortexMetadata],
     segment_cache: Any | None,
-) -> Any:
+) -> tuple[Any, _VortexMetadata]:
     """Open a reader using the store's footer and segment caches."""
     vortex = _require_vortex()
-    if metadata_cache is None and segment_cache is None:
-        return vortex.open(str(path), without_segment_cache=True)
     key = file_cache_key(path)
     options: dict[str, Any] = (
         {"segment_cache": segment_cache, "cache_key": key}
         if segment_cache is not None
         else {"without_segment_cache": True}
     )
-    if metadata_cache is None:
-        return vortex.open(str(path), **options)
-
     file = None
 
-    def load_footer() -> Any:
+    def load_metadata() -> _VortexMetadata:
         nonlocal file
         file = vortex.open(str(path), **options)
-        return file.footer
+        pa = require_pyarrow()
+        export_type = _list_view_type(file.dtype.to_arrow_type(), pa)
+        text_only = all(
+            pa.types.is_string(field.type)
+            or pa.types.is_large_string(field.type)
+            or pa.types.is_string_view(field.type)
+            or pa.types.is_binary(field.type)
+            or pa.types.is_large_binary(field.type)
+            or pa.types.is_binary_view(field.type)
+            for field in export_type
+        )
+        return _VortexMetadata(file.footer, export_type, text_only)
 
-    footer = metadata_cache.get_or_load(key, load_footer)
+    metadata = metadata_cache.get_or_load(key, load_metadata)
     # Reuse the reader opened on a footer-cache miss.
-    return (
-        file if file is not None else vortex.open(str(path), footer=footer, **options)
-    )
+    if file is None:
+        file = vortex.open(str(path), footer=metadata.footer, **options)
+    return file, metadata
 
 
 @contextmanager
@@ -131,15 +146,19 @@ class VortexShard(RandomAccessShard):
         path: Path,
         *,
         length: int | None = None,
-        metadata_cache: MetadataCache[str, Any] | None = None,
+        metadata_cache: MetadataCache[str, _VortexMetadata] | None = None,
         segment_cache: Any | None = None,
     ) -> None:
         self._path = path
+        if metadata_cache is None:
+            metadata_cache = MetadataCache(0)
         with _local_io_errors(path):
-            self._file = _open_vortex_file(path, metadata_cache, segment_cache)
+            self._file, metadata = _open_vortex_file(
+                path, metadata_cache, segment_cache
+            )
         self._length = length if length is not None else len(self._file)
-        self._export_type: Any | None = None
-        self._text_only = False
+        self._export_type = metadata.export_type
+        self._text_only = metadata.text_only
 
     def __getitem__(self, index: int) -> "SamplePayload":
         return self.getsamples([index])[0]
@@ -150,6 +169,7 @@ class VortexShard(RandomAccessShard):
     def close(self) -> None:
         self._file = None
         self._export_type = None
+        self._text_only = False
 
     def getsamples(self, indices: list[int]) -> list["SamplePayload"]:
         """Bulk read rows in request order, preserving duplicate indices."""
@@ -183,19 +203,6 @@ class VortexShard(RandomAccessShard):
             batch = self._file.scan(
                 indices=_require_vortex().array(selected)
             ).read_all()
-            pa = require_pyarrow()
-            if self._export_type is None:
-                export_type = _list_view_type(self._file.dtype.to_arrow_type(), pa)
-                self._export_type = export_type
-                self._text_only = all(
-                    pa.types.is_string(field.type)
-                    or pa.types.is_large_string(field.type)
-                    or pa.types.is_string_view(field.type)
-                    or pa.types.is_binary(field.type)
-                    or pa.types.is_large_binary(field.type)
-                    or pa.types.is_binary_view(field.type)
-                    for field in export_type
-                )
             if self._text_only and len(sorted_unique) == 1:
                 # Scalar access avoids exporting a whole string dictionary.
                 row = batch.scalar_at(0).as_py()
@@ -205,6 +212,7 @@ class VortexShard(RandomAccessShard):
                     )
                 # Null structs need Arrow's per-field null conversion.
             # ListView export can trim unselected child values before decoding.
+            pa = require_pyarrow()
             arrow_table = pa.Table.from_struct_array(
                 batch.to_arrow_array(arrow_type=self._export_type)
             )
@@ -248,10 +256,8 @@ class VortexShardOpener:
 
     def __init__(self, options: "StoreOptions") -> None:
         vortex = _require_vortex()
-        self._metadata_cache = (
-            MetadataCache[str, Any](options.cache.metadata_cache_entries)
-            if options.cache.metadata_cache_entries
-            else None
+        self._metadata_cache = MetadataCache[str, _VortexMetadata](
+            options.cache.metadata_cache_entries
         )
         self._segment_cache = (
             vortex.SegmentCache(options.vortex.segment_cache_bytes)
@@ -272,8 +278,7 @@ class VortexShardOpener:
 
     def close(self) -> None:
         """Clear the store's Vortex caches."""
-        if self._metadata_cache is not None:
-            self._metadata_cache.clear()
+        self._metadata_cache.clear()
         if self._segment_cache is not None:
             self._segment_cache.clear()
 

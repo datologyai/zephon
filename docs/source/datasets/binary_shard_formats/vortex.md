@@ -58,14 +58,15 @@ reads the `.vortex` files directly without requiring an extra, decompressed copy
 shard to be created.
 
 Vortex and Parquet share the same [sample payload contract](../parquet.md#sample-payloads).
-A single top-level column returns its value directly; multiple columns return a
-dictionary. Numeric arrays are read-only NumPy arrays with their original dtype and
+Each sample is a dictionary keyed by column name, including single-column files.
+Numeric arrays are read-only NumPy arrays with their original dtype and
 fixed-size shape, and remain valid after the reader closes. Numeric lists containing
 null elements use a Python-list fallback. Call `.copy()` before mutating an array.
 
 **Read caches.** Each fetch replica has a footer cache (256 entries by default) and an
 encoded-segment cache (64 MiB target), shared across its Vortex readers. These are
-independent of Zephon's on-disk shard cache. The segment cache reuses encoded bytes;
+independent of Zephon's on-disk shard cache. Footer entries also retain the derived
+Arrow export schema. The segment cache reuses encoded bytes;
 it does not retain decoded samples.
 
 Configure them through the pipeline's `io_options`:

@@ -35,6 +35,8 @@ class MetadataCache(Generic[_Key, _Value]):
 
     def get_or_load(self, key: _Key, load: Callable[[], _Value]) -> _Value:
         """Return retained metadata, or load and retain it on a miss."""
+        if self._max_entries == 0:
+            return load()
         with self._lock:
             if key in self._entries:
                 self._entries.move_to_end(key)

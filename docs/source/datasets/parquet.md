@@ -61,12 +61,9 @@ cache has its own configuration and budget.
 
 ## Sample payloads
 
-Parquet and Vortex use the same Arrow-to-sample conversion. A file with one top-level
-column returns that column's value directly: a `tokens` column returns an array,
-and a `text` column returns a string. Two or more columns return a dictionary keyed
-by column name. Adding a second column therefore changes the payload structure.
-Operations requiring named fields can wrap the payload explicitly with a transform,
-such as `lambda tokens: {"tokens": tokens}`.
+Parquet and Vortex use the same Arrow-to-sample conversion. Each sample is a dictionary
+keyed by column name, including files with only one column. A missing value stays within
+its field, for example `{"tokens": None}`.
 
 Numeric lists without null elements return read-only NumPy arrays, preserving dtype
 and fixed-size nested shapes. Conversion shares Arrow buffers where possible; boolean
@@ -77,6 +74,8 @@ copies, so consumers must not rely on writability after transport.
 
 Present numeric scalars retain their NumPy dtype even alongside null values. Strings,
 bytes, and scalar booleans are Python values. A missing value remains `None`.
+Other scalar types follow Arrow's Python conversion; for example, `timestamp[us]`
+values become `datetime.datetime` objects.
 Lists containing null elements or variable-length nesting return Python lists:
 `[1, None]` preserves missingness and `[[1, 2], [3]]` preserves uneven nesting.
 Mutable fallback containers are independent for duplicate requests.

@@ -527,14 +527,14 @@ def test_single_column_samples_survive_close(tmp_path: Path) -> None:
         rows = shard.getsamples([3, 1, 0, 3, 2])
     finally:
         shard.close()
-    assert single.tolist() == [1, 2]
-    assert rows[1] is None
+    assert single["tokens"].tolist() == [1, 2]
+    assert rows[1] == {"tokens": None}
     for row, expected in zip(
         (rows[0], rows[2], rows[3], rows[4]), ([3], [1, 2], [3], []), strict=True
     ):
-        assert row.dtype == np.uint32
-        assert not row.flags.writeable
-        assert row.tolist() == expected
+        assert row["tokens"].dtype == np.uint32
+        assert not row["tokens"].flags.writeable
+        assert row["tokens"].tolist() == expected
 
 
 def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:

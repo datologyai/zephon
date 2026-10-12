@@ -104,12 +104,13 @@ def test_single_column_values_survive_mapping_close(tmp_path: Path) -> None:
     destination.unlink()
     for row, index in zip(rows, [1, 0, 1, 2], strict=True):
         expected = array[index].as_py()
-        if isinstance(row, np.ndarray):
-            assert row.tolist() == expected
-            assert row.dtype == np.uint32
-            assert not row.flags.writeable
+        value = row["value"]
+        if isinstance(value, np.ndarray):
+            assert value.tolist() == expected
+            assert value.dtype == np.uint32
+            assert not value.flags.writeable
         else:
-            assert row == expected
+            assert value == expected
 
 
 def test_measurement_mismatch_removes_private_temp(tmp_path: Path) -> None:
