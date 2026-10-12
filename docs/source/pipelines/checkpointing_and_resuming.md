@@ -89,7 +89,9 @@ or regroup records, like those that need to shuffle or pack, it means the chunks
 processed since the most recent flush, so the `flush_every_k_chunks` setting also limits
 how much work a restore operation has to redo. The
 [How pipelines run](how_pipelines_run.md) page describes this mechanism and the tradeoffs
-involved with it in more detail.
+involved with it in more detail, and
+[Checkpoint Replay and Bounded Recovery](../internals/checkpoint_replay.md) covers what a
+checkpoint actually contains and how a restore rebuilds operator state from it.
 
 **Checkpointing in distributed training jobs.** In distributed training, each rank sees
 only a portion of the overall job's data loading progress, so Zephon combines the progress

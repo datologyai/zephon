@@ -150,6 +150,9 @@ partitioned among the data-parallel groups the current run has:
 :caption: examples/guide/pipelines/canonical_replicas.py
 ```
 
+[Elastic Determinism](../internals/elastic_determinism.md) explains how lanes are fed, how
+their outputs are recombined, and exactly which pieces of state survive a topology change.
+
 With `canonical_replicas=8`, a run with 8 data-parallel groups assigns one lane to each
 group, while a run with 4 data-parallel groups assigns two lanes to each of them. As long
 as `canonical_replicas` stays the same, the run can be restored on a different `dp_degree`

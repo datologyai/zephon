@@ -8,8 +8,10 @@ to be both surprisingly useful and tricky to get right.
 The best place to start is :doc:`basic_concepts`, which introduces the ``Dataset``,
 ``WorkSource``, and ``Pipeline`` abstractions that the rest of this guide walks through
 in turn. If you want to know even more about why we built Zephon (and why you might care
-about the order your data arrives in), :doc:`why_zephon` has you covered. The API
-reference documents the public classes and functions that the guide refers to.
+about the order your data arrives in), :doc:`why_zephon` has you covered. The
+Internals section opens Zephon up and describes the machinery behind the guarantees the
+guide makes, and the API reference documents the public classes and functions that the
+guide refers to.
 
 .. toctree::
    :maxdepth: 2
@@ -24,22 +26,9 @@ reference documents the public classes and functions that the guide refers to.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Understanding Zephon
+   :caption: Internals
 
-   understanding/worksources
-   understanding/sample_lifecycle
-   understanding/checkpointing
-   understanding/distributed_training
-   understanding/determinism
-   understanding/accumulators_operators
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Developer Resources
-
-   guides/dev_guide
-   guides/prefetch_op
-   guides/sample_lifecycle
+   internals/index
 
 .. toctree::
    :maxdepth: 1
