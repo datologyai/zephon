@@ -83,6 +83,14 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.prefetch:PrefetchOp",
         }
     ),
+    # Inspect native thread pools inside real fetch workers after reader setup.
+    "tests/integration/test_reader_options.py": frozenset(
+        {
+            "zephon._internal:pipeline",
+            "zephon._internal.ops.fetch:FetchOp",
+            "zephon._internal.stream:EngineSample",
+        }
+    ),
     # The standalone op is an independent oracle for the pipeline path.
     "tests/integration/test_tokenize_chat_pipeline.py": frozenset(
         {"zephon._internal.ops.tokenize_chat:TokenizeChat"}
