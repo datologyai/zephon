@@ -42,14 +42,6 @@ If you have existing infrastructure for writing out Parquet files using distribu
 processing frameworks like Spark or Ray, you might want to write out an `index.json` file
 while creating the dataset.
 
-**Caching Metadata.** Zephon caches up to 256 Parquet footers per fetch replica to avoid
-rereading metadata. You can change this with
-`pipeline.options(io_options={"metadata_cache_entries": 256})`; set the limit
-to zero to disable it. The same setting applies independently to Vortex. This cache is
-separate from the shard and row-group caches, and is unaffected by `cache.enabled`.
-Footer size grows with columns × row groups, so wide files with many row groups can
-need a much smaller entry limit. Each fetch replica has its own limit.
-
 **Reading Parquet in Zephon**
 
 ```{literalinclude} ../../../examples/guide/datasets/parquet_dataset.py
@@ -59,87 +51,59 @@ need a much smaller entry limit. Each fetch replica has its own limit.
 
 ## Sample payloads
 
-Parquet and Vortex return each sample as a dictionary keyed by column name, even for
-single-column files. Missing values are represented by `None`.
+Each sample is a dictionary keyed by column name, even for single-column files.
+Parquet and Vortex use the same conversion rules for top-level columns:
 
-Top-level numeric list columns become read-only NumPy arrays, preserving their dtype
-and fixed-size nested shapes. Call `.copy()` if you need to modify them. This applies
-to the thread runner and Torch-backed process transport, which preserves the
-read-only flag without an extra reader-side copy. Without Torch, the process runner
-uses ordinary NumPy pickling and received arrays can be writable. Lists with null
-elements or variable-length nesting remain
-Python lists, such as `[1, None]` or `[[1, 2], [3]]`. Numeric lists inside structs also
-remain Python lists: `struct{ids: list<int>}` becomes `{"ids": [1, 2]}`.
+| Stored value | Sample value |
+| --- | --- |
+| Missing value | `None` |
+| Integer or floating-point scalar | NumPy scalar preserving its dtype |
+| Timestamp or date | `np.datetime64` |
+| Duration | `np.timedelta64` |
+| String, bytes, boolean, or decimal | Python `str`, `bytes`, `bool`, or `decimal.Decimal` |
+| Numeric list without null elements | Read-only NumPy array preserving dtype and fixed-size nested shapes |
+| List with null elements or variable-length nesting | Python list preserving `None` and nesting |
+| Struct | Dictionary, with nested values converted to Python types |
 
-Top-level integer and floating-point scalars retain their NumPy dtype. Timestamp and
-date scalars are `np.datetime64`, and duration scalars are `np.timedelta64`, preserving
-the stored unit and nanosecond precision without requiring pandas. Timezone-bearing
-timestamps represent the UTC instant; NumPy scalars do not carry the timezone name.
-Missing values remain `None`. Other values use Arrow's Python conversion, including
-`str`, `bytes`, Python `bool`, and `decimal.Decimal`. Dictionary-encoded strings return
-strings. Values nested inside structs or variable-length lists use Python conversion.
-
-`torch.from_numpy()` can warn about read-only arrays. Other tensor conversion helpers
-may use that same path; a tensor sharing this storage must not be modified in place.
-
-Compared with the earlier Parquet reader, the shared conversion changes these values:
-
-| Value | Earlier Parquet output | Shared conversion |
-| --- | --- | --- |
-| Numeric list without inner nulls | Writable NumPy array | Read-only NumPy array |
-| Numeric list containing null elements | NumPy array | Python list preserving `None` |
-| Missing floating-point scalar | `NaN` | `None` |
-| Boolean scalar | `np.bool_` | Python `bool` |
-| Variable nested numeric list | Object array of arrays | Nested Python lists |
-| Numeric list inside a struct | NumPy array inside a dictionary | Python list inside a dictionary |
-
-Timestamp and date scalars retain their NumPy representation.
+Call `.copy()` if you need to modify a numeric array. Numeric lists inside structs
+remain Python lists. Temporal scalars preserve their stored units and precision;
+timezone-bearing timestamps represent the UTC instant without retaining the timezone name.
 
 ## Reader configuration
 
-Parquet read behavior and the decoded row-group cache are
-configured together. Arrow's CPU and I/O pools have separate settings because they
-are also used by Vortex and Arrow-backed LitData chunks:
+**Caching Reads.** Zephon caches up to 256 Parquet footers in memory per fetch replica.
+The `metadata_cache_entries` option controls this limit for both Parquet and Vortex;
+zero disables it. Wide files with many row groups have larger footers and may need a
+smaller limit.
+
+The decoded row-group cache avoids repeatedly decoding the same data. It stores files
+locally and shares them across fetch processes on the same machine. It is enabled with
+the shard cache by default; use `parquet.rg_cache` to change its location or size, or
+set `enabled=False` to disable it. For example:
 
 ```python
-from zephon.io import ArrowOptions, ParquetOptions, ParquetRGCacheOptions, StoreOptions
-
 pipeline.options(
-    io_options=StoreOptions(
-        arrow=ArrowOptions(cpu_threads=1, io_threads=1),
-        parquet=ParquetOptions(
-            use_threads=False,
-            rg_cache=ParquetRGCacheOptions(
-                enabled=True,
-                root="/mnt/local/zephon-parquet-cache",
-                limit_bytes=4 * 1024**3,
-            ),
-        ),
-    )
+    io_options={
+        "metadata_cache_entries": 256,
+        "parquet": {"rg_cache": {"limit_bytes": "4gb"}},
+    }
 )
 ```
 
-The thread settings shown are the defaults. With `use_threads=False`, each fetch
-thread decodes its Parquet columns sequentially; separate fetches can still decode
-concurrently. Set `use_threads=True` to let a read decode columns through Arrow's CPU
-pool. Increasing `arrow.cpu_threads` alone does not enable this per-read parallelism.
-The same choice applies to direct reads and decoded-cache misses.
+**Worker Threads.** Arrow's CPU and I/O pools are shared within each process, including
+by other formats that use Arrow. Zephon defaults both pools to one thread to avoid
+multiplying thread counts across fetch processes and training ranks. Parquet also
+reads columns sequentially by default; separate fetches can still run concurrently.
+These are the defaults:
 
-Arrow pool sizes are process-wide, shared by all stores and formats in that process.
-They are applied when readers are set up, including inside process workers; importing
-a format or doing discovery alone does not resize them. The process runner currently
-also sets up operator copies in the driver, so building that pipeline configures the
-driver's pools as well. An explicit `None` leaves
-that pool unchanged. Different stores cannot have independent pool sizes: the last
-applied count wins, and closing a store does not restore an earlier count. Increasing
-pool sizes can multiply CPU demand across fetch processes or training ranks, including
-ranks that each use the thread runner.
+```python
+pipeline.options(
+    io_options={
+        "arrow": {"cpu_threads": 1, "io_threads": 1},
+        "parquet": {"use_threads": False},
+    }
+)
+```
 
-Dictionary options use the same nesting, for example
-`{"parquet": {"use_threads": False, "rg_cache": {"limit_bytes": "4gb"}}}`.
-The previous top-level `parquet_rg_cache` setting has moved to `parquet.rg_cache`;
-the `ParquetRGCacheOptions` class is unchanged. The older `cache.rg_cache_bytes` alias
-still works with a deprecation warning. `ZEPHON_PARQUET_ARROW_THREADS` is deprecated
-and only supplies pool counts omitted from `ArrowOptions`; explicit counts or `None`
-take precedence. Setting an entire options section to `None` resets that section to
-Zephon's defaults, rather than leaving its individual pools unchanged.
+Set `parquet.use_threads=True` to decode columns through Arrow's CPU pool. Increasing
+`arrow.cpu_threads` alone does not enable parallel column decoding.
