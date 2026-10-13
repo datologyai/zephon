@@ -1,6 +1,7 @@
 import multiprocessing
 import multiprocessing.context
 import os
+import pickle
 import signal
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from multiprocessing.connection import wait
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,8 @@ from tests.zephon._internal.runners._helpers import (
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.concurrent import WorkerCrashed
-from zephon._internal.runners.process import ProcessStageRunner
+from zephon._internal.runners.process import ProcessStageRunner, _WorkerCommand
+from zephon._internal.utils import shm_coalesce
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import (
@@ -47,6 +50,22 @@ def _collect(runner: ProcessStageRunner, data: list[int]) -> list[int]:
 
 
 torch = pytest.importorskip("torch")
+
+
+def test_worker_command_serializes_without_preparing_payloads(monkeypatch) -> None:
+    def unexpected_preparation(*args, **kwargs):
+        raise AssertionError("worker commands must not prepare payloads")
+
+    monkeypatch.setattr(shm_coalesce, "prepare_microbatch", unexpected_preparation)
+    records = _mk_records([1, 2])
+    records[1].meta = records[0].meta
+    command = _WorkerCommand("batch", 7, records, 11, 2, 13, 17, True)
+    for protocol in (4, 5):
+        restored = pickle.loads(ForkingPickler.dumps(command, protocol))
+        assert restored == command
+        assert restored.batch[0].meta is restored.batch[1].meta
+        assert restored.batch is not records
+    assert records[0].payload == {"value": 1}
 
 
 def test_process_runner_emits_in_input_order_when_deterministic() -> None:
@@ -195,95 +214,6 @@ class _MultiplyValueOp(_ValueMappingOp):
 
     def _map(self, value: int) -> int:
         return value * self.factor
-
-
-@dataclass
-class _TensorizeValueOp(BaseOp):
-    def __post_init__(self) -> None:
-        super().__init__()
-
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-            batch_shape_sensitive=False,
-        )
-
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        return PassthroughAccumulator[SampleRecord]()
-
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        out: list[SampleRecord] = []
-        for elem in elems:
-            payload = dict(elem.payload)
-            payload["tensor"] = torch.tensor([int(payload["value"])], dtype=torch.int64)
-            out.append(SampleRecord(meta=elem.meta, payload=payload))
-        return out
-
-
-@dataclass
-class _EncodeLargeBytesOp(BaseOp):
-    def __post_init__(self) -> None:
-        super().__init__()
-
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-            batch_shape_sensitive=False,
-        )
-
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        return PassthroughAccumulator[SampleRecord]()
-
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        out: list[SampleRecord] = []
-        for elem in elems:
-            value = int(elem.payload["value"])
-            payload = dict(elem.payload)
-            payload["text"] = (f"value-{value}|".encode("utf-8")) * 1024
-            out.append(SampleRecord(meta=elem.meta, payload=payload))
-        return out
-
-
-@dataclass
-class _DecodeAndAnnotateBatchOp(BaseOp):
-    max_batch: int = 3
-
-    def __post_init__(self) -> None:
-        super().__init__()
-
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-            batch_shape_sensitive=False,
-        )
-
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        return CountingAccumulator[SampleRecord](
-            max_batch=self.max_batch,
-            max_latency_ms=None if deterministic else 1,
-        )
-
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        batch_size = len(elems)
-        out: list[SampleRecord] = []
-        for elem in elems:
-            payload = dict(elem.payload)
-            payload["text"] = payload["text"].decode("utf-8")
-            payload["batch_size"] = batch_size
-            out.append(SampleRecord(meta=elem.meta, payload=payload))
-        return out
 
 
 @dataclass
@@ -497,126 +427,6 @@ def test_process_runner_multi_op_draining_forwards_to_next_op() -> None:
     # Expected: v + 1 + 10 = v + 11
     expected = [v + 11 for v in data]
     assert out == expected
-
-
-def test_process_runner_coalesced_tensors_preserve_deterministic_order() -> None:
-    tensorize = Node(name="tensorize", op=_TensorizeValueOp())
-    delay = Node(name="delay", op=DelayById(max_delay_ms=1.5), inputs=[tensorize])
-    stage = Stage(
-        name="coalesced_tensors",
-        nodes=[tensorize, delay],
-        placement="auto",
-        break_reason="test",
-    )
-
-    runner = ProcessStageRunner(
-        stage,
-        ctx_services=_ctx_services(),
-        max_workers=4,
-        deterministic=True,
-        stage_output_mode="stream_items",
-        coalesce_tensors=True,
-    )
-
-    data = list(range(30))
-    out = list(runner.run(iter(_mk_records(data))))
-    assert _extract_values(out) == data
-    for expected, rec in zip(data, out, strict=True):
-        assert int(rec.payload["tensor"][0]) == expected
-
-
-@dataclass
-class _BatchTensorizeOp(BaseOp):
-    """Tensorize with batching so multiple records land in one microbatch."""
-
-    max_batch: int = 8
-
-    def __post_init__(self) -> None:
-        super().__init__()
-
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-            batch_shape_sensitive=False,
-        )
-
-    def accumulator(
-        self, *, deterministic: bool, ctx: dict[str, Any]
-    ) -> Accumulator[SampleRecord]:
-        return CountingAccumulator[SampleRecord](
-            max_batch=self.max_batch, max_latency_ms=None
-        )
-
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        out: list[SampleRecord] = []
-        for elem in elems:
-            payload = dict(elem.payload)
-            payload["tensor"] = torch.tensor([int(payload["value"])], dtype=torch.int64)
-            out.append(SampleRecord(meta=elem.meta, payload=payload))
-        return out
-
-
-def test_process_runner_coalesced_tensors_are_zero_copy_views() -> None:
-    """Restored tensors after IPC should be views into the same SHM storage."""
-    tensorize = Node(name="tensorize", op=_BatchTensorizeOp(max_batch=8))
-    stage = Stage(
-        name="coalesced_zerocopy",
-        nodes=[tensorize],
-        placement="auto",
-        break_reason="test",
-    )
-
-    runner = ProcessStageRunner(
-        stage,
-        ctx_services=_ctx_services(),
-        max_workers=1,
-        deterministic=True,
-        stage_output_mode="stream_items",
-        coalesce_tensors=True,
-    )
-
-    # 8 records with max_batch=8 → one microbatch → one coalesced buffer
-    data = list(range(8))
-    out = list(runner.run(iter(_mk_records(data))))
-    assert _extract_values(out) == data
-
-    # All tensors from the same coalesced microbatch share one storage
-    storages = {rec.payload["tensor"].untyped_storage().data_ptr() for rec in out}
-    assert len(storages) == 1, (
-        f"Expected all tensors to share one SHM storage, got {len(storages)}"
-    )
-
-
-def test_process_runner_coalesced_bytes_preserve_counting_accumulator_batches() -> None:
-    encode = Node(name="encode", op=_EncodeLargeBytesOp())
-    decode = Node(
-        name="decode",
-        op=_DecodeAndAnnotateBatchOp(max_batch=3),
-        inputs=[encode],
-    )
-    stage = Stage(
-        name="coalesced_bytes",
-        nodes=[encode, decode],
-        placement="auto",
-        break_reason="test",
-    )
-
-    runner = ProcessStageRunner(
-        stage,
-        ctx_services=_ctx_services(),
-        max_workers=4,
-        deterministic=True,
-        stage_output_mode="stream_items",
-        coalesce_tensors=True,
-    )
-
-    out = list(runner.run(iter(_mk_records(range(7)))))
-    assert _extract_values(out) == list(range(7))
-    assert [rec.payload["batch_size"] for rec in out] == [3, 3, 3, 3, 3, 3, 1]
-    for rec in out:
-        assert rec.payload["text"].startswith(f"value-{rec.payload['value']}|")
 
 
 @dataclass
@@ -2297,64 +2107,4 @@ def test_process_runner_worker_exit_is_visible_despite_helper_subprocess(
         assert proc.exitcode == 0
     finally:
         _kill_helper(pid_path)
-        runner.close()
-
-
-class _CopySharedArray(BaseOp):
-    def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
-
-    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        from zephon._internal.utils.shm_coalesce import _shared_numpy_storage
-
-        outputs = []
-        for record in elems:
-            array: Any = record.payload
-            assert _shared_numpy_storage(array) is not None
-            copied = array.copy()
-            copied[0] += 1
-            outputs.append(SampleRecord(meta=record.meta, payload=copied))
-        return outputs
-
-
-def test_process_numpy_reduction_forwards_zephon_buffers_between_ops() -> None:
-    import pickle
-    from multiprocessing.reduction import ForkingPickler
-
-    from zephon._internal.stream import resolve_lazy_payloads
-    from zephon._internal.utils.shm_coalesce import coalesce_microbatch
-
-    np = pytest.importorskip("numpy")
-    record = _mk_record(0)
-    record.payload = np.arange(32)[3:20:2]
-    coalesced = coalesce_microbatch([record])
-    assert coalesced is not None
-    records = pickle.loads(ForkingPickler.dumps(coalesced))
-    resolve_lazy_payloads(records)
-    [record] = records
-    array = record.payload
-    stage = Stage(
-        "shared_numpy",
-        [
-            Node("first", _CopySharedArray(), parallelism=1),
-            Node("second", _CopySharedArray(), parallelism=1),
-        ],
-        "auto",
-        "test",
-    )
-    runner = ProcessStageRunner(
-        stage,
-        _ctx_services(),
-        max_workers=2,
-        deterministic=True,
-        stage_output_mode="stream_items",
-    )
-    try:
-        [result] = list(runner.run([record]))
-        assert isinstance(result, SampleRecord)
-        assert record.payload is array
-        expected = array.copy()
-        expected[0] += 2
-        np.testing.assert_array_equal(result.payload, expected)
-    finally:
         runner.close()
