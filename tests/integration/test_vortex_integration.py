@@ -84,7 +84,9 @@ def test_vortex_discovery_index_roundtrip(
     assert discovered.total() == 5
     assert len(discovered) == 5
     target = tmp_path / "custom-index.json"
-    assert build_index("vortex", tmp_path, output_path=target, progress=False) == target
+    assert build_index("vortex", tmp_path, output_path=target, progress=False) == str(
+        target
+    )
     index = json.loads(target.read_text())
     assert [shard["basename"] for shard in index["shards"]] == ["a.vortex", "b.vortex"]
     assert [shard["num_rows"] for shard in index["shards"]] == [2, 3]

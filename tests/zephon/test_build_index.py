@@ -29,7 +29,7 @@ def test_build_index_delegates(monkeypatch):
             progress=progress,
             max_workers=max_workers,
         )
-        return Path("/idx/index.json")
+        return "/idx/index.json"
 
     monkeypatch.setattr(bi, "_create_index", fake_create_index)
 
@@ -43,7 +43,7 @@ def test_build_index_delegates(monkeypatch):
         "progress": True,
         "max_workers": 2,
     }
-    assert str(result) == "/idx/index.json"
+    assert result == "/idx/index.json"
 
 
 def test_build_index_imports_jsonl_builder(monkeypatch):
@@ -53,7 +53,7 @@ def test_build_index_imports_jsonl_builder(monkeypatch):
     monkeypatch.setattr(
         bi,
         "_create_index",
-        lambda *_args, **_kwargs: Path("/idx/index.json"),
+        lambda *_args, **_kwargs: "/idx/index.json",
     )
 
     bi.build_index("jsonl", "/data")
@@ -64,6 +64,30 @@ def test_build_index_imports_jsonl_builder(monkeypatch):
 def test_build_index_unknown_format_raises():
     with pytest.raises(ValueError):
         bi.build_index("no_such_format", "/data")
+
+
+@pytest.mark.parametrize("path_input", [False, True])
+@pytest.mark.parametrize("output", ["default", "path", "str"])
+def test_build_index_local_output_is_string(
+    tmp_path: Path, path_input: bool, output: str
+) -> None:
+    (tmp_path / "data.jsonl").write_text('{"i": 0}\n', encoding="utf-8")
+    target = tmp_path / ("index.json" if output == "default" else "custom.json")
+    output_path: str | Path | None = None
+    if output == "path":
+        output_path = target
+    elif output == "str":
+        output_path = str(target)
+
+    result = bi.build_index(
+        "jsonl",
+        tmp_path if path_input else str(tmp_path),
+        output_path=output_path,
+        progress=False,
+    )
+
+    assert result == str(target)
+    assert json.loads(target.read_text(encoding="utf-8"))["shards"][0]["num_rows"] == 1
 
 
 def test_cli_prints_public_usage_and_exits(monkeypatch, capsys):

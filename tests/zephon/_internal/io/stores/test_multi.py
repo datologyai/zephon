@@ -7,22 +7,27 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
+from tests._catalog_helpers import catalog_set_from_locators
+from tests.helpers.storage import MemoryStorage
 from zephon._internal.io.catalog import CatalogSet
 from zephon._internal.io.formats.base import ShardOpener
 from zephon._internal.io.formats.jsonl import JsonlFormat
 from zephon._internal.io.resolvers.cache.manager import CacheManager
 from zephon._internal.io.resolvers.direct import DirectResolver
+from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.stores import multi as multi_store
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import (
     build_catalog_set,
     build_multi_dataset_store,
+    build_resolver,
     build_resolver_with_locators,
     finalize_dataset_catalogs,
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
+from zephon._internal.io.types import ShardFile, ShardLocator
 from zephon._internal.utils.disk import InsufficientCacheSpaceError
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
@@ -75,6 +80,47 @@ def test_build_multi_dataset_store_unknown_backend_kind_raises(tmp_path: Path) -
     ds = Dataset(name="x", backend={"kind": "unknown"}, path=str(tmp_path))
     with pytest.raises(ValueError):
         _ = build_multi_dataset_store({0: ds})
+
+
+@pytest.mark.parametrize(
+    "root", ["s3://bucket/data", "gs://bucket/data", "hf://datasets/org/repo"]
+)
+@pytest.mark.parametrize("explicit_storage", [False, True])
+def test_remote_root_requires_shard_cache(
+    tmp_path: Path, root: str, explicit_storage: bool
+) -> None:
+    # Include a local dataset first: every catalog root must be checked.
+    catalogs = catalog_set_from_locators(
+        [
+            ShardLocator(
+                dataset=name,
+                shard_id=0,
+                format="jsonl",
+                root=path,
+                raw=ShardFile("data.jsonl", 2, {}),
+            )
+            for name, path in (("local", str(tmp_path)), ("remote", root))
+        ],
+        tmp_path / "catalogs",
+    )
+    storage = MemoryStorage(root, {}) if explicit_storage else None
+
+    with pytest.raises(ValueError, match=r"set cache\.enabled=True") as exc:
+        build_resolver(
+            catalogs,
+            options=StoreOptions(cache=CacheOptions(enabled=False)),
+            storage=storage,
+        )
+    assert root in str(exc.value)
+
+
+def test_nonlocal_storage_requires_shard_cache() -> None:
+    with pytest.raises(ValueError, match=r"set cache\.enabled=True"):
+        build_resolver(
+            None,
+            options=StoreOptions(cache=CacheOptions(enabled=False)),
+            storage=RouterStorageBackend(),
+        )
 
 
 def test_build_multi_dataset_store_mixed_inmem_and_file_backed(tmp_path: Path) -> None:
