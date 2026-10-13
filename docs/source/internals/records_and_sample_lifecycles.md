@@ -39,8 +39,7 @@ training loop has already consumed and the ones it has not. During a run, Zephon
 `(chunk_id, chunk_offset)` prefix, which we call the **base offset**, to decide when a
 chunk has been fully consumed and its memory can be released.
 
-**What an operator does to the record count.** Four cases exhaust it, and which one you
-are in decides everything the rest of this page asks of you:
+Operators can have different relationships between input and output:
 
 | Cardinality | What happens | Examples |
 |---|---|---|
