@@ -5,7 +5,6 @@
 
 import multiprocessing as mp
 from dataclasses import dataclass, field
-from functools import wraps
 from typing import Any, Literal
 
 from zephon._internal.utils.ipc import (
@@ -29,16 +28,6 @@ IpcTransport = Literal["socketpair", "pipe"]
 
 
 DEFAULT_RUN_ID = "default_run_id"
-
-
-def _reject_removed_shm_options(hints: dict[str, Any]) -> None:
-    """Reject removed SHM option names with their replacements."""
-    for old, new in (
-        ("shm_min_size", "shm_min_item_bytes"),
-        ("coalesce_tensors", "shm_coalesce"),
-    ):
-        if old in hints:
-            raise TypeError(f"'{old}' is no longer supported. Use '{new}' instead.")
 
 
 @dataclass
@@ -217,19 +206,6 @@ class RuntimeOptions:
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
-
-
-_runtime_options_init = RuntimeOptions.__init__
-
-
-@wraps(_runtime_options_init)
-def _init_runtime_options(self: RuntimeOptions, *args: Any, **kwargs: Any) -> None:
-    """Report removed names without exposing them in the dataclass signature."""
-    _reject_removed_shm_options(kwargs)
-    _runtime_options_init(self, *args, **kwargs)
-
-
-RuntimeOptions.__init__ = _init_runtime_options
 
 
 __all__ = [

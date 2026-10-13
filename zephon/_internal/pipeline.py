@@ -66,7 +66,7 @@ from zephon.ops.config import (
 )
 from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
-from zephon.options import RuntimeOptions, _reject_removed_shm_options
+from zephon.options import RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SamplePayload, SampleRecord, StreamItem
 from zephon.validation import ValidationError, preflight_tokenizers
 from zephon.work import WorkSource
@@ -1377,7 +1377,12 @@ class Pipeline:
 
     def options(self, **hints: Any) -> "Pipeline":
         # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
-        _reject_removed_shm_options(hints)
+        for old, new in (
+            ("shm_min_size", "shm_min_item_bytes"),
+            ("coalesce_tensors", "shm_coalesce"),
+        ):
+            if old in hints:
+                raise TypeError(f"'{old}' is no longer supported. Use '{new}' instead.")
         for key, value in hints.items():
             if not hasattr(self._options, key):
                 warnings.warn(
