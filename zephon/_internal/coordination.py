@@ -100,11 +100,11 @@ class CheckpointCoordinator(Protocol):
         ...
 
     def cleanup(self) -> None:
-        """Idempotently release round resources whose consumers have finished.
+        """Release retained coordination resources that are safe to discard.
 
-        Preserve unconsumed results after a failed exchange. FileCoordinator
-        leaves these results in ``aggregate_dir`` for manual cleanup after all
-        participants have stopped. Leave other runs' resources intact.
+        Calls must be idempotent and leave other runs' resources intact. Never
+        remove a result that a participant may still need after a failed exchange.
+        This is not a guarantee to reclaim every artifact of a failed round.
         """
         ...
 
@@ -114,8 +114,10 @@ class FileCoordinator:
 
     The leader publishes a round ID, every rank writes its state, the leader
     lists the state files until every rank covers its assigned lanes, merges
-    them and writes the merged state. The leader returns, and hands the result
-    to cleanup, only after every follower has acknowledged decoding it.
+    them and writes the merged state. The leader returns only after every
+    follower has acknowledged decoding it. Aggregation removes temporary round
+    files as they become unnecessary, retaining the consumed merged result as
+    a closed-round marker until the next successful round or a cleanup call.
     """
 
     def __init__(
@@ -559,6 +561,13 @@ class FileCoordinator:
         self.backend.mkdir(self.agg_dir, parents=True, exist_ok=True)
 
     def cleanup(self) -> None:
+        """Delete the retained result of the last fully acknowledged round.
+
+        The engine calls this during teardown. It does not scan for failed-round
+        artifacts or retry earlier best-effort deletions. Those files may require
+        manual cleanup once every participant has stopped; in particular, an
+        unacknowledged result must remain available to delayed readers.
+        """
         if self._previous_merged_file is not None:
             self.backend.delete(self._previous_merged_file)
             self._previous_merged_file = None
