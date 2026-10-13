@@ -68,10 +68,12 @@ if TYPE_CHECKING:  # Precise typing when numpy/torch available to the type check
     from torch import Tensor
 
     _NumpyNumber: TypeAlias = np.number[Any]
+    _NumpyTemporal: TypeAlias = np.datetime64 | np.timedelta64
     SamplePayloadArray: TypeAlias = NDArray[Any] | Tensor
 else:  # Runtime fallback keeps optional dependencies optional.
     SamplePayloadArray = Any  # type: ignore[assignment]
     _NumpyNumber = Any  # type: ignore[assignment]
+    _NumpyTemporal = Any  # type: ignore[assignment]
 
 DatasetId = int
 ShardId = int
@@ -933,7 +935,13 @@ class SampleBatch:
 SampleNumeric: TypeAlias = int | float | complex | _NumpyNumber
 
 SamplePayloadAtom: TypeAlias = (
-    bytes | memoryview | str | SampleNumeric | SamplePayloadArray | None
+    bytes
+    | memoryview
+    | str
+    | SampleNumeric
+    | _NumpyTemporal
+    | SamplePayloadArray
+    | None
 )
 SamplePayload: TypeAlias = (
     SamplePayloadAtom | list["SamplePayload"] | dict[Any, "SamplePayload"]

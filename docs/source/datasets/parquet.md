@@ -44,9 +44,11 @@ while creating the dataset.
 
 **Caching Metadata.** Zephon caches up to 256 Parquet footers per fetch replica to avoid
 rereading metadata. You can change this with
-`pipeline.options(io_options={"cache": {"metadata_cache_entries": 256}})`; set the limit
+`pipeline.options(io_options={"metadata_cache_entries": 256})`; set the limit
 to zero to disable it. The same setting applies independently to Vortex. This cache is
-separate from the shard and row-group caches.
+separate from the shard and row-group caches, and is unaffected by `cache.enabled`.
+Footer size grows with columns × row groups, so wide files with many row groups can
+need a much smaller entry limit. Each fetch replica has its own limit.
 
 **Reading Parquet in Zephon**
 
@@ -60,11 +62,38 @@ separate from the shard and row-group caches.
 Parquet and Vortex return each sample as a dictionary keyed by column name, even for
 single-column files. Missing values are represented by `None`.
 
-Numeric lists become NumPy arrays, preserving their dtype and fixed-size nested shapes.
-These arrays may be read-only, so call `.copy()` if you need to modify them. Lists with
-null elements or variable-length nesting remain Python lists, such as `[1, None]` or
-`[[1, 2], [3]]`. Numeric scalars retain their NumPy dtype; other values use Python types,
-such as `str`, `bytes`, `bool`, and `datetime.datetime`.
+Top-level numeric list columns become read-only NumPy arrays, preserving their dtype
+and fixed-size nested shapes. Call `.copy()` if you need to modify them. This applies
+to the thread runner and Torch-backed process transport, which preserves the
+read-only flag without an extra reader-side copy. Without Torch, the process runner
+uses ordinary NumPy pickling and received arrays can be writable. Lists with null
+elements or variable-length nesting remain
+Python lists, such as `[1, None]` or `[[1, 2], [3]]`. Numeric lists inside structs also
+remain Python lists: `struct{ids: list<int>}` becomes `{"ids": [1, 2]}`.
+
+Top-level integer and floating-point scalars retain their NumPy dtype. Timestamp and
+date scalars are `np.datetime64`, and duration scalars are `np.timedelta64`, preserving
+the stored unit and nanosecond precision without requiring pandas. Timezone-bearing
+timestamps represent the UTC instant; NumPy scalars do not carry the timezone name.
+Missing values remain `None`. Other values use Arrow's Python conversion, including
+`str`, `bytes`, Python `bool`, and `decimal.Decimal`. Dictionary-encoded strings return
+strings. Values nested inside structs or variable-length lists use Python conversion.
+
+`torch.from_numpy()` can warn about read-only arrays. Other tensor conversion helpers
+may use that same path; a tensor sharing this storage must not be modified in place.
+
+Compared with the earlier Parquet reader, the shared conversion changes these values:
+
+| Value | Earlier Parquet output | Shared conversion |
+| --- | --- | --- |
+| Numeric list without inner nulls | Writable NumPy array | Read-only NumPy array |
+| Numeric list containing null elements | NumPy array | Python list preserving `None` |
+| Missing floating-point scalar | `NaN` | `None` |
+| Boolean scalar | `np.bool_` | Python `bool` |
+| Variable nested numeric list | Object array of arrays | Nested Python lists |
+| Numeric list inside a struct | NumPy array inside a dictionary | Python list inside a dictionary |
+
+Timestamp and date scalars retain their NumPy representation.
 
 ## Reader configuration
 
@@ -98,7 +127,9 @@ The same choice applies to direct reads and decoded-cache misses.
 
 Arrow pool sizes are process-wide, shared by all stores and formats in that process.
 They are applied when readers are set up, including inside process workers; importing
-a format or doing discovery alone does not resize them. An explicit `None` leaves
+a format or doing discovery alone does not resize them. The process runner currently
+also sets up operator copies in the driver, so building that pipeline configures the
+driver's pools as well. An explicit `None` leaves
 that pool unchanged. Different stores cannot have independent pool sizes: the last
 applied count wins, and closing a store does not restore an earlier count. Increasing
 pool sizes can multiply CPU demand across fetch processes or training ranks, including

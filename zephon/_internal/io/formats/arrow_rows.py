@@ -8,6 +8,7 @@ Conversion decisions, applied to each column chunk independently::
     Arrow value
     +-- Null -> None
     +-- Integer / float scalar -> NumPy scalar with the same dtype
+    +-- Timestamp / date / duration scalar -> NumPy datetime64 / timedelta64
     +-- List / ListView / fixed-size list
     |   +-- Integer / float / bool elements (including fixed-size nesting)
     |   |   +-- No null elements -> read-only NumPy array
@@ -181,6 +182,8 @@ def _lists_for_python(array: Any, pa: Any) -> Any:
             mask=mask,
         )
     if pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind):
+        # Do not cast to list: PyArrow 25.0.1 corrupts nonmonotonic views.
+        # Offsets [2, 0, 1], sizes [2, 2, 2] over [a,b,c,d] cast to [[],[a],[]].
         # Flatten follows sizes and offsets, including gaps, overlaps and nulls.
         values = _lists_for_python(array.flatten(), pa)
         sizes = array.sizes.to_numpy(zero_copy_only=False)
@@ -234,6 +237,17 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
         is_fixed or is_view or pa.types.is_list(kind) or pa.types.is_large_list(kind)
     )
     if not is_list:
+        if (
+            pa.types.is_timestamp(kind)
+            or pa.types.is_date(kind)
+            or pa.types.is_duration(kind)
+        ):
+            # Python conversion can require pandas or lose nanosecond precision.
+            values = array.to_numpy(zero_copy_only=False)
+            if not array.null_count:
+                return values
+            valid = array.is_valid().to_numpy(zero_copy_only=False)
+            return [value if present else None for value, present in zip(values, valid)]
         if pa.types.is_integer(kind) or pa.types.is_floating(kind):
             if not array.null_count:
                 return array.to_numpy(zero_copy_only=False)

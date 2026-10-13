@@ -30,13 +30,19 @@ def _write_dataset(root: Path, fmt: str, table: Any) -> Dataset:
 
 @pytest.mark.parametrize("fmt", ["parquet", "vortex"])
 @pytest.mark.parametrize("runner", ["threads", "process"])
+@pytest.mark.parametrize("array_length", [2048, 256 * 1024], ids=["inline", "shm"])
 def test_single_column_payloads_through_fetch_and_transport(
-    tmp_path: Path, fmt: str, runner: str
+    tmp_path: Path, fmt: str, runner: str, array_length: int
 ) -> None:
+    if runner == "process":
+        pytest.importorskip(
+            "torch", reason="Read-only payload transport requires Torch"
+        )
     pa = pytest.importorskip("pyarrow")
-    # One representative schema covers views, missing values, and SHM transport.
+    # Exercise both inline payloads and allocations above the SHM threshold.
     values = [
-        None if i == 1 else np.arange(i, i + 2048, dtype=np.int32) for i in range(8)
+        None if i == 1 else np.arange(i, i + array_length, dtype=np.int32)
+        for i in range(8)
     ]
     array = pa.array(values, type=pa.list_(pa.int32()))
     table = pa.table({"value": array})
@@ -74,8 +80,7 @@ def test_single_column_payloads_through_fetch_and_transport(
             assert isinstance(value, np.ndarray)
             assert value.dtype == np.int32
             np.testing.assert_array_equal(value, expected)
-            if runner == "threads":
-                assert not value.flags.writeable
+            assert not value.flags.writeable
 
 
 @pytest.mark.parametrize("fmt", ["parquet", "vortex"])

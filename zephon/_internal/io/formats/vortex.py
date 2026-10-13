@@ -122,6 +122,8 @@ def _open_vortex_file(
         file = vortex.open(str(path), **options)
         pa = require_pyarrow()
         export_type = _list_view_type(file.dtype.to_arrow_type(), pa)
+        if not pa.types.is_struct(export_type):
+            raise ValueError("Vortex shards must contain a struct of columns")
         text_only = all(
             pa.types.is_string(field.type)
             or pa.types.is_large_string(field.type)
@@ -216,6 +218,8 @@ class VortexShard(RandomAccessShard):
             else sorted_unique
         )
         with _local_io_errors(self._path):
+            # TODO(MaxiBoether): Follow up upstream on retained-reader point-read
+            # setup costs; reproduction and baseline are in scripts/vortex_bench.
             batch = self._file.scan(
                 indices=_require_vortex().array(selected)
             ).read_all()
@@ -227,6 +231,8 @@ class VortexShard(RandomAccessShard):
                         {name: [value] for name, value in row.items()}, positions
                     )
                 # Null structs need Arrow's per-field null conversion.
+                # Vortex 0.88's writer rejects nullable root structs; keep this
+                # guard for native arrays supplied by other readers or writers.
             # ListView export can trim unselected child values before decoding.
             pa = require_pyarrow()
             arrow_table = pa.Table.from_struct_array(
@@ -275,7 +281,7 @@ class VortexShardOpener:
         configure_vortex_threads(vortex, options.vortex)
         configure_pyarrow(options.arrow)
         self._metadata_cache = MetadataCache[str, _VortexMetadata](
-            options.cache.metadata_cache_entries
+            options.metadata_cache_entries
         )
         self._segment_cache = (
             vortex.SegmentCache(options.vortex.segment_cache_bytes)

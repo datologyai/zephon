@@ -67,7 +67,7 @@ the defaults:
 ```python
 pipeline.options(
     io_options={
-        "cache": {"metadata_cache_entries": 256},
+        "metadata_cache_entries": 256,
         "vortex": {"segment_cache_bytes": "64mb"},
     }
 )
@@ -101,6 +101,7 @@ An explicit positive count overrides `VORTEX_MAX_THREADS`; zero disables backgro
 workers, while `None` leaves the current pool unchanged. When `worker_threads` is
 omitted, an existing `VORTEX_MAX_THREADS` setting is respected. Without either override,
 Zephon applies one worker during reader setup. Importing the format or performing
-discovery alone leaves Vortex's own pool settings unchanged. Different stores in the
+discovery alone leaves Vortex's own pool settings unchanged. The process runner also
+sets up operator copies in the driver, so its pool is configured too. Different stores in the
 same process share the pool, so the last applied count wins; closing a store does not
 restore an earlier count. `ZEPHON_VORTEX_THREADS` is no longer used.

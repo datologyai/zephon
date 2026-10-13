@@ -112,7 +112,7 @@ def test_shared_footer_limit_is_forwarded_without_shard_cache(
 
     monkeypatch.setattr(runtime_module, "ParquetShardOpener", make_opener)
     runtime = runtime_module.build_parquet_cache_runtime(
-        None, StoreOptions(cache=CacheOptions(metadata_cache_entries=7))
+        None, StoreOptions(metadata_cache_entries=7)
     )
     assert runtime.cache is None
     assert calls == [

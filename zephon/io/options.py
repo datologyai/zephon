@@ -99,11 +99,7 @@ def parse_size_bytes(value: str | int | None) -> int | None:
 
 @dataclass
 class CacheOptions:
-    """Shard-cache and parsed-footer cache configuration.
-
-    ``enabled`` controls the on-disk shard cache. ``metadata_cache_entries``
-    sets the footer limit per format and fetch replica; zero disables retention.
-    """
+    """On-disk shard-cache configuration."""
 
     enabled: bool = _option(False)
     root: str | Path = _option(Path("~/.cache/zephon").expanduser())
@@ -120,7 +116,6 @@ class CacheOptions:
     open_retry_max_backoff: float = _option(2.0)
     min_slack_bytes: int = _option(512 * 1024)  # 512 KiB minimum slack
     max_slack_bytes: int = _option(64 * 1024 * 1024)  # 64 MiB maximum slack
-    metadata_cache_entries: int = _option(256)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
@@ -129,9 +124,6 @@ class CacheOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
-        _validate_non_negative_int(
-            "cache.metadata_cache_entries", self.metadata_cache_entries
-        )
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
@@ -321,8 +313,6 @@ class VortexOptions:
         _validate_non_negative_int(
             "vortex.segment_cache_bytes", self.segment_cache_bytes
         )
-        if self.segment_cache_bytes > 2**64 - 1:
-            raise ValueError("vortex.segment_cache_bytes exceeds Vortex's byte limit")
 
     @classmethod
     def from_any(cls, obj: Any) -> "VortexOptions":
@@ -348,14 +338,25 @@ class VortexOptions:
 
 @dataclass
 class StoreOptions:
-    """Top-level IO store options passed to FetchOp."""
+    """Top-level IO store options passed to FetchOp.
+
+    ``metadata_cache_entries`` bounds retained footers per format and fetch
+    replica, independently of the on-disk shard cache; zero disables retention.
+    Parquet footer sizes grow with the number of columns and row groups.
+    """
 
     cache: CacheOptions = field(default_factory=CacheOptions)
     arrow: ArrowOptions = field(default_factory=ArrowOptions)
     parquet: ParquetOptions = field(default_factory=ParquetOptions)
     vortex: VortexOptions = field(default_factory=VortexOptions)
+    metadata_cache_entries: int = _option(256)
+    _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        _normalize_options(self)
+        _validate_non_negative_int(
+            "metadata_cache_entries", self.metadata_cache_entries
+        )
         legacy_limit = self.cache.rg_cache_bytes
         if legacy_limit is not None:
             warnings.warn(
@@ -411,6 +412,7 @@ class StoreOptions:
                 arrow=ArrowOptions.from_any(None),
                 parquet=ParquetOptions.from_any(None),
                 vortex=VortexOptions.from_any(None),
+                metadata_cache_entries=256,
             )
         if isinstance(obj, StoreOptions):
             return obj
@@ -437,12 +439,19 @@ class StoreOptions:
                 if "vortex" in obj
                 else VortexOptions()
             )
-            return cls(cache=cache, arrow=arrow, parquet=parquet, vortex=vortex)
+            return cls(
+                cache=cache,
+                arrow=arrow,
+                parquet=parquet,
+                vortex=vortex,
+                metadata_cache_entries=obj.get("metadata_cache_entries", _NOT_SUPPLIED),
+            )
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 
     def merge(self, other: "StoreOptions") -> "StoreOptions":
         """Return a new options object with ``other`` overriding ``self``."""
         return StoreOptions(
+            **_merged_options(self, other),
             cache=self.cache.merge(other.cache),
             arrow=self.arrow.merge(other.arrow),
             parquet=self.parquet.merge(other.parquet),

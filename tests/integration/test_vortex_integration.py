@@ -64,9 +64,9 @@ def test_store_reuses_caches_across_fetch_groups(
             cache=CacheOptions(
                 enabled=True,
                 root=tmp_path / "cache",
-                metadata_cache_entries=2,
             ),
             vortex=VortexOptions(segment_cache_bytes=4096),
+            metadata_cache_entries=2,
         ),
     )
     try:

@@ -35,7 +35,7 @@ from zephon._internal.io.types import (
     ShardFile,
     ShardLocator,
 )
-from zephon.io import CacheOptions, StoreOptions, VortexOptions
+from zephon.io import StoreOptions, VortexOptions
 from zephon.io.dataset import Dataset
 
 
@@ -49,6 +49,15 @@ def vortex() -> Any:
 @pytest.fixture
 def pa() -> Any:
     return pytest.importorskip("pyarrow")
+
+
+def test_non_struct_root_has_clear_error(tmp_path: Path, vortex: Any, pa: Any) -> None:
+    path = tmp_path / "values.vortex"
+    vortex.io.write(vortex.array(pa.array([10, 20, 30])), str(path))
+    with pytest.raises(
+        ValueError, match="Vortex shards must contain a struct of columns"
+    ):
+        VortexShard(path)
 
 
 @pytest.fixture
@@ -720,7 +729,7 @@ def test_opener_retains_only_enabled_caches(
     )
     opener = VortexShardOpener(
         StoreOptions(
-            cache=CacheOptions(metadata_cache_entries=metadata_entries),
+            metadata_cache_entries=metadata_entries,
             vortex=VortexOptions(segment_cache_bytes=segment_bytes),
         )
     )

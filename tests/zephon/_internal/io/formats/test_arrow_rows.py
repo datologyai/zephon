@@ -4,6 +4,11 @@
 """Shared Arrow conversion contract for Parquet and Vortex."""
 
 import gc
+import subprocess
+import sys
+import textwrap
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +23,160 @@ from zephon._internal.io.formats.arrow_rows import (
     take_and_materialize,
 )
 from zephon.io import ArrowOptions
+
+
+@pytest.mark.parametrize(
+    "kind,unit,count",
+    [
+        (pa.timestamp("s"), "s", 1_700_000_001),
+        (pa.timestamp("ms"), "ms", 1_700_000_000_001),
+        (pa.timestamp("us"), "us", 1_700_000_000_000_001),
+        (pa.timestamp("ns"), "ns", 1_700_000_000_000_000_001),
+        (pa.timestamp("ns", tz="Europe/Berlin"), "ns", 1_700_000_000_000_000_001),
+        (pa.date32(), "D", 19_000),
+        (pa.date64(), "ms", 19_000 * 86_400_000),
+        (pa.duration("s"), "s", 123),
+        (pa.duration("ms"), "ms", 123),
+        (pa.duration("us"), "us", 123),
+        (pa.duration("ns"), "ns", 123),
+    ],
+)
+def test_temporal_scalars_preserve_precision_and_nulls(
+    kind: Any, unit: str, count: int
+) -> None:
+    scalar = np.timedelta64 if pa.types.is_duration(kind) else np.datetime64
+    table = pa.table(
+        {"value": pa.chunked_array([[count], [None, count + 1]], type=kind)}
+    )
+    rows = take_and_materialize(table, [2, 0, 2, 1])
+    for row, expected in zip(rows[:3], [count + 1, count, count + 1]):
+        assert type(row["value"]) is scalar
+        assert row["value"].dtype == scalar(expected, unit).dtype
+        assert row["value"] == scalar(expected, unit)
+    assert rows[3]["value"] is None
+    assert arrow_table_to_samples(table.slice(0, 1))[0]["value"] == scalar(count, unit)
+
+
+def test_nanosecond_temporals_without_pandas() -> None:
+    code = textwrap.dedent("""
+        import importlib.abc
+        import sys
+
+        class NoPandas(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "pandas" or fullname.startswith("pandas."):
+                    raise ImportError("pandas deliberately unavailable")
+
+        sys.meta_path.insert(0, NoPandas())
+        import numpy as np
+        import pyarrow as pa
+        from zephon._internal.io.formats.arrow_rows import take_and_materialize
+
+        kinds = [pa.timestamp("us"), pa.timestamp("ns"), pa.date32(),
+                 pa.date64(), pa.duration("ns")]
+        for kind in kinds:
+            table = pa.table({"v": pa.array([1, None], type=kind)})
+            values = take_and_materialize(table, [0, 1])
+            scalar = np.timedelta64 if pa.types.is_duration(kind) else np.datetime64
+            assert isinstance(values[0]["v"], scalar)
+            assert values[0]["v"].astype("int64") == 1
+            assert values[1]["v"] is None
+        assert "pandas" not in sys.modules
+    """)
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
+
+
+def test_boolean_decimal_and_dictionary_scalars() -> None:
+    table = pa.table(
+        {
+            "flag": pa.array([True, None, False]),
+            "price": pa.array(
+                [Decimal("1.25"), None, Decimal("-0.01")], pa.decimal128(8, 2)
+            ),
+            "label": pa.array(["a", None, "b"], pa.dictionary(pa.int8(), pa.string())),
+        }
+    )
+    rows = take_and_materialize(table, [2, 0, 1])
+    assert rows == [
+        {"flag": False, "price": Decimal("-0.01"), "label": "b"},
+        {"flag": True, "price": Decimal("1.25"), "label": "a"},
+        {"flag": None, "price": None, "label": None},
+    ]
+    assert type(rows[0]["flag"]) is bool
+    assert type(rows[0]["price"]) is Decimal
+    assert type(rows[0]["label"]) is str
+
+
+def test_mixed_parquet_and_vortex_payloads_agree(tmp_path: Path) -> None:
+    pq = pytest.importorskip("pyarrow.parquet")
+    vortex_io = pytest.importorskip("vortex.io")
+    from zephon._internal.io.formats.parquet import ParquetShard
+    from zephon._internal.io.formats.vortex import VortexShard
+
+    table = pa.table(
+        {
+            "integer": pa.array([1, None, 3], pa.int16()),
+            "float": pa.array([1.5, None, 3.5], pa.float32()),
+            "flag": pa.array([True, None, False]),
+            "text": ["a", None, "b"],
+            "bytes": [b"a", None, b"b"],
+            "dictionary": pa.array(
+                ["a", None, "b"], pa.dictionary(pa.int8(), pa.string())
+            ),
+            "decimal": pa.array(
+                [Decimal("1.25"), None, Decimal("-0.01")], pa.decimal128(8, 2)
+            ),
+            "timestamp_us": pa.array(
+                [1_700_000_000_000_001, None, -1], pa.timestamp("us")
+            ),
+            "timestamp_ns": pa.array(
+                [1_700_000_000_000_000_001, None, -1], pa.timestamp("ns")
+            ),
+            "date": pa.array([19_000, None, -1], pa.date32()),
+            "numbers": pa.array([[1, 2], [1, None], []], pa.list_(pa.int32())),
+            "fixed": pa.array([[1, 2], [3, 4], [5, 6]], pa.list_(pa.int16(), 2)),
+            "nested": pa.array(
+                [[[1], [2, 3]], None, []], pa.list_(pa.list_(pa.int32()))
+            ),
+            "struct": pa.array(
+                [{"ids": [1, 2]}, None, {"ids": []}],
+                pa.struct([("ids", pa.list_(pa.int32()))]),
+            ),
+        }
+    )
+    parquet_path, vortex_path = tmp_path / "data.parquet", tmp_path / "data.vortex"
+    pq.write_table(table, parquet_path, row_group_size=1)
+    vortex_io.write(table, str(vortex_path))
+    parquet = ParquetShard(parquet_path, row_groups=[{"num_rows": 1}] * 3)
+    vortex = VortexShard(vortex_path)
+
+    def assert_equal(actual: Any, expected: Any) -> None:
+        assert type(actual) is type(expected)
+        if isinstance(expected, dict):
+            assert actual.keys() == expected.keys()
+            for key in expected:
+                assert_equal(actual[key], expected[key])
+        elif isinstance(expected, list):
+            assert len(actual) == len(expected)
+            for left, right in zip(actual, expected):
+                assert_equal(left, right)
+        elif isinstance(expected, np.ndarray):
+            assert actual.dtype == expected.dtype
+            assert not actual.flags.writeable
+            np.testing.assert_array_equal(actual, expected)
+        else:
+            assert actual == expected
+            if isinstance(expected, np.generic):
+                assert actual.dtype == expected.dtype
+
+    try:
+        for indices in ([0], [1], [2, 0, 2, 1], [0, 1, 2]):
+            expected = arrow_table_to_samples(table, indices)
+            assert_equal(parquet.getsamples(indices), expected)
+            assert_equal(vortex.getsamples(indices), expected)
+    finally:
+        parquet.close()
+        vortex.close()
 
 
 def test_pyarrow_import_does_not_resize_pools(monkeypatch: pytest.MonkeyPatch) -> None:
