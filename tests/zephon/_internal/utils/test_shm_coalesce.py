@@ -507,8 +507,7 @@ class TestCoalesceBytes:
         for i, record in enumerate(restored):
             raw = record.payload["raw"]
             assert isinstance(raw, _ShmBytes)
-            with pytest.raises(TypeError):
-                raw[0] = 1
+            assert not memoryview(raw).readonly
             assert bytes(raw) == data
             assert len(raw) == len(data)
             if sys.version_info >= (3, 12):
@@ -525,6 +524,100 @@ class TestCoalesceBytes:
         coalesced = prepare_microbatch(records, _policy())
         # No tensors, no large bytes → nothing to coalesce
         assert not coalesced.buffers
+
+    def test_fresh_bytes_are_writable_and_inline_preserves_source(self) -> None:
+        source = {
+            "bytes": b"abcdef",
+            "readonly": memoryview(b"abcdef"),
+            "mutable": bytearray(b"abcdef"),
+            "view": memoryview(bytearray(b"a.b.c.d.e.f."))[::2],
+        }
+        for policy in (_policy(0), _policy(1 << 20)):
+            [result] = _transport(source, policy=policy)
+            readonly_names = ("bytes", "readonly") if policy.min_item_bytes else ()
+            for name in readonly_names:
+                raw = result[name]
+                assert bytes(raw) == b"abcdef"
+                assert memoryview(raw).readonly
+                with pytest.raises(TypeError):
+                    raw[0] = 42
+                with pytest.raises(TypeError):
+                    memoryview(raw)[0] = 42
+            for name in source.keys() - set(readonly_names):
+                raw = result[name]
+                assert not memoryview(raw).readonly
+                raw[0] = ord("A")
+                raw[1:3] = b"BC"
+                raw[5:2:-1] = b"FED"
+                assert bytes(raw) == b"ABCDEF"
+            if not readonly_names:
+                assert all(bytes(value) == b"abcdef" for value in source.values())
+            # Resolved values also pass directly through the process pickler.
+            for protocol in (4, 5):
+                forwarded = pickle.loads(ForkingPickler.dumps(result, protocol))
+                [forwarded] = _transport(forwarded, policy=policy)
+                for name in result:
+                    assert bytes(forwarded[name]) == bytes(result[name])
+                    assert (
+                        memoryview(forwarded[name]).readonly
+                        == memoryview(result[name]).readonly
+                    )
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12), reason="Shared bytes views require Python 3.12+"
+    )
+    def test_readonly_shared_bytes_forward_or_copy(self) -> None:
+        source = torch.arange(64, dtype=torch.uint8).share_memory_()
+        readonly = _ShmBytes(source, offset=8, length=6, writable=False)
+        for protocol in (4, 5):
+            direct = pickle.loads(ForkingPickler.dumps(readonly, protocol))
+            [forwarded] = _transport(direct, protocol=protocol)
+            assert bytes(forwarded) == bytes(range(8, 14))
+            assert memoryview(forwarded).readonly
+            assert forwarded._buffer.data_ptr() == source.data_ptr()
+            with pytest.raises(TypeError):
+                forwarded[0] = 42
+        compact = _policy(0, compact_above_ratio=2, compact_min_savings_bytes=1)
+        [copied] = _transport(readonly, policy=compact)
+        assert copied._buffer.data_ptr() != source.data_ptr()
+        assert not memoryview(copied).readonly
+        copied[0] = 42
+        assert readonly[0] == 8
+        [inline] = _transport(readonly, policy=_policy(1 << 20))
+        assert isinstance(inline, bytes)
+        assert inline == bytes(readonly)
+
+    def test_writable_byte_wrappers_validate_writes_without_resizing(self) -> None:
+        [shared] = _transport(bytearray(b"abcdef"))
+        for raw in (shared, _ShmBytesLegacy(b"abcdef")):
+            raw[-1] = ord("Z")
+            raw[::2] = b"ABC"
+            assert bytes(raw) == b"AbBdCZ"
+            for value in (-1, 256):
+                with pytest.raises(ValueError):
+                    raw[0] = value
+            with pytest.raises(IndexError):
+                raw[6] = 1
+            with pytest.raises(ValueError):
+                raw[1:2] = b"longer"
+            assert bytes(raw) == b"AbBdCZ"
+            with pytest.raises((AttributeError, BufferError)):
+                raw.append(1)
+            with pytest.raises((AttributeError, TypeError, BufferError)):
+                del raw[0]
+        legacy = _ShmBytesLegacy(b"abcdef")
+        for operation in (
+            lambda: legacy.clear(),
+            lambda: legacy.extend(b"x"),
+            lambda: legacy.insert(0, 1),
+            lambda: legacy.pop(),
+            lambda: legacy.remove(97),
+            lambda: legacy.__iadd__(b"x"),
+            lambda: legacy.__imul__(2),
+        ):
+            with pytest.raises(BufferError):
+                operation()
+        assert bytes(legacy) == b"abcdef"
 
     def test_mixed_tensors_and_bytes(self) -> None:
         """Tensors and large bytes coalesce into separate SHM buffers."""
@@ -636,7 +729,7 @@ class TestCoalesceBytes:
         tensor_view = torch.arange(16, dtype=torch.uint8)
         raw = _ShmBytesLegacy(tensor_view)
 
-        assert isinstance(raw, bytes)
+        assert isinstance(raw, bytearray)
         t = torch.frombuffer(raw, dtype=torch.uint8)
         assert t.shape == (16,)
         assert bytes(t.numpy()) == bytes(tensor_view.numpy())
@@ -697,6 +790,9 @@ class TestCoalesceBytes:
         # Verify zero-copy: the tensor from frombuffer should share the same
         # underlying storage as the SHM-backed _ShmBytes (no data copy).
         assert t.data_ptr() == raw._np_view.__array_interface__["data"][0]
+        raw[0] = 42
+        raw[1:3] = b"xy"
+        assert t[:3].tolist() == [42, ord("x"), ord("y")]
 
 
 # Import threshold for the decode test
@@ -2119,7 +2215,7 @@ def test_small_shared_backings_join_private_values_on_the_fresh_path() -> None:
         for record in _round_trip_resolved(inline):
             assert not record.payload["t"].is_shared()
             assert _shared_numpy_storage(record.payload["n"]) is None
-            assert isinstance(record.payload["b"], bytes)
+            assert isinstance(record.payload["b"], (bytes, bytearray))
 
 
 def test_view_compaction_is_shared_by_numpy_and_torch_and_does_not_repeat() -> None:

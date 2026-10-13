@@ -182,6 +182,7 @@ class _CreatePayloadMemory(_OrderedOp):
                     "large_n": np.arange(64),
                     "large_b": b"x" * 512,
                     "large_ba": bytearray(b"x" * 512),
+                    "large_mv": memoryview(bytearray(b"x" * 512)),
                 },
             )
             for record in elems
@@ -212,7 +213,7 @@ class _InspectPayloadMemory(_OrderedOp):
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         for record in elems:
-            payload = record.payload
+            payload: Any = record.payload
             assert payload["large_t"].is_shared()
             assert payload["large_t"].untyped_storage().nbytes() == 512
             assert _shared_numpy_storage(payload["large_n"]).nbytes() == 512
@@ -221,9 +222,12 @@ class _InspectPayloadMemory(_OrderedOp):
                 == len(payload["large_n"])
                 == (4 if self.crop else 64)
             )
-            for key in ("large_b", "large_ba"):
-                assert bytes(payload[key]) == b"x" * 512
-                assert isinstance(payload[key], _ShmBytes)
+            for key in ("large_b", "large_ba", "large_mv"):
+                raw = payload[key]
+                assert isinstance(raw, (_ShmBytes, bytearray))
+                assert bytes(raw) == (b"yzz" if self.crop else b"xxx") + b"x" * 509
+                raw[0] = ord("z" if self.crop else "y")
+                raw[1:3] = b"zz"
         return elems
 
 
@@ -274,3 +278,7 @@ def test_worker_output_policy_and_parent_forwarding_after_resolution(
         assert actual.payload[key].tolist() == list(range(4))
     assert not actual.payload["large_t"].is_shared()
     assert _shared_numpy_storage(actual.payload["large_n"]) is None
+    payload: Any = actual.payload
+    for key in ("large_b", "large_ba", "large_mv"):
+        assert bytes(payload[key]) == b"zzz" + b"x" * 509
+        assert not memoryview(payload[key]).readonly
