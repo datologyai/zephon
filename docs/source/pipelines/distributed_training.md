@@ -94,22 +94,6 @@ which is set to three minutes by default) expires, and then the checkpoint opera
 fail. The details of when to take a checkpoint and how to restore it are covered in
 [Checkpointing and Resuming Pipelines](checkpointing_and_resuming.md).
 
-The leader's checkpoint call returns only after every active rank/worker has decoded
-the merged result. No additional barrier is needed to protect Zephon's temporary
-checkpoint files from leader cleanup. If a participant publishes its state but fails
-to acknowledge the result, the leader raises an error even if other participants have
-already returned. The error identifies missing acknowledgements and the retained
-result, which can be removed after all participants have stopped. This guarantee does
-not cover saving the training framework's checkpoint or shutting down its processes.
-All coordination waits share one `aggregate_timeout_s` budget starting when the
-call begins. Time spent collecting contributions therefore reduces the time left
-to wait for acknowledgements. Blocking storage operations and merge/codec work are
-not interrupted by this deadline. When the leader fails before publishing a result,
-it attempts to publish a round-specific failure notification so followers can report
-that error without waiting for a result until timeout. If that notification cannot be
-written, followers still time out. Published results remain readable after a later
-leader failure.
-
 In many jobs, the coordination identity is simply the global rank and the world size of
 the training job itself. But it doesn't have to be set this way, and up next we explain
 why it might not be.

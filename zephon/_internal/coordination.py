@@ -279,14 +279,16 @@ class FileCoordinator:
     def _wait_until(self, pred: Callable[[], bool], timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         delay = self._poll_base
-        while time.monotonic() < deadline:
+        while True:
             if pred():
                 return True
-            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(delay, remaining))
             # Exponential backoff for cloud, capped at 5s
             if self._is_cloud:
                 delay = min(delay * 1.5, 5.0)
-        return False
 
     def _wait_value(
         self,
@@ -295,14 +297,16 @@ class FileCoordinator:
     ) -> T | None:
         deadline = time.monotonic() + timeout
         delay = self._poll_base
-        while time.monotonic() < deadline:
+        while True:
             val = supplier()
             if val is not None:
                 return val
-            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(delay, remaining))
             if self._is_cloud:
                 delay = min(delay * 1.5, 5.0)
-        return None
 
     # ---------- Round / paths ----------
 

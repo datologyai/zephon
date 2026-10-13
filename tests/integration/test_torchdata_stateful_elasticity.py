@@ -324,6 +324,7 @@ def _phase_run_and_checkpoint_mp(
 def test_model_parallel_ranks_checkpoint_with_multiple_dataloader_workers(
     tmp_path: Path,
 ) -> None:
+    """Exercise TorchData wiring; gated coordinator tests pin the shutdown race."""
     barrier = Barrier(2)
 
     def checkpoint_rank(rank: int) -> list[dict]:

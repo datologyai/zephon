@@ -3,13 +3,13 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from zephon._internal.coordination import AggregationRound, FileCoordinator
-from zephon._internal.coordination import time as coordination_time
 from zephon.options import RuntimeOptions
 
 
@@ -404,6 +404,25 @@ def test_leader_failure_notification_preserves_original_error(
             follower.aggregate(rounds[1], Mock())
 
 
+def test_waits_check_readiness_without_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    sleep = Mock(side_effect=AssertionError("An expired wait must not sleep"))
+    monkeypatch.setattr(
+        "zephon._internal.coordination.time",
+        SimpleNamespace(monotonic=lambda: 0.0, sleep=sleep),
+    )
+    ready = Mock(side_effect=[True, False])
+    value = Mock(side_effect=[0, None])
+    assert coordinator._wait_until(ready, 0)
+    assert coordinator._wait_value(value, 0) == 0
+    assert not coordinator._wait_until(ready, 0)
+    assert coordinator._wait_value(value, 0) is None
+    assert ready.call_count == value.call_count == 2
+    sleep.assert_not_called()
+
+
 def test_contribution_and_ack_waits_share_one_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -430,8 +449,10 @@ def test_contribution_and_ack_waits_share_one_deadline(
         if elapsed >= 1.2:
             follower.backend.put(f"{shard_path}.ack", b"")
 
-    monkeypatch.setattr(coordination_time, "monotonic", lambda: elapsed)
-    monkeypatch.setattr(coordination_time, "sleep", advance_time)
+    monkeypatch.setattr(
+        "zephon._internal.coordination.time",
+        SimpleNamespace(monotonic=lambda: elapsed, sleep=advance_time),
+    )
     with pytest.raises(RuntimeError, match="checkpoint acknowledgements: missing=1"):
         leader.aggregate(
             AggregationRound(
