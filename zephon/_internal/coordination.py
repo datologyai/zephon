@@ -205,7 +205,9 @@ class RoundCoordinator(ABC):
     successful round or a cleanup call.
 
     Subclasses map round artifacts to storage locations and implement reading,
-    writing, deleting, and discovering them.
+    writing, deleting, and discovering them. They may also override how the
+    result and a failure notice are published, waited for, and read, for
+    example to keep both in one conditionally written value.
     """
 
     def __init__(
@@ -259,10 +261,11 @@ class RoundCoordinator(ABC):
 
     @abstractmethod
     def _ack_name(self, shard_location: str) -> str:
-        """The name ``_list_ack_names`` reports for that publisher's ack."""
+        """A name identifying that publisher's ack, unique within the round."""
 
     @abstractmethod
-    def _list_ack_names(self, round_id: str) -> Iterable[str]: ...
+    def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
+        """Return the names in ``pending`` whose acks have been published."""
 
     @abstractmethod
     def _list_shards(self, round_id: str) -> Iterable[str]:
@@ -287,6 +290,40 @@ class RoundCoordinator(ABC):
 
     @abstractmethod
     def _delete(self, location: str) -> None: ...
+
+    # ---------- Round outcome, overridable as a unit ----------
+
+    def _publish_result(self, round_id: str, data: bytes) -> None:
+        result = self._result_location(round_id)
+        assert not self._exists(result)
+        self._put(result, data)
+
+    def _publish_failure(self, round_id: str, message: str) -> None:
+        self._put(self._failure_location(round_id), message.encode("utf-8"))
+
+    def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
+        """Wait for the round's result; return False on timeout.
+
+        Raise if the leader reported a failure instead. A published result
+        takes precedence over a failure notice, which never revokes it.
+        """
+        result = self._result_location(round_id)
+        failure = self._failure_location(round_id)
+
+        def _result_ready() -> bool:
+            if self._exists(result):
+                return True
+            message = self._read_text(failure)
+            if message is not None:
+                raise RuntimeError(
+                    f"Checkpoint round {round_id} failed on leader: {message}"
+                )
+            return False
+
+        return self._wait_until(_result_ready, timeout)
+
+    def _read_result(self, round_id: str) -> dict | None:
+        return self._read_aggregation_state(self._result_location(round_id))
 
     # ---------- Shared helpers ----------
 
@@ -474,17 +511,13 @@ class RoundCoordinator(ABC):
 
             # States already cached from polling above.
             merged = merge(list(seen.values()))
-            assert not self._exists(result)
             merged_bytes = self._codec.encode(merged)
-            self._put(result, merged_bytes)
+            self._publish_result(round_id, merged_bytes)
         except Exception as exc:
             # Only announce failures before publication. After publication,
             # delayed followers must still be able to consume the result.
             try:
-                self._put(
-                    self._failure_location(round_id),
-                    f"{type(exc).__name__}: {exc}".encode("utf-8"),
-                )
+                self._publish_failure(round_id, f"{type(exc).__name__}: {exc}")
             except Exception as notify_error:
                 self._log(f"Failed to publish checkpoint failure: {notify_error!r}")
             raise
@@ -521,7 +554,7 @@ class RoundCoordinator(ABC):
         acknowledged: dict[str, str] = {}
 
         def _all_acknowledged() -> bool:
-            for name in pending.intersection(self._list_ack_names(round_id)):
+            for name in self._acknowledged(round_id, pending):
                 pending.remove(name)
                 acknowledged[name] = ack_locations[name]
             return not pending
@@ -550,24 +583,10 @@ class RoundCoordinator(ABC):
     ) -> dict[str, Any]:
         my_shard = self._shard_location(round_id)
         result = self._result_location(round_id)
-        failure = self._failure_location(round_id)
         self._put(my_shard, self._codec.encode(round_.local))
-
-        # Followers prefer a published result; a failure notification never
-        # revokes it. Failure markers are isolated by the same round namespace.
-        def _result_ready() -> bool:
-            if self._exists(result):
-                return True
-            message = self._read_text(failure)
-            if message is not None:
-                raise RuntimeError(
-                    f"Checkpoint round {round_id} failed on leader: {message}"
-                )
-            return False
-
-        if not self._wait_until(_result_ready, max(0.0, deadline - time.monotonic())):
+        if not self._wait_for_outcome(round_id, max(0.0, deadline - time.monotonic())):
             raise self._timeout_error(deadline, f"merged checkpoint at {result}")
-        merged = self._read_aggregation_state(result)
+        merged = self._read_result(round_id)
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {result}")
         self._delete_best_effort(my_shard)
@@ -732,10 +751,10 @@ class FileCoordinator(RoundCoordinator):
         # normalizes the directory.
         return f"{os.path.basename(shard_location)}.ack"
 
-    def _list_ack_names(self, round_id: str) -> Iterable[str]:
+    def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
         # One listing per poll avoids a HEAD for every reader.
         pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
-        return (os.path.basename(path) for path in self.backend.glob(pattern))
+        return pending & {os.path.basename(path) for path in self.backend.glob(pattern)}
 
     def _list_shards(self, round_id: str) -> Iterable[str]:
         return self._list_state_files(round_id)

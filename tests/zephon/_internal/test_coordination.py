@@ -664,7 +664,11 @@ def test_cleanup_removes_retained_result_idempotently(tmp_path: Path) -> None:
 
 
 class _DictCoordinator(RoundCoordinator):
-    """Round protocol over a shared dict, standing in for a key-value store."""
+    """Round protocol over a shared dict, standing in for a key-value store.
+
+    Like a key-value backend, it can't list acks and keeps the result and a
+    failure notice in one conditionally written outcome value.
+    """
 
     def __init__(
         self, store: dict[str, bytes], lock: Lock, *, rank: int, worker_id: int
@@ -680,6 +684,7 @@ class _DictCoordinator(RoundCoordinator):
             poll_backoff=False,
         )
         self._store, self._lock = store, lock
+        self._decode = self._codec.decode
         self._participant = f"r{rank}_w{worker_id}_p{os.getpid()}"
 
     @property
@@ -690,10 +695,32 @@ class _DictCoordinator(RoundCoordinator):
         return f"{self._scoped_run_id()}/{round_id}/state/{self._participant}"
 
     def _result_location(self, round_id: str) -> str:
-        return f"{self._scoped_run_id()}/{round_id}/merged"
+        return f"{self._scoped_run_id()}/{round_id}/outcome"
 
     def _failure_location(self, round_id: str) -> str:
-        return f"{self._scoped_run_id()}/{round_id}/failed"
+        return self._result_location(round_id)
+
+    def _publish_outcome(self, round_id: str, value: bytes) -> None:
+        with self._lock:
+            self._store.setdefault(self._result_location(round_id), value)
+
+    def _publish_result(self, round_id: str, data: bytes) -> None:
+        self._publish_outcome(round_id, b"R" + data)
+
+    def _publish_failure(self, round_id: str, message: str) -> None:
+        self._publish_outcome(round_id, b"F" + message.encode())
+
+    def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
+        outcome = self._wait_value(
+            lambda: self._read(self._result_location(round_id)), timeout
+        )
+        if outcome is not None and outcome[:1] == b"F":
+            raise RuntimeError(f"failed on leader: {outcome[1:].decode()}")
+        return outcome is not None
+
+    def _read_result(self, round_id: str) -> dict | None:
+        outcome = self._read(self._result_location(round_id))
+        return self._decode(outcome[1:]) if outcome else None
 
     def _ack_location(self, shard_location: str) -> str:
         return shard_location.replace("/state/", "/ack/")
@@ -701,10 +728,10 @@ class _DictCoordinator(RoundCoordinator):
     def _ack_name(self, shard_location: str) -> str:
         return shard_location.rsplit("/", 1)[1]
 
-    def _list_ack_names(self, round_id: str) -> list[str]:
+    def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
         prefix = f"{self._scoped_run_id()}/{round_id}/ack/"
         with self._lock:
-            return [k[len(prefix) :] for k in self._store if k.startswith(prefix)]
+            return {name for name in pending if prefix + name in self._store}
 
     def _list_shards(self, round_id: str) -> list[str]:
         prefix = f"{self._scoped_run_id()}/{round_id}/state/"
@@ -776,7 +803,15 @@ def test_round_protocol_runs_over_non_file_storage() -> None:
             assert len(merge.call_args.args[0]) == 4
             # Only the retained result of this round remains.
             round_id = coordinators[0].last_round_id
-            assert list(store) == [f"dict-0/{round_id}/merged"]
+            assert list(store) == [f"dict-0/{round_id}/outcome"]
 
     coordinators[0].cleanup()
     assert store == {}
+
+
+def test_failure_notice_never_revokes_a_published_outcome() -> None:
+    leader = _DictCoordinator({}, Lock(), rank=0, worker_id=0)
+    leader._publish_result("r", leader._codec.encode({"progress": {0: 1}}))
+    leader._publish_failure("r", "late error")
+    assert leader._wait_for_outcome("r", 0)
+    assert leader._read_result("r") == {"progress": {0: 1}}
