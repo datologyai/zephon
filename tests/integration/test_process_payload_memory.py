@@ -227,7 +227,7 @@ class _InspectPayloadMemory(_OrderedOp):
                 assert isinstance(raw, (_ShmBytes, bytearray))
                 assert bytes(raw) == (b"yzz" if self.crop else b"xxx") + b"x" * 509
                 raw[0] = ord("z" if self.crop else "y")
-                raw[1:3] = b"zz"
+                raw[1:3] = [ord("z"), ord("z")]
         return elems
 
 

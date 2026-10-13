@@ -145,12 +145,10 @@ benchmark representative batches before changing them. Lowering
 alive, at the cost of more allocations. Compaction applies when workers prepare
 outputs; it does not revisit samples already held in shuffle buffers.
 
-On Python 3.12+, bytes-like values sent through SHM arrive as zero-copy buffer
-views. Fresh copies support index and same-length slice assignment, including
-copies of immutable bytes. Forwarded shared views retain their writeability.
-The wrappers cannot resize and do not implement the full APIs of the original
-types. On Python 3.10 and 3.11, they materialize as fixed-size `bytearray` subclasses.
-Memoryviews are exposed as flat bytes, without their original format or shape.
-Values sent inline retain writeability as `bytearray` or `bytes`.
+Bytes-like payloads sent through SHM arrive as fixed-size, writable buffers.
+They support index and same-length slice assignment, but not resizing or the
+full `bytes`/`bytearray` API. Memoryviews arrive flat, without their original
+format or shape.
+
 These options apply to worker outputs. The final queue
 to the training process (MTP) is configured separately.

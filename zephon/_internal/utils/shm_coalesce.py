@@ -17,7 +17,7 @@ Supported payload types:
   into a uint8 SHM buffer and restored as ``_ShmBytes`` wrappers. Fresh copies
   support index and same-length slice assignment; wrappers cannot resize.
   Python 3.12+ exposes the shared buffer directly. Python 3.10/3.11 materializes
-  a bytearray subclass. Forwarded shared views retain their writeability.
+  a bytearray subclass.
 - **homogeneous numeric lists** — coalesced as int64/float64 and restored
   as ordinary lists. Mixed lists and integers outside int64 use pickle.
 
@@ -499,19 +499,18 @@ class _BytesSlot(_LeafDescriptor):
     offset: int  # byte offset into the _BYTES_DTYPE_KEY buffer
     length: int
     buffer_key: str | None = None
-    writable: bool = True
 
     def buffer_keys(self) -> tuple[str, ...]:
         return (self.buffer_key or _BYTES_DTYPE_KEY,)
 
     def __reduce__(self) -> tuple:
-        return type(self), (self.offset, self.length, self.buffer_key, self.writable)
+        return type(self), (self.offset, self.length, self.buffer_key)
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a bytes view backed by the shared uint8 buffer."""
         buf = buffers[self.buffer_key or _BYTES_DTYPE_KEY]
         if _ShmBytes is _ShmBytes312:
-            return _ShmBytes312(buf, self.offset, self.length, self.writable)
+            return _ShmBytes312(buf, self.offset, self.length)
         return _ShmBytesLegacy(
             _shared_numpy_view(buf)[self.offset : self.offset + self.length]
         )
@@ -632,11 +631,18 @@ class _FlatSkeleton(_PayloadDescriptor):
 # ---------------------------------------------------------------------------
 # SHM-backed bytes view
 # ---------------------------------------------------------------------------
+def _assign_byte_slice(view: memoryview, key: slice, value: Any) -> None:
+    """Validate a slice replacement with bytearray before writing into the buffer."""
+    replacement = bytearray()
+    # Slice assignment rejects scalar lengths, unlike bytearray(value).
+    replacement[:] = value
+    view[key] = replacement
+
+
 class _ShmBytes312:
     """Zero-copy bytes view backed by a SHM uint8 tensor.
 
-    Writable views support index and same-length slice assignment, without
-    resizing. Read-only views export a read-only buffer through the buffer protocol.
+    Supports index and same-length slice assignment, without resizing.
     """
 
     __slots__ = ("_buffer", "_offset", "_np_view", "_write_view")
@@ -646,23 +652,17 @@ class _ShmBytes312:
         buffer: Any,
         offset: int = 0,
         length: int | None = None,
-        writable: bool = True,
     ) -> None:
         self._buffer = buffer
         self._offset = offset
         end = None if length is None else offset + length
         self._np_view = _shared_numpy_view(buffer)[offset:end]
-        if not writable:
-            self._np_view.flags.writeable = False
         self._write_view: memoryview | None = None
 
     def __reduce_ex__(self, protocol: int) -> tuple:
         # ForkingPickler handles the tensor via SHM FD passing (zero copy).
         # Regular pickle falls back to copying tensor data inline.
-        return (
-            _rebuild_shm_bytes,
-            (self._buffer, self._offset, len(self), self._np_view.flags.writeable),
-        )
+        return (_rebuild_shm_bytes, (self._buffer, self._offset, len(self)))
 
     def __len__(self) -> int:
         return self._np_view.size
@@ -679,7 +679,12 @@ class _ShmBytes312:
             # Memoryview validates byte ranges and slice lengths without NumPy
             # broadcasting or integer coercion. Cache it only when used.
             self._write_view = view = memoryview(self._np_view)
-        view[key] = value
+        try:
+            view[key] = value
+        except (TypeError, ValueError):
+            if not isinstance(key, slice):
+                raise
+            _assign_byte_slice(view, key, value)
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, (bytes, memoryview, bytearray)):
@@ -696,10 +701,8 @@ class _ShmBytes312:
         return self._np_view.__buffer__(flags)
 
 
-def _rebuild_shm_bytes(
-    buffer: Any, offset: int, length: int, writable: bool = True
-) -> _ShmBytes312:
-    return _ShmBytes312(buffer, offset, length, writable)
+def _rebuild_shm_bytes(buffer: Any, offset: int, length: int) -> _ShmBytes312:
+    return _ShmBytes312(buffer, offset, length)
 
 
 class _ShmBytesLegacy(bytearray):
@@ -713,7 +716,13 @@ class _ShmBytesLegacy(bytearray):
         super().__init__(tensor_view)
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        memoryview(self)[key] = value
+        view = memoryview(self)
+        try:
+            view[key] = value
+        except (TypeError, ValueError):
+            if not isinstance(key, slice):
+                raise
+            _assign_byte_slice(view, key, value)
 
     def _reject_resize(self, *args: Any, **kwargs: Any) -> Any:
         raise BufferError("Cannot resize a fixed-size bytes view")
@@ -929,7 +938,7 @@ def _inline_buffer(source: Any, slot: Any, shared: bool) -> Any:
     if isinstance(source, memoryview):
         return source.tobytes() if source.readonly else bytearray(source)
     if isinstance(source, _ShmBytes312):
-        return bytearray(source._np_view) if slot.writable else bytes(source)
+        return bytearray(source._np_view)
     return source
 
 
@@ -1203,8 +1212,6 @@ class _PayloadPreparation:
                     if isinstance(view, memoryview)
                     else np.frombuffer(view, dtype=np.uint8)
                 )
-                # A fresh copy owns writable storage independently of its source.
-                value.slot.writable = True
             elif isinstance(value.slot, _TensorSlot) and source.requires_grad:
                 source = source.detach()
             items.append(source)
@@ -1284,11 +1291,7 @@ def _describe_buffer(leaf: Any) -> _BufferPayload | None:
         size = leaf.nbytes if isinstance(leaf, memoryview) else len(leaf)
         return _BufferPayload(
             leaf,
-            _BytesSlot(
-                0,
-                size,
-                writable=leaf._np_view.flags.writeable if storage is not None else True,
-            ),
+            _BytesSlot(0, size),
             _BYTES_DTYPE_KEY,
             size,
             size,
