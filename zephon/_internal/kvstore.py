@@ -85,12 +85,15 @@ _REGISTRY: dict[str, KVStoreFactory] = {}
 
 
 def register_kv_store(scheme: str, factory: KVStoreFactory) -> None:
-    """Register ``factory`` for ``scheme://`` URIs.
+    """Register ``factory`` for ``scheme://`` URIs; each scheme registers once.
 
     Registration is per process, so an MTP or spawned worker process must also
     import the module that registers the store.
     """
-    _REGISTRY[scheme.lower()] = factory
+    scheme = scheme.lower()
+    if scheme in _REGISTRY:
+        raise ValueError(f"aggregate_store scheme {scheme!r} is already registered")
+    _REGISTRY[scheme] = factory
 
 
 def open_kv_store(uri: str, *, timeout_s: float) -> KVStore:
@@ -109,7 +112,8 @@ class TorchKVStore(KVStore):
     """Client for a c10d ``TCPStore``, such as torchrun's.
 
     Connects on first use and again after a fork, so a forked DataLoader worker
-    never shares its parent's socket.
+    never shares its parent's socket. A failed operation discards the client,
+    so the next checkpoint reconnects; the failed operation is not retried.
     """
 
     poll_interval_s = 0.01
@@ -123,15 +127,39 @@ class TorchKVStore(KVStore):
 
     @classmethod
     def from_uri(cls, uri: str, timeout_s: float) -> TorchKVStore:
+        """Parse ``torch://host:port``, or ``torch://`` for MASTER_ADDR/MASTER_PORT."""
         parsed = urlparse(uri)
-        host = parsed.hostname or os.environ.get("MASTER_ADDR")
-        port = parsed.port or os.environ.get("MASTER_PORT")
-        if not host or not port:
-            raise ValueError(
-                f"{uri!r} names no host and port, and MASTER_ADDR/MASTER_PORT "
-                "are not set; use torch://host:port or launch with torchrun"
-            )
-        return cls(host, int(port), timeout_s=timeout_s)
+        if parsed.username or parsed.password or parsed.path.strip("/"):
+            raise ValueError(f"{uri!r} may name only a host and port")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise ValueError(f"{uri!r} may name only a host and port")
+        if not parsed.netloc:
+            host = os.environ.get("MASTER_ADDR")
+            port = _parse_port(os.environ.get("MASTER_PORT"), "MASTER_PORT")
+            if not host or port is None:
+                raise ValueError(
+                    f"{uri!r} names no host and port, and MASTER_ADDR/MASTER_PORT "
+                    "are not set; use torch://host:port or launch with torchrun"
+                )
+            return cls(host, port, timeout_s=timeout_s)
+        try:
+            explicit_port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"{uri!r} has an invalid port") from exc
+        port = _parse_port(explicit_port, uri)
+        if not parsed.hostname or port is None:
+            raise ValueError(f"{uri!r} must name both a host and a port")
+        return cls(parsed.hostname, port, timeout_s=timeout_s)
+
+    def _call(self, op: str, key: object, fn: Callable[[Any], Any]) -> Any:
+        try:
+            return fn(self._client())
+        except Exception as exc:
+            # Don't reuse a client in an unknown state; reconnect next time.
+            self._store = None
+            raise RuntimeError(
+                f"TCPStore {op} of {key!r} at {self.host}:{self.port} failed: {exc}"
+            ) from exc
 
     def _client(self) -> Any:
         pid = os.getpid()
@@ -149,50 +177,67 @@ class TorchKVStore(KVStore):
         return self._store
 
     def get(self, key: str) -> bytes | None:
-        store = self._client()
         # TCPStore.get blocks until the key exists, so check first.
-        if not store.check([key]):
+        if not self.exists(key):
             return None
-        return store.get(key)
+        return self._call("get", key, lambda store: store.get(key))
 
     def get_many(self, keys: list[str]) -> list[bytes | None]:
         # multi_get blocks on missing keys, so batch only when all exist.
-        store = self._client()
-        if keys and store.check(keys):
-            return list(store.multi_get(keys))
+        if keys and self._call("check", keys, lambda store: store.check(keys)):
+            return list(
+                self._call("multi_get", keys, lambda store: store.multi_get(keys))
+            )
         return [self.get(key) for key in keys]
 
     def set(self, key: str, value: bytes) -> None:
-        self._client().set(key, value)
+        self._call("set", key, lambda store: store.set(key, value))
 
     def set_if_absent(self, key: str, value: bytes) -> bytes:
         # With an empty expected value, compare_set writes only if the key is
         # absent, and returns the stored value either way.
-        return self._client().compare_set(key, "", value)
+        return self._call(
+            "compare_set", key, lambda store: store.compare_set(key, "", value)
+        )
 
     def append(self, key: str, value: bytes) -> None:
-        self._client().append(key, value)
+        self._call("append", key, lambda store: store.append(key, value))
 
     def exists(self, key: str) -> bool:
-        return self._client().check([key])
+        return self._call("check", key, lambda store: store.check([key]))
 
     def delete(self, key: str) -> None:
-        self._client().delete_key(key)
+        self._call("delete", key, lambda store: store.delete_key(key))
 
     def wait(self, keys: list[str], timeout: float) -> bool:
-        store = self._client()
         # TCPStore waits in whole milliseconds; with no budget left, only
         # check whether the keys are already there.
         timeout_ms = math.ceil(timeout * 1000)
         if timeout_ms <= 0:
-            return store.check(keys)
+            return self._call("check", keys, lambda store: store.check(keys))
         import torch.distributed as dist
 
-        try:
-            store.wait(keys, timedelta(milliseconds=timeout_ms))
-        except dist.DistStoreError:
-            return store.check(keys)
-        return True
+        def _wait(store: Any) -> bool:
+            try:
+                store.wait(keys, timedelta(milliseconds=timeout_ms))
+            except dist.DistStoreError:
+                # A timeout leaves the connection usable.
+                return store.check(keys)
+            return True
+
+        return self._call("wait", keys, _wait)
+
+
+def _parse_port(value: object, source: str) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        port = int(str(value))
+    except ValueError:
+        raise ValueError(f"{source} is not a valid port: {value!r}") from None
+    if not 0 < port < 65536:
+        raise ValueError(f"{source} is not a valid port: {value!r}")
+    return port
 
 
 register_kv_store("torch", TorchKVStore.from_uri)

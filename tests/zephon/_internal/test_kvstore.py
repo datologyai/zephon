@@ -86,3 +86,53 @@ def test_registered_scheme_is_opened(monkeypatch: pytest.MonkeyPatch) -> None:
     store = InMemoryKVStore()
     monkeypatch.setitem(kvstore._REGISTRY, "memory", lambda _uri, _t: store)
     assert open_kv_store("MEMORY://x", timeout_s=1.0) is store
+
+
+@pytest.mark.parametrize(
+    "uri,error",
+    [
+        ("torch://host:1234/run-a", "only a host and port"),
+        ("torch://user@host:1234", "only a host and port"),
+        ("torch://host:1234?x=1", "only a host and port"),
+        ("torch://host:0", "not a valid port"),
+        ("torch://host:99999", "invalid port"),
+        ("torch://host", "both a host and a port"),
+        ("torch://:1234", "both a host and a port"),
+    ],
+)
+def test_torch_store_rejects_ambiguous_uris(uri: str, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        open_kv_store(uri, timeout_s=1.0)
+
+
+def test_torch_store_names_invalid_master_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MASTER_ADDR", "leader")
+    monkeypatch.setenv("MASTER_PORT", "not-a-port")
+    with pytest.raises(ValueError, match="MASTER_PORT is not a valid port"):
+        open_kv_store("torch://", timeout_s=1.0)
+
+
+def test_duplicate_scheme_registration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(kvstore._REGISTRY, "memory", lambda _uri, _t: InMemoryKVStore())
+    with pytest.raises(ValueError, match="already registered"):
+        kvstore.register_kv_store("MEMORY", lambda _uri, _t: InMemoryKVStore())
+
+
+def test_torch_store_reconnects_after_failure() -> None:
+    dist = pytest.importorskip("torch.distributed")
+    server = dist.TCPStore("127.0.0.1", 0, is_master=True, wait_for_workers=False)
+    port = server.port
+    store = TorchKVStore("127.0.0.1", port, timeout_s=1.0)
+    store.set("k", b"v")
+    del server
+    with pytest.raises(RuntimeError, match=rf"TCPStore \w+ of 'k' at 127.0.0.1:{port}"):
+        store.set("k", b"v")
+        store.get("k")
+    replacement = dist.TCPStore(
+        "127.0.0.1", port, is_master=True, wait_for_workers=False
+    )
+    store.set("k", b"again")
+    assert store.get("k") == b"again"
+    del replacement

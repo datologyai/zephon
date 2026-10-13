@@ -63,6 +63,7 @@ def _build_pipe(
     dp_group_id: int = 0,
     mapping_strategy: str = "contiguous",
     tmp_path: Path = Path("/tmp/pytest_zephon"),
+    aggregate_store: str | None = None,
 ) -> PublicPipeline:
     # Keep prefetch off and threads minimal to avoid shutdown races on partial consumption.
     work = StaticMixtureWorkSource(
@@ -95,7 +96,8 @@ def _build_pipe(
         default_stage_prefetch=2,
         prefetch_batches=2,
         max_workers=8,
-        aggregate_dir=tmp_path,
+        aggregate_dir=None if aggregate_store else tmp_path,
+        aggregate_store=aggregate_store,
         run_id=run_id,
     )
 
@@ -321,10 +323,22 @@ def _phase_run_and_checkpoint_mp(
 @pytest.mark.skipif(
     StatefulDataLoader is None, reason="torchdata.StatefulDataLoader not available"
 )
+@pytest.mark.parametrize("coordination", ["file", "torch"])
 def test_model_parallel_ranks_checkpoint_with_multiple_dataloader_workers(
-    tmp_path: Path,
+    tmp_path: Path, coordination: str
 ) -> None:
-    """Exercise TorchData wiring; gated coordinator tests pin the shutdown race."""
+    """Exercise TorchData wiring; gated coordinator tests pin the shutdown race.
+
+    ``coordination="torch"`` aggregates through a TCPStore that this process
+    hosts; each spawned DataLoader worker connects to it.
+    """
+    aggregate_store = None
+    if coordination == "torch":
+        dist = pytest.importorskip("torch.distributed")
+        store_server = dist.TCPStore(
+            "127.0.0.1", 0, is_master=True, wait_for_workers=False
+        )
+        aggregate_store = f"torch://127.0.0.1:{store_server.port}"
     barrier = Barrier(2)
 
     def checkpoint_rank(rank: int) -> list[dict]:
@@ -338,6 +352,7 @@ def test_model_parallel_ranks_checkpoint_with_multiple_dataloader_workers(
             dp_degree=1,
             dp_group_id=0,
             tmp_path=tmp_path,
+            aggregate_store=aggregate_store,
         )
         assert StatefulDataLoader is not None
         dl = StatefulDataLoader(

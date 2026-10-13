@@ -240,6 +240,7 @@ class RoundCoordinator(ABC):
         self.last_round_id: str | None = None
         self.reload_count = 0
         self._previous_result: str | None = None
+        self._previous_result_pid: int | None = None
 
     # ---------- Storage, implemented by subclasses ----------
 
@@ -269,6 +270,10 @@ class RoundCoordinator(ABC):
     @abstractmethod
     def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
         """Return the names in ``pending`` whose acks have been published."""
+
+    @abstractmethod
+    def _shard_rank(self, shard_location: str) -> int:
+        """The global rank of the participant that published ``shard_location``."""
 
     @abstractmethod
     def _list_shards(self, round_id: str) -> Iterable[str]:
@@ -480,13 +485,27 @@ class RoundCoordinator(ABC):
         round_id: str,
         *,
         seen: dict[str, dict[str, Any]],
+        own_name: str,
     ) -> Iterator[tuple[str, dict[str, Any]]]:
-        """Cache and yield only newly read shards so each is validated once."""
-        new = [loc for loc in self._list_shards(round_id) if loc not in seen]
+        """Cache and yield only newly read shards so each is validated once.
+
+        Skips the leader's own shard by participant name rather than location,
+        since a listing may spell the location differently.
+        """
+        new = [
+            loc
+            for loc in self._list_shards(round_id)
+            if loc not in seen and self._ack_name(loc) != own_name
+        ]
         for location, raw in zip(new, self._read_many(new)):
             st = self._decode_state(location, raw)
             if st is None:
                 continue
+            publisher = self._shard_rank(location)
+            if int(st["world"]["global_rank"]) != publisher:
+                raise RuntimeError(
+                    f"Shard at {location} carries global_rank={st['world']['global_rank']} but was published by rank {publisher}"
+                )
             seen[location] = st
             yield location, st
 
@@ -513,11 +532,19 @@ class RoundCoordinator(ABC):
         result = self._result_location(round_id)
         seen: dict[str, dict[str, Any]] = {}
         try:
-            self._publish_shard(round_id, self._codec.encode(round_.local))
+            encoded = self._codec.encode(round_.local)
+            self._publish_shard(round_id, encoded)
             coverage = _CoverageTracker(round_)
+            # Use the leader's own shard without reading it back, keeping the
+            # codec roundtrip so it matches what followers' shards decode to.
+            seen[my_shard] = self._codec.decode(encoded)
+            coverage.add(my_shard, seen[my_shard])
+            own_name = self._ack_name(my_shard)
 
             def _have_full_coverage() -> bool:
-                for location, state in self._read_states_for_round(round_id, seen=seen):
+                for location, state in self._read_states_for_round(
+                    round_id, seen=seen, own_name=own_name
+                ):
                     coverage.add(location, state)
                 return coverage.complete()
 
@@ -556,6 +583,7 @@ class RoundCoordinator(ABC):
         # Retain the consumed result as a closed-round marker: a follower
         # starting the next round may still have read the old announcement.
         self._previous_result = result
+        self._previous_result_pid = os.getpid()
         return merged
 
     def _wait_for_acks(
@@ -612,7 +640,7 @@ class RoundCoordinator(ABC):
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {result}")
         self._delete_best_effort(my_shard)
-        self._put(self._ack_location(my_shard), b"")
+        self._put(self._ack_location(my_shard), b"ok")
         return merged
 
     def prepare_restore(self) -> None:
@@ -626,9 +654,13 @@ class RoundCoordinator(ABC):
         manual cleanup once every participant has stopped; in particular, an
         unacknowledged result must remain available to delayed readers.
         """
-        if self._previous_result is not None:
+        # A forked child inherits this record but never owned the result.
+        if (
+            self._previous_result is not None
+            and self._previous_result_pid == os.getpid()
+        ):
             self._delete(self._previous_result)
-            self._previous_result = None
+        self._previous_result = None
 
 
 class FileCoordinator(RoundCoordinator):
@@ -778,6 +810,9 @@ class FileCoordinator(RoundCoordinator):
         pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
         return pending & {os.path.basename(path) for path in self.backend.glob(pattern)}
 
+    def _shard_rank(self, shard_location: str) -> int:
+        return int(os.path.basename(shard_location).split("_")[1][1:])
+
     def _list_shards(self, round_id: str) -> Iterable[str]:
         return self._list_state_files(round_id)
 
@@ -898,6 +933,9 @@ class KVCoordinator(RoundCoordinator):
         if self._store.wait(list(keys.values()), 0):
             return set(pending)
         return {name for name, key in keys.items() if self._store.exists(key)}
+
+    def _shard_rank(self, shard_location: str) -> int:
+        return int(self._ack_name(shard_location).split("_")[0][1:])
 
     def _list_shards(self, round_id: str) -> list[str]:
         raw = self._store.get(self._participants_key(round_id))

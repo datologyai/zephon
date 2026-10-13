@@ -225,7 +225,8 @@ def test_leader_waits_for_contributors_and_readers_before_cleanup(
         for lane in shard["progress"]
     }
     assert contributions == {(0, 0), (0, 1), (1, 0), (1, 1)}
-    assert read_shard.call_count == 4
+    # Each follower's shard is read once; the leader uses its own directly.
+    assert read_shard.call_count == 3
     assert not list(Path(coordinators[0].agg_dir).iterdir())
 
 
@@ -731,6 +732,9 @@ class _DictCoordinator(RoundCoordinator):
     def _ack_name(self, shard_location: str) -> str:
         return shard_location.rsplit("/", 1)[1]
 
+    def _shard_rank(self, shard_location: str) -> int:
+        return int(self._ack_name(shard_location).split("_")[0][1:])
+
     def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
         prefix = f"{self._scoped_run_id()}/{round_id}/ack/"
         with self._lock:
@@ -1017,3 +1021,41 @@ def test_make_coordinator_selects_by_option(
         )
     with pytest.raises(RuntimeError, match="aggregate_store"):
         make_coordinator(RuntimeOptions(), **common)
+
+
+def test_shard_from_wrong_rank_is_rejected(participant: Any) -> None:
+    # A rank-1 participant publishes a shard that claims to be rank 0's.
+    mapping = {0: [0], 1: [1]}
+    leader = participant(world_size=2, timeout=2.0)
+    impostor = participant(rank=1, world_size=2, timeout=0.5)
+    merge = Mock()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        led = pool.submit(leader.aggregate, _round(0, [0], mapping, leader=True), merge)
+        pool.submit(impostor.aggregate, _round(0, [1], mapping, leader=False), Mock())
+        with pytest.raises(
+            RuntimeError, match="global_rank=0 but was published by rank 1"
+        ):
+            led.result(timeout=10)
+    merge.assert_not_called()
+
+
+def test_cleanup_in_forked_child_keeps_the_result(
+    participant: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader = participant()
+    solo = AggregationRound(
+        local={
+            "world": {"global_rank": 0, "dp_group_id": 0, "mapping": {0: [0]}},
+            "progress": {0: 7},
+        },
+        is_leader=True,
+        expected_ranks=frozenset({0}),
+        expected_lanes=frozenset({0}),
+    )
+    leader.aggregate(solo, _merge_progress)
+    round_id = leader.last_round_id
+    pid = os.getpid()
+    monkeypatch.setattr(os, "getpid", lambda: pid + 1)
+    leader.cleanup()
+    monkeypatch.undo()
+    assert leader._read_result(round_id) == {"progress": {"0": 7}}
