@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert Arrow tables to Zephon sample payloads.
+"""Convert Arrow tables and arrays to Zephon sample payloads.
 
 Conversion decisions, applied to each column chunk independently::
 
@@ -17,6 +17,7 @@ Conversion decisions, applied to each column chunk independently::
     `-- Other types -> Arrow's Python values (str, bytes, bool, dict, ...)
 
     Assemble each requested row -> {column_name: value}
+    Non-struct root arrays -> bare values with the same conversion rules
 
 Chunks are converted separately to avoid concatenating numeric buffers. Numeric
 arrays use read-only NumPy views where possible, avoiding Python objects for each
@@ -88,18 +89,27 @@ def arrow_table_to_samples(
     Columns may have different chunk boundaries.
     """
     pa = require_pyarrow()
-    columns: dict[str, list[Any] | np.ndarray] = {}
-    for name in table.column_names:
-        column = table.column(name)
-        if column.num_chunks == 1:
-            columns[name] = _column_values(column.chunk(0), pa)
-        else:
-            columns[name] = [
-                value for chunk in column.chunks for value in _column_values(chunk, pa)
-            ]
+    columns = {
+        name: _column_values(table.column(name), pa) for name in table.column_names
+    }
     return samples_from_columns(
         columns, range(table.num_rows) if positions is None else positions
     )
+
+
+def arrow_array_to_samples(
+    array: Any, positions: Iterable[int] | None = None
+) -> list[SamplePayload]:
+    """Return struct rows as dictionaries and other root values as bare payloads."""
+    pa = require_pyarrow()
+    if pa.types.is_struct(array.type):
+        return arrow_table_to_samples(pa.Table.from_struct_array(array), positions)
+    values = _column_values(array, pa)
+    if positions is None:
+        positions = range(len(array))
+    elif not isinstance(positions, range):
+        positions = list(positions)
+    return _copy_repeated_containers([values[pos] for pos in positions], positions)
 
 
 def samples_from_columns(
@@ -114,6 +124,13 @@ def samples_from_columns(
     samples: list[SamplePayload] = [
         {name: values[pos] for name, values in columns.items()} for pos in positions
     ]
+    return _copy_repeated_containers(samples, positions)
+
+
+def _copy_repeated_containers(
+    samples: list[SamplePayload], positions: Iterable[int]
+) -> list[SamplePayload]:
+    """Keep duplicate samples' mutable containers independent without copying arrays."""
     if not isinstance(positions, range):
         seen: set[int] = set()
         for output, pos in enumerate(positions):
@@ -229,7 +246,14 @@ def _lists_for_python(array: Any, pa: Any) -> Any:
 
 
 def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
-    """Convert one Arrow chunk to per-row values."""
+    """Convert Arrow chunks independently to avoid concatenating their buffers."""
+    if isinstance(array, pa.ChunkedArray):
+        if array.num_chunks == 1:
+            array = array.chunk(0)
+        else:
+            return [
+                value for chunk in array.chunks for value in _column_values(chunk, pa)
+            ]
     kind = array.type
     is_fixed = pa.types.is_fixed_size_list(kind)
     is_view = pa.types.is_list_view(kind) or pa.types.is_large_list_view(kind)

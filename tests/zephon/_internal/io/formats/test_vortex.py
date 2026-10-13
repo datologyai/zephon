@@ -51,13 +51,108 @@ def pa() -> Any:
     return pytest.importorskip("pyarrow")
 
 
-def test_non_struct_root_has_clear_error(tmp_path: Path, vortex: Any, pa: Any) -> None:
+@pytest.mark.parametrize(
+    "make_array,expected",
+    [
+        pytest.param(
+            lambda pa: pa.array([10, None, 30], pa.int16()),
+            [np.int16(10), None, np.int16(30)],
+            id="integer",
+        ),
+        pytest.param(
+            lambda pa: pa.array([1.5, None, 3.5], pa.float32()),
+            [np.float32(1.5), None, np.float32(3.5)],
+            id="float",
+        ),
+        pytest.param(
+            lambda pa: pa.array([True, None, False]), [True, None, False], id="boolean"
+        ),
+        pytest.param(
+            lambda pa: pa.array(["zero", None, "two"]), ["zero", None, "two"], id="text"
+        ),
+        pytest.param(
+            lambda pa: pa.array([b"zero", None, b"two"]),
+            [b"zero", None, b"two"],
+            id="binary",
+        ),
+        pytest.param(
+            lambda pa: pa.array([[1, 2], None, []], pa.list_(pa.int16())),
+            [np.array([1, 2], dtype=np.int16), None, np.array([], dtype=np.int16)],
+            id="numeric-list",
+        ),
+        pytest.param(
+            lambda pa: pa.array([[1, None], None, [3, None]], pa.list_(pa.int16())),
+            [[1, None], None, [3, None]],
+            id="inner-nulls",
+        ),
+        pytest.param(
+            lambda pa: pa.array(
+                [[[1, 2], [3, 4]], None, [[5, 6], [7, 8]]],
+                pa.list_(pa.list_(pa.int16(), 2), 2),
+            ),
+            [
+                np.array([[1, 2], [3, 4]], dtype=np.int16),
+                None,
+                np.array([[5, 6], [7, 8]], dtype=np.int16),
+            ],
+            id="fixed-nesting",
+        ),
+        pytest.param(
+            lambda pa: pa.array(
+                [[[1], [2, 3]], None, [[4, 5], []]], pa.list_(pa.list_(pa.int16()))
+            ),
+            [[[1], [2, 3]], None, [[4, 5], []]],
+            id="variable-nesting",
+        ),
+        pytest.param(
+            lambda pa: pa.array(
+                [1_700_000_000_000_000_001, None, -1], pa.timestamp("ns")
+            ),
+            [
+                np.datetime64(1_700_000_000_000_000_001, "ns"),
+                None,
+                np.datetime64(-1, "ns"),
+            ],
+            id="timestamp",
+        ),
+    ],
+)
+def test_non_struct_roots_preserve_values_and_ownership(
+    tmp_path: Path,
+    vortex: Any,
+    pa: Any,
+    make_array: Callable[[Any], Any],
+    expected: list[Any],
+) -> None:
+    """Bare roots retain their types, order and buffers, including cached reopen."""
     path = tmp_path / "values.vortex"
-    vortex.io.write(vortex.array(pa.array([10, 20, 30])), str(path))
-    with pytest.raises(
-        ValueError, match="Vortex shards must contain a struct of columns"
-    ):
-        VortexShard(path)
+    vortex.io.write(vortex.array(make_array(pa)), str(path))
+    metadata_cache = vortex_format.MetadataCache(2)
+    requested = [0, 2, 0, 1]
+    for _ in range(2):
+        shard = VortexShard(path, metadata_cache=metadata_cache)
+        try:
+            rows = shard.getsamples(requested)
+            single = shard[0]
+        finally:
+            shard.close()
+        del shard
+        gc.collect()
+        for actual, index in zip([*rows, single], [*requested, 0]):
+            value = expected[index]
+            assert type(actual) is type(value)
+            if isinstance(value, np.ndarray):
+                assert actual.dtype == value.dtype
+                assert actual.shape == value.shape
+                assert actual.tolist() == value.tolist()
+                assert not actual.flags.writeable
+            else:
+                assert actual == value
+        if isinstance(rows[0], np.ndarray):
+            assert np.shares_memory(rows[0], rows[2])
+        elif isinstance(rows[0], list):
+            rows[0].append("changed")
+            assert rows[2] == expected[0]
 
 
 @pytest.fixture

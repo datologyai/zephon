@@ -19,10 +19,26 @@ pa = pytest.importorskip("pyarrow")
 from zephon._internal.io.formats import arrow_rows
 from zephon._internal.io.formats.arrow_rows import (
     _column_values,
+    arrow_array_to_samples,
     arrow_table_to_samples,
     take_and_materialize,
 )
 from zephon.io import ArrowOptions
+
+
+def test_bare_chunked_arrays_preserve_order_and_mutable_containers() -> None:
+    array = pa.chunked_array(
+        [
+            pa.array([[[1], [2, 3]]]),
+            pa.array([None, [[4, 5]]], type=pa.list_(pa.list_(pa.int64()))),
+        ]
+    )
+    rows = arrow_array_to_samples(array, iter([2, 0, 2, 1]))
+    assert rows == [[[4, 5]], [[1], [2, 3]], [[4, 5]], None]
+    rows[0][0].append(6)
+    assert rows[2] == [[4, 5]]
+    assert arrow_array_to_samples(array) == [[[1], [2, 3]], None, [[4, 5]]]
+    assert arrow_array_to_samples(pa.chunked_array([], type=pa.int32())) == []
 
 
 @pytest.mark.parametrize(

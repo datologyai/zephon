@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 import numpy as np
 
 from zephon._internal.io.formats.arrow_rows import (
-    arrow_table_to_samples,
+    arrow_array_to_samples,
     configure_pyarrow,
     require_pyarrow,
     samples_from_columns,
@@ -122,9 +122,7 @@ def _open_vortex_file(
         file = vortex.open(str(path), **options)
         pa = require_pyarrow()
         export_type = _list_view_type(file.dtype.to_arrow_type(), pa)
-        if not pa.types.is_struct(export_type):
-            raise ValueError("Vortex shards must contain a struct of columns")
-        text_only = all(
+        text_only = pa.types.is_struct(export_type) and all(
             pa.types.is_string(field.type)
             or pa.types.is_large_string(field.type)
             or pa.types.is_string_view(field.type)
@@ -235,11 +233,8 @@ class VortexShard(RandomAccessShard):
                 # Vortex 0.88's writer rejects nullable root structs; keep this
                 # guard for native arrays supplied by other readers or writers.
             # ListView export can trim unselected child values before decoding.
-            pa = require_pyarrow()
-            arrow_table = pa.Table.from_struct_array(
-                batch.to_arrow_array(arrow_type=self._export_type)
-            )
-        return arrow_table_to_samples(arrow_table, positions)
+            arrow_array = batch.to_arrow_array(arrow_type=self._export_type)
+        return arrow_array_to_samples(arrow_array, positions)
 
 
 def _list_view_type(kind: Any, pa: Any) -> Any:

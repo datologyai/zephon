@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 pytest.importorskip("vortex.io", reason="vortex-data not installed")
@@ -34,6 +35,50 @@ def _write(path: Path, start: int = 0) -> None:
     vortex.io.write(
         vortex.array([{"value": i} for i in range(start, start + 8)]), str(path)
     )
+
+
+@pytest.mark.parametrize("runner", ["threads", "process"])
+@pytest.mark.parametrize("kind", ["integer", "text", "list"])
+def test_non_struct_roots_through_fetch(tmp_path: Path, runner: str, kind: str) -> None:
+    """Discovery, fetch and transport preserve a native bare payload's shape."""
+    pa = pytest.importorskip("pyarrow")
+    source = {
+        "integer": pa.array([10, None, 30, 40], pa.int16()),
+        "text": pa.array(["zero", None, "two", "three"]),
+        "list": pa.array([[1, 2], None, [], [3]], pa.list_(pa.int16())),
+    }[kind]
+    vortex.io.write(vortex.array(source), str(tmp_path / "data.vortex"))
+    dataset = Dataset.from_path("bare", str(tmp_path), fmt="vortex")
+    work = StaticMixtureWorkSource(
+        [dataset],
+        {"bare": 1.0},
+        chunk_size=2,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = (
+        Pipeline(work)
+        .batch(microbatch_size=2, drop_last=False)
+        .options(runner=runner, max_workers=2, io_options={"cache": {"enabled": False}})
+    )
+    iterator = iter(pipeline)
+    try:
+        records = [record for batch in iterator for record in batch.records]
+    finally:
+        iterator.close()
+    assert len(records) == len(source)
+    for record in records:
+        expected = source[record.meta.sample_id[2]].as_py()
+        actual = record.payload
+        if expected is None:
+            assert actual is None
+        elif kind == "list":
+            assert isinstance(actual, np.ndarray)
+            assert actual.dtype == np.int16
+            assert actual.tolist() == expected
+        else:
+            assert type(actual) is (np.int16 if kind == "integer" else str)
+            assert actual == expected
 
 
 def test_store_reuses_caches_across_fetch_groups(

@@ -57,7 +57,9 @@ Note that Vortex handles compression operations within the file format itself, s
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
 
-Vortex returns samples in the [same form as Parquet](../parquet.md#sample-payloads).
+Vortex structs return dictionaries keyed by field name, including single-field structs.
+Files containing bare values, such as strings or numeric lists, return those values
+directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
 
 **Caching Reads.** Zephon caches Vortex metadata and encoded file segments in memory to
 speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
