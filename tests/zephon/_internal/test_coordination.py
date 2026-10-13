@@ -10,10 +10,14 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.helpers.kvstore import InMemoryKVStore
+from zephon._internal import kvstore
 from zephon._internal.coordination import (
     AggregationRound,
     FileCoordinator,
+    KVCoordinator,
     RoundCoordinator,
+    make_coordinator,
 )
 from zephon.options import RuntimeOptions
 
@@ -183,8 +187,8 @@ def test_leader_waits_for_contributors_and_readers_before_cleanup(
     monkeypatch.setattr(coordinators[-1], "_read_aggregation_state", delayed_read)
     expected = {"progress": {"0": 7, "1": 7}}
     merge = Mock(return_value=expected)
-    read_shard = Mock(wraps=coordinators[0]._read_aggregation_state)
-    monkeypatch.setattr(coordinators[0], "_read_aggregation_state", read_shard)
+    read_shard = Mock(wraps=coordinators[0]._read)
+    monkeypatch.setattr(coordinators[0], "_read", read_shard)
 
     def aggregate(index: int) -> dict[str, Any]:
         coordinator = coordinators[index]
@@ -233,19 +237,18 @@ def test_unacknowledged_result_survives_timeout_and_cleanup(
     follower = _coordinator(tmp_path, rank=1, world_size=3)
     healthy_follower = _coordinator(tmp_path, rank=2, world_size=3)
     follower_failed = Event()
-    delete = leader.backend.delete
+    wait_for_acks = leader._wait_for_acks
     wait_until = leader._wait_until
 
-    def close_round(path: str) -> None:
-        if path == leader.round_file:
-            assert follower_failed.wait(5)
-        delete(path)
+    def wait_for_failed_reader(*args: Any) -> None:
+        assert follower_failed.wait(5)
+        wait_for_acks(*args)
 
     def wait_for_readers(pred: Callable[[], bool], timeout: float) -> bool:
         # Exercise ack timeout without making discovery depend on startup latency.
         return wait_until(pred, 0.01 if follower_failed.is_set() else timeout)
 
-    monkeypatch.setattr(leader.backend, "delete", close_round)
+    monkeypatch.setattr(leader, "_wait_for_acks", wait_for_failed_reader)
     monkeypatch.setattr(leader, "_wait_until", wait_for_readers)
     if failure == "decode":
         monkeypatch.setattr(
@@ -815,3 +818,202 @@ def test_failure_notice_never_revokes_a_published_outcome() -> None:
     leader._publish_failure("r", "late error")
     assert leader._wait_for_outcome("r", 0)
     assert leader._read_result("r") == {"progress": {0: 1}}
+
+
+# ---------------------------------------------------------------------------
+# Behavior shared by FileCoordinator and KVCoordinator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["file", "kv"])
+def participant(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
+    """Build coordinators for one test's participants on the chosen backend."""
+    store = InMemoryKVStore()
+
+    def make(
+        *,
+        rank: int = 0,
+        worker_id: int = 0,
+        workers_per_rank: int = 1,
+        world_size: int = 1,
+        timeout: float = 5.0,
+    ) -> RoundCoordinator:
+        if request.param == "file":
+            return _coordinator(
+                tmp_path,
+                rank=rank,
+                world_size=world_size,
+                worker_id=worker_id,
+                workers_per_rank=workers_per_rank,
+                timeout=timeout,
+            )
+        return KVCoordinator(
+            RuntimeOptions(
+                run_id="coordination-test",
+                aggregate_serializer="json",
+                aggregate_compressor="none",
+                aggregate_timeout_s=timeout,
+            ),
+            store,
+            global_rank=rank,
+            world_size=world_size,
+            plan_id="test-plan",
+            worker_info=lambda: (worker_id, workers_per_rank),
+        )
+
+    make.store = store  # type: ignore[attr-defined]
+    make.backend = request.param  # type: ignore[attr-defined]
+    return make
+
+
+def _round(
+    rank: int, lanes: list[int], mapping: dict[int, list[int]], *, leader: bool
+) -> AggregationRound:
+    groups = {lane: group for group, members in mapping.items() for lane in members}
+    return AggregationRound(
+        local={
+            "world": {
+                "global_rank": rank,
+                "dp_group_id": groups[lanes[0]],
+                "mapping": mapping,
+            },
+            "progress": dict.fromkeys(lanes, 7),
+        },
+        is_leader=leader,
+        expected_ranks=frozenset({0, 1}),
+        expected_lanes=frozenset(groups),
+    )
+
+
+def _merge_progress(shards: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"progress": {k: v for s in shards for k, v in s["progress"].items()}}
+
+
+def test_rounds_with_uneven_workers_across_model_parallel_ranks(
+    participant: Any,
+) -> None:
+    # Ranks 0 and 1 are MP peers sharing lanes 0 and 1. Rank 0 splits them
+    # across two active workers (a third configured worker is idle); rank 1
+    # has one worker owning both.
+    mapping = {0: [0, 1]}
+    members = [
+        (participant(rank=0, worker_id=0, workers_per_rank=3, world_size=2), 0, [0]),
+        (participant(rank=0, worker_id=1, workers_per_rank=3, world_size=2), 0, [1]),
+        (participant(rank=1, world_size=2), 1, [0, 1]),
+    ]
+    merge = Mock(side_effect=_merge_progress)
+    with ThreadPoolExecutor(max_workers=len(members)) as pool:
+        for step in range(3):
+            futures = [
+                pool.submit(
+                    coordinator.aggregate,
+                    _round(rank, lanes, mapping, leader=index == 0),
+                    merge,
+                )
+                for index, (coordinator, rank, lanes) in enumerate(members)
+            ]
+            results = [future.result(timeout=10) for future in futures]
+            assert results == [{"progress": {"0": 7, "1": 7}}] * len(members)
+            assert merge.call_count == step + 1
+            assert len(merge.call_args.args[0]) == len(members)
+    if participant.backend == "kv":
+        # Only the last round's retained outcome remains in the store.
+        assert [key.rsplit("/", 1)[1] for key in participant.store.data] == ["outcome"]
+    members[0][0].cleanup()
+    if participant.backend == "kv":
+        assert participant.store.data == {}
+
+
+def test_leader_failure_reaches_followers(participant: Any) -> None:
+    mapping = {0: [0], 1: [1]}
+    leader = participant(world_size=2)
+    follower = participant(rank=1, world_size=2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        led = pool.submit(
+            leader.aggregate,
+            _round(0, [0], mapping, leader=True),
+            Mock(side_effect=ValueError("Inconsistent snapshots")),
+        )
+        followed = pool.submit(
+            follower.aggregate, _round(1, [1], mapping, leader=False), Mock()
+        )
+        with pytest.raises(ValueError, match="Inconsistent snapshots"):
+            led.result(timeout=10)
+        with pytest.raises(
+            RuntimeError, match="failed on leader: ValueError: Inconsistent snapshots"
+        ):
+            followed.result(timeout=10)
+
+
+def test_unacknowledged_result_is_retained(
+    participant: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mapping = {0: [0], 1: [1]}
+    leader = participant(world_size=2, timeout=1.0)
+    follower = participant(rank=1, world_size=2, timeout=1.0)
+    monkeypatch.setattr(follower, "_read_result", lambda _round_id: None)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        led = pool.submit(
+            leader.aggregate, _round(0, [0], mapping, leader=True), _merge_progress
+        )
+        followed = pool.submit(
+            follower.aggregate, _round(1, [1], mapping, leader=False), Mock()
+        )
+        with pytest.raises(RuntimeError, match="Failed to read merged checkpoint"):
+            followed.result(timeout=10)
+        with pytest.raises(RuntimeError, match="acknowledgements: missing=1"):
+            led.result(timeout=10)
+    leader.cleanup()
+    assert leader._read_result(leader.last_round_id) == {"progress": {"0": 7, "1": 7}}
+
+
+def test_completed_stale_round_is_not_joined(participant: Any) -> None:
+    # A previous attempt left a fresh announcement and its result behind.
+    previous = participant(world_size=2)
+    previous._write_announcement("old")
+    previous._publish_result("old", previous._codec.encode({"progress": {}}))
+    follower = participant(rank=1, world_size=2, timeout=0.2)
+    with pytest.raises(RuntimeError, match="waiting for round id"):
+        follower.aggregate(_round(1, [1], {0: [0], 1: [1]}, leader=False), Mock())
+
+
+def test_coverage_timeout_reports_missing_rank(participant: Any) -> None:
+    leader = participant(world_size=2, timeout=0.05)
+    merge = Mock()
+    with pytest.raises(RuntimeError, match=r"Missing ranks=\[1\]"):
+        leader.aggregate(_round(0, [0], {0: [0], 1: [1]}, leader=True), merge)
+    merge.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Coordinator selection
+# ---------------------------------------------------------------------------
+
+
+def test_make_coordinator_selects_by_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        kvstore._REGISTRY, "memory", lambda _uri, _timeout_s: InMemoryKVStore()
+    )
+    common: dict[str, Any] = {
+        "global_rank": 0,
+        "world_size": 2,
+        "plan_id": "test-plan",
+        "worker_info": lambda: (0, 1),
+    }
+    assert isinstance(
+        make_coordinator(RuntimeOptions(aggregate_dir=str(tmp_path)), **common),
+        FileCoordinator,
+    )
+    assert isinstance(
+        make_coordinator(RuntimeOptions(aggregate_store="memory://"), **common),
+        KVCoordinator,
+    )
+    with pytest.raises(ValueError, match="at most one"):
+        make_coordinator(
+            RuntimeOptions(aggregate_dir=str(tmp_path), aggregate_store="memory://"),
+            **common,
+        )
+    with pytest.raises(RuntimeError, match="aggregate_store"):
+        make_coordinator(RuntimeOptions(), **common)

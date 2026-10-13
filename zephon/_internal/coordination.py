@@ -5,11 +5,13 @@ logic. The coordinator checks participant and lane coverage before merging.
 A :class:`CheckpointCoordinator` exchanges those snapshots and the merged result
 between participants. :class:`RoundCoordinator` implements the round protocol
 over storage that subclasses provide; :class:`FileCoordinator` uses a shared
-``aggregate_dir``.
+``aggregate_dir`` and :class:`KVCoordinator` the key-value store that
+``aggregate_store`` names.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -23,6 +25,7 @@ from typing import Any, Protocol, TypeVar, cast
 
 from zephon._internal.checkpoint import AggregationCodec
 from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.kvstore import KVStore, open_kv_store
 from zephon.options import DEFAULT_RUN_ID, RuntimeOptions
 
 T = TypeVar("T")
@@ -291,6 +294,24 @@ class RoundCoordinator(ABC):
     @abstractmethod
     def _delete(self, location: str) -> None: ...
 
+    # ---------- Storage with defaults that subclasses may override ----------
+
+    def _publish_shard(self, round_id: str, data: bytes) -> None:
+        """Publish this process's shard where ``_list_shards`` will find it."""
+        self._put(self._shard_location(round_id), data)
+
+    def _read_many(self, locations: list[str]) -> list[bytes | None]:
+        """Read several values; override to batch them."""
+        return [self._read(location) for location in locations]
+
+    def _wait_for_announcement(self, timeout: float) -> str | None:
+        """Poll until a joinable round is announced; return None on timeout."""
+        return self._wait_value(self._read_open_round_id, timeout)
+
+    def _close_round(self, round_id: str) -> None:
+        """Stop new participants from joining once every shard is in."""
+        self._delete(self._announcement_location)
+
     # ---------- Round outcome, overridable as a unit ----------
 
     def _publish_result(self, round_id: str, data: bytes) -> None:
@@ -354,7 +375,9 @@ class RoundCoordinator(ABC):
         return None if raw is None else raw.decode("utf-8")
 
     def _read_aggregation_state(self, location: str) -> dict | None:
-        raw = self._read(location)
+        return self._decode_state(location, self._read(location))
+
+    def _decode_state(self, location: str, raw: bytes | None) -> dict | None:
         if raw is None:
             return None
         try:
@@ -432,9 +455,7 @@ class RoundCoordinator(ABC):
         if is_leader:
             return self._publish_new_round_id()
 
-        rid = self._wait_value(
-            self._read_open_round_id, max(0.0, deadline - time.monotonic())
-        )
+        rid = self._wait_for_announcement(max(0.0, deadline - time.monotonic()))
         if rid is None:
             raise self._timeout_error(
                 deadline, f"round id at {self._announcement_location}"
@@ -461,10 +482,9 @@ class RoundCoordinator(ABC):
         seen: dict[str, dict[str, Any]],
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         """Cache and yield only newly read shards so each is validated once."""
-        for location in self._list_shards(round_id):
-            if location in seen:
-                continue
-            st = self._read_aggregation_state(location)
+        new = [loc for loc in self._list_shards(round_id) if loc not in seen]
+        for location, raw in zip(new, self._read_many(new)):
+            st = self._decode_state(location, raw)
             if st is None:
                 continue
             seen[location] = st
@@ -493,7 +513,7 @@ class RoundCoordinator(ABC):
         result = self._result_location(round_id)
         seen: dict[str, dict[str, Any]] = {}
         try:
-            self._put(my_shard, self._codec.encode(round_.local))
+            self._publish_shard(round_id, self._codec.encode(round_.local))
             coverage = _CoverageTracker(round_)
 
             def _have_full_coverage() -> bool:
@@ -509,6 +529,11 @@ class RoundCoordinator(ABC):
                     f"checkpoint shards: {coverage.missing()}; shards={len(seen)}",
                 )
 
+            # Safe: per-rank lane coverage means every active worker has read
+            # the announcement and published its shard. Closing the round
+            # before publishing means no follower can still be reading the
+            # announcement while it's deleted.
+            self._close_round(round_id)
             # States already cached from polling above.
             merged = merge(list(seen.values()))
             merged_bytes = self._codec.encode(merged)
@@ -525,9 +550,6 @@ class RoundCoordinator(ABC):
         # what followers read back (json would otherwise stringify keys).
         merged = self._codec.decode(merged_bytes)
         self._delete_best_effort(my_shard)
-        # Safe: per-rank lane coverage means every active worker has read the
-        # announcement and published its shard before we close the round.
-        self._delete(self._announcement_location)
         self._wait_for_acks(round_id, seen, my_shard, result, deadline)
         if self._previous_result is not None:
             self._delete_best_effort(self._previous_result)
@@ -583,7 +605,7 @@ class RoundCoordinator(ABC):
     ) -> dict[str, Any]:
         my_shard = self._shard_location(round_id)
         result = self._result_location(round_id)
-        self._put(my_shard, self._codec.encode(round_.local))
+        self._publish_shard(round_id, self._codec.encode(round_.local))
         if not self._wait_for_outcome(round_id, max(0.0, deadline - time.monotonic())):
             raise self._timeout_error(deadline, f"merged checkpoint at {result}")
         merged = self._read_result(round_id)
@@ -638,7 +660,7 @@ class FileCoordinator(RoundCoordinator):
             # Multi-node: must be provided (shared FS or cloud storage)
             if not opts.aggregate_dir:
                 raise RuntimeError(
-                    "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
+                    "RuntimeOptions.aggregate_dir or RuntimeOptions.aggregate_store must be set for multi-node checkpoint aggregation."
                 )
             base = opts.aggregate_dir
 
@@ -790,3 +812,212 @@ class FileCoordinator(RoundCoordinator):
 
     def prepare_restore(self) -> None:
         self.backend.mkdir(self.agg_dir, parents=True, exist_ok=True)
+
+
+class KVCoordinator(RoundCoordinator):
+    """Checkpoint rounds over a :class:`~zephon._internal.kvstore.KVStore`.
+
+    Keys live under ``zephon/{run_id}-{reload_count}``. Restoring the same
+    checkpoint twice reuses that namespace, so isolation between such
+    attempts is best effort, as with ``aggregate_dir``. Per round:
+
+    - ``round``: the open round ID and a timestamp.
+    - ``{round}/state/{participant}``: each participant's shard, where a
+      participant is one rank, DataLoader worker, and process.
+    - ``{round}/participants``: participant IDs, appended after each shard is
+      written, so the leader finds shards without listing keys.
+    - ``{round}/outcome``: the merged result or the leader's failure, written
+      conditionally so a later failure can't replace a published result.
+    - ``{round}/ack/{participant}``: each follower's acknowledgement.
+    """
+
+    _RESULT = b"R"
+    _FAILURE = b"F"
+
+    def __init__(
+        self,
+        opts: RuntimeOptions,
+        store: KVStore,
+        *,
+        global_rank: int,
+        world_size: int,
+        plan_id: str,
+        worker_info: Callable[[], tuple[int, int]],
+    ) -> None:
+        super().__init__(
+            opts,
+            global_rank=global_rank,
+            world_size=world_size,
+            plan_id=plan_id,
+            worker_info=worker_info,
+            timeout_s=opts.aggregate_timeout_s,
+            poll_base_s=store.poll_interval_s,
+            poll_backoff=False,
+        )
+        self._store = store
+
+    @property
+    def _namespace(self) -> str:
+        return f"zephon/{self._scoped_run_id()}"
+
+    @property
+    def _participant(self) -> str:
+        worker_id, _ = self._worker_info()
+        return f"r{self._global_rank}_w{worker_id}_p{os.getpid()}"
+
+    def _participants_key(self, round_id: str) -> str:
+        return f"{self._namespace}/{round_id}/participants"
+
+    def _state_key(self, round_id: str, participant: str) -> str:
+        return f"{self._namespace}/{round_id}/state/{participant}"
+
+    # ---------- RoundCoordinator storage ----------
+
+    @property
+    def _announcement_location(self) -> str:
+        return f"{self._namespace}/round"
+
+    def _shard_location(self, round_id: str) -> str:
+        return self._state_key(round_id, self._participant)
+
+    def _result_location(self, round_id: str) -> str:
+        return f"{self._namespace}/{round_id}/outcome"
+
+    def _failure_location(self, round_id: str) -> str:
+        return self._result_location(round_id)
+
+    def _ack_location(self, shard_location: str) -> str:
+        round_dir, _, participant = shard_location.rpartition("/state/")
+        return f"{round_dir}/ack/{participant}"
+
+    def _ack_name(self, shard_location: str) -> str:
+        return shard_location.rpartition("/state/")[2]
+
+    def _acknowledged(self, round_id: str, pending: set[str]) -> set[str]:
+        keys = {name: f"{self._namespace}/{round_id}/ack/{name}" for name in pending}
+        if self._store.wait(list(keys.values()), 0):
+            return set(pending)
+        return {name for name, key in keys.items() if self._store.exists(key)}
+
+    def _list_shards(self, round_id: str) -> list[str]:
+        raw = self._store.get(self._participants_key(round_id))
+        participants = raw.decode("utf-8").split() if raw else []
+        return [self._state_key(round_id, p) for p in participants]
+
+    def _publish_shard(self, round_id: str, data: bytes) -> None:
+        self._store.set(self._shard_location(round_id), data)
+        # Appended on the same connection after the shard, so a leader that
+        # sees this participant can already read its shard.
+        self._store.append(
+            self._participants_key(round_id), f"{self._participant}\n".encode()
+        )
+
+    def _close_round(self, round_id: str) -> None:
+        super()._close_round(round_id)
+        self._delete_best_effort(self._participants_key(round_id))
+
+    def _write_announcement(self, round_id: str) -> None:
+        payload = json.dumps({"round": round_id, "ts": time.time()})
+        self._store.set(self._announcement_location, payload.encode("utf-8"))
+
+    def _read_announcement(self) -> tuple[str, float] | None:
+        raw = self._store.get(self._announcement_location)
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        return payload["round"], time.time() - payload["ts"]
+
+    def _put(self, location: str, data: bytes) -> None:
+        self._store.set(location, data)
+
+    def _read(self, location: str) -> bytes | None:
+        return self._store.get(location)
+
+    def _read_many(self, locations: list[str]) -> list[bytes | None]:
+        return self._store.get_many(locations)
+
+    def _exists(self, location: str) -> bool:
+        return self._store.exists(location)
+
+    def _delete(self, location: str) -> None:
+        self._store.delete(location)
+
+    # ---------- Native waits and a single outcome value ----------
+
+    def _wait_for_announcement(self, timeout: float) -> str | None:
+        deadline = time.monotonic() + timeout
+        while (rid := self._read_open_round_id()) is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if not self._store.exists(self._announcement_location):
+                self._store.wait([self._announcement_location], remaining)
+            else:
+                # Stale or already joined; wait for the leader to replace it.
+                time.sleep(min(self._poll_base, remaining))
+        return rid
+
+    def _publish_result(self, round_id: str, data: bytes) -> None:
+        outcome = self._RESULT + data
+        if (
+            self._store.set_if_absent(self._result_location(round_id), outcome)
+            != outcome
+        ):
+            raise RuntimeError(
+                f"Round {round_id} already has an outcome at {self._result_location(round_id)}"
+            )
+
+    def _publish_failure(self, round_id: str, message: str) -> None:
+        self._store.set_if_absent(
+            self._result_location(round_id), self._FAILURE + message.encode("utf-8")
+        )
+
+    def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
+        outcome_key = self._result_location(round_id)
+        if not self._store.wait([outcome_key], timeout):
+            return False
+        outcome = self._store.get(outcome_key) or b""
+        if outcome[:1] == self._FAILURE:
+            raise RuntimeError(
+                f"Checkpoint round {round_id} failed on leader: {outcome[1:].decode('utf-8')}"
+            )
+        return True
+
+    def _read_result(self, round_id: str) -> dict | None:
+        outcome_key = self._result_location(round_id)
+        outcome = self._store.get(outcome_key)
+        if not outcome or outcome[:1] != self._RESULT:
+            return None
+        return self._decode_state(outcome_key, outcome[1:])
+
+
+def make_coordinator(
+    opts: RuntimeOptions,
+    *,
+    global_rank: int,
+    world_size: int,
+    plan_id: str,
+    worker_info: Callable[[], tuple[int, int]],
+) -> CheckpointCoordinator:
+    """Build the coordinator that ``aggregate_dir``/``aggregate_store`` select."""
+    if opts.aggregate_store:
+        if opts.aggregate_dir:
+            raise ValueError(
+                "Set at most one of RuntimeOptions.aggregate_dir and "
+                "RuntimeOptions.aggregate_store."
+            )
+        return KVCoordinator(
+            opts,
+            open_kv_store(opts.aggregate_store, timeout_s=opts.aggregate_timeout_s),
+            global_rank=global_rank,
+            world_size=world_size,
+            plan_id=plan_id,
+            worker_info=worker_info,
+        )
+    return FileCoordinator(
+        opts,
+        global_rank=global_rank,
+        world_size=world_size,
+        plan_id=plan_id,
+        worker_info=worker_info,
+    )

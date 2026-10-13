@@ -46,9 +46,12 @@ from zephon._internal.checkpoint import (
     ENGINE_VERSION,
     EngineStateV2,
 )
-from zephon._internal.coordination import AggregationRound, FileCoordinator
+from zephon._internal.coordination import (
+    AggregationRound,
+    CheckpointCoordinator,
+    make_coordinator,
+)
 from zephon._internal.graph import Plan
-from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.stores.multi import (
     finalize_dataset_catalogs,
     has_cacheable_dataset,
@@ -413,7 +416,7 @@ class Engine:
         ] = []
         self._build_runners()
 
-        self._coordinator = FileCoordinator(
+        self._coordinator: CheckpointCoordinator = make_coordinator(
             self._opts,
             global_rank=self._world.global_rank,
             world_size=self._world.world_size,
@@ -436,18 +439,6 @@ class Engine:
             assert cs is not None, (
                 "No chunk size hint for current work source, determinism breaks potentially"
             )
-
-    @property
-    def _agg_backend(self) -> RouterStorageBackend:
-        return self._coordinator.backend
-
-    @property
-    def _agg_dir(self) -> str:
-        return self._coordinator.agg_dir
-
-    @property
-    def _round_file(self) -> str:
-        return self._coordinator.round_file
 
     @property
     def _last_round_id(self) -> str | None:

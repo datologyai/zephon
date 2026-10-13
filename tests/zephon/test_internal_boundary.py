@@ -67,6 +67,30 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.types:ShardLocator",
         }
     ),
+    # Engine fixtures shared by engine unit tests and coordination integration.
+    "tests/helpers/engine.py": frozenset(
+        {
+            "zephon._internal.engine:Engine",
+            "zephon._internal.graph:Graph",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.planner:Planner",
+            "zephon._internal.runtime_spec:resolve_runtime_spec",
+            "zephon._internal.stream:LanePtr",
+        }
+    ),
+    # In-memory fake for the internal checkpoint key-value store interface.
+    "tests/helpers/kvstore.py": frozenset({"zephon._internal.kvstore:KVStore"}),
+    # Checkpoint coordinators over real TCPStore processes and the engine merge.
+    "tests/integration/test_kv_coordination.py": frozenset(
+        {
+            "zephon._internal.checkpoint:AggregationCodec",
+            "zephon._internal.coordination:AggregationRound",
+            "zephon._internal.coordination:FileCoordinator",
+            "zephon._internal.coordination:KVCoordinator",
+            "zephon._internal.coordination:RoundCoordinator",
+            "zephon._internal.coordination:make_coordinator",
+        }
+    ),
     # Persisted LitData fixtures need the internal index treespec representation.
     "tests/helpers/litdata_chunks.py": frozenset(
         {"zephon._internal.io.formats.litdata_support:support"}

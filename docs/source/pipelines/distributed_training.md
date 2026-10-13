@@ -87,6 +87,13 @@ same `aggregate_dir` do not collide with each other.
 :caption: examples/guide/pipelines/coordination_identity.py
 ```
 
+If your nodes don't share a filesystem or bucket with read-after-write consistency, set
+`aggregate_store` instead of `aggregate_dir`. With `aggregate_store="torch://"`, the
+`Pipeline` instances exchange checkpoint state through the TCPStore that `torchrun` already
+runs at `MASTER_ADDR`/`MASTER_PORT`, so no extra storage is needed; use
+`torch://host:port` to name a different store. Set at most one of the two options. Both
+support the same setups, including several DataLoader workers per rank.
+
 Every `Pipeline` instance that is part of the same coordination group must call
 `Pipeline.checkpoint()` at the same training step. If one of them does not, the leader
 will wait for the missing instance until the aggregation timeout (`aggregate_timeout_s`,
