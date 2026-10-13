@@ -1,9 +1,9 @@
-# Training Integrations
+# Training integrations
 
 When we are initially developing or testing out our data pipeline, it's easiest to treat a
 Zephon `Pipeline` as a regular Python iterable that produces batches of data that we can
 manually inspect and debug. But as we discussed in
-[Distributed Training](pipelines/distributed_training.md), integrating our data pipeline
+[Distributed training](pipelines/distributed_training.md), integrating our data pipeline
 into a distributed model training framework requires us to align the two at a few specific
 points to ensure that the model receives the data in the right form and that the data
 loader and the model always agree on where the training run is. Here we will discuss these
@@ -17,10 +17,9 @@ get you up and running quickly, so the purpose of this page is to explain the de
 had to make in order to make the integrations work so that you can adapt them to your own
 setup or build a similar integration for your own framework.
 
-## Where Zephon Meets the Training Loop
-
-Here is the idealized training loop from earlier in the guide, with annotations for the
-places where the data loader and the training framework need to agree with each other:
+**Where Zephon meets the training loop.** Here is the idealized training loop from earlier
+in the guide, with annotations for the places where the data loader and the training
+framework need to agree with each other:
 
 ```python
 pipeline = build_pipeline(recipe, seq_len, tokenizer, topology)    # settings the framework owns
@@ -39,7 +38,7 @@ for step, batch in enumerate(pipeline):
 
 Let's discuss each of the integration points here in turn.
 
-**Building the Pipeline.** The first place the two sides meet is when the `Pipeline` is
+**Building the pipeline.** The first place the two sides meet is when the `Pipeline` is
 built, because some of the settings that we need for configuring the `Pipeline` are also
 required for the model training loop, and so we need to pull them from the model training
 framework. The other settings, like the datasets, the mixture weights, and the knobs that
@@ -77,10 +76,10 @@ In Megatron, we build the Zephon `Pipeline` via a replacement for the
 subset of ranks that consume the batch need to build one, since Megatron broadcasts each
 batch to the other tensor-parallel ranks.
 
-**Shaping Each Batch.** The second integration point is in the shape of the batch itself,
+**Shaping each batch.** The second integration point is in the shape of the batch itself,
 provided by the `SampleBatch.to_training` method. Every framework expects its batches in a
 particular form with the field names and types that match what the model is expecting.
-[Building Training Batches](pipelines/building_training_batches.md) explains how to map a
+[Building training batches](pipelines/building_training_batches.md) explains how to map a
 packed sequence of tokens into the format that the model expects, and the job of the
 integration code is to wire up the settings from the training framework that are necessary
 for this to work into the `to_training` method's arguments.
@@ -92,7 +91,7 @@ a float loss mask, and then it has a number of different training options that c
 the form of the positions and attention masks depending on the model that is being
 trained.
 
-**Saving and Restoring.** The last place where we need to ensure alignment between the
+**Saving and restoring.** The last place where we need to ensure alignment between the
 training framework and Zephon is in checkpointing and restoring: we need to guarantee that
 the data loader's state describes exactly the same point in training as the model's state.
 If the two inadvertently drift apart, a resumed run will skip or repeat data without any
@@ -113,7 +112,7 @@ integration looks for the data loader state only in the directory for the iterat
 the model checkpoint came from, and refuses to start if it isn't there, rather than
 quietly starting the data over from the beginning.
 
-**Building Your Own Integration.** If you are integrating Zephon with a different training
+**Building your own integration.** If you are integrating Zephon with a different training
 framework, you should start from whichever reference integration's approach to ranks and
 data loaders is closer to yours, and then work through configuring the `Pipeline`, shaping
 the batch that gets handed off to the training loop, and ensuring consistent checkpoint

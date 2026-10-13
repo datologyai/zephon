@@ -1,6 +1,6 @@
-# Shuffling and Repeating Samples
+# Shuffling and repeating samples
 
-**Sample Order Is Part of the Curriculum.** While the mixture specification determines
+**Sample order is part of the curriculum.** While the mixture specification determines
 how many samples each `Dataset` contributes to each training epoch and how samples from
 different `Dataset`s are interleaved, the shuffle specification determines the order in
 which the `StaticMixtureWorkSource` draws samples from each individual `Dataset` before
@@ -26,7 +26,7 @@ each training epoch so that you can maximize the performance of your data loadin
 while minimizing the impact of spurious correlations between samples on your training
 loop.
 
-**Choosing A Shuffle Strategy.** Our shuffling configuration is inspired by [Mosaic
+**Choosing a shuffle strategy.** Our shuffling configuration is inspired by [Mosaic
 Streaming](https://docs.mosaicml.com/projects/streaming/en/latest/dataset_configuration/shuffling.html).
 By default, the `StaticMixtureWorkSource` will shuffle the order of the individual
 shards within a `Dataset`. You can turn this default behavior off by setting
@@ -66,7 +66,7 @@ Streaming have observed that the entropy of a shuffle across the shards is
 
 (repeating-samples)=
 
-**Repeating Samples.** In addition to determining the order in which the records from
+**Repeating samples.** In addition to determining the order in which the records from
 each `Dataset` are processed, we also need to decide when to stop drawing samples from
 each `Dataset`, i.e., when an epoch ends. By default, the `StaticMixtureWorkSource`
 repeats datasets that finish a pass sooner under the requested mixture in order to

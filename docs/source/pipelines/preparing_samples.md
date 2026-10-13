@@ -1,4 +1,4 @@
-# Preparing Samples
+# Preparing samples
 
 Every `Pipeline` begins with an implicit `fetch` operation that pulls in record payloads
 from the underlying shards based on sample identifiers in work chunks provided by the
@@ -17,7 +17,7 @@ together multiple short tokenized sequences), etc. The samples "flow" through th
 until they reach the training framework in their final representation — commonly, a batch
 of tensors.
 
-**Tokenizing Text.** By far the most common type of data preparation for model training is
+**Tokenizing text.** By far the most common type of data preparation for model training is
 converting a string of text in an input record into a sequence of tokens that can be fed
 into the model. The `Pipeline` API provides a number of built-in and optimized operations
 for these common data preparation steps. The `tokenize` operator on the `Pipeline` builds
@@ -67,7 +67,7 @@ tokenized output. If later operations in your pipeline need access to the origin
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized
 output. We recommend to check out the full docstring of all options.
 
-**Transforming and Filtering Records.** The built-in `Pipeline` operations cover common
+**Transforming and filtering records.** The built-in `Pipeline` operations cover common
 data preparation tasks like tokenization, but many data pipelines will have their own
 specific schema and requirements that will require some amount of custom processing. Use
 the `map_transform` operator when you need to apply a custom Python function to each
@@ -88,4 +88,4 @@ produce the same output for the same input, including the decision to filter a r
 careful not to rely on mutable global state or any unseeded randomness inside of the
 transformation function itself. For adding more complex transformations than the
 `map_transform` can support, see the section on
-[User-Defined Operators](user_defined_operators.md).
+[User-defined operators](user_defined_operators.md).

@@ -14,7 +14,7 @@ flexibility that it provided for representing both tensors/numPy arrays and comp
 Python dictionaries depending on the data schema that we needed for the file, and its
 performance as it relies on a fast [PyTree serializer](https://pypi.org/project/optree/).
 
-**Preparing litData Shards.** To use the litData format with Zephon, install the project
+**Preparing litData shards.** To use the litData format with Zephon, install the project
 with the `litdata` extra, which includes all of the dependencies needed for reading litData
 shards:
 
@@ -37,7 +37,7 @@ move the dataset to or from object storage. More examples of tools for generatin
 preparing samples for litData shards are available in
 [litData's data preparation guide](https://github.com/Lightning-AI/litData#speed-up-model-training).
 
-**Reading litData Shards.** Once the litData files have been written, you can define a
+**Reading litData shards.** Once the litData files have been written, you can define a
 `Dataset` by passing the dataset location to the `Dataset.from_path` method with the
 `fmt="litdata"` argument. Zephon will infer the format if `fmt` is not passed. You can then
 use a `DatasetInspector` to examine the reconstructed sample payloads to confirm that the

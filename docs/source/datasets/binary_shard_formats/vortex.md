@@ -9,7 +9,7 @@ and stored. You can think of Vortex as a modern Parquet with fast random access.
 read more about the Vortex format's structure in the
 [project's documentation](https://docs.vortex.dev/).
 
-**Preparing Vortex Shards.** To use the Vortex format with Zephon, install the project
+**Preparing Vortex shards.** To use the Vortex format with Zephon, install the project
 with the `vortex` extra which includes the `vortex-data` dependency (note that Vortex
 requires Python >= 3.11):
 
@@ -43,7 +43,7 @@ without requiring Zephon to load each Vortex shard individually:
 :caption: examples/guide/datasets/vortex_index.sh
 ```
 
-**Reading Vortex Shards in Zephon.** Once the Vortex files have been written, you can
+**Reading Vortex shards in Zephon.** Once the Vortex files have been written, you can
 define a `Dataset` object by passing the dataset location and the `fmt="vortex"` argument
 to the `Dataset.from_path` function. Zephon will infer the format if `fmt` is not passed.
 You can then use the `DatasetInspector` to examine the decoded sample payloads:
