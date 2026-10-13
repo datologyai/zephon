@@ -37,7 +37,7 @@ class AggregationRound:
     """Whether this process merges the round (global rank 0, worker 0)."""
 
     expected_ranks: frozenset[int]
-    """Global ranks whose states the leader must collect."""
+    """Global ranks whose assigned lanes the leader must collect in full."""
 
     expected_lanes: frozenset[int]
     """Canonical lanes the collected states must cover."""
@@ -72,10 +72,12 @@ class CheckpointCoordinator(Protocol):
 
         The leader opens a fresh round; followers join that same round. Set
         ``last_round_id`` when joining and publish one local shard per rank/worker.
-        Collect this round's shards covering exactly ``expected_ranks`` and all
-        ``expected_lanes``, then call ``merge`` once on the leader and publish its
-        result. Bound waits by the configured timeout; raise on failed exchange,
-        encoding, decoding, merge, or timeout.
+        Collect this round's shards covering exactly ``expected_ranks``, each
+        rank's assigned lanes from the snapshot's world mapping, and all
+        ``expected_lanes``. Then call ``merge`` once on the leader and publish
+        its result. Before the leader returns, every contributor must have
+        decoded the result. Bound waits by the configured timeout; raise on
+        failed exchange, encoding, decoding, merge, or timeout.
         """
         ...
 
@@ -90,10 +92,10 @@ class CheckpointCoordinator(Protocol):
         ...
 
     def cleanup(self) -> None:
-        """Idempotently release this coordinator's retained round resources.
+        """Idempotently release round resources whose consumers have finished.
 
-        Callers must ensure every participant has finished reading shared
-        results before cleanup. Leave other runs' resources intact.
+        Preserve unconsumed results after a failed exchange. Leave other runs'
+        resources intact.
         """
         ...
 
@@ -102,8 +104,9 @@ class FileCoordinator:
     """Checkpoint aggregation over files in a shared ``aggregate_dir``.
 
     The leader publishes a round ID, every rank writes its state, the leader
-    lists the state files until every rank and lane is covered, merges them and
-    writes the merged state, and the other ranks read it back.
+    lists the state files until every rank covers its assigned lanes, merges
+    them and writes the merged state. Followers acknowledge successful reads
+    before the leader returns and allows the result to be cleaned up.
     """
 
     def __init__(
@@ -374,22 +377,62 @@ class FileCoordinator:
         if is_leader:
             expected_lanes = set(round_.expected_lanes)
             expected_ranks = set(round_.expected_ranks)
+            lane_mapping = {
+                int(dp_id): {int(lane) for lane in lanes}
+                for dp_id, lanes in round_.local["world"]["mapping"].items()
+            }
             seen: dict[str, dict[str, Any]] = {}
             covered: set[int] = set()
+            rank_groups: dict[int, int] = {}
+            covered_by_rank: dict[int, set[int]] = {}
 
             def _have_full_coverage() -> bool:
                 self._read_states_for_round(round_id, seen=seen, covered=covered)
-                ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
-                return ranks_seen == expected_ranks and expected_lanes.issubset(covered)
+                for state in seen.values():
+                    world = state["world"]
+                    rank = int(world["global_rank"])
+                    dp_id = int(world["dp_group_id"])
+                    shard_mapping = {
+                        int(group): {int(lane) for lane in lanes}
+                        for group, lanes in world["mapping"].items()
+                    }
+                    if shard_mapping != lane_mapping or dp_id not in lane_mapping:
+                        raise RuntimeError(f"Lane mapping mismatch for rank {rank}")
+                    if rank_groups.setdefault(rank, dp_id) != dp_id:
+                        raise RuntimeError(
+                            f"DP group mismatch across rank {rank}'s shards"
+                        )
+                    covered_by_rank.setdefault(rank, set()).update(
+                        int(lane) for lane in state["progress"]
+                    )
+
+                # Workers partition a rank's lanes into disjoint, nonempty
+                # subsets. Per-rank coverage therefore waits for every active
+                # worker, without counting idle workers or letting an MP peer
+                # satisfy a slow worker's lane coverage.
+                return (
+                    set(covered_by_rank) == expected_ranks
+                    and expected_lanes.issubset(covered)
+                    and all(
+                        covered_by_rank[rank] == lane_mapping[rank_groups[rank]]
+                        for rank in expected_ranks
+                    )
+                )
 
             if not self._wait_until(_have_full_coverage, self._timeout_s):
                 ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
                 missing_ranks = sorted(expected_ranks - ranks_seen)
                 missing_lanes = sorted(expected_lanes - covered)
+                missing_lanes_by_rank = {
+                    rank: sorted(lane_mapping[rank_groups[rank]] - lanes)
+                    for rank, lanes in sorted(covered_by_rank.items())
+                    if lane_mapping[rank_groups[rank]] - lanes
+                }
                 raise RuntimeError(
                     f"[PID {os.getpid()}] Aggregation timeout after "
                     f"{self._timeout_s}s. Missing ranks={missing_ranks}; "
                     f"missing lanes={missing_lanes}; "
+                    f"missing lanes per rank={missing_lanes_by_rank}; "
                     f"files={len(self._list_state_files(round_id))}"
                 )
 
@@ -402,12 +445,27 @@ class FileCoordinator:
             # what followers read back (json would otherwise stringify keys).
             merged = self._codec.decode(merged_bytes)
             self.backend.delete(my_path)
+            # Safe: per-rank lane coverage means every active worker has read
+            # round.current and published its shard before we close the round.
+            self.backend.delete(self.round_file)
+
+            # Shard paths identify every active rank/worker in this round.
+            # Only retain the result for cleanup after all readers acknowledge;
+            # on timeout it must remain available to delayed followers.
+            ack_paths = [f"{path}.ack" for path in seen if path != my_path]
+            if not self._wait_until(
+                lambda: all(self.backend.exists(path) for path in ack_paths),
+                self._timeout_s,
+            ):
+                missing = [path for path in ack_paths if not self.backend.exists(path)]
+                raise RuntimeError(
+                    f"[PID {os.getpid()}] Timed out after {self._timeout_s}s waiting for checkpoint acknowledgements: {missing}"
+                )
+            for path in ack_paths:
+                self.backend.delete(path)
             if self._previous_merged_file is not None:
                 self.backend.delete(self._previous_merged_file)
             self._previous_merged_file = merged_path
-            # Safe: by the coverage check above every rank has already read
-            # round.current and is now waiting on merged_path.
-            self.backend.delete(self.round_file)
             return merged
 
         # Followers: wait for merged file
@@ -417,9 +475,10 @@ class FileCoordinator:
                 f"[PID {os.getpid()}] Timed out after {self._timeout_s}s waiting for merged checkpoint at {merged_path}"
             )
         merged = self._read_aggregation_state(merged_path)
-        self.backend.delete(my_path)
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
+        self.backend.put(f"{my_path}.ack", b"1")
+        self.backend.delete(my_path)
         return merged
 
     def prepare_restore(self) -> None:
@@ -427,8 +486,5 @@ class FileCoordinator:
 
     def cleanup(self) -> None:
         if self._previous_merged_file is not None:
-            self._log(
-                f"We are cleaning up the previous checkpoint synchronization file ({self._previous_merged_file}). If you face a timeout error after this, it means that your main rank/worker exits before all workers have consumed the checkpoint. You should ensure all workers have completed the checkpoint (e.g., via a barrier) if you checkpoint at the end of training. If no error occurs, all is well."
-            )
             self.backend.delete(self._previous_merged_file)
             self._previous_merged_file = None
