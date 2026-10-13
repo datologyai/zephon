@@ -79,7 +79,10 @@ def test_single_column_payloads_through_fetch_and_transport(
             value = record.payload["value"]
             assert isinstance(value, np.ndarray)
             assert value.dtype == np.int32
-            np.testing.assert_array_equal(value, expected)
+            assert value.shape == expected.shape
+            # These are integers: compare every value without assert_array_equal's
+            # NaN/Inf filtering, which produces an empty operand in 3.14t CI.
+            assert np.array_equal(value, expected)
             assert not value.flags.writeable
 
 
