@@ -197,6 +197,58 @@ def _row_groups_from_ref(
     return row_groups
 
 
+def _read_parquet_metadata(path: str, storage: StorageBackend, *, size: int) -> Any:
+    """Read Parquet metadata without downloading the entire object when possible.
+
+    Because the footer size is unknown, you can't do a single "read footer" call
+    without first knowing its length. The prefetch is an optimization:
+
+    1. Read up to 64 KB from the end (_PARQUET_FOOTER_PREFETCH_BYTES).
+    2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
+    3. Check if the footer fits in the prefetch – if footer_size <= prefetch_size,
+       use the prefetched bytes.
+    4. Otherwise, do a second read – if the footer is larger than 64 KB, read
+       exactly footer_size bytes from the correct offset.
+
+    For most Parquet files, the footer is well under 64 KB, so one read is enough.
+    The prefetch avoids:
+    - A tiny read of just 8 bytes (which can be inefficient on some backends).
+    - A second read in the common case.
+    """
+    pa, pq = _ensure_pyarrow()
+
+    if size < 8:
+        raise ValueError(f"File too small to be a valid Parquet file: {path}")
+
+    # 1. Read up to 64 KB from the end.
+    prefetch_size = min(size, _PARQUET_FOOTER_PREFETCH_BYTES)
+    footer_start = size - prefetch_size
+    footer = storage.read_range(path, footer_start, length=prefetch_size)
+    if len(footer) != prefetch_size:
+        raise ValueError(f"Incomplete Parquet footer prefetch for {path}")
+
+    # 2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
+    trailer = footer[-8:]
+    if trailer[4:] != b"PAR1":
+        raise ValueError(f"Invalid Parquet footer trailer for {path}")
+
+    metadata_len = struct.unpack("<I", trailer[:4])[0]
+    footer_size = metadata_len + 8
+    if footer_size > size:
+        raise ValueError(f"Invalid Parquet footer size for {path}")
+
+    if footer_size > len(footer):
+        # 4. Footer larger than prefetch – read exactly footer_size bytes.
+        footer = storage.read_range(path, size - footer_size, length=footer_size)
+        if len(footer) != footer_size:
+            raise ValueError(f"Incomplete Parquet footer read for {path}")
+    else:
+        # 3. Use the prefetched bytes.
+        footer = footer[-footer_size:]
+
+    return pq.read_metadata(pa.BufferReader(footer))
+
+
 class ParquetFormat(FormatHandler):
     """Format handler for Parquet datasets.
 
@@ -206,59 +258,6 @@ class ParquetFormat(FormatHandler):
     """
 
     kind = "parquet"
-
-    def _read_metadata_only(
-        self, path: str, storage: StorageBackend, *, size: int
-    ) -> Any:
-        """Read Parquet metadata without downloading the entire object when possible.
-
-        Because the footer size is unknown, you can't do a single "read footer" call
-        without first knowing its length. The prefetch is an optimization:
-
-        1. Read up to 64 KB from the end (_PARQUET_FOOTER_PREFETCH_BYTES).
-        2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
-        3. Check if the footer fits in the prefetch – if footer_size <= prefetch_size,
-           use the prefetched bytes.
-        4. Otherwise, do a second read – if the footer is larger than 64 KB, read
-           exactly footer_size bytes from the correct offset.
-
-        For most Parquet files, the footer is well under 64 KB, so one read is enough.
-        The prefetch avoids:
-        - A tiny read of just 8 bytes (which can be inefficient on some backends).
-        - A second read in the common case.
-        """
-        pa, pq = _ensure_pyarrow()
-
-        if size < 8:
-            raise ValueError(f"File too small to be a valid Parquet file: {path}")
-
-        # 1. Read up to 64 KB from the end.
-        prefetch_size = min(size, _PARQUET_FOOTER_PREFETCH_BYTES)
-        footer_start = size - prefetch_size
-        footer = storage.read_range(path, footer_start, length=prefetch_size)
-        if len(footer) != prefetch_size:
-            raise ValueError(f"Incomplete Parquet footer prefetch for {path}")
-
-        # 2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
-        trailer = footer[-8:]
-        if trailer[4:] != b"PAR1":
-            raise ValueError(f"Invalid Parquet footer trailer for {path}")
-
-        metadata_len = struct.unpack("<I", trailer[:4])[0]
-        footer_size = metadata_len + 8
-        if footer_size > size:
-            raise ValueError(f"Invalid Parquet footer size for {path}")
-
-        if footer_size > len(footer):
-            # 4. Footer larger than prefetch – read exactly footer_size bytes.
-            footer = storage.read_range(path, size - footer_size, length=footer_size)
-            if len(footer) != footer_size:
-                raise ValueError(f"Incomplete Parquet footer read for {path}")
-        else:
-            # 3. Use the prefetched bytes.
-            footer = footer[-footer_size:]
-
-        return pq.read_metadata(pa.BufferReader(footer))
 
     def discover(
         self, path: str, storage: StorageBackend
@@ -361,7 +360,7 @@ class ParquetFormat(FormatHandler):
             stats = storage.stat(full_path)
             size = int(stats.get("size", 0))
 
-            metadata = self._read_metadata_only(full_path, storage, size=size)
+            metadata = _read_parquet_metadata(full_path, storage, size=size)
 
             # Extract row group info
             row_groups = []

@@ -21,6 +21,10 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
+    # In-memory backends keep index tests independent of cloud services.
+    "tests/helpers/storage.py": frozenset(
+        {"zephon._internal.io.storage:StorageBackend"}
+    ),
     # Shared-storage and lazy-payload checks exercise real process transport.
     "tests/integration/test_process_payload_memory.py": frozenset(
         {
