@@ -1,13 +1,21 @@
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
 from tests._catalog_helpers import catalog_set_from_locators
 from tests.helpers.storage import MemoryStorage
+from zephon._internal.io.catalog import CatalogSet
+from zephon._internal.io.formats.base import ShardOpener
+from zephon._internal.io.formats.jsonl import JsonlFormat
 from zephon._internal.io.resolvers.cache.manager import CacheManager
 from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.io.stores import multi as multi_store
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import (
     build_catalog_set,
@@ -283,3 +291,89 @@ def test_jsonl_store_ignores_parquet_cache_root(tmp_path: Path) -> None:
         ),
     )
     store.close()
+
+
+@pytest.fixture
+def opener_dependencies(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mock]:
+    """Isolate store construction from catalogs, storage, and shard readers."""
+    catalog_set = Mock(spec=CatalogSet)
+    resolver = Mock(spec=CacheManager)
+    views = Mock(side_effect=lambda **kwargs: Mock(spec=FileBackedDatasetShardView))
+    monkeypatch.setattr(multi_store, "build_catalog_set", lambda datasets: catalog_set)
+    monkeypatch.setattr(multi_store, "build_resolver", lambda *args, **kwargs: resolver)
+    monkeypatch.setattr(multi_store, "FileBackedDatasetShardView", views)
+    return catalog_set, resolver, views
+
+
+def test_format_opener_shared_and_closed_once(
+    monkeypatch: pytest.MonkeyPatch, opener_dependencies: tuple[Mock, Mock, Mock]
+) -> None:
+    catalog_set, resolver, views = opener_dependencies
+    datasets = {
+        i: Dataset(name=name, backend={"kind": "jsonl"})
+        for i, name in enumerate(("first", "second"))
+    }
+    opener = Mock(spec=ShardOpener)
+    events: list[str] = []
+
+    @contextmanager
+    def create_opener(
+        self: JsonlFormat, catalogs: CatalogSet | None, options: StoreOptions
+    ) -> Iterator[ShardOpener]:
+        assert catalogs is catalog_set
+        events.append("open")
+        try:
+            yield opener
+        finally:
+            events.append("close")
+
+    monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
+    store = build_multi_dataset_store(datasets)
+    try:
+        assert events == ["open"]
+        assert views.call_count == 2
+        assert all(call.kwargs["opener"] is opener for call in views.call_args_list)
+        assert all(call.kwargs["resolver"] is resolver for call in views.call_args_list)
+    finally:
+        store.close()
+        store.close()
+    assert events == ["open", "close"]
+    resolver.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failed_kind", ["jsonl", "parquet"])
+def test_failed_opener_initialization_closes_resources(
+    failed_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    opener_dependencies: tuple[Mock, Mock, Mock],
+) -> None:
+    """Failure closes the resolver and any previously initialized format opener."""
+    _, resolver, _ = opener_dependencies
+    datasets = {
+        i: Dataset(name=kind, backend={"kind": kind})
+        for i, kind in enumerate(("jsonl", "parquet"))
+    }
+    events: list[str] = []
+    resolver.close.side_effect = lambda: events.append("resolver.close")
+
+    def get_format(kind: str) -> SimpleNamespace:
+        @contextmanager
+        def create_opener(
+            catalogs: CatalogSet | None, options: StoreOptions
+        ) -> Iterator[ShardOpener]:
+            if kind == failed_kind:
+                raise RuntimeError("opener initialization failed")
+            events.append(f"{kind}.open")
+            try:
+                yield Mock(spec=ShardOpener)
+            finally:
+                events.append(f"{kind}.close")
+
+        return SimpleNamespace(create_opener=create_opener)
+
+    monkeypatch.setattr(multi_store, "get_format", get_format)
+    with pytest.raises(RuntimeError, match="opener initialization failed"):
+        build_multi_dataset_store(datasets)
+    expected = [] if failed_kind == "jsonl" else ["jsonl.open", "jsonl.close"]
+    assert events == [*expected, "resolver.close"]
+    resolver.close.assert_called_once_with()

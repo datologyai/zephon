@@ -17,13 +17,13 @@ import bisect
 import logging
 import os
 import struct
-import threading
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, cast
 
 import numpy as np
 
@@ -31,8 +31,10 @@ from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra
 from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
 from zephon._internal.io.formats.base import (
     FormatHandler,
+    ShardOpener,
     register_format,
 )
+from zephon._internal.io.formats.metadata_cache import MetadataCache
 from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
@@ -43,7 +45,9 @@ from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 
 if TYPE_CHECKING:
+    from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +262,21 @@ class ParquetFormat(FormatHandler):
     """
 
     kind = "parquet"
+
+    @contextmanager
+    def create_opener(
+        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+    ) -> Iterator[ShardOpener]:
+        """Own the footer and decoded row-group caches for one store."""
+        from zephon._internal.io.formats.parquet_cache.runtime import (
+            build_parquet_cache_runtime,
+        )
+
+        runtime = build_parquet_cache_runtime(catalog_set, options)
+        try:
+            yield runtime.opener
+        finally:
+            runtime.close()
 
     def discover(
         self, path: str, storage: StorageBackend
@@ -525,8 +544,7 @@ class ParquetShardOpener:
             raise ValueError("Decoded RG cache and index must be provided together")
         self._decoded_cache = decoded_cache
         self._index = index
-        self._metadata_cache: OrderedDict[Path, Any] = OrderedDict()
-        self._metadata_lock = threading.Lock()
+        self._metadata_cache = MetadataCache[Path, Any](self._METADATA_CACHE_MAX_SIZE)
 
     def open_shard(
         self,
@@ -556,24 +574,11 @@ class ParquetShardOpener:
         )
 
     def _get_cached_metadata(self, path: Path) -> Any:
-        with self._metadata_lock:
-            metadata = self._metadata_cache.get(path)
-            if metadata is not None:
-                self._metadata_cache.move_to_end(path)
-                return metadata
+        def load() -> Any:
+            _, pq = _ensure_pyarrow()
+            return pq.read_metadata(path)
 
-        _, pq = _ensure_pyarrow()
-        metadata = pq.read_metadata(path)
-
-        with self._metadata_lock:
-            existing = self._metadata_cache.get(path)
-            if existing is not None:
-                self._metadata_cache.move_to_end(path)
-                return existing
-            self._metadata_cache[path] = metadata
-            while len(self._metadata_cache) > self._METADATA_CACHE_MAX_SIZE:
-                self._metadata_cache.popitem(last=False)
-            return metadata
+        return self._metadata_cache.get_or_load(path, load)
 
 
 class _ParquetExtraCodec:
