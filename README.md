@@ -189,7 +189,7 @@ more detail:
 - [WorkSources](https://datologyai.github.io/zephon/worksources/index.html): mixing, shuffling, and repeating samples
 - [Pipelines](https://datologyai.github.io/zephon/pipelines/index.html): operators, packing, distributed training, and checkpointing
 - [Training Integrations](https://datologyai.github.io/zephon/training_integrations.html): the TorchTitan and Megatron-LM reference integrations
-- [API Reference](https://datologyai.github.io/zephon/api/zephon_pipeline.html)
+- [API Reference](https://datologyai.github.io/zephon/api/pipeline.html)
 
 ## Status
 
