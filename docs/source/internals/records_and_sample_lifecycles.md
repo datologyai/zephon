@@ -43,10 +43,11 @@ Operators can have different relationships between input and output:
 
 | Cardinality | What happens | Examples |
 |---|---|---|
-| 1:1 | One record in, one record out | `map_transform`, tokenizing without splitting |
-| 1:N | One record becomes several | `tokenize(split_long_samples=True)` |
-| N:1 | Several records become one | `pack_sequences`, `pack_flat`, `batch` |
-| 1:0 | A record is dropped | `map_transform` returning `None`, any filter |
+| 1 &rarr; 1 | One record in, one out, identity unchanged | Tokenizing without splitting, image decode |
+| 1 &rarr; 0 or 1 | A record is kept or dropped | Dedup, length gating, `map_transform` returning `None` |
+| 1 &rarr; N | One record becomes several | `tokenize(split_long_samples=True)` |
+| N &rarr; 1 | Several records become one | `pack_sequences`, `pack_flat`, `batch` |
+
 
 **Fan-out: one sample, many records.** Each output needs its own identity, and gets it
 through **lineage**: a tuple of integer indices appended to the parent's cursor. A
