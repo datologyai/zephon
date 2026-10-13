@@ -1,5 +1,6 @@
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from io import BytesIO
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -8,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from zephon._internal.coordination import AggregationRound, FileCoordinator
+from zephon._internal.coordination import time as coordination_time
 from zephon.options import RuntimeOptions
 
 
@@ -20,11 +22,12 @@ def _coordinator(
     workers_per_rank: int = 1,
     serializer: str = "json",
     timeout: float = 5.0,
+    run_id: str = "coordination-test",
 ) -> FileCoordinator:
     return FileCoordinator(
         RuntimeOptions(
             aggregate_dir=str(tmp_path),
-            run_id="coordination-test",
+            run_id=run_id,
             aggregate_serializer=serializer,
             aggregate_compressor="none",
             aggregate_timeout_s=timeout,
@@ -109,64 +112,7 @@ def test_aggregate_returns_same_result_across_rounds(
             coordinator.cleanup()
 
 
-def test_aggregate_waits_for_lane_coverage_on_every_rank(
-    tmp_path: Path,
-) -> None:
-    # Model-parallel ranks share two lanes, split between workers 0 and 1.
-    # Worker 2 is inactive and must not be needed to finish the round.
-    coordinator = _coordinator(
-        tmp_path, world_size=2, workers_per_rank=3, serializer="msgpack"
-    )
-    shards = [
-        {
-            "world": {
-                "global_rank": rank,
-                "dp_group_id": 0,
-                "mapping": {0: [0, 1]},
-            },
-            "progress": {worker: 7},
-        }
-        for rank in range(2)
-        for worker in range(2)
-    ]
-    payloads = {
-        f"shard-{i}": coordinator._codec.encode(shard) for i, shard in enumerate(shards)
-    }
-
-    def open_shard(path: str, mode: str) -> BytesIO:
-        assert mode == "rb"
-        return BytesIO(payloads[path])
-
-    backend = Mock()
-    backend.exists.side_effect = lambda path: path.endswith(".ack")
-    backend.open.side_effect = open_shard
-    # The first poll sees every rank and lane globally, but rank 1's lane-1
-    # worker has not published yet. Its shard appears on the following poll.
-    backend.glob.side_effect = [list(payloads)[:3], list(payloads)]
-    coordinator.backend = backend
-    merge = Mock(return_value={"progress": {"0": 7, "1": 7}})
-
-    result = coordinator.aggregate(
-        AggregationRound(
-            local=shards[0],
-            is_leader=True,
-            expected_ranks=frozenset({0, 1}),
-            expected_lanes=frozenset({0, 1}),
-        ),
-        merge,
-    )
-
-    merge.assert_called_once()
-    contributions = {
-        (shard["world"]["global_rank"], int(lane))
-        for shard in merge.call_args.args[0]
-        for lane in shard["progress"]
-    }
-    assert contributions == {(0, 0), (0, 1), (1, 0), (1, 1)}
-    assert result == {"progress": {"0": 7, "1": 7}}
-
-
-def test_leader_waits_for_readers_before_return_and_cleanup(
+def test_leader_waits_for_contributors_and_readers_before_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,6 +126,9 @@ def test_leader_waits_for_readers_before_return_and_cleanup(
             world_size=2,
             worker_id=worker,
             workers_per_rank=3,
+            # glob normalizes both ./ and //; participant identity must not
+            # depend on the raw spelling of the run directory.
+            run_id="./team//exp",
         )
         for rank, worker in participants
     ]
@@ -201,6 +150,24 @@ def test_leader_waits_for_readers_before_return_and_cleanup(
     ]
     reading = Event()
     release = Event()
+    three_contributors = Event()
+    release_publish = Event()
+    put = coordinators[-1].backend.put
+    list_shards = coordinators[0]._list_state_files
+
+    def delayed_publish(path: str, data: bytes) -> None:
+        if path.endswith(".ckpt"):
+            assert release_publish.wait(5), "Test did not release the delayed writer"
+        put(path, data)
+
+    def observe_shards(round_id: str) -> list[str]:
+        paths = list_shards(round_id)
+        if len(paths) == 3:
+            three_contributors.set()
+        return paths
+
+    monkeypatch.setattr(coordinators[-1].backend, "put", delayed_publish)
+    monkeypatch.setattr(coordinators[0], "_list_state_files", observe_shards)
     read_result = coordinators[-1]._read_aggregation_state
 
     def delayed_read(path: str) -> dict | None:
@@ -210,10 +177,13 @@ def test_leader_waits_for_readers_before_return_and_cleanup(
 
     monkeypatch.setattr(coordinators[-1], "_read_aggregation_state", delayed_read)
     expected = {"progress": {"0": 7, "1": 7}}
+    merge = Mock(return_value=expected)
+    read_shard = Mock(wraps=coordinators[0]._read_aggregation_state)
+    monkeypatch.setattr(coordinators[0], "_read_aggregation_state", read_shard)
 
     def aggregate(index: int) -> dict[str, Any]:
         coordinator = coordinators[index]
-        result = coordinator.aggregate(rounds[index], lambda _: expected)
+        result = coordinator.aggregate(rounds[index], merge)
         if index == 0:
             coordinator.cleanup()  # Simulate immediate leader shutdown.
         return result
@@ -221,18 +191,32 @@ def test_leader_waits_for_readers_before_return_and_cleanup(
     with ThreadPoolExecutor(max_workers=len(participants)) as pool:
         futures = [pool.submit(aggregate, i) for i in range(len(participants))]
         try:
+            assert three_contributors.wait(5)
+            with pytest.raises(FutureTimeoutError):
+                futures[0].result(timeout=0.1)
+            merge.assert_not_called()
+            release_publish.set()
             assert reading.wait(5)
             for future in futures[1:-1]:
                 assert future.result(timeout=5) == expected
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 futures[0].result(timeout=0.1)
             assert list(Path(coordinators[0].agg_dir).glob("merged_*.ckpt"))
         finally:
+            release_publish.set()
             release.set()
         assert [future.result(timeout=5) for future in futures] == [expected] * len(
             participants
         )
 
+    merge.assert_called_once()
+    contributions = {
+        (shard["world"]["global_rank"], int(lane))
+        for shard in merge.call_args.args[0]
+        for lane in shard["progress"]
+    }
+    assert contributions == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert read_shard.call_count == 4
     assert not list(Path(coordinators[0].agg_dir).iterdir())
 
 
@@ -240,8 +224,24 @@ def test_leader_waits_for_readers_before_return_and_cleanup(
 def test_unacknowledged_result_survives_timeout_and_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    leader = _coordinator(tmp_path, world_size=2, timeout=0.5)
-    follower = _coordinator(tmp_path, rank=1, world_size=2)
+    leader = _coordinator(tmp_path, world_size=3)
+    follower = _coordinator(tmp_path, rank=1, world_size=3)
+    healthy_follower = _coordinator(tmp_path, rank=2, world_size=3)
+    follower_failed = Event()
+    delete = leader.backend.delete
+    wait_until = leader._wait_until
+
+    def close_round(path: str) -> None:
+        if path == leader.round_file:
+            assert follower_failed.wait(5)
+        delete(path)
+
+    def wait_for_readers(pred: Callable[[], bool], timeout: float) -> bool:
+        # Exercise ack timeout without making discovery depend on startup latency.
+        return wait_until(pred, 0.01 if follower_failed.is_set() else timeout)
+
+    monkeypatch.setattr(leader.backend, "delete", close_round)
+    monkeypatch.setattr(leader, "_wait_until", wait_for_readers)
     if failure == "decode":
         monkeypatch.setattr(
             follower._codec, "decode", Mock(side_effect=ValueError("Invalid result"))
@@ -265,23 +265,28 @@ def test_unacknowledged_result_survives_timeout_and_cleanup(
                     "world": {
                         "global_rank": rank,
                         "dp_group_id": rank,
-                        "mapping": {0: [0], 1: [1]},
+                        "mapping": {0: [0], 1: [1], 2: [2]},
                     },
                     "progress": {rank: 7},
                 },
                 is_leader=rank == 0,
-                expected_ranks=frozenset({0, 1}),
-                expected_lanes=frozenset({0, 1}),
+                expected_ranks=frozenset({0, 1, 2}),
+                expected_lanes=frozenset({0, 1, 2}),
             ),
-            lambda _: {"progress": {"0": 7, "1": 7}},
+            lambda _: {"progress": {"0": 7, "1": 7, "2": 7}},
         )
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         leader_result = pool.submit(aggregate, leader, 0)
         follower_result = pool.submit(aggregate, follower, 1)
+        healthy_result = pool.submit(aggregate, healthy_follower, 2)
         with pytest.raises(error_type, match=error_message):
             follower_result.result(timeout=5)
-        with pytest.raises(RuntimeError, match="acknowledgements.*state_r1_w0"):
+        assert healthy_result.result(timeout=5)
+        follower_failed.set()
+        with pytest.raises(
+            RuntimeError, match="acknowledgements: missing=1.*state_r1_w0.*retained at"
+        ):
             leader_result.result(timeout=5)
 
     leader.cleanup()
@@ -289,9 +294,224 @@ def test_unacknowledged_result_survives_timeout_and_cleanup(
     merged_files = list(Path(leader.agg_dir).glob("merged_*.ckpt"))
     assert len(merged_files) == 1
     assert leader._read_aggregation_state(str(merged_files[0])) == {
-        "progress": {"0": 7, "1": 7}
+        "progress": {"0": 7, "1": 7, "2": 7}
     }
     assert not list(Path(leader.agg_dir).glob("*.ack"))
+    assert not list(Path(leader.agg_dir).glob("failed_*.txt"))
+
+
+def test_cleanup_errors_do_not_fail_acknowledged_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    coordinators = [
+        _coordinator(tmp_path, rank=rank, world_size=2) for rank in range(2)
+    ]
+    for coordinator in coordinators:
+        delete = coordinator.backend.delete
+
+        def fail_cleanup(path: str, delete: Callable[[str], None] = delete) -> None:
+            if not path.endswith("round.current"):
+                raise OSError("Cleanup unavailable")
+            delete(path)
+
+        monkeypatch.setattr(coordinator.backend, "delete", fail_cleanup)
+
+    expected = {"progress": {"0": 7, "1": 7}}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                coordinator.aggregate,
+                AggregationRound(
+                    local={
+                        "world": {
+                            "global_rank": rank,
+                            "dp_group_id": rank,
+                            "mapping": {0: [0], 1: [1]},
+                        },
+                        "progress": {rank: 7},
+                    },
+                    is_leader=rank == 0,
+                    expected_ranks=frozenset({0, 1}),
+                    expected_lanes=frozenset({0, 1}),
+                ),
+                lambda _: expected,
+            )
+            for rank, coordinator in enumerate(coordinators)
+        ]
+        assert [future.result(timeout=5) for future in futures] == [expected] * 2
+    assert "Cleanup unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["merge", "notification", "published_write"])
+def test_leader_failure_notification_preserves_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    leader = _coordinator(tmp_path, world_size=2)
+    follower = _coordinator(tmp_path, rank=1, world_size=2, timeout=0.05)
+    rounds = [
+        AggregationRound(
+            {
+                "world": {
+                    "global_rank": rank,
+                    "dp_group_id": rank,
+                    "mapping": {0: [0], 1: [1]},
+                },
+                "progress": {rank: 0},
+            },
+            rank == 0,
+            frozenset({0, 1}),
+            frozenset({0, 1}),
+        )
+        for rank in range(2)
+    ]
+    for coordinator in (leader, follower):
+        monkeypatch.setattr(coordinator, "_open_round_id", lambda *_: "failed-round")
+    follower.backend.put(
+        follower._state_file_path("failed-round"),
+        follower._codec.encode(rounds[1].local),
+    )
+    put = leader.backend.put
+    original = ValueError("Inconsistent snapshots")
+    expected = {"progress": {"0": 0, "1": 0}}
+
+    def publish(path: str, data: bytes) -> None:
+        if failure == "notification" and path.endswith(".txt"):
+            raise OSError("Notification unavailable")
+        put(path, data)
+        if failure == "published_write" and Path(path).name.startswith("merged_"):
+            # A storage write can succeed remotely and still report an error.
+            raise original
+
+    monkeypatch.setattr(leader.backend, "put", publish)
+    merge = Mock(
+        return_value=expected,
+        side_effect=original if failure != "published_write" else None,
+    )
+    with pytest.raises(ValueError) as error:
+        leader.aggregate(rounds[0], merge)
+    assert error.value is original
+    leader.cleanup()
+    if failure == "notification":
+        assert not list(Path(leader.agg_dir).glob("failed_*.txt"))
+    elif failure == "published_write":
+        # A failure notice must not revoke an already published result.
+        assert list(Path(leader.agg_dir).glob("failed_*.txt"))
+        assert follower.aggregate(rounds[1], Mock()) == expected
+    else:
+        with pytest.raises(
+            RuntimeError, match="failed on leader: ValueError: Inconsistent snapshots"
+        ):
+            follower.aggregate(rounds[1], Mock())
+
+
+def test_contribution_and_ack_waits_share_one_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader = _coordinator(tmp_path, world_size=2, timeout=1.0)
+    follower = _coordinator(tmp_path, rank=1, world_size=2)
+    monkeypatch.setattr(leader, "_open_round_id", lambda *_: "timed-round")
+    world = {"global_rank": 0, "dp_group_id": 0, "mapping": {0: [0], 1: [1]}}
+    shard_path = follower._state_file_path("timed-round")
+    elapsed = 0.0
+
+    def advance_time(delay: float) -> None:
+        nonlocal elapsed
+        elapsed += delay
+        if elapsed >= 0.6:
+            follower.backend.put(
+                shard_path,
+                follower._codec.encode(
+                    {
+                        "world": {**world, "global_rank": 1, "dp_group_id": 1},
+                        "progress": {1: 0},
+                    }
+                ),
+            )
+        if elapsed >= 1.2:
+            follower.backend.put(f"{shard_path}.ack", b"")
+
+    monkeypatch.setattr(coordination_time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(coordination_time, "sleep", advance_time)
+    with pytest.raises(RuntimeError, match="checkpoint acknowledgements: missing=1"):
+        leader.aggregate(
+            AggregationRound(
+                {"world": world, "progress": {0: 0}},
+                True,
+                frozenset({0, 1}),
+                frozenset({0, 1}),
+            ),
+            lambda _: {"progress": {"0": 0, "1": 0}},
+        )
+    assert elapsed == pytest.approx(1.0)
+    leader.cleanup()
+    assert Path(leader._merged_file_path("timed-round")).exists()
+    assert not list(Path(leader.agg_dir).glob("failed_*.txt"))
+
+
+@pytest.mark.parametrize(
+    "world,progress,error",
+    [
+        (
+            {"mapping": {0: [1], 1: [0]}},
+            {0: 0},
+            "Lane mapping mismatch.*groups=\\[0, 1\\]",
+        ),
+        ({"dp_group_id": 2}, {0: 0}, "Unknown DP group 2"),
+        ({"dp_group_id": 1}, {1: 0}, "DP group mismatch.*0 != 1"),
+        ({}, {2: 0}, "Unexpected lanes.*\\[2\\]"),
+    ],
+)
+def test_invalid_shard_fails_without_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    world: dict[str, Any],
+    progress: dict[int, int],
+    error: str,
+) -> None:
+    coordinator = _coordinator(tmp_path)
+    monkeypatch.setattr(coordinator, "_open_round_id", lambda *_: "test-round")
+    local = {
+        "world": {"global_rank": 0, "dp_group_id": 0, "mapping": {0: [0], 1: [1]}},
+        "progress": {0: 0},
+    }
+    shard = {"world": {**local["world"], **world}, "progress": progress}
+    coordinator.backend.put(
+        f"{coordinator.agg_dir}/state_r0_w1_p0_test-round.ckpt",
+        coordinator._codec.encode(shard),
+    )
+    merge = Mock()
+    with pytest.raises(RuntimeError, match=error):
+        coordinator.aggregate(
+            AggregationRound(local, True, frozenset({0}), frozenset({0, 1})), merge
+        )
+    merge.assert_not_called()
+
+
+def test_timeout_reports_missing_lane_on_model_parallel_rank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = _coordinator(tmp_path, world_size=2, timeout=0.01)
+    monkeypatch.setattr(coordinator, "_open_round_id", lambda *_: "test-round")
+    world = {"global_rank": 0, "dp_group_id": 0, "mapping": {0: [0, 1]}}
+    coordinator.backend.put(
+        f"{coordinator.agg_dir}/state_r1_w0_p0_test-round.ckpt",
+        coordinator._codec.encode(
+            {"world": {**world, "global_rank": 1}, "progress": {0: 0}}
+        ),
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"Missing ranks=\[\]; missing lanes=\[\]; missing lanes per rank=\{1: \[1\]\}",
+    ):
+        coordinator.aggregate(
+            AggregationRound(
+                {"world": world, "progress": {0: 0, 1: 0}},
+                True,
+                frozenset({0, 1}),
+                frozenset({0, 1}),
+            ),
+            Mock(),
+        )
 
 
 @pytest.mark.parametrize(
