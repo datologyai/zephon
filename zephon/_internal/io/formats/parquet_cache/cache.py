@@ -520,7 +520,7 @@ class ParquetRGCache:
             "groups decoded into the cache after it filled had previously been "
             "evicted and were re-decoded (%.1f%%; cache cap %.2f GiB). The shuffle "
             "working set exceeds the decoded cache; raise it via "
-            "io_options.parquet_rg_cache.limit_bytes to cut redundant decode work.",
+            "io_options.parquet.rg_cache.limit_bytes to cut redundant decode work.",
             warning_reloads,
             warning_publications,
             min(100.0, 100.0 * warning_reloads / warning_publications),

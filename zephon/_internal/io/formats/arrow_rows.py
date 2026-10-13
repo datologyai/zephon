@@ -28,21 +28,40 @@ copy. Duplicate rows share read-only arrays but own their mutable Python contain
 
 from __future__ import annotations
 
+import sys
 import threading
 from typing import Any, Iterable, Mapping
 
 import numpy as np
 
-from zephon._internal.utils.thread_utils import cap_arrow_threads
+from zephon._internal.utils.thread_utils import configure_arrow_threads
+from zephon.io.options import ArrowOptions
 from zephon.types import SamplePayload
 
 ArrowColumns = Mapping[str, list[Any] | np.ndarray]
 _pa: Any | None = None
 _pa_lock = threading.Lock()
+_arrow_options: ArrowOptions | None = None
+
+
+def configure_pyarrow(options: ArrowOptions) -> None:
+    """Apply store pool settings now, or on first use if Arrow is not loaded.
+
+    LitData's binary layouts do not need Arrow. Retaining the process-wide
+    policy here lets Arrow layouts initialize lazily without importing an
+    optional dependency just to configure it. Later stores replace the policy.
+    """
+    global _arrow_options, _pa
+    with _pa_lock:
+        pa = _pa if _pa is not None else sys.modules.get("pyarrow")
+        if pa is not None:
+            configure_arrow_threads(pa, options)
+            _pa = pa
+        _arrow_options = options
 
 
 def require_pyarrow() -> Any:
-    """Return PyArrow after applying Zephon's thread cap once."""
+    """Return PyArrow, applying a reader's pending pool configuration on import."""
     global _pa
     if _pa is None:
         with _pa_lock:
@@ -54,7 +73,8 @@ def require_pyarrow() -> Any:
                         "pyarrow is required for Arrow row conversion. "
                         + "Install the matching zephon[parquet] or zephon[vortex] extra."
                     ) from exc
-                cap_arrow_threads()
+                if _arrow_options is not None:
+                    configure_arrow_threads(pa, _arrow_options)
                 _pa = pa
     return _pa
 

@@ -97,6 +97,8 @@ EXPECTED_ALL = {
         "CacheOptions",
         "Dataset",
         "InMemoryShard",
+        "ArrowOptions",
+        "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
         "VortexOptions",
@@ -180,6 +182,8 @@ EXPECTED_ALL = {
     ],
     "zephon.io.options": [
         "CacheOptions",
+        "ArrowOptions",
+        "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
         "VortexOptions",

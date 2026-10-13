@@ -65,3 +65,50 @@ These arrays may be read-only, so call `.copy()` if you need to modify them. Lis
 null elements or variable-length nesting remain Python lists, such as `[1, None]` or
 `[[1, 2], [3]]`. Numeric scalars retain their NumPy dtype; other values use Python types,
 such as `str`, `bytes`, `bool`, and `datetime.datetime`.
+
+## Reader configuration
+
+Parquet read behavior and the decoded row-group cache are
+configured together. Arrow's CPU and I/O pools have separate settings because they
+are also used by Vortex and Arrow-backed LitData chunks:
+
+```python
+from zephon.io import ArrowOptions, ParquetOptions, ParquetRGCacheOptions, StoreOptions
+
+pipeline.options(
+    io_options=StoreOptions(
+        arrow=ArrowOptions(cpu_threads=1, io_threads=1),
+        parquet=ParquetOptions(
+            use_threads=False,
+            rg_cache=ParquetRGCacheOptions(
+                enabled=True,
+                root="/mnt/local/zephon-parquet-cache",
+                limit_bytes=4 * 1024**3,
+            ),
+        ),
+    )
+)
+```
+
+The thread settings shown are the defaults. With `use_threads=False`, each fetch
+thread decodes its Parquet columns sequentially; separate fetches can still decode
+concurrently. Set `use_threads=True` to let a read decode columns through Arrow's CPU
+pool. Increasing `arrow.cpu_threads` alone does not enable this per-read parallelism.
+The same choice applies to direct reads and decoded-cache misses.
+
+Arrow pool sizes are process-wide, shared by all stores and formats in that process.
+They are applied when readers are set up, including inside process workers; importing
+a format or doing discovery alone does not resize them. An explicit `None` leaves
+that pool unchanged. Different stores cannot have independent pool sizes: the last
+applied count wins, and closing a store does not restore an earlier count. Increasing
+pool sizes can multiply CPU demand across fetch processes or training ranks, including
+ranks that each use the thread runner.
+
+Dictionary options use the same nesting, for example
+`{"parquet": {"use_threads": False, "rg_cache": {"limit_bytes": "4gb"}}}`.
+The previous top-level `parquet_rg_cache` setting has moved to `parquet.rg_cache`;
+the `ParquetRGCacheOptions` class is unchanged. The older `cache.rg_cache_bytes` alias
+still works with a deprecation warning. `ZEPHON_PARQUET_ARROW_THREADS` is deprecated
+and only supplies pool counts omitted from `ArrowOptions`; explicit counts or `None`
+take precedence. Setting an entire options section to `None` resets that section to
+Zephon's defaults, rather than leaving its individual pools unchanged.

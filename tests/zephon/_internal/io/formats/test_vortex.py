@@ -62,9 +62,8 @@ def write_vortex(vortex: Any) -> Callable[[Path, Any], None]:
 def test_vortex_caps_threads_at_initialization_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_vortex: Any
 ) -> None:
-    """Discovery and repeated reads retain the cap applied during format loading."""
+    """Only reader setup caps Vortex; imports, discovery and reads do not."""
     write_vortex(tmp_path / "data.vortex", [{"value": 1}, {"value": 2}])
-    monkeypatch.setenv("ZEPHON_VORTEX_THREADS", "1")
     monkeypatch.setenv("VORTEX_MAX_THREADS", "2")
     script = textwrap.dedent(
         """
@@ -78,11 +77,17 @@ def test_vortex_caps_threads_at_initialization_only(
         with patch.object(vortex, "set_worker_threads", wraps=vortex.set_worker_threads) as cap:
             from zephon._internal.io.formats.vortex import VortexFormat, VortexShard
             from zephon._internal.io.storage.local import LocalFSBackend
+            from zephon.io import StoreOptions, VortexOptions
 
-            cap.assert_called_once_with(1)
+            cap.assert_not_called()
             root = Path(sys.argv[1])
             counts, _ = VortexFormat().discover(str(root), LocalFSBackend(root))
             assert sum(counts.values()) == 2
+            cap.assert_not_called()
+            with VortexFormat().create_opener(
+                None, StoreOptions(vortex=VortexOptions(worker_threads=1))
+            ):
+                cap.assert_called_once_with(1)
             for _ in range(2):
                 shard = VortexShard(root / "data.vortex")
                 try:
@@ -709,7 +714,9 @@ def test_opener_retains_only_enabled_caches(
     monkeypatch.setattr(
         vortex_format,
         "_require_vortex",
-        lambda: SimpleNamespace(open=native_open, SegmentCache=make_cache),
+        lambda: SimpleNamespace(
+            open=native_open, SegmentCache=make_cache, set_worker_threads=mock.Mock()
+        ),
     )
     opener = VortexShardOpener(
         StoreOptions(

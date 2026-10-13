@@ -17,7 +17,12 @@ from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon.io.dataset import Dataset
-from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+from zephon.io.options import (
+    CacheOptions,
+    ParquetOptions,
+    ParquetRGCacheOptions,
+    StoreOptions,
+)
 
 
 def test_repeated_initialization_failure_warns_once_per_process_and_root(
@@ -43,9 +48,11 @@ def test_repeated_initialization_failure_warns_once_per_process_and_root(
     runtime_module._cache_failure_warning_keys.clear()
     options = StoreOptions(
         cache=CacheOptions(enabled=True, root=tmp_path / "raw-cache"),
-        parquet_rg_cache=ParquetRGCacheOptions(
-            limit_bytes=16 * 1024 * 1024,
-            min_free_bytes=0,
+        parquet=ParquetOptions(
+            rg_cache=ParquetRGCacheOptions(
+                limit_bytes=16 * 1024 * 1024,
+                min_free_bytes=0,
+            )
         ),
     )
     caplog.set_level(logging.WARNING, logger=runtime_module.__name__)
@@ -109,7 +116,12 @@ def test_shared_footer_limit_is_forwarded_without_shard_cache(
     )
     assert runtime.cache is None
     assert calls == [
-        {"decoded_cache": None, "index": None, "metadata_cache_entries": 7}
+        {
+            "decoded_cache": None,
+            "index": None,
+            "metadata_cache_entries": 7,
+            "use_threads": False,
+        }
     ]
 
 
@@ -119,10 +131,12 @@ def test_parquet_datasets_share_one_store_opener(tmp_path: Path) -> None:
     store = build_multi_dataset_store(
         {0: first, 1: second},
         options=StoreOptions(
-            parquet_rg_cache=ParquetRGCacheOptions(
-                root=tmp_path / "decoded-cache",
-                limit_bytes=16 * 1024 * 1024,
-                min_free_bytes=0,
+            parquet=ParquetOptions(
+                rg_cache=ParquetRGCacheOptions(
+                    root=tmp_path / "decoded-cache",
+                    limit_bytes=16 * 1024 * 1024,
+                    min_free_bytes=0,
+                )
             )
         ),
     )
@@ -150,9 +164,11 @@ def test_shard_cache_enables_and_locates_decoded_cache(tmp_path: Path) -> None:
         {0: dataset},
         options=StoreOptions(
             cache=CacheOptions(enabled=True, root=raw_root),
-            parquet_rg_cache=ParquetRGCacheOptions(
-                limit_bytes=16 * 1024 * 1024,
-                min_free_bytes=0,
+            parquet=ParquetOptions(
+                rg_cache=ParquetRGCacheOptions(
+                    limit_bytes=16 * 1024 * 1024,
+                    min_free_bytes=0,
+                )
             ),
         ),
     )
@@ -184,10 +200,12 @@ def test_explicit_root_works_without_shard_cache(tmp_path: Path) -> None:
     store = build_multi_dataset_store(
         {0: dataset},
         options=StoreOptions(
-            parquet_rg_cache=ParquetRGCacheOptions(
-                root=decoded_root,
-                limit_bytes=16 * 1024 * 1024,
-                min_free_bytes=0,
+            parquet=ParquetOptions(
+                rg_cache=ParquetRGCacheOptions(
+                    root=decoded_root,
+                    limit_bytes=16 * 1024 * 1024,
+                    min_free_bytes=0,
+                )
             )
         ),
     )
@@ -217,10 +235,12 @@ def test_live_configuration_mismatch_fails(tmp_path: Path) -> None:
     first = build_multi_dataset_store(
         {0: dataset},
         options=StoreOptions(
-            parquet_rg_cache=ParquetRGCacheOptions(
-                root=decoded_root,
-                limit_bytes=16 * 1024 * 1024,
-                min_free_bytes=0,
+            parquet=ParquetOptions(
+                rg_cache=ParquetRGCacheOptions(
+                    root=decoded_root,
+                    limit_bytes=16 * 1024 * 1024,
+                    min_free_bytes=0,
+                )
             )
         ),
     )
@@ -229,10 +249,12 @@ def test_live_configuration_mismatch_fails(tmp_path: Path) -> None:
             build_multi_dataset_store(
                 {0: dataset},
                 options=StoreOptions(
-                    parquet_rg_cache=ParquetRGCacheOptions(
-                        root=decoded_root,
-                        limit_bytes=32 * 1024 * 1024,
-                        min_free_bytes=0,
+                    parquet=ParquetOptions(
+                        rg_cache=ParquetRGCacheOptions(
+                            root=decoded_root,
+                            limit_bytes=32 * 1024 * 1024,
+                            min_free_bytes=0,
+                        )
                     )
                 ),
             )
@@ -248,6 +270,48 @@ def test_custom_root_must_not_overlap_raw_cache(tmp_path: Path) -> None:
             {0: dataset},
             options=StoreOptions(
                 cache=CacheOptions(enabled=True, root=raw_root),
-                parquet_rg_cache=ParquetRGCacheOptions(root=raw_root / "custom-child"),
+                parquet=ParquetOptions(
+                    rg_cache=ParquetRGCacheOptions(root=raw_root / "custom-child")
+                ),
             ),
         )
+
+
+@pytest.mark.parametrize("use_threads", [False, True])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_read_options_reach_cached_and_uncached_decodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_threads: bool,
+    cache_enabled: bool,
+) -> None:
+    pq = pytest.importorskip("pyarrow.parquet")
+    dataset = _parquet_dataset(tmp_path)
+    calls: list[bool] = []
+    native_read = pq.ParquetFile.read_row_group
+
+    def read(self, *args, **kwargs):
+        calls.append(kwargs["use_threads"])
+        return native_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", read)
+    options = StoreOptions(
+        parquet=ParquetOptions(
+            use_threads=use_threads,
+            rg_cache=ParquetRGCacheOptions(
+                enabled=cache_enabled,
+                root=tmp_path / "decoded",
+                limit_bytes=16 * 1024**2,
+                min_free_bytes=0,
+            ),
+        )
+    )
+    store = build_multi_dataset_store({0: dataset}, options=options)
+    try:
+        for _ in range(2):
+            shard, _ = store.for_dataset(0).open(0)
+            rows, _ = shard.getsamples([1, 0, 1])
+            assert rows == [{"value": 20}, {"value": 10}, {"value": 20}]
+        assert calls == [use_threads] * (1 if cache_enabled else 2)
+    finally:
+        store.close()

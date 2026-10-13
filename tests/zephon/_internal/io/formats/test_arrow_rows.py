@@ -17,21 +17,38 @@ from zephon._internal.io.formats.arrow_rows import (
     arrow_table_to_samples,
     take_and_materialize,
 )
+from zephon.io import ArrowOptions
 
 
-def test_pyarrow_thread_cap_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = 0
+def test_pyarrow_import_does_not_resize_pools(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
 
-    def count_call() -> None:
-        nonlocal calls
-        calls += 1
+    def record_call(*args: Any) -> None:
+        calls.append(args)
 
     monkeypatch.setattr(arrow_rows, "_pa", None)
-    monkeypatch.setattr(arrow_rows, "cap_arrow_threads", count_call)
+    monkeypatch.setattr(arrow_rows, "_arrow_options", None)
+    monkeypatch.setattr(arrow_rows, "configure_arrow_threads", record_call)
 
     assert arrow_rows.require_pyarrow() is pa
     assert arrow_rows.require_pyarrow() is pa
-    assert calls == 1
+    assert calls == []
+
+
+def test_pyarrow_store_configuration_survives_later_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(arrow_rows, "_pa", None)
+    monkeypatch.setattr(arrow_rows, "_arrow_options", None)
+    monkeypatch.setattr(
+        arrow_rows, "configure_arrow_threads", lambda *args: calls.append(args)
+    )
+    options = ArrowOptions(cpu_threads=2, io_threads=None)
+    arrow_rows.configure_pyarrow(options)
+    assert arrow_rows.require_pyarrow() is pa
+    assert arrow_rows.require_pyarrow() is pa
+    assert calls == [(pa, options)]
 
 
 @pytest.mark.parametrize(
@@ -253,3 +270,33 @@ def test_empty_column_and_empty_selection() -> None:
     table = pa.table({"tokens": pa.chunked_array([], type=pa.list_(pa.int32()))})
     assert arrow_table_to_samples(table) == []
     assert take_and_materialize(table, []) == []
+
+
+def test_arrow_configuration_is_lazy_and_applied_after_import() -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+        import sys
+        from zephon._internal.io.formats.arrow_rows import configure_pyarrow, require_pyarrow
+        from zephon.io import ArrowOptions
+
+        assert "pyarrow" not in sys.modules
+        configure_pyarrow(ArrowOptions(cpu_threads=2, io_threads=3))
+        assert "pyarrow" not in sys.modules
+        pa = require_pyarrow()
+        assert (pa.cpu_count(), pa.io_thread_count()) == (2, 3)
+        configure_pyarrow(ArrowOptions(cpu_threads=None, io_threads=1))
+        assert (pa.cpu_count(), pa.io_thread_count()) == (2, 1)
+        assert require_pyarrow() is pa
+        assert (pa.cpu_count(), pa.io_thread_count()) == (2, 1)
+    """),
+        ],
+        check=True,
+        timeout=30,
+    )

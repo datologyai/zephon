@@ -27,8 +27,11 @@ class _NotSupplied(Enum):
 _NOT_SUPPLIED = _NotSupplied.TOKEN
 
 
-def _option(default: object) -> Any:
-    return field(default=_NOT_SUPPLIED, metadata={_OPTION_DEFAULT: default})
+def _option(default: object, *, preserve_none: bool = False) -> Any:
+    return field(
+        default=_NOT_SUPPLIED,
+        metadata={_OPTION_DEFAULT: default, "preserve_none": preserve_none},
+    )
 
 
 def _normalize_options(options: Any) -> None:
@@ -39,7 +42,9 @@ def _normalize_options(options: Any) -> None:
         value = getattr(options, option.name)
         if value is not _NOT_SUPPLIED:
             provided.add(option.name)
-        if value is _NOT_SUPPLIED or value is None:
+        if value is _NOT_SUPPLIED or (
+            value is None and not option.metadata["preserve_none"]
+        ):
             setattr(options, option.name, option.metadata[_OPTION_DEFAULT])
     options._provided_fields = frozenset(provided)
 
@@ -58,7 +63,7 @@ def _merged_options(base: Any, override: Any) -> dict[str, Any]:
 
 def _default_options(option_type: Any) -> Any:
     values = {
-        option.name: None
+        option.name: option.metadata[_OPTION_DEFAULT]
         for option in fields(option_type)
         if _OPTION_DEFAULT in option.metadata
     }
@@ -104,7 +109,7 @@ class CacheOptions:
     root: str | Path = _option(Path("~/.cache/zephon").expanduser())
     # Bound on the on-disk shard cache only, not in-memory cache.
     limit_bytes: int | None = _option(None)
-    # Deprecated alias migrated by StoreOptions to parquet_rg_cache.limit_bytes.
+    # Deprecated alias migrated by StoreOptions to parquet.rg_cache.limit_bytes.
     rg_cache_bytes: int | None = _option(None)
     keep_zip: bool = _option(False)
     validate_hash: str | None = _option(None)
@@ -178,9 +183,9 @@ class ParquetRGCacheOptions:
             and self.limit_bytes is not None
             and self.limit_bytes <= 0
         ):
-            raise ValueError("parquet_rg_cache.limit_bytes must be positive")
+            raise ValueError("parquet.rg_cache.limit_bytes must be positive")
         if self.min_free_bytes < 0:
-            raise ValueError("parquet_rg_cache.min_free_bytes cannot be negative")
+            raise ValueError("parquet.rg_cache.min_free_bytes cannot be negative")
 
     @classmethod
     def from_any(cls, obj: Any) -> "ParquetRGCacheOptions":
@@ -201,7 +206,7 @@ class ParquetRGCacheOptions:
                     parsed = parse_size_bytes(value)
                     if parsed is None:
                         raise ValueError(
-                            f"parquet_rg_cache.{field_name} must not be empty"
+                            f"parquet.rg_cache.{field_name} must not be empty"
                         )
                     data[field_name] = parsed
             return cls(**data)
@@ -213,14 +218,96 @@ class ParquetRGCacheOptions:
 
 
 @dataclass
+class ArrowOptions:
+    """Process-wide Arrow CPU and I/O pool sizes, shared by all Arrow readers.
+
+    Counts default to one. Explicit ``None`` leaves that pool unchanged.
+    Configuring another store in the same process affects existing readers too.
+    """
+
+    cpu_threads: int | None = _option(1, preserve_none=True)
+    io_threads: int | None = _option(1, preserve_none=True)
+    _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
+        for name in ("cpu_threads", "io_threads"):
+            value = getattr(self, name)
+            if value is not None:
+                _validate_non_negative_int(f"arrow.{name}", value)
+                if value == 0:
+                    raise ValueError(f"arrow.{name} must be positive or None")
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "ArrowOptions":
+        """Normalize Arrow pool options without importing PyArrow."""
+        if obj is None:
+            return _default_options(cls)
+        if isinstance(obj, cls):
+            return obj
+        if isinstance(obj, dict):
+            return cls(**obj)
+        raise TypeError(f"Cannot interpret Arrow options from {obj!r}")
+
+    def merge(self, other: "ArrowOptions") -> "ArrowOptions":
+        """Overlay supplied fields, preserving explicit ``None``."""
+        return ArrowOptions(**_merged_options(self, other))
+
+
+@dataclass
+class ParquetOptions:
+    """Parquet read behavior and the node-shared decoded row-group cache.
+
+    ``use_threads`` enables parallel column decoding through Arrow's CPU pool.
+    False keeps each read on its calling thread; separate fetches can still
+    decode concurrently. Pool sizes are configured separately in ArrowOptions.
+    """
+
+    use_threads: bool = _option(False)
+    rg_cache: ParquetRGCacheOptions = field(default_factory=ParquetRGCacheOptions)
+    _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
+        if type(self.use_threads) is not bool:
+            raise ValueError("parquet.use_threads must be a boolean")
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "ParquetOptions":
+        """Normalize Parquet read and cache options."""
+        if obj is None:
+            return cls(use_threads=False, rg_cache=ParquetRGCacheOptions.from_any(None))
+        if isinstance(obj, cls):
+            return obj
+        if isinstance(obj, dict):
+            data = dict(obj)
+            if "rg_cache" in data:
+                data["rg_cache"] = ParquetRGCacheOptions.from_any(data["rg_cache"])
+            return cls(**data)
+        raise TypeError(f"Cannot interpret Parquet options from {obj!r}")
+
+    def merge(self, other: "ParquetOptions") -> "ParquetOptions":
+        """Overlay supplied read options and merge nested cache fields."""
+        return ParquetOptions(
+            **_merged_options(self, other), rg_cache=self.rg_cache.merge(other.rg_cache)
+        )
+
+
+@dataclass
 class VortexOptions:
-    """Vortex read-cache configuration.
+    """Vortex read-cache and process-wide worker-pool configuration.
 
     ``segment_cache_bytes`` sets the encoded-segment cache's target size per
     fetch replica. Zero disables it. The target is not a strict memory bound.
+    ``worker_threads`` defaults to one background worker; calling fetch threads
+    can also execute Vortex work. Zero disables background workers, and explicit
+    None leaves the pool unchanged. An explicit count overrides VORTEX_MAX_THREADS;
+    an omitted count respects that environment variable. Stores in one process
+    share the pool, so the last applied count wins.
     """
 
     segment_cache_bytes: int = _option(64 * 1024**2)
+    worker_threads: int | None = _option(1, preserve_none=True)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
@@ -229,6 +316,8 @@ class VortexOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
+        if self.worker_threads is not None:
+            _validate_non_negative_int("vortex.worker_threads", self.worker_threads)
         _validate_non_negative_int(
             "vortex.segment_cache_bytes", self.segment_cache_bytes
         )
@@ -262,9 +351,8 @@ class StoreOptions:
     """Top-level IO store options passed to FetchOp."""
 
     cache: CacheOptions = field(default_factory=CacheOptions)
-    parquet_rg_cache: ParquetRGCacheOptions = field(
-        default_factory=ParquetRGCacheOptions
-    )
+    arrow: ArrowOptions = field(default_factory=ArrowOptions)
+    parquet: ParquetOptions = field(default_factory=ParquetOptions)
     vortex: VortexOptions = field(default_factory=VortexOptions)
 
     def __post_init__(self) -> None:
@@ -272,21 +360,21 @@ class StoreOptions:
         if legacy_limit is not None:
             warnings.warn(
                 "cache.rg_cache_bytes is deprecated; use "
-                + "parquet_rg_cache.limit_bytes",
+                + "parquet.rg_cache.limit_bytes",
                 DeprecationWarning,
                 stacklevel=2,
             )
 
     def resolved_parquet_rg_cache(self) -> ParquetRGCacheOptions:
         """Resolve decoded-cache defaults against the shard-cache options."""
-        configured = self.parquet_rg_cache
+        configured = self.parquet.rg_cache
         if (
             configured.enabled is True
             and not self.cache.enabled
             and configured.root is None
         ):
             raise ValueError(
-                "parquet_rg_cache.enabled=True requires parquet_rg_cache.root "
+                "parquet.rg_cache.enabled=True requires parquet.rg_cache.root "
                 + "when cache.enabled=False"
             )
         legacy_limit = self.cache.rg_cache_bytes
@@ -320,41 +408,52 @@ class StoreOptions:
         if obj is None:
             return cls(
                 cache=CacheOptions.from_any(None),
-                parquet_rg_cache=ParquetRGCacheOptions.from_any(None),
+                arrow=ArrowOptions.from_any(None),
+                parquet=ParquetOptions.from_any(None),
                 vortex=VortexOptions.from_any(None),
             )
         if isinstance(obj, StoreOptions):
             return obj
         if isinstance(obj, dict):
+            if "parquet_rg_cache" in obj:
+                raise TypeError("parquet_rg_cache has moved to parquet.rg_cache")
             cache = (
                 CacheOptions.from_any(obj["cache"])
                 if "cache" in obj
                 else CacheOptions()
             )
-            parquet_rg_cache = (
-                ParquetRGCacheOptions.from_any(obj["parquet_rg_cache"])
-                if "parquet_rg_cache" in obj
-                else ParquetRGCacheOptions()
+            arrow = (
+                ArrowOptions.from_any(obj["arrow"])
+                if "arrow" in obj
+                else ArrowOptions()
+            )
+            parquet = (
+                ParquetOptions.from_any(obj["parquet"])
+                if "parquet" in obj
+                else ParquetOptions()
             )
             vortex = (
                 VortexOptions.from_any(obj["vortex"])
                 if "vortex" in obj
                 else VortexOptions()
             )
-            return cls(cache=cache, parquet_rg_cache=parquet_rg_cache, vortex=vortex)
+            return cls(cache=cache, arrow=arrow, parquet=parquet, vortex=vortex)
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 
     def merge(self, other: "StoreOptions") -> "StoreOptions":
         """Return a new options object with ``other`` overriding ``self``."""
         return StoreOptions(
             cache=self.cache.merge(other.cache),
-            parquet_rg_cache=self.parquet_rg_cache.merge(other.parquet_rg_cache),
+            arrow=self.arrow.merge(other.arrow),
+            parquet=self.parquet.merge(other.parquet),
             vortex=self.vortex.merge(other.vortex),
         )
 
 
 __all__ = [
+    "ArrowOptions",
     "CacheOptions",
+    "ParquetOptions",
     "ParquetRGCacheOptions",
     "StoreOptions",
     "VortexOptions",

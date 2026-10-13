@@ -6,67 +6,56 @@
 from __future__ import annotations
 
 import os
-import sys
+import warnings
+from types import ModuleType
+
+from zephon.io.options import ArrowOptions, VortexOptions
 
 # Env vars that suppress internal thread pools in numerical libraries.
 # Shared between suppress_library_threads() (set at runtime) and the
 # Ray runner (baked into runtime_env so they're set before import time).
-# ARROW_NUM_THREADS is PyArrow's pre-import default for its CPU thread pool;
-# cap_arrow_threads() additionally pins the pools at runtime in case PyArrow
-# was already imported before the env was set.
+# Arrow and Vortex pools are configured separately when their readers are set up.
 THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
     "TOKENIZERS_PARALLELISM": "False",
     "OMP_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
     "RAYON_NUM_THREADS": "1",
-    "ARROW_NUM_THREADS": "1",
 }
 
 
-def cap_vortex_threads() -> None:
-    """Limit an already-loaded Vortex runtime's worker pool.
-
-    ``ZEPHON_VORTEX_THREADS`` overrides ``VORTEX_MAX_THREADS``; the default
-    is one worker. A non-positive override leaves the runtime unchanged.
-    """
-    configured = os.environ.get("ZEPHON_VORTEX_THREADS")
-    if configured is None and "VORTEX_MAX_THREADS" in os.environ:
+def configure_vortex_threads(vortex: ModuleType, options: VortexOptions) -> None:
+    """Configure the process-wide background pool without hiding native errors."""
+    count = options.worker_threads
+    if count is None:
         return
-    try:
-        n = int(configured if configured is not None else "1")
-    except ValueError as exc:
-        raise ValueError("ZEPHON_VORTEX_THREADS must be an integer") from exc
-    if n <= 0:
+    if (
+        "worker_threads" not in options._provided_fields
+        and "VORTEX_MAX_THREADS" in os.environ
+    ):
         return
-    vortex = sys.modules.get("vortex")
-    if vortex is None:
-        return
-    try:
-        vortex.set_worker_threads(n)
-    except Exception:
-        pass
+    vortex.set_worker_threads(count)
 
 
-def cap_arrow_threads() -> None:
-    """Pin PyArrow's CPU and IO thread pools (independent of OMP/MKL).
-
-    PyArrow keeps its own CPU (compute / Parquet column decode) and IO thread
-    pools, sized to the core count by default. With several parallel fetch
-    lanes each decoding a row group, those per-process pools multiply into
-    oversubscription. ``ZEPHON_PARQUET_ARROW_THREADS`` sets the count (default
-    1); ``0`` leaves PyArrow's own defaults untouched.
-    """
-    n = int(os.environ.get("ZEPHON_PARQUET_ARROW_THREADS", "1"))
-    if n <= 0:
-        return
-    try:
-        import pyarrow as pa
-
-        pa.set_cpu_count(n)
-        pa.set_io_thread_count(n)
-    except Exception:
-        pass
+def configure_arrow_threads(pa: ModuleType, options: ArrowOptions) -> None:
+    """Configure Arrow's process-wide pools, retaining the legacy env fallback."""
+    counts = {"cpu_threads": options.cpu_threads, "io_threads": options.io_threads}
+    legacy = os.environ.get("ZEPHON_PARQUET_ARROW_THREADS")
+    if legacy is not None and options._provided_fields != counts.keys():
+        warnings.warn(
+            "ZEPHON_PARQUET_ARROW_THREADS is deprecated; use "
+            + "io_options.arrow.cpu_threads and io_options.arrow.io_threads",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        count = int(legacy)
+        for name in counts:
+            if name not in options._provided_fields:
+                counts[name] = count if count > 0 else None
+    if counts["cpu_threads"] is not None:
+        pa.set_cpu_count(counts["cpu_threads"])
+    if counts["io_threads"] is not None:
+        pa.set_io_thread_count(counts["io_threads"])
 
 
 def suppress_library_threads() -> None:
@@ -79,9 +68,6 @@ def suppress_library_threads() -> None:
     at worker/actor startup avoids that.
     """
     os.environ.update(THREAD_SUPPRESSION_ENV_VARS)
-
-    cap_arrow_threads()
-    cap_vortex_threads()
 
     try:
         import torch

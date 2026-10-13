@@ -15,6 +15,7 @@ import numpy as np
 
 from zephon._internal.io.formats.arrow_rows import (
     arrow_table_to_samples,
+    configure_pyarrow,
     require_pyarrow,
     samples_from_columns,
 )
@@ -26,7 +27,7 @@ from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
-from zephon._internal.utils.thread_utils import cap_vortex_threads
+from zephon._internal.utils.thread_utils import configure_vortex_threads
 from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
@@ -38,8 +39,6 @@ try:
     import vortex as _vortex
 except ImportError:
     _vortex = None
-else:
-    cap_vortex_threads()
 
 
 def _require_vortex() -> ModuleType:
@@ -273,6 +272,8 @@ class VortexShardOpener:
 
     def __init__(self, options: "StoreOptions") -> None:
         vortex = _require_vortex()
+        configure_vortex_threads(vortex, options.vortex)
+        configure_pyarrow(options.arrow)
         self._metadata_cache = MetadataCache[str, _VortexMetadata](
             options.cache.metadata_cache_entries
         )

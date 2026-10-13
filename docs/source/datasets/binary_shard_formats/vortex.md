@@ -77,3 +77,30 @@ Set either limit to zero to disable that cache. The metadata limit counts footer
 segment size is a memory target that Vortex can exceed. Decoded samples and other memory
 use are additional, so allow some headroom when planning memory usage.
 
+**Worker Threads.** Configure Vortex's background pool through `VortexOptions`:
+
+```python
+from zephon.io import ArrowOptions, StoreOptions, VortexOptions
+
+pipeline.options(
+    io_options=StoreOptions(
+        vortex=VortexOptions(worker_threads=1),
+        arrow=ArrowOptions(cpu_threads=1, io_threads=1),
+    )
+)
+```
+
+Vortex defaults to one background worker in Zephon. Calling fetch threads can also
+execute Vortex work, so four fetch threads with this setting can still read
+concurrently. The background pool is shared within a process; each fetch process or
+training rank has its own pool. This count does not limit Vortex's separate blocking
+I/O pool. Arrow's CPU and I/O pools are configured independently as described in the
+[Parquet reader configuration](../parquet.md#reader-configuration).
+
+An explicit positive count overrides `VORTEX_MAX_THREADS`; zero disables background
+workers, while `None` leaves the current pool unchanged. When `worker_threads` is
+omitted, an existing `VORTEX_MAX_THREADS` setting is respected. Without either override,
+Zephon applies one worker during reader setup. Importing the format or performing
+discovery alone leaves Vortex's own pool settings unchanged. Different stores in the
+same process share the pool, so the last applied count wins; closing a store does not
+restore an earlier count. `ZEPHON_VORTEX_THREADS` is no longer used.

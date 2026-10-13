@@ -6,8 +6,9 @@ import os
 import struct
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import numpy as np
 
@@ -17,7 +18,8 @@ from zephon._internal.io.catalog.extra_codec import (
     register_extra_codec,
     unpackb,
 )
-from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.arrow_rows import configure_pyarrow
+from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
 from zephon._internal.io.index import find_and_load_index
 from zephon._internal.io.index.index_types import LitDataIndex, is_litdata_index
 from zephon._internal.io.protocols import RandomAccessShard
@@ -53,7 +55,9 @@ def _ensure_litdata_support():
 
 
 if TYPE_CHECKING:
+    from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 
 class _StreamingTemplateDict(dict[str, Any]):
@@ -302,6 +306,14 @@ class LitDataFormat(FormatHandler):
     """
 
     kind = "litdata"
+
+    @contextmanager
+    def create_opener(
+        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+    ) -> Iterator[ShardOpener]:
+        """Configure Arrow layouts without importing Arrow for binary chunks."""
+        configure_pyarrow(options.arrow)
+        yield self
 
     def discover(
         self, path: str, storage: StorageBackend
