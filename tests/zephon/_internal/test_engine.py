@@ -3,7 +3,6 @@ import logging
 import re
 import threading
 import time
-import types
 import weakref
 from collections import defaultdict
 from pathlib import Path
@@ -96,8 +95,8 @@ def test_engine_reproducible_weighted_random() -> None:
     assert first == second
 
 
-def test_engine_cleanup_finalizer_removes_previous_merged(
-    monkeypatch, tmp_path
+def test_engine_cleanup_finalizer_releases_coordinator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Avoid building runners to keep setup minimal for this finalizer test.
     monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
@@ -109,12 +108,8 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
     spec = resolve_runtime_spec(plan, opts)
     eng = Engine(plan, opts, work, spec)
 
-    called = {"flag": False}
-
-    def patched_clean(self: Engine) -> None:
-        called["flag"] = True
-
-    eng._clean_merged = types.MethodType(patched_clean, eng)
+    cleanup = Mock()
+    monkeypatch.setattr(eng._coordinator, "cleanup", cleanup)
     fin = eng._cleanup_finalizer
     eng_ref = weakref.ref(eng)
     eng = None
@@ -125,7 +120,7 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
         gc.collect()
         time.sleep(0.01)
 
-    assert called["flag"] is True
+    cleanup.assert_called()
     assert fin.alive is False
     assert eng_ref() is None
 

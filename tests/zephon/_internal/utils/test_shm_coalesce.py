@@ -7,6 +7,7 @@ import pickle
 import sys
 from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
+from typing import Any
 
 import pytest
 
@@ -14,17 +15,29 @@ from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.stream import LazyPayload, resolve_lazy_payloads
 from zephon._internal.utils import shm_coalesce
 from zephon._internal.utils.shm_coalesce import (
-    CoalescedMicrobatch,
+    MicrobatchEnvelope,
+    PayloadMemoryPolicy,
     ShmLazyPayload,
+    _shared_numpy_storage,
     _ShmBytes,
     _ShmBytesLegacy,
     _ShmLeafPayload,
-    coalesce_microbatch,
+    prepare_microbatch,
 )
 from zephon.ops.accumulators import CountingAccumulator
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 torch = pytest.importorskip("torch")
+
+
+def _policy(min_item_bytes: int = 4096, **overrides: Any) -> PayloadMemoryPolicy:
+    """Use small, explicit transport thresholds for the fixture payloads."""
+    sizes = dict(
+        min_item_bytes=min_item_bytes,
+        min_new_allocation_bytes=min_item_bytes,
+        min_forward_bytes=min_item_bytes,
+    )
+    return PayloadMemoryPolicy(**(sizes | overrides))
 
 
 def _forking_round_trip(obj: object) -> bytes:
@@ -37,40 +50,52 @@ def _meta(i: int) -> SampleMeta:
     return SampleMeta(sample_id=(0, 0, i), lane_id=0, chunk_id=0, chunk_offset=i)
 
 
-def _round_trip(coalesced: CoalescedMicrobatch) -> list:
+def _round_trip(coalesced: Any, *, protocol: int | None = None) -> list:
     """ForkingPickler round-trip — returns records with unresolved LazyPayloads."""
-    blob = _forking_round_trip(coalesced)
-    restored = pickle.loads(blob)
+    restored = pickle.loads(ForkingPickler.dumps(coalesced, protocol))
     assert isinstance(restored, list)
     return restored
 
 
-def _round_trip_resolved(coalesced: CoalescedMicrobatch) -> list:
+def _round_trip_resolved(
+    coalesced: Any, *, protocol: int | None = None, hops: int = 1
+) -> list:
     """Full round-trip simulating worker → pump → worker resolve."""
-    restored = _round_trip(coalesced)
+    restored = coalesced
+    for _ in range(hops):
+        restored = _round_trip(restored, protocol=protocol)
     resolve_lazy_payloads(restored)
     return restored
+
+
+def _prepare(
+    *payloads: Any, policy: PayloadMemoryPolicy | None = None
+) -> MicrobatchEnvelope:
+    """Prepare fixture records, using zero thresholds unless supplied explicitly."""
+    return prepare_microbatch(
+        [SampleRecord(_meta(i), payload) for i, payload in enumerate(payloads)],
+        _policy(0) if policy is None else policy,
+    )
+
+
+def _transport(
+    *payloads: Any,
+    policy: PayloadMemoryPolicy | None = None,
+    protocol: int | None = None,
+) -> list[Any]:
+    prepared = _prepare(*payloads, policy=policy)
+    return [r.payload for r in _round_trip_resolved(prepared, protocol=protocol)]
+
+
+def _shared_storage(value: Any) -> Any | None:
+    if isinstance(value, torch.Tensor):
+        return value.untyped_storage() if value.is_shared() else None
+    return shm_coalesce._shared_numpy_storage(value)
 
 
 # ---------------------------------------------------------------------------
 # Basic round-trip
 # ---------------------------------------------------------------------------
-def test_training_policies_after_coalesced_transport() -> None:
-    """EOS loss masking works after SHM transport and lazy payload resolution."""
-    tokens = torch.tensor([1, 10, 2, 1, 20, 2])
-    batch = SampleBatch(
-        records=(SampleRecord(meta=_meta(0), payload={"input_ids": tokens}),),
-    )
-    coalesced = coalesce_microbatch([batch], shm_min_size=0)
-    assert coalesced is not None
-    [restored_batch] = _round_trip(coalesced)
-    assert isinstance(restored_batch.records[0].payload, LazyPayload)
-    resolve_lazy_payloads([restored_batch])
-    assert restored_batch.to_training(
-        return_labels=True,
-        eos_mask_loss=True,
-        eos_token_id=2,
-    )["labels"].tolist() == [[10, 2, -100, 20, 2]]
 
 
 class TestCoalesceMicrobatchRoundTrip:
@@ -88,9 +113,8 @@ class TestCoalesceMicrobatchRoundTrip:
             )
             for i in range(4)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-        assert isinstance(coalesced, CoalescedMicrobatch)
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert isinstance(coalesced, MicrobatchEnvelope)
 
         # Only 1 dtype → 1 SHM buffer
         assert len(coalesced.buffers) == 1
@@ -124,8 +148,7 @@ class TestCoalesceMicrobatchRoundTrip:
             )
             for i in range(2)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # 2 dtypes → 2 SHM buffers
         assert len(coalesced.buffers) == 2
         assert "torch.int64" in coalesced.buffers
@@ -140,32 +163,91 @@ class TestCoalesceMicrobatchRoundTrip:
     def test_multidimensional_tensors(self) -> None:
         t = torch.arange(12, dtype=torch.float32).reshape(3, 4)
         records = [SampleRecord(meta=_meta(0), payload={"matrix": t})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
 
         restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload["matrix"], t)
         assert restored[0].payload["matrix"].shape == (3, 4)
+        assert restored[0].payload["matrix"].is_shared()
 
 
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 class TestCoalesceEdgeCases:
-    def test_no_tensors_returns_none(self) -> None:
+    def test_collection_defers_inline_conversion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even small memoryviews are copied only during destination preparation."""
+        view = memoryview(bytearray(b"abcdef"))[::2]
+        payload = {"view": view, "tensor": torch.arange(3), "array": np.arange(3)}
+        records = [SampleRecord(_meta(0), payload)]
+        inline_buffer = shm_coalesce._inline_buffer
+        converted: list[Any] = []
+
+        def track_conversion(source: Any, slot: Any, shared: bool) -> Any:
+            converted.append(source)
+            return inline_buffer(source, slot, shared)
+
+        monkeypatch.setattr(shm_coalesce, "_inline_buffer", track_conversion)
+        preparation = shm_coalesce._PayloadPreparation.collect(records, _policy())
+        assert not converted
+        assert records[0].payload is payload
+
+        buffers = preparation.prepare_destinations()
+        assert any(source is view for source in converted)
+        assert records[0].payload is payload
+        assert not buffers
+
+        preparation.replace_record_payloads()
+        [restored] = _round_trip_resolved(MicrobatchEnvelope(records, buffers))
+        assert restored.payload["view"] == b"ace"
+        torch.testing.assert_close(restored.payload["tensor"], payload["tensor"])
+        np.testing.assert_array_equal(restored.payload["array"], payload["array"])
+        assert not restored.payload["tensor"].is_shared()
+
+    def test_allocation_failure_preserves_original_record_payloads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later allocation failure leaves even already-prepared records intact."""
+        first = {"array": np.arange(8, dtype=np.float32)}
+        second = DCSample(torch.arange(9)[:8], "kept")
+        records = [SampleRecord(_meta(0), first), SampleRecord(_meta(1), second)]
+        items = [records[0], SampleBatch(records=(records[1],))]
+        allocate = shm_coalesce._alloc_shm_buffer
+        allocations = 0
+
+        def fail_second(*args: Any, **kwargs: Any) -> Any:
+            nonlocal allocations
+            allocations += 1
+            if allocations == 2:
+                raise RuntimeError("unexpected allocation failure")
+            return allocate(*args, **kwargs)
+
+        monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", fail_second)
+        with pytest.raises(RuntimeError, match="unexpected allocation failure"):
+            prepare_microbatch(items, _policy(0))
+        assert allocations == 2
+        assert records[0].payload is first
+        assert records[1].payload is second
+        np.testing.assert_array_equal(first["array"], np.arange(8, dtype=np.float32))
+        torch.testing.assert_close(second.image, torch.arange(8))
+        assert not second.image.is_shared()
+
+    def test_no_tensors_stay_raw(self) -> None:
         records = [SampleRecord(meta=_meta(0), payload={"text": "hello", "count": 42})]
-        assert coalesce_microbatch(records) is None
+        assert not prepare_microbatch(records, _policy()).buffers
         assert pickle.loads(_forking_round_trip(records)) == records
 
     def test_no_tensors_payloads_unchanged(self) -> None:
-        """When coalesce returns None, payloads must not be mutated."""
+        """Payloads needing no preparation must not be mutated."""
         payload = {"text": "hello", "count": 42}
         records = [SampleRecord(meta=_meta(0), payload=payload)]
-        assert coalesce_microbatch(records) is None
+        assert not prepare_microbatch(records, _policy()).buffers
         assert records[0].payload is payload
         assert records[0].payload["text"] == "hello"
 
-    def test_returns_none_when_torch_is_unavailable(
+    def test_payloads_stay_raw_when_torch_is_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         records = [
@@ -179,7 +261,7 @@ class TestCoalesceEdgeCases:
         ]
         monkeypatch.setattr("zephon._internal.utils.shm_coalesce._torch", None)
         monkeypatch.setattr("zephon._internal.utils.shm_coalesce._torch_loaded", True)
-        assert coalesce_microbatch(records) is None
+        assert not prepare_microbatch(records, _policy()).buffers
 
     def test_empty_tensor(self) -> None:
         records = [
@@ -191,11 +273,11 @@ class TestCoalesceEdgeCases:
                 },
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["empty"].numel() == 0
         torch.testing.assert_close(restored[0].payload["ok"], torch.tensor([1.0]))
+        assert restored[0].payload["ok"].is_shared()
 
     def test_nested_list_payload(self) -> None:
         """Tensors inside list-typed payloads are also coalesced."""
@@ -205,12 +287,12 @@ class TestCoalesceEdgeCases:
                 payload=[torch.tensor([1, 2, 3]), "text", torch.tensor([4.0, 5.0])],
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload[0], torch.tensor([1, 2, 3]))
         assert restored[0].payload[1] == "text"
         torch.testing.assert_close(restored[0].payload[2], torch.tensor([4.0, 5.0]))
+        assert restored[0].payload[0].is_shared() and restored[0].payload[2].is_shared()
 
     def test_noncontiguous_torch_tensor(self) -> None:
         """Non-contiguous tensors (slices, transposes) coalesce correctly."""
@@ -224,8 +306,8 @@ class TestCoalesceEdgeCases:
                 payload={"sliced": t_slice, "transposed": t_transposed},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         torch.testing.assert_close(restored[0].payload["sliced"], t_slice)
@@ -240,8 +322,8 @@ class TestCoalesceEdgeCases:
             SampleRecord(meta=_meta(1), payload={"t": torch.tensor([2.0])}),
         ]
         batch = SampleBatch(records=tuple(records))
-        coalesced = coalesce_microbatch([batch])
-        assert coalesced is not None
+        coalesced = prepare_microbatch([batch], _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         assert len(restored) == 1
@@ -332,8 +414,8 @@ class TestCoalesceShmProperties:
             )
             for i in range(5)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
         for buf in coalesced.buffers.values():
             assert buf.is_shared(), "Coalesced buffer should be in shared memory"
 
@@ -349,8 +431,7 @@ class TestCoalesceShmProperties:
             )
             for i in range(10)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # 10 records × 2 tensors = 20 tensors, but only 1 SHM buffer (all float32)
         assert len(coalesced.buffers) == 1
         buf = coalesced.buffers["torch.float32"]
@@ -365,8 +446,7 @@ class TestCoalesceShmProperties:
             )
             for i in range(3)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
 
         restored = _round_trip_resolved(coalesced)
         # All restored tensors should share the same storage
@@ -380,9 +460,10 @@ class TestCoalesceShmProperties:
                 payload={"t": torch.arange(12, dtype=torch.float32).reshape(3, 4)},
             )
         ]
-        coalesced = coalesce_microbatch(records)
+        coalesced = prepare_microbatch(records, _policy(0))
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["t"].is_contiguous()
+        assert restored[0].payload["t"].is_shared()
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +478,7 @@ class TestCoalesceBytes:
             SampleRecord(meta=_meta(0), payload={"raw": data_a, "label": "hello"}),
             SampleRecord(meta=_meta(1), payload={"raw": data_b, "label": "world"}),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
         assert "_bytes_uint8" in coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
@@ -406,26 +486,128 @@ class TestCoalesceBytes:
         assert restored[0].payload["label"] == "hello"
         assert bytes(restored[1].payload["raw"]) == data_b
 
-    def test_restored_bytes_are_shm_backed(self) -> None:
-        """Restored bytes are _ShmBytes backed by SHM tensor."""
+    def test_restored_bytes_are_shm_backed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bytes and bytearrays restore as SHM wrappers, with zero-copy views on 3.12+."""
         data = b"M" * 8192
-        records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        records = [
+            SampleRecord(meta=_meta(0), payload={"raw": data}),
+            SampleRecord(meta=_meta(1), payload={"raw": bytearray(data)}),
+        ]
+        coalesced = prepare_microbatch(records, _policy())
 
+        if sys.version_info >= (3, 12):
+
+            def unexpected_narrow(*args, **kwargs):
+                raise AssertionError("restoring shared bytes needs no Tensor view")
+
+            monkeypatch.setattr(torch.Tensor, "narrow", unexpected_narrow)
         restored = _round_trip_resolved(coalesced)
-        raw = restored[0].payload["raw"]
-        assert isinstance(raw, _ShmBytes)
-        assert bytes(raw) == data
-        assert len(raw) == len(data)
+        for i, record in enumerate(restored):
+            raw = record.payload["raw"]
+            assert isinstance(raw, _ShmBytes)
+            assert not memoryview(raw).readonly
+            assert bytes(raw) == data
+            assert len(raw) == len(data)
+            if sys.version_info >= (3, 12):
+                assert not isinstance(raw, bytes)
+                assert raw._buffer.is_shared()
+                assert raw._np_view.__array_interface__["data"][
+                    0
+                ] == raw._buffer.data_ptr() + i * len(data)
 
     def test_small_bytes_stay_inline(self) -> None:
         """bytes below the threshold are left in the pickle stream."""
         small = b"tiny"
         records = [SampleRecord(meta=_meta(0), payload={"data": small})]
-        coalesced = coalesce_microbatch(records)
+        coalesced = prepare_microbatch(records, _policy())
         # No tensors, no large bytes → nothing to coalesce
-        assert coalesced is None
+        assert not coalesced.buffers
+
+    def test_fresh_bytes_are_writable_and_inline_preserves_source(self) -> None:
+        source = {
+            "bytes": b"abcdef",
+            "readonly": memoryview(b"abcdef"),
+            "mutable": bytearray(b"abcdef"),
+            "view": memoryview(bytearray(b"a.b.c.d.e.f."))[::2],
+        }
+        for policy in (_policy(0), _policy(1 << 20)):
+            [result] = _transport(source, policy=policy)
+            readonly_names = ("bytes", "readonly") if policy.min_item_bytes else ()
+            for name in readonly_names:
+                raw = result[name]
+                assert bytes(raw) == b"abcdef"
+                assert memoryview(raw).readonly
+                with pytest.raises(TypeError):
+                    raw[0] = 42
+                with pytest.raises(TypeError):
+                    memoryview(raw)[0] = 42
+            for name in source.keys() - set(readonly_names):
+                raw = result[name]
+                assert not memoryview(raw).readonly
+                raw[0] = ord("A")
+                raw[1:3] = b"BC"
+                raw[5:2:-1] = b"FED"
+                assert bytes(raw) == b"ABCDEF"
+            if not readonly_names:
+                assert all(bytes(value) == b"abcdef" for value in source.values())
+            # Resolved values also pass directly through the process pickler.
+            for protocol in (4, 5):
+                forwarded = pickle.loads(ForkingPickler.dumps(result, protocol))
+                [forwarded] = _transport(forwarded, policy=policy)
+                for name in result:
+                    assert bytes(forwarded[name]) == bytes(result[name])
+                    assert (
+                        memoryview(forwarded[name]).readonly
+                        == memoryview(result[name]).readonly
+                    )
+
+    def test_byte_slices_accept_iterables_without_partial_writes(self) -> None:
+        [shared] = _transport(b"abcdef")
+        for raw in (shared, _ShmBytesLegacy(b"abcdef")):
+            for replacement in ([1, 2], (1, 2), iter([1, 2])):
+                raw[:2] = replacement
+                assert bytes(raw) == b"\x01\x02cdef"
+            raw[5:1:-2] = [3, 4]
+            assert bytes(raw) == b"\x01\x02c\x04e\x03"
+            before = bytes(raw)
+            for replacement in ([1, 256], [1, 1.5], [1], 2, "ab"):
+                with pytest.raises((TypeError, ValueError)):
+                    raw[:2] = replacement
+                assert bytes(raw) == before
+
+    def test_writable_byte_wrappers_validate_writes_without_resizing(self) -> None:
+        [shared] = _transport(bytearray(b"abcdef"))
+        for raw in (shared, _ShmBytesLegacy(b"abcdef")):
+            raw[-1] = ord("Z")
+            raw[::2] = b"ABC"
+            assert bytes(raw) == b"AbBdCZ"
+            for value in (-1, 256):
+                with pytest.raises(ValueError):
+                    raw[0] = value
+            with pytest.raises(IndexError):
+                raw[6] = 1
+            with pytest.raises(ValueError):
+                raw[1:2] = b"longer"
+            assert bytes(raw) == b"AbBdCZ"
+            with pytest.raises((AttributeError, BufferError)):
+                raw.append(1)
+            with pytest.raises((AttributeError, TypeError, BufferError)):
+                del raw[0]
+        legacy = _ShmBytesLegacy(b"abcdef")
+        for operation in (
+            lambda: legacy.clear(),
+            lambda: legacy.extend(b"x"),
+            lambda: legacy.insert(0, 1),
+            lambda: legacy.pop(),
+            lambda: legacy.remove(97),
+            lambda: legacy.__iadd__(b"x"),
+            lambda: legacy.__imul__(2),
+        ):
+            with pytest.raises(BufferError):
+                operation()
+        assert bytes(legacy) == b"abcdef"
 
     def test_mixed_tensors_and_bytes(self) -> None:
         """Tensors and large bytes coalesce into separate SHM buffers."""
@@ -439,8 +621,7 @@ class TestCoalesceBytes:
             )
             for i in range(3)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # 1 buffer for int64 tensors + 1 buffer for bytes
         assert "torch.int64" in coalesced.buffers
         assert "_bytes_uint8" in coalesced.buffers
@@ -457,8 +638,7 @@ class TestCoalesceBytes:
         data = bytearray(range(256)) * 32
         view = memoryview(data).cast("I", shape=(32, 64))
         records = [SampleRecord(meta=_meta(0), payload={"mv": view})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
         restored = _round_trip_resolved(coalesced)
         assert bytes(restored[0].payload["mv"]) == data
         assert isinstance(restored[0].payload["mv"], _ShmBytes)
@@ -466,8 +646,9 @@ class TestCoalesceBytes:
     def test_empty_multidim_memoryview_stays_inline(self) -> None:
         empty = memoryview(np.zeros((0, 4), dtype=np.int32))
         record = SampleRecord(meta=_meta(0), payload=empty)
-        assert coalesce_microbatch([record], shm_min_size=0) is None
-        assert record.payload is empty
+        prepared = prepare_microbatch([record], _policy(0))
+        assert not prepared.buffers
+        assert _round_trip_resolved(prepared)[0].payload == b""
 
     def test_strided_memoryviews_preserve_bytes_and_offsets(self) -> None:
         array = np.arange(12, dtype=np.int32)
@@ -479,10 +660,10 @@ class TestCoalesceBytes:
         padded.view(np.uint8)[:] = np.arange(padded.nbytes, dtype=np.uint8)
         structured = memoryview(padded)[::2]
         payload = {"a": b"abc", "b": view, "c": structured, "d": b"tail"}
-        coalesced = coalesce_microbatch(
-            [SampleRecord(meta=_meta(0), payload=payload)], shm_min_size=0
+        coalesced = prepare_microbatch(
+            [SampleRecord(meta=_meta(0), payload=payload)], _policy(0)
         )
-        assert coalesced is not None
+        assert coalesced.buffers
         [record] = _round_trip_resolved(coalesced)
         assert bytes(record.payload["a"]) == b"abc"
         assert bytes(record.payload["b"]) == view.tobytes()
@@ -494,7 +675,7 @@ class TestCoalesceBytes:
         """Full round-trip: worker→pump→worker2, bytes stay in SHM throughout.
 
         Simulates the real pipeline path:
-          1. Worker coalesces bytes into SHM, puts CoalescedMicrobatch on queue
+          1. Worker coalesces bytes into SHM, puts MicrobatchEnvelope on queue
           2. Pump thread unpickles (hop 1) → gets list[StreamItem] with ShmLazyPayload
           3. Pump thread re-pickles records to next worker (hop 2) — ShmLazyPayload
              forwards SHM refs without resolving
@@ -502,10 +683,9 @@ class TestCoalesceBytes:
         """
         data = b"Z" * 8192
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
 
-        # Hop 1: worker → pump thread (CoalescedMicrobatch → ShmLazyPayload)
+        # Hop 1: worker → pump thread (MicrobatchEnvelope → ShmLazyPayload)
         restored = _round_trip(coalesced)
         assert isinstance(restored[0].payload, ShmLazyPayload)
 
@@ -526,10 +706,10 @@ class TestCoalesceBytes:
         text = "hello world"
         data = text.encode("utf-8")
         # Pad to exceed threshold
-        padded = data + b"\x00" * (DEFAULT_SHM_MIN_SIZE - len(data) + 1)
+        padded = data + b"\x00" * (DEFAULT_SHM_MIN_ITEM_BYTES - len(data) + 1)
         records = [SampleRecord(meta=_meta(0), payload={"text": padded})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert coalesced.buffers
         restored = _round_trip_resolved(coalesced)
         result = restored[0].payload["text"].decode("utf-8")
         assert result.startswith("hello world")
@@ -539,7 +719,7 @@ class TestCoalesceBytes:
         tensor_view = torch.arange(16, dtype=torch.uint8)
         raw = _ShmBytesLegacy(tensor_view)
 
-        assert isinstance(raw, bytes)
+        assert isinstance(raw, bytearray)
         t = torch.frombuffer(raw, dtype=torch.uint8)
         assert t.shape == (16,)
         assert bytes(t.numpy()) == bytes(tensor_view.numpy())
@@ -549,8 +729,8 @@ class TestCoalesceBytes:
         op = DecodeText(fields=("text",), max_batch=3)
         payload = {"text": ("hello world|".encode("utf-8")) * 512}
         records = [SampleRecord(meta=_meta(0), payload=payload)]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         decoded = op.process_many(restored)
@@ -570,8 +750,7 @@ class TestCoalesceBytes:
             )
             for i in range(7)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
 
         restored = _round_trip(coalesced)
         # Accumulator routes without resolving — only reads .meta
@@ -592,20 +771,33 @@ class TestCoalesceBytes:
         """On 3.12+, torch.frombuffer works zero-copy on _ShmBytes."""
         data = b"\x01\x02\x03\x04" * 2048  # 8 KiB
         records = [SampleRecord(meta=_meta(0), payload={"raw": data})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
         restored = _round_trip_resolved(coalesced)
         raw = restored[0].payload["raw"]
-        t = torch.frombuffer(raw, dtype=torch.uint8)
+        readonly = memoryview(raw).toreadonly()
+        array = np.frombuffer(raw, dtype=np.uint8)
+        array.flags.writeable = False
+        [forwarded] = _transport(raw)
+        assert not memoryview(forwarded).readonly
+        t = torch.frombuffer(forwarded, dtype=torch.uint8)
         assert t.shape == (len(data),)
         assert bytes(t.numpy()) == data
         # Verify zero-copy: the tensor from frombuffer should share the same
         # underlying storage as the SHM-backed _ShmBytes (no data copy).
-        assert t.data_ptr() == raw._tensor_view.data_ptr()
+        assert t.data_ptr() == raw._np_view.__array_interface__["data"][0]
+        raw[0] = 42
+        raw[1:3] = b"xy"
+        assert t[:3].tolist() == [42, ord("x"), ord("y")]
+        assert readonly.readonly
+        assert not array.flags.writeable
+        [copied] = _transport(readonly)
+        copied[0] = 99
+        assert raw[0] == 42
+        assert torch.frombuffer(copied, dtype=torch.uint8)[0] == 99
 
 
 # Import threshold for the decode test
-from zephon._internal.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
+from zephon._internal.utils.shm_coalesce import DEFAULT_SHM_MIN_ITEM_BYTES
 
 np = pytest.importorskip("numpy")
 
@@ -617,8 +809,9 @@ class TestCoalesceNdarray:
     def test_shared_numpy_reduction_preserves_views_and_reuses_storage(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(24))])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(_meta(0), np.arange(24))], _policy(0)
+        )
         base = _round_trip_resolved(coalesced)[0].payload
         source = shm_coalesce._array_owner(base)
         array = base.reshape(4, 6)[::-1, ::2]
@@ -632,8 +825,12 @@ class TestCoalesceNdarray:
             "slice": base[3:9],
         }
         records = [SampleRecord(meta=_meta(0), payload=payload)]
-        assert coalesce_microbatch(records) is None
-        assert records[0].payload is payload
+        prepared = prepare_microbatch(records, _policy(0))
+        assert all(
+            buf.untyped_storage().data_ptr() == source.untyped_storage().data_ptr()
+            for buf in prepared.buffers.values()
+        )
+        records = [SampleRecord(meta=_meta(0), payload=payload)]
 
         storage_reductions = 0
         reduce_storage = ForkingPickler._extra_reducers[torch.UntypedStorage]
@@ -720,8 +917,9 @@ class TestCoalesceNdarray:
     def test_numpy_reducer_rejects_out_of_bounds_views(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        coalesced = coalesce_microbatch([SampleRecord(_meta(0), np.arange(8))])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(_meta(0), np.arange(8))], _policy(0)
+        )
         shared = _round_trip_resolved(coalesced)[0].payload
         assert shm_coalesce._shared_numpy_storage(shared) is not None
         # Simulate a claimed span outside the owner without accessing invalid memory.
@@ -743,13 +941,15 @@ class TestCoalesceNdarray:
             ),
         }
         payload = dict(values, tensor=torch.ones(1))
-        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(meta=_meta(0), payload=payload)], _policy(0)
+        )
         [restored] = _round_trip_resolved(coalesced)
         for name, expected in values.items():
             actual = restored.payload[name]
             inline = pickle.loads(_forking_round_trip(expected))
             assert actual.dtype == inline.dtype
+            assert shm_coalesce._shared_numpy_storage(actual) is None
             np.testing.assert_array_equal(actual, expected)
 
     @pytest.mark.parametrize(
@@ -771,13 +971,13 @@ class TestCoalesceNdarray:
             # Ensure an empty array can share a message with a nonempty buffer.
             SampleRecord(meta=_meta(1), payload=np.arange(4, dtype=np.float32)),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
         first_hop = _round_trip(coalesced)
-        assert isinstance(first_hop[0].payload, _ShmLeafPayload)
+        assert isinstance(first_hop[0].payload, _ShmLeafPayload) == bool(array.size)
         second_hop = pickle.loads(_forking_round_trip(first_hop))
         assert isinstance(second_hop[0], SampleRecord)
-        assert isinstance(second_hop[0].payload, _ShmLeafPayload)
+        assert isinstance(second_hop[0].payload, _ShmLeafPayload) == bool(array.size)
         assert second_hop[0].meta == meta
         resolve_lazy_payloads(second_hop)
         result = second_hop[0].payload
@@ -795,8 +995,8 @@ class TestCoalesceNdarray:
         records = tuple(
             SampleRecord(meta=meta, payload=array) for meta, array in zip(metas, arrays)
         )
-        coalesced = coalesce_microbatch([SampleBatch(records=records)])
-        assert coalesced is not None
+        coalesced = prepare_microbatch([SampleBatch(records=records)], _policy(0))
+        assert coalesced.buffers
         forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
         assert isinstance(forwarded[0], SampleBatch)
         assert all(isinstance(r.payload, LazyPayload) for r in forwarded[0].records)
@@ -813,8 +1013,8 @@ class TestCoalesceNdarray:
             SampleRecord(meta=_meta(0), payload=root),
             SampleRecord(meta=_meta(1), payload={"array": nested, "label": "nested"}),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert coalesced.buffers
         restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(restored[0].payload, root)
         np.testing.assert_array_equal(restored[1].payload["array"], nested)
@@ -825,8 +1025,7 @@ class TestCoalesceNdarray:
             SampleRecord(meta=_meta(i), payload=np.arange(8, dtype=np.float32) + i)
             for i in range(2)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         restored = _round_trip_resolved(coalesced)
         buffer = next(iter(coalesced.buffers.values()))
         buffer[0] = 123
@@ -842,8 +1041,7 @@ class TestCoalesceNdarray:
             )
             for i in range(3)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         assert len(coalesced.buffers) == 1
 
         restored = _round_trip_resolved(coalesced)
@@ -863,8 +1061,7 @@ class TestCoalesceNdarray:
                 },
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         assert len(coalesced.buffers) == 2
 
         restored = _round_trip_resolved(coalesced)
@@ -878,8 +1075,8 @@ class TestCoalesceNdarray:
     def test_multidimensional(self) -> None:
         arr = np.arange(12, dtype=np.float32).reshape(3, 4)
         records = [SampleRecord(meta=_meta(0), payload={"matrix": arr})]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         np.testing.assert_array_equal(restored[0].payload["matrix"], arr)
@@ -894,8 +1091,7 @@ class TestCoalesceNdarray:
             )
             for i in range(3)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
 
         restored = _round_trip_resolved(coalesced)
         # All restored arrays share one underlying torch storage
@@ -912,14 +1108,13 @@ class TestCoalesceNdarray:
             SampleRecord(
                 meta=_meta(0),
                 payload={
-                    "torch_t": torch.tensor([1.0, 2.0], dtype=torch.float32),
+                    "torch_t": torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)[:2],
                     "np_arr": np.array([3.0, 4.0], dtype=np.float32),
                     "text": "hello",
                 },
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # Separate buffers: torch.float32 vs np:float32
         assert len(coalesced.buffers) == 2
 
@@ -946,8 +1141,7 @@ class TestCoalesceNdarray:
                 payload={"objects": obj_arr, "normal": normal_arr},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # Only the float32 array should be coalesced, not the object array.
         assert len(coalesced.buffers) == 1
 
@@ -971,8 +1165,8 @@ class TestCoalesceNdarray:
                 payload={"sliced": arr_slice, "fortran": arr_fortran},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         for name, expected in (("sliced", arr_slice), ("fortran", arr_fortran)):
@@ -992,8 +1186,8 @@ class TestCoalesceNdarray:
                 },
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["empty"].size == 0
         np.testing.assert_array_equal(restored[0].payload["ok"], np.array([1.0]))
@@ -1019,11 +1213,10 @@ class TestRootLeafPayload:
         meta.tags["source"] = "tensor"
         records = [
             SampleRecord(meta=meta, payload=tensor),
-            # An empty int64 root has no buffer of its own dtype.
-            SampleRecord(meta=_meta(1), payload=torch.ones(1, dtype=torch.float32)),
+            # A second value exercises coalescing, including an empty root.
+            SampleRecord(meta=_meta(1), payload=torch.ones(1, dtype=tensor.dtype)),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         first_hop = _round_trip(coalesced)
         assert isinstance(first_hop[0].payload, _ShmLeafPayload)
         forwarded = pickle.loads(_forking_round_trip(first_hop))
@@ -1050,23 +1243,28 @@ class TestRootLeafPayload:
     ) -> None:
         leaf = np.arange(4) if kind == "numpy" else torch.arange(4)
         payload = {"tokens": leaf} if container == "dict" else [leaf]
-        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(meta=_meta(0), payload=payload)],
+            _policy(0),
+        )
         forwarded = _round_trip(coalesced)
-        assert isinstance(forwarded[0].payload, ShmLazyPayload)
         resolve_lazy_payloads(forwarded)
         result = forwarded[0].payload
         assert type(result) is type(payload)
         restored_leaf = result["tokens"] if container == "dict" else result[0]
         if kind == "numpy":
             np.testing.assert_array_equal(restored_leaf, leaf)
+            assert shm_coalesce._shared_numpy_storage(restored_leaf) is not None
         else:
             torch.testing.assert_close(restored_leaf, leaf)
+            assert restored_leaf.is_shared()
 
     @pytest.mark.parametrize("payload", [b"x" * 8192, [1, 2, 3], [1.5, 2.5]])
     def test_other_extracted_roots_forward_lazily(self, payload: object) -> None:
-        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(meta=_meta(0), payload=payload)], _policy(0)
+        )
+        assert coalesced.buffers
         forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
         assert isinstance(forwarded[0].payload, _ShmLeafPayload)
         resolve_lazy_payloads(forwarded)
@@ -1080,8 +1278,7 @@ class TestRootLeafPayload:
             SampleRecord(meta=_meta(i), payload=p) for i, p in enumerate(payloads)
         ]
         records.append(SampleRecord(meta=_meta(7), payload=np.arange(4)))
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         forwarded = pickle.loads(_forking_round_trip(_round_trip(coalesced)))
         resolve_lazy_payloads(forwarded)
         assert [r.payload for r in forwarded[:5]] == payloads[:5]
@@ -1099,8 +1296,8 @@ class TestShmLazyPayload:
                 payload={"t": torch.tensor([1.0, 2.0])},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert not coalesced.buffers
 
         restored = _round_trip(coalesced)
         assert len(restored) == 1
@@ -1117,8 +1314,8 @@ class TestShmLazyPayload:
                 payload={"t": torch.tensor([1.0, 2.0]), "label": "hello"},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert not coalesced.buffers
 
         restored = _round_trip(coalesced)
         payload = restored[0].payload
@@ -1136,10 +1333,10 @@ class TestShmLazyPayload:
                 payload={"t": torch.arange(5, dtype=torch.float32)},
             )
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert not coalesced.buffers
 
-        # Hop 1: CoalescedMicrobatch → list with ShmLazyPayload
+        # Hop 1: MicrobatchEnvelope → list with ShmLazyPayload
         restored1 = _round_trip(coalesced)
         assert isinstance(restored1[0].payload, ShmLazyPayload)
 
@@ -1164,8 +1361,8 @@ class TestShmLazyPayload:
             )
             for i in range(3)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip(coalesced)
         # All records have lazy payloads
@@ -1203,8 +1400,8 @@ class TestShmLazyPayload:
             SampleRecord(meta=_meta(1), payload={"t": torch.tensor([2.0])}),
         ]
         batch = SampleBatch(records=tuple(records))
-        coalesced = coalesce_microbatch([batch])
-        assert coalesced is not None
+        coalesced = prepare_microbatch([batch], _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip(coalesced)
         assert isinstance(restored[0], SampleBatch)
@@ -1307,275 +1504,114 @@ if _has_attrs:
         label: str
 
 
+@pytest.mark.parametrize(
+    "struct_type",
+    [
+        DCSample,
+        pytest.param(
+            PydSample if _has_pydantic else None,
+            marks=pytest.mark.skipif(
+                not _has_pydantic, reason="pydantic not installed"
+            ),
+        ),
+        pytest.param(
+            AttrsSample if _has_attrs else None,
+            marks=pytest.mark.skipif(not _has_attrs, reason="attrs not installed"),
+        ),
+    ],
+    ids=["dataclass", "pydantic", "attrs"],
+)
+class TestStructRoundTrip:
+    def test_root_and_dict_payloads(self, struct_type: type[Any]) -> None:
+        tensor = torch.arange(6, dtype=torch.float32)
+        root, nested = _transport(
+            struct_type(image=tensor, label="root"),
+            {"sample": struct_type(image=tensor + 1, label="nested"), "extra": 42},
+        )
+        assert nested["extra"] == 42
+        for actual, expected, label in (
+            (root, tensor, "root"),
+            (nested["sample"], tensor + 1, "nested"),
+        ):
+            assert isinstance(actual, struct_type)
+            torch.testing.assert_close(actual.image, expected)
+            assert actual.label == label
+            assert actual.image.is_shared()
+
+    def test_no_tensors_stays_inline(self, struct_type: type[Any]) -> None:
+        prepared = _prepare(struct_type(image="not_a_tensor", label="text"))
+        assert not prepared.buffers
+
+    def test_multiple_records_survive_lazy_forwarding(
+        self, struct_type: type[Any]
+    ) -> None:
+        prepared = _prepare(
+            *(
+                struct_type(
+                    image=(torch.arange(5, dtype=torch.float32) + i)[:4], label=f"s{i}"
+                )
+                for i in range(5)
+            )
+        )
+        assert len(prepared.buffers) == 1
+        restored = prepared
+        for _ in range(2):
+            restored = _round_trip(restored)
+            assert all(isinstance(r.payload, LazyPayload) for r in restored)
+        resolve_lazy_payloads(restored)
+        assert len(restored) == 5
+        for i, record in enumerate(restored):
+            assert isinstance(record.payload, struct_type)
+            torch.testing.assert_close(record.payload.image, torch.arange(4.0) + i)
+            assert record.payload.label == f"s{i}"
+            assert record.payload.image.is_shared()
+
+
 class TestStructDataclass:
-    """Dataclass payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_dataclass_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="cat")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, DCSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-
-    def test_dataclass_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": DCSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], DCSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["sample"].label == "dog"
-        assert restored[0].payload["extra"] == 42
-
     def test_nested_dataclasses(self) -> None:
-        t = torch.tensor([1.0, 2.0, 3.0])
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=DCNested(inner=DCSample(image=t, label="nested"), score=0.95),
-            ),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, DCNested)
-        assert isinstance(p.inner, DCSample)
-        torch.testing.assert_close(p.inner.image, t)
-        assert p.inner.label == "nested"
-        assert p.score == 0.95
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        [actual] = _transport(
+            DCNested(inner=DCSample(image=tensor, label="nested"), score=0.95)
+        )
+        assert isinstance(actual, DCNested)
+        assert isinstance(actual.inner, DCSample)
+        torch.testing.assert_close(actual.inner.image, tensor)
+        assert actual.inner.label == "nested"
+        assert actual.score == 0.95
+        assert actual.inner.image.is_shared()
 
     def test_dataclass_with_post_init(self) -> None:
-        t = torch.tensor([10.0, 20.0])
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCWithPostInit(values=t, tag="test")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, DCWithPostInit)
-        torch.testing.assert_close(p.values, t)
-        assert p.tag == "test"
-        assert p.description == "tag=test"
-
-    def test_dataclass_no_tensors_returns_none(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=DCSample(image="not_a_tensor", label="text"),
-            ),
-        ]
-        assert coalesce_microbatch(records) is None
-
-    def test_dataclass_multiple_records(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(i),
-                payload=DCSample(
-                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
-                ),
-            )
-            for i in range(5)
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-        assert len(coalesced.buffers) == 1
-
-        restored = _round_trip_resolved(coalesced)
-        assert len(restored) == 5
-        for i, rec in enumerate(restored):
-            assert isinstance(rec.payload, DCSample)
-            torch.testing.assert_close(
-                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
-            )
-            assert rec.payload.label == f"s{i}"
-
-    def test_dataclass_lazy_payload_survives_repickling(self) -> None:
-        t = torch.arange(4, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=DCSample(image=t, label="re")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        # Hop 1
-        restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
-
-        # Hop 2
-        blob2 = _forking_round_trip(restored1)
-        restored2 = pickle.loads(blob2)
-        assert isinstance(restored2[0].payload, LazyPayload)
-
-        # Resolve
-        resolve_lazy_payloads(restored2)
-        assert isinstance(restored2[0].payload, DCSample)
-        torch.testing.assert_close(restored2[0].payload.image, t)
+        tensor = torch.tensor([10.0, 20.0])
+        [actual] = _transport(DCWithPostInit(values=tensor, tag="test"))
+        assert isinstance(actual, DCWithPostInit)
+        torch.testing.assert_close(actual.values, tensor)
+        assert actual.tag == "test"
+        assert actual.description == "tag=test"
+        assert actual.values.is_shared()
 
 
 @pytest.mark.skipif(not _has_pydantic, reason="pydantic not installed")
 class TestStructPydantic:
-    """Pydantic model payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_pydantic_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="cat")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, PydSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-
-    def test_pydantic_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": PydSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], PydSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["extra"] == 42
-
     def test_nested_pydantic(self) -> None:
-        t = torch.tensor([1.0, 2.0, 3.0])
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=PydNested(inner=PydSample(image=t, label="nested"), score=0.95),
-            ),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, PydNested)
-        assert isinstance(p.inner, PydSample)
-        torch.testing.assert_close(p.inner.image, t)
-        assert p.inner.label == "nested"
-        assert p.score == 0.95
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        [actual] = _transport(
+            PydNested(inner=PydSample(image=tensor, label="nested"), score=0.95)
+        )
+        assert isinstance(actual, PydNested)
+        assert isinstance(actual.inner, PydSample)
+        torch.testing.assert_close(actual.inner.image, tensor)
+        assert actual.inner.label == "nested"
+        assert actual.score == 0.95
+        assert actual.inner.image.is_shared()
 
     def test_pydantic_with_computed_field(self) -> None:
-        t = torch.tensor([10.0, 20.0])
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydWithComputed(values=t, tag="test")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        p = restored[0].payload
-        assert isinstance(p, PydWithComputed)
-        torch.testing.assert_close(p.values, t)
-        assert p.tag == "test"
-        assert p.description == "tag=test"
-
-    def test_pydantic_no_tensors_returns_none(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload=PydSample(image="not_a_tensor", label="text"),
-            ),
-        ]
-        assert coalesce_microbatch(records) is None
-
-    def test_pydantic_multiple_records(self) -> None:
-        records = [
-            SampleRecord(
-                meta=_meta(i),
-                payload=PydSample(
-                    image=torch.arange(3, dtype=torch.float32) + i, label=f"s{i}"
-                ),
-            )
-            for i in range(5)
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert len(restored) == 5
-        for i, rec in enumerate(restored):
-            assert isinstance(rec.payload, PydSample)
-            torch.testing.assert_close(
-                rec.payload.image, torch.arange(3, dtype=torch.float32) + i
-            )
-
-    def test_pydantic_lazy_payload_survives_repickling(self) -> None:
-        t = torch.arange(4, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=PydSample(image=t, label="re")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored1 = _round_trip(coalesced)
-        assert isinstance(restored1[0].payload, LazyPayload)
-
-        blob2 = _forking_round_trip(restored1)
-        restored2 = pickle.loads(blob2)
-        resolve_lazy_payloads(restored2)
-        assert isinstance(restored2[0].payload, PydSample)
-        torch.testing.assert_close(restored2[0].payload.image, t)
-
-
-@pytest.mark.skipif(not _has_attrs, reason="attrs not installed")
-class TestStructAttrs:
-    """Attrs class payloads get SHM coalescing through _StructSlot decomposition."""
-
-    def test_attrs_as_top_level_payload(self) -> None:
-        t = torch.arange(6, dtype=torch.float32)
-        records = [
-            SampleRecord(meta=_meta(0), payload=AttrsSample(image=t, label="cat")),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload, AttrsSample)
-        torch.testing.assert_close(restored[0].payload.image, t)
-        assert restored[0].payload.label == "cat"
-
-    def test_attrs_inside_dict(self) -> None:
-        t = torch.randn(4)
-        records = [
-            SampleRecord(
-                meta=_meta(0),
-                payload={"sample": AttrsSample(image=t, label="dog"), "extra": 42},
-            ),
-        ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
-
-        restored = _round_trip_resolved(coalesced)
-        assert isinstance(restored[0].payload["sample"], AttrsSample)
-        torch.testing.assert_close(restored[0].payload["sample"].image, t)
-        assert restored[0].payload["extra"] == 42
+        tensor = torch.tensor([10.0, 20.0])
+        [actual] = _transport(PydWithComputed(values=tensor, tag="test"))
+        assert isinstance(actual, PydWithComputed)
+        torch.testing.assert_close(actual.values, tensor)
+        assert actual.tag == "test"
+        assert actual.description == "tag=test"
+        assert actual.values.is_shared()
 
 
 @pytest.mark.skipif(
@@ -1588,7 +1624,7 @@ class TestStructMixed:
     def test_deeply_nested_mixed_payloads_keep_structure_and_shared_storage(
         self, depth: int
     ) -> None:
-        tensor = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        tensor = torch.arange(7, dtype=torch.float32)[:6].reshape(2, 3)
         array = np.arange(6, dtype=np.uint32).reshape(2, 3)
         # Descriptor-shaped user fields must remain ordinary user data.
         lookalike = {
@@ -1615,10 +1651,10 @@ class TestStructMixed:
             )
         meta = _meta(0).child(3)
         meta.tags["source"] = "nested"
-        coalesced = coalesce_microbatch(
-            [SampleBatch(records=(SampleRecord(meta=meta, payload=payload),))]
+        coalesced = prepare_microbatch(
+            [SampleBatch(records=(SampleRecord(meta=meta, payload=payload),))],
+            _policy(0),
         )
-        assert coalesced is not None
         assert set(coalesced.buffers) == {"torch.float32", "np:uint32", "_bytes_uint8"}
         first_hop = _round_trip(coalesced)
         forwarded = pickle.loads(_forking_round_trip(first_hop))
@@ -1657,8 +1693,7 @@ class TestStructMixed:
         records = [
             SampleRecord(meta=_meta(0), payload=DCNested(inner=inner, score=0.5)),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1669,6 +1704,7 @@ class TestStructMixed:
         assert isinstance(p.inner, PydSample)
         torch.testing.assert_close(p.inner.image, t)
         assert p.score == 0.5
+        assert p.inner.image.is_shared()
 
     def test_dict_of_mixed_structs(self) -> None:
         t1 = torch.tensor([1.0])
@@ -1683,8 +1719,8 @@ class TestStructMixed:
                 },
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1704,8 +1740,8 @@ class TestStructMixed:
                 ],
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1720,8 +1756,8 @@ class TestStructMixed:
         records = [
             SampleRecord(meta=_meta(0), payload=DCSample(image=arr, label="numpy")),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1735,8 +1771,8 @@ class TestStructMixed:
         records = [
             SampleRecord(meta=_meta(0), payload=DCSample(image=data, label="bytes")),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1749,16 +1785,17 @@ class TestStructMixed:
             SampleRecord(
                 meta=_meta(0),
                 payload=DCSample(
-                    image=torch.randn(3, 4, dtype=torch.float32), label="multi"
+                    image=torch.randn(4, 4, dtype=torch.float32)[:3], label="multi"
                 ),
             ),
             SampleRecord(
                 meta=_meta(1),
-                payload=DCSample(image=torch.arange(5, dtype=torch.int64), label="int"),
+                payload=DCSample(
+                    image=torch.arange(6, dtype=torch.int64)[:5], label="int"
+                ),
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         assert len(coalesced.buffers) == 2
 
         restored = _round_trip_resolved(coalesced)
@@ -1796,8 +1833,7 @@ class TestPrimitiveListAsLeaf:
                 payload=DCWithTokenIds(image=t, token_ids=token_ids, label="msg"),
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -1805,26 +1841,30 @@ class TestPrimitiveListAsLeaf:
         torch.testing.assert_close(p.image, t)
         assert p.token_ids == token_ids
         assert p.label == "msg"
+        assert p.image.is_shared()
 
     def test_list_of_ints_becomes_numeric_list_slot(self) -> None:
         """A numeric list becomes a single _NumericListSlot, coalesced into SHM."""
         from zephon._internal.utils.shm_coalesce import (
-            _extract_payload_pytree,
             _NumericListSlot,
         )
 
         token_ids = list(range(500))
         payload = {"ids": token_ids, "tensor": torch.randn(4)}
-        collector: dict[str, list] = {}
-        offsets: dict[str, int] = {}
-        skel = _extract_payload_pytree(payload, collector, offsets, shm_min_size=4096)
+        preparation = shm_coalesce._PayloadPreparation(_policy(0))
+        skel = preparation._collect_tree(payload)
+        preparation.prepare_destinations()
         # dict with 2 keys → 2 leaves (the list as 1 + the tensor slot as 1)
         assert len(skel.slots) == 2
-        int_slots = [s for s in skel.slots if isinstance(s, _NumericListSlot)]
+        int_slots = [
+            s
+            for s in skel.slots
+            if isinstance(getattr(s, "transport_value", s), _NumericListSlot)
+        ]
         assert len(int_slots) == 1
-        assert int_slots[0].length == 500
+        assert int_slots[0].transport_value.length == 500
         # The list lands in the int64 buffer alongside other int64 tensors.
-        assert str(torch.int64) in collector
+        assert str(torch.int64) in preparation.buffers
 
     def test_list_of_tensors_still_recurses(self) -> None:
         """Lists starting with a tensor must NOT be treated as leaf."""
@@ -1832,8 +1872,8 @@ class TestPrimitiveListAsLeaf:
         records = [
             SampleRecord(meta=_meta(0), payload={"items": tensors}),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         for i, t in enumerate(restored[0].payload["items"]):
@@ -1847,8 +1887,8 @@ class TestPrimitiveListAsLeaf:
                 payload={"scores": scores, "t": torch.tensor([1.0])},
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["scores"] == pytest.approx(scores)
@@ -1856,33 +1896,35 @@ class TestPrimitiveListAsLeaf:
     def test_list_of_strings_is_leaf_not_coalesced(self) -> None:
         """String lists are treated as leaves but NOT promoted to SHM."""
         from zephon._internal.utils.shm_coalesce import (
-            _extract_payload_pytree,
             _NumericListSlot,
         )
 
         payload = {"roles": ["system", "user", "assistant"], "t": torch.ones(2)}
-        collector: dict[str, list] = {}
-        offsets: dict[str, int] = {}
-        skel = _extract_payload_pytree(payload, collector, offsets, shm_min_size=4096)
+        preparation = shm_coalesce._PayloadPreparation(_policy(0))
+        skel = preparation._collect_tree(payload)
+        preparation.prepare_destinations()
         # String list should be inline, not a _NumericListSlot
-        assert not any(isinstance(s, _NumericListSlot) for s in skel.slots)
+        assert not any(
+            isinstance(getattr(s, "transport_value", s), _NumericListSlot)
+            for s in skel.slots
+        )
 
         records = [SampleRecord(meta=_meta(0), payload=payload)]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["roles"] == ["system", "user", "assistant"]
+        assert restored[0].payload["t"].is_shared()
 
     def test_empty_list_still_recurses(self) -> None:
         """Empty lists should not match the primitive heuristic."""
         records = [
             SampleRecord(meta=_meta(0), payload={"empty": [], "t": torch.ones(2)}),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
 
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["empty"] == []
+        assert restored[0].payload["t"].is_shared()
 
     def test_multiple_int_lists_coalesce_into_one_buffer(self) -> None:
         """Several List[int] fields should all land in the same int64 SHM buffer."""
@@ -1900,8 +1942,7 @@ class TestPrimitiveListAsLeaf:
                 },
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # int64 buffer should contain all three lists (+ possibly the float tensor in its own)
         assert str(torch.int64) in coalesced.buffers
         assert coalesced.buffers[str(torch.int64)].numel() == 100 + 300 + 50
@@ -1924,8 +1965,7 @@ class TestPrimitiveListAsLeaf:
             )
             for i in range(4)
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         # All 4 × 100 ints in one buffer
         assert coalesced.buffers[str(torch.int64)].numel() == 400
 
@@ -1948,8 +1988,7 @@ class TestPrimitiveListAsLeaf:
             ),
         ]
 
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
         assert str(torch.int64) in coalesced.buffers
         assert str(torch.float64) in coalesced.buffers
 
@@ -1968,8 +2007,9 @@ class TestPrimitiveListAsLeaf:
             "subclass": _NumberList([1, 2, 3]),
         }
         payload = dict(values, tensor=torch.ones(1))
-        coalesced = coalesce_microbatch([SampleRecord(meta=_meta(0), payload=payload)])
-        assert coalesced is not None
+        coalesced = prepare_microbatch(
+            [SampleRecord(meta=_meta(0), payload=payload)], _policy(0)
+        )
         [restored] = _round_trip_resolved(coalesced)
         for name, expected in values.items():
             actual = restored.payload[name]
@@ -1986,8 +2026,8 @@ class TestPrimitiveListAsLeaf:
                 payload={"one": [42], "t": torch.ones(1)},
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["one"] == [42]
@@ -2000,8 +2040,8 @@ class TestPrimitiveListAsLeaf:
                 payload={"ids": list(range(100)), "more": [1.0, 2.0]},
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy(0))
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         assert restored[0].payload["ids"] == list(range(100))
@@ -2023,8 +2063,8 @@ class TestPrimitiveListAsLeaf:
                 payload={"conversation": conv, "length": 500},
             ),
         ]
-        coalesced = coalesce_microbatch(records)
-        assert coalesced is not None
+        coalesced = prepare_microbatch(records, _policy())
+        assert coalesced.buffers
 
         restored = _round_trip_resolved(coalesced)
         p = restored[0].payload
@@ -2036,3 +2076,563 @@ class TestPrimitiveListAsLeaf:
         for i in range(2):
             torch.testing.assert_close(p["conversation"].images[i], images[i])
         assert p["length"] == 500
+
+
+def test_memory_policy_applies_the_same_threshold_to_supported_payloads() -> None:
+    policy = PayloadMemoryPolicy(min_item_bytes=64, min_new_allocation_bytes=0)
+    small = {
+        "torch": torch.arange(4),
+        "numpy": np.arange(4),
+        "bytes": b"abc",
+        "view": memoryview(b"abc"),
+        "mutable": bytearray(b"abc"),
+        "list": [1, 2, 3],
+        "tuple": (torch.arange(4), np.arange(4)),
+    }
+    large = {"torch": torch.arange(16), "numpy": np.arange(16), "bytes": b"x" * 64}
+    [actual] = _transport({"small": small, "large": large}, policy=policy)
+    assert not actual["small"]["torch"].is_shared()
+    assert _shared_numpy_storage(actual["small"]["numpy"]) is None
+    assert actual["large"]["torch"].is_shared()
+    assert _shared_numpy_storage(actual["large"]["numpy"]) is not None
+    torch.testing.assert_close(actual["small"]["torch"], small["torch"])
+    np.testing.assert_array_equal(actual["small"]["numpy"], small["numpy"])
+    assert actual["small"]["bytes"] == actual["small"]["view"] == b"abc"
+    assert type(actual["small"]["mutable"]) is bytearray
+    assert actual["small"]["list"] == [1, 2, 3]
+    assert isinstance(actual["small"]["tuple"], tuple)
+    assert not actual["small"]["tuple"][0].is_shared()
+    assert _shared_numpy_storage(actual["small"]["tuple"][1]) is None
+    # Taking the inline route does not globally replace Torch's reducer.
+    tensor = pickle.loads(_forking_round_trip(torch.arange(4)))
+    assert tensor.is_shared()
+
+
+def test_memory_policy_accounts_for_other_values_using_the_same_buffer() -> None:
+    policy = PayloadMemoryPolicy(
+        min_item_bytes=64,
+        min_new_allocation_bytes=256,
+        min_forward_bytes=256,
+        compact_min_savings_bytes=512,
+        compact_above_ratio=2,
+    )
+    for numpy in (False, True):
+        values = [torch.arange(16) for _ in range(4)]
+        if numpy:
+            values = [value.numpy() for value in values]
+
+        assert _shared_storage(_transport(values[0], policy=policy)[0]) is None
+        shared = _transport(*values, policy=policy)
+        assert {_shared_storage(value).data_ptr() for value in shared} == {
+            _shared_storage(shared[0]).data_ptr()
+        }
+        assert _shared_storage(shared[0]).nbytes() == 512
+        # The allocation cap can split a batch into groups below the buffer floor.
+        capped = PayloadMemoryPolicy(
+            min_item_bytes=64, min_new_allocation_bytes=256, max_coalesced_bytes=128
+        )
+        assert all(
+            _shared_storage(value) is None
+            for value in _transport(*values, policy=capped)
+        )
+
+        slab = torch.arange(128).share_memory_()
+        owner = shm_coalesce._shared_numpy_view(slab) if numpy else slab
+        # Each view alone qualifies for compaction, but together they use the slab.
+        siblings = _transport(
+            *(owner[i : i + 32] for i in range(0, 128, 32)), policy=policy
+        )
+        assert all(
+            _shared_storage(value).data_ptr() == slab.data_ptr() for value in siblings
+        )
+        [crop] = _transport(owner[:32], policy=policy)
+        assert _shared_storage(crop).nbytes() == 256
+        # Compacted siblings use the same coalescing path as private values.
+        compacted = _transport(owner[:16], owner[32:48], policy=policy)
+        assert _shared_storage(compacted[0]).nbytes() == 256
+        assert (
+            _shared_storage(compacted[0]).data_ptr()
+            == _shared_storage(compacted[1]).data_ptr()
+        )
+        assert compacted[0].tolist() == list(range(16))
+        assert compacted[1].tolist() == list(range(32, 48))
+        # Existing siblings below the fresh-item floor still share their handle.
+        tiny_siblings = _transport(
+            *(owner[i : i + 4] for i in range(0, 128, 4)), policy=policy
+        )
+        assert all(
+            _shared_storage(value).data_ptr() == slab.data_ptr()
+            for value in tiny_siblings
+        )
+
+
+def test_small_shared_backings_join_private_values_on_the_fresh_path() -> None:
+    policy = PayloadMemoryPolicy(
+        min_item_bytes=64,
+        min_new_allocation_bytes=256,
+        min_forward_bytes=256,
+        compact_above_ratio=None,
+    )
+    payloads = []
+    for shared in (True, True, False):
+        tensor, array, raw = (
+            torch.arange(16),
+            torch.arange(16),
+            torch.arange(128, dtype=torch.uint8),
+        )
+        if shared:
+            tensor.share_memory_()
+            array = shm_coalesce._shared_numpy_view(array.share_memory_())
+            raw = _ShmBytes(raw.share_memory_())
+        else:
+            array, raw = array.numpy(), bytes(raw.numpy())
+        payloads.append({"t": tensor, "n": array, "b": raw})
+    payloads.append(
+        {"t": payloads[0]["t"][:4], "n": payloads[0]["n"][:4], "b": b"tiny"}
+    )
+    prepared = _prepare(*payloads, policy=policy)
+    assert len(prepared.buffers) == 3
+    # Shared views and private values use one fresh allocation per type. Tiny
+    # views stay below the item floor even when the rest of their group qualifies.
+    assert all(
+        buffer.untyped_storage().nbytes() == 384 for buffer in prepared.buffers.values()
+    )
+    restored = _round_trip_resolved(prepared)
+    for record, expected in zip(restored, payloads, strict=True):
+        torch.testing.assert_close(record.payload["t"], expected["t"])
+        np.testing.assert_array_equal(record.payload["n"], expected["n"])
+        assert bytes(record.payload["b"]) == bytes(expected["b"])
+    assert not restored[-1].payload["t"].is_shared()
+    assert _shared_numpy_storage(restored[-1].payload["n"]) is None
+    assert restored[0].payload["t"].data_ptr() != payloads[0]["t"].data_ptr()
+
+    # A small group remains inline; disabling coalescing applies the allocation
+    # floor to each value, including values already backed by SHM.
+    for selected_payloads, coalesce in ((payloads[:1], True), (payloads, False)):
+        inline = _prepare(
+            *selected_payloads, policy=dataclasses.replace(policy, coalesce=coalesce)
+        )
+        assert not inline.buffers
+        for record in _round_trip_resolved(inline):
+            assert not record.payload["t"].is_shared()
+            assert _shared_numpy_storage(record.payload["n"]) is None
+            assert isinstance(record.payload["b"], (bytes, bytearray))
+
+
+def test_view_compaction_is_shared_by_numpy_and_torch_and_does_not_repeat() -> None:
+    [values] = _transport(
+        {"t": torch.arange(8192), "n": np.arange(8192)}, policy=_policy()
+    )
+    payload = {"t": values["t"][::512], "n": values["n"][::-512]}
+    payload["n"].flags.writeable = False
+    policy = _policy(0, compact_above_ratio=4, compact_min_savings_bytes=1024)
+    assert policy.shared_action(512, 2048) == "keep"  # Absolute condition alone.
+    assert policy.shared_action(32, 256) == "keep"  # Relative condition alone.
+    assert policy.shared_action(32, 4096) == "fresh"  # Both conditions.
+    prepared = _prepare(payload, policy=policy)
+    [record] = _round_trip_resolved(prepared)
+    torch.testing.assert_close(record.payload["t"], payload["t"])
+    np.testing.assert_array_equal(record.payload["n"], payload["n"])
+    assert not record.payload["n"].flags.writeable
+    assert record.payload["t"].untyped_storage().nbytes() == 128
+    assert _shared_numpy_storage(record.payload["n"]).nbytes() == 128
+    assert not prepare_microbatch([record], policy).buffers
+    # Compaction does not change an independently retained source view.
+    assert values["t"].untyped_storage().nbytes() == 65536
+    assert _shared_numpy_storage(values["n"]).nbytes() == 65536
+
+
+def test_coalescing_limit_and_disable_apply_to_all_buffer_types() -> None:
+    policy = _policy(0, max_coalesced_bytes=128)
+    for enabled, expected_buffers in ((True, 5), (False, 6)):
+        payloads = [
+            {"t": torch.arange(8), "n": np.arange(8), "b": bytes(64)} for _ in range(3)
+        ]
+        prepared = _prepare(
+            *payloads, policy=dataclasses.replace(policy, coalesce=enabled)
+        )
+        assert len(prepared.buffers) == expected_buffers
+        assert all(
+            buf.untyped_storage().nbytes() <= 128 for buf in prepared.buffers.values()
+        )
+        restored = _round_trip_resolved(prepared)
+        assert len(restored) == 3
+        for rec in restored:
+            assert (
+                rec.payload["t"].tolist() == rec.payload["n"].tolist() == list(range(8))
+            )
+            assert bytes(rec.payload["b"]) == bytes(64)
+
+    # The cap bounds coalescing, not the size of an individual shared value.
+    large = _prepare(
+        {"t": torch.arange(32), "n": np.arange(32), "b": bytes(256)}, policy=policy
+    )
+    assert len(large.buffers) == 2
+    [restored] = _round_trip_resolved(large)
+    assert restored.payload["t"].is_shared()
+    assert restored.payload["t"].untyped_storage().nbytes() == 256
+    assert all(buf.untyped_storage().nbytes() == 256 for buf in large.buffers.values())
+
+
+def test_lazy_payload_retains_only_its_own_allocation() -> None:
+    prepared = _prepare(
+        torch.arange(1025)[:1024], np.arange(1024), b"small", policy=_policy()
+    )
+    restored = _round_trip(prepared)
+    first, second = (r.payload._buffers for r in restored[:2])
+    assert len(first) == len(second) == 1
+    assert first.keys().isdisjoint(second)
+    assert type(restored[2].payload) is bytes
+    assert _round_trip(_prepare({"data": b"small"}, policy=_policy()))[0].payload == {
+        "data": b"small"
+    }
+
+
+def test_inline_outputs_preserve_values_and_metadata_across_lazy_hops() -> None:
+    policy = PayloadMemoryPolicy(min_item_bytes=8192)
+    tensor = torch.arange(6, dtype=torch.bfloat16).reshape(2, 3).t()
+    array = shm_coalesce._shared_numpy_view(torch.arange(512).share_memory_())
+    readonly = np.arange(6)
+    readonly.flags.writeable = False
+    meta = SampleMeta((1, 2, 3), 4, 5, 6, {7: 8}, {7: 9}, (2,), {"note": "kept"})
+    for protocol in (4, 5):
+        records = [
+            SampleRecord(
+                meta, {"tensor": tensor, "array": array, "readonly": readonly}
+            ),
+            SampleRecord(meta, "plain"),
+        ]
+        transport = prepare_microbatch(records, policy)
+        result = _round_trip_resolved(transport, protocol=protocol, hops=2)
+        assert result[0].meta == meta
+        assert result[0].meta is result[1].meta
+        actual = result[0].payload["tensor"]
+        assert not actual.is_shared()
+        torch.testing.assert_close(actual, tensor)
+        actual[0, 0] = -1
+        assert tensor[0, 0].item() == 0
+        assert not tensor.is_shared()
+        actual_array = result[0].payload["array"]
+        np.testing.assert_array_equal(actual_array, array)
+        assert actual_array.flags.writeable
+        assert shm_coalesce._shared_numpy_storage(actual_array) is None
+        np.testing.assert_array_equal(result[0].payload["readonly"], readonly)
+        assert not result[0].payload["readonly"].flags.writeable
+
+
+def test_prepared_shared_views_reuse_descriptors_without_reducing_numpy_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor = torch.arange(16).share_memory_()
+    array = shm_coalesce._shared_numpy_view(tensor)
+    payload = {"t": tensor[2:6], "n": array[4:8], "reverse": array[::-1]}
+    payload["n"].flags.writeable = False
+    calls = 0
+    reducer = ForkingPickler._extra_reducers[np.ndarray]
+
+    def reduce_numpy(value):
+        nonlocal calls
+        calls += 1
+        return reducer(value)
+
+    def unexpected_allocation(*args, **kwargs):
+        raise AssertionError("forwarding views must not allocate SHM")
+
+    monkeypatch.setitem(ForkingPickler._extra_reducers, np.ndarray, reduce_numpy)
+    monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", unexpected_allocation)
+    prepared = _prepare(payload)
+    [record] = _round_trip_resolved(prepared)
+    # The strided view keeps its normal reducer; contiguous views use descriptors.
+    assert calls == 1
+    torch.testing.assert_close(record.payload["t"], tensor[2:6])
+    np.testing.assert_array_equal(record.payload["n"], array[4:8])
+    np.testing.assert_array_equal(record.payload["reverse"], array[::-1])
+    assert not record.payload["n"].flags.writeable
+    assert record.payload["reverse"].strides == array[::-1].strides
+    assert (
+        record.payload["t"].untyped_storage().data_ptr()
+        == tensor.untyped_storage().data_ptr()
+    )
+
+
+@pytest.mark.parametrize("compact", [True, False], ids=["compaction", "regrouping"])
+def test_optional_replacement_preserves_sources_without_waiting(
+    monkeypatch: pytest.MonkeyPatch, compact: bool
+) -> None:
+    source = torch.arange(8192).share_memory_()
+    private = torch.arange(16)
+    policy = _policy(
+        0,
+        min_forward_bytes=0 if compact else 512,
+        compact_min_savings_bytes=1024,
+        compact_above_ratio=8 if compact else None,
+    )
+
+    def full(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("No space left on device")
+
+    def unexpected_wait(*args: Any) -> None:
+        raise AssertionError("optional replacement must not wait for SHM")
+
+    monkeypatch.setattr(torch.UntypedStorage, "_new_shared", full)
+    monkeypatch.setattr(shm_coalesce, "wait_for_shm_space", unexpected_wait)
+    prepared = _prepare(
+        source[:16], DCSample(source[32:48], "kept"), private, policy=policy
+    )
+    assert not prepared.buffers
+    restored = _round_trip(prepared)
+    assert not isinstance(restored[0].payload, LazyPayload)
+    assert not restored[1].payload._buffers
+    resolve_lazy_payloads(restored)
+    root, struct, inline = (r.payload for r in restored)
+    assert (
+        root.untyped_storage().data_ptr()
+        == struct.image.untyped_storage().data_ptr()
+        == source.data_ptr()
+    )
+    for actual, expected in (
+        (root, source[:16]),
+        (struct.image, source[32:48]),
+        (inline, private),
+    ):
+        torch.testing.assert_close(actual, expected)
+    assert struct.label == "kept"
+    assert not inline.is_shared()
+
+
+def test_bulk_writes_target_final_shared_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    concatenate, cat = np.concatenate, torch.cat
+    destinations: set[int] = set()
+
+    def numpy_write(*args, **kwargs):
+        out = kwargs["out"]
+        assert out.base.is_shared()
+        destinations.add(out.base.data_ptr())
+        return concatenate(*args, **kwargs)
+
+    def torch_write(*args, **kwargs):
+        out = kwargs["out"]
+        assert out.is_shared()
+        destinations.add(out.data_ptr())
+        return cat(*args, **kwargs)
+
+    monkeypatch.setattr(np, "concatenate", numpy_write)
+    monkeypatch.setattr(torch, "cat", torch_write)
+    values = [
+        {"t": torch.arange(6).reshape(2, 3), "n": np.arange(12)[::-2], "b": b"abc"},
+        {"t": torch.arange(4), "n": np.arange(8).reshape(2, 4).T, "b": b"de"},
+    ]
+    prepared = _prepare(*values)
+    assert destinations == {b.data_ptr() for b in prepared.buffers.values()}
+    for actual, expected in zip(_round_trip_resolved(prepared), values):
+        torch.testing.assert_close(actual.payload["t"], expected["t"])
+        np.testing.assert_array_equal(actual.payload["n"], expected["n"])
+        assert bytes(actual.payload["b"]) == expected["b"]
+
+
+def test_single_output_tensor_uses_its_whole_storage_or_copies_a_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    allocations = []
+    allocate = shm_coalesce._alloc_shm_buffer
+
+    def tracked(numel: int, dtype: Any, label: str, **kwargs: Any) -> Any:
+        allocations.append(numel)
+        return allocate(numel, dtype, label, **kwargs)
+
+    monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", tracked)
+    for needs_copy, tensor in (
+        (False, torch.arange(32)),
+        (True, torch.arange(64)[:32]),
+        (True, (torch.arange(32) + 1j).conj()),
+    ):
+        [actual] = _transport(tensor)
+        torch.testing.assert_close(actual, tensor)
+        assert actual.is_shared()
+        assert actual.untyped_storage().nbytes() == 256
+        assert tensor.is_shared() != needs_copy
+    assert allocations == [32, 32]
+
+
+def test_primitive_tuples_stay_whole_beside_shared_tensors() -> None:
+    tokens = tuple(range(2048))
+    payload = {"tokens": tokens, "tensors": (torch.arange(8), torch.arange(8))}
+    prepared = _prepare(payload)
+    assert len(prepared.items[0].payload.slots) == 3
+    actual = _round_trip_resolved(prepared)[0].payload
+    assert actual["tokens"] == tokens
+    assert type(actual["tokens"]) is tuple
+    assert all(tensor.is_shared() for tensor in actual["tensors"])
+
+
+@pytest.mark.parametrize("memmap", [False, True], ids=["subclass", "memmap"])
+def test_numpy_subclasses_use_shared_transport(tmp_path, memmap: bool) -> None:
+    class Array(np.ndarray):
+        pass
+
+    if memmap:
+        path = tmp_path / "tokens.npy"
+        np.save(path, np.arange(8192))
+        source = np.load(path, mmap_mode="r")[::2]
+    else:
+        source = np.arange(8192).view(Array)[::2]
+    policy = PayloadMemoryPolicy(min_item_bytes=0, min_new_allocation_bytes=0)
+    encoded = _forking_round_trip(_prepare(source, policy=policy))
+    assert len(encoded) < source.nbytes // 2
+    [record] = pickle.loads(encoded)
+    resolve_lazy_payloads([record])
+    assert type(record.payload) is np.ndarray
+    assert record.payload.flags.writeable == source.flags.writeable
+    assert _shared_numpy_storage(record.payload) is not None
+    np.testing.assert_array_equal(record.payload, source)
+
+
+@pytest.mark.parametrize("shared", [False, True], ids=["inline", "shm"])
+def test_parameter_transport_preserves_values_and_grad(shared: bool) -> None:
+    source = torch.nn.Parameter(torch.arange(16, dtype=torch.float32))
+    address = source.data_ptr()
+    policy = _policy(0, min_new_allocation_bytes=0 if shared else 1024)
+    [actual] = _transport(source, policy=policy)
+    torch.testing.assert_close(actual, source)
+    assert actual.requires_grad and actual.is_leaf
+    assert actual.is_shared() == source.is_shared() == shared
+    if not shared:
+        assert source.data_ptr() == address
+
+
+def test_numpy_view_does_not_duplicate_storage_in_plain_tensor_pickle() -> None:
+    buffer = torch.arange(65536, dtype=torch.uint8).share_memory_()
+    array = shm_coalesce._shared_numpy_view(buffer)
+    encoded = pickle.dumps(buffer)
+    assert len(encoded) < buffer.numel() + 4096
+    assert _shared_numpy_storage(array) is not None
+    torch.testing.assert_close(pickle.loads(encoded), buffer)
+
+
+def test_shared_logical_tensor_views_keep_values_on_allocation_fallback(
+    monkeypatch,
+) -> None:
+    shared_complex = torch.tensor([1 + 2j, 3 - 4j]).share_memory_()
+    shared_real = torch.arange(4, dtype=torch.float32).share_memory_()
+    policy = _policy(0)
+
+    def no_space(*args, **kwargs):
+        raise RuntimeError("No space left on device")
+
+    for fail_allocation in (False, True):
+        if fail_allocation:
+            monkeypatch.setattr(shm_coalesce, "_alloc_shm_buffer", no_space)
+        for protocol in (4, 5):
+            # Exercise both a singleton backing and several views of one backing.
+            values = [
+                shared_complex.conj(),
+                torch._neg_view(shared_real[:2]),
+                torch._neg_view(shared_real[2:]),
+            ]
+            expected = [value.clone() for value in values]
+            restored = _transport(
+                *({"x": value} for value in values), policy=policy, protocol=protocol
+            )
+            for actual, value in zip(restored, expected):
+                torch.testing.assert_close(actual["x"], value)
+
+
+def test_policy_rejects_non_integral_sizes_and_invalid_flags() -> None:
+    for name in (
+        "min_item_bytes",
+        "min_new_allocation_bytes",
+        "min_forward_bytes",
+        "compact_min_savings_bytes",
+        "max_coalesced_bytes",
+    ):
+        for value in (True, 1.5, -1):
+            with pytest.raises(ValueError, match="shm_" + name):
+                PayloadMemoryPolicy(**{name: value})
+    for kwargs in (
+        {"coalesce": 1},
+        {"compact_above_ratio": True},
+        {"compact_above_ratio": float("nan")},
+    ):
+        with pytest.raises(ValueError):
+            PayloadMemoryPolicy(**kwargs)
+
+
+def test_descriptor_reducers_keep_nondefault_fields() -> None:
+    sc = shm_coalesce
+    spec = sc.optree.tree_structure({"image": 0, "label": "x"})
+    flat = sc._FlatSkeleton([7, "label"], spec)
+    descriptors = [
+        sc._TensorSlot("torch.float64", 3, (2, 3), "group-a", True),
+        sc._NdarraySlot("np:float64", 7, (2, 4), np.dtype("float64"), "group-b", False),
+        sc._NumericListSlot("torch.int64", 2, 3, "group-c"),
+        sc._BytesSlot(3, 5, "group-d"),
+        sc._StructSlot(DCSample, flat),
+        flat,
+        sc._InlineTensorData(bytearray(8), torch.float64, (1,), True),
+        sc.PayloadMemoryPolicy(
+            min_item_bytes=17,
+            min_new_allocation_bytes=1024,
+            min_forward_bytes=512,
+            coalesce=False,
+            max_coalesced_bytes=4096,
+            compact_above_ratio=2.5,
+            compact_min_savings_bytes=31,
+        ),
+    ]
+    for descriptor in descriptors:
+        assert pickle.loads(pickle.dumps(descriptor)) == descriptor, type(descriptor)
+    unfinished = sc._describe_buffer(torch.arange(3))
+    tree = sc._FlatSkeleton([unfinished, "label"], spec)
+    for value in (unfinished, tree, sc._StructSlot(DCSample, tree)):
+        with pytest.raises(RuntimeError, match="before preparation finished"):
+            pickle.dumps(value)
+
+
+def test_mixed_numeric_list_does_not_count_towards_fresh_allocation() -> None:
+    policy = PayloadMemoryPolicy(min_item_bytes=0, min_new_allocation_bytes=128)
+    prepared = _prepare(
+        {"mixed": [1, 2.5] * 8, "tokens": torch.arange(8)}, policy=policy
+    )
+    assert not prepared.buffers
+    actual = _round_trip_resolved(prepared)[0].payload
+    assert actual["mixed"] == [1, 2.5] * 8
+    assert not actual["tokens"].is_shared()
+
+
+def test_nonleaf_grad_tensor_keeps_torch_serialization_error() -> None:
+    tensor = torch.arange(8, dtype=torch.float32, requires_grad=True) * 2
+    prepared = _prepare(tensor)
+    with pytest.raises(RuntimeError, match="non-leaf tensor"):
+        _forking_round_trip(prepared)
+
+
+def test_inline_empty_and_singleton_tensors_with_nonunit_strides() -> None:
+    policy = PayloadMemoryPolicy()
+    for size in (0, 1):
+        source = torch.arange(2, dtype=torch.bfloat16)[::2][:size]
+        for protocol in (4, 5):
+            [actual] = _transport(source, policy=policy, protocol=protocol)
+            torch.testing.assert_close(actual, source)
+            assert not actual.is_shared()
+
+
+def test_training_policies_after_coalesced_transport() -> None:
+    """EOS loss masking works after SHM transport and lazy payload resolution."""
+    tokens = torch.tensor([1, 10, 2, 1, 20, 2, 0])[:6]
+    batch = SampleBatch(
+        records=(SampleRecord(meta=_meta(0), payload={"input_ids": tokens}),),
+    )
+    coalesced = prepare_microbatch(
+        [batch],
+        PayloadMemoryPolicy(min_item_bytes=0, min_new_allocation_bytes=0),
+    )
+    [restored_batch] = pickle.loads(ForkingPickler.dumps(coalesced))
+    assert isinstance(restored_batch.records[0].payload, LazyPayload)
+    resolve_lazy_payloads([restored_batch])
+    assert restored_batch.to_training(
+        return_labels=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+    )["labels"].tolist() == [[10, 2, -100, 20, 2]]
