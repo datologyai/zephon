@@ -21,6 +21,21 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
+    # Shared-storage and lazy-payload checks exercise real process transport.
+    "tests/integration/test_process_payload_memory.py": frozenset(
+        {
+            "zephon._internal.graph:Node",
+            "zephon._internal.graph:Stage",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.runners.process:ProcessStageRunner",
+            "zephon._internal.runners:process",
+            "zephon._internal.stream:resolve_lazy_payloads",
+            "zephon._internal.utils.shm_coalesce:PayloadMemoryPolicy",
+            "zephon._internal.utils.shm_coalesce:_ShmBytes",
+            "zephon._internal.utils.shm_coalesce:_shared_numpy_storage",
+            "zephon._internal.utils.shm_coalesce:prepare_microbatch",
+        }
+    ),
     # Control-service crash/startup tests require real internal runners and stages.
     "tests/integration/test_process_control_services.py": frozenset(
         {
