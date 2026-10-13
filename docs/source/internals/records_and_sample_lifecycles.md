@@ -39,10 +39,19 @@ training loop has already consumed and the ones it has not. During a run, Zephon
 `(chunk_id, chunk_offset)` prefix, which we call the **base offset**, to decide when a
 chunk has been fully consumed and its memory can be released.
 
-**Fan-out: one sample, many records.** Operators that produce several outputs from one
-input need to give each output its own identity, and they do it through **lineage**: a
-tuple of integer indices appended to the parent's cursor. A tokenizer splitting a long
-document into three sequences produces this:
+**What an operator does to the record count.** Four cases exhaust it, and which one you
+are in decides everything the rest of this page asks of you:
+
+| Cardinality | What happens | Examples |
+|---|---|---|
+| 1:1 | One record in, one record out | `map_transform`, tokenizing without splitting |
+| 1:N | One record becomes several | `tokenize(split_long_samples=True)` |
+| N:1 | Several records become one | `pack_sequences`, `pack_flat`, `batch` |
+| 1:0 | A record is dropped | `map_transform` returning `None`, any filter |
+
+**Fan-out: one sample, many records.** Each output needs its own identity, and gets it
+through **lineage**: a tuple of integer indices appended to the parent's cursor. A
+tokenizer splitting a long document into three sequences produces this:
 
 ```
 Input (chunk 7, offset 2):

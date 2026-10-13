@@ -15,8 +15,33 @@ order for a given seed, and everything downstream is a deterministic function of
 section describes, they are an interface you are meant to implement against, and you need
 them if you want a curriculum that the built-in static mixture cannot express.
 
-**The contract.** Zephon only ever calls a handful of methods on your source, and they
-fall into four groups:
+**The contract.** This is the whole of what Zephon ever calls on your source:
+
+```python
+class MyWorkSource(WorkSource):
+    def next_chunk(self) -> WorkChunk | None: ...
+    def component_ids(self) -> Mapping[str, int]: ...
+
+    @property
+    def datasets_by_id(self) -> Mapping[int, Dataset]: ...
+
+    def clone_for_lane(self, lane_id: int, canonical_replicas: int) -> WorkSource: ...
+    def state_dict(self) -> dict[str, Any]: ...
+    def load_state_dict(self, state: dict[str, Any]) -> None: ...
+
+    # Optional below here.
+    def chunk_size_hint(self) -> int | None: ...
+
+    @property
+    def requires_token_priming(self) -> bool: ...
+    def prime(self, **kwargs: Any) -> None: ...
+
+    def supports_indexing(self) -> bool: ...
+    def __len__(self) -> int: ...
+    def sample_id_at(self, index: int) -> SampleId: ...
+```
+
+The required ones fall into five groups:
 
 - **Chunk production.** `next_chunk()` returns the next `WorkChunk` for this source's
   lane, or `None` when the source is exhausted. Everything else in the interface exists to
@@ -30,6 +55,11 @@ fall into four groups:
   topology changes, and resumes. The alternative, assigning ids in encounter order, would
   produce a different numbering on a rank that happens to see a rare component later.
   Emitting a component that was never declared raises.
+- **Dataset catalogue.** `datasets_by_id` maps each dataset id appearing in your pointers
+  to the `Dataset` that can read it. The engine reads it once at startup, builds the
+  node-local shard catalogue from it, and passes it to the operators through their
+  context, so this is the bridge between a pointer and the bytes it names. Fetching and
+  prefetching raise without it.
 - **Lane binding.** Before pulling any chunks, the engine clones the source once per lane
   it owns with `clone_for_lane(lane_id, canonical_replicas)`, and each clone produces only
   the chunks assigned to its lane. The default implementation deep-copies, so a subclass
@@ -104,8 +134,7 @@ checkpoints small, because only the chunks currently in flight are saved and rep
 never the whole history.
 {ref}`Chunks are the unit of state <chunks-are-the-unit-of-state>` covers that side of it.
 
-**Filling a chunk.** `StaticMixtureWorkSource` is the only implementation that ships with
-Zephon, and it fills a chunk in two steps: decide how many pointers each component
+**Filling a chunk.** `StaticMixtureWorkSource` is the only WorkSource implementation that ships with Zephon today and covers the common case: a fixed set of datasets mixed in fixed proportions. It fills a chunk in two steps: decide how many pointers each component
 contributes, then pull that many from each component's cursor.
 
 Quota allocation is the first step, and the default strategy is incremental rather than

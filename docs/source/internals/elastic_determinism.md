@@ -61,7 +61,8 @@ introduces the **lane** as the fixed logical data stream you size with
 `canonical_replicas`, which is the natural equivalent of a canonical node for an iterable
 pipeline. What matters here is the consequence: the per-lane sample streams are identical
 at every `dp_degree`, and the only thing a topology change moves is which group owns which
-lane.
+lane. The owner is one GPU in a job without tensor or pipeline parallelism, and otherwise
+the set of GPUs that share a `dp_group_id`.
 
 ```
 canonical_replicas = 8, dp_degree = 2
@@ -80,12 +81,9 @@ Resume with dp_degree = 8:
 Two things cannot change across a resume without changing the curriculum: the seed and
 `canonical_replicas`. The per-lane order is a function of both, so changing either
 produces a different global schedule, and Zephon refuses to restore a checkpoint whose
-`canonical_replicas` does not match. Everything else is yours to change, including the
-parallelism, the runner type, the prefetch depth, and the per-device microbatch size. The
-one qualification is the batches-per-step rule in
-{ref}`planning for elasticity <planning-for-elasticity>`.
+`canonical_replicas` does not match.
 
-**Samples do not travel in separate lane streams.** This part tends to surprise people:
+**Samples do not travel in separate lane streams.** 
 Zephon does **not** physically separate the data into one stream per lane. Every record
 carries its `lane_id` in its metadata, and the operators process records from every owned
 lane together, through the same queues and the same worker pools.
@@ -93,8 +91,7 @@ lane together, through the same queues and the same worker pools.
 We do it this way because the alternative is wasteful. Separate per-lane streams would
 mean separate per-lane operator instances, each with its own buffers and its own slice of
 the worker pool, so a group that owns eight lanes would end up running eight tokenizer
-pools with an eighth of the work each. Keeping the lanes mixed means one pool, sized once,
-shared across all of them.
+pools with an eighth of the work each. Keeping the lanes mixed means one pool, sized once, shared across all of them.
 
 Zephon feeds the `Pipeline` in fair round-robin across the lanes the group owns, taking
 one sample from lane 0, one from lane 1, and so on, skipping lanes that have finished.
@@ -111,7 +108,7 @@ and the shuffle buffer keeps separate reservoirs. Stateless operators such as ma
 tokenization and filters never have to think about lanes at all, and that covers most of
 them.
 
-**The tail multiplexer.** Because the lanes are interleaved on the way in, and operators
+**The output multiplexer.** Because the lanes are interleaved on the way in, and operators
 like packing and filtering change the rate at which each lane produces output, the raw
 output of a `Pipeline` does not emit lanes in any predictable order. A group that owns
 lanes 0 through 3 might see batches finish as lane 2, lane 0, lane 2, lane 1, and so on.
@@ -143,9 +140,7 @@ through without consuming a turn, since they are bookkeeping rather than data.
 
 (what-actually-survives-a-topology-change)=
 
-**What actually survives a topology change.** The guarantee rests on two pieces of state
-that behave very differently, and if you take one thing away from this page, this is the
-one we would pick:
+**What is preserved across topology changes.** The guarantee rests on two layers:
 
 - **Per-lane progress is the source of truth.** Each lane independently records how far it
   has advanced, as a chunk ID and an offset within that chunk. This state is durable,
@@ -157,10 +152,7 @@ one we would pick:
   of active workers, and the exact list of owned lanes, deliberately not by rank, so that
   peers inside a data-parallel group own identical lanes and share one entry. When the
   topology is unchanged, the key still matches on restore, the pointer comes back exactly,
-  and the per-group output is identical sample for sample to an uninterrupted run. When
-  the topology changes, no saved key matches the new ownership, so Zephon recomputes a
-  starting point from per-lane progress instead, picking the least-advanced owned lane
-  ordered by `(chunk_id, offset, lane_id)`.
+  and the per-group output is identical sample for sample to an uninterrupted run. When the topology changes, the old key no longer matches and the engine recomputes a starting point from per-lane progress.
 
 That recomputation is why you want to checkpoint at global step boundaries. At the end of
 a step every lane has contributed exactly once per cycle, so every lane sits at the same
@@ -169,12 +161,10 @@ recomputed pointer starts where the saved one would have. Checkpoint in the midd
 step and the lanes are at different frontiers; the no-skip and no-duplicate guarantees
 still hold, but we cannot promise you the exact interleaving across the remap.
 
-What is preserved, then, is the **global training step**: the union of the per-lane
-batches across all groups contains the same samples whatever the topology. What is not
-preserved is which physical GPU sees which of those samples, and that is not something you
-should need to care about. With eight groups and eight lanes, each group handles one
+What is preserved is the **global training step**: the union of the per-lane
+batches across all groups contains the same samples whatever the topology. What can differ is the assignment of lanes to GPUs. With eight groups and eight lanes, each group handles one
 lane's batch; with two groups, each handles four lanes' batches through the tail
-round-robin. Same samples, different machines. The same holds when you change the
+round-robin. The samples are the same; only the physical distribution changes. The same holds when you change the
 per-device microbatch size, because that changes how many samples a lane puts in one local
 batch while the round-robin still cycles the same lanes producing the same data.
 
@@ -190,8 +180,7 @@ batch while the round-robin still cycles the same lanes producing the same data.
   </figcaption>
 </figure>
 
-**Mapping strategies.** When a group owns several lanes, something has to decide which
-ones, and you get two strategies through `Pipeline.options(mapping_strategy=...)`. Both
+**Mapping strategies.** When a GPU owns multiple lanes, the engine needs to decide which lanes it gets. Two strategies are available via `Pipeline.options(mapping_strategy=...)`. Both
 are deterministic and produce identical global batches, so all they decide is which group
 does which work.
 

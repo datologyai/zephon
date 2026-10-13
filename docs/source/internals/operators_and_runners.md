@@ -1,13 +1,12 @@
 # Operators and Runners
 
-[How Pipelines Run](../pipelines/how_pipelines_run.md) makes a claim in passing that is
-worth taking seriously: an operator running across sixteen workers makes exactly the same
+[How Pipelines Run](../pipelines/how_pipelines_run.md) claims an operator running across sixteen workers makes exactly the same
 decisions it would have made on one. This page explains the two pieces of machinery that
 deliver that, and what they ask of your operator in return.
 
 **The operator contract.** An operator is a unit of transformation such as tokenizing,
 packing, batching or shuffling, and it neither knows nor cares how Zephon executes it.
-Five methods make up the contract, of which three matter most:
+The three most important methods are:
 
 - `accumulator(*, deterministic, ctx)` returns the {ref}`accumulator <accumulators>` that
   decides how incoming elements are grouped into micro-batches. The `deterministic` flag
@@ -22,19 +21,18 @@ Five methods make up the contract, of which three matter most:
 - `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
   all-important `preserves_cursor_order`.
 
-Two more round it out. `setup(ctx)` runs once before any data arrives and receives an
+Two additional methods complete the contract. `setup(ctx)` runs once before any data arrives and receives an
 `OpContext` with runtime services and plan metadata, while `process_one(elem)` handles a
 single element and by default just calls `process_many` with a one-element list. You only
 want to override that last one if you have a genuinely faster scalar path.
 
 **The invariant is that `process_many` must be stateless across calls.** It must not
 depend on anything left over from a previous invocation, so every piece of
-cross-invocation state belongs in the accumulator instead, whether that is a buffer, a
-counter or an open packing bin. This is the whole reason Zephon can safely hand
+cross-invocation state belongs in the accumulator instead. This is the whole reason Zephon can safely hand
 `process_many` calls to an arbitrary number of workers: each call is independent, so the
-results can be reordered back into input order without changing anything.
+results can be reordered back into input order without loss of correctness.
 
-How the work splits between the accumulator and the workers varies a lot. For tokenization
+Not every operator splits its work evenly between accumulator and workers. For tokenization
 or fetching, the accumulator does nothing but group elements into fixed-size
 micro-batches, and all the real work happens in `process_many` across the pool. For
 operators whose core logic is inherently serial, such as packing, mixture correction and
@@ -47,14 +45,14 @@ order lives in the accumulator.
 
 **Micro-batch sizes.** [How Pipelines Run](../pipelines/how_pipelines_run.md) introduces
 the micro-batch as the small group of elements Zephon hands to a worker for a single
-`process_many` call. What it does not say is how big they are, and the sizes are
+`process_many` call. Their sizes are
 per-operator, chosen for the work involved: fetching and tokenization use 64, text
 decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and `batch` uses
-whatever `microbatch_size` you asked for. With four workers on a tokenizer, four
+whatever `microbatch_size` requested. With four workers on a tokenizer, four
 micro-batches of 64 are in flight at once, so 256 samples are being tokenized concurrently
 while each call still sees a sensible 64.
 
-Who decides the boundaries? That is the accumulator's entire job.
+Who decides the boundaries? That is the accumulator's job.
 
 (accumulators)=
 
@@ -63,36 +61,8 @@ operator's input stream and its worker pool. It receives elements from upstream 
 decides when enough of them are ready, and hands a micro-batch off to be dispatched.
 
 What we guarantee is that it runs **serially**: the runner never calls into it from two
-threads at once, and elements always arrive in upstream order. In the current runners that
-means a dedicated pump thread per operator, but the serialness is the part of the contract
-you can rely on. The workers run the stateless `process_many`, and the accumulator decides
+threads at once, and elements always arrive in upstream order. In the current runner implementations this is achieved by a dedicated pump thread per operator, but the architectural contract is simply that the accumulator is never invoked in parallel with itself. The workers run the stateless `process_many`, and the accumulator decides
 what each worker sees.
-
-```
-Upstream elements
-       │
-       v
-┌──────────────────────────────────────────────────────────┐
-│  Accumulator (serial)                                     │
-│                                                           │
-│  push_many(elems)                                         │
-│      ├── not enough yet  → buffer internally              │
-│      └── ready           → emit micro-batch               │
-│                                                           │
-│  Runner tags the micro-batch with a sequence number        │
-└─────────────────────────┬─────────────────────────────────┘
-                          v
-          ┌───────────────────────────┐
-          │        Worker pool         │
-          │   process_many()  × N      │
-          └─────────────┬─────────────┘
-                        │  results, possibly out of order
-                        v
-            Reorder by sequence number (deterministic mode)
-                        │
-                        v
-                   Downstream
-```
 
 <figure class="zephon-post zephon-embed">
   <iframe src="../_static/embeds/operator-detail.html" height="551" loading="lazy"
@@ -105,7 +75,7 @@ Upstream elements
   </figcaption>
 </figure>
 
-**Why this buys determinism.** Take sequence packing. The packer keeps open bins, which
+**Why accumulators matter for determinism.** Take sequence packing. The packer keeps open bins, which
 are partially filled sequences waiting for short samples to complete them, and which bin a
 given sequence lands in depends on what is already in the bins. If each worker kept its
 own bins, the bin assignment would depend on which worker happened to receive which
@@ -120,7 +90,7 @@ determinism](elastic_determinism.md): samples from different lanes are never pac
 together, so each lane's packing decisions are independent of how many GPUs you are
 running on.
 
-**The interface.** Four methods and a flag, defined in `zephon.ops.accumulators`:
+**The interface.** The accumulator has a simple interface with four methods and a flag, defined in `zephon.ops.accumulators`:
 
 - `push_many(elems)` consumes elements from upstream, buffers them, and returns zero or
   more ready micro-batches.
@@ -146,7 +116,7 @@ running on.
 Note that `flush()` is deterministic in the sense that matters. Its output depends only on
 the elements the accumulator has seen, never on timing.
 
-**The built-ins.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
+**Built-in accumulators.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
 lane and emits when a lane reaches `max_batch`, and it is what most operators use: fetch,
 decode, tokenize, map transforms, and batching, which uses a `CountingAccumulator`
