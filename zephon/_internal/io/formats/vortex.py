@@ -219,7 +219,8 @@ class VortexShard(RandomAccessShard):
         )
         with _local_io_errors(self._path):
             # TODO(MaxiBoether): Follow up upstream on retained-reader point-read
-            # setup costs; reproduction and baseline are in scripts/vortex_bench.
+            # setup costs. Reproduction and baseline live in
+            # our internal dataloader arena.
             batch = self._file.scan(
                 indices=_require_vortex().array(selected)
             ).read_all()
