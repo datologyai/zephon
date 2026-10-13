@@ -43,6 +43,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    cast,
     get_args,
 )
 
@@ -553,7 +554,10 @@ class _EnvelopeSerializer:
                 assert seg.field is not None
                 fields = _sliceable_field_names(payload, seg.field, seg.seq_len)
                 entries.append(
-                    {k: payload[k][seg.start : seg.end] for k in sorted(fields)}
+                    {
+                        k: cast(Any, payload[k])[seg.start : seg.end]
+                        for k in sorted(fields)
+                    }
                 )
             else:
                 entries.append(seg.record.payload)
@@ -624,7 +628,10 @@ class _FlatSerializer:
             )
 
         per_field_parts = {
-            k: [seg.record.payload[k][seg.start : seg.end] for seg in segments]
+            k: [
+                cast(dict[str, Any], seg.record.payload)[k][seg.start : seg.end]
+                for seg in segments
+            ]
             for k in field_names
         }
         payload: dict[str, Any] = {

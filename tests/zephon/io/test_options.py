@@ -1,6 +1,82 @@
+import pickle
+
 import pytest
 
-from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+from zephon.io.options import (
+    ArrowOptions,
+    CacheOptions,
+    ParquetOptions,
+    ParquetRGCacheOptions,
+    StoreOptions,
+    VortexOptions,
+)
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [("vortex", "worker_threads"), ("arrow", "cpu_threads"), ("arrow", "io_threads")],
+)
+def test_thread_options_preserve_explicit_none_and_omitted_fields(kind, field) -> None:
+    base = StoreOptions.from_any({kind: {field: 3}})
+    assert getattr(getattr(base.merge(StoreOptions()), kind), field) == 3
+    unchanged = base.merge(StoreOptions.from_any({kind: {field: None}}))
+    assert getattr(getattr(unchanged, kind), field) is None
+    assert getattr(getattr(unchanged.merge(StoreOptions()), kind), field) is None
+    reset = base.merge(StoreOptions.from_any({kind: None}))
+    assert getattr(getattr(reset, kind), field) == 1
+    assert getattr(getattr(base.merge(StoreOptions.from_any(None)), kind), field) == 1
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [("vortex", "worker_threads"), ("arrow", "cpu_threads"), ("arrow", "io_threads")],
+)
+@pytest.mark.parametrize("value", [-1, True, 1.5, "2"])
+def test_invalid_thread_counts(kind, field, value) -> None:
+    with pytest.raises(ValueError, match=f"{kind}.{field}"):
+        StoreOptions.from_any({kind: {field: value}})
+
+
+def test_zero_workers_and_arrow_validation() -> None:
+    assert VortexOptions(worker_threads=0).worker_threads == 0
+    with pytest.raises(ValueError, match="arrow.cpu_threads"):
+        ArrowOptions(cpu_threads=0)
+    with pytest.raises(ValueError, match="arrow.io_threads"):
+        ArrowOptions(io_threads=0)
+    with pytest.raises(ValueError, match="parquet.use_threads"):
+        ParquetOptions(use_threads=1)
+
+
+def test_nested_reader_options_roundtrip_and_partial_merge(tmp_path) -> None:
+    import pickle
+
+    base = StoreOptions.from_any(
+        {
+            "arrow": {"cpu_threads": 3, "io_threads": None},
+            "parquet": {
+                "use_threads": True,
+                "rg_cache": {"root": str(tmp_path), "limit_bytes": "8gb"},
+            },
+            "vortex": {"worker_threads": 0},
+        }
+    )
+    merged = base.merge(
+        StoreOptions.from_any({"parquet": {"rg_cache": {"limit_bytes": "4gb"}}})
+    )
+    assert merged.parquet.use_threads is True
+    assert merged.parquet.rg_cache.root == str(tmp_path)
+    assert merged.parquet.rg_cache.limit_bytes == 4 * 1024**3
+    assert merged.arrow == base.arrow
+    restored = pickle.loads(pickle.dumps(merged))
+    assert restored == merged
+    assert restored.arrow._provided_fields == {"cpu_threads", "io_threads"}
+    assert restored.vortex._provided_fields == {"worker_threads"}
+    reset = base.merge(StoreOptions.from_any({"parquet": None}))
+    assert reset.parquet == ParquetOptions()
+    reset_cache = base.merge(StoreOptions.from_any({"parquet": {"rg_cache": None}}))
+    assert reset_cache.parquet.use_threads is True
+    assert reset_cache.parquet.rg_cache == ParquetRGCacheOptions()
+
 
 _CACHE_FIELDS = (
     "enabled",
@@ -23,6 +99,55 @@ _PARQUET_RG_CACHE_FIELDS = (
     "limit_bytes",
     "min_free_bytes",
 )
+
+
+def test_vortex_options_merge_disable_and_reset() -> None:
+    base = StoreOptions.from_any({"vortex": {"segment_cache_bytes": "8mb"}})
+    assert base.vortex.segment_cache_bytes == 8 * 1024**2
+    assert base.merge(StoreOptions()).vortex == base.vortex
+    disabled = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
+    assert disabled.vortex.segment_cache_bytes == 0
+    reset = base.merge(StoreOptions.from_any({"vortex": None}))
+    assert reset.vortex == VortexOptions()
+    assert base.merge(StoreOptions.from_any(None)).vortex == VortexOptions()
+    assert VortexOptions.from_any(base.vortex) is base.vortex
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"segment_cache_bytes": -1},
+        {"segment_cache_bytes": 1.5},
+        {"segment_cache_bytes": True},
+        {"segment_cache_bytes": ""},
+    ],
+)
+def test_vortex_options_reject_invalid_limits(options: dict) -> None:
+    with pytest.raises(ValueError):
+        StoreOptions.from_any({"vortex": options})
+
+
+def test_shared_metadata_cache_option_merge_disable_and_reset() -> None:
+    base = StoreOptions.from_any({"metadata_cache_entries": 12})
+    assert not base.cache.enabled
+    assert base.merge(StoreOptions()).metadata_cache_entries == 12
+    disabled = base.merge(StoreOptions.from_any({"metadata_cache_entries": 0}))
+    assert disabled.metadata_cache_entries == 0
+    reset = base.merge(StoreOptions.from_any({"metadata_cache_entries": None}))
+    assert reset.metadata_cache_entries == 256
+    assert base.merge(StoreOptions.from_any(None)).metadata_cache_entries == 256
+    assert (
+        base.merge(StoreOptions.from_any({"cache": False})).metadata_cache_entries == 12
+    )
+    assert pickle.loads(pickle.dumps(base)).metadata_cache_entries == 12
+    with pytest.raises(TypeError, match="metadata_cache_entries"):
+        StoreOptions.from_any({"cache": {"metadata_cache_entries": 12}})
+
+
+@pytest.mark.parametrize("limit", [-1, 1.5, True, "256"])
+def test_metadata_cache_rejects_invalid_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="metadata_cache_entries"):
+        StoreOptions.from_any({"metadata_cache_entries": limit})
 
 
 def _configured_cache(
@@ -82,8 +207,8 @@ def test_cache_options_from_any_and_merge(tmp_path) -> None:
 
 def test_store_options_from_any_and_merge(tmp_path) -> None:
     s0 = StoreOptions()
-    assert s0.parquet_rg_cache.enabled is None
-    assert s0.parquet_rg_cache.limit_bytes is None
+    assert s0.parquet.rg_cache.enabled is None
+    assert s0.parquet.rg_cache.limit_bytes is None
     resolved0 = s0.resolved_parquet_rg_cache()
     assert resolved0.enabled is False
     assert resolved0.limit_bytes == 4 * 1024**3
@@ -91,23 +216,25 @@ def test_store_options_from_any_and_merge(tmp_path) -> None:
     s1 = StoreOptions.from_any(
         {
             "cache": {"enabled": True, "root": str(tmp_path)},
-            "parquet_rg_cache": {
-                "root": str(tmp_path / "rg"),
-                "limit_bytes": "8gb",
-                "min_free_bytes": "2gb",
+            "parquet": {
+                "rg_cache": {
+                    "root": str(tmp_path / "rg"),
+                    "limit_bytes": "8gb",
+                    "min_free_bytes": "2gb",
+                }
             },
         }
     )
     assert s1.cache.enabled is True
     assert str(s1.cache.root) == str(tmp_path)
-    assert str(s1.parquet_rg_cache.root) == str(tmp_path / "rg")
-    assert s1.parquet_rg_cache.limit_bytes == 8 * 1024**3
-    assert s1.parquet_rg_cache.min_free_bytes == 2 * 1024**3
+    assert str(s1.parquet.rg_cache.root) == str(tmp_path / "rg")
+    assert s1.parquet.rg_cache.limit_bytes == 8 * 1024**3
+    assert s1.parquet.rg_cache.min_free_bytes == 2 * 1024**3
     assert s1.resolved_parquet_rg_cache().enabled is True
 
     s2 = s0.merge(s1)
     assert s2.cache.enabled is True
-    assert s2.parquet_rg_cache.limit_bytes == 8 * 1024**3
+    assert s2.parquet.rg_cache.limit_bytes == 8 * 1024**3
 
     with pytest.raises(TypeError):
         _ = StoreOptions.from_any(3.14)
@@ -116,14 +243,14 @@ def test_store_options_from_any_and_merge(tmp_path) -> None:
 def test_store_merge_preserves_explicit_rg_limit_when_later_call_omits_it(
     tmp_path,
 ) -> None:
-    first = StoreOptions.from_any({"parquet_rg_cache": {"limit_bytes": "20gb"}})
+    first = StoreOptions.from_any({"parquet": {"rg_cache": {"limit_bytes": "20gb"}}})
     second = StoreOptions.from_any(
         {"cache": {"enabled": True, "root": tmp_path / "cache"}}
     )
 
     merged = first.merge(second)
 
-    assert merged.parquet_rg_cache.limit_bytes == 20 * 1024**3
+    assert merged.parquet.rg_cache.limit_bytes == 20 * 1024**3
     resolved = merged.resolved_parquet_rg_cache()
     assert resolved.enabled is True
     assert resolved.limit_bytes == 20 * 1024**3
@@ -139,7 +266,9 @@ def test_parquet_rg_cache_default_tracks_enabled_shard_cache_limit(tmp_path) -> 
     unlimited = StoreOptions(cache=CacheOptions(enabled=True))
     rg_only = StoreOptions(
         cache=CacheOptions(enabled=False, limit_bytes=100 * 1024**3),
-        parquet_rg_cache=ParquetRGCacheOptions(root=tmp_path / "decoded"),
+        parquet=ParquetOptions(
+            rg_cache=ParquetRGCacheOptions(root=tmp_path / "decoded")
+        ),
     )
 
     large_rg = large.resolved_parquet_rg_cache()
@@ -169,7 +298,7 @@ def test_legacy_rg_cache_limit_migrates_unless_new_limit_is_set() -> None:
         overridden = StoreOptions.from_any(
             {
                 "cache": {"enabled": True, "rg_cache_bytes": "6gb"},
-                "parquet_rg_cache": {"limit_bytes": "8gb"},
+                "parquet": {"rg_cache": {"limit_bytes": "8gb"}},
             }
         )
 
@@ -218,12 +347,12 @@ def test_parquet_rg_cache_options_normalization_and_validation(tmp_path) -> None
 def test_explicit_rg_enable_requires_a_root_without_shard_cache() -> None:
     options = StoreOptions(
         cache=CacheOptions(enabled=False),
-        parquet_rg_cache=ParquetRGCacheOptions(enabled=True),
+        parquet=ParquetOptions(rg_cache=ParquetRGCacheOptions(enabled=True)),
     )
 
     with pytest.raises(
         ValueError,
-        match="enabled=True requires parquet_rg_cache.root",
+        match="enabled=True requires parquet.rg_cache.root",
     ):
         options.resolved_parquet_rg_cache()
 
@@ -255,22 +384,24 @@ def test_later_limit_only_store_options_preserve_other_rg_settings(tmp_path) -> 
     first = StoreOptions.from_any(
         {
             "cache": {"enabled": True, "root": tmp_path / "cache"},
-            "parquet_rg_cache": {
-                "enabled": True,
-                "root": tmp_path / "decoded",
-                "min_free_bytes": "2gb",
+            "parquet": {
+                "rg_cache": {
+                    "enabled": True,
+                    "root": tmp_path / "decoded",
+                    "min_free_bytes": "2gb",
+                }
             },
         }
     )
-    second = StoreOptions.from_any({"parquet_rg_cache": {"limit_bytes": "20gb"}})
+    second = StoreOptions.from_any({"parquet": {"rg_cache": {"limit_bytes": "20gb"}}})
 
     merged = first.merge(second)
 
     assert merged.cache == first.cache
-    assert merged.parquet_rg_cache.enabled is True
-    assert merged.parquet_rg_cache.root == tmp_path / "decoded"
-    assert merged.parquet_rg_cache.limit_bytes == 20 * 1024**3
-    assert merged.parquet_rg_cache.min_free_bytes == 2 * 1024**3
+    assert merged.parquet.rg_cache.enabled is True
+    assert merged.parquet.rg_cache.root == tmp_path / "decoded"
+    assert merged.parquet.rg_cache.limit_bytes == 20 * 1024**3
+    assert merged.parquet.rg_cache.min_free_bytes == 2 * 1024**3
 
 
 def test_cache_merge_distinguishes_omitted_fields_from_explicit_none(
@@ -305,3 +436,8 @@ def test_store_merge_treats_missing_cache_as_omitted_and_none_as_reset(
 
     assert configured.merge(StoreOptions.from_any({})).cache == configured.cache
     assert configured.merge(StoreOptions.from_any(None)).cache == CacheOptions()
+
+
+def test_old_top_level_parquet_cache_path_is_not_silently_ignored() -> None:
+    with pytest.raises(TypeError, match="has moved to parquet.rg_cache"):
+        StoreOptions.from_any({"parquet_rg_cache": {"enabled": False}})

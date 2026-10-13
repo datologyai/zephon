@@ -1,31 +1,39 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vortex shard format integration.
-
-Vortex is a next-generation columnar file format designed for high-performance
-data processing with zero-copy Arrow integration and GPU-friendly design.
-"""
+"""Vortex shard discovery and indexed sample reads."""
 
 import posixpath
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 import numpy as np
 
-from zephon._internal.io.formats.base import FormatHandler, register_format
+from zephon._internal.io.formats.arrow_rows import (
+    arrow_array_to_samples,
+    configure_pyarrow,
+    require_pyarrow,
+    samples_from_columns,
+)
+from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
+from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
 from zephon._internal.io.index.index_types import ShardIndex, is_shard_index
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import StorageBackend
 from zephon._internal.io.suffixes import VORTEX_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.thread_utils import configure_vortex_threads
+from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
+    from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 try:
     import vortex as _vortex
@@ -85,62 +93,231 @@ def _read_vortex_row_count(path: str, storage: StorageBackend, file_size: int) -
         raise
 
 
+@dataclass(frozen=True)
+class _VortexMetadata:
+    """Footer and Arrow export schema shared across readers of one file."""
+
+    footer: Any
+    export_type: Any
+    text_only: bool
+
+
+def _open_vortex_file(
+    path: Path,
+    metadata_cache: MetadataCache[str, _VortexMetadata],
+    segment_cache: Any | None,
+) -> tuple[Any, _VortexMetadata]:
+    """Open a reader using the store's footer and segment caches."""
+    vortex = _require_vortex()
+    key = file_cache_key(path)
+    options: dict[str, Any] = (
+        {"segment_cache": segment_cache, "cache_key": key}
+        if segment_cache is not None
+        else {"without_segment_cache": True}
+    )
+    file = None
+
+    def load_metadata() -> _VortexMetadata:
+        nonlocal file
+        file = vortex.open(str(path), **options)
+        pa = require_pyarrow()
+        export_type = _list_view_type(file.dtype.to_arrow_type(), pa)
+        text_only = pa.types.is_struct(export_type) and all(
+            pa.types.is_string(field.type)
+            or pa.types.is_large_string(field.type)
+            or pa.types.is_string_view(field.type)
+            or pa.types.is_binary(field.type)
+            or pa.types.is_large_binary(field.type)
+            or pa.types.is_binary_view(field.type)
+            for field in export_type
+        )
+        return _VortexMetadata(file.footer, export_type, text_only)
+
+    metadata = metadata_cache.get_or_load(key, load_metadata)
+    # Reuse the reader opened on a footer-cache miss.
+    if file is None:
+        file = vortex.open(str(path), footer=metadata.footer, **options)
+    return file, metadata
+
+
+@contextmanager
+def _local_io_errors(path: Path) -> Iterator[None]:
+    """Expose filesystem errors for missing or inaccessible shards."""
+    try:
+        yield
+    except RuntimeError as exc:
+        # Vortex wraps IO errors in RuntimeError; only path failures are retryable.
+        try:
+            path.stat()
+        except OSError as io_error:
+            raise io_error from exc
+        raise
+
+
 class VortexShard(RandomAccessShard):
     """Random access shard backed by a Vortex file."""
 
-    def __init__(self, path: Path, *, length: int | None = None) -> None:
-        vortex = _require_vortex()
+    def __init__(
+        self,
+        path: Path,
+        *,
+        length: int | None = None,
+        metadata_cache: MetadataCache[str, _VortexMetadata] | None = None,
+        segment_cache: Any | None = None,
+    ) -> None:
         self._path = path
-        self._file = vortex.open(str(path))
-        self._scan = self._file.to_repeated_scan()
+        if metadata_cache is None:
+            metadata_cache = MetadataCache(0)
+        with _local_io_errors(path):
+            self._file, metadata = _open_vortex_file(
+                path, metadata_cache, segment_cache
+            )
         self._length = length if length is not None else len(self._file)
+        self._export_type = metadata.export_type
+        self._text_only = metadata.text_only
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        if index < 0 or index >= self._length:
-            raise IndexError(index)
-        if self._scan is None:
-            raise RuntimeError("VortexShard has been closed")
-
-        scalar = self._scan.scalar_at(index)
-        result = scalar.as_py()
-        return result  # type: ignore[return-value]
+    def __getitem__(self, index: int) -> "SamplePayload":
+        return self.getsamples([index])[0]
 
     def __len__(self) -> int:
         return self._length
 
     def close(self) -> None:
-        self._scan = None
         self._file = None
+        self._export_type = None
+        self._text_only = False
 
-    def getsamples(self, indices: list[int]) -> list[dict[str, Any]]:
+    def getsamples(self, indices: list[int]) -> list["SamplePayload"]:
         """Bulk read rows in request order, preserving duplicate indices."""
         if not indices:
             return []
         for i in indices:
             if i < 0 or i >= self._length:
                 raise IndexError(i)
-        if self._file is None or _vortex is None:
+        if self._file is None:
             raise RuntimeError("VortexShard has been closed")
 
         # Vortex scans require strictly increasing indices, even when callers
         # request rows out of order or more than once.
-        sorted_unique = sorted(set(indices))
-        index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
+        positions: Iterable[int]
+        if all(a < b for a, b in zip(indices, indices[1:])):
+            sorted_unique = indices
+            positions = range(len(indices))
+        else:
+            sorted_unique = sorted(set(indices))
+            index_to_pos = {idx: pos for pos, idx in enumerate(sorted_unique)}
+            positions = map(index_to_pos.__getitem__, indices)
 
-        batch = self._file.scan(indices=_vortex.array(sorted_unique)).read_all()
-        arrow_table = batch.to_arrow_table()
-        batch_dict = arrow_table.to_pydict()
+        # Native ranges avoid converting Python index lists through Arrow.
+        contiguous = sorted_unique[-1] - sorted_unique[0] + 1 == len(sorted_unique)
+        selected = (
+            range(sorted_unique[0], sorted_unique[-1] + 1)
+            if contiguous
+            else sorted_unique
+        )
+        with _local_io_errors(self._path):
+            # TODO(MaxiBoether): Follow up upstream on retained-reader point-read
+            # setup costs. Reproduction and baseline live in
+            # our internal dataloader arena.
+            batch = self._file.scan(
+                indices=_require_vortex().array(selected)
+            ).read_all()
+            if self._text_only and len(sorted_unique) == 1:
+                # Scalar access avoids exporting a whole string dictionary.
+                row = batch.scalar_at(0).as_py()
+                if row is not None:
+                    return samples_from_columns(
+                        {name: [value] for name, value in row.items()}, positions
+                    )
+                # Null structs need Arrow's per-field null conversion.
+                # Vortex 0.88's writer rejects nullable root structs; keep this
+                # guard for native arrays supplied by other readers or writers.
+            # ListView export can trim unselected child values before decoding.
+            arrow_array = batch.to_arrow_array(arrow_type=self._export_type)
+        return arrow_array_to_samples(arrow_array, positions)
 
-        # Restore the caller's order and duplicate rows.
-        return [
-            {k: v[index_to_pos[idx]] for k, v in batch_dict.items()} for idx in indices
-        ]
+
+def _list_view_type(kind: Any, pa: Any) -> Any:
+    """Use ListView for variable-length lists, preserving fields and fixed shapes."""
+    if pa.types.is_struct(kind):
+        return pa.struct(
+            [field.with_type(_list_view_type(field.type, pa)) for field in kind]
+        )
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        child = kind.value_field.with_type(_list_view_type(kind.value_type, pa))
+        return (
+            pa.list_view(child) if pa.types.is_list(kind) else pa.large_list_view(child)
+        )
+    if pa.types.is_fixed_size_list(kind):
+        return pa.list_(
+            kind.value_field.with_type(_list_view_type(kind.value_type, pa)),
+            kind.list_size,
+        )
+    return kind
+
+
+def _shard_length(local_ref: LocalShardRef) -> int | None:
+    if local_ref.extra and "length" in local_ref.extra:
+        length_value = local_ref.extra["length"]
+        if isinstance(length_value, (int, float)):
+            return int(length_value)
+        if isinstance(length_value, str):
+            try:
+                return int(length_value)
+            except ValueError:
+                pass
+    return None
+
+
+class VortexShardOpener:
+    """Share footer and segment caches across a store's Vortex readers."""
+
+    def __init__(self, options: "StoreOptions") -> None:
+        vortex = _require_vortex()
+        configure_vortex_threads(vortex, options.vortex)
+        configure_pyarrow(options.arrow)
+        self._metadata_cache = MetadataCache[str, _VortexMetadata](
+            options.metadata_cache_entries
+        )
+        self._segment_cache = (
+            vortex.SegmentCache(options.vortex.segment_cache_bytes)
+            if options.vortex.segment_cache_bytes
+            else None
+        )
+
+    def open_shard(
+        self, locator: ShardLocator, local_ref: LocalShardRef
+    ) -> RandomAccessShard:
+        """Open a shard with this store's caches."""
+        return VortexShard(
+            local_ref.raw.path,
+            length=_shard_length(local_ref),
+            metadata_cache=self._metadata_cache,
+            segment_cache=self._segment_cache,
+        )
+
+    def close(self) -> None:
+        """Clear the store's Vortex caches."""
+        self._metadata_cache.clear()
+        if self._segment_cache is not None:
+            self._segment_cache.clear()
 
 
 class VortexFormat(FormatHandler):
     """Format handler for Vortex datasets."""
 
     kind = "vortex"
+
+    @contextmanager
+    def create_opener(
+        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+    ) -> Iterator[ShardOpener]:
+        """Provide a store-scoped opener and clear its caches on exit."""
+        opener = VortexShardOpener(options)
+        try:
+            yield opener
+        finally:
+            opener.close()
 
     def discover(
         self, path: str, storage: StorageBackend
@@ -296,17 +473,7 @@ class VortexFormat(FormatHandler):
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
         """Open a Vortex shard for random access reading."""
-        length = None
-        if local_ref.extra and "length" in local_ref.extra:
-            length_value = local_ref.extra["length"]
-            if isinstance(length_value, (int, float)):
-                length = int(length_value)
-            elif isinstance(length_value, str):
-                try:
-                    length = int(length_value)
-                except ValueError:
-                    length = None
-        return VortexShard(local_ref.raw.path, length=length)
+        return VortexShard(local_ref.raw.path, length=_shard_length(local_ref))
 
 
 register_format(VortexFormat())

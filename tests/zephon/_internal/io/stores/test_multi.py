@@ -31,7 +31,12 @@ from zephon._internal.io.types import ShardFile, ShardLocator
 from zephon._internal.utils.disk import InsufficientCacheSpaceError
 from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
-from zephon.io.options import CacheOptions, ParquetRGCacheOptions, StoreOptions
+from zephon.io.options import (
+    CacheOptions,
+    ParquetOptions,
+    ParquetRGCacheOptions,
+    StoreOptions,
+)
 
 GiB = 1024**3
 
@@ -259,15 +264,17 @@ def test_decoded_only_preflight_never_probes_raw_device(
     )
     dataset = Dataset(name="pq", backend={"kind": "parquet"}, path="/data")
     options = StoreOptions(
-        parquet_rg_cache=ParquetRGCacheOptions(
-            enabled=True,
-            root=tmp_path / "decoded",
-            limit_bytes=4 * GiB,
+        parquet=ParquetOptions(
+            rg_cache=ParquetRGCacheOptions(
+                enabled=True,
+                root=tmp_path / "decoded",
+                limit_bytes=4 * GiB,
+            )
         )
     )
 
     validate_store_cache_disk_space({0: dataset}, options)
-    assert probed == [options.parquet_rg_cache.root]
+    assert probed == [options.parquet.rg_cache.root]
 
 
 def test_has_cacheable_dataset(tmp_path: Path) -> None:
@@ -287,7 +294,9 @@ def test_jsonl_store_ignores_parquet_cache_root(tmp_path: Path) -> None:
         {0: ds},
         options=StoreOptions(
             cache=CacheOptions(enabled=True, root=raw_root),
-            parquet_rg_cache=ParquetRGCacheOptions(root=raw_root / "custom-child"),
+            parquet=ParquetOptions(
+                rg_cache=ParquetRGCacheOptions(root=raw_root / "custom-child")
+            ),
         ),
     )
     store.close()

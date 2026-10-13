@@ -6,10 +6,16 @@
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
+from pathlib import Path
 from typing import Generic, TypeVar
 
 _Key = TypeVar("_Key", bound=Hashable)
 _Value = TypeVar("_Value")
+
+
+def file_cache_key(path: Path) -> str:
+    """Return the absolute-path cache key for an immutable shard."""
+    return str(path.absolute())
 
 
 class MetadataCache(Generic[_Key, _Value]):
@@ -29,6 +35,8 @@ class MetadataCache(Generic[_Key, _Value]):
 
     def get_or_load(self, key: _Key, load: Callable[[], _Value]) -> _Value:
         """Return retained metadata, or load and retain it on a miss."""
+        if self._max_entries == 0:
+            return load()
         with self._lock:
             if key in self._entries:
                 self._entries.move_to_end(key)

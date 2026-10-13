@@ -98,6 +98,14 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.prefetch:PrefetchOp",
         }
     ),
+    # Inspect native thread pools inside real fetch workers after reader setup.
+    "tests/integration/test_reader_options.py": frozenset(
+        {
+            "zephon._internal:pipeline",
+            "zephon._internal.ops.fetch:FetchOp",
+            "zephon._internal.stream:EngineSample",
+        }
+    ),
     # The standalone op is an independent oracle for the pipeline path.
     "tests/integration/test_tokenize_chat_pipeline.py": frozenset(
         {"zephon._internal.ops.tokenize_chat:TokenizeChat"}
@@ -121,6 +129,19 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Internal retry constants make SHM exhaustion deterministic.
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
+    ),
+    # Verify native cache sharing and deterministic eviction recovery across the store.
+    "tests/integration/test_vortex_integration.py": frozenset(
+        {
+            "zephon._internal.io.formats.vortex:VortexFormat",
+            "zephon._internal.io.resolvers.base:ShardResolver",
+            "zephon._internal.io.stores.multi:build_multi_dataset_store",
+            "zephon._internal.io.stores.resilient:ResilientShard",
+            "zephon._internal.io.types:LocalShardFile",
+            "zephon._internal.io.types:LocalShardRef",
+            "zephon._internal.io.types:ShardFile",
+            "zephon._internal.io.types:ShardLocator",
+        }
     ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(

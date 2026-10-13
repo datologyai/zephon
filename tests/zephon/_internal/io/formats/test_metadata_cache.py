@@ -5,6 +5,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from unittest.mock import patch
 
 import pytest
 
@@ -25,7 +26,9 @@ def test_lru_eviction_and_clear() -> None:
 
 def test_disabled_cache_and_invalid_limit() -> None:
     cache = MetadataCache[str, object](0)
-    assert cache.get_or_load("key", object) is not cache.get_or_load("key", object)
+    with patch.object(cache, "_lock") as lock:
+        lock.__enter__.side_effect = AssertionError("disabled cache acquired its lock")
+        assert cache.get_or_load("key", object) is not cache.get_or_load("key", object)
     with pytest.raises(ValueError, match="negative"):
         MetadataCache(-1)
 
