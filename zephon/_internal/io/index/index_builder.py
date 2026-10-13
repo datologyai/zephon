@@ -152,7 +152,7 @@ class IndexBuilder(ABC):
         *,
         output_path: str | Path | None = None,
         progress: bool = True,
-    ) -> Path | str:
+    ) -> str:
         """Build and write index.json for a dataset.
 
         Args:
@@ -161,7 +161,7 @@ class IndexBuilder(ABC):
             progress: Whether to print progress messages
 
         Returns:
-            Path to a local index or URL string to a remote index.
+            Local index path or remote URL, as a string.
         """
         index = self.build(dataset_dir, progress=progress)
 
@@ -182,7 +182,7 @@ class IndexBuilder(ABC):
                 f"{total_size_mb:.1f} MB"
             )
 
-        return target if "://" in target else Path(target)
+        return target
 
 
 # Registry of format -> IndexBuilder
@@ -212,7 +212,7 @@ def create_index(
     output_path: str | Path | None = None,
     progress: bool = True,
     max_workers: int = 8,
-) -> Path | str:
+) -> str:
     """Create index.json for a dataset using the appropriate builder.
 
     Args:
@@ -223,7 +223,7 @@ def create_index(
         max_workers: Maximum number of shards to inspect concurrently.
 
     Returns:
-        Path to a local index or URL string to a remote index.
+        Local index path or remote URL, as a string.
     """
     builder = get_builder(format_name, max_workers=max_workers)
     return builder.create_index(dataset_dir, output_path=output_path, progress=progress)

@@ -120,7 +120,7 @@ def preflight(pipe: Pipeline) -> ValidationReport:
 
 
 def make_index(dataset_dir: str) -> str:
-    return str(build_index("parquet", dataset_dir))
+    return build_index("parquet", dataset_dir)
 
 
 def pack_grouped(pipe: Pipeline) -> Pipeline:

@@ -23,6 +23,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
+from zephon._internal.utils.shm_coalesce import (
+    DEFAULT_PAYLOAD_MEMORY_POLICY,
+    PayloadMemoryPolicy,
+)
 from zephon.options import IpcTransport
 
 if TYPE_CHECKING:
@@ -46,8 +50,7 @@ class StageRuntimeSpec:
     prefetch_capacity: int
     output_mode: str  # "microbatches" | "stream_items"
     allow_latency_flush: bool
-    coalesce_tensors: bool
-    shm_min_size: int
+    memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY
     # See RuntimeOptions.max_worker_retries; ignored by non-process runners.
     max_worker_retries: int = 0
     # See RuntimeOptions.ipc_transport / ipc_buffer_bytes; process runners only.
@@ -316,6 +319,21 @@ def resolve_runtime_spec(
         Whether the Engine will run inside a PyTorch DataLoader worker.
         Affects runner type selection (``process`` → ``threads`` demotion).
     """
+    if type(opts.shm_enabled) is not bool:
+        raise ValueError("shm_enabled must be a bool")
+    memory_policy = (
+        None
+        if not opts.shm_enabled
+        else PayloadMemoryPolicy(
+            min_item_bytes=opts.shm_min_item_bytes,
+            min_new_allocation_bytes=opts.shm_min_new_allocation_bytes,
+            min_forward_bytes=opts.shm_min_forward_bytes,
+            coalesce=opts.shm_coalesce,
+            compact_above_ratio=opts.shm_compact_above_ratio,
+            compact_min_savings_bytes=opts.shm_compact_min_savings_bytes,
+            max_coalesced_bytes=opts.shm_max_coalesced_bytes,
+        )
+    )
     num_stages = len(plan.stages)
     mode = opts.worker_allocation
 
@@ -410,8 +428,7 @@ def resolve_runtime_spec(
                 prefetch_capacity=prefetch,
                 output_mode=output_mode,
                 allow_latency_flush=allow_latency,
-                coalesce_tensors=opts.coalesce_tensors,
-                shm_min_size=opts.shm_min_size,
+                memory_policy=memory_policy,
                 max_worker_retries=opts.max_worker_retries,
                 ipc_transport=opts.ipc_transport,
                 ipc_buffer_bytes=opts.ipc_buffer_bytes,

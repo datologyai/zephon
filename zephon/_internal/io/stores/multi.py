@@ -232,8 +232,21 @@ def build_resolver(
             max_slack_bytes=store_opts.cache.max_slack_bytes,
         )
 
+    if catalog_set is not None:
+        for name in catalog_set.cacheable_names:
+            root = catalog_set.catalog_for(name).root
+            if "://" in root:
+                raise ValueError(
+                    f"Cannot read remote dataset root {root!r} without the shard "
+                    "cache; set cache.enabled=True."
+                )
+
     storage = LocalFSBackend(root=Path("/")) if storage is None else storage
-    assert isinstance(storage, LocalFSBackend)
+    if not isinstance(storage, LocalFSBackend):
+        raise ValueError(
+            "Reading without the shard cache requires LocalFSBackend; "
+            "set cache.enabled=True to use a different storage backend."
+        )
     return DirectResolver(storage, validate_hash=store_opts.cache.validate_hash)
 
 

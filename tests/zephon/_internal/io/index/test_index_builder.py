@@ -27,6 +27,18 @@ def test_scan_directory_without_matches_names_every_pattern(tmp_path: Path) -> N
         _JsonlLikeBuilder().scan_directory(tmp_path)
 
 
+@pytest.mark.parametrize("output_path", [None, "s3://other-bucket/custom-index.json"])
+def test_create_index_preserves_remote_output_url(output_path: str | None) -> None:
+    storage = MemoryStorage("s3://bucket/data", {"a.jsonl": b"{}"})
+
+    result = _JsonlLikeBuilder(storage).create_index(
+        storage.root, output_path=output_path, progress=False
+    )
+
+    assert result == (output_path or "s3://bucket/data/index.json")
+    assert result in storage.files
+
+
 def test_parallel_indexing_is_bounded_and_keeps_progress_order(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
