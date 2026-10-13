@@ -1,9 +1,9 @@
-# User-Defined Operators
+# User-defined operators
 
 The previous pages of this guide covered the operators that Zephon ships with: fetching,
 decoding, tokenizing, shuffling, etc. Most training pipelines can be expressed wholly with
 those built-ins plus the `map_transform` operator (see
-[Transforming and Filtering Records](preparing_samples.md)). We will now
+[Transforming and filtering records](preparing_samples.md)). We will now
 examine the case where these options are not enough; e.g. your data has a peculiar schema,
 or where a filtering decision depends on samples you have already seen, or where a
 transformation is expensive or different enough that you need fine-tuned control over how
@@ -14,11 +14,11 @@ the same whether it is a Zephon-shipped operator or a custom one. This means tha
 operator can be as efficient as a built-in one, though it can also break determinism and
 checkpointing if not written carefully.
 
-**Your Own Functions.** There are multiple ways in Zephon to run custom pipeline code.
+**Your own functions.** There are multiple ways in Zephon to run custom pipeline code.
 Suppose the documents in your dataset include some boilerplate (e.g. website navigation
 bars) that you would like to protect your model from. Furthermore, you would like to
 remove anything that is too short after stripping this boilerplate. Similar to what we
-have seen in [Transforming and Filtering Records](preparing_samples.md), this can be
+have seen in [Transforming and filtering records](preparing_samples.md), this can be
 expressed via a `map_transform`:
 
 ```{literalinclude} ../../../examples/guide/pipelines/map_transform_filter.py
@@ -39,7 +39,7 @@ payload. This means that it has to come after the `batch` operator in the pipeli
 Handing functions to `map_transform` and `map_batch` is convenient, but there are limits to
 what they can achieve, which are covered by Custom Operators.
 
-**Remembering Things Between Samples.** There are plenty of cases where you would want
+**Remembering things between samples.** There are plenty of cases where you would want
 to see more than one sample for your transformation. Holding back records until you can
 pair them with another one, or merging records that belong together. In these cases, we
 can sub out our `map_transform` for `stateful_transform`:
@@ -73,14 +73,14 @@ A few things should be noted here:
 - Unlike `map_transform`, if you do use `stateful_transform` for dropping records, you
   must emit tombstones so that Zephon does not keep waiting for them.
 
-**The Limits of Transformations.** The examples above work well as simple
+**The limits of transformations.** The examples above work well as simple
 transformations, but sometimes you may require something more complicated, such as
 running documents through a classifier for scoring. You could write this as a filter
 transformation, but it would be slow as it would run the classifier on individual
 records instead of batches of records. Any operations that require different mapping
 like this, e.g. once per worker instead of once per record, require writing an operator.
 
-**Writing Your Own Operators.** An operator you write yourself is the same kind of
+**Writing your own operators.** An operator you write yourself is the same kind of
 object as the ones Zephon ships. The operators behind `tokenize`, `shuffle`, and
 `pack_flat` are all `BaseOp` subclasses, with the same lifecycle, grouping machinery,
 and traits your own operators will have. We can define our own custom operators via
@@ -101,7 +101,7 @@ mistake, and Zephon will reject it:
 :caption: examples/guide/pipelines/records_in_records_out.py
 ```
 
-**Attaching A Function.** As discussed above, there are two ways to add operators. The
+**Attaching a function.** As discussed above, there are two ways to add operators. The
 light form of `add_op` takes a name and a `process_many` function. Here is the previous
 classifier, rating sixty-four documents per call across four workers. It writes a score
 onto each record and leaves the dropping to a `map_transform` downstream:
@@ -131,7 +131,7 @@ more than one worker at once. Due to Zephon's determinism, however, the pipeline
 produces the same records in the same order. That holds because `process_many` must not
 rely on anything from a previous invocation.
 
-**Writing a full Operator class.** The function form covers operators whose dependencies
+**Writing a full operator class.** The function form covers operators whose dependencies
 fit in a closure. The classifier example discussed previously is great right up until
 the classifier is a real model that takes seconds to load: the function form does not
 allow you to load it once, so you would be needing to load it per call. This can be
@@ -173,7 +173,7 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `batch_shape_sensitive` indicates your output depends on how records were grouped, which
   disables latency-based grouping.
 
-**Splitting Records.** When an operator turns one record into several, construct each
+**Splitting records.** When an operator turns one record into several, construct each
 child's metadata with `spawn_child` from `zephon.ops.children`. Give the children
 deterministic indices in emission order and set `is_last_child=True` only on the final
 child of that immediate parent. The helper appends the index to the parent's lineage
@@ -201,7 +201,7 @@ keep the contributor cursors but clear all closing flags. If you drop a record i
 of splitting it, use `tombstones_for_record` from the same module to emit tombstones for
 the closing responsibilities it carries.
 
-**Operator Validation.** The first time you let Zephon iterate on your `Pipeline`, it
+**Operator validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and
 the source of a test suite of a few small synthetic records. Besides checking for
 malformed and unexpected output, this checks determinism, namely whether calling your

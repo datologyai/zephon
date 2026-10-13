@@ -97,8 +97,8 @@ Zephon handles this by checkpointing how far the run has progressed through the 
 rather than the internal state of the pipeline, and by periodically bringing its operators
 back to a clean point that a resumed run can restart from. This is what lets Zephon bound
 the state of an otherwise potentially infinitely unbounded pipeline.
-[How Pipelines Run](pipelines/how_pipelines_run.md) describes this mechanism in detail,
-and [Distributed Training](pipelines/distributed_training.md) covers what you need to
+[How pipelines run](pipelines/how_pipelines_run.md) describes this mechanism in detail,
+and [Distributed training](pipelines/distributed_training.md) covers what you need to
 configure for a multi-rank run.
 
 **Why we released it.** When we went looking for something that already implemented

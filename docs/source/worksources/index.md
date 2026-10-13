@@ -1,4 +1,4 @@
-# WorkSources: The Training Curriculum
+# WorkSources: the training curriculum
 
 **The center of Zephon.** The `WorkSource` defines the training curriculum: which samples
 Zephon should use, and the order they reach the pipeline in. The WorkSource uses the

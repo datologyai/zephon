@@ -1,6 +1,6 @@
-# Mixing Datasets
+# Mixing datasets
 
-**Defining A Static Dataset Mixture.** One of the most powerful levers that we have for
+**Defining a static dataset mixture.** One of the most powerful levers that we have for
 influencing the performance of models is the mixture of datasets that the model sees
 during the training process. By combining datasets that contain samples from specific
 domains (like math problems or code, or documents that are written in one or more target
@@ -32,7 +32,7 @@ independently of how many samples it contains, which means that some datasets wi
 of samples before others. By default, Zephon repeats those datasets as needed in order to
 maintain the requested mixture while the remaining datasets finish their first pass.
 Settings for controlling how samples are repeated and randomized during training are
-covered in [Shuffling and Repeating Samples](shuffling_and_repeating_samples.md).
+covered in [Shuffling and repeating samples](shuffling_and_repeating_samples.md).
 
 Once the `StaticMixtureWorkSource` is defined, we can inspect it to estimate the number of
 samples it will produce before stopping:
@@ -42,7 +42,7 @@ samples it will produce before stopping:
 :caption: examples/guide/worksources/inspect_worksource.py
 ```
 
-**Token-Aware Mixtures.** By default, Zephon mixes based on the number of *samples* in
+**Token-aware mixtures.** By default, Zephon mixes based on the number of *samples* in
 each `Dataset`, which is not necessarily the same thing as the number of *tokens* in each
 `Dataset`. If your data is already pre-tokenized and pre-packed into samples that each
 contain the same number of tokens, sample-aware mixing and token-aware mixing are
@@ -75,7 +75,7 @@ use a small subset of tokenized records from each `Dataset` to adjust the mixtur
 specification so that the plan that the work source comes up with is more closely aligned
 with our desired token mix.
 
-**The Mixture That Reaches The Model.** It is important to remember that the
+**The mixture that reaches the model.** It is important to remember that the
 `StaticMixtureWorkSource` only defines which samples will get processed by the operator
 pipeline, even when it is token-aware. Transformations and filters that are applied to the
 samples in the `Pipeline` can meaningfully change the composition of the data that the
@@ -90,4 +90,4 @@ The `Pipeline.ensure_mixture` operator can re-order records after filtering and
 transformation to keep the mixture of its outputs closer to the target specified by the
 work source; a discussion of the options and tradeoffs that are involved in using it is
 provided in the page for the `Pipeline`'s
-[Shuffling and Maintaining Mixtures](../pipelines/shuffling_and_maintaining_mixtures.md).
+[Shuffling and maintaining mixtures](../pipelines/shuffling_and_maintaining_mixtures.md).
