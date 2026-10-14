@@ -91,7 +91,9 @@ Every `Pipeline` instance that is part of the same coordination group must call
 `Pipeline.checkpoint()` at the same training step. If one of them does not, the leader
 will wait for the missing instance until the aggregation timeout (`aggregate_timeout_s`,
 which is set to three minutes by default) expires, and then the checkpoint operation will
-fail. The details of when to take a checkpoint and how to restore it are covered in
+fail. When the leader's `checkpoint()` call returns, every other instance has its copy of
+the checkpoint as well, so there's no need for a barrier afterwards. The details of when
+to take a checkpoint and how to restore it are covered in
 [Checkpointing and Resuming Pipelines](checkpointing_and_resuming.md).
 
 In many jobs, the coordination identity is simply the global rank and the world size of

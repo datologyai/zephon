@@ -197,7 +197,11 @@ class RuntimeOptions:
     # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
     # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None
-    # How long to wait for all contributors and for the merged file.
+    # Timeout budget for one checkpoint, shared by all of its coordination waits
+    # (joining the round, collecting shards, the merged result, and reader
+    # acknowledgements). Raised to at least 90s for cloud storage. Blocking
+    # storage operations and merge/codec work are not interrupted, so a
+    # checkpoint can take longer than this in wall-clock time.
     aggregate_timeout_s: float = 180.0
     # Serialization format for intermediate aggregation files ("json" or "msgpack").
     aggregate_serializer: str = "msgpack"
