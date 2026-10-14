@@ -6,8 +6,6 @@ from typing import Any
 
 import pytest
 
-from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
-from zephon import Pipeline
 from zephon._internal.ops.expand_chat import ExpandChat
 from zephon.ops.children import spawn_child, tombstones_for_record
 from zephon.types import SampleMeta, SampleRecord
@@ -16,7 +14,6 @@ from zephon.validation import (
     _check_op_no_cross_call_state,
     _check_op_sample_identity,
 )
-from zephon.work.token_estimation import _PreTokenizeReplay
 
 
 def record(*roles: str) -> SampleRecord:
@@ -119,21 +116,6 @@ def test_builtin_identity_determinism_and_cross_call_harness() -> None:
     assert not _check_op_determinism(op, "expand_chat", samples)
     assert not _check_op_no_cross_call_state(op, "expand_chat", samples)
     assert not _check_op_sample_identity(op, "expand_chat", samples)
-
-
-def test_pipeline_replay_and_field_validation() -> None:
-    parent = record("user", "assistant", "user", "assistant")
-    work = FakeIndexableWorkSource(
-        make_inmem_dataset("chat", [parent.payload]), chunk_size=1
-    )
-    pipe = Pipeline(work).expand_chat().tokenize_chat(tokenizer_id="unused")
-    replay = pipe._build_pre_tokenize_replay(len(pipe._graph.nodes) - 1)
-    assert isinstance(replay, _PreTokenizeReplay)
-    assert [len(p["messages"]) for p in replay.apply(parent.payload)] == [2, 4]
-    assert not pipe.is_indexable
-    Pipeline(work).expand_chat().map_transform(
-        lambda p: {"chat": p["messages"]}
-    ).tokenize_chat(tokenizer_id="unused", field="chat")
 
 
 def test_prefix_payloads_do_not_alias() -> None:

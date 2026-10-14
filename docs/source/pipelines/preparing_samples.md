@@ -67,39 +67,6 @@ tokenized output. If later operations in your pipeline need access to the origin
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized
 output. We recommend to check out the full docstring of all options.
 
-**Expanding Conversations.** Use `pipeline.expand_chat(field="messages")` before
-`tokenize_chat()` to emit one prefix per answered user query:
-
-```text
-U1 → A1 → U2 → A-call → Tool-result → A-answer
-  → U1 → A1
-  → U1 → A1 → U2 → A-call → Tool-result → A-answer
-```
-
-Several assistant/tool exchanges after one user form one sample. Other payload
-fields and preceding history remain available. Queries without an assistant emit
-nothing; empty assistant content counts structurally. Normalize roles and filter
-accidental empty responses upstream.
-
-Expansion does not select supervision. Configure the chat template's generation
-tags to target the desired assistant output in each prefix. Packed prefixes need
-document-isolated model attention. Do not expand datasets already stored as
-prefixes, or change expansion settings when resuming a checkpoint.
-
-Repeated history increases delivered tokens: four 100-token cycles produce
-prefixes of 100, 200, 300 and 400 tokens. Token calibration replays expansion and
-counts all 1,000 tokens against the original row's bytes. Sample weights count
-prefixes; token weights include repeated context. Custom token estimators must
-reproduce expansion themselves.
-
-Rows producing multiple prefixes append the original user-query ordinal to the
-cursor lineage: a parent with lineage `(4,)` produces `(4, 0)` and `(4, 1)` for
-two answered queries. Unanswered queries leave ordinal gaps. A row producing
-only one prefix retains its original lineage, even when a trailing unanswered
-query is trimmed. Use full cursors to distinguish prefixes of one source row.
-Keep expansion and tokenization in one stage to avoid sending repeated history
-between processes.
-
 **Transforming and Filtering Records.** The built-in `Pipeline` operations cover common
 data preparation tasks like tokenization, but many data pipelines will have their own
 specific schema and requirements that will require some amount of custom processing. Use

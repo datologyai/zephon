@@ -17,7 +17,27 @@ log = logging.getLogger(__name__)
 
 
 class ExpandChat(BaseOp):
-    """Emit one prefix per user query containing an assistant message."""
+    """Emit one prefix per answered user query, retaining its complete tool cycle.
+
+    Each A below includes every assistant/tool exchange before the next user::
+
+        input:     U1 -> A1 -> U2 -> A2 -> U3 (unanswered)
+        prefixes:  U1 -> A1
+                   U1 -> A1 -> U2 -> A2
+
+    Empty assistant content counts as an answer. Normalize roles and filter
+    accidental empty answers upstream. Expansion does not select loss targets;
+    configure tokenize_chat separately and isolate packed prefixes in attention.
+
+    Multiple prefixes append original user-query ordinals to cursor lineage;
+    unanswered queries leave gaps. A sole prefix retains the parent's lineage.
+    Siblings own independent nested payloads; the final prefix consumes the source.
+
+    Calibration counts all prefix tokens against original input bytes: four
+    100-token cycles emit 100 + 200 + 300 + 400 = 1,000 tokens. Custom estimators
+    must include this expansion. Keep expansion and tokenization in one stage
+    to avoid serializing repeated history between processes.
+    """
 
     def __init__(self, *, field: str = "messages") -> None:
         super().__init__()
@@ -25,13 +45,16 @@ class ExpandChat(BaseOp):
             raise ValueError("field must name a non-empty messages payload path")
         self.field = field
         self._field_path = tuple(field.split("."))
-        # Logging only; the emitted records do not depend on this latch.
         self._warned_no_user = False
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=False, preserves_cursor_order=True, parallelism=4)
 
     def _messages(self, record: SampleRecord) -> Sequence[Mapping[str, Any]]:
+        """Resolve the field path and validate each message's role.
+
+        ``field="chat.messages"`` reads ``payload -> chat -> messages``.
+        """
         value = record.payload
         for key in self._field_path:
             if not isinstance(value, Mapping) or key not in value:
@@ -55,6 +78,11 @@ class ExpandChat(BaseOp):
     def _prefix_payload(
         self, payload: Any, messages: Sequence[Mapping[str, Any]]
     ) -> dict[str, Any]:
+        """Copy containers along the field path and replace the message sequence.
+
+        ``chat.messages: [U1, A1, U2, A2] -> [U1, A1]``; other fields are shared
+        until process_many deep-copies the non-final siblings.
+        """
         result = current = dict(payload)
         source = payload
         for key in self._field_path[:-1]:
@@ -66,6 +94,11 @@ class ExpandChat(BaseOp):
 
     @staticmethod
     def _child_meta(meta: SampleMeta, ordinal: int, last: bool) -> SampleMeta:
+        """Append the query ordinal; only the final prefix inherits closing refs.
+
+        Lineage ``(4,) -> (4, ordinal)``. Inherited flags ``[open, closed]``
+        become ``[open, open]`` before the last prefix, then ``[open, closed]``.
+        """
         if not meta.contributors:
             return spawn_child(meta, ordinal, is_last_child=last)
         # Only the final prefix inherits its parent's closing contributors.
@@ -74,6 +107,7 @@ class ExpandChat(BaseOp):
         return child.with_contributors(meta.contributors if last else opened)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        """Scan user boundaries, then emit prefixes or closing tombstones."""
         out: list[SampleRecord] = []
         for record in elems:
             if record.meta.tombstone:
