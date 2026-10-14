@@ -103,6 +103,7 @@ def test_chat_calibration_counts_expanded_tokens_over_source_bytes() -> None:
         [dataset],
         {"chat": 1.0},
         chunk_size=1,
+        exhausted_policy="stop",
         token_estimation=TokenEstimation(
             calibration_samples=1,
             calibration_shards_min=1,
@@ -117,7 +118,7 @@ def test_chat_calibration_counts_expanded_tokens_over_source_bytes() -> None:
     )
     assert len(records) == 2
     tokens = sum(len(record.payload["input_ids"]) for record in records)
-    ratio = work.state_dict()["token_ratios"]["chat"]
-    assert ratio["source"] == "measured"
-    assert ratio["tokens_per_byte"] == pytest.approx(tokens / content_bytes(payload))
+    ratio, source = work.state_dict()["token_ratios"]["chat"]
+    assert source == "measured"
+    assert ratio == pytest.approx(tokens / content_bytes(payload))
     assert tokens > len(records[-1].payload["input_ids"])
