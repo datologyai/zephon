@@ -16,6 +16,7 @@ import numpy as np
 from zephon._internal.io.formats.arrow_rows import (
     arrow_array_to_samples,
     configure_pyarrow,
+    copy_array_views,
     require_pyarrow,
     samples_from_columns,
 )
@@ -42,10 +43,12 @@ except ImportError:
 
 
 def _require_vortex() -> ModuleType:
-    """Return Vortex with custom-reader support or explain how to upgrade."""
-    if _vortex is None or not hasattr(_vortex, "open_readable"):
+    """Return Vortex with scan export and mapped reads, or explain how to upgrade."""
+    # Older releases have no ArrayIterator.to_arrow_array or open(memory_map=...).
+    iterator = getattr(_vortex, "ArrayIterator", None)
+    if _vortex is None or not hasattr(iterator, "to_arrow_array"):
         raise ImportError(
-            "Vortex support requires vortex-data>=0.88.0; "
+            "Vortex support requires vortex-data>=0.90.0; "
             + 'install or upgrade with: pip install -U "zephon[vortex]"'
         )
     return _vortex
@@ -106,15 +109,20 @@ def _open_vortex_file(
     path: Path,
     metadata_cache: MetadataCache[str, _VortexMetadata],
     segment_cache: Any | None,
+    *,
+    memory_map: bool = True,
 ) -> tuple[Any, _VortexMetadata]:
     """Open a reader using the store's footer and segment caches."""
     vortex = _require_vortex()
     key = file_cache_key(path)
-    options: dict[str, Any] = (
-        {"segment_cache": segment_cache, "cache_key": key}
-        if segment_cache is not None
-        else {"without_segment_cache": True}
-    )
+    options: dict[str, Any]
+    if memory_map:
+        # The page cache serves a mapped file, so it needs no segment cache.
+        options = {"memory_map": True}
+    elif segment_cache is not None:
+        options = {"segment_cache": segment_cache, "cache_key": key}
+    else:
+        options = {"without_segment_cache": True}
     file = None
 
     def load_metadata() -> _VortexMetadata:
@@ -164,13 +172,17 @@ class VortexShard(RandomAccessShard):
         length: int | None = None,
         metadata_cache: MetadataCache[str, _VortexMetadata] | None = None,
         segment_cache: Any | None = None,
+        memory_map: bool = True,
+        copy_mapped_arrays: bool = True,
     ) -> None:
         self._path = path
+        # Arrays exported from a mapped file can point into the map.
+        self._copy_arrays = memory_map and copy_mapped_arrays
         if metadata_cache is None:
             metadata_cache = MetadataCache(0)
         with _local_io_errors(path):
             self._file, metadata = _open_vortex_file(
-                path, metadata_cache, segment_cache
+                path, metadata_cache, segment_cache, memory_map=memory_map
             )
         self._length = length if length is not None else len(self._file)
         self._export_type = metadata.export_type
@@ -219,10 +231,11 @@ class VortexShard(RandomAccessShard):
             # TODO(MaxiBoether): Follow up upstream on retained-reader point-read
             # setup costs. Reproduction and baseline live in
             # our internal dataloader arena.
-            batch = self._file.scan(
-                indices=_require_vortex().array(selected)
-            ).read_all()
+            scan = self._file.scan(indices=_require_vortex().array(selected))
+
             if self._text_only and len(sorted_unique) == 1:
+                batch = scan.read_all()
+
                 # Scalar access avoids exporting a whole string dictionary.
                 row = batch.scalar_at(0).as_py()
                 if row is not None:
@@ -230,11 +243,24 @@ class VortexShard(RandomAccessShard):
                         {name: [value] for name, value in row.items()}, positions
                     )
                 # Null structs need Arrow's per-field null conversion.
-                # Vortex 0.88's writer rejects nullable root structs; keep this
+                # Vortex's writer rejects nullable root structs; keep this
                 # guard for native arrays supplied by other readers or writers.
-            # ListView export can trim unselected child values before decoding.
-            arrow_array = batch.to_arrow_array(arrow_type=self._export_type)
-        return arrow_array_to_samples(arrow_array, positions)
+                arrow_array = batch.to_arrow_array(arrow_type=self._export_type)
+            else:
+                # One GIL release covers both the read and the export. Scattered
+                # rows come from many Vortex chunks, a few rows each, so one
+                # combined array costs less than an Arrow export per chunk.
+                # Contiguous rows keep their chunks, which avoids a copy.
+                arrow_array = scan.to_arrow_array(
+                    arrow_type=self._export_type, combine_chunks=not contiguous
+                )
+
+        samples = arrow_array_to_samples(arrow_array, positions)
+        if self._copy_arrays:
+            # A view into the map keeps the whole file on disk after the shard
+            # cache evicts it, and the cache no longer counts that space.
+            return copy_array_views(samples)
+        return samples
 
 
 def _list_view_type(kind: Any, pa: Any) -> Any:
@@ -279,9 +305,11 @@ class VortexShardOpener:
         self._metadata_cache = MetadataCache[str, _VortexMetadata](
             options.metadata_cache_entries
         )
+        self._memory_map = options.vortex.memory_map
+        self._safe_mmap = options.vortex.safe_mmap
         self._segment_cache = (
             vortex.SegmentCache(options.vortex.segment_cache_bytes)
-            if options.vortex.segment_cache_bytes
+            if options.vortex.segment_cache_bytes and not self._memory_map
             else None
         )
 
@@ -294,6 +322,8 @@ class VortexShardOpener:
             length=_shard_length(local_ref),
             metadata_cache=self._metadata_cache,
             segment_cache=self._segment_cache,
+            memory_map=self._memory_map,
+            copy_mapped_arrays=self._safe_mmap,
         )
 
     def close(self) -> None:

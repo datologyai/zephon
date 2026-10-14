@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from zephon._internal.ops import fetch as fetch_module
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.stream import EngineSample
-from zephon.io import Dataset
+from zephon.io import Dataset, StoreOptions
 from zephon.ops.base import OpContext, StageInfo
 
 
@@ -149,3 +150,40 @@ def test_fetch_op_traits_and_accumulator() -> None:
     acc_nondet = op.accumulator(deterministic=False, ctx={})
     assert acc_nondet._max_batch == 32
     assert acc_nondet._max_latency_ms == 10
+
+
+@pytest.mark.parametrize(
+    ("ctx_data", "vortex_options", "safe_mmap"),
+    [
+        ({}, {}, True),
+        ({"stage_outputs_copied": False}, {}, True),
+        ({"stage_outputs_copied": True}, {}, False),
+        ({}, {"safe_mmap": False}, False),
+    ],
+)
+def test_fetch_op_copies_mapped_arrays_unless_the_runner_copies(
+    jsonl_dataset: Dataset,
+    monkeypatch: pytest.MonkeyPatch,
+    ctx_data: dict[str, object],
+    vortex_options: dict[str, object],
+    safe_mmap: bool,
+) -> None:
+    options: list[StoreOptions] = []
+
+    def record_store(_datasets: object, **kwargs: StoreOptions) -> object:
+        options.append(kwargs["options"])
+        return object()
+
+    monkeypatch.setattr(fetch_module, "build_multi_dataset_store", record_store)
+    _setup_op(
+        FetchOp(),
+        {
+            "datasets_by_id": {0: jsonl_dataset},
+            "io_options": {"vortex": {"memory_map": False, **vortex_options}},
+            **ctx_data,
+        },
+    )
+
+    assert options[0].vortex.safe_mmap is safe_mmap
+    # The runner's copy changes only safe_mmap.
+    assert options[0].vortex.memory_map is False

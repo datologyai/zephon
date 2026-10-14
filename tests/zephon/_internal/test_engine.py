@@ -404,6 +404,30 @@ def test_engine_batch_with_post_ops_not_inline() -> None:
         eng.close()
 
 
+@pytest.mark.parametrize("tail", [False, True])
+def test_engine_marks_stages_whose_runner_copies_outputs(tail: bool) -> None:
+    """Process stages copy their outputs to send them; local stages do not."""
+    g = Graph()
+    src = g.add("src", DelayById(max_delay_ms=0.0))
+    batch = g.add("batch", Batch(microbatch_size=4), src)
+    if tail:
+        g.add("tail", DelayById(max_delay_ms=0.0), batch)
+
+    plan = Planner().make_plan(g)
+    opts = RuntimeOptions(
+        runner="process", worker_allocation="per_stage_fixed", max_workers=1
+    )
+    eng = Engine(plan, opts, _DummyWorkSource(), resolve_runtime_spec(plan, opts))
+    try:
+        copied = [
+            runner._ctx_services["stage_outputs_copied"] for runner in eng._runners
+        ]
+        assert copied == [True, False]
+        assert "stage_outputs_copied" not in eng._ctx
+    finally:
+        eng.close()
+
+
 # ---------------------------------------------------------------------------
 # max_worker_retries plumbing (RuntimeOptions -> Engine -> ProcessStageRunner)
 # ---------------------------------------------------------------------------

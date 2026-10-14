@@ -339,12 +339,12 @@ def test_vortex_import_error_handling(
 ) -> None:
     """Missing and outdated installations fail before touching storage."""
     monkeypatch.setattr(vortex_format, "_vortex", installed)
-    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0.*pip install -U"):
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.90\.0.*pip install -U"):
         VortexShard(Path("/fake/path.vortex"))
     storage = _RangeOnlyStorage("custom://data", {})
-    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0"):
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.90\.0"):
         VortexFormat().discover(storage.root, storage)
-    with pytest.raises(ImportError, match=r"vortex-data>=0\.88\.0"):
+    with pytest.raises(ImportError, match=r"vortex-data>=0\.90\.0"):
         vortex_format._read_vortex_row_count("missing.vortex", storage, 1)
 
 
@@ -414,7 +414,8 @@ def test_contiguous_read_limits_the_decoded_list_values(
     )
     path = tmp_path / "tokens.vortex"
     vortex.io.write(pa.table({"tokens": array}), str(path))
-    shard = VortexShard(path)
+    # Without the copy, the views show the size of the exported buffer.
+    shard = VortexShard(path, copy_mapped_arrays=False)
     try:
         rows = shard.getsamples(indices)
     finally:
@@ -474,12 +475,12 @@ def test_nullable_native_struct_uses_arrow_table_row_semantics(
         selected = source.take(indices)
         return vortex.ArrayIterator.from_iter(selected.dtype, iter([selected]))
 
-    # Vortex 0.88's file statistics writer rejects nullable root structs. Feed a
+    # Vortex's file statistics writer rejects nullable root structs. Feed a
     # real native nullable array through the reader to exercise conversion alone.
     file = SimpleNamespace(dtype=source.dtype, scan=scan)
     metadata = vortex_format._VortexMetadata(None, source.dtype.to_arrow_type(), True)
     monkeypatch.setattr(
-        vortex_format, "_open_vortex_file", lambda *_args: (file, metadata)
+        vortex_format, "_open_vortex_file", lambda *_args, **_kwargs: (file, metadata)
     )
     shard = VortexShard(tmp_path / "nullable.vortex", length=len(source))
     try:
@@ -827,7 +828,8 @@ def test_opener_retains_only_enabled_caches(
     opener = VortexShardOpener(
         StoreOptions(
             metadata_cache_entries=metadata_entries,
-            vortex=VortexOptions(segment_cache_bytes=segment_bytes),
+            # Segment caches apply to file reads; mapped reads are tested below.
+            vortex=VortexOptions(memory_map=False, segment_cache_bytes=segment_bytes),
         )
     )
     try:
@@ -867,3 +869,85 @@ def test_opener_retains_only_enabled_caches(
         opener.close()
     if segment_bytes:
         segment_cache.clear.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("memory_map", "copy_mapped_arrays", "owned"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_mapped_reads_copy_arrays_unless_disabled(
+    tmp_path: Path,
+    vortex: Any,
+    pa: Any,
+    memory_map: bool,
+    copy_mapped_arrays: bool,
+    owned: bool,
+) -> None:
+    """Mapped reads return owned arrays; duplicate rows keep sharing one array."""
+    path = tmp_path / "tokens.vortex"
+    table = pa.table(
+        {"tokens": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32()))}
+    )
+    vortex.io.write(table, str(path))
+    shard = VortexShard(
+        path, memory_map=memory_map, copy_mapped_arrays=copy_mapped_arrays
+    )
+    try:
+        rows = shard.getsamples([1, 0, 1])
+    finally:
+        shard.close()
+
+    assert [row["tokens"].tolist() for row in rows] == [[3, 4, 5], [1, 2], [3, 4, 5]]
+    assert [row["tokens"].base is None for row in rows] == [owned] * 3
+    assert rows[0]["tokens"] is rows[2]["tokens"] or not owned
+    assert all(not row["tokens"].flags.writeable for row in rows)
+
+
+def test_opener_maps_files_and_copies_arrays_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pa: Any
+) -> None:
+    """Mapped reads, the default, use no segment cache and copy their arrays."""
+    to_arrow_type = mock.Mock(return_value=pa.struct([("value", pa.int64())]))
+    native_open = mock.Mock(
+        side_effect=lambda *_args, **_kwargs: SimpleNamespace(
+            footer=object(), dtype=SimpleNamespace(to_arrow_type=to_arrow_type)
+        )
+    )
+    make_cache = mock.Mock()
+    monkeypatch.setattr(
+        vortex_format,
+        "_require_vortex",
+        lambda: SimpleNamespace(
+            open=native_open, SegmentCache=make_cache, set_worker_threads=mock.Mock()
+        ),
+    )
+    path = tmp_path / "a.vortex"
+    path.write_bytes(b"data")
+    locator = ShardLocator(
+        dataset="test",
+        shard_id=0,
+        format="vortex",
+        root=str(tmp_path),
+        raw=ShardFile(basename="a.vortex", bytes=4, hashes={}),
+    )
+    ref = LocalShardRef(raw=LocalShardFile(path=path, bytes=4), extra={"length": 1})
+
+    opener = VortexShardOpener(StoreOptions())
+    try:
+        shards = [opener.open_shard(locator, ref) for _ in range(2)]
+        assert all(shard._copy_arrays for shard in shards)
+        assert [
+            call.kwargs.get("memory_map") for call in native_open.call_args_list
+        ] == [
+            True,
+            True,
+        ]
+        make_cache.assert_not_called()
+    finally:
+        opener.close()
+
+    opener = VortexShardOpener(StoreOptions(vortex=VortexOptions(safe_mmap=False)))
+    try:
+        assert not opener.open_shard(locator, ref)._copy_arrays
+    finally:
+        opener.close()

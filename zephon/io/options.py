@@ -294,8 +294,18 @@ class ParquetOptions:
 class VortexOptions:
     """Vortex read-cache and process-wide worker-pool configuration.
 
+    ``memory_map`` maps local shards into memory and reads segments as slices
+    of the map. Reads then use no IO threads and no copies, and the page cache
+    takes the place of the segment cache. A mapped shard must not change while
+    it is open. False reads shards through file IO and the segment cache.
+    ``safe_mmap`` copies the arrays of mapped reads into owned memory. Without
+    the copy, one retained sample keeps its whole shard on disk after the shard
+    cache evicts it, and the disk can fill. Process and Ray stages skip the
+    copy, because they copy their outputs to send them. False keeps the
+    zero-copy views.
     ``segment_cache_bytes`` sets the encoded-segment cache's target size per
-    fetch replica. Zero disables it. The target is not a strict memory bound.
+    fetch replica when ``memory_map`` is False. Zero disables it. The target is
+    not a strict memory bound.
     ``worker_threads`` defaults to one background worker; calling fetch threads
     can also execute Vortex work. Zero disables background workers, and explicit
     None leaves the pool unchanged. An explicit count overrides VORTEX_MAX_THREADS;
@@ -303,6 +313,8 @@ class VortexOptions:
     share the pool, so the last applied count wins.
     """
 
+    memory_map: bool = _option(True)
+    safe_mmap: bool = _option(True)
     segment_cache_bytes: int = _option(64 * 1024**2)
     worker_threads: int | None = _option(1, preserve_none=True)
     _provided_fields: frozenset[str] = field(
@@ -313,6 +325,11 @@ class VortexOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
+        if type(self.memory_map) is not bool:
+            raise ValueError("vortex.memory_map must be a boolean")
+        if type(self.safe_mmap) is not bool:
+            raise ValueError("vortex.safe_mmap must be a boolean")
+
         if self.worker_threads is not None:
             _validate_non_negative_int("vortex.worker_threads", self.worker_threads)
         _validate_non_negative_int(

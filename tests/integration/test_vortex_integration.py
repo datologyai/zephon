@@ -110,7 +110,8 @@ def test_store_reuses_caches_across_fetch_groups(
                 enabled=True,
                 root=tmp_path / "cache",
             ),
-            vortex=VortexOptions(segment_cache_bytes=4096),
+            # Segment caches apply to file reads; mapped reads are tested below.
+            vortex=VortexOptions(memory_map=False, segment_cache_bytes=4096),
             metadata_cache_entries=2,
         ),
     )
@@ -136,6 +137,47 @@ def test_store_reuses_caches_across_fetch_groups(
     finally:
         store.close()
     assert calls[0]["segment_cache"].size_bytes == 0
+
+
+@pytest.mark.parametrize("safe_mmap", [True, False])
+def test_thread_fetch_copies_mapped_arrays_unless_disabled(
+    tmp_path: Path, safe_mmap: bool
+) -> None:
+    """Thread stages keep no view of a mapped shard unless safe_mmap is False."""
+    pa = pytest.importorskip("pyarrow")
+    tokens = pa.array([[i, i + 1] for i in range(4)], pa.list_(pa.int32()))
+    vortex.io.write(pa.table({"tokens": tokens}), str(tmp_path / "data.vortex"))
+    work = StaticMixtureWorkSource(
+        [Dataset.from_path("tokens", str(tmp_path), fmt="vortex")],
+        {"tokens": 1.0},
+        chunk_size=2,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = (
+        Pipeline(work)
+        .batch(microbatch_size=2, drop_last=False)
+        .options(
+            runner="threads",
+            max_workers=1,
+            io_options={
+                "cache": {"enabled": False},
+                "vortex": {"safe_mmap": safe_mmap},
+            },
+        )
+    )
+    iterator = iter(pipeline)
+    try:
+        records = [record for batch in iterator for record in batch.records]
+    finally:
+        iterator.close()
+
+    assert sorted(record.payload["tokens"].tolist() for record in records) == [
+        [i, i + 1] for i in range(4)
+    ]
+    assert all(
+        (record.payload["tokens"].base is None) is safe_mmap for record in records
+    )
 
 
 def test_native_open_eviction_is_retried(
