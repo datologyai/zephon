@@ -45,6 +45,7 @@ from zephon.ops.config import LossScope
 if TYPE_CHECKING:
     import tensorflow as tf
     import torch
+    from transformers import BatchEncoding, PreTrainedTokenizerFast
 
 TokenBatch: TypeAlias = Union[
     "np.ndarray",
@@ -66,6 +67,22 @@ class TokenizerLike(Protocol):
     def __call__(
         self, texts: Sequence[str] | str, **kwargs: Any
     ) -> TokenizerOutput: ...
+
+
+def encode_rendered_text(
+    tokenizer: PreTrainedTokenizerFast,
+    text: str,
+    *,
+    max_length: int | None = None,
+    return_offsets_mapping: bool = False,
+) -> BatchEncoding:
+    """Tokenize rendered text without adding specials; truncate at an explicit cap."""
+    kwargs: dict[str, Any] = {"add_special_tokens": False}
+    if max_length is not None:
+        kwargs.update(truncation=True, max_length=max_length)
+    if return_offsets_mapping:
+        kwargs["return_offsets_mapping"] = True
+    return tokenizer(text, **kwargs)
 
 
 def thread_salted_template(template: str) -> str:

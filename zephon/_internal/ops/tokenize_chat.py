@@ -31,6 +31,7 @@ from zephon._internal.token_counting import (
 )
 from zephon._internal.utils.tokenizer import (
     TokenizerLike,
+    encode_rendered_text,
     generation_mask,
     selected_assistant_indices,
     thread_salted_template,
@@ -181,13 +182,6 @@ class TokenizeChat(TokenizeBase):
     ) -> None:
         """Tokenize chat conversations with a chat template and loss mask.
 
-        With ``after_last_user`` and generation tags, check that every selected
-        assistant's reasoning, tool calls, answer and any end-of-turn token appear
-        in its own ``{% generation %}`` blocks, within its message loop. Keep
-        user/tool-result text and content read from other messages outside those
-        blocks. Inspect rendered text and loss masks on representative inputs,
-        because automatic probes can miss content-dependent errors.
-
         Args:
             tokenizer: Pre-instantiated HF-compatible **fast** tokenizer; takes
                 precedence over ``tokenizer_id``.
@@ -221,8 +215,8 @@ class TokenizeChat(TokenizeBase):
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
                 ``after_last_user`` selects every assistant after the final user.
-                The default is ``all_assistant``. For ``after_last_user``, Zephon
-                must identify which input message owns each generation block.
+                The default is ``all_assistant``. With generation tags,
+                ``after_last_user`` identifies the input owner of each block.
                 Synthetic checks run at tokenizer initialization and once per
                 new message/tool structure. Every render checks owners and ranges.
                 ``preflight_tokenizers()`` runs initialization checks early; omitting
@@ -232,6 +226,14 @@ class TokenizeChat(TokenizeBase):
                 Pair ``expand_chat()`` with ``after_last_user`` when a template
                 such as Qwen removes reasoning from earlier user cycles: each
                 prefix then renders its target cycle with reasoning included.
+
+                With ``after_last_user`` and generation tags, check that every
+                selected assistant's reasoning, tool calls, answer and any
+                end-of-turn token appear in its own ``{% generation %}`` blocks,
+                within its message loop. Keep user/tool-result text and content
+                read from other messages outside those blocks. Inspect rendered
+                text and loss masks on representative inputs, because automatic
+                probes can miss content-dependent errors.
             loss_on_last_turn_only: Deprecated alias: True selects ``last_span``;
                 False selects ``all_assistant``. Cannot accompany ``loss_scope``.
             chat_template_kwargs: Static extra kwargs forwarded to
@@ -410,7 +412,6 @@ class TokenizeChat(TokenizeBase):
             self._resolved_span_source == "generation_tags"
             and self.loss_scope == "after_last_user"
         ):
-            # Jinja and Transformers are optional; import only for this path.
             from zephon._internal.utils.chat_template import TemplateVerifier
 
             verifier = TemplateVerifier(
@@ -546,10 +547,7 @@ class TokenizeChat(TokenizeBase):
                     + f"{verifier.template.identity}: nonempty selected assistant "
                     + f"{owner} emitted no generation range; sample={sample_id!r}"
                 )
-        kwargs: dict[str, Any] = {"add_special_tokens": False}
-        if self.max_length is not None:
-            kwargs.update(truncation=True, max_length=self.max_length)
-        encoding = tok(text, **kwargs)
+        encoding = encode_rendered_text(tok, text, max_length=self.max_length)
         return encoding["input_ids"], generation_mask(encoding, spans, selected)
 
     def _via_prefix_diff(
@@ -625,15 +623,12 @@ class TokenizeChat(TokenizeBase):
     def _encode_with_spans(
         self, text: str, spans: list[tuple[int, int]]
     ) -> tuple[list[int], "np.ndarray"]:
-        tok = cast(Any, self.tok)
-        kwargs: dict[str, Any] = {
-            "add_special_tokens": False,
-            "return_offsets_mapping": True,
-        }
-        if self.max_length is not None:
-            kwargs["truncation"] = True
-            kwargs["max_length"] = self.max_length
-        enc = tok(text, **kwargs)
+        enc = encode_rendered_text(
+            cast("PreTrainedTokenizerFast", self.tok),
+            text,
+            max_length=self.max_length,
+            return_offsets_mapping=True,
+        )
         return enc["input_ids"], _mask_from_spans(enc["offset_mapping"], spans)
 
     # Record processing
