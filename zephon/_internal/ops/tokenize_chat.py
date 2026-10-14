@@ -138,8 +138,9 @@ class TokenizeChat(TokenizeBase):
     Renders each conversation to one flat string, tokenizes it once, and marks
     assistant tokens via character spans. Span provenance:
 
-    * ``generation_tags``: the template carries ``{% generation %}`` tags and
-      HF records assistant-token masks during rendering.
+    * ``generation_tags``: HF supplies the assistant mask for ``all_assistant``
+      and ``last_span``. ``after_last_user`` tracks which input message owns
+      each generation block and maps selected ranges through HF's encoding.
     * ``prefix_diff``: spans are reconstructed by prefix-diffing partial
       renders. Auto-selected for untagged templates with ``all_assistant`` or
       ``last_span`` and guarded against position-dependent rendering.
