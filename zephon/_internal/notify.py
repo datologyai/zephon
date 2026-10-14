@@ -9,6 +9,7 @@ them to the engine.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 from zephon.types import (
@@ -44,7 +45,7 @@ class _ContributorNotify(NamedTuple):
     """
 
     lane_id: int
-    entries: list[ContributorRef]
+    entries: Sequence[ContributorRef]
     record_cursor: SampleCursor | None
     delivered: bool = True
 

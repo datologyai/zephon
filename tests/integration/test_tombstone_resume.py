@@ -12,7 +12,10 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.parametrize("runner", ["threads", "process"])
 @pytest.mark.parametrize("downstream", ["map", "batch"])
-def test_resume_after_mid_pipeline_drops(runner: str, downstream: str) -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True])
+def test_resume_after_mid_pipeline_drops(
+    runner: str, downstream: str, mtp_mode: bool
+) -> None:
     def build() -> Pipeline:
         work = StaticMixtureWorkSource(
             [Dataset.from_dict("d", {0: InMemoryShard([{"id": i} for i in range(8)])})],
@@ -27,6 +30,7 @@ def test_resume_after_mid_pipeline_drops(runner: str, downstream: str) -> None:
             pipe.map_transform(lambda p: p)
         return pipe.options(
             runner=runner,
+            mtp_mode=mtp_mode,
             max_workers=2,
             canonical_replicas=1,
             deterministic=True,
