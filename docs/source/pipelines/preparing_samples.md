@@ -90,8 +90,7 @@ Repeated history increases delivered tokens: four 100-token cycles produce
 prefixes of 100, 200, 300 and 400 tokens. Token calibration replays expansion and
 counts all 1,000 tokens against the original row's bytes. Sample weights count
 prefixes; token weights include repeated context. Custom token estimators must
-reproduce expansion themselves. Debug logs report source rows, prefixes,
-no-user rows and unanswered queries.
+reproduce expansion themselves.
 
 Rows producing multiple prefixes append the original user-query ordinal to the
 cursor lineage: a parent with lineage `(4,)` produces `(4, 0)` and `(4, 1)` for
