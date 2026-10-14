@@ -186,7 +186,7 @@ The validation framework is exclusive to custom operators (those you add with `a
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
 own operators and is not validated this way.
 
-### Child completion
+## Child completion
 
 `zephon.ops.children.spawn_child()` appends a child index to the replay lineage.
 For a parent without explicit contributors, only `is_last_child=True` closes the
