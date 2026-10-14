@@ -16,8 +16,10 @@ from zephon.types import (
 
 class _StubEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[int, list[ContributorRef], SampleCursor | None]] = []
-        self.monotone_calls: list[tuple[int, int, list[SampleCursor] | None]] = []
+        self.calls: list[
+            tuple[int, list[ContributorRef], SampleCursor | None, bool]
+        ] = []
+        self.monotone_calls: list[tuple[int, int, int, SampleCursor | None]] = []
         self.delivery_calls: list[int] = []
         self.inflight_chunks_per_lane: dict[int, dict[int, object]] = {}
 
@@ -26,14 +28,20 @@ class _StubEngine:
         lane_id: int,
         entries: list[ContributorRef],
         record_cursor: SampleCursor | None = None,
+        *,
+        advance_replay: bool = True,
     ) -> bool:
-        self.calls.append((lane_id, list(entries), record_cursor))
+        self.calls.append((lane_id, list(entries), record_cursor, advance_replay))
         return True
 
     def notify_monotone(
-        self, lane_id: int, max_chunk_id: int, cursors: list[SampleCursor]
+        self,
+        lane_id: int,
+        max_chunk_id: int,
+        add_k: int,
+        max_cursor: SampleCursor | None,
     ) -> bool:
-        self.monotone_calls.append((lane_id, max_chunk_id, list(cursors)))
+        self.monotone_calls.append((lane_id, max_chunk_id, add_k, max_cursor))
         return True
 
     def record_delivery(self, lane_id: int) -> None:
@@ -96,11 +104,12 @@ def test_pipeline_batch_requires_positive_microbatch() -> None:
         pipe.batch(0)
 
 
-def test_yield_while_notifying_drops_tombstones() -> None:
+@pytest.mark.parametrize("monotone", [False, True])
+def test_yield_while_notifying_drops_tombstones(monotone: bool) -> None:
     pipe = object.__new__(Pipeline)
     stub = _StubEngine()
     object.__setattr__(pipe, "_engine", stub)
-    plan = Plan(stages=[], explain="", indexable=True, preserves_cursor_order=False)
+    plan = Plan(stages=[], explain="", indexable=True, preserves_cursor_order=monotone)
     object.__setattr__(pipe, "_plan", plan)
 
     tomb_meta = SampleMeta(
@@ -115,5 +124,10 @@ def test_yield_while_notifying_drops_tombstones() -> None:
 
     out = list(Pipeline._yield_while_notifying(pipe, [tomb, kept]))
     assert out == [kept]
-    # tombstone still notified for progress
-    assert len(stub.calls) == 2
+    assert len(stub.calls) == (1 if monotone else 2)
+    assert stub.calls[0] == (0, list(tomb.meta.contribution_refs()), None, False)
+    assert stub.delivery_calls == [0]
+    if monotone:
+        assert stub.monotone_calls == [(0, 0, 1, kept.meta.cursor)]
+    else:
+        assert stub.calls[1][2:] == (kept.meta.cursor, True)
