@@ -1793,20 +1793,35 @@ def test_probe_coverage_uses_requested_scope(chat_scope_tokenizer: Any) -> None:
     from zephon.validation import verify_chat_template
 
     messages = copy.deepcopy(CYCLE)
-    messages[-1].pop("reasoning_content")
+    messages.extend(
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "yes"},
+        ]
+    )
     report = verify_chat_template(
         chat_scope_tokenizer,
         TAGGED_TEMPLATE,
-        loss_scope="last_assistant",
+        loss_scope="after_last_user",
         probes=[{"messages": messages}],
     )
     assert report.ok, report.format()
     messages[-1]["reasoning_content"] = "yes"
-    messages.append({"role": "user", "content": "hello"})
     report = verify_chat_template(
         chat_scope_tokenizer,
         TAGGED_TEMPLATE,
-        loss_scope="last_assistant",
+        loss_scope="after_last_user",
         probes=[{"messages": messages}],
     )
     assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)
+
+
+def test_chat_verifier_rejects_invalid_scope(chat_scope_tokenizer: Any) -> None:
+    from tests.helpers.chat import TAGGED_TEMPLATE
+    from zephon.validation import verify_chat_template
+
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, loss_scope="last_assistant"
+    )
+    assert not report.ok
+    assert any("invalid loss_scope" in issue.message for issue in report.errors)

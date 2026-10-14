@@ -167,7 +167,7 @@ class OwnedTemplate:
             from transformers.utils.chat_template_utils import _compile_jinja_template
         except ImportError as error:
             raise RuntimeError(
-                "Message loss scopes require transformers>=4.52; upgrade transformers "
+                "Chat template verification requires transformers>=4.52; upgrade transformers "
                 + "or use loss_scope='all_assistant'/'last_span'."
             ) from error
         environment = _compile_jinja_template("").environment.overlay(
@@ -199,7 +199,9 @@ class OwnedTemplate:
             not isinstance(tools, (list, tuple))
             or any(not isinstance(tool, dict) for tool in tools)
         ):
-            raise ValueError("message scopes require tools as JSON-schema dictionaries")
+            raise ValueError(
+                "chat template verification requires tools as JSON-schema dictionaries"
+            )
         documents = context.get("documents")
         if documents is not None and (
             not isinstance(documents, (list, tuple))
@@ -291,7 +293,9 @@ def _marked_probe(
         elif isinstance(content, list):
             for part in content:
                 if not isinstance(part, dict) or part.get("type") != "text":
-                    raise ValueError("message scopes support text-only content parts")
+                    raise ValueError(
+                        "chat template verification supports text-only content parts"
+                    )
                 if part.get("text"):
                     part["text"] = marker(i, required_output=i in selected)
         elif content is not None and not isinstance(content, str):
@@ -394,7 +398,7 @@ class TemplateVerifier:
         backend = getattr(tokenizer, "backend_tokenizer", None)
         if not getattr(tokenizer, "is_fast", False) or backend is None:
             raise ValueError(
-                "Message loss scopes require a fast Hugging Face tokenizer"
+                "Chat template verification requires a fast Hugging Face tokenizer"
             )
         # Hash the backend directly; the small outer key never copies its JSON.
         # Recompute at construction so tokenizer mutations invalidate old probes.

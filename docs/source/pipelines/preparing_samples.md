@@ -73,11 +73,10 @@ output. We recommend to check out the full docstring of all options.
 |---|---|
 | `all_assistant` (default) | All spans supplied by the span source |
 | `last_span` | The final contiguous run of supervised tokens |
-| `last_assistant` | All generated ranges of the final raw assistant message |
 | `after_last_user` | All generated ranges of assistants after the final raw user |
 
 For `U → A-call → Tool-result → A-answer`, `after_last_user` trains both assistant
-messages; `last_assistant` trains the answer. Tool results remain context.
+messages. Tool results remain context.
 `loss_on_last_turn_only=True` is deprecated in favor of `loss_scope="last_span"`;
 `False` maps to `all_assistant`. Supplying both arguments raises an error.
 
@@ -96,8 +95,8 @@ a conversation ending in an unanswered user has no targets and is dropped.
 Truncation can remove a late query's targets; no earlier assistant is substituted.
 
 The default and `last_span` tagged paths use HF's assistant mask directly.
-`last_assistant` and `after_last_user` track the raw message owning each generation
-block. Their tagged path requires:
+`after_last_user` tracks the raw message owning each generation block.
+Its tagged path requires:
 
 - Transformers 4.52 or later and a fast tokenizer.
 - Generation blocks directly inside loops over input assistant messages. Multiple

@@ -34,7 +34,7 @@ import pickle
 import textwrap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict, get_args
 
 from zephon._internal.ops.tokenize_base import TokenizeBase as _TokenizeBase
 from zephon.ops.accumulators import Accumulator
@@ -1667,7 +1667,7 @@ def verify_chat_template(
 ) -> ValidationReport:
     """Check generation ownership, content coverage and HF token-mask parity.
 
-    Message-based scopes run these checks automatically. This entry point is
+    ``after_last_user`` runs these checks automatically. This entry point is
     useful for template CI, extra fixtures and tagged/stock comparisons.
     Passing probes is evidence, not proof for untested data-dependent branches.
 
@@ -1689,6 +1689,8 @@ def verify_chat_template(
     from zephon._internal.ops.chat_template import TemplateVerifier, _issue
 
     try:
+        if loss_scope not in get_args(LossScope):
+            raise ValueError(f"invalid loss_scope: {loss_scope!r}")
         template = (
             chat_template if chat_template is not None else tokenizer.chat_template
         )

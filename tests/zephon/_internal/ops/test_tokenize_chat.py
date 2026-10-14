@@ -798,9 +798,7 @@ def run(op: TokenizeChat, messages: list[dict[str, Any]]) -> SampleRecord:
 
 
 @pytest.mark.parametrize("mode", ["generation_tags", "prefix_diff", "literal"])
-@pytest.mark.parametrize(
-    "scope", ["all_assistant", "last_span", "last_assistant", "after_last_user"]
-)
+@pytest.mark.parametrize("scope", ["all_assistant", "last_span", "after_last_user"])
 def test_scope_targets_by_source(fast_tokenizer: Any, mode: str, scope: str) -> None:
     kwargs = {
         "chat_template": TAGGED_TEMPLATE
@@ -827,7 +825,7 @@ def test_user_cycle_includes_calls_reasoning_and_answers_excludes_tools(
         CYCLE,
     )
     last = run(
-        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="last_assistant"),
+        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="last_span"),
         CYCLE,
     )
     ids, mask = after.payload["input_ids"], after.payload["loss_mask"]
@@ -945,7 +943,7 @@ def test_deprecated_flag_and_conflict(fast_tokenizer: Any) -> None:
             TokenizeChat(
                 fast_tokenizer,
                 chat_template=UNTAGGED_TEMPLATE,
-                loss_scope="last_assistant",
+                loss_scope="after_last_user",
             ),
             CONVERSATION,
         )
@@ -1051,15 +1049,11 @@ def test_role_and_multimodal_validation_precedes_cached_profile(
         run(op, multimodal)
 
 
-def test_last_assistant_does_not_select_previous_nonempty_message(
+def test_user_cycle_includes_call_before_empty_final_assistant(
     fast_tokenizer: Any,
 ) -> None:
     messages = copy.deepcopy(CYCLE)
     messages[-1] = {"role": "assistant", "content": ""}
-    assert run(
-        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="last_assistant"),
-        messages,
-    ).meta.tombstone
     assert not run(
         TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user"),
         messages,
@@ -1165,7 +1159,7 @@ def test_rendered_prefix_guard_does_not_prove_message_selection(
     [
         ("all_assistant", "tokenizer_kwargs"),
         ("last_span", "padding"),
-        ("last_assistant", "continue_final_message"),
+        ("after_last_user", "continue_final_message"),
         ("after_last_user", "messages"),
         ("after_last_user", "return_offsets_mapping"),
     ],

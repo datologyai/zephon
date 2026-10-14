@@ -35,10 +35,10 @@ The string literals that operator-configuration arguments accept.
    How ``tokenize_chat`` works out which tokens belong to the assistant.
 
 .. py:data:: LossScope
-   :type: Literal['all_assistant', 'last_span', 'last_assistant', 'after_last_user']
+   :type: Literal['all_assistant', 'last_span', 'after_last_user']
 
-   Which assistant spans ``tokenize_chat`` supervises. Message-based scopes
-   automatically verify generation ownership before producing output.
+   Which assistant spans ``tokenize_chat`` supervises. ``after_last_user``
+   automatically verifies generation ownership before producing output.
 
 Accumulator types
 -----------------

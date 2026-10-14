@@ -913,12 +913,11 @@ class Pipeline:
         in the no-template path (``apply_chat_template=False``).
 
         ``loss_scope`` selects all assistant spans (``all_assistant``), the
-        final contiguous mask run (``last_span``), the final raw assistant
-        message (``last_assistant``), or every assistant after the final raw
-        user (``after_last_user``). The default is ``all_assistant``.
+        final contiguous mask run (``last_span``), or every assistant after the
+        final raw user (``after_last_user``). The default is ``all_assistant``.
 
-        Message-based scopes verify tagged templates automatically at setup
-        and check each input structure before output. Preflight only runs setup
+        ``after_last_user`` verifies tagged templates automatically at setup
+        and checks each input structure before output. Preflight only runs setup
         earlier. Generation blocks must belong to input assistant objects;
         unsupported structures raise. Probes cannot prove content isolation
         for every data-dependent branch. ``loss_on_last_turn_only`` is a

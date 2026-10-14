@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_MESSAGE_SCOPES = frozenset({"last_assistant", "after_last_user"})
-
 _VALID_SPAN_SOURCES: tuple[str, ...] = get_args(SpanSource)
 
 # Same detection HF uses to decide whether a template records assistant spans.
@@ -125,8 +123,6 @@ def _selected_owners(
     assistants = {
         i for i, message in enumerate(messages) if message.get("role") == "assistant"
     }
-    if scope == "last_assistant":
-        return {max(assistants)} if assistants else set()
     if scope == "after_last_user":
         users = [
             i for i, message in enumerate(messages) if message.get("role") == "user"
@@ -208,16 +204,15 @@ class TokenizeChat(TokenizeBase):
             span_source: ``"auto"`` picks ``generation_tags`` when the
                 resolved template has ``{% generation %}`` tags, else
                 ``prefix_diff`` (with a setup-time warning). Pin explicitly
-                for reproducibility or testing. Message-based scopes require
+                for reproducibility or testing. ``after_last_user`` requires
                 explicit ``prefix_diff`` when the template is untagged.
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
-                ``last_assistant`` selects the final raw assistant message;
                 ``after_last_user`` selects every assistant after the final user.
-                The default is ``all_assistant``. Message-based tagged scopes
-                verify the template automatically and require generation blocks
-                inside loops over original assistant message objects. Buffered,
-                nested and orphan generation blocks raise. Each new input
+                The default is ``all_assistant``. The ``after_last_user`` tagged
+                path verifies the template automatically and requires generation
+                blocks inside loops over original assistant message objects.
+                Buffered, nested and orphan generation blocks raise. Each new input
                 structure is checked before output; no manual check is needed.
                 Probes cannot certify every data-dependent template branch.
                 Scope selection cannot recover omitted text. A nonempty selected
@@ -396,9 +391,9 @@ class TokenizeChat(TokenizeBase):
             self._resolved_span_source = (
                 "generation_tags" if has_tags else "prefix_diff"
             )
-            if not has_tags and self.loss_scope in _MESSAGE_SCOPES:
+            if not has_tags and self.loss_scope == "after_last_user":
                 raise ValueError(
-                    "message scopes require generation tags or explicit span_source='prefix_diff'"
+                    "after_last_user requires generation tags or explicit span_source='prefix_diff'"
                 )
             if not has_tags:
                 log.warning(
@@ -412,7 +407,7 @@ class TokenizeChat(TokenizeBase):
 
         if (
             self._resolved_span_source == "generation_tags"
-            and self.loss_scope in _MESSAGE_SCOPES
+            and self.loss_scope == "after_last_user"
         ):
             from zephon._internal.ops.chat_template import TemplateVerifier
             from zephon.validation import ValidationError
@@ -470,14 +465,14 @@ class TokenizeChat(TokenizeBase):
                     f"TokenizeChat: sample {sample_id!r} contains a "
                     + "message without a 'role' mapping"
                 )
-        if self.loss_scope in _MESSAGE_SCOPES:
+        if self.loss_scope == "after_last_user":
             for message in messages:
                 content = message.get("content")
                 if isinstance(content, list) and any(
                     not isinstance(part, Mapping) or part.get("type") != "text"
                     for part in content
                 ):
-                    raise ValueError("message scopes require text-only content parts")
+                    raise ValueError("after_last_user requires text-only content parts")
                 if message.get("role") != "assistant" and message.get("tool_calls"):
                     raise ValueError("tool_calls must belong to assistant messages")
         return list(messages)
