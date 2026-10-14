@@ -6,12 +6,27 @@ import json
 import logging
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
+from tests.helpers.chat import (
+    CONVERSATION,
+    CYCLE,
+    GOLDEN_MASK,
+    GOLDEN_TOKENS,
+    POSITION_DEPENDENT_TEMPLATE,
+    SPLIT,
+    TAGGED_TEMPLATE,
+    TAGGED_TEMPLATE_NO_EOS,
+    TOOLS_TEMPLATE,
+    UNTAGGED_TEMPLATE,
+    _messages,
+    make_fast_tokenizer,
+)
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.observability.size_estimator import content_bytes
 from zephon._internal.ops.tokenize_chat import (
@@ -24,94 +39,17 @@ from zephon._internal.token_counting import FatalCountError
 from zephon.io import Dataset, InMemoryShard
 from zephon.ops.config import SpanSource
 from zephon.types import SampleMeta, SampleRecord
+from zephon.validation import ValidationError, verify_chat_template
 from zephon.work.token_estimation import (
     TokenEstimation,
     _measure_dataset,
     prime_token_ratios,
 )
 
-transformers = pytest.importorskip("transformers")
-tokenizers = pytest.importorskip("tokenizers")
-
-
-_WORDS = (
-    "hello hi there how are you good morning the answer is what thanks "
-    "yes no 1 2 4 12 + ? ! . w"
-).split()
-
-#: Both templates render to the identical string; only span provenance differs.
-UNTAGGED_TEMPLATE = (
-    "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}"
-    "<|end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}"
-)
-TAGGED_TEMPLATE = (
-    "{% for message in messages %}{% if message['role'] == 'assistant' %}"
-    "<|assistant|>{% generation %}{{ message['content'] }}<|end|>{% endgeneration %}"
-    "{% else %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endif %}"
-    "{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}"
-)
-#: Assistant turns end without EOS — exercises the conditional EOS finalizer.
-TAGGED_TEMPLATE_NO_EOS = (
-    "{% for message in messages %}{% if message['role'] == 'assistant' %}"
-    "<|assistant|>{% generation %}{{ message['content'] }}{% endgeneration %}"
-    "{% else %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endif %}"
-    "{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}"
-)
-#: The trailing marker moves with the conversation length, so partial renders
-#: are not prefixes of the full render.
-POSITION_DEPENDENT_TEMPLATE = (
-    "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}"
-    "{% if loop.last %}<|sep|>{% endif %}<|end|>{% endfor %}"
-    "{% if add_generation_prompt %}<|assistant|>{% endif %}"
-)
-TOOLS_TEMPLATE = (
-    "{% if tools %}<|sep|>{% endif %}{% if enable_thinking %}<|sep|><|sep|>{% endif %}"
-    + UNTAGGED_TEMPLATE
-)
-
-
-def _messages(*items: tuple[str, Any]) -> list[dict[str, Any]]:
-    return [{"role": role, "content": content} for role, content in items]
-
-
-CONVERSATION = _messages(
-    ("user", "hi there"),
-    ("assistant", "good morning"),
-    ("user", "what is 2 + 2 ?"),
-    ("assistant", "the answer is 4"),
-)
-
-GOLDEN_TOKENS = (
-    "<|user|> hi there <|end|> <|assistant|> good morning <|end|> "
-    "<|user|> what is 2 + 2 ? <|end|> <|assistant|> the answer is 4 <|end|>"
-).split()
-GOLDEN_MASK = [0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
-
 
 @pytest.fixture(scope="module")
 def fast_tokenizer() -> Any:
-    vocab = {"[UNK]": 0}
-    for word in _WORDS:
-        vocab[word] = len(vocab)
-    tok = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab, unk_token="[UNK]"))
-    tok.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
-    fast = transformers.PreTrainedTokenizerFast(
-        tokenizer_object=tok,
-        unk_token="[UNK]",
-        eos_token="<|end|>",
-        pad_token="<|pad|>",
-    )
-    fast.add_special_tokens(
-        {
-            "additional_special_tokens": [
-                "<|user|>",
-                "<|assistant|>",
-                "<|system|>",
-                "<|sep|>",
-            ]
-        }
-    )
-    return fast
+    return make_fast_tokenizer()
 
 
 def _rec(payload: Any, sample_id: tuple[int, int, int] = (0, 0, 0)) -> SampleRecord:
@@ -190,6 +128,8 @@ def test_mode_equivalence_tagged_vs_prefix_diff(fast_tokenizer: Any) -> None:
     )
     conversations = [
         CONVERSATION,
+        CYCLE,
+        SPLIT,
         _messages(
             ("system", "you are good"),
             ("user", "hello"),
@@ -239,7 +179,7 @@ def test_position_dependent_template_hard_errors(fast_tokenizer: Any) -> None:
         op.process_many([_rec({"messages": messages})])
 
 
-def test_loss_on_last_turn_only(fast_tokenizer: Any) -> None:
+def test_last_span_scope(fast_tokenizer: Any) -> None:
     cases: tuple[tuple[str, SpanSource], ...] = (
         (TAGGED_TEMPLATE, "generation_tags"),
         (UNTAGGED_TEMPLATE, "prefix_diff"),
@@ -249,7 +189,7 @@ def test_loss_on_last_turn_only(fast_tokenizer: Any) -> None:
             fast_tokenizer,
             chat_template=template,
             span_source=source,
-            loss_on_last_turn_only=True,
+            loss_scope="last_span",
         )
         record = _run_one(op, {"messages": CONVERSATION})
         expected = [0] * 17 + [1, 1, 1, 1, 1]
@@ -848,3 +788,408 @@ def test_concurrent_masked_renders_share_no_tracker_state(fast_tokenizer: Any) -
         assert np.array_equal(payload["input_ids"], reference["input_ids"])
         assert np.array_equal(payload["loss_mask"], reference["loss_mask"])
         assert int(payload["loss_mask"].sum()) > 0
+
+
+def run(op: TokenizeChat, messages: list[dict[str, Any]]) -> SampleRecord:
+    return op.process_one(
+        SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+            payload={"messages": copy.deepcopy(messages)},
+        )
+    )[0]
+
+
+@pytest.mark.parametrize("mode", ["generation_tags", "prefix_diff", "literal"])
+@pytest.mark.parametrize(
+    "scope", ["all_assistant", "last_span", "last_assistant", "after_last_user"]
+)
+def test_scope_targets_by_source(fast_tokenizer: Any, mode: str, scope: str) -> None:
+    kwargs = {
+        "chat_template": TAGGED_TEMPLATE
+        if mode == "generation_tags"
+        else UNTAGGED_TEMPLATE,
+        "span_source": mode,
+    }
+    if mode == "literal":
+        kwargs = {"apply_chat_template": False}
+    actual = run(TokenizeChat(fast_tokenizer, loss_scope=scope, **kwargs), CONVERSATION)
+    baseline = run(TokenizeChat(fast_tokenizer, **kwargs), CONVERSATION)
+    assert np.array_equal(actual.payload["input_ids"], baseline.payload["input_ids"])
+    assert np.all(actual.payload["loss_mask"] <= baseline.payload["loss_mask"])
+    if scope != "all_assistant":
+        ids = actual.payload["input_ids"][actual.payload["loss_mask"].astype(bool)]
+        assert fast_tokenizer.decode(ids) == "the answer is 4 <|end|>"
+
+
+def test_user_cycle_includes_calls_reasoning_and_answers_excludes_tools(
+    fast_tokenizer: Any,
+) -> None:
+    after = run(
+        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user"),
+        CYCLE,
+    )
+    last = run(
+        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="last_assistant"),
+        CYCLE,
+    )
+    ids, mask = after.payload["input_ids"], after.payload["loss_mask"]
+    assert not mask[ids == fast_tokenizer.convert_tokens_to_ids("hi")].any()
+    assert not mask[ids == fast_tokenizer.convert_tokens_to_ids("12")].any()
+    assert mask[ids == fast_tokenizer.convert_tokens_to_ids("how")].all()
+    assert mask[ids == fast_tokenizer.convert_tokens_to_ids("yes")].all()
+    assert mask.sum() > last.payload["loss_mask"].sum()
+    assert not last.payload["loss_mask"][
+        ids == fast_tokenizer.convert_tokens_to_ids("how")
+    ].any()
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        TAGGED_TEMPLATE + "{% generation %}{{eos_token}}{% endgeneration %}",
+        "{% for m in messages %}{% set x %}{% generation %}{{m.content}}{% endgeneration %}{% endset %}{{x}}{% endfor %}",
+        "{% for m in messages %}{% generation %}{% generation %}{{m.content}}{% endgeneration %}{% endgeneration %}{% endfor %}",
+        "{% include 'other.jinja' %}" + TAGGED_TEMPLATE,
+    ],
+)
+def test_invalid_structure_fails_without_preflight(
+    fast_tokenizer: Any, template: str
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    with pytest.raises((ValueError, ValidationError)):
+        run(op, CONVERSATION)
+    assert op._setup_error is not None
+    with pytest.raises(FatalCountError):
+        op.token_counting_spec().build_counter().plan([]).count(
+            {"messages": CONVERSATION}
+        )
+
+
+def test_profile_detects_omitted_calls_before_emission(fast_tokenizer: Any) -> None:
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="after_last_user"
+    )
+    assert not run(op, CONVERSATION).meta.tombstone
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
+        run(op, CYCLE)
+
+
+def test_tool_content_contamination_detected(fast_tokenizer: Any) -> None:
+    template = SPLIT.replace(
+        "{{m.content}}<|end|>{% endgeneration %}",
+        '{{m.content}}{% if loop.previtem is defined and loop.previtem.role == "tool" %}{{loop.previtem.content}}{% endif %}<|end|>{% endgeneration %}',
+    )
+    with pytest.raises(ValidationError, match="CHAT_CONTENT_OWNERSHIP"):
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+            ),
+            CYCLE,
+        )
+
+
+def test_truncation_never_retargets_earlier_assistant(fast_tokenizer: Any) -> None:
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        max_length=10,
+    )
+    assert run(op, CONVERSATION).meta.tombstone
+    assert run(
+        TokenizeChat(
+            fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="after_last_user"
+        ),
+        CONVERSATION + [{"role": "user", "content": "hello"}],
+    ).meta.tombstone
+
+
+def test_default_and_last_span_use_hf_without_ownership_verifier(
+    fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zephon._internal.ops import chat_template
+
+    monkeypatch.setattr(
+        chat_template,
+        "TemplateVerifier",
+        lambda *a, **k: pytest.fail("unexpected verifier"),
+    )
+    for scope in ("all_assistant", "last_span"):
+        output = run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope=scope
+            ),
+            CONVERSATION,
+        )
+        assert output.payload["loss_mask"].any()
+
+
+def test_deprecated_flag_and_conflict(fast_tokenizer: Any) -> None:
+    with pytest.warns(FutureWarning):
+        old = TokenizeChat(
+            fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_on_last_turn_only=True
+        )
+    new = TokenizeChat(
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="last_span"
+    )
+    assert np.array_equal(
+        run(old, CONVERSATION).payload["loss_mask"],
+        run(new, CONVERSATION).payload["loss_mask"],
+    )
+    with pytest.raises(ValueError, match="not both"):
+        TokenizeChat(
+            fast_tokenizer, loss_scope="last_span", loss_on_last_turn_only=False
+        )
+    with pytest.raises(ValueError, match="explicit"):
+        run(
+            TokenizeChat(
+                fast_tokenizer,
+                chat_template=UNTAGGED_TEMPLATE,
+                loss_scope="last_assistant",
+            ),
+            CONVERSATION,
+        )
+
+
+def test_shared_instance_rendering_and_copy(fast_tokenizer: Any) -> None:
+    op = TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
+    expected = run(op, CYCLE).payload["loss_mask"]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        actual = list(
+            pool.map(lambda _: run(op, CYCLE).payload["loss_mask"], range(24))
+        )
+    assert all(np.array_equal(mask, expected) for mask in actual)
+    assert np.array_equal(run(copy.deepcopy(op), CYCLE).payload["loss_mask"], expected)
+
+
+def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
+    from zephon._internal.ops.chat_template import OwnedTemplate
+
+    nulls = [{**m, "tool_calls": None, "reasoning_content": None} for m in CONVERSATION]
+    op = TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
+    assert not run(op, nulls).meta.tombstone
+    bad_presence = TAGGED_TEMPLATE.replace(
+        "message['role'] == 'assistant'",
+        "message['role'] == 'assistant' or 'tool_calls' in message",
+    )
+    with pytest.raises(ValidationError, match="not assistant"):
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=bad_presence, loss_scope="after_last_user"
+            ),
+            nulls,
+        )
+    lists = [
+        {**m, "content": [{"type": "text", "text": m["content"]}]} for m in CONVERSATION
+    ]
+    drops_lists = TAGGED_TEMPLATE.replace(
+        "{{ message['content'] }}",
+        "{{ message['content'] if message['content'] is string else '' }}",
+    )
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=drops_lists, loss_scope="after_last_user"
+            ),
+            lists,
+        )
+    messages = [CONVERSATION[0], CONVERSATION[1], CONVERSATION[0]]
+    text, spans = OwnedTemplate(TAGGED_TEMPLATE).render(messages, {})
+    assert text.count("hi there") == 2
+    assert {owner for owner, *_ in spans} == {1}
+
+
+def test_profile_key_covers_reasoning_flags_and_json_argument_shape(
+    fast_tokenizer: Any,
+) -> None:
+    from zephon._internal.ops.chat_template import _profile
+
+    assert _profile({"arguments": '{"a":"x"}'}) != _profile({"arguments": '{"b":"x"}'})
+    template = (
+        "{% if enable_thinking %}"
+        + SPLIT
+        + "{% else %}"
+        + TAGGED_TEMPLATE
+        + "{% endif %}"
+    )
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    op._ids_and_mask({"messages": CYCLE, "enable_thinking": True}, "fixture")
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
+        op._ids_and_mask({"messages": CYCLE, "enable_thinking": False}, "fixture")
+
+
+def test_real_rows_check_missing_owners_after_profile_cache(
+    fast_tokenizer: Any,
+) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "message['role'] == 'assistant'",
+        "message['role'] == 'assistant' and message.content != 'skip'",
+    )
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    run(op, CONVERSATION)
+    changed = copy.deepcopy(CONVERSATION)
+    changed[-1]["content"] = "skip"
+    with pytest.raises(ValueError, match="emitted no generation range"):
+        run(op, changed)
+
+
+def test_role_and_multimodal_validation_precedes_cached_profile(
+    fast_tokenizer: Any,
+) -> None:
+    op = TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
+    run(op, CONVERSATION)
+    wrapped = copy.deepcopy(CONVERSATION)
+    wrapped[-2]["content"] = "<tool_response>result</tool_response>"
+    assert not run(op, wrapped).meta.tombstone
+    multimodal = copy.deepcopy(CONVERSATION)
+    multimodal[0]["content"] = [{"type": "image", "image": "unused"}]
+    with pytest.raises(ValueError, match="text-only"):
+        run(op, multimodal)
+
+
+def test_last_assistant_does_not_select_previous_nonempty_message(
+    fast_tokenizer: Any,
+) -> None:
+    messages = copy.deepcopy(CYCLE)
+    messages[-1] = {"role": "assistant", "content": ""}
+    assert run(
+        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="last_assistant"),
+        messages,
+    ).meta.tombstone
+    assert not run(
+        TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user"),
+        messages,
+    ).meta.tombstone
+
+
+def test_rebinding_message_loop_is_rejected(fast_tokenizer: Any) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "{% generation %}", "{% set message = messages[-1] %}{% generation %}"
+    )
+    with pytest.raises(ValueError, match="rebinding"):
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+            ),
+            CONVERSATION,
+        )
+
+
+def test_untagged_history_is_allowed(fast_tokenizer: Any) -> None:
+    template = (
+        "{% set ns=namespace(user=0) %}{% for m in messages %}{% if m.role == 'user' %}{% set ns.user=loop.index0 %}{% endif %}{% endfor %}"
+        + TAGGED_TEMPLATE.replace(
+            "message['role'] == 'assistant'",
+            "message['role'] == 'assistant' and loop.index0 > ns.user",
+        )
+    )
+    report = verify_chat_template(fast_tokenizer, template)
+    assert report.ok, report.format()
+    result = run(
+        TokenizeChat(
+            fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+        ),
+        CONVERSATION,
+    )
+    assert (
+        fast_tokenizer.decode(
+            result.payload["input_ids"][result.payload["loss_mask"].astype(bool)]
+        )
+        == "the answer is 4 <|end|>"
+    )
+
+
+def test_empty_generated_range_for_nonempty_selected_message_raises(
+    fast_tokenizer: Any,
+) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "{{ message['content'] }}<|end|>",
+        "{{ message.content if message.content != 'skip' else '' }}",
+    )
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    run(op, CONVERSATION)
+    changed = copy.deepcopy(CONVERSATION)
+    changed[-1]["content"] = "skip"
+    with pytest.raises(ValueError, match="emitted no generation range"):
+        run(op, changed)
+
+
+def test_rendered_prefix_guard_does_not_prove_message_selection(
+    fast_tokenizer: Any,
+) -> None:
+    template = (
+        "{% for m in messages if m.role == 'user' %}<|user|>{{m.content}}<|end|>{% endfor %}"
+        "{% if messages[-1].role == 'assistant' %}{% for m in messages if m.role == 'assistant' %}"
+        "<|assistant|>{% generation %}{{m.content}}<|end|>{% endgeneration %}{% endfor %}{% endif %}"
+    )
+    full = fast_tokenizer.apply_chat_template(
+        CONVERSATION, chat_template=template, tokenize=False
+    )
+    prefix = fast_tokenizer.apply_chat_template(
+        CONVERSATION[:3], chat_template=template, tokenize=False
+    )
+    assert full.startswith(prefix)
+    hf = fast_tokenizer.apply_chat_template(
+        CONVERSATION,
+        chat_template=template,
+        return_dict=True,
+        return_assistant_tokens_mask=True,
+    )
+    boundary_mask = np.asarray(hf["assistant_masks"])
+    boundary_mask[: hf.char_to_token(0, len(prefix))] = 0
+    assert "good morning" in fast_tokenizer.decode(
+        np.asarray(hf["input_ids"])[boundary_mask.astype(bool)]
+    )
+    result = run(
+        TokenizeChat(
+            fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+        ),
+        CONVERSATION,
+    )
+    assert (
+        fast_tokenizer.decode(
+            result.payload["input_ids"][result.payload["loss_mask"].astype(bool)]
+        )
+        == "the answer is 4 <|end|>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scope", "key"),
+    [
+        ("all_assistant", "tokenizer_kwargs"),
+        ("last_span", "padding"),
+        ("last_assistant", "continue_final_message"),
+        ("after_last_user", "messages"),
+        ("after_last_user", "return_offsets_mapping"),
+    ],
+)
+def test_reserved_controls_apply_to_every_scope(
+    fast_tokenizer: Any, scope: str, key: str
+) -> None:
+    with pytest.raises(ValueError, match="operator-owned"):
+        TokenizeChat(fast_tokenizer, loss_scope=scope, chat_template_kwargs={key: None})
+
+
+def test_tool_loop_rebinding_inside_generation_retains_message_owner(
+    fast_tokenizer: Any,
+) -> None:
+    template = SPLIT.replace(
+        "{{m.tool_calls|tojson}}",
+        "{% for call in m.tool_calls %}{% set call = call.function %}{{call|tojson}}{% endfor %}",
+    )
+    result = run(
+        TokenizeChat(
+            fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+        ),
+        CYCLE,
+    )
+    assert result.payload["loss_mask"].any()

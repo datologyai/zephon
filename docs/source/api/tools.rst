@@ -8,3 +8,10 @@ builds an index in :doc:`../datasets/parquet` and
 .. automodule:: zephon.build_index
    :members:
    :show-inheritance:
+
+Chat template verification
+--------------------------
+
+Message-based loss scopes run verification automatically.
+:func:`zephon.validation.verify_chat_template` exposes additional fixtures and
+stock-template comparisons for template development.

@@ -8,9 +8,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
+import warnings
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Literal,
     Mapping,
@@ -30,11 +33,16 @@ from zephon._internal.token_counting import (
 )
 from zephon._internal.utils.tokenizer import TokenizerLike
 from zephon.ops.children import tombstones_for_record
-from zephon.ops.config import SpanSource
+from zephon.ops.config import LossScope, SpanSource
 from zephon.ops.traits import OpTraits
 from zephon.types import SamplePayloadDict, SampleRecord
 
+if TYPE_CHECKING:
+    from zephon._internal.ops.chat_template import TemplateVerifier
+
 log = logging.getLogger(__name__)
+
+_MESSAGE_SCOPES = frozenset({"last_assistant", "after_last_user"})
 
 _VALID_SPAN_SOURCES: tuple[str, ...] = get_args(SpanSource)
 
@@ -54,6 +62,11 @@ _RESERVED_RENDER_KWARGS = frozenset(
         "max_length",
         "return_tensors",
         "return_attention_mask",
+        "continue_final_message",
+        "tokenizer_kwargs",
+        "padding",
+        "messages",
+        "return_offsets_mapping",
     }
 )
 
@@ -63,9 +76,8 @@ def _mask_from_spans(
 ) -> "np.ndarray":
     """Mark tokens whose character range overlaps any supervised span.
 
-    Overlap (not containment) matches HF's ``char_to_token``-based marking:
-    a token straddling a span boundary is supervised. Zero-width offsets
-    never overlap.
+    A token straddling a span boundary is supervised. Zero-width offsets
+    never overlap. Generation-tag masks use HF's endpoint rule separately.
     """
     mask = np.zeros(len(offsets), dtype=np.uint8)
     if not len(offsets) or not spans:
@@ -106,6 +118,23 @@ def _thread_salted_template(template: str) -> str:
     return template + f'{{{{ "zephon-render-slot-{threading.get_ident()}" and "" }}}}'
 
 
+def _selected_owners(
+    messages: Sequence[Mapping[str, Any]], scope: LossScope
+) -> set[int]:
+    """Select raw assistant indices before rendering or truncation."""
+    assistants = {
+        i for i, message in enumerate(messages) if message.get("role") == "assistant"
+    }
+    if scope == "last_assistant":
+        return {max(assistants)} if assistants else set()
+    if scope == "after_last_user":
+        users = [
+            i for i, message in enumerate(messages) if message.get("role") == "user"
+        ]
+        return {i for i in assistants if users and i > users[-1]}
+    return assistants
+
+
 class TokenizeChat(TokenizeBase):
     """Tokenize chat conversations into ids plus a supervised-token loss mask.
 
@@ -115,8 +144,8 @@ class TokenizeChat(TokenizeBase):
     * ``generation_tags``: the template carries ``{% generation %}`` tags and
       HF records assistant-token masks during rendering.
     * ``prefix_diff``: spans are reconstructed by prefix-diffing partial
-      renders. Auto-selected for untagged templates and guarded against
-      position-dependent rendering.
+      renders. Auto-selected for untagged templates with ``all_assistant`` or
+      ``last_span`` and guarded against position-dependent rendering.
     * ``apply_chat_template=False``: message contents are concatenated
       verbatim, with EOS appended to assistant turns, so spans are exact.
 
@@ -139,7 +168,8 @@ class TokenizeChat(TokenizeBase):
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
-        loss_on_last_turn_only: bool = False,
+        loss_scope: LossScope | None = None,
+        loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -178,8 +208,24 @@ class TokenizeChat(TokenizeBase):
             span_source: ``"auto"`` picks ``generation_tags`` when the
                 resolved template has ``{% generation %}`` tags, else
                 ``prefix_diff`` (with a setup-time warning). Pin explicitly
-                for reproducibility or testing.
-            loss_on_last_turn_only: Supervise only the final assistant turn.
+                for reproducibility or testing. Message-based scopes require
+                explicit ``prefix_diff`` when the template is untagged.
+            loss_scope: ``all_assistant`` selects every assistant span;
+                ``last_span`` selects the final contiguous supervised run;
+                ``last_assistant`` selects the final raw assistant message;
+                ``after_last_user`` selects every assistant after the final user.
+                The default is ``all_assistant``. Message-based tagged scopes
+                verify the template automatically and require generation blocks
+                inside loops over original assistant message objects. Buffered,
+                nested and orphan generation blocks raise. Each new input
+                structure is checked before output; no manual check is needed.
+                Probes cannot certify every data-dependent template branch.
+                Scope selection cannot recover omitted text. A nonempty selected
+                assistant without a nonempty generation range raises. Empty
+                selections or targets removed by truncation are dropped. Changing
+                scope on checkpoint resume is unsupported and undetected.
+            loss_on_last_turn_only: Deprecated alias: True selects ``last_span``;
+                False selects ``all_assistant``. Cannot accompany ``loss_scope``.
             chat_template_kwargs: Static extra kwargs forwarded to
                 ``apply_chat_template`` (template context variables).
             tools_field: Dot-separated payload path of per-sample tools passed
@@ -193,6 +239,28 @@ class TokenizeChat(TokenizeBase):
             max_batch: Accumulator batch size.
             max_latency_ms: Accumulator latency bound (non-deterministic runs).
         """
+        if loss_scope is not None and loss_on_last_turn_only is not None:
+            raise ValueError("supply loss_scope or loss_on_last_turn_only, not both")
+        if loss_on_last_turn_only is not None:
+            if type(loss_on_last_turn_only) is not bool:
+                raise TypeError("loss_on_last_turn_only must be a bool")
+            frame = sys._getframe(1)
+            stacklevel = 2
+            while frame and frame.f_globals.get("__name__", "").startswith("zephon."):
+                stacklevel += 1
+                frame = frame.f_back
+            del frame
+            warnings.warn(
+                "loss_on_last_turn_only is deprecated; use loss_scope='last_span' "
+                + "or loss_scope='all_assistant'",
+                FutureWarning,
+                stacklevel=stacklevel,
+            )
+            loss_scope = "last_span" if loss_on_last_turn_only else "all_assistant"
+        if loss_scope is None:
+            loss_scope = "all_assistant"
+        if loss_scope not in get_args(LossScope):
+            raise ValueError(f"invalid loss_scope: {loss_scope!r}")
         if span_source not in _VALID_SPAN_SOURCES:
             raise ValueError(
                 f"span_source must be one of {_VALID_SPAN_SOURCES}, got {span_source!r}"
@@ -240,7 +308,8 @@ class TokenizeChat(TokenizeBase):
         self.apply_chat_template = apply_chat_template
         self.chat_template = self._read_template(chat_template)
         self.span_source: SpanSource = span_source
-        self.loss_on_last_turn_only = loss_on_last_turn_only
+        self.loss_scope: LossScope = loss_scope
+        self._template_verifier: TemplateVerifier | None = None
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         self.tools_field = tools_field
         self.enable_thinking_field = enable_thinking_field
@@ -255,6 +324,15 @@ class TokenizeChat(TokenizeBase):
         self._eos_str: str | None = None
         # Logging-only latch; outputs stay independent across process_many calls.
         self._warned_unsupervised_drop = False
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        if self._template_verifier is not None:
+            # Compiled Jinja objects are not picklable. Setup reuses process-local
+            # compilation and successful verification caches after copying.
+            state["_template_verifier"] = None
+            state["_tokenizer_instantiated"] = False
+        return state
 
     @staticmethod
     def _read_template(template: str | os.PathLike[str] | None) -> str | None:
@@ -318,6 +396,10 @@ class TokenizeChat(TokenizeBase):
             self._resolved_span_source = (
                 "generation_tags" if has_tags else "prefix_diff"
             )
+            if not has_tags and self.loss_scope in _MESSAGE_SCOPES:
+                raise ValueError(
+                    "message scopes require generation tags or explicit span_source='prefix_diff'"
+                )
             if not has_tags:
                 log.warning(
                     "TokenizeChat: chat template has no {%% generation %%} tags; "
@@ -327,6 +409,21 @@ class TokenizeChat(TokenizeBase):
                 )
         else:
             self._resolved_span_source = self.span_source
+
+        if (
+            self._resolved_span_source == "generation_tags"
+            and self.loss_scope in _MESSAGE_SCOPES
+        ):
+            from zephon._internal.ops.chat_template import TemplateVerifier
+            from zephon.validation import ValidationError
+
+            verifier = TemplateVerifier(
+                tok, template, self.chat_template_kwargs, self.loss_scope
+            )
+            report = verifier.setup_report()
+            if not report.ok:
+                raise ValidationError(report)
+            self._template_verifier = verifier
 
         if self._resolved_span_source == "prefix_diff":
             # The generation prompt anchors assistant content, excluding role headers.
@@ -373,6 +470,16 @@ class TokenizeChat(TokenizeBase):
                     f"TokenizeChat: sample {sample_id!r} contains a "
                     + "message without a 'role' mapping"
                 )
+        if self.loss_scope in _MESSAGE_SCOPES:
+            for message in messages:
+                content = message.get("content")
+                if isinstance(content, list) and any(
+                    not isinstance(part, Mapping) or part.get("type") != "text"
+                    for part in content
+                ):
+                    raise ValueError("message scopes require text-only content parts")
+                if message.get("role") != "assistant" and message.get("tool_calls"):
+                    raise ValueError("tool_calls must belong to assistant messages")
         return list(messages)
 
     def _render_kwargs(self, payload: Any) -> dict[str, Any]:
@@ -413,6 +520,44 @@ class TokenizeChat(TokenizeBase):
             mask_raw = mask_raw[0]
         return ids, np.asarray(mask_raw, dtype=np.uint8)
 
+    def _via_owned_generation_tags(
+        self,
+        messages: list[Mapping[str, Any]],
+        render_kwargs: dict[str, Any],
+        sample_id: Any,
+    ) -> tuple[list[int], "np.ndarray"]:
+        from zephon._internal.ops.chat_template import generation_mask
+
+        verifier = self._template_verifier
+        assert verifier is not None
+        verifier.require_profile(
+            messages,
+            render_kwargs,
+            context=f"loss_scope={self.loss_scope!r}, template={verifier.template.identity}, sample={sample_id!r}",
+        )
+        tok = cast(Any, self.tok)
+        text, spans = verifier.template.render(
+            messages, {**tok.special_tokens_map, **render_kwargs}
+        )
+        selected = _selected_owners(messages, self.loss_scope)
+        rendered_owners = {owner for owner, start, end, _ in spans if end > start}
+        for owner in selected - rendered_owners:
+            message = messages[owner]
+            if any(
+                message.get(key)
+                for key in ("content", "reasoning_content", "reasoning", "tool_calls")
+            ):
+                raise ValueError(
+                    f"TokenizeChat: loss_scope={self.loss_scope!r}, template="
+                    + f"{verifier.template.identity}: nonempty selected assistant "
+                    + f"{owner} emitted no generation range; sample={sample_id!r}"
+                )
+        kwargs: dict[str, Any] = {"add_special_tokens": False}
+        if self.max_length is not None:
+            kwargs.update(truncation=True, max_length=self.max_length)
+        encoding = tok(text, **kwargs)
+        return encoding["input_ids"], generation_mask(encoding, spans, selected)
+
     def _via_prefix_diff(
         self, messages: list[Mapping[str, Any]], render_kwargs: dict[str, Any]
     ) -> tuple[list[int], "np.ndarray"]:
@@ -428,6 +573,7 @@ class TokenizeChat(TokenizeBase):
             )
 
         full = render(messages, False)
+        selected = _selected_owners(messages, self.loss_scope)
         spans: list[tuple[int, int]] = []
         for i, message in enumerate(messages):
             if message.get("role") != "assistant":
@@ -442,7 +588,8 @@ class TokenizeChat(TokenizeBase):
                     + "loss mask. Provide a {% generation %}-tagged template "
                     + "variant via chat_template=."
                 )
-            spans.append((len(prefix), len(upto)))
+            if i in selected:
+                spans.append((len(prefix), len(upto)))
         return self._encode_with_spans(full, spans)
 
     def _via_no_template(
@@ -453,7 +600,8 @@ class TokenizeChat(TokenizeBase):
         parts: list[str] = []
         spans: list[tuple[int, int]] = []
         cursor = 0
-        for message in messages:
+        selected = _selected_owners(messages, self.loss_scope)
+        for i, message in enumerate(messages):
             content = message.get("content", "")
             if isinstance(content, list):
                 texts: list[str] = []
@@ -472,7 +620,8 @@ class TokenizeChat(TokenizeBase):
             if message.get("role") == "assistant":
                 parts.append(content)
                 parts.append(eos)
-                spans.append((cursor, cursor + len(content) + len(eos)))
+                if i in selected:
+                    spans.append((cursor, cursor + len(content) + len(eos)))
                 cursor += len(content) + len(eos)
             else:
                 parts.append(content)
@@ -509,11 +658,16 @@ class TokenizeChat(TokenizeBase):
         else:
             render_kwargs = self._render_kwargs(payload)
             if self._resolved_span_source == "generation_tags":
-                ids, mask = self._via_generation_tags(messages, render_kwargs)
+                if self._template_verifier is not None:
+                    ids, mask = self._via_owned_generation_tags(
+                        messages, render_kwargs, sample_id
+                    )
+                else:
+                    ids, mask = self._via_generation_tags(messages, render_kwargs)
             else:
                 ids, mask = self._via_prefix_diff(messages, render_kwargs)
 
-        if self.loss_on_last_turn_only:
+        if self.loss_scope == "last_span":
             mask = _last_span_only(mask)
 
         # Templates may omit the final EOS. Copying the previous mask bit
@@ -567,13 +721,14 @@ class TokenizeChat(TokenizeBase):
         if record.meta.tombstone:
             return [record]
 
-        result = self._tokenize_delivery(record.payload, record.meta.sample_id)
+        source = record.meta.cursor
+        result = self._tokenize_delivery(record.payload, source)
 
         if isinstance(result, str):
             if result == "degenerate":
                 log.debug(
                     "TokenizeChat: dropping degenerate sample %r (<2 tokens)",
-                    record.meta.sample_id,
+                    record.meta.cursor,
                 )
             elif not self._warned_unsupervised_drop:
                 self._warned_unsupervised_drop = True
@@ -581,12 +736,12 @@ class TokenizeChat(TokenizeBase):
                     "TokenizeChat: dropping sample %r — no supervised tokens "
                     + "(all-zero loss mask, e.g. truncation swallowed every "
                     + "assistant token). Further drops are logged at DEBUG.",
-                    record.meta.sample_id,
+                    record.meta.cursor,
                 )
             else:
                 log.debug(
                     "TokenizeChat: dropping unsupervised sample %r",
-                    record.meta.sample_id,
+                    record.meta.cursor,
                 )
             return tombstones_for_record(record)
 
@@ -632,7 +787,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
     chat_template: str | None = None
     apply_chat_template: bool = True
     span_source: SpanSource = "auto"
-    loss_on_last_turn_only: bool = False
+    loss_scope: LossScope = "all_assistant"
     chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     tools_field: str = "tools"
     enable_thinking_field: str = "enable_thinking"
@@ -649,7 +804,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
             chat_template=op.chat_template,
             apply_chat_template=op.apply_chat_template,
             span_source=op.span_source,
-            loss_on_last_turn_only=op.loss_on_last_turn_only,
+            loss_scope=op.loss_scope,
             chat_template_kwargs=tuple(sorted(op.chat_template_kwargs.items())),
             tools_field=op.tools_field,
             enable_thinking_field=op.enable_thinking_field,
@@ -667,7 +822,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
                 chat_template=self.chat_template,
                 apply_chat_template=self.apply_chat_template,
                 span_source=self.span_source,
-                loss_on_last_turn_only=self.loss_on_last_turn_only,
+                loss_scope=self.loss_scope,
                 chat_template_kwargs=dict(self.chat_template_kwargs),
                 tools_field=self.tools_field,
                 enable_thinking_field=self.enable_thinking_field,

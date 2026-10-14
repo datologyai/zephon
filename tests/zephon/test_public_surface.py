@@ -69,6 +69,7 @@ EXPECTED_ALL = {
         "BaseOp",
         "CountingAccumulator",
         "DomainGroups",
+        "LossScope",
         "MissingFieldMode",
         "OpContext",
         "OpTraits",
@@ -152,10 +153,12 @@ EXPECTED_ALL = {
         "build_index",
     ],
     "zephon.validation": [
+        "ChatTemplateProbe",
         "Issue",
         "ValidationError",
         "ValidationReport",
         "preflight_tokenizers",
+        "verify_chat_template",
     ],
     "zephon.debug": [
         "DatasetInspector",
@@ -238,6 +241,7 @@ EXPECTED_ALL = {
         "tombstones_for_record",
     ],
     "zephon.ops.config": [
+        "LossScope",
         "MissingFieldMode",
         "PackingAlgorithm",
         "SpanSource",

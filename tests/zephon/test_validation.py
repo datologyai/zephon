@@ -1747,3 +1747,66 @@ def test_preflight_aggregates_issues_in_graph_order(
     assert [i.code for i in report.issues] == ["TOKENIZER_PREFLIGHT_FAILED"] * 2
     assert "text-model" in report.issues[0].message
     assert "chat-model" in report.issues[1].message
+
+
+@pytest.fixture
+def chat_scope_tokenizer() -> Any:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    return make_fast_tokenizer()
+
+
+def test_public_verifier_requires_stock_identity_and_marker_coverage(
+    chat_scope_tokenizer: Any,
+) -> None:
+    from tests.helpers.chat import (
+        CYCLE,
+        TAGGED_TEMPLATE,
+        UNTAGGED_TEMPLATE,
+    )
+    from zephon.validation import verify_chat_template
+
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, stock_template=UNTAGGED_TEMPLATE
+    )
+    assert report.ok, report.format()
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        stock_template=UNTAGGED_TEMPLATE + "extra",
+    )
+    assert not report.ok
+    assert any(i.code == "CHAT_STOCK_IDENTITY" for i in report.errors)
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, probes=[{"messages": CYCLE}]
+    )
+    assert any(i.code == "CHAT_REQUIRED_CONTENT" for i in report.errors)
+
+
+def test_probe_coverage_uses_requested_scope(chat_scope_tokenizer: Any) -> None:
+    import copy
+
+    from tests.helpers.chat import (
+        CYCLE,
+        TAGGED_TEMPLATE,
+    )
+    from zephon.validation import verify_chat_template
+
+    messages = copy.deepcopy(CYCLE)
+    messages[-1].pop("reasoning_content")
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="last_assistant",
+        probes=[{"messages": messages}],
+    )
+    assert report.ok, report.format()
+    messages[-1]["reasoning_content"] = "yes"
+    messages.append({"role": "user", "content": "hello"})
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="last_assistant",
+        probes=[{"messages": messages}],
+    )
+    assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)

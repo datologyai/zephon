@@ -60,6 +60,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    LossScope,
     MissingFieldMode,
     PackingAlgorithm,
     SpanSource,
@@ -894,7 +895,8 @@ class Pipeline:
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
-        loss_on_last_turn_only: bool = False,
+        loss_scope: LossScope | None = None,
+        loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -909,6 +911,23 @@ class Pipeline:
         render+tokenize with assistant spans from ``{% generation %}`` tags,
         a guarded prefix-diff fallback for untagged templates, or exact spans
         in the no-template path (``apply_chat_template=False``).
+
+        ``loss_scope`` selects all assistant spans (``all_assistant``), the
+        final contiguous mask run (``last_span``), the final raw assistant
+        message (``last_assistant``), or every assistant after the final raw
+        user (``after_last_user``). The default is ``all_assistant``.
+
+        Message-based scopes verify tagged templates automatically at setup
+        and check each input structure before output. Preflight only runs setup
+        earlier. Generation blocks must belong to input assistant objects;
+        unsupported structures raise. Probes cannot prove content isolation
+        for every data-dependent branch. ``loss_on_last_turn_only`` is a
+        deprecated alias: True selects ``last_span``, False ``all_assistant``.
+        It cannot be supplied together with ``loss_scope``.
+
+        Scope selection cannot recover text omitted by the template. Use
+        ``expand_chat`` to render each user cycle as final. Changing expansion
+        or scope before checkpoint resume is unsupported and undetected.
         """
         op = TokenizeChat(
             tokenizer,
@@ -919,6 +938,7 @@ class Pipeline:
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
+            loss_scope=loss_scope,
             loss_on_last_turn_only=loss_on_last_turn_only,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
