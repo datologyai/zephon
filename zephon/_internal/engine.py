@@ -1282,6 +1282,8 @@ class Engine:
                 to_evict = [cid for cid in snapshot if cid < max_chunk_id]
                 for cid in to_evict:
                     inflight_lane.pop(cid, None)
+                    self._offset_done[lane_id].pop(cid, None)
+                    self._offset_done_count[lane_id].pop(cid, None)
                 self._sync_inflight_shm(lane_id)
                 with self._mixture_lock:
                     for cid in to_evict:
@@ -1332,6 +1334,9 @@ class Engine:
         last delivered cursor because they can overtake buffered output.
         """
         if not advance_replay:
+            assert record_cursor is None, (
+                "Control notifications cannot set a replay cursor"
+            )
             record_cursor = self._lane_last_cursor.get(lane_id)
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts

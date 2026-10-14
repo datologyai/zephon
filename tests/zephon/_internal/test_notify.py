@@ -186,7 +186,7 @@ class TestDeliveredFlag:
     @pytest.mark.parametrize("use_monotone", [True, False])
     def test_real_record_is_delivered(self, use_monotone: bool):
         result = _extract_notify_args(_record(lane=1), use_monotone=use_monotone)
-        assert result.delivered is True
+        assert isinstance(result, _MonotoneNotify) or result.delivered is True
 
     @pytest.mark.parametrize("use_monotone", [True, False])
     def test_tombstone_record_is_not_delivered(self, use_monotone: bool):
@@ -203,7 +203,7 @@ class TestDeliveredFlag:
             _batch(_record(lane=0, offset=0), _record(lane=0, offset=1)),
             use_monotone=use_monotone,
         )
-        assert result.delivered is True
+        assert isinstance(result, _MonotoneNotify) or result.delivered is True
 
     def test_apply_records_delivery_for_delivered_items(self):
         engine = MagicMock()

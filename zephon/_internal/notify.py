@@ -22,26 +22,19 @@ from zephon.types import (
 
 
 class _MonotoneNotify(NamedTuple):
-    """Lightweight args for ``engine.notify_monotone()``.
-
-    ``delivered`` is True when the notified item is actually yielded to the
-    consumer at the pipeline tail (a real batch or record) and False for
-    control items (tombstones, sentinels) that are notified but never
-    delivered. It feeds the per-lane delivery counters used for mid-window
-    checkpoint detection.
-    """
+    """Lightweight args for a delivery through ``engine.notify_monotone()``."""
 
     lane_id: int
     max_chunk_id: int
     add_k: int
     max_cursor: SampleCursor | None
-    delivered: bool = True
 
 
 class _ContributorNotify(NamedTuple):
     """Lightweight args for ``engine.notify()``.
 
-    See :class:`_MonotoneNotify` for the meaning of ``delivered``.
+    ``delivered`` is False for control records that close contributors without
+    advancing the replay cursor or the per-lane delivery counters.
     """
 
     lane_id: int
@@ -97,9 +90,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
                 lane_id, item.meta.contribution_refs(), None, False
             )
         if use_monotone:
-            return _MonotoneNotify(
-                lane_id, item.meta.chunk_id, 1, item.meta.cursor, delivered
-            )
+            return _MonotoneNotify(lane_id, item.meta.chunk_id, 1, item.meta.cursor)
         return _ContributorNotify(
             lane_id, item.meta.contribution_refs(), item.meta.cursor, delivered
         )
@@ -124,7 +115,7 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
         )
     # Both delivery paths funnel through here (inline _notify_item and the MTP
     # ACK handler), so tail counters cover every pipeline shape.
-    if notify.delivered:
+    if isinstance(notify, _MonotoneNotify) or notify.delivered:
         engine.record_delivery(notify.lane_id)
 
 
