@@ -220,9 +220,6 @@ def test_expansion_renders_each_query_as_final() -> None:
     import copy
 
     from tests.helpers.chat import CONVERSATION, SPLIT, make_fast_tokenizer
-    from zephon._internal.ops.expand_chat import ExpandChat
-    from zephon._internal.ops.tokenize_chat import TokenizeChat
-    from zephon.types import SampleMeta
 
     fast_tokenizer = make_fast_tokenizer()
     template = (
@@ -235,15 +232,19 @@ def test_expansion_renders_each_query_as_final() -> None:
     messages = copy.deepcopy(CONVERSATION)
     messages[1]["reasoning_content"] = "how"
     messages[3]["reasoning_content"] = "yes"
-    record = SampleRecord(
-        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
-        payload={"messages": messages},
+    work = StaticMixtureWorkSource(
+        [Dataset.from_dict("chat", {0: InMemoryShard([{"messages": messages}])})],
+        {"chat": 1.0},
+        chunk_size=1,
     )
-    prefixes = ExpandChat().process_one(record)
-    op = TokenizeChat(
-        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    outputs = list(
+        Pipeline(work)
+        .expand_chat()
+        .tokenize_chat(
+            fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+        )
+        .options(runner="threads", max_workers=1, canonical_replicas=1)
     )
-    outputs = op.process_many(prefixes)
     assert len(outputs) == 2
     texts = [
         fast_tokenizer.decode(
