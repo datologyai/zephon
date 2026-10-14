@@ -80,10 +80,12 @@ def test_single_prefix_keeps_metadata_and_nested_payload() -> None:
     op = ExpandChat(field="chat.messages")
     assert op.process_one(parent)[0] is parent
     parent.payload["chat"]["messages"].append({"role": "user", "content": "unanswered"})
+    original_payload = parent.payload
     output = op.process_one(parent)[0]
+    assert output is parent
     assert output.meta is parent.meta
     assert len(output.payload["chat"]["messages"]) == 2
-    assert len(parent.payload["chat"]["messages"]) == 3
+    assert len(original_payload["chat"]["messages"]) == 3
     assert output.payload["chat"]["extra"] == "value"
 
 

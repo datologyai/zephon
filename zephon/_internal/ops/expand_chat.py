@@ -33,10 +33,6 @@ class ExpandChat(BaseOp):
     unanswered queries leave gaps. A sole prefix retains the parent's lineage.
     Siblings own independent nested payloads; the final prefix consumes the source.
 
-    Calibration counts all prefix tokens against original input bytes: four
-    100-token cycles emit 100 + 200 + 300 + 400 = 1,000 tokens. Custom estimators
-    must include this expansion. Keep expansion and tokenization in one stage
-    to avoid serializing repeated history between processes.
     """
 
     def __init__(self, *, field: str = "messages") -> None:
@@ -132,14 +128,10 @@ class ExpandChat(BaseOp):
                     out.append(record)
                 else:
                     # Remove trailing unanswered queries from the sole prefix.
-                    out.append(
-                        SampleRecord(
-                            meta=record.meta,
-                            payload=self._prefix_payload(
-                                record.payload, messages[:end]
-                            ),
-                        )
+                    record.payload = self._prefix_payload(
+                        record.payload, messages[:end]
                     )
+                    out.append(record)
                 continue
             for index, (ordinal, end) in enumerate(prefixes):
                 last = index == len(prefixes) - 1
