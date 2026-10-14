@@ -94,7 +94,8 @@ class ValidationReport:
             lines.append(
                 f"  [{issue.severity}] {issue.code} in {issue.op_name!r}: {issue.message}"
             )
-            lines.append(f"      → {issue.doc_link}")
+            if issue.doc_link:
+                lines.append(f"      → {issue.doc_link}")
         return "\n".join(lines)
 
 
@@ -1686,7 +1687,7 @@ def verify_chat_template(
         Findings for mandatory probes and extra fixtures. Unexecuted generation
         sites are warnings; structural, ownership and parity failures are errors.
     """
-    from zephon._internal.ops.chat_template import TemplateVerifier, _issue
+    from zephon._internal.utils.chat_template import TemplateVerifier, _issue
 
     try:
         if loss_scope not in get_args(LossScope):

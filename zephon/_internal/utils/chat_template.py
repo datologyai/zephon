@@ -1,7 +1,20 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Message ownership and verification for generation-tagged chat templates."""
+"""Check chat templates for message-based loss selection.
+
+``after_last_user`` needs to know which input assistant owns each generated
+range. ``OwnedTracker`` and ``instrument`` attach that ownership during Jinja
+rendering; ``OwnedTemplate`` rejects constructs that make ownership ambiguous.
+``TemplateVerifier`` inserts markers into sample messages to check that selected
+content receives loss, user/tool content does not, and rendering and the complete
+assistant mask agree with Hugging Face. These checks cannot prove every branch
+of arbitrary content-dependent Jinja code.
+
+Setup checks simple conversations. New message/tool structures are checked on
+first use and successful results are cached within each worker process. Every
+actual render still checks its owners and character ranges.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +35,11 @@ from jinja2.ext import Extension
 from jinja2.parser import Parser
 from jinja2.runtime import Context
 
-from zephon._internal.ops.tokenize_chat import _selected_owners, _thread_salted_template
+from zephon._internal.utils.tokenizer import (
+    generation_mask,
+    selected_assistant_indices,
+    thread_salted_template,
+)
 from zephon.ops.config import LossScope
 from zephon.validation import Issue, ValidationError, ValidationReport
 
@@ -141,22 +158,6 @@ def instrument(
             instrument(child, loops, buffered, in_generation)
 
 
-def generation_mask(
-    encoding: Any, spans: Sequence[tuple[int, int, int, int]], owners: set[int]
-) -> np.ndarray:
-    """Map selected generated ranges with HF's endpoint and early-break rules."""
-    mask = np.zeros(len(encoding["input_ids"]), dtype=np.uint8)
-    for owner, start, end, _ in spans:
-        start_token = encoding.char_to_token(0, start)
-        end_token = encoding.char_to_token(0, end - 1)
-        if start_token is None:
-            break
-        if owner in owners:
-            stop = end_token + 1 if end_token else len(mask)
-            mask[start_token:stop] = 1
-    return mask
-
-
 class OwnedTemplate:
     """Compiled HF Jinja template with per-render generation ownership."""
 
@@ -233,21 +234,27 @@ class OwnedTemplate:
 
 
 def _issue(code: str, message: str, *, warning: bool = False) -> Issue:
+    if not warning and code != "CHAT_INPUT_CONTEXT":
+        message += (
+            " Check chat_template: generation blocks must be inside the input "
+            "assistant's message loop and cover its reasoning, tool calls and "
+            "answer. Keep user and tool-result content outside those blocks."
+        )
     return Issue(
         severity="warning" if warning else "error",
         code=code,
         op_name="tokenize_chat",
         message=message,
-        doc_link="https://datologyai.github.io/zephon/pipelines/preparing_samples.html",
+        doc_link="",
     )
 
 
-def _profile(value: Any, key: str = "") -> Any:
+def _structure(value: Any, key: str = "") -> Any:
     """Describe input structure while excluding conversation text."""
     if isinstance(value, Mapping):
-        return tuple((k, _profile(v, k)) for k, v in sorted(value.items()))
+        return tuple((k, _structure(v, k)) for k, v in sorted(value.items()))
     if isinstance(value, (list, tuple)):
-        return tuple(_profile(item, key) for item in value)
+        return tuple(_structure(item, key) for item in value)
     if (
         key in {"role", "type", "enable_thinking", "name"}
         or value is None
@@ -257,7 +264,7 @@ def _profile(value: Any, key: str = "") -> Any:
     if isinstance(value, str):
         if key == "arguments":
             try:
-                return ("json", _profile(json.loads(value)))
+                return ("json", _structure(json.loads(value)))
             except ValueError:
                 return ("invalid_json",)
         return ("str", bool(value), "<think>" in value, "</think>" in value)
@@ -272,7 +279,7 @@ def _marked_probe(
     marked = [copy.deepcopy(dict(message)) for message in messages]
     markers: dict[str, int] = {}
     required: set[str] = set()
-    selected = _selected_owners(messages, scope)
+    selected = selected_assistant_indices(messages, scope)
 
     def marker(owner: int, *, required_output: bool = False) -> str:
         text = f"zephon_probe_{owner}_{len(markers)}_text"
@@ -369,15 +376,20 @@ def _check_markers(
     return issues
 
 
-# Cache successful probes across copied operators in one process. Keys include the
-# tokenizer serialization, template, scope and complete structural input profile.
-_PROFILES: OrderedDict[Any, tuple[ValidationReport, frozenset[int]]] = OrderedDict()
-_PROFILE_LOCK = threading.Lock()
-_PROFILE_LIMIT = 1024
+# Process-local LRU: successful reports and executed generation sites, keyed by
+# tokenizer configuration, template, scope, kwargs and message/tool structure.
+# Threads share this lock-protected cache; separate processes have independent
+# copies. The lock never covers rendering, so concurrent misses may repeat work.
+_VERIFIED_STRUCTURES: OrderedDict[Any, tuple[ValidationReport, frozenset[int]]] = (
+    OrderedDict()
+)
+_VERIFICATION_LOCK = threading.Lock()
+_VERIFICATION_CACHE_LIMIT = 1024
 
 
 @lru_cache(maxsize=32)
 def _owned_template(template: str) -> OwnedTemplate:
+    """Cache up to 32 compiled templates; each render has its own tracking state."""
     return OwnedTemplate(template)
 
 
@@ -438,7 +450,7 @@ class TemplateVerifier:
             context = {**self.tokenizer.special_tokens_map, **kwargs}
             text, spans = self.template.render(probe, context)
             # HF's cached mask recorder is mutable; use the tokenizer's thread salt.
-            hf_template = _thread_salted_template(self.template.source)
+            hf_template = thread_salted_template(self.template.source)
             hf_text = self.tokenizer.apply_chat_template(
                 probe,
                 chat_template=hf_template,
@@ -449,7 +461,7 @@ class TemplateVerifier:
             if text != hf_text:
                 raise ValueError("owned rendering differs from Hugging Face")
             sites = {site for _, _, _, site in spans}
-            with _PROFILE_LOCK:
+            with _VERIFICATION_LOCK:
                 self.executed_sites.update(sites)
             if executed_sites is not None:
                 executed_sites.update(sites)
@@ -469,7 +481,7 @@ class TemplateVerifier:
                     **options,
                 )
                 baseline = generation_mask(
-                    hf, spans, _selected_owners(probe, "all_assistant")
+                    hf, spans, selected_assistant_indices(probe, "all_assistant")
                 )
                 if not np.array_equal(baseline, hf["assistant_masks"]):
                     raise ValueError("generated-token mask differs from Hugging Face")
@@ -518,14 +530,20 @@ class TemplateVerifier:
         *,
         setup: bool = False,
     ) -> ValidationReport:
-        profile = hashlib.sha256(
-            repr((_profile(messages), _profile(kwargs))).encode()
+        """Reuse successful checks across rows, preflight and operator copies.
+
+        Structure includes roles, optional fields and tool/schema names, but not
+        ordinary text values. This avoids repeating probes for matching inputs;
+        it does not certify untested content-dependent template branches.
+        """
+        structure = hashlib.sha256(
+            repr((_structure(messages), _structure(kwargs))).encode()
         ).digest()
-        key = (self._identity, setup, profile)
-        with _PROFILE_LOCK:
-            cached = _PROFILES.get(key)
+        key = (self._identity, setup, structure)
+        with _VERIFICATION_LOCK:
+            cached = _VERIFIED_STRUCTURES.get(key)
             if cached is not None:
-                _PROFILES.move_to_end(key)
+                _VERIFIED_STRUCTURES.move_to_end(key)
                 self.executed_sites.update(cached[1])
                 return cached[0]
         # Rendering and tokenization never hold the cache lock. Concurrent misses
@@ -535,21 +553,25 @@ class TemplateVerifier:
             messages, kwargs, check_truncation=setup, executed_sites=executed_sites
         )
         if report.ok:
-            with _PROFILE_LOCK:
-                _PROFILES[key] = (report, frozenset(executed_sites))
-                _PROFILES.move_to_end(key)
-                if len(_PROFILES) > _PROFILE_LIMIT:
-                    _PROFILES.popitem(last=False)
+            with _VERIFICATION_LOCK:
+                _VERIFIED_STRUCTURES[key] = (report, frozenset(executed_sites))
+                _VERIFIED_STRUCTURES.move_to_end(key)
+                if len(_VERIFIED_STRUCTURES) > _VERIFICATION_CACHE_LIMIT:
+                    _VERIFIED_STRUCTURES.popitem(last=False)
         return report
 
-    def require_profile(
+    def verify_input_structure(
         self,
         messages: list[Mapping[str, Any]],
         kwargs: Mapping[str, Any],
         *,
         context: str = "",
     ) -> None:
-        """Run mandatory probes on the first occurrence of each input structure."""
+        """Check an unseen input structure before its training sample is emitted.
+
+        Setup cannot anticipate every tool schema or message sequence. Cache hits
+        skip probes; diverse inputs may require extra renders for most rows.
+        """
         report = self._cached_verify(messages, kwargs)
         if not report.ok:
             issues = list(report.issues)

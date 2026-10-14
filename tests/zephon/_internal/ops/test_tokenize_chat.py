@@ -33,7 +33,6 @@ from zephon._internal.ops.tokenize_chat import (
     TokenizeChat,
     _last_span_only,
     _mask_from_spans,
-    _thread_salted_template,
 )
 from zephon._internal.token_counting import FatalCountError
 from zephon.io import Dataset, InMemoryShard
@@ -695,44 +694,6 @@ def _multi_turn(n_pairs: int = 12) -> list[dict[str, Any]]:
     return _messages(*(pair * n_pairs))
 
 
-@pytest.mark.parametrize(
-    "tail",
-    [
-        "",
-        " done",
-        " done   ",
-        " done\n",
-        " done\n   ",
-        " done\n\t",
-        " done\r\n",
-        " done\r",
-        " done\n\n",
-    ],
-    ids=[
-        "tag-end",
-        "text-end",
-        "spaces-same-line",
-        "trailing-newline",
-        "newline-spaces",
-        "newline-tab",
-        "crlf",
-        "cr",
-        "double-newline",
-    ],
-)
-def test_thread_salt_render_is_byte_identical(fast_tokenizer: Any, tail: str) -> None:
-    # Whitespace tails probe lstrip_blocks and jinja's trailing-newline strip,
-    # which a naive template suffix would disturb.
-    template = TAGGED_TEMPLATE + tail
-    base = fast_tokenizer.apply_chat_template(
-        CONVERSATION, chat_template=template, tokenize=False
-    )
-    rendered = fast_tokenizer.apply_chat_template(
-        CONVERSATION, chat_template=_thread_salted_template(template), tokenize=False
-    )
-    assert rendered == base
-
-
 def test_concurrent_masked_renders_share_no_tracker_state(fast_tokenizer: Any) -> None:
     """Deepcopied ops rendering one template in parallel must not collide.
 
@@ -863,7 +824,7 @@ def test_invalid_structure_fails_without_preflight(
         )
 
 
-def test_profile_detects_omitted_calls_before_emission(fast_tokenizer: Any) -> None:
+def test_structure_detects_omitted_calls_before_emission(fast_tokenizer: Any) -> None:
     op = TokenizeChat(
         fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="after_last_user"
     )
@@ -905,7 +866,7 @@ def test_truncation_never_retargets_earlier_assistant(fast_tokenizer: Any) -> No
 def test_default_and_last_span_use_hf_without_ownership_verifier(
     fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from zephon._internal.ops import chat_template
+    from zephon._internal.utils import chat_template
 
     monkeypatch.setattr(
         chat_template,
@@ -961,7 +922,7 @@ def test_shared_instance_rendering_and_copy(fast_tokenizer: Any) -> None:
 
 
 def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
-    from zephon._internal.ops.chat_template import OwnedTemplate
+    from zephon._internal.utils.chat_template import OwnedTemplate
 
     nulls = [{**m, "tool_calls": None, "reasoning_content": None} for m in CONVERSATION]
     op = TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
@@ -997,12 +958,14 @@ def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
     assert {owner for owner, *_ in spans} == {1}
 
 
-def test_profile_key_covers_reasoning_flags_and_json_argument_shape(
+def test_structure_key_covers_reasoning_flags_and_json_argument_shape(
     fast_tokenizer: Any,
 ) -> None:
-    from zephon._internal.ops.chat_template import _profile
+    from zephon._internal.utils.chat_template import _structure
 
-    assert _profile({"arguments": '{"a":"x"}'}) != _profile({"arguments": '{"b":"x"}'})
+    assert _structure({"arguments": '{"a":"x"}'}) != _structure(
+        {"arguments": '{"b":"x"}'}
+    )
     template = (
         "{% if enable_thinking %}"
         + SPLIT
@@ -1018,7 +981,7 @@ def test_profile_key_covers_reasoning_flags_and_json_argument_shape(
         op._ids_and_mask({"messages": CYCLE, "enable_thinking": False}, "fixture")
 
 
-def test_real_rows_check_missing_owners_after_profile_cache(
+def test_real_rows_check_missing_owners_after_structure_cache(
     fast_tokenizer: Any,
 ) -> None:
     template = TAGGED_TEMPLATE.replace(
@@ -1035,7 +998,7 @@ def test_real_rows_check_missing_owners_after_profile_cache(
         run(op, changed)
 
 
-def test_role_and_multimodal_validation_precedes_cached_profile(
+def test_role_and_multimodal_validation_precedes_cached_structure(
     fast_tokenizer: Any,
 ) -> None:
     op = TokenizeChat(fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user")

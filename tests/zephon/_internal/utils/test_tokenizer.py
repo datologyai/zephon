@@ -304,3 +304,62 @@ def test_load_retries_transient_cloud_sync_failure(
     load_hf_tokenizer("s3://fake-bucket/fake/prefix/")
     assert resolve_attempts == 2, "Transient sync error must be retried once"
     assert received_ids == [resolved_path]
+
+
+def test_endpoint_mapping_includes_hf_stopping_and_zero_index_rules() -> None:
+    from zephon._internal.utils.tokenizer import generation_mask
+
+    class Encoding(dict):
+        def char_to_token(self, batch: int, char: int) -> int | None:
+            return {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}.get(char)
+
+    encoding = Encoding(input_ids=[10, 20, 30])
+    assert generation_mask(encoding, [(1, 0, 1, 1)], {1}).tolist() == [1, 1, 1]
+    assert generation_mask(encoding, [(0, 20, 21, 1), (1, 2, 4, 2)], {1}).tolist() == [
+        0,
+        0,
+        0,
+    ]
+    assert generation_mask(encoding, [(1, 3, 3, 1)], {1}).tolist() == [0, 1, 0]
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "",
+        " done",
+        " done   ",
+        " done\n",
+        " done\n   ",
+        " done\n\t",
+        " done\r\n",
+        " done\r",
+        " done\n\n",
+    ],
+    ids=[
+        "tag-end",
+        "text-end",
+        "spaces-same-line",
+        "trailing-newline",
+        "newline-spaces",
+        "newline-tab",
+        "crlf",
+        "cr",
+        "double-newline",
+    ],
+)
+def test_thread_salt_render_is_byte_identical(tail: str) -> None:
+    from tests.helpers.chat import CONVERSATION, TAGGED_TEMPLATE, make_fast_tokenizer
+    from zephon._internal.utils.tokenizer import thread_salted_template
+
+    fast_tokenizer = make_fast_tokenizer()
+    # Whitespace tails probe lstrip_blocks and jinja's trailing-newline strip,
+    # which a naive template suffix would disturb.
+    template = TAGGED_TEMPLATE + tail
+    base = fast_tokenizer.apply_chat_template(
+        CONVERSATION, chat_template=template, tokenize=False
+    )
+    rendered = fast_tokenizer.apply_chat_template(
+        CONVERSATION, chat_template=thread_salted_template(template), tokenize=False
+    )
+    assert rendered == base

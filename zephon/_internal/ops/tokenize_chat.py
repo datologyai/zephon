@@ -8,8 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sys
-import threading
 import warnings
 from dataclasses import dataclass
 from typing import (
@@ -31,14 +29,22 @@ from zephon._internal.token_counting import (
     FatalCountError,
     TokenCountingSpec,
 )
-from zephon._internal.utils.tokenizer import TokenizerLike
+from zephon._internal.utils.tokenizer import (
+    TokenizerLike,
+    generation_mask,
+    selected_assistant_indices,
+    thread_salted_template,
+)
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.config import LossScope, SpanSource
 from zephon.ops.traits import OpTraits
 from zephon.types import SamplePayloadDict, SampleRecord
+from zephon.validation import ValidationError
 
 if TYPE_CHECKING:
-    from zephon._internal.ops.chat_template import TemplateVerifier
+    from transformers import PreTrainedTokenizerFast
+
+    from zephon._internal.utils.chat_template import TemplateVerifier
 
 log = logging.getLogger(__name__)
 
@@ -100,35 +106,30 @@ def _last_span_only(mask: "np.ndarray") -> "np.ndarray":
     return out
 
 
-def _thread_salted_template(template: str) -> str:
-    """Return ``template`` plus a per-thread no-op salt expression.
-
-    HF caches compiled chat templates process-wide by template text, and masked
-    renders mutate AssistantTracker state on the cached object; the salt gives
-    each thread its own template. An expression tag survives ``lstrip_blocks``
-    untouched, and jinja's trailing-newline strip is replicated here, so the
-    salted render is byte-identical.
-    """
-    for newline in ("\r\n", "\r", "\n"):
-        if template.endswith(newline):
-            template = template[: -len(newline)]
-            break
-    return template + f'{{{{ "zephon-render-slot-{threading.get_ident()}" and "" }}}}'
-
-
-def _selected_owners(
-    messages: Sequence[Mapping[str, Any]], scope: LossScope
-) -> set[int]:
-    """Select raw assistant indices before rendering or truncation."""
-    assistants = {
-        i for i, message in enumerate(messages) if message.get("role") == "assistant"
-    }
-    if scope == "after_last_user":
-        users = [
-            i for i, message in enumerate(messages) if message.get("role") == "user"
-        ]
-        return {i for i in assistants if users and i > users[-1]}
-    return assistants
+def _resolve_loss_scope(
+    loss_scope: LossScope | None,
+    loss_on_last_turn_only: bool | None,
+    *,
+    stacklevel: int,
+) -> LossScope:
+    """Resolve the deprecated boolean and warn at the calling API boundary."""
+    if loss_scope is not None and loss_on_last_turn_only is not None:
+        raise ValueError("supply loss_scope or loss_on_last_turn_only, not both")
+    if loss_on_last_turn_only is not None:
+        if type(loss_on_last_turn_only) is not bool:
+            raise TypeError("loss_on_last_turn_only must be a bool")
+        warnings.warn(
+            "loss_on_last_turn_only is deprecated; use loss_scope='last_span' "
+            + "or loss_scope='all_assistant'",
+            FutureWarning,
+            stacklevel=stacklevel,
+        )
+        loss_scope = "last_span" if loss_on_last_turn_only else "all_assistant"
+    if loss_scope is None:
+        loss_scope = "all_assistant"
+    if loss_scope not in get_args(LossScope):
+        raise ValueError(f"invalid loss_scope: {loss_scope!r}")
+    return loss_scope
 
 
 class TokenizeChat(TokenizeBase):
@@ -209,16 +210,20 @@ class TokenizeChat(TokenizeBase):
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
                 ``after_last_user`` selects every assistant after the final user.
-                The default is ``all_assistant``. The ``after_last_user`` tagged
-                path verifies the template automatically and requires generation
-                blocks inside loops over original assistant message objects.
-                Buffered, nested and orphan generation blocks raise. Each new input
-                structure is checked before output; no manual check is needed.
-                Probes cannot certify every data-dependent template branch.
-                Scope selection cannot recover omitted text. A nonempty selected
-                assistant without a nonempty generation range raises. Empty
-                selections or targets removed by truncation are dropped. Changing
-                scope on checkpoint resume is unsupported and undetected.
+                The default is ``all_assistant``. For ``after_last_user``, Zephon
+                must identify which input message owns each generation block.
+                Blocks must sit inside that message's loop and cover its output,
+                including reasoning and tool calls; include assistant EOS there.
+                Synthetic checks run at tokenizer initialization and once per
+                new message/tool structure. Every render checks owners and ranges.
+                ``preflight_tokenizers()`` runs initialization checks early; omitting
+                it does not disable checks. Unassignable blocks and missing selected
+                content raise; finite probes cannot certify arbitrary Jinja branches.
+                Diverse agentic data can cost roughly 2–3× HF tokenization due to
+                cache misses. Empty or fully truncated targets are dropped.
+                Pair ``expand_chat()`` with ``after_last_user`` when a template
+                such as Qwen removes reasoning from earlier user cycles: each
+                prefix then renders its target cycle with reasoning included.
             loss_on_last_turn_only: Deprecated alias: True selects ``last_span``;
                 False selects ``all_assistant``. Cannot accompany ``loss_scope``.
             chat_template_kwargs: Static extra kwargs forwarded to
@@ -234,28 +239,9 @@ class TokenizeChat(TokenizeBase):
             max_batch: Accumulator batch size.
             max_latency_ms: Accumulator latency bound (non-deterministic runs).
         """
-        if loss_scope is not None and loss_on_last_turn_only is not None:
-            raise ValueError("supply loss_scope or loss_on_last_turn_only, not both")
-        if loss_on_last_turn_only is not None:
-            if type(loss_on_last_turn_only) is not bool:
-                raise TypeError("loss_on_last_turn_only must be a bool")
-            frame = sys._getframe(1)
-            stacklevel = 2
-            while frame and frame.f_globals.get("__name__", "").startswith("zephon."):
-                stacklevel += 1
-                frame = frame.f_back
-            del frame
-            warnings.warn(
-                "loss_on_last_turn_only is deprecated; use loss_scope='last_span' "
-                + "or loss_scope='all_assistant'",
-                FutureWarning,
-                stacklevel=stacklevel,
-            )
-            loss_scope = "last_span" if loss_on_last_turn_only else "all_assistant"
-        if loss_scope is None:
-            loss_scope = "all_assistant"
-        if loss_scope not in get_args(LossScope):
-            raise ValueError(f"invalid loss_scope: {loss_scope!r}")
+        loss_scope = _resolve_loss_scope(
+            loss_scope, loss_on_last_turn_only, stacklevel=3
+        )
         if span_source not in _VALID_SPAN_SOURCES:
             raise ValueError(
                 f"span_source must be one of {_VALID_SPAN_SOURCES}, got {span_source!r}"
@@ -321,10 +307,11 @@ class TokenizeChat(TokenizeBase):
         self._warned_unsupervised_drop = False
 
     def __getstate__(self) -> dict[str, Any]:
+        """Serialize tokenizer and template text, excluding compiled Jinja state."""
         state = dict(self.__dict__)
         if self._template_verifier is not None:
-            # Compiled Jinja objects are not picklable. Setup reuses process-local
-            # compilation and successful verification caches after copying.
+            # Rebuild the verifier in the receiving process. The tokenizer stays
+            # loaded; same-process copies reuse compiled-template and probe caches.
             state["_template_verifier"] = None
             state["_tokenizer_instantiated"] = False
         return state
@@ -409,8 +396,8 @@ class TokenizeChat(TokenizeBase):
             self._resolved_span_source == "generation_tags"
             and self.loss_scope == "after_last_user"
         ):
-            from zephon._internal.ops.chat_template import TemplateVerifier
-            from zephon.validation import ValidationError
+            # Jinja and Transformers are optional; import only for this path.
+            from zephon._internal.utils.chat_template import TemplateVerifier
 
             verifier = TemplateVerifier(
                 tok, template, self.chat_template_kwargs, self.loss_scope
@@ -499,7 +486,7 @@ class TokenizeChat(TokenizeBase):
             "return_dict": True,
             "return_assistant_tokens_mask": True,
             "add_generation_prompt": False,
-            "chat_template": _thread_salted_template(self._template_str),
+            "chat_template": thread_salted_template(self._template_str),
             **render_kwargs,
         }
         if self.max_length is not None:
@@ -517,24 +504,21 @@ class TokenizeChat(TokenizeBase):
 
     def _via_owned_generation_tags(
         self,
+        verifier: TemplateVerifier,
         messages: list[Mapping[str, Any]],
         render_kwargs: dict[str, Any],
         sample_id: Any,
     ) -> tuple[list[int], "np.ndarray"]:
-        from zephon._internal.ops.chat_template import generation_mask
-
-        verifier = self._template_verifier
-        assert verifier is not None
-        verifier.require_profile(
+        verifier.verify_input_structure(
             messages,
             render_kwargs,
             context=f"loss_scope={self.loss_scope!r}, template={verifier.template.identity}, sample={sample_id!r}",
         )
-        tok = cast(Any, self.tok)
+        tok = cast("PreTrainedTokenizerFast", self.tok)
         text, spans = verifier.template.render(
             messages, {**tok.special_tokens_map, **render_kwargs}
         )
-        selected = _selected_owners(messages, self.loss_scope)
+        selected = selected_assistant_indices(messages, self.loss_scope)
         rendered_owners = {owner for owner, start, end, _ in spans if end > start}
         for owner in selected - rendered_owners:
             message = messages[owner]
@@ -568,7 +552,7 @@ class TokenizeChat(TokenizeBase):
             )
 
         full = render(messages, False)
-        selected = _selected_owners(messages, self.loss_scope)
+        selected = selected_assistant_indices(messages, self.loss_scope)
         spans: list[tuple[int, int]] = []
         for i, message in enumerate(messages):
             if message.get("role") != "assistant":
@@ -595,7 +579,7 @@ class TokenizeChat(TokenizeBase):
         parts: list[str] = []
         spans: list[tuple[int, int]] = []
         cursor = 0
-        selected = _selected_owners(messages, self.loss_scope)
+        selected = selected_assistant_indices(messages, self.loss_scope)
         for i, message in enumerate(messages):
             content = message.get("content", "")
             if isinstance(content, list):
@@ -655,7 +639,7 @@ class TokenizeChat(TokenizeBase):
             if self._resolved_span_source == "generation_tags":
                 if self._template_verifier is not None:
                     ids, mask = self._via_owned_generation_tags(
-                        messages, render_kwargs, sample_id
+                        self._template_verifier, messages, render_kwargs, sample_id
                     )
                 else:
                     ids, mask = self._via_generation_tags(messages, render_kwargs)

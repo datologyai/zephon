@@ -37,7 +37,7 @@ from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.ops.prefetch import PrefetchOp
 from zephon._internal.ops.shuffle_buffer import ShuffleBuffer
 from zephon._internal.ops.tokenize_base import TokenizeBase
-from zephon._internal.ops.tokenize_chat import TokenizeChat
+from zephon._internal.ops.tokenize_chat import TokenizeChat, _resolve_loss_scope
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.planner import Planner
 from zephon._internal.runtime_spec import (
@@ -907,27 +907,34 @@ class Pipeline:
     ) -> "Pipeline":
         """Tokenize chat conversations into ids plus a loss mask.
 
-        Full contract: one-shot
-        render+tokenize with assistant spans from ``{% generation %}`` tags,
-        a guarded prefix-diff fallback for untagged templates, or exact spans
-        in the no-template path (``apply_chat_template=False``).
+        Assistant targets come from ``{% generation %}`` blocks in the chat
+        template. Untagged templates use guarded prefix comparisons; with
+        ``apply_chat_template=False``, targets come directly from message roles.
 
         ``loss_scope`` selects all assistant spans (``all_assistant``), the
         final contiguous mask run (``last_span``), or every assistant after the
         final raw user (``after_last_user``). The default is ``all_assistant``.
 
-        ``after_last_user`` verifies tagged templates automatically at setup
-        and checks each input structure before output. Preflight only runs setup
-        earlier. Generation blocks must belong to input assistant objects;
-        unsupported structures raise. Probes cannot prove content isolation
-        for every data-dependent branch. ``loss_on_last_turn_only`` is a
-        deprecated alias: True selects ``last_span``, False ``all_assistant``.
-        It cannot be supplied together with ``loss_scope``.
+        ``after_last_user`` needs to associate generated text with its input
+        assistant message. Zephon checks tagged templates using synthetic
+        conversations at tokenizer initialization and on each new message/tool
+        structure; ambiguous ownership or missing selected content raises.
+        ``preflight_tokenizers()`` runs initialization checks before iteration;
+        the checks also run automatically without it. These probes cannot prove
+        every content-dependent branch of a custom template.
 
-        Scope selection cannot recover text omitted by the template. Use
-        ``expand_chat`` to render each user cycle as final. Changing expansion
-        or scope before checkpoint resume is unsupported and undetected.
+        Pair ``expand_chat()`` with ``after_last_user`` for templates such as
+        Qwen that omit reasoning from earlier user cycles. Each prefix makes
+        its target cycle the final one, so its reasoning appears in the tokens.
+
+        ``loss_on_last_turn_only`` is deprecated: replace True with
+        ``loss_scope="last_span"`` and False with ``loss_scope="all_assistant"``.
+        Supplying both arguments raises.
         """
+        # warn -> resolver -> tokenize_chat -> @_mutates_graph -> caller
+        loss_scope = _resolve_loss_scope(
+            loss_scope, loss_on_last_turn_only, stacklevel=4
+        )
         op = TokenizeChat(
             tokenizer,
             tokenizer_id,
@@ -938,7 +945,6 @@ class Pipeline:
             apply_chat_template=apply_chat_template,
             span_source=span_source,
             loss_scope=loss_scope,
-            loss_on_last_turn_only=loss_on_last_turn_only,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
             enable_thinking_field=enable_thinking_field,

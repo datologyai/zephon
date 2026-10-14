@@ -20,25 +20,8 @@ def fast_tokenizer() -> Any:
     return make_fast_tokenizer()
 
 
-def test_endpoint_mapping_includes_hf_stopping_and_zero_index_rules() -> None:
-    from zephon._internal.ops.chat_template import generation_mask
-
-    class Encoding(dict):
-        def char_to_token(self, batch: int, char: int) -> int | None:
-            return {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}.get(char)
-
-    encoding = Encoding(input_ids=[10, 20, 30])
-    assert generation_mask(encoding, [(1, 0, 1, 1)], {1}).tolist() == [1, 1, 1]
-    assert generation_mask(encoding, [(0, 20, 21, 1), (1, 2, 4, 2)], {1}).tolist() == [
-        0,
-        0,
-        0,
-    ]
-    assert generation_mask(encoding, [(1, 3, 3, 1)], {1}).tolist() == [0, 1, 0]
-
-
 def test_generation_sites_on_same_line_are_distinct(fast_tokenizer: Any) -> None:
-    from zephon._internal.ops.chat_template import OwnedTemplate
+    from zephon._internal.utils.chat_template import OwnedTemplate
 
     assert len(OwnedTemplate(SPLIT).sites) == 3
     report = verify_chat_template(fast_tokenizer, SPLIT)
@@ -53,7 +36,7 @@ def test_generation_sites_on_same_line_are_distinct(fast_tokenizer: Any) -> None
 def test_verifier_does_not_wrap_programming_errors(
     fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
 ) -> None:
-    from zephon._internal.ops.chat_template import TemplateVerifier
+    from zephon._internal.utils.chat_template import TemplateVerifier
 
     verifier = TemplateVerifier(fast_tokenizer, TAGGED_TEMPLATE, {})
 
@@ -68,10 +51,10 @@ def test_verifier_does_not_wrap_programming_errors(
 def test_verification_cache_shared_and_lru(
     fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from zephon._internal.ops import chat_template as module
+    from zephon._internal.utils import chat_template as module
 
-    monkeypatch.setattr(module, "_PROFILE_LIMIT", 2)
-    module._PROFILES.clear()
+    monkeypatch.setattr(module, "_VERIFICATION_CACHE_LIMIT", 2)
+    module._VERIFIED_STRUCTURES.clear()
     verifier = module.TemplateVerifier(fast_tokenizer, TAGGED_TEMPLATE, {})
     calls = []
     verify = module.TemplateVerifier.verify
@@ -81,23 +64,23 @@ def test_verification_cache_shared_and_lru(
         return verify(self, *args, **kwargs)
 
     monkeypatch.setattr(module.TemplateVerifier, "verify", counted)
-    verifier.require_profile(CONVERSATION, {})
+    verifier.verify_input_structure(CONVERSATION, {})
     other = module.TemplateVerifier(copy.deepcopy(fast_tokenizer), TAGGED_TEMPLATE, {})
-    other.require_profile(CONVERSATION, {})
+    other.verify_input_structure(CONVERSATION, {})
     assert len(calls) == 1
-    verifier.require_profile(CONVERSATION, {"flag": True})
-    verifier.require_profile(CONVERSATION, {})  # refresh this entry
-    verifier.require_profile(CONVERSATION, {"flag": False})
-    verifier.require_profile(CONVERSATION, {})
+    verifier.verify_input_structure(CONVERSATION, {"flag": True})
+    verifier.verify_input_structure(CONVERSATION, {})  # refresh this entry
+    verifier.verify_input_structure(CONVERSATION, {"flag": False})
+    verifier.verify_input_structure(CONVERSATION, {})
     assert len(calls) == 3
-    verifier.require_profile(CONVERSATION, {"flag": True})
+    verifier.verify_input_structure(CONVERSATION, {"flag": True})
     assert len(calls) == 4
-    module._PROFILES.clear()
+    module._VERIFIED_STRUCTURES.clear()
 
 
 @pytest.mark.parametrize("target", ["message", "(other, message)"])
 def test_with_cannot_rebind_message_owner(target: str) -> None:
-    from zephon._internal.ops.chat_template import OwnedTemplate
+    from zephon._internal.utils.chat_template import OwnedTemplate
 
     template = TAGGED_TEMPLATE.replace(
         "{% generation %}",
@@ -107,8 +90,8 @@ def test_with_cannot_rebind_message_owner(target: str) -> None:
         OwnedTemplate(template)
 
 
-def test_cached_sites_belong_only_to_the_cached_profile(fast_tokenizer: Any) -> None:
-    from zephon._internal.ops.chat_template import TemplateVerifier
+def test_cached_sites_belong_only_to_the_cached_structure(fast_tokenizer: Any) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
 
     template = TAGGED_TEMPLATE.replace(
         "{% generation %}{{ message['content'] }}<|end|>{% endgeneration %}",
@@ -116,23 +99,23 @@ def test_cached_sites_belong_only_to_the_cached_profile(fast_tokenizer: Any) -> 
         "{% else %}{% generation %}{{ message.content }}<|end|>{% endgeneration %}{% endif %}",
     )
     first = TemplateVerifier(fast_tokenizer, template, {})
-    first.require_profile(CONVERSATION, {"flag": False})
-    first.require_profile(CONVERSATION, {"flag": True})
+    first.verify_input_structure(CONVERSATION, {"flag": False})
+    first.verify_input_structure(CONVERSATION, {"flag": True})
     assert first.executed_sites == {0, 1}
     second = TemplateVerifier(fast_tokenizer, template, {})
-    second.require_profile(CONVERSATION, {"flag": True})
+    second.verify_input_structure(CONVERSATION, {"flag": True})
     assert second.executed_sites == {0}
 
 
 def test_unknown_tokenizer_cannot_share_verification_results() -> None:
-    from zephon._internal.ops.chat_template import TemplateVerifier
+    from zephon._internal.utils.chat_template import TemplateVerifier
 
     with pytest.raises(ValueError, match="fast Hugging Face tokenizer"):
         TemplateVerifier(object(), TAGGED_TEMPLATE, {})
 
 
 def test_tokenizer_mutation_changes_verification_identity(fast_tokenizer: Any) -> None:
-    from zephon._internal.ops.chat_template import TemplateVerifier
+    from zephon._internal.utils.chat_template import TemplateVerifier
 
     before = TemplateVerifier(fast_tokenizer, TAGGED_TEMPLATE, {})._identity
     fast_tokenizer.add_tokens(["new-token-for-verifier"])

@@ -18,6 +18,7 @@ from zephon import Pipeline as PublicPipeline
 from zephon.ops import Accumulator, BaseOp, CountingAccumulator, OpTraits, ReadyBatch
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.validation import (
+    Issue,
     ValidationError,
     ValidationReport,
     preflight_tokenizers,
@@ -32,6 +33,25 @@ def _empty_pipeline() -> PublicPipeline:
 
 def _codes(report: ValidationReport) -> list[str]:
     return [i.code for i in report.issues]
+
+
+def test_report_formats_issues_with_and_without_doc_links() -> None:
+    report = ValidationReport(
+        [
+            Issue("error", "LOCAL", "chat", "Fix the template", doc_link=""),
+            Issue(
+                "warning",
+                "LINKED",
+                "chat",
+                "See the guide",
+                doc_link="https://example.com",
+            ),
+        ]
+    )
+    formatted = report.format()
+    assert "Fix the template" in formatted
+    assert formatted.count("→") == 1
+    assert "→ https://example.com" in formatted
 
 
 # ---------------------------------------------------------------------------
