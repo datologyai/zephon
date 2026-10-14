@@ -178,6 +178,13 @@ class TokenizeChat(TokenizeBase):
     ) -> None:
         """Tokenize chat conversations with a chat template and loss mask.
 
+        With ``after_last_user`` and generation tags, check that every selected
+        assistant's reasoning, tool calls, answer and any end-of-turn token appear
+        in its own ``{% generation %}`` blocks, within its message loop. Keep
+        user/tool-result text and content read from other messages outside those
+        blocks. Inspect rendered text and loss masks on representative inputs,
+        because automatic probes can miss content-dependent errors.
+
         Args:
             tokenizer: Pre-instantiated HF-compatible **fast** tokenizer; takes
                 precedence over ``tokenizer_id``.
@@ -213,13 +220,10 @@ class TokenizeChat(TokenizeBase):
                 ``after_last_user`` selects every assistant after the final user.
                 The default is ``all_assistant``. For ``after_last_user``, Zephon
                 must identify which input message owns each generation block.
-                Blocks must sit inside that message's loop and cover its output,
-                including reasoning and tool calls; include assistant EOS there.
                 Synthetic checks run at tokenizer initialization and once per
                 new message/tool structure. Every render checks owners and ranges.
                 ``preflight_tokenizers()`` runs initialization checks early; omitting
-                it does not disable checks. Unassignable blocks and missing selected
-                content raise; finite probes cannot certify arbitrary Jinja branches.
+                it does not disable checks. Detected errors raise.
                 Diverse agentic data can cost roughly 2–3× HF tokenization due to
                 cache misses. Empty or fully truncated targets are dropped.
                 Pair ``expand_chat()`` with ``after_last_user`` when a template

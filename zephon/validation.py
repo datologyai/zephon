@@ -1670,7 +1670,13 @@ def verify_chat_template(
 
     ``after_last_user`` runs these checks automatically. This entry point is
     useful for template CI, extra fixtures and tagged/stock comparisons.
-    Passing probes is evidence, not proof for untested data-dependent branches.
+
+    Check your template: every selected assistant's reasoning, tool calls,
+    answer and any end-of-turn token must appear inside its own ``{% generation %}``
+    blocks, within its message loop. Keep user/tool-result text and content read
+    from other messages outside those blocks. Inspect rendered text and loss
+    masks on representative inputs, because automatic probes can miss
+    content-dependent errors.
 
     Args:
         tokenizer: HF-compatible fast tokenizer.

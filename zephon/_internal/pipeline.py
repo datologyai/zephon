@@ -918,10 +918,16 @@ class Pipeline:
         ``after_last_user`` needs to associate generated text with its input
         assistant message. Zephon checks tagged templates using synthetic
         conversations at tokenizer initialization and on each new message/tool
-        structure; ambiguous ownership or missing selected content raises.
+        structure; detected errors raise.
         ``preflight_tokenizers()`` runs initialization checks before iteration;
-        the checks also run automatically without it. These probes cannot prove
-        every content-dependent branch of a custom template.
+        the checks also run automatically without it.
+
+        Check your template: every selected assistant's reasoning, tool calls,
+        answer and any end-of-turn token must appear inside its own
+        ``{% generation %}`` blocks, within its message loop. Keep user/tool-result
+        text and content read from other messages outside those blocks. Inspect
+        rendered text and loss masks on representative inputs, because automatic
+        probes can miss content-dependent errors.
 
         Pair ``expand_chat()`` with ``after_last_user`` for templates such as
         Qwen that omit reasoning from earlier user cycles. Each prefix makes
