@@ -11,7 +11,7 @@ from typing import Any, cast
 from zephon.ops.base import BaseOp
 from zephon.ops.children import spawn_child, tombstones_for_record
 from zephon.ops.traits import OpTraits
-from zephon.types import ContributorRef, SampleMeta, SampleRecord
+from zephon.types import SampleRecord
 
 log = logging.getLogger(__name__)
 
@@ -92,20 +92,6 @@ class ExpandChat(BaseOp):
         current[self._field_path[-1]] = messages
         return result
 
-    @staticmethod
-    def _child_meta(meta: SampleMeta, ordinal: int, last: bool) -> SampleMeta:
-        """Append the query ordinal; only the final prefix inherits closing refs.
-
-        Lineage ``(4,) -> (4, ordinal)``. Inherited flags ``[open, closed]``
-        become ``[open, open]`` before the last prefix, then ``[open, closed]``.
-        """
-        if not meta.contributors:
-            return spawn_child(meta, ordinal, is_last_child=last)
-        # Only the final prefix inherits its parent's closing contributors.
-        opened = tuple(ContributorRef(ref.cursor, False) for ref in meta.contributors)
-        child = spawn_child(meta.with_contributors(opened), ordinal)
-        return child.with_contributors(meta.contributors if last else opened)
-
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         """Scan user boundaries, then emit prefixes or closing tombstones."""
         out: list[SampleRecord] = []
@@ -157,7 +143,7 @@ class ExpandChat(BaseOp):
                 continue
             for index, (ordinal, end) in enumerate(prefixes):
                 last = index == len(prefixes) - 1
-                meta = self._child_meta(record.meta, ordinal, last)
+                meta = spawn_child(record.meta, ordinal, is_last_child=last)
                 payload = self._prefix_payload(record.payload, messages[:end])
                 # Siblings own independent nested data; the final prefix consumes
                 # the source objects after all earlier prefixes have been copied.

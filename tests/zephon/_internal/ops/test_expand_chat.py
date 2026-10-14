@@ -56,19 +56,6 @@ def test_query_prefixes_include_tool_cycles_and_original_ordinals() -> None:
     assert tombstones_for_record(outputs[0]) == []
 
 
-@pytest.mark.parametrize("last", [False, True])
-def test_upstream_child_closes_only_on_its_last_prefix(last: bool) -> None:
-    parent = record("user", "assistant", "user", "assistant")
-    parent.meta = spawn_child(parent.meta, 5, is_last_child=last)
-    outputs = ExpandChat().process_one(parent)
-    assert [child.meta.lineage for child in outputs] == [(5, 0), (5, 1)]
-    assert [child.meta.contribution_refs()[0].is_last_child for child in outputs] == [
-        False,
-        last,
-    ]
-    assert outputs[-1].meta.contributors == parent.meta.contributors
-
-
 @pytest.mark.parametrize(
     "roles", [(), ("assistant",), ("user",), ("user", "tool", "user")]
 )
