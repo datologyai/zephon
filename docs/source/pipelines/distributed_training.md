@@ -94,6 +94,17 @@ which is set to three minutes by default) expires, and then the checkpoint opera
 fail. The details of when to take a checkpoint and how to restore it are covered in
 [Checkpointing and Resuming Pipelines](checkpointing_and_resuming.md).
 
+The leader's `checkpoint()` call returns only after every participating instance has
+received the merged checkpoint, so you don't need a barrier after checkpointing before a
+rank shuts down. The `aggregate_timeout_s` budget covers the whole checkpoint operation:
+joining it, waiting for every instance's state, and waiting for every instance to read the
+result. For object storage the budget is raised to at least 90 seconds. Slow storage
+requests and the merge itself are not interrupted when the budget runs out, so a
+checkpoint can take somewhat longer than `aggregate_timeout_s` in wall-clock time; the
+timeout error reports the time actually spent. If an instance publishes its state but
+never reads the result, the leader's checkpoint fails and the merged file is left in
+`aggregate_dir` so the instances that did read it are unaffected.
+
 In many jobs, the coordination identity is simply the global rank and the world size of
 the training job itself. But it doesn't have to be set this way, and up next we explain
 why it might not be.

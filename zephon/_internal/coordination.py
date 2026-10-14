@@ -346,14 +346,29 @@ class FileCoordinator:
             return rid
         return None
 
-    def _open_round_id(self, is_leader: bool, timeout: float) -> str:
+    def _open_round_id(self, is_leader: bool, deadline: float) -> str:
         if is_leader:
             return self._publish_new_round_id()
 
-        rid = self._wait_value(self._read_open_round_id, timeout)
+        rid = self._wait_value(
+            self._read_open_round_id, max(0.0, deadline - time.monotonic())
+        )
         if rid is None:
-            raise RuntimeError(f"Timeout waiting for round id at {self.round_file}")
+            raise self._timeout_error(deadline, f"round id at {self.round_file}")
         return rid
+
+    def _timeout_error(self, deadline: float, waiting_for: str) -> RuntimeError:
+        """Report the time actually spent, which may differ from the budget.
+
+        Waits share one budget per ``aggregate()`` call, and blocking storage or
+        merge work is not interrupted, so a timed-out wait may have run for less
+        than the budget while the whole call ran for longer.
+        """
+        elapsed = time.monotonic() - (deadline - self._timeout_s)
+        budget = f"aggregate_timeout_s budget: {self._timeout_s}s"
+        return RuntimeError(
+            f"[PID {os.getpid()}] Timed out after {elapsed:.1f}s ({budget}) waiting for {waiting_for}"
+        )
 
     def _read_states_for_round(
         self,
@@ -378,7 +393,7 @@ class FileCoordinator:
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self._timeout_s
         is_leader = round_.is_leader
-        round_id = self._open_round_id(is_leader, max(0.0, deadline - time.monotonic()))
+        round_id = self._open_round_id(is_leader, deadline)
         self.last_round_id = round_id
         my_path = self._state_file_path(round_id)
         failure_path = f"{self.agg_dir}/failed_{round_id}.txt"
@@ -414,7 +429,7 @@ class FileCoordinator:
                                 if shard_mapping.get(group) != lane_mapping.get(group)
                             )
                             raise RuntimeError(
-                                f"Lane mapping mismatch for rank {rank} at {path}: differing DP groups={differing_groups}"
+                                f"Lane mapping in rank {rank}'s shard at {path} differs from the leader's: differing DP groups={differing_groups}"
                             )
                         if dp_id not in lane_mapping:
                             raise RuntimeError(
@@ -465,8 +480,8 @@ class FileCoordinator:
                         f"missing lanes per rank={missing_lanes_by_rank}",
                         f"files={len(seen)}",
                     )
-                    raise RuntimeError(
-                        f"[PID {os.getpid()}] Aggregation timeout after {self._timeout_s}s. {'; '.join(details)}"
+                    raise self._timeout_error(
+                        deadline, f"checkpoint shards: {'; '.join(details)}"
                     )
 
                 # States already cached from polling above.
@@ -500,14 +515,16 @@ class FileCoordinator:
                 if os.path.basename(path) != os.path.basename(my_path)
             }
             pending = set(ack_paths)
+            acknowledged: dict[str, str] = {}
 
             def _all_acknowledged() -> bool:
-                pending.difference_update(
-                    os.path.basename(path)
-                    for path in self.backend.glob(
-                        f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
-                    )
-                )
+                for path in self.backend.glob(
+                    f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
+                ):
+                    name = os.path.basename(path)
+                    if name in pending:
+                        pending.remove(name)
+                        acknowledged[name] = ack_paths[name]
                 return not pending
 
             try:
@@ -521,13 +538,13 @@ class FileCoordinator:
                         f"first 10={sorted(pending)[:10]}",
                         f"Merged result retained at {merged_path}",
                     )
-                    message = f"[PID {os.getpid()}] Timed out after {self._timeout_s}s"
-                    raise RuntimeError(
-                        f"{message} waiting for checkpoint acknowledgements: {'; '.join(details)}"
+                    raise self._timeout_error(
+                        deadline,
+                        f"checkpoint acknowledgements: {'; '.join(details)}",
                     )
             finally:
-                for name in ack_paths.keys() - pending:
-                    self._delete_best_effort(ack_paths[name])
+                for ack_path in acknowledged.values():
+                    self._delete_best_effort(ack_path)
             if self._previous_merged_file is not None:
                 self._delete_best_effort(self._previous_merged_file)
             # Retain the consumed result as a closed-round marker: a follower
@@ -551,9 +568,7 @@ class FileCoordinator:
 
         ok = self._wait_until(_result_ready, max(0.0, deadline - time.monotonic()))
         if not ok:
-            raise RuntimeError(
-                f"[PID {os.getpid()}] Timed out after {self._timeout_s}s waiting for merged checkpoint at {merged_path}"
-            )
+            raise self._timeout_error(deadline, f"merged checkpoint at {merged_path}")
         merged = self._read_aggregation_state(merged_path)
         if merged is None:
             raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")

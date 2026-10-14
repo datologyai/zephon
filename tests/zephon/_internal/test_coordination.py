@@ -453,7 +453,10 @@ def test_contribution_and_ack_waits_share_one_deadline(
         "zephon._internal.coordination.time",
         SimpleNamespace(monotonic=lambda: elapsed, sleep=advance_time),
     )
-    with pytest.raises(RuntimeError, match="checkpoint acknowledgements: missing=1"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"after 1\.0s \(aggregate_timeout_s budget: 1\.0s\) waiting for checkpoint acknowledgements: missing=1",
+    ):
         leader.aggregate(
             AggregationRound(
                 {"world": world, "progress": {0: 0}},
@@ -469,13 +472,53 @@ def test_contribution_and_ack_waits_share_one_deadline(
     assert not list(Path(leader.agg_dir).glob("failed_*.txt"))
 
 
+def test_timeout_reports_elapsed_time_beyond_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader = _coordinator(tmp_path, world_size=2, timeout=1.0)
+    follower = _coordinator(tmp_path, rank=1, world_size=2)
+    monkeypatch.setattr(leader, "_open_round_id", lambda *_: "slow-round")
+    world = {"global_rank": 0, "dp_group_id": 0, "mapping": {0: [0], 1: [1]}}
+    follower.backend.put(
+        follower._state_file_path("slow-round"),
+        follower._codec.encode(
+            {"world": {**world, "global_rank": 1, "dp_group_id": 1}, "progress": {1: 0}}
+        ),
+    )
+    elapsed = 0.0
+
+    def slow_merge(_: list[dict[str, Any]]) -> dict[str, Any]:
+        # Merge work is not interrupted by the budget.
+        nonlocal elapsed
+        elapsed += 5.0
+        return {"progress": {"0": 0, "1": 0}}
+
+    monkeypatch.setattr(
+        "zephon._internal.coordination.time",
+        SimpleNamespace(monotonic=lambda: elapsed, sleep=lambda _: None),
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"after 5\.0s \(aggregate_timeout_s budget: 1\.0s\) waiting for checkpoint acknowledgements",
+    ):
+        leader.aggregate(
+            AggregationRound(
+                {"world": world, "progress": {0: 0}},
+                True,
+                frozenset({0, 1}),
+                frozenset({0, 1}),
+            ),
+            slow_merge,
+        )
+
+
 @pytest.mark.parametrize(
     "world,progress,error",
     [
         (
             {"mapping": {0: [1], 1: [0]}},
             {0: 0},
-            "Lane mapping mismatch.*groups=\\[0, 1\\]",
+            "rank 0's shard.*differs from the leader's.*groups=\\[0, 1\\]",
         ),
         ({"dp_group_id": 2}, {0: 0}, "Unknown DP group 2"),
         ({"dp_group_id": 1}, {1: 0}, "DP group mismatch.*0 != 1"),
