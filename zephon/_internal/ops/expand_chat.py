@@ -114,10 +114,12 @@ class ExpandChat(BaseOp):
                 out.append(record)
                 continue
             messages = self._messages(record)
+            # Each entry is (user-query ordinal, exclusive prefix end).
             prefixes: list[tuple[int, int]] = []
             ordinal, answered = -1, False
             for index, message in enumerate(messages):
                 if message["role"] == "user":
+                    # Unanswered queries have no prefix of their own.
                     if answered:
                         prefixes.append((ordinal, index))
                     ordinal, answered = ordinal + 1, False
@@ -126,24 +128,32 @@ class ExpandChat(BaseOp):
             if answered:
                 prefixes.append((ordinal, len(messages)))
             if ordinal < 0:
+                # No user message was encountered; warn once per operator.
                 if not self._warned_no_user:
                     log.warning(
                         "expand_chat: dropping conversations with no user message"
                     )
                     self._warned_no_user = True
             if not prefixes:
+                # No query has an assistant message; emit only completion markers.
                 out.extend(tombstones_for_record(record))
                 continue
             if len(prefixes) == 1:
+                # One answered query yields one output with the input's metadata.
                 end = prefixes[0][1]
-                out.append(
-                    record
-                    if end == len(messages)
-                    else SampleRecord(
-                        meta=record.meta,
-                        payload=self._prefix_payload(record.payload, messages[:end]),
+                if end == len(messages):
+                    # The prefix covers the entire conversation.
+                    out.append(record)
+                else:
+                    # Remove trailing unanswered queries from the sole prefix.
+                    out.append(
+                        SampleRecord(
+                            meta=record.meta,
+                            payload=self._prefix_payload(
+                                record.payload, messages[:end]
+                            ),
+                        )
                     )
-                )
                 continue
             for index, (ordinal, end) in enumerate(prefixes):
                 last = index == len(prefixes) - 1
