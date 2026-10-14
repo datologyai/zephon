@@ -224,8 +224,8 @@ class TokenizeChat(TokenizeBase):
                 new message/tool structure. Every render checks owners and ranges.
                 ``preflight_tokenizers()`` runs initialization checks early; omitting
                 it does not disable checks. Detected errors raise.
-                Diverse agentic data can cost roughly 2–3× HF tokenization due to
-                cache misses. Empty or fully truncated targets are dropped.
+                Cache misses run extra rendering and tokenization probes.
+                Empty or fully truncated targets are dropped.
                 Pair ``expand_chat()`` with ``after_last_user`` when a template
                 such as Qwen removes reasoning from earlier user cycles: each
                 prefix then renders its target cycle with reasoning included.

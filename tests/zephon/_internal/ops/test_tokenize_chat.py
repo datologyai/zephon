@@ -958,14 +958,9 @@ def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
     assert {owner for owner, *_ in spans} == {1}
 
 
-def test_structure_key_covers_reasoning_flags_and_json_argument_shape(
+def test_structure_key_covers_thinking_flag(
     fast_tokenizer: Any,
 ) -> None:
-    from zephon._internal.utils.chat_template import _structure
-
-    assert _structure({"arguments": '{"a":"x"}'}) != _structure(
-        {"arguments": '{"b":"x"}'}
-    )
     template = (
         "{% if enable_thinking %}"
         + SPLIT

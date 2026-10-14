@@ -253,25 +253,97 @@ def _issue(code: str, message: str, *, warning: bool = False) -> Issue:
     )
 
 
+def _call_arguments(value: Any) -> dict[str, Any]:
+    """Validate argument objects, including JSON strings, without changing inputs."""
+    arguments = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(arguments, dict):
+        raise ValueError("tool-call arguments must be a dictionary or JSON object")
+    return arguments
+
+
+def _tool_structure(value: Any, *, call: bool) -> tuple[Any, ...]:
+    """Describe tool formats without names, argument contents or parameter schemas."""
+    if not isinstance(value, dict):
+        raise ValueError("tools and tool calls must be dictionaries")
+    function = value.get("function", value)
+    if not isinstance(function, dict) or (call and "function" not in value):
+        raise ValueError("tool calls must contain a function dictionary")
+    common = (
+        "wrapped" if "function" in value else "flat",
+        tuple(sorted(value)),
+        tuple(sorted(function)),
+        _structure(value.get("type"), "type"),
+        _structure(function.get("name")),
+    )
+    if call:
+        arguments = function.get("arguments", {})
+        return (
+            *common,
+            "json" if isinstance(arguments, str) else "object",
+            bool(_call_arguments(arguments)),
+        )
+    parameters = function.get("parameters", function.get("arguments"))
+    return (
+        *common,
+        _structure(function.get("description")),
+        type(parameters).__name__,
+        bool(parameters),
+    )
+
+
+def _tool_list_structure(value: Any, *, call: bool) -> tuple[Any, ...]:
+    """Keep 0/1/2/3+ counts, first/last formats and distinct middle formats."""
+    if value is None:
+        return ("none",)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("tools and tool_calls must be lists or None")
+    # Inspect every element before the cache lookup, including repeated formats.
+    items = tuple(_tool_structure(item, call=call) for item in value)
+    return (
+        "list",
+        min(len(items), 3),
+        items[:1],
+        items[-1:],
+        tuple(sorted(set(items[1:-1]), key=repr)),
+    )
+
+
 def _structure(value: Any, key: str = "") -> Any:
-    """Describe input structure while excluding conversation text."""
+    """Describe message formats and validate fields on every cache lookup."""
+    if key in {"tools", "tool_calls"}:
+        return _tool_list_structure(value, call=key == "tool_calls")
+    if key in {"content", "reasoning_content", "reasoning"}:
+        if key == "content" and isinstance(value, list):
+            if any(
+                not isinstance(part, dict)
+                or part.get("type") != "text"
+                or not isinstance(part.get("text", ""), (str, type(None)))
+                for part in value
+            ):
+                raise ValueError(
+                    "chat template verification supports text-only content parts"
+                )
+            return tuple(_structure(part) for part in value)
+        elif value is not None and not isinstance(value, str):
+            raise ValueError(f"message {key} must be text or None")
     if isinstance(value, Mapping):
         return tuple((k, _structure(v, k)) for k, v in sorted(value.items()))
     if isinstance(value, (list, tuple)):
         return tuple(_structure(item, key) for item in value)
     if (
-        key in {"role", "type", "enable_thinking", "name"}
+        key in {"role", "type", "enable_thinking"}
         or value is None
         or isinstance(value, bool)
     ):
         return value
     if isinstance(value, str):
-        if key == "arguments":
-            try:
-                return ("json", _structure(json.loads(value)))
-            except ValueError:
-                return ("invalid_json",)
-        return ("str", bool(value), "<think>" in value, "</think>" in value)
+        return (
+            "str",
+            bool(value),
+            "<think>" in value,
+            "</think>" in value,
+            value.startswith("<tool_response>") and value.endswith("</tool_response>"),
+        )
     return type(value).__name__
 
 
@@ -320,12 +392,7 @@ def _marked_probe(
             function = call["function"]
             args = function.get("arguments", {})
             is_json = isinstance(args, str)
-            if is_json:
-                args = json.loads(args)
-            if not isinstance(args, dict):
-                raise ValueError(
-                    "tool-call arguments must be a dictionary or JSON object"
-                )
+            args = _call_arguments(args)
             # A string argument detects templates that omit the whole call.
             args = {**args, "zephon_probe": marker(i, required_output=i in selected)}
             function["arguments"] = json.dumps(args) if is_json else args
@@ -536,13 +603,29 @@ class TemplateVerifier:
     ) -> ValidationReport:
         """Reuse successful checks across rows, preflight and operator copies.
 
-        Structure includes roles, optional fields and tool/schema names, but not
-        ordinary text values. This avoids repeating probes for matching inputs;
-        it does not certify untested content-dependent template branches.
+        Keep message order, field formats, text flags and exact render options.
+        Tool names, argument contents and schemas are omitted; tool/call counts
+        use 0/1/2/3+ buckets with first/last and distinct middle formats. These
+        probes do not certify branches on omitted values or exact larger counts.
         """
-        structure = hashlib.sha256(
-            repr((_structure(messages), _structure(kwargs))).encode()
-        ).digest()
+        try:
+            # Unknown render options remain exact: they may select template modes.
+            options = tuple(
+                (name, _structure(value, "tools") if name == "tools" else value)
+                for name, value in sorted(kwargs.items())
+            )
+            structure = hashlib.sha256(
+                repr((_structure(messages), options)).encode()
+            ).digest()
+        except ValueError as error:
+            return ValidationReport(
+                [
+                    _issue(
+                        "CHAT_TEMPLATE_INVALID",
+                        f"Template {self.template.identity}: {error}",
+                    )
+                ]
+            )
         key = (self._identity, setup, structure)
         with _VERIFICATION_LOCK:
             cached = _VERIFIED_STRUCTURES.get(key)
@@ -573,8 +656,8 @@ class TemplateVerifier:
     ) -> None:
         """Check an unseen input structure before its training sample is emitted.
 
-        Setup cannot anticipate every tool schema or message sequence. Cache hits
-        skip probes; diverse inputs may require extra renders for most rows.
+        Field validity is checked on every call. Successful cached structures
+        skip marker probes; actual rendering still checks owners and ranges.
         """
         report = self._cached_verify(messages, kwargs)
         if not report.ok:
