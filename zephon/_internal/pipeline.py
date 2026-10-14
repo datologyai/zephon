@@ -60,6 +60,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    ContentLossPolicy,
     LossScope,
     MissingFieldMode,
     PackingAlgorithm,
@@ -897,6 +898,7 @@ class Pipeline:
         span_source: SpanSource = "auto",
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
+        on_content_loss: ContentLossPolicy = "drop",
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -918,9 +920,17 @@ class Pipeline:
         ``after_last_user`` needs to associate generated text with its input
         assistant message. Zephon checks tagged templates using synthetic
         conversations at tokenizer initialization and on each new message/tool
-        structure; detected errors raise.
+        structure.
         ``preflight_tokenizers()`` runs initialization checks before iteration;
         the checks also run automatically without it.
+
+        ``on_content_loss="drop"`` (default) logs at ERROR and drops samples whose
+        selected source content disappears during rendering; ``"raise"`` stops
+        instead. This check applies to ``after_last_user`` with generation tags;
+        other paths do not verify source-content retention. Drops count zero
+        tokens during calibration. Setup, ownership and mask errors always raise.
+        Drop logs include running counts and sample context, limited to the first
+        five drops and every hundredth per operator instance.
 
         Check your template: every selected assistant's reasoning, tool calls,
         answer and any end-of-turn token must appear inside its own
@@ -951,6 +961,7 @@ class Pipeline:
             apply_chat_template=apply_chat_template,
             span_source=span_source,
             loss_scope=loss_scope,
+            on_content_loss=on_content_loss,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
             enable_thinking_field=enable_thinking_field,

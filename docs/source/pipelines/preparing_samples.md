@@ -62,6 +62,16 @@ training it to predict the user's messages:
 :caption: examples/guide/pipelines/tokenize_chat.py
 ```
 
+With `loss_scope="after_last_user"` and a generation-tagged template, `tokenize_chat`
+checks that selected assistant content survives rendering and receives loss. If source
+content disappears, `on_content_loss="drop"` (the default) logs at ERROR and drops the
+affected sample or expanded prefix. For example, repeated `</think>` delimiters can
+cause a template to discard text between them. Set `on_content_loss="raise"` to stop
+on these samples. Setup failures, wrong ownership and incorrect supervision always
+raise. Drops count zero tokens during calibration; logs include running counts and
+sample context for the first five drops and every hundredth per operator instance.
+The default `all_assistant` path uses HF's mask and does not run these retention checks.
+
 By default, both tokenization operators replace the original record payload with their
 tokenized output. If later operations in your pipeline need access to the original fields,
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized

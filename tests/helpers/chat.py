@@ -27,6 +27,14 @@ TAGGED_TEMPLATE = (
     "{% else %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endif %}"
     "{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}"
 )
+# Qwen-style extraction retains text before the first and after the last close.
+THINK_SPLIT_TEMPLATE = TAGGED_TEMPLATE.replace(
+    "{{ message['content'] }}",
+    "{% if '</think>' in message.content %}"
+    "{{ message.content.split('</think>')[0] }}"
+    "{{ message.content.split('</think>')[-1] }}"
+    "{% else %}{{ message.content }}{% endif %}",
+)
 #: Assistant turns end without EOS — exercises the conditional EOS finalizer.
 TAGGED_TEMPLATE_NO_EOS = (
     "{% for message in messages %}{% if message['role'] == 'assistant' %}"

@@ -37,7 +37,7 @@ from zephon._internal.utils.tokenizer import (
     thread_salted_template,
 )
 from zephon.ops.children import tombstones_for_record
-from zephon.ops.config import LossScope, SpanSource
+from zephon.ops.config import ContentLossPolicy, LossScope, SpanSource
 from zephon.ops.traits import OpTraits
 from zephon.types import SamplePayloadDict, SampleRecord
 from zephon.validation import ValidationError
@@ -172,6 +172,7 @@ class TokenizeChat(TokenizeBase):
         span_source: SpanSource = "auto",
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
+        on_content_loss: ContentLossPolicy = "drop",
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -220,7 +221,8 @@ class TokenizeChat(TokenizeBase):
                 Synthetic checks run at tokenizer initialization and once per
                 new message/tool structure. Every render checks owners and ranges.
                 ``preflight_tokenizers()`` runs initialization checks early; omitting
-                it does not disable checks. Detected errors raise.
+                it does not disable checks. Omitted source content follows
+                ``on_content_loss``; other detected errors raise.
                 Cache misses run extra rendering and tokenization probes.
                 Empty or fully truncated targets are dropped.
                 Pair ``expand_chat()`` with ``after_last_user`` when a template
@@ -236,6 +238,14 @@ class TokenizeChat(TokenizeBase):
                 probes can miss content-dependent errors.
             loss_on_last_turn_only: Deprecated alias: True selects ``last_span``;
                 False selects ``all_assistant``. Cannot accompany ``loss_scope``.
+            on_content_loss: ``"drop"`` (default) logs at ERROR and drops samples
+                whose selected assistant content disappears during rendering,
+                counting zero delivered tokens during calibration. ``"raise"``
+                stops instead. Applies to ``after_last_user`` with generation
+                tags; other paths do not check source-content retention. Setup errors,
+                wrong ownership and rendered content outside generation blocks
+                always raise. Logs the first five drops and every hundredth drop
+                per operator instance, including running counts and sample context.
             chat_template_kwargs: Static extra kwargs forwarded to
                 ``apply_chat_template`` (template context variables).
             tools_field: Dot-separated payload path of per-sample tools passed
@@ -256,6 +266,8 @@ class TokenizeChat(TokenizeBase):
             raise ValueError(
                 f"span_source must be one of {_VALID_SPAN_SOURCES}, got {span_source!r}"
             )
+        if on_content_loss not in get_args(ContentLossPolicy):
+            raise ValueError(f"invalid on_content_loss: {on_content_loss!r}")
         if not apply_chat_template:
             if span_source != "auto":
                 raise ValueError(
@@ -300,6 +312,7 @@ class TokenizeChat(TokenizeBase):
         self.chat_template = self._read_template(chat_template)
         self.span_source: SpanSource = span_source
         self.loss_scope: LossScope = loss_scope
+        self.on_content_loss: ContentLossPolicy = on_content_loss
         self._template_verifier: TemplateVerifier | None = None
         self._template_setup_result: TemplateSetupResult | None = None
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
@@ -316,6 +329,9 @@ class TokenizeChat(TokenizeBase):
         self._eos_str: str | None = None
         # Logging-only latch; outputs stay independent across process_many calls.
         self._warned_unsupervised_drop = False
+        # Logging-only counts; sample delivery does not depend on their values.
+        self._content_loss_checked = 0
+        self._content_loss_dropped = 0
 
     def __getstate__(self) -> dict[str, Any]:
         """Serialize successful setup checks, excluding compiled Jinja state."""
@@ -682,9 +698,46 @@ class TokenizeChat(TokenizeBase):
 
     def _tokenize_delivery(
         self, payload: Any, sample_id: Any
-    ) -> tuple[list[int], "np.ndarray"] | Literal["degenerate", "unsupervised"]:
+    ) -> (
+        tuple[list[int], "np.ndarray"]
+        | Literal["degenerate", "unsupervised", "content_loss"]
+    ):
         """Apply the delivery policy shared by execution and calibration."""
-        ids, mask = self._ids_and_mask(payload, sample_id)
+        # Setup failures are fatal regardless of the per-sample content-loss policy.
+        if not self._tokenizer_instantiated:
+            self._setup_tokenizer()
+        drop_content_loss = (
+            self.on_content_loss == "drop" and self._template_verifier is not None
+        )
+        if drop_content_loss:
+            self._content_loss_checked += 1
+        try:
+            ids, mask = self._ids_and_mask(payload, sample_id)
+        except ValidationError as error:
+            codes = {issue.code for issue in error.report.errors} - {
+                "CHAT_INPUT_CONTEXT"
+            }
+            if not drop_content_loss or codes != {"CHAT_REQUIRED_CONTENT"}:
+                raise
+            self._content_loss_dropped += 1
+            level = (
+                logging.ERROR
+                if self._content_loss_dropped <= 5
+                or self._content_loss_dropped % 100 == 0
+                else logging.DEBUG
+            )
+            log.log(
+                level,
+                "TokenizeChat: dropping sample %r because selected assistant "
+                + "content was omitted; content-loss drops=%d/%d (%.2f%%) "
+                + "in this operator instance. %s",
+                sample_id,
+                self._content_loss_dropped,
+                self._content_loss_checked,
+                100 * self._content_loss_dropped / self._content_loss_checked,
+                error,
+            )
+            return "content_loss"
         if len(ids) < 2:
             return "degenerate"
         if not mask.any():
@@ -720,6 +773,8 @@ class TokenizeChat(TokenizeBase):
         result = self._tokenize_delivery(record.payload, source)
 
         if isinstance(result, str):
+            if result == "content_loss":
+                return tombstones_for_record(record)
             if result == "degenerate":
                 log.debug(
                     "TokenizeChat: dropping degenerate sample %r (<2 tokens)",
@@ -783,6 +838,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
     apply_chat_template: bool = True
     span_source: SpanSource = "auto"
     loss_scope: LossScope = "all_assistant"
+    on_content_loss: ContentLossPolicy = "drop"
     chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     tools_field: str = "tools"
     enable_thinking_field: str = "enable_thinking"
@@ -800,6 +856,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
             apply_chat_template=op.apply_chat_template,
             span_source=op.span_source,
             loss_scope=op.loss_scope,
+            on_content_loss=op.on_content_loss,
             chat_template_kwargs=tuple(sorted(op.chat_template_kwargs.items())),
             tools_field=op.tools_field,
             enable_thinking_field=op.enable_thinking_field,
@@ -818,6 +875,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
                 apply_chat_template=self.apply_chat_template,
                 span_source=self.span_source,
                 loss_scope=self.loss_scope,
+                on_content_loss=self.on_content_loss,
                 chat_template_kwargs=dict(self.chat_template_kwargs),
                 tools_field=self.tools_field,
                 enable_thinking_field=self.enable_thinking_field,

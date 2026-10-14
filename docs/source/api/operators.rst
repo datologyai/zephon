@@ -40,6 +40,15 @@ The string literals that operator-configuration arguments accept.
    Which assistant spans ``tokenize_chat`` supervises. ``after_last_user``
    automatically verifies generation ownership before producing output.
 
+.. py:data:: ContentLossPolicy
+   :type: Literal['raise', 'drop']
+
+   What ``tokenize_chat`` does when selected assistant source content disappears
+   during rendering. The default ``on_content_loss='drop'`` logs at ERROR and
+   counts the affected sample as zero delivered tokens; ``'raise'`` stops instead.
+   Applies to ``after_last_user`` with generation tags. Setup failures, wrong
+   ownership and incorrect supervision always raise.
+
 Accumulator types
 -----------------
 

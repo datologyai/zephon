@@ -124,6 +124,51 @@ def test_chat_calibration_counts_expanded_tokens_over_source_bytes() -> None:
     assert tokens > len(records[-1].payload["input_ids"])
 
 
+@pytest.mark.parametrize("runner", ["threads", "process"])
+def test_content_loss_drops_preserve_expansion_and_calibration(runner: str) -> None:
+    from tests.helpers.chat import THINK_SPLIT_TEMPLATE, make_fast_tokenizer
+    from zephon._internal.observability.size_estimator import content_bytes
+    from zephon.work.token_estimation import TokenEstimation
+
+    good = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    bad = [
+        {"role": "user", "content": "what"},
+        {"role": "assistant", "content": "<think>how</think>yes</think>the answer"},
+    ]
+    rows = [{"messages": good + bad + good + bad}]
+    work = StaticMixtureWorkSource(
+        [Dataset.from_dict("chat", {0: InMemoryShard(rows)})],
+        {"chat": 1.0},
+        chunk_size=1,
+        exhausted_policy="stop",
+        token_estimation=TokenEstimation(
+            calibration_samples=1, calibration_shards_min=1, calibration_shards_max=1
+        ),
+    )
+    pipe = (
+        Pipeline(work)
+        .expand_chat()
+        .tokenize_chat(
+            make_fast_tokenizer(),
+            chat_template=THINK_SPLIT_TEMPLATE,
+            loss_scope="after_last_user",
+            on_content_loss="drop",
+        )
+        .options(runner=runner, max_workers=1, canonical_replicas=1)
+    )
+    assert pipe.preflight_tokenizers().ok
+    records = list(pipe)
+    assert len(records) == 2
+    assert [record.meta.cursor.lineage for record in records] == [(0,), (2,)]
+    tokens = sum(len(record.payload["input_ids"]) for record in records)
+    ratio, source = work.state_dict()["token_ratios"]["chat"]
+    assert source == "measured"
+    assert ratio == pytest.approx(tokens / sum(content_bytes(row) for row in rows))
+
+
 def test_expanded_scoped_tokens_pack_with_document_boundaries() -> None:
     import numpy as np
 

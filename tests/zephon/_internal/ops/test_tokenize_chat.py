@@ -23,6 +23,7 @@ from tests.helpers.chat import (
     SPLIT,
     TAGGED_TEMPLATE,
     TAGGED_TEMPLATE_NO_EOS,
+    THINK_SPLIT_TEMPLATE,
     TOOLS_TEMPLATE,
     UNTAGGED_TEMPLATE,
     _messages,
@@ -827,11 +828,137 @@ def test_invalid_structure_fails_without_preflight(
 
 def test_structure_detects_omitted_calls_before_emission(fast_tokenizer: Any) -> None:
     op = TokenizeChat(
-        fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="after_last_user"
+        fast_tokenizer,
+        chat_template=TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        on_content_loss="raise",
     )
     assert not run(op, CONVERSATION).meta.tombstone
     with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
         run(op, CYCLE)
+
+
+def test_content_loss_defaults_to_drop_and_logs_sample_context(
+    fast_tokenizer: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=THINK_SPLIT_TEMPLATE, loss_scope="after_last_user"
+    )
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1]["content"] = "<think>how</think>yes</think>the answer"
+    with caplog.at_level(logging.ERROR):
+        dropped = run(op, messages)
+    assert dropped.meta.tombstone
+    assert "SampleCursor" in caplog.text
+    assert "CHAT_REQUIRED_CONTENT" in caplog.text
+    assert "message 3" in caplog.text
+    assert "template=" in caplog.text
+    assert "content-loss drops=1/1" in caplog.text
+    assert not run(op, CONVERSATION).meta.tombstone
+    # Another matching input must not be treated as a verified structure.
+    assert run(op, messages).meta.tombstone
+
+    strict = TokenizeChat(
+        fast_tokenizer,
+        chat_template=THINK_SPLIT_TEMPLATE,
+        loss_scope="after_last_user",
+        on_content_loss="raise",
+    )
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
+        run(strict, messages)
+
+
+def test_content_loss_policy_reaches_serialized_token_counter(
+    fast_tokenizer: Any,
+) -> None:
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1]["content"] = "<think>how</think>yes</think>the answer"
+    bad = {"messages": messages}
+    good = {"messages": CONVERSATION}
+    for policy in ("drop", "raise"):
+        op = TokenizeChat(
+            fast_tokenizer,
+            chat_template=THINK_SPLIT_TEMPLATE,
+            loss_scope="after_last_user",
+            on_content_loss=policy,
+        )
+        spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+        plan = spec.build_counter().plan([bad, good])
+        if policy == "drop":
+            assert plan.count(bad) == 0
+        else:
+            with pytest.raises(FatalCountError, match="CHAT_REQUIRED_CONTENT"):
+                plan.count(bad)
+        assert plan.count(good) == len(run(op, CONVERSATION).payload["input_ids"])
+
+
+def test_drop_policy_never_suppresses_setup_errors(fast_tokenizer: Any) -> None:
+    template = TAGGED_TEMPLATE.replace("{{ message['content'] }}<|end|>", "<|end|>")
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    for _ in range(2):
+        with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
+            run(op, CONVERSATION)
+
+
+def test_drop_policy_rejects_missing_supervision(fast_tokenizer: Any) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "{% generation %}{{ message['content'] }}<|end|>{% endgeneration %}",
+        "{% if message.content.startswith('skip') %}{{ message.content }}{% endif %}"
+        "{% generation %}{% if not message.content.startswith('skip') %}"
+        "{{ message.content }}{% endif %}<|end|>{% endgeneration %}",
+    )
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1]["content"] = "skip this"
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_SUPERVISION"):
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+            ),
+            messages,
+        )
+
+
+def test_drop_policy_rejects_mixed_ownership_and_content_errors(
+    fast_tokenizer: Any,
+) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "{% generation %}",
+        "{% generation %}{% if message.tool_calls %}{{ messages[0].content }}{% endif %}",
+    )
+    with pytest.raises(ValidationError) as exc:
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+            ),
+            CYCLE,
+        )
+    codes = {issue.code for issue in exc.value.report.errors}
+    assert {"CHAT_REQUIRED_CONTENT", "CHAT_CONTENT_OWNERSHIP"} <= codes
+
+
+def test_content_loss_logging_is_bounded(
+    fast_tokenizer: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, loss_scope="after_last_user"
+    )
+    with caplog.at_level(logging.ERROR):
+        for _ in range(101):
+            assert run(op, CYCLE).meta.tombstone
+    logs = [
+        record.message
+        for record in caplog.records
+        if "content-loss drops=" in record.message
+    ]
+    assert len(logs) == 6
+    assert "content-loss drops=100/100" in logs[-1]
+
+
+def test_content_loss_policy_rejects_unknown_value(fast_tokenizer: Any) -> None:
+    with pytest.raises(ValueError, match="invalid on_content_loss"):
+        TokenizeChat(fast_tokenizer, on_content_loss=cast(Any, "ignore"))
 
 
 def test_tool_content_contamination_detected(fast_tokenizer: Any) -> None:
@@ -989,7 +1116,10 @@ def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
     with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
         run(
             TokenizeChat(
-                fast_tokenizer, chat_template=drops_lists, loss_scope="after_last_user"
+                fast_tokenizer,
+                chat_template=drops_lists,
+                loss_scope="after_last_user",
+                on_content_loss="raise",
             ),
             lists,
         )
