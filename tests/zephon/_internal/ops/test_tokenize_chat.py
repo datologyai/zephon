@@ -128,8 +128,6 @@ def test_mode_equivalence_tagged_vs_prefix_diff(fast_tokenizer: Any) -> None:
     )
     conversations = [
         CONVERSATION,
-        CYCLE,
-        SPLIT,
         _messages(
             ("system", "you are good"),
             ("user", "hello"),

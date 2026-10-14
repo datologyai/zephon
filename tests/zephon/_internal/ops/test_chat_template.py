@@ -15,7 +15,7 @@ from tests.helpers.chat import (
 from zephon.validation import verify_chat_template
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def fast_tokenizer() -> Any:
     return make_fast_tokenizer()
 
