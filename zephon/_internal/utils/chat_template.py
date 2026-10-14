@@ -113,7 +113,11 @@ def instrument(
     buffered: bool = False,
     in_generation: bool = False,
 ) -> None:
-    """Attach enclosing loop variables to direct generation calls."""
+    """Attach enclosing loop variables to direct generation calls.
+
+    Their names must not be rebound outside generation blocks; each block
+    captures its owner before rendering its body.
+    """
     if isinstance(node, (nodes.Include, nodes.Import, nodes.FromImport, nodes.Extends)):
         raise ValueError(f"template line {node.lineno}: external template structure")
     if is_generation(node):
@@ -129,7 +133,7 @@ def instrument(
         return
     if not in_generation:
         targets = []
-        if isinstance(node, (nodes.Assign, nodes.AssignBlock)):
+        if isinstance(node, (nodes.Assign, nodes.AssignBlock, nodes.For)):
             targets = [node.target]
         elif isinstance(node, nodes.With):
             targets = node.targets

@@ -90,6 +90,62 @@ def test_with_cannot_rebind_message_owner(target: str) -> None:
         OwnedTemplate(template)
 
 
+@pytest.mark.parametrize(
+    ("target", "iterable", "index"),
+    [
+        ("message", "[messages[i - 2] if i >= 2 else message]", "i"),
+        ("message, j", "[(messages[i - 2] if i >= 2 else message, i)]", "j"),
+    ],
+)
+def test_nested_for_cannot_rebind_message_owner(
+    target: str, iterable: str, index: str
+) -> None:
+    from zephon._internal.utils.chat_template import OwnedTemplate
+
+    template = (
+        "{% for message in messages %}{% if message.role == 'assistant' %}"
+        "{% set i = loop.index0 %}"
+        "{% for " + target + " in " + iterable + " %}"
+        "<a>{% generation %}{{ messages["
+        + index
+        + "].content }}{% endgeneration %}</a>"
+        "{% endfor %}{% else %}<u>{{ message.content }}</u>{% endif %}{% endfor %}"
+    )
+    with pytest.raises(ValueError, match="rebinding an enclosing loop variable"):
+        OwnedTemplate(template)
+
+
+def test_nested_tool_loop_with_distinct_target_retains_message_owner() -> None:
+    from zephon._internal.utils.chat_template import OwnedTemplate
+
+    template = (
+        "{% for message in messages %}{% if message.role == 'assistant' %}"
+        "{% for tool_call in message.tool_calls %}"
+        "{% generation %}{{ tool_call.function.name }}{% endgeneration %}"
+        "{% endfor %}{% endif %}{% endfor %}"
+    )
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"function": {"name": "lookup"}}]},
+    ]
+    text, spans = OwnedTemplate(template).render(messages, {})
+    assert text == "lookup"
+    assert spans == [(1, 0, len(text), 0)]
+
+
+def test_nested_for_inside_generation_retains_captured_owner() -> None:
+    from zephon._internal.utils.chat_template import OwnedTemplate
+
+    template = (
+        "{% for message in messages %}{% if message.role == 'assistant' %}"
+        "{% generation %}{% for message in [message.content] %}{{ message }}"
+        "{% endfor %}{% endgeneration %}{% endif %}{% endfor %}"
+    )
+    text, spans = OwnedTemplate(template).render(CONVERSATION, {})
+    assert text == "good morningthe answer is 4"
+    assert spans == [(1, 0, 12, 0), (3, 12, len(text), 0)]
+
+
 def test_cached_sites_belong_only_to_the_cached_structure(fast_tokenizer: Any) -> None:
     from zephon._internal.utils.chat_template import TemplateVerifier
 
