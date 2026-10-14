@@ -194,6 +194,8 @@ class TestDeliveredFlag:
             _record(lane=1, tombstone=True), use_monotone=use_monotone
         )
         assert result.delivered is False
+        assert isinstance(result, _ContributorNotify)
+        assert result.record_cursor is None
 
     @pytest.mark.parametrize("use_monotone", [True, False])
     def test_batch_is_delivered(self, use_monotone: bool):
@@ -215,7 +217,10 @@ class TestDeliveredFlag:
         _notify_item(engine, r, use_monotone=True)
         engine.record_delivery.assert_not_called()
         # The tombstone is still notified for eviction bookkeeping.
-        engine.notify_monotone.assert_called_once()
+        engine.notify_monotone.assert_not_called()
+        engine.notify.assert_called_once_with(
+            3, r.meta.contribution_refs(), advance_replay=False
+        )
 
     def test_apply_records_delivery_for_batches(self):
         engine = MagicMock()

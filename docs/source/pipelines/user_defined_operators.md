@@ -185,3 +185,12 @@ These last two are reported as warnings; the rest will error and stop the pipeli
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
 own operators and is not validated this way.
+
+### Child completion
+
+`zephon.ops.children.spawn_child()` appends a child index to the replay lineage.
+For a parent without explicit contributors, only `is_last_child=True` closes the
+source offset. For a parent with contributors, non-final children open every
+contributor; the final child inherits the parent's flags exactly. Finishing a
+child of a non-final parent therefore cannot close that parent's source offset.
+This also applies to packed parents with mixed open and closing contributors.

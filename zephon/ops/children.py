@@ -22,31 +22,20 @@ def spawn_child(
     - Contributors:
         * If the parent has no contributors (single-base record), emit one
           contributor tied to the child cursor and honor ``is_last_child``.
-        * If the parent already has contributors (e.g., packed input), propagate
-          them to the child; if ``is_last_child=True``, mark all propagated
-          contributors as closing.
-    - Raises if you try to mark a child as closing a base offset that is already
-      marked closed by the parent metadata (e.g., parent contributors already
-      contain an ``is_last_child=True`` ref or the parent is a tombstone).
+        * If the parent already has contributors, non-final children open all
+          refs; the final child inherits the parent's closing flags exactly.
+          Completing a child does not complete a non-final parent.
+    - Raises when creating a closing child from tombstone metadata.
     """
-    if is_last_child:
-        if parent.tombstone:
-            raise ValueError("Cannot spawn a closing child from tombstone metadata")
-        if parent.contributors and any(
-            ref.is_last_child for ref in parent.contributors
-        ):
-            raise ValueError(
-                "Cannot mark child as last: parent metadata already marks the base offset closed"
-            )
+    if is_last_child and parent.tombstone:
+        raise ValueError("Cannot spawn a closing child from tombstone metadata")
 
     new_lineage = parent.lineage + (int(child_idx),)
     if parent.contributors:
-        refs = tuple(
-            ContributorRef(
-                cursor=ref.cursor,
-                is_last_child=(ref.is_last_child or is_last_child),
-            )
-            for ref in parent.contributors
+        refs = (
+            parent.contributors
+            if is_last_child
+            else tuple(ContributorRef(ref.cursor, False) for ref in parent.contributors)
         )
     else:
         cursor = SampleCursor(

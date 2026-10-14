@@ -91,6 +91,10 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
         # Sentinels never reach the consumer; replayed-and-dropped records arrive
         # as tombstones, so excluding them prevents double-counting on resume.
         delivered = not item.meta.is_sentinel
+        if not delivered:
+            return _ContributorNotify(
+                lane_id, item.meta.contribution_refs(), None, False
+            )
         if use_monotone:
             return _MonotoneNotify(
                 lane_id, item.meta.chunk_id, 1, item.meta.cursor, delivered
@@ -111,6 +115,8 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
         engine.notify_monotone(
             notify.lane_id, notify.max_chunk_id, notify.add_k, notify.max_cursor
         )
+    elif not notify.delivered:
+        engine.notify(notify.lane_id, notify.entries, advance_replay=False)
     else:
         engine.notify(
             notify.lane_id, notify.entries, record_cursor=notify.record_cursor

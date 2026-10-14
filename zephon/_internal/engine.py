@@ -1318,6 +1318,8 @@ class Engine:
         lane_id: int,
         entries: Iterable[ContributorRef],
         record_cursor: SampleCursor | None = None,
+        *,
+        advance_replay: bool = True,
     ) -> None:
         """Record delivery progress for ``lane_id`` and evict completed chunks.
 
@@ -1325,8 +1327,12 @@ class Engine:
         be evicted once this lane has a recorded flush boundary and every base
         offset in its chunks has produced a contributor (or tombstone) with
         ``is_last_child=True``. ``record_cursor`` pins its epoch and is stored
-        as the per-lane sentinel for equality-based replay.
+        as the per-lane sentinel for equality-based replay. Control records use
+        ``advance_replay=False``: they can close contributors but must pin the
+        last delivered cursor because they can overtake buffered output.
         """
+        if not advance_replay:
+            record_cursor = self._lane_last_cursor.get(lane_id)
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts
         # so we can check "chunk complete?" in O(1) instead of re-counting bits.
@@ -1462,7 +1468,7 @@ class Engine:
         # else: cur stays at default (chunk_id=-1, offset=0)
 
         # 4) Track latest record-level cursor for replay
-        if record_cursor is not None:
+        if advance_replay and record_cursor is not None:
             self._lane_last_cursor[lane_id] = record_cursor
 
     def record_delivery(self, lane_id: int) -> None:
