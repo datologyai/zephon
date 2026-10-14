@@ -3,7 +3,9 @@
 The engine builds local snapshots and supplies the merge and content validation
 logic. The coordinator checks participant and lane coverage before merging.
 A :class:`CheckpointCoordinator` exchanges those snapshots and the merged result
-between participants. :class:`FileCoordinator` uses a shared ``aggregate_dir``.
+between participants. :class:`RoundCoordinator` implements the round protocol
+over storage that subclasses provide; :class:`FileCoordinator` uses a shared
+``aggregate_dir``.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import re
 import sys
 import tempfile
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,15 +192,20 @@ class _CoverageTracker:
         )
 
 
-class FileCoordinator:
-    """Checkpoint aggregation over files in a shared ``aggregate_dir``.
+class RoundCoordinator(ABC):
+    """Checkpoint rounds over a storage backend that subclasses provide.
 
-    The leader publishes a round ID, every rank writes its state, the leader
-    lists the state files until every rank covers its assigned lanes, merges
-    them and writes the merged state. The leader returns only after every
-    follower has acknowledged decoding it. Aggregation removes temporary round
-    files as they become unnecessary, retaining the consumed merged result as
-    a closed-round marker until the next successful round or a cleanup call.
+    The leader announces a round ID, every active rank/worker publishes its
+    state shard, and the leader collects shards until every rank covers its
+    assigned lanes. It then merges them, publishes the result, and returns only
+    after every follower has acknowledged decoding it. If the leader fails
+    before publishing, it publishes a failure notice so followers don't wait
+    out the timeout. Temporary round data is removed as it becomes unnecessary;
+    the consumed result is retained as a closed-round marker until the next
+    successful round or a cleanup call.
+
+    Subclasses map round artifacts to storage locations and implement reading,
+    writing, deleting, and discovering them.
     """
 
     def __init__(
@@ -208,57 +216,79 @@ class FileCoordinator:
         world_size: int,
         plan_id: str,
         worker_info: Callable[[], tuple[int, int]],
+        timeout_s: float,
+        poll_base_s: float,
+        poll_backoff: bool,
     ) -> None:
         self._opts = opts
         self._global_rank = global_rank
         self._world_size = world_size
         self._plan_id = plan_id
         self._worker_info = worker_info
-        self.reload_count = 0
-
-        self._using_fresh_tmp = False
-        if world_size == 1:
-            # Single-node: auto if not provided
-            base = opts.aggregate_dir or os.path.join(
-                tempfile.gettempdir(), f"zephon_state_r{global_rank}"
-            )
-            self._using_fresh_tmp = (
-                opts.aggregate_dir is None or opts.aggregate_dir == ""
-            )
-        else:
-            # Multi-node: must be provided (shared FS or cloud storage)
-            if not opts.aggregate_dir:
-                raise RuntimeError(
-                    "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
-                )
-            base = opts.aggregate_dir
-
-        # Initialize storage backend and aggregation codec for checkpoint I/O
-        self.backend = RouterStorageBackend()
+        self._timeout_s = timeout_s
+        self._poll_base = poll_base_s
+        self._poll_backoff = poll_backoff
         self._codec = AggregationCodec(
             serializer=opts.aggregate_serializer,
             compressor=opts.aggregate_compressor,
         )
-
-        # Detect cloud storage and adjust timeouts for higher latency
-        base = str(base)  # Handle Path objects
-        self._is_cloud = self.backend.is_cloud_path(base)
-        if self._is_cloud:
-            # Floor: guard against user-provided values that are too low for cloud I/O.
-            self._timeout_s = max(opts.aggregate_timeout_s, 90.0)
-            self._poll_base = 0.5  # 500ms base poll interval, backing off to 5s
-        else:
-            self._timeout_s = opts.aggregate_timeout_s
-            self._poll_base = 0.05  # 50ms base poll interval
-            # Resolve local paths; cloud paths stay as-is
-            base = str(Path(base).resolve())
-        self._poll_backoff = self._is_cloud
-
-        self._base = base.rstrip("/")
-        self.backend.mkdir(self._base, parents=True, exist_ok=True)
         self.last_round_id: str | None = None
+        self.reload_count = 0
         self._previous_result: str | None = None
-        self._warned_once_about_runid = False
+
+    # ---------- Storage, implemented by subclasses ----------
+
+    @property
+    @abstractmethod
+    def _announcement_location(self) -> str:
+        """Where the leader announces the open round."""
+
+    @abstractmethod
+    def _shard_location(self, round_id: str) -> str:
+        """Where this process publishes its state shard for ``round_id``."""
+
+    @abstractmethod
+    def _result_location(self, round_id: str) -> str: ...
+
+    @abstractmethod
+    def _failure_location(self, round_id: str) -> str: ...
+
+    @abstractmethod
+    def _ack_location(self, shard_location: str) -> str:
+        """Where the publisher of ``shard_location`` acknowledges the result."""
+
+    @abstractmethod
+    def _ack_name(self, shard_location: str) -> str:
+        """The name ``_list_ack_names`` reports for that publisher's ack."""
+
+    @abstractmethod
+    def _list_ack_names(self, round_id: str) -> Iterable[str]: ...
+
+    @abstractmethod
+    def _list_shards(self, round_id: str) -> Iterable[str]:
+        """Locations of the shards published so far for ``round_id``."""
+
+    @abstractmethod
+    def _write_announcement(self, round_id: str) -> None: ...
+
+    @abstractmethod
+    def _read_announcement(self) -> tuple[str, float] | None:
+        """Return the announced round ID and its age in seconds, if any."""
+
+    @abstractmethod
+    def _put(self, location: str, data: bytes) -> None: ...
+
+    @abstractmethod
+    def _read(self, location: str) -> bytes | None:
+        """Return the value at ``location``, or None if it can't be read."""
+
+    @abstractmethod
+    def _exists(self, location: str) -> bool: ...
+
+    @abstractmethod
+    def _delete(self, location: str) -> None: ...
+
+    # ---------- Shared helpers ----------
 
     def _log(self, msg: str) -> None:
         worker_id, workers_per_rank = self._worker_info()
@@ -275,123 +305,6 @@ class FileCoordinator:
             run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world_size}-{self._plan_id}"
         # Avoid having to use a new run id with every reload
         return f"{run_id}-{self.reload_count}"
-
-    @property
-    def round_file(self) -> str:
-        return f"{self.agg_dir}/round.current"
-
-    @property
-    def agg_dir(self) -> str:
-        def _normalize_run_dir_name(
-            name: str,
-        ) -> str:  # Drop a trailing "-<int>" if present
-            m = _RELOAD_SUFFIX.search(name)
-            return name[: m.start()] if m else name
-
-        using_default = self._opts.run_id.startswith(DEFAULT_RUN_ID)
-        # Names (not full paths) of subdirectories in _base, used to warn
-        # about potential run ID collisions when using the default run ID.
-        existing_subdir_names: list[str] = []
-        if using_default:
-            existing_subdir_names = self.backend.listdir(self._base)
-
-        run_id = self._scoped_run_id()
-        current_run_dir = f"{self._base}/{run_id}"
-        cur_norm = _normalize_run_dir_name(run_id)
-        result = f"{current_run_dir}/.zephon_agg"
-
-        if (
-            not self._using_fresh_tmp
-            and using_default
-            and not self._warned_once_about_runid
-            and existing_subdir_names
-        ):
-            existing_norms = {
-                _normalize_run_dir_name(name) for name in existing_subdir_names
-            }
-            if existing_norms != {cur_norm}:
-                # Potentially we can also only warn if the plan id or canonical replicas change since that probably really causes a semantic change but we better just tell the user early this is not the. best idea.
-                print(
-                    f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {existing_subdir_names}",
-                    file=sys.stderr,
-                )
-                self._warned_once_about_runid = True
-
-        return result
-
-    def _state_file_path(self, round_id: str) -> str:
-        wid, _ = self._worker_info()
-        pid = os.getpid()
-        return (
-            f"{self.agg_dir}/state_r{self._global_rank}_w{wid}_p{pid}_{round_id}.ckpt"
-        )
-
-    def _merged_file_path(self, round_id: str) -> str:
-        return f"{self.agg_dir}/merged_{round_id}.ckpt"
-
-    def _list_state_files(self, round_id: str) -> list[str]:
-        pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt"
-        return self.backend.glob(pattern)
-
-    # ---------- Storage ----------
-
-    @property
-    def _announcement_location(self) -> str:
-        return self.round_file
-
-    def _shard_location(self, round_id: str) -> str:
-        return self._state_file_path(round_id)
-
-    def _result_location(self, round_id: str) -> str:
-        return self._merged_file_path(round_id)
-
-    def _failure_location(self, round_id: str) -> str:
-        return f"{self.agg_dir}/failed_{round_id}.txt"
-
-    def _ack_location(self, shard_location: str) -> str:
-        return f"{shard_location}.ack"
-
-    def _ack_name(self, shard_location: str) -> str:
-        # Basenames identify participants independently of how glob
-        # normalizes the directory.
-        return f"{os.path.basename(shard_location)}.ack"
-
-    def _list_ack_names(self, round_id: str) -> Iterable[str]:
-        # One listing per poll avoids a HEAD for every reader.
-        pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
-        return (os.path.basename(path) for path in self.backend.glob(pattern))
-
-    def _list_shards(self, round_id: str) -> Iterable[str]:
-        return self._list_state_files(round_id)
-
-    def _write_announcement(self, round_id: str) -> None:
-        self.backend.put(self.round_file, round_id.encode("utf-8"))
-
-    def _read_announcement(self) -> tuple[str, float] | None:
-        rid = (self._read_text(self.round_file) or "").strip()
-        if not rid:
-            return None
-        try:
-            stat = self.backend.stat(self.round_file)
-        except OSError:
-            return None  # File doesn't exist or access denied
-        return rid, time.time() - stat["mtime"]
-
-    def _put(self, location: str, data: bytes) -> None:
-        self.backend.put(location, data)
-
-    def _read(self, location: str) -> bytes | None:
-        try:
-            with self.backend.open(location, "rb") as f:
-                return cast(bytes, f.read())
-        except Exception:
-            return None
-
-    def _exists(self, location: str) -> bool:
-        return self.backend.exists(location)
-
-    def _delete(self, location: str) -> None:
-        self.backend.delete(location)
 
     def _delete_best_effort(self, location: str) -> None:
         try:
@@ -662,7 +575,7 @@ class FileCoordinator:
         return merged
 
     def prepare_restore(self) -> None:
-        self.backend.mkdir(self.agg_dir, parents=True, exist_ok=True)
+        """Nothing to prepare: the round namespace includes ``reload_count``."""
 
     def cleanup(self) -> None:
         """Delete the retained result of the last fully acknowledged round.
@@ -675,3 +588,186 @@ class FileCoordinator:
         if self._previous_result is not None:
             self._delete(self._previous_result)
             self._previous_result = None
+
+
+class FileCoordinator(RoundCoordinator):
+    """Checkpoint rounds over files in a shared ``aggregate_dir``.
+
+    Shards are discovered by listing the round's state files, whose names
+    include the rank, DataLoader worker, and PID of their publisher.
+    """
+
+    def __init__(
+        self,
+        opts: RuntimeOptions,
+        *,
+        global_rank: int,
+        world_size: int,
+        plan_id: str,
+        worker_info: Callable[[], tuple[int, int]],
+    ) -> None:
+        self._using_fresh_tmp = False
+        if world_size == 1:
+            # Single-node: auto if not provided
+            base = opts.aggregate_dir or os.path.join(
+                tempfile.gettempdir(), f"zephon_state_r{global_rank}"
+            )
+            self._using_fresh_tmp = (
+                opts.aggregate_dir is None or opts.aggregate_dir == ""
+            )
+        else:
+            # Multi-node: must be provided (shared FS or cloud storage)
+            if not opts.aggregate_dir:
+                raise RuntimeError(
+                    "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
+                )
+            base = opts.aggregate_dir
+
+        self.backend = RouterStorageBackend()
+
+        # Detect cloud storage and adjust timeouts for higher latency
+        base = str(base)  # Handle Path objects
+        self._is_cloud = self.backend.is_cloud_path(base)
+        if self._is_cloud:
+            # Floor: guard against user-provided values that are too low for cloud I/O.
+            timeout_s = max(opts.aggregate_timeout_s, 90.0)
+            poll_base_s = 0.5  # 500ms base poll interval, backing off to 5s
+        else:
+            timeout_s = opts.aggregate_timeout_s
+            poll_base_s = 0.05  # 50ms base poll interval
+            # Resolve local paths; cloud paths stay as-is
+            base = str(Path(base).resolve())
+
+        super().__init__(
+            opts,
+            global_rank=global_rank,
+            world_size=world_size,
+            plan_id=plan_id,
+            worker_info=worker_info,
+            timeout_s=timeout_s,
+            poll_base_s=poll_base_s,
+            poll_backoff=self._is_cloud,
+        )
+        self._base = base.rstrip("/")
+        self.backend.mkdir(self._base, parents=True, exist_ok=True)
+        self._warned_once_about_runid = False
+
+    @property
+    def round_file(self) -> str:
+        return f"{self.agg_dir}/round.current"
+
+    @property
+    def agg_dir(self) -> str:
+        def _normalize_run_dir_name(
+            name: str,
+        ) -> str:  # Drop a trailing "-<int>" if present
+            m = _RELOAD_SUFFIX.search(name)
+            return name[: m.start()] if m else name
+
+        using_default = self._opts.run_id.startswith(DEFAULT_RUN_ID)
+        # Names (not full paths) of subdirectories in _base, used to warn
+        # about potential run ID collisions when using the default run ID.
+        existing_subdir_names: list[str] = []
+        if using_default:
+            existing_subdir_names = self.backend.listdir(self._base)
+
+        run_id = self._scoped_run_id()
+        current_run_dir = f"{self._base}/{run_id}"
+        cur_norm = _normalize_run_dir_name(run_id)
+        result = f"{current_run_dir}/.zephon_agg"
+
+        if (
+            not self._using_fresh_tmp
+            and using_default
+            and not self._warned_once_about_runid
+            and existing_subdir_names
+        ):
+            existing_norms = {
+                _normalize_run_dir_name(name) for name in existing_subdir_names
+            }
+            if existing_norms != {cur_norm}:
+                # Potentially we can also only warn if the plan id or canonical replicas change since that probably really causes a semantic change but we better just tell the user early this is not the. best idea.
+                print(
+                    f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {existing_subdir_names}",
+                    file=sys.stderr,
+                )
+                self._warned_once_about_runid = True
+
+        return result
+
+    def _state_file_path(self, round_id: str) -> str:
+        wid, _ = self._worker_info()
+        pid = os.getpid()
+        return (
+            f"{self.agg_dir}/state_r{self._global_rank}_w{wid}_p{pid}_{round_id}.ckpt"
+        )
+
+    def _merged_file_path(self, round_id: str) -> str:
+        return f"{self.agg_dir}/merged_{round_id}.ckpt"
+
+    def _list_state_files(self, round_id: str) -> list[str]:
+        pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt"
+        return self.backend.glob(pattern)
+
+    # ---------- RoundCoordinator storage ----------
+
+    @property
+    def _announcement_location(self) -> str:
+        return self.round_file
+
+    def _shard_location(self, round_id: str) -> str:
+        return self._state_file_path(round_id)
+
+    def _result_location(self, round_id: str) -> str:
+        return self._merged_file_path(round_id)
+
+    def _failure_location(self, round_id: str) -> str:
+        return f"{self.agg_dir}/failed_{round_id}.txt"
+
+    def _ack_location(self, shard_location: str) -> str:
+        return f"{shard_location}.ack"
+
+    def _ack_name(self, shard_location: str) -> str:
+        # Basenames identify participants independently of how glob
+        # normalizes the directory.
+        return f"{os.path.basename(shard_location)}.ack"
+
+    def _list_ack_names(self, round_id: str) -> Iterable[str]:
+        # One listing per poll avoids a HEAD for every reader.
+        pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
+        return (os.path.basename(path) for path in self.backend.glob(pattern))
+
+    def _list_shards(self, round_id: str) -> Iterable[str]:
+        return self._list_state_files(round_id)
+
+    def _write_announcement(self, round_id: str) -> None:
+        self.backend.put(self.round_file, round_id.encode("utf-8"))
+
+    def _read_announcement(self) -> tuple[str, float] | None:
+        rid = (self._read_text(self.round_file) or "").strip()
+        if not rid:
+            return None
+        try:
+            stat = self.backend.stat(self.round_file)
+        except OSError:
+            return None  # File doesn't exist or access denied
+        return rid, time.time() - stat["mtime"]
+
+    def _put(self, location: str, data: bytes) -> None:
+        self.backend.put(location, data)
+
+    def _read(self, location: str) -> bytes | None:
+        try:
+            with self.backend.open(location, "rb") as f:
+                return cast(bytes, f.read())
+        except Exception:
+            return None
+
+    def _exists(self, location: str) -> bool:
+        return self.backend.exists(location)
+
+    def _delete(self, location: str) -> None:
+        self.backend.delete(location)
+
+    def prepare_restore(self) -> None:
+        self.backend.mkdir(self.agg_dir, parents=True, exist_ok=True)
