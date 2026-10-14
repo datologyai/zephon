@@ -14,6 +14,7 @@ import pytest
 
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.ops.expand_chat import ExpandChat
 from zephon._internal.ops.tokenize_chat import (
     TokenizeChat,
     _last_span_only,
@@ -27,6 +28,7 @@ from zephon.types import SampleMeta, SampleRecord
 from zephon.work.token_estimation import (
     TokenEstimation,
     _measure_dataset,
+    _PreTokenizeReplay,
     prime_token_ratios,
 )
 
@@ -848,3 +850,29 @@ def test_concurrent_masked_renders_share_no_tracker_state(fast_tokenizer: Any) -
         assert np.array_equal(payload["input_ids"], reference["input_ids"])
         assert np.array_equal(payload["loss_mask"], reference["loss_mask"])
         assert int(payload["loss_mask"].sum()) > 0
+
+
+def test_expansion_calibration_counts_prefix_tokens_over_original_bytes(
+    fast_tokenizer: Any,
+) -> None:
+    payload = {"messages": CONVERSATION}
+    dataset = Dataset.from_dict("chat", {0: InMemoryShard([payload])})
+    op = TokenizeChat(fast_tokenizer, chat_template=TAGGED_TEMPLATE)
+    prefixes = [{"messages": CONVERSATION[:2]}, payload]
+    expected = sum(op.count_delivered_tokens(prefix) for prefix in prefixes)
+    measured = _measure_dataset(
+        dataset,
+        0,
+        build_multi_dataset_store({0: dataset}),
+        TokenEstimation(
+            calibration_samples=4, calibration_shards_min=1, calibration_shards_max=1
+        ),
+        op.token_counting_spec().build_counter(),
+        seed=1,
+        pre_tokenize_replay=_PreTokenizeReplay([ExpandChat()]),
+    )
+    assert measured.ratio.source == "measured"
+    assert measured.ratio.tokens_per_byte == pytest.approx(
+        expected / content_bytes(payload)
+    )
+    assert expected > op.count_delivered_tokens(payload)

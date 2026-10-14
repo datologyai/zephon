@@ -1,0 +1,156 @@
+# Copyright 2026 DatologyAI
+# SPDX-License-Identifier: Apache-2.0
+
+import copy
+from typing import Any
+
+import pytest
+
+from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+from zephon import Pipeline
+from zephon._internal.ops.expand_chat import ExpandChat
+from zephon.ops.children import spawn_child, tombstones_for_record
+from zephon.types import SampleMeta, SampleRecord
+from zephon.validation import (
+    _check_op_determinism,
+    _check_op_no_cross_call_state,
+    _check_op_sample_identity,
+)
+from zephon.work.token_estimation import _PreTokenizeReplay
+
+
+def record(*roles: str) -> SampleRecord:
+    return SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=7, chunk_offset=2),
+        payload={
+            "messages": [
+                {"role": role, "content": str(i)} for i, role in enumerate(roles)
+            ],
+            "tools": [{"name": "lookup"}],
+        },
+    )
+
+
+def test_query_prefixes_include_tool_cycles_and_original_ordinals() -> None:
+    parent = record(
+        "system",
+        "assistant",
+        "user",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    )
+    original = copy.deepcopy(parent)
+    outputs = ExpandChat().process_one(parent)
+    assert [len(child.payload["messages"]) for child in outputs] == [5, 9]
+    assert [child.meta.lineage for child in outputs] == [(1,), (2,)]
+    assert [child.meta.contribution_refs()[0].is_last_child for child in outputs] == [
+        False,
+        True,
+    ]
+    assert all(child.meta.sample_id == parent.meta.sample_id for child in outputs)
+    assert all(child.payload["tools"] == parent.payload["tools"] for child in outputs)
+    assert parent == original
+    assert len(tombstones_for_record(outputs[-1])) == 1
+    assert tombstones_for_record(outputs[0]) == []
+
+
+@pytest.mark.parametrize("last", [False, True])
+def test_upstream_child_closes_only_on_its_last_prefix(last: bool) -> None:
+    parent = record("user", "assistant", "user", "assistant")
+    parent.meta = spawn_child(parent.meta, 5, is_last_child=last)
+    outputs = ExpandChat().process_one(parent)
+    assert [child.meta.lineage for child in outputs] == [(5, 0), (5, 1)]
+    assert [child.meta.contribution_refs()[0].is_last_child for child in outputs] == [
+        False,
+        last,
+    ]
+    assert outputs[-1].meta.contributors == parent.meta.contributors
+
+
+@pytest.mark.parametrize(
+    "roles", [(), ("assistant",), ("user",), ("user", "tool", "user")]
+)
+def test_dropped_rows_close_and_tombstones_pass_through(roles: tuple[str, ...]) -> None:
+    parent = record(*roles)
+    op = ExpandChat()
+    outputs = op.process_one(parent)
+    assert len(outputs) == 1 and outputs[0].meta.tombstone
+    assert outputs[0].meta.cursor == parent.meta.cursor
+    assert op.process_one(outputs[0])[0] is outputs[0]
+    parent.meta = spawn_child(parent.meta, 3, is_last_child=False)
+    assert op.process_one(parent) == []
+
+
+def test_single_prefix_keeps_metadata_and_nested_payload() -> None:
+    parent = record("user", "assistant")
+    parent.payload["messages"][-1]["content"] = None
+    parent.payload["chat"] = {
+        "messages": parent.payload.pop("messages"),
+        "extra": "value",
+    }
+    op = ExpandChat(field="chat.messages")
+    assert op.process_one(parent)[0] is parent
+    parent.payload["chat"]["messages"].append({"role": "user", "content": "unanswered"})
+    output = op.process_one(parent)[0]
+    assert output.meta is parent.meta
+    assert len(output.payload["chat"]["messages"]) == 2
+    assert len(parent.payload["chat"]["messages"]) == 3
+    assert output.payload["chat"]["extra"] == "value"
+
+
+@pytest.mark.parametrize(
+    "messages", [None, "text", {}, [None], [{}], [{"role": None}], [{"role": ""}]]
+)
+def test_bad_messages_raise(messages: Any) -> None:
+    parent = record()
+    parent.payload["messages"] = messages
+    with pytest.raises((TypeError, ValueError), match="expand_chat"):
+        ExpandChat().process_one(parent)
+
+
+def test_builtin_identity_determinism_and_cross_call_harness() -> None:
+    samples = [record("user", "assistant", "user", "assistant", "tool")]
+    op = ExpandChat()
+    assert not _check_op_determinism(op, "expand_chat", samples)
+    assert not _check_op_no_cross_call_state(op, "expand_chat", samples)
+    assert not _check_op_sample_identity(op, "expand_chat", samples)
+
+
+def test_pipeline_replay_and_field_validation() -> None:
+    parent = record("user", "assistant", "user", "assistant")
+    work = FakeIndexableWorkSource(
+        make_inmem_dataset("chat", [parent.payload]), chunk_size=1
+    )
+    pipe = Pipeline(work).expand_chat().tokenize_chat(tokenizer_id="unused")
+    replay = pipe._build_pre_tokenize_replay(len(pipe._graph.nodes) - 1)
+    assert isinstance(replay, _PreTokenizeReplay)
+    assert [len(p["messages"]) for p in replay.apply(parent.payload)] == [2, 4]
+    assert not pipe.is_indexable
+    Pipeline(work).expand_chat().map_transform(
+        lambda p: {"chat": p["messages"]}
+    ).tokenize_chat(tokenizer_id="unused", field="chat")
+
+
+def test_prefix_payloads_do_not_alias() -> None:
+    parent = record("user", "assistant", "user", "assistant")
+    parent.payload["messages"][1]["tool_calls"] = [
+        {"function": {"arguments": {"a": 1}}}
+    ]
+    first, last = ExpandChat().process_one(parent)
+    first.payload["messages"][1]["tool_calls"][0]["function"]["arguments"]["a"] = 2
+    first.payload["tools"][0]["name"] = "changed"
+    assert last.payload == parent.payload
+
+
+def test_tuple_messages() -> None:
+    parent = record("user", "assistant", "user", "assistant")
+    parent.payload["messages"] = tuple(parent.payload["messages"])
+    assert [len(r.payload["messages"]) for r in ExpandChat().process_one(parent)] == [
+        2,
+        4,
+    ]
