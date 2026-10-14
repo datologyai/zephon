@@ -409,3 +409,118 @@ def test_failed_setup_has_no_portable_result(fast_tokenizer: Any) -> None:
     verifier = TemplateVerifier(fast_tokenizer, template, {})
     assert not verifier.setup_report().ok
     assert verifier.setup_result is None
+
+
+@pytest.mark.parametrize("in_message_loop", [False, True])
+def test_tool_schema_loop_can_rebind_its_target(
+    fast_tokenizer: Any, in_message_loop: bool
+) -> None:
+    schema = (
+        "{% for tool in tools %}{% set tool = tool.function %}"
+        "{{ tool.name }}{% endfor %}"
+    )
+    template = (
+        TAGGED_TEMPLATE.replace(
+            "{% for message in messages %}", "{% for message in messages %}" + schema
+        )
+        if in_message_loop
+        else schema + TAGGED_TEMPLATE
+    )
+    report = verify_chat_template(
+        fast_tokenizer,
+        template,
+        chat_template_kwargs={"tools": [{"function": {"name": "lookup"}}]},
+    )
+    assert report.ok, report.format()
+
+
+@pytest.mark.parametrize("field", ["thinking", "reasoning", "reasoning_content"])
+def test_selected_reasoning_field_must_receive_loss(
+    fast_tokenizer: Any, field: str
+) -> None:
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1][field] = "private reasoning"
+    report = verify_chat_template(
+        fast_tokenizer, TAGGED_TEMPLATE, probes=[{"messages": messages}]
+    )
+    assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)
+    tagged = TAGGED_TEMPLATE.replace(
+        "{% generation %}", "{% generation %}{{ message." + field + " | default('') }}"
+    )
+    report = verify_chat_template(
+        fast_tokenizer, tagged, probes=[{"messages": messages}]
+    )
+    assert report.ok, report.format()
+
+
+@pytest.mark.parametrize(
+    ("predicate", "normal", "trigger"),
+    [
+        ("message.content.startswith('SKIP:')", "answer SKIP:", "SKIP: answer"),
+        ("message.content.endswith(':SKIP')", ":SKIP answer", "answer :SKIP"),
+        ("'SKIP:' in message.content", "ordinary answer", "answer SKIP: answer"),
+    ],
+)
+def test_content_controls_detect_unmasked_text_with_warm_cache(
+    fast_tokenizer: Any, predicate: str, normal: str, trigger: str
+) -> None:
+    from zephon._internal.ops.tokenize_chat import TokenizeChat
+    from zephon.validation import ValidationError
+
+    template = TAGGED_TEMPLATE.replace(
+        "{% generation %}{{ message['content'] }}<|end|>{% endgeneration %}",
+        "{% if " + predicate + " %}{{ message.content }}{% endif %}"
+        "{% generation %}{% if not (" + predicate + ") %}{{ message.content }}"
+        "{% endif %}<|end|>{% endgeneration %}",
+    )
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1]["content"] = normal
+    op._tokenize_delivery({"messages": messages}, "warmup")
+    messages[-1]["content"] = trigger
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_SUPERVISION"):
+        op._tokenize_delivery({"messages": messages}, "trigger")
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "message.content == 'COPY_PROMPT'",
+        "message.content | length > 5",
+        "message.content.startswith(prefix)",
+        "message.content.endswith('SKIP', 2)",
+    ],
+)
+def test_unpreservable_text_conditions_fail_setup(
+    fast_tokenizer: Any, condition: str
+) -> None:
+    from zephon._internal.ops.tokenize_chat import TokenizeChat
+
+    template = TAGGED_TEMPLATE.replace(
+        "{% endgeneration %}",
+        "{% if "
+        + condition
+        + " %}{{ messages[0].content }}{% endif %}{% endgeneration %}",
+    )
+    report = verify_chat_template(fast_tokenizer, template)
+    assert not report.ok
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, loss_scope="after_last_user"
+    )
+    with pytest.raises(ValueError, match="content.*(comparison|prefix/suffix)"):
+        op._tokenize_delivery({"messages": CONVERSATION}, "without-preflight")
+
+
+def test_content_alias_comparison_in_assignment_fails_setup(
+    fast_tokenizer: Any,
+) -> None:
+    template = TAGGED_TEMPLATE.replace(
+        "{% generation %}",
+        "{% set value = message.content %}{% set copy_prompt = value == 'COPY_PROMPT' %}"
+        "{% generation %}{% if copy_prompt %}{{ messages[0].content }}{% endif %}",
+    )
+    report = verify_chat_template(fast_tokenizer, template)
+    assert not report.ok
+    assert "content-dependent comparison" in report.format()

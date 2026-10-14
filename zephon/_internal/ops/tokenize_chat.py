@@ -540,7 +540,13 @@ class TokenizeChat(TokenizeBase):
             message = messages[owner]
             if any(
                 message.get(key)
-                for key in ("content", "reasoning_content", "reasoning", "tool_calls")
+                for key in (
+                    "content",
+                    "reasoning_content",
+                    "reasoning",
+                    "thinking",
+                    "tool_calls",
+                )
             ):
                 raise ValueError(
                     f"TokenizeChat: loss_scope={self.loss_scope!r}, template="

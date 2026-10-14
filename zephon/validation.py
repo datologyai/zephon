@@ -1679,6 +1679,11 @@ def verify_chat_template(
     masks on representative inputs, because automatic probes can miss
     content-dependent errors.
 
+    Probes retain literal substring, prefix and suffix controls in message text.
+    Exact text comparisons and length thresholds beyond emptiness are rejected
+    when detected on content fields or their assignment aliases. Coverage checks
+    include ``content``, ``reasoning_content``, ``reasoning`` and ``thinking``.
+
     Args:
         tokenizer: HF-compatible fast tokenizer.
         chat_template: Tagged Jinja source; None uses the tokenizer's template.

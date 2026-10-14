@@ -46,6 +46,95 @@ from zephon.ops.config import LossScope
 from zephon.validation import Issue, ValidationError, ValidationReport
 
 STATE = "__zephon_owned_generation_state"
+_TEXT_FIELDS = ("content", "reasoning_content", "reasoning", "thinking")
+
+
+def _content_controls(ast: nodes.Node) -> tuple[str, ...]:
+    """Find literal text controls that marker probes must retain.
+
+    Exact text and nonempty length comparisons cannot survive replacement with
+    ownership markers. Type/emptiness checks and literal substring controls can.
+    This checks direct fields and assignment aliases, not arbitrary Jinja dataflow.
+    """
+    aliases: set[str] = set(_TEXT_FIELDS)
+
+    def reads_text(node: nodes.Node) -> bool:
+        if isinstance(node, nodes.Name) and node.name in aliases:
+            return True
+        if isinstance(node, nodes.Getattr) and node.attr in _TEXT_FIELDS:
+            return True
+        if (
+            isinstance(node, nodes.Getitem)
+            and isinstance(node.arg, nodes.Const)
+            and node.arg.value in _TEXT_FIELDS
+        ):
+            return True
+        return any(reads_text(child) for child in node.iter_child_nodes())
+
+    assignments = list(ast.find_all(nodes.Assign))
+    while True:
+        before = len(aliases)
+        for assignment in assignments:
+            if isinstance(assignment.target, nodes.Name) and reads_text(
+                assignment.node
+            ):
+                aliases.add(assignment.target.name)
+        if len(aliases) == before:
+            break
+
+    controls = {"<think>", "</think>"}
+    for node in ast.find_all((nodes.Compare, nodes.Call)):
+        if isinstance(node, nodes.Compare) and reads_text(node):
+            left = node.expr
+            for operand in node.ops:
+                right = operand.expr
+                if reads_text(left) or reads_text(right):
+                    if (
+                        operand.op in {"in", "notin"}
+                        and isinstance(left, nodes.Const)
+                        and isinstance(left.value, str)
+                        and left.value
+                    ):
+                        controls.add(left.value)
+                    elif (
+                        isinstance(left, nodes.Filter)
+                        and left.name in {"length", "count"}
+                        and isinstance(right, nodes.Const)
+                        and right.value == 0
+                        and operand.op in {"eq", "ne", "gt", "lteq"}
+                    ) or (
+                        isinstance(right, nodes.Const)
+                        and right.value in (None, "")
+                        and operand.op in {"eq", "ne"}
+                    ):
+                        pass
+                    else:
+                        raise ValueError(
+                            f"template line {node.lineno}: content-dependent comparison "
+                            "cannot be checked with ownership markers"
+                        )
+                left = right
+        elif (
+            isinstance(node, nodes.Call)
+            and isinstance(node.node, nodes.Getattr)
+            and node.node.attr in {"startswith", "endswith"}
+            and reads_text(node.node.node)
+        ):
+            if (
+                len(node.args) != 1
+                or not isinstance(node.args[0], nodes.Const)
+                or not isinstance(node.args[0].value, str)
+                or not node.args[0].value
+                or node.kwargs
+                or node.dyn_args is not None
+                or node.dyn_kwargs is not None
+            ):
+                raise ValueError(
+                    f"template line {node.lineno}: content prefix/suffix checks "
+                    "require one nonempty string literal"
+                )
+            controls.add(node.args[0].value)
+    return tuple(sorted(controls, key=lambda text: (-len(text), text)))
 
 
 @dataclass
@@ -152,10 +241,17 @@ def instrument(
     )
     if isinstance(node, nodes.For):
         buffered = buffered or node.recursive
+        owns_generation = any(
+            is_generation(descendant)
+            for statement in node.body
+            for descendant in (statement, *statement.find_all(nodes.CallBlock))
+        )
         for child in node.iter_child_nodes():
             stack = loops
-            if isinstance(node.target, nodes.Name) and any(
-                child is item for item in node.body
+            if (
+                owns_generation
+                and isinstance(node.target, nodes.Name)
+                and any(child is item for item in node.body)
             ):
                 stack += (node.target.name,)
             instrument(child, stack, buffered, in_generation)
@@ -189,6 +285,9 @@ class OwnedTemplate:
                 node.call.args.insert(0, nodes.Const(site))
         if not self.sites:
             raise ValueError("template has no generation blocks")
+        self.content_controls = re.compile(
+            "(" + "|".join(re.escape(token) for token in _content_controls(ast)) + ")"
+        )
         instrument(ast)
         self.compiled = environment.from_string(ast)
         self.identity = hashlib.sha256(template.encode()).hexdigest()[:12]
@@ -314,7 +413,7 @@ def _structure(value: Any, key: str = "") -> Any:
     """Describe message formats and validate fields on every cache lookup."""
     if key in {"tools", "tool_calls"}:
         return _tool_list_structure(value, call=key == "tool_calls")
-    if key in {"content", "reasoning_content", "reasoning"}:
+    if key in _TEXT_FIELDS:
         if key == "content" and isinstance(value, list):
             if any(
                 not isinstance(part, dict)
@@ -352,6 +451,7 @@ def _structure(value: Any, key: str = "") -> Any:
 def _marked_probe(
     messages: Sequence[Mapping[str, Any]],
     scope: LossScope,
+    content_controls: re.Pattern[str] | None = None,
 ) -> tuple[list[Mapping[str, Any]], dict[str, int], set[str]]:
     """Replace text fields with source-owned markers, retaining message structure."""
     marked = [copy.deepcopy(dict(message)) for message in messages]
@@ -366,15 +466,24 @@ def _marked_probe(
             required.add(text)
         return text
 
+    def mark_text(value: str, owner: int) -> str:
+        parts = (
+            content_controls.split(value) if content_controls is not None else [value]
+        )
+        for index in range(0, len(parts), 2):
+            part = parts[index]
+            if part.strip():
+                left = part[: len(part) - len(part.lstrip())]
+                right = part[len(part.rstrip()) :]
+                parts[index] = (
+                    left + marker(owner, required_output=owner in selected) + right
+                )
+        return "".join(parts)
+
     for i, message in enumerate(marked):
         content = message.get("content")
         if isinstance(content, str) and content:
-            if "</think>" in content:
-                thought = marker(i, required_output=i in selected)
-                answer = marker(i, required_output=i in selected)
-                message["content"] = f"<think>\n{thought}\n</think>\n\n{answer}"
-            else:
-                message["content"] = marker(i, required_output=i in selected)
+            message["content"] = mark_text(content, i)
         elif isinstance(content, list):
             for part in content:
                 if not isinstance(part, dict) or part.get("type") != "text":
@@ -382,12 +491,12 @@ def _marked_probe(
                         "chat template verification supports text-only content parts"
                     )
                 if part.get("text"):
-                    part["text"] = marker(i, required_output=i in selected)
+                    part["text"] = mark_text(part["text"], i)
         elif content is not None and not isinstance(content, str):
             raise ValueError("message content must be text, text parts or None")
-        for field_name in ("reasoning_content", "reasoning"):
+        for field_name in _TEXT_FIELDS[1:]:
             if message.get(field_name):
-                message[field_name] = marker(i, required_output=i in selected)
+                message[field_name] = mark_text(message[field_name], i)
         for call in message.get("tool_calls") or []:
             if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
                 raise ValueError("tool calls must contain a function dictionary")
@@ -527,7 +636,9 @@ class TemplateVerifier:
         report = ValidationReport()
         try:
             if markers is None:
-                probe, markers, required = _marked_probe(messages, self.scope)
+                probe, markers, required = _marked_probe(
+                    messages, self.scope, self.template.content_controls
+                )
             else:
                 probe, required = copy.deepcopy(messages), set(required_markers)
             context = {**self.tokenizer.special_tokens_map, **kwargs}
@@ -634,6 +745,28 @@ class TemplateVerifier:
         use 0/1/2/3+ buckets with first/last and distinct middle formats. These
         probes do not certify branches on omitted values or exact larger counts.
         """
+        # Preserve branch controls even when ordinary text shares a cache entry.
+        text_controls = []
+        for message in messages:
+            for field_name in _TEXT_FIELDS:
+                value = message.get(field_name)
+                values = (
+                    [part.get("text") for part in value if isinstance(part, Mapping)]
+                    if isinstance(value, list)
+                    else [value]
+                )
+                text_controls.append(
+                    tuple(
+                        tuple(
+                            part if index % 2 else (bool(part), bool(part.strip()))
+                            for index, part in enumerate(
+                                self.template.content_controls.split(text)
+                            )
+                        )
+                        for text in values
+                        if isinstance(text, str)
+                    )
+                )
         try:
             # Unknown render options remain exact: they may select template modes.
             options = tuple(
@@ -641,7 +774,7 @@ class TemplateVerifier:
                 for name, value in sorted(kwargs.items())
             )
             structure = hashlib.sha256(
-                repr((_structure(messages), options)).encode()
+                repr((_structure(messages), options, text_controls)).encode()
             ).digest()
         except ValueError as error:
             return ValidationReport(

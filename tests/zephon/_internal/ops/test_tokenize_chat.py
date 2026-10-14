@@ -1019,15 +1019,20 @@ def test_structure_key_covers_thinking_flag(
 
 def test_real_rows_check_missing_owners_after_structure_cache(
     fast_tokenizer: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     template = TAGGED_TEMPLATE.replace(
         "message['role'] == 'assistant'",
-        "message['role'] == 'assistant' and message.content != 'skip'",
+        "message['role'] == 'assistant' and not message.content.startswith('skip')",
     )
     op = TokenizeChat(
         fast_tokenizer, chat_template=template, loss_scope="after_last_user"
     )
     run(op, CONVERSATION)
+    # Exercise the per-render guard independently of the cached probe checks.
+    monkeypatch.setattr(
+        op._template_verifier, "verify_input_structure", lambda *a, **k: None
+    )
     changed = copy.deepcopy(CONVERSATION)
     changed[-1]["content"] = "skip"
     with pytest.raises(ValueError, match="emitted no generation range"):
@@ -1098,15 +1103,19 @@ def test_untagged_history_is_allowed(fast_tokenizer: Any) -> None:
 
 def test_empty_generated_range_for_nonempty_selected_message_raises(
     fast_tokenizer: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     template = TAGGED_TEMPLATE.replace(
         "{{ message['content'] }}<|end|>",
-        "{{ message.content if message.content != 'skip' else '' }}",
+        "{{ message.content if not message.content.startswith('skip') else '' }}",
     )
     op = TokenizeChat(
         fast_tokenizer, chat_template=template, loss_scope="after_last_user"
     )
     run(op, CONVERSATION)
+    monkeypatch.setattr(
+        op._template_verifier, "verify_input_structure", lambda *a, **k: None
+    )
     changed = copy.deepcopy(CONVERSATION)
     changed[-1]["content"] = "skip"
     with pytest.raises(ValueError, match="emitted no generation range"):
