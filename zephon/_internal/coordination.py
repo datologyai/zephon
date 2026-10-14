@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 from zephon._internal.checkpoint import AggregationCodec
 from zephon._internal.io.storage import RouterStorageBackend
@@ -246,17 +246,18 @@ class FileCoordinator:
         if self._is_cloud:
             # Floor: guard against user-provided values that are too low for cloud I/O.
             self._timeout_s = max(opts.aggregate_timeout_s, 90.0)
-            self._poll_base = 0.5  # 500ms base poll interval
+            self._poll_base = 0.5  # 500ms base poll interval, backing off to 5s
         else:
             self._timeout_s = opts.aggregate_timeout_s
             self._poll_base = 0.05  # 50ms base poll interval
             # Resolve local paths; cloud paths stay as-is
             base = str(Path(base).resolve())
+        self._poll_backoff = self._is_cloud
 
         self._base = base.rstrip("/")
         self.backend.mkdir(self._base, parents=True, exist_ok=True)
         self.last_round_id: str | None = None
-        self._previous_merged_file: str | None = None
+        self._previous_result: str | None = None
         self._warned_once_about_runid = False
 
     def _log(self, msg: str) -> None:
@@ -265,6 +266,15 @@ class FileCoordinator:
             f"[PR {self._global_rank}][PID {os.getpid()}][Worker {worker_id}/{workers_per_rank - 1}] {msg}",
             file=sys.stderr,
         )
+
+    def _scoped_run_id(self) -> str:
+        """Run ID qualified by topology (for the default run ID) and restore count."""
+        run_id = self._opts.run_id
+        if run_id.startswith(DEFAULT_RUN_ID):
+            # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
+            run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world_size}-{self._plan_id}"
+        # Avoid having to use a new run id with every reload
+        return f"{run_id}-{self.reload_count}"
 
     @property
     def round_file(self) -> str:
@@ -278,20 +288,14 @@ class FileCoordinator:
             m = _RELOAD_SUFFIX.search(name)
             return name[: m.start()] if m else name
 
-        run_id = self._opts.run_id
-        using_default = False
+        using_default = self._opts.run_id.startswith(DEFAULT_RUN_ID)
         # Names (not full paths) of subdirectories in _base, used to warn
         # about potential run ID collisions when using the default run ID.
         existing_subdir_names: list[str] = []
-
-        if run_id.startswith(DEFAULT_RUN_ID):
+        if using_default:
             existing_subdir_names = self.backend.listdir(self._base)
-            using_default = True
-            # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
-            run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world_size}-{self._plan_id}"
 
-        # Avoid having to use a new run id with every reload
-        run_id = f"{run_id}-{self.reload_count}"
+        run_id = self._scoped_run_id()
         current_run_dir = f"{self._base}/{run_id}"
         cur_norm = _normalize_run_dir_name(run_id)
         result = f"{current_run_dir}/.zephon_agg"
@@ -329,31 +333,84 @@ class FileCoordinator:
         pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt"
         return self.backend.glob(pattern)
 
-    # ---------- FS utilities ----------
+    # ---------- Storage ----------
 
-    def _delete_best_effort(self, path: str) -> None:
-        try:
-            self.backend.delete(path)
-        except Exception as exc:
-            self._log(f"Failed to clean up checkpoint file {path}: {exc!r}")
+    @property
+    def _announcement_location(self) -> str:
+        return self.round_file
 
-    def _read_text(self, path: str) -> str | None:
+    def _shard_location(self, round_id: str) -> str:
+        return self._state_file_path(round_id)
+
+    def _result_location(self, round_id: str) -> str:
+        return self._merged_file_path(round_id)
+
+    def _failure_location(self, round_id: str) -> str:
+        return f"{self.agg_dir}/failed_{round_id}.txt"
+
+    def _ack_location(self, shard_location: str) -> str:
+        return f"{shard_location}.ack"
+
+    def _ack_name(self, shard_location: str) -> str:
+        # Basenames identify participants independently of how glob
+        # normalizes the directory.
+        return f"{os.path.basename(shard_location)}.ack"
+
+    def _list_ack_names(self, round_id: str) -> Iterable[str]:
+        # One listing per poll avoids a HEAD for every reader.
+        pattern = f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
+        return (os.path.basename(path) for path in self.backend.glob(pattern))
+
+    def _list_shards(self, round_id: str) -> Iterable[str]:
+        return self._list_state_files(round_id)
+
+    def _write_announcement(self, round_id: str) -> None:
+        self.backend.put(self.round_file, round_id.encode("utf-8"))
+
+    def _read_announcement(self) -> tuple[str, float] | None:
+        rid = (self._read_text(self.round_file) or "").strip()
+        if not rid:
+            return None
         try:
-            with self.backend.open(path, "r") as f:
-                return str(f.read())
+            stat = self.backend.stat(self.round_file)
+        except OSError:
+            return None  # File doesn't exist or access denied
+        return rid, time.time() - stat["mtime"]
+
+    def _put(self, location: str, data: bytes) -> None:
+        self.backend.put(location, data)
+
+    def _read(self, location: str) -> bytes | None:
+        try:
+            with self.backend.open(location, "rb") as f:
+                return cast(bytes, f.read())
         except Exception:
             return None
 
-    def _read_aggregation_state(self, path: str) -> dict | None:
+    def _exists(self, location: str) -> bool:
+        return self.backend.exists(location)
+
+    def _delete(self, location: str) -> None:
+        self.backend.delete(location)
+
+    def _delete_best_effort(self, location: str) -> None:
         try:
-            with self.backend.open(path, "rb") as f:
-                raw = f.read()
-        except Exception:
+            self._delete(location)
+        except Exception as exc:
+            self._log(f"Failed to clean up checkpoint file {location}: {exc!r}")
+
+    def _read_text(self, location: str) -> str | None:
+        raw = self._read(location)
+        return None if raw is None else raw.decode("utf-8")
+
+    def _read_aggregation_state(self, location: str) -> dict | None:
+        raw = self._read(location)
+        if raw is None:
             return None
         try:
             return self._codec.decode(raw)
         except Exception as exc:
-            self._log(f"Failed to decode aggregation state at {path}: {exc!r}")
+            self._log(f"Failed to decode aggregation state at {location}: {exc!r}")
             return None
 
     def _wait_until(self, pred: Callable[[], bool], timeout: float) -> bool:
@@ -366,8 +423,7 @@ class FileCoordinator:
             if remaining <= 0:
                 return False
             time.sleep(min(delay, remaining))
-            # Exponential backoff for cloud, capped at 5s
-            if self._is_cloud:
+            if self._poll_backoff:
                 delay = min(delay * 1.5, 5.0)
 
     def _wait_value(
@@ -385,28 +441,24 @@ class FileCoordinator:
             if remaining <= 0:
                 return None
             time.sleep(min(delay, remaining))
-            if self._is_cloud:
+            if self._poll_backoff:
                 delay = min(delay * 1.5, 5.0)
 
-    # ---------- Round / paths ----------
+    # ---------- Rounds ----------
 
     def _publish_new_round_id(self) -> str:
         rid = str(int(time.time() * 1e9))  # monotonic-ish
-        self.backend.put(self.round_file, rid.encode("utf-8"))
+        self._write_announcement(rid)
         self.last_round_id = rid
         return rid
 
     def _read_open_round_id(self) -> str | None:
-        rid = (self._read_text(self.round_file) or "").strip()
-        if not rid:
+        announcement = self._read_announcement()
+        if announcement is None:
             return None
+        rid, age_s = announcement
 
         # This is a practically relevant guard in case users do neither supply a run id nor a fresh aggregate directory. With this check we at least avoid stale state if it is obviously old.
-        try:
-            stat = self.backend.stat(self.round_file)
-            age_s = time.time() - stat["mtime"]
-        except OSError:
-            return None  # File doesn't exist or access denied
         if age_s > self._timeout_s + 30:
             return None
 
@@ -415,14 +467,14 @@ class FileCoordinator:
         # from the parent before it has published; in that case we must proceed.
         if self.last_round_id is not None and rid == self.last_round_id:
             try:
-                my_fp = self._state_file_path(rid)
+                my_shard = self._shard_location(rid)
             except Exception:
-                my_fp = None
-            if not my_fp or self.backend.exists(my_fp):
+                my_shard = None
+            if not my_shard or self._exists(my_shard):
                 return None
 
-        # only "open" if merged for this rid doesn't exist yet
-        if not self.backend.exists(self._merged_file_path(rid)):
+        # Only "open" if the result for this rid doesn't exist yet.
+        if not self._exists(self._result_location(rid)):
             return rid
         return None
 
@@ -434,7 +486,9 @@ class FileCoordinator:
             self._read_open_round_id, max(0.0, deadline - time.monotonic())
         )
         if rid is None:
-            raise self._timeout_error(deadline, f"round id at {self.round_file}")
+            raise self._timeout_error(
+                deadline, f"round id at {self._announcement_location}"
+            )
         return rid
 
     def _timeout_error(self, deadline: float, waiting_for: str) -> RuntimeError:
@@ -457,14 +511,14 @@ class FileCoordinator:
         seen: dict[str, dict[str, Any]],
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         """Cache and yield only newly read shards so each is validated once."""
-        for fp in self._list_state_files(round_id):
-            if fp in seen:
+        for location in self._list_shards(round_id):
+            if location in seen:
                 continue
-            st = self._read_aggregation_state(fp)
+            st = self._read_aggregation_state(location)
             if st is None:
                 continue
-            seen[fp] = st
-            yield fp, st
+            seen[location] = st
+            yield location, st
 
     def aggregate(
         self,
@@ -485,16 +539,16 @@ class FileCoordinator:
         merge: Callable[[list[dict[str, Any]]], dict[str, Any]],
         deadline: float,
     ) -> dict[str, Any]:
-        my_path = self._state_file_path(round_id)
-        merged_path = self._merged_file_path(round_id)
+        my_shard = self._shard_location(round_id)
+        result = self._result_location(round_id)
         seen: dict[str, dict[str, Any]] = {}
         try:
-            self.backend.put(my_path, self._codec.encode(round_.local))
+            self._put(my_shard, self._codec.encode(round_.local))
             coverage = _CoverageTracker(round_)
 
             def _have_full_coverage() -> bool:
-                for path, state in self._read_states_for_round(round_id, seen=seen):
-                    coverage.add(path, state)
+                for location, state in self._read_states_for_round(round_id, seen=seen):
+                    coverage.add(location, state)
                 return coverage.complete()
 
             if not self._wait_until(
@@ -502,20 +556,20 @@ class FileCoordinator:
             ):
                 raise self._timeout_error(
                     deadline,
-                    f"checkpoint shards: {coverage.missing()}; files={len(seen)}",
+                    f"checkpoint shards: {coverage.missing()}; shards={len(seen)}",
                 )
 
             # States already cached from polling above.
             merged = merge(list(seen.values()))
-            assert not self.backend.exists(merged_path)
+            assert not self._exists(result)
             merged_bytes = self._codec.encode(merged)
-            self.backend.put(merged_path, merged_bytes)
+            self._put(result, merged_bytes)
         except Exception as exc:
             # Only announce failures before publication. After publication,
             # delayed followers must still be able to consume the result.
             try:
-                self.backend.put(
-                    f"{self.agg_dir}/failed_{round_id}.txt",
+                self._put(
+                    self._failure_location(round_id),
                     f"{type(exc).__name__}: {exc}".encode("utf-8"),
                 )
             except Exception as notify_error:
@@ -524,92 +578,87 @@ class FileCoordinator:
         # Roundtrip so the leader's return value is byte-identical to
         # what followers read back (json would otherwise stringify keys).
         merged = self._codec.decode(merged_bytes)
-        self._delete_best_effort(my_path)
-        # Safe: per-rank lane coverage means every active worker has read
-        # round.current and published its shard before we close the round.
-        self.backend.delete(self.round_file)
-        self._wait_for_acks(round_id, seen, my_path, merged_path, deadline)
-        if self._previous_merged_file is not None:
-            self._delete_best_effort(self._previous_merged_file)
+        self._delete_best_effort(my_shard)
+        # Safe: per-rank lane coverage means every active worker has read the
+        # announcement and published its shard before we close the round.
+        self._delete(self._announcement_location)
+        self._wait_for_acks(round_id, seen, my_shard, result, deadline)
+        if self._previous_result is not None:
+            self._delete_best_effort(self._previous_result)
         # Retain the consumed result as a closed-round marker: a follower
-        # starting the next round may still have read the old round.current.
-        self._previous_merged_file = merged_path
+        # starting the next round may still have read the old announcement.
+        self._previous_result = result
         return merged
 
     def _wait_for_acks(
         self,
         round_id: str,
         shards: Iterable[str],
-        my_path: str,
-        merged_path: str,
+        my_shard: str,
+        result: str,
         deadline: float,
     ) -> None:
-        # Basenames identify participants independently of how glob normalizes
-        # the directory. One listing per poll avoids a HEAD for every reader.
-        ack_paths = {
-            f"{os.path.basename(path)}.ack": f"{path}.ack"
-            for path in shards
-            if os.path.basename(path) != os.path.basename(my_path)
+        own_ack = self._ack_name(my_shard)
+        ack_locations = {
+            self._ack_name(shard): self._ack_location(shard)
+            for shard in shards
+            if self._ack_name(shard) != own_ack
         }
-        pending = set(ack_paths)
+        pending = set(ack_locations)
         acknowledged: dict[str, str] = {}
 
         def _all_acknowledged() -> bool:
-            for path in self.backend.glob(
-                f"{self.agg_dir}/state_r*_w*_p*_{round_id}.ckpt.ack"
-            ):
-                name = os.path.basename(path)
-                if name in pending:
-                    pending.remove(name)
-                    acknowledged[name] = ack_paths[name]
+            for name in pending.intersection(self._list_ack_names(round_id)):
+                pending.remove(name)
+                acknowledged[name] = ack_locations[name]
             return not pending
 
         try:
             if not self._wait_until(
                 _all_acknowledged, max(0.0, deadline - time.monotonic())
             ):
-                # Do not advance _previous_merged_file: cleanup must preserve
-                # this result for followers that have not decoded it yet.
+                # Don't advance _previous_result: cleanup must preserve this
+                # result for followers that have not decoded it yet.
                 details = (
                     f"missing={len(pending)}",
                     f"first 10={sorted(pending)[:10]}",
-                    f"Merged result retained at {merged_path}",
+                    f"Merged result retained at {result}",
                 )
                 raise self._timeout_error(
                     deadline,
                     f"checkpoint acknowledgements: {'; '.join(details)}",
                 )
         finally:
-            for ack_path in acknowledged.values():
-                self._delete_best_effort(ack_path)
+            for location in acknowledged.values():
+                self._delete_best_effort(location)
 
     def _follow(
         self, round_id: str, round_: AggregationRound, deadline: float
     ) -> dict[str, Any]:
-        my_path = self._state_file_path(round_id)
-        merged_path = self._merged_file_path(round_id)
-        failure_path = f"{self.agg_dir}/failed_{round_id}.txt"
-        self.backend.put(my_path, self._codec.encode(round_.local))
+        my_shard = self._shard_location(round_id)
+        result = self._result_location(round_id)
+        failure = self._failure_location(round_id)
+        self._put(my_shard, self._codec.encode(round_.local))
 
         # Followers prefer a published result; a failure notification never
         # revokes it. Failure markers are isolated by the same round namespace.
         def _result_ready() -> bool:
-            if self.backend.exists(merged_path):
+            if self._exists(result):
                 return True
-            failure = self._read_text(failure_path)
-            if failure is not None:
+            message = self._read_text(failure)
+            if message is not None:
                 raise RuntimeError(
-                    f"Checkpoint round {round_id} failed on leader: {failure}"
+                    f"Checkpoint round {round_id} failed on leader: {message}"
                 )
             return False
 
         if not self._wait_until(_result_ready, max(0.0, deadline - time.monotonic())):
-            raise self._timeout_error(deadline, f"merged checkpoint at {merged_path}")
-        merged = self._read_aggregation_state(merged_path)
+            raise self._timeout_error(deadline, f"merged checkpoint at {result}")
+        merged = self._read_aggregation_state(result)
         if merged is None:
-            raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
-        self._delete_best_effort(my_path)
-        self.backend.put(f"{my_path}.ack", b"")
+            raise RuntimeError(f"Failed to read merged checkpoint {result}")
+        self._delete_best_effort(my_shard)
+        self._put(self._ack_location(my_shard), b"")
         return merged
 
     def prepare_restore(self) -> None:
@@ -619,10 +668,10 @@ class FileCoordinator:
         """Delete the retained result of the last fully acknowledged round.
 
         The engine calls this during teardown. It does not scan for failed-round
-        artifacts or retry earlier best-effort deletions. Those files may require
+        artifacts or retry earlier best-effort deletions. Those may require
         manual cleanup once every participant has stopped; in particular, an
         unacknowledged result must remain available to delayed readers.
         """
-        if self._previous_merged_file is not None:
-            self.backend.delete(self._previous_merged_file)
-            self._previous_merged_file = None
+        if self._previous_result is not None:
+            self._delete(self._previous_result)
+            self._previous_result = None
