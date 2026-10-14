@@ -4,6 +4,7 @@
 import copy
 import json
 import logging
+import pickle
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -919,6 +920,46 @@ def test_shared_instance_rendering_and_copy(fast_tokenizer: Any) -> None:
         )
     assert all(np.array_equal(mask, expected) for mask in actual)
     assert np.array_equal(run(copy.deepcopy(op), CYCLE).payload["loss_mask"], expected)
+
+
+def test_preflight_transfers_setup_checks_without_loading_original_tokenizer(
+    fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+    from zephon import Pipeline
+    from zephon._internal.utils import chat_template as module
+
+    monkeypatch.setattr(
+        "zephon._internal.ops.tokenize_base.load_hf_tokenizer",
+        lambda *args, **kwargs: copy.deepcopy(fast_tokenizer),
+    )
+    work = FakeIndexableWorkSource(
+        make_inmem_dataset("chat", [{"messages": CONVERSATION}])
+    )
+    pipe = Pipeline(work).tokenize_chat(
+        tokenizer_id="local-fixture",
+        chat_template=TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+    )
+    assert pipe.preflight_tokenizers().ok
+    ((_, op),) = pipe._iter_ops(TokenizeChat)
+    assert op.tok is None
+    assert not op._tokenizer_instantiated
+    assert op._template_verifier is None
+    assert op._template_setup_result is not None
+    saved = pickle.dumps(op)
+    module._VERIFIED_STRUCTURES.clear()
+    module._owned_template.cache_clear()
+
+    def unexpected_probe(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("setup probes repeated")
+
+    monkeypatch.setattr(module.TemplateVerifier, "verify", unexpected_probe)
+    assert pipe.preflight_tokenizers().ok
+    worker = pickle.loads(saved)
+    worker._setup_tokenizer()
+    assert worker._template_verifier is not None
+    assert worker._template_verifier.executed_sites
 
 
 def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:

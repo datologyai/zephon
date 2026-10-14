@@ -14,6 +14,8 @@ of arbitrary content-dependent Jinja code.
 Setup checks simple conversations. New message/tool structures are checked on
 first use and successful results are cached within each worker process. Every
 actual render still checks its owners and character ranges.
+Successful setup checks can travel with an operator to another process; its
+compiled Jinja template is rebuilt locally before the result's identity is checked.
 """
 
 from __future__ import annotations
@@ -464,6 +466,15 @@ def _owned_template(template: str) -> OwnedTemplate:
     return OwnedTemplate(template)
 
 
+@dataclass(frozen=True)
+class TemplateSetupResult:
+    """Portable successful setup checks for one verifier configuration."""
+
+    identity: bytes
+    issues: tuple[Issue, ...]
+    executed_sites: frozenset[int]
+
+
 class TemplateVerifier:
     """Verify a compiled template and gate new input structures before rendering."""
 
@@ -500,6 +511,7 @@ class TemplateVerifier:
             ).encode()
         ).digest()
         self.executed_sites: set[int] = set()
+        self.setup_result: TemplateSetupResult | None = None
 
     def verify(
         self,
@@ -580,7 +592,17 @@ class TemplateVerifier:
             )
         return report
 
-    def setup_report(self) -> ValidationReport:
+    def setup_report(
+        self, *, cached: TemplateSetupResult | None = None
+    ) -> ValidationReport:
+        """Reuse successful setup checks only for an identical configuration."""
+        self.setup_result = None
+        if cached is not None and cached.identity == self._identity:
+            report = ValidationReport(list(cached.issues))
+            if report.ok:
+                self.executed_sites.update(cached.executed_sites)
+                self.setup_result = cached
+                return report
         report = ValidationReport()
         for roles in (
             ("user", "assistant"),
@@ -591,6 +613,10 @@ class TemplateVerifier:
             ]
             report.issues.extend(
                 self._cached_verify(messages, self.kwargs, setup=True).issues
+            )
+        if report.ok:
+            self.setup_result = TemplateSetupResult(
+                self._identity, tuple(report.issues), frozenset(self.executed_sites)
             )
         return report
 

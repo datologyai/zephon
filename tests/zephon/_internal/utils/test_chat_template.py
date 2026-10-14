@@ -3,6 +3,7 @@
 
 import copy
 import json
+import pickle
 from collections import OrderedDict
 from typing import Any
 
@@ -15,7 +16,7 @@ from tests.helpers.chat import (
     TAGGED_TEMPLATE,
     make_fast_tokenizer,
 )
-from zephon.validation import ValidationError, verify_chat_template
+from zephon.validation import Issue, ValidationError, verify_chat_template
 
 
 @pytest.fixture
@@ -333,3 +334,78 @@ def test_custom_render_options_keep_exact_values(fast_tokenizer: Any) -> None:
     verifier.verify_input_structure(CYCLE, {"mode": "calls"})
     with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
         verifier.verify_input_structure(CYCLE, {"mode": "text"})
+
+
+def test_setup_result_survives_empty_process_caches(
+    fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zephon._internal.utils import chat_template as module
+
+    verifier = module.TemplateVerifier(
+        copy.deepcopy(fast_tokenizer), TAGGED_TEMPLATE, {}
+    )
+    assert verifier.setup_report().ok
+    saved = pickle.dumps(verifier.setup_result)
+    module._VERIFIED_STRUCTURES.clear()
+    module._owned_template.cache_clear()
+
+    def unexpected_probe(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("verification probe ran")
+
+    monkeypatch.setattr(module.TemplateVerifier, "verify", unexpected_probe)
+    worker = module.TemplateVerifier(fast_tokenizer, TAGGED_TEMPLATE, {})
+    assert worker.template is not verifier.template
+    report = worker.setup_report(cached=pickle.loads(saved))
+    assert report.ok
+    assert worker.executed_sites == verifier.executed_sites
+    assert worker.setup_result is not None
+    report.issues.append(Issue("error", "TEST", "chat", "Caller-added issue"))
+    assert worker.setup_report(cached=worker.setup_result).ok
+    with pytest.raises(AssertionError, match="verification probe ran"):
+        worker.verify_input_structure(CONVERSATION, {})
+
+
+@pytest.mark.parametrize("changed", ["tokenizer", "template", "kwargs", "scope"])
+def test_setup_result_requires_matching_configuration(
+    fast_tokenizer: Any, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    from zephon._internal.utils import chat_template as module
+
+    original = module.TemplateVerifier(
+        copy.deepcopy(fast_tokenizer), TAGGED_TEMPLATE, {}
+    )
+    assert original.setup_report().ok
+    tokenizer = copy.deepcopy(fast_tokenizer)
+    template = TAGGED_TEMPLATE
+    kwargs = {}
+    scope = "after_last_user"
+    if changed == "tokenizer":
+        tokenizer.add_tokens(["different-vocabulary"])
+    elif changed == "template":
+        template += " "
+    elif changed == "kwargs":
+        kwargs["enable_thinking"] = True
+    else:
+        scope = "all_assistant"
+    worker = module.TemplateVerifier(tokenizer, template, kwargs, scope)
+    module._VERIFIED_STRUCTURES.clear()
+    calls = []
+    verify = module.TemplateVerifier.verify
+
+    def counted(self: Any, *args: Any, **options: Any) -> Any:
+        calls.append(1)
+        return verify(self, *args, **options)
+
+    monkeypatch.setattr(module.TemplateVerifier, "verify", counted)
+    assert worker.setup_report(cached=original.setup_result).ok
+    assert len(calls) == 2
+    assert worker.setup_result != original.setup_result
+
+
+def test_failed_setup_has_no_portable_result(fast_tokenizer: Any) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    template = TAGGED_TEMPLATE.replace("{{ message['content'] }}<|end|>", "<|end|>")
+    verifier = TemplateVerifier(fast_tokenizer, template, {})
+    assert not verifier.setup_report().ok
+    assert verifier.setup_result is None

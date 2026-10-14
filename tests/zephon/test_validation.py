@@ -1719,7 +1719,7 @@ def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
     assert report.ok, report.format()
     assert loads == ["fake-model"]
 
-    # Preflight must not load or cache state on the pipeline-owned operator.
+    # Preflight must not initialize the pipeline-owned tokenizer.
     (op,) = _tokenize_ops(pipe)
     assert op.tok is None
     assert op._tokenizer_instantiated is False

@@ -1674,8 +1674,10 @@ class Pipeline:
     def preflight_tokenizers(self, *, strict: bool = True) -> "ValidationReport":
         """Load and validate every tokenizer configured on the pipeline.
 
-        Each tokenizer operator is probed through a deep copy, leaving the
-        pipeline's operator state unchanged. This may download tokenizer files.
+        Each tokenizer operator is initialized through a deep copy. Successful
+        template checks are retained for worker reuse, while the original
+        tokenizer stays lazy. Changed configurations are checked again in the
+        worker. This may download tokenizer files.
 
         Args:
             strict: If True, raise :class:`ValidationError` when any tokenizer

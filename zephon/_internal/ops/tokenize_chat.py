@@ -44,7 +44,10 @@ from zephon.validation import ValidationError
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerFast
 
-    from zephon._internal.utils.chat_template import TemplateVerifier
+    from zephon._internal.utils.chat_template import (
+        TemplateSetupResult,
+        TemplateVerifier,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -296,6 +299,7 @@ class TokenizeChat(TokenizeBase):
         self.span_source: SpanSource = span_source
         self.loss_scope: LossScope = loss_scope
         self._template_verifier: TemplateVerifier | None = None
+        self._template_setup_result: TemplateSetupResult | None = None
         self.chat_template_kwargs: dict[str, Any] = dict(chat_template_kwargs or {})
         self.tools_field = tools_field
         self.enable_thinking_field = enable_thinking_field
@@ -312,14 +316,19 @@ class TokenizeChat(TokenizeBase):
         self._warned_unsupervised_drop = False
 
     def __getstate__(self) -> dict[str, Any]:
-        """Serialize tokenizer and template text, excluding compiled Jinja state."""
+        """Serialize successful setup checks, excluding compiled Jinja state."""
         state = dict(self.__dict__)
         if self._template_verifier is not None:
-            # Rebuild the verifier in the receiving process. The tokenizer stays
-            # loaded; same-process copies reuse compiled-template and probe caches.
+            # Workers recompile Jinja and match the portable result against their
+            # configuration before reusing checks. Loaded tokenizers are retained.
             state["_template_verifier"] = None
             state["_tokenizer_instantiated"] = False
         return state
+
+    def _cache_preflight_result(self, probe: TokenizeBase) -> None:
+        """Retain verified setup without copying the probe's loaded tokenizer."""
+        if isinstance(probe, TokenizeChat):
+            self._template_setup_result = probe._template_setup_result
 
     @staticmethod
     def _read_template(template: str | os.PathLike[str] | None) -> str | None:
@@ -407,9 +416,10 @@ class TokenizeChat(TokenizeBase):
             verifier = TemplateVerifier(
                 tok, template, self.chat_template_kwargs, self.loss_scope
             )
-            report = verifier.setup_report()
+            report = verifier.setup_report(cached=self._template_setup_result)
             if not report.ok:
                 raise ValidationError(report)
+            self._template_setup_result = verifier.setup_result
             self._template_verifier = verifier
 
         if self._resolved_span_source == "prefix_diff":

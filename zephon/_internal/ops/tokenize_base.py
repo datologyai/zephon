@@ -86,6 +86,9 @@ class TokenizeBase(BaseOp):
     def _finalize_setup(self) -> None:
         """Post-load, per-op configuration; failures are cached and re-raised."""
 
+    def _cache_preflight_result(self, probe: TokenizeBase) -> None:
+        """Retain reusable checks without copying the probe's initialized tokenizer."""
+
     def _lookup_path(self, payload: Any, path: tuple[str, ...]) -> Any:
         """Resolve a dot-path against a (possibly nested) mapping payload.
 
