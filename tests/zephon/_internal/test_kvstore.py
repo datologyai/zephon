@@ -5,7 +5,12 @@ import pytest
 
 from tests.helpers.kvstore import InMemoryKVStore
 from zephon._internal import kvstore
-from zephon._internal.kvstore import TorchKVStore, open_kv_store
+from zephon._internal.kvstore import (
+    TorchKVStore,
+    open_kv_store,
+    read_staged_value,
+    stage_value,
+)
 
 
 @pytest.fixture
@@ -136,3 +141,61 @@ def test_torch_store_reconnects_after_failure() -> None:
     store.set("k", b"again")
     assert store.get("k") == b"again"
     del replacement
+
+
+def _small_store(max_value_bytes: int) -> InMemoryKVStore:
+    store = InMemoryKVStore()
+    store.max_value_bytes = max_value_bytes
+    return store
+
+
+def test_small_value_travels_inside_its_manifest() -> None:
+    store = _small_store(1024)
+    staged = stage_value(store, "k", b"small")
+    assert staged.chunk_keys == []
+    assert store.data == {}
+    assert read_staged_value(store, "k", staged.manifest) == b"small"
+
+
+def test_large_value_is_written_in_chunks_before_its_manifest() -> None:
+    store = _small_store(10)
+    data = bytes(range(256)) * 3
+    staged = stage_value(store, "k", data)
+    assert len(staged.chunk_keys) == 77
+    assert all(len(store.data[key]) <= 10 for key in staged.chunk_keys)
+    assert len(staged.manifest) <= 64
+    assert read_staged_value(store, "k", staged.manifest) == data
+
+
+def test_identical_values_get_distinct_manifests() -> None:
+    # Distinct write IDs let set_if_absent tell which publisher won.
+    store = _small_store(10)
+    first = stage_value(store, "k", b"same bytes, twice")
+    second = stage_value(store, "k", b"same bytes, twice")
+    assert first.manifest != second.manifest
+    assert set(first.chunk_keys).isdisjoint(second.chunk_keys)
+
+
+def test_incomplete_or_altered_value_is_rejected() -> None:
+    store = _small_store(10)
+    staged = stage_value(store, "k", b"x" * 100)
+    store.data[staged.chunk_keys[3]] = b"y" * 10
+    with pytest.raises(RuntimeError, match="doesn't match its manifest"):
+        read_staged_value(store, "k", staged.manifest)
+    del store.data[staged.chunk_keys[0]]
+    with pytest.raises(RuntimeError, match="missing 1 of 10 chunks"):
+        read_staged_value(store, "k", staged.manifest)
+    with pytest.raises(RuntimeError, match="no valid manifest"):
+        read_staged_value(store, "k", b"not a manifest")
+
+
+def test_torch_store_moves_values_above_its_write_limit(
+    torch_store: TorchKVStore,
+) -> None:
+    data = bytes(range(256)) * (20 * 1024 * 1024 // 256)
+    staged = stage_value(torch_store, "big", data)
+    assert len(staged.chunk_keys) == 5
+    torch_store.set("big", staged.manifest)
+    manifest = torch_store.get("big")
+    assert manifest is not None
+    assert read_staged_value(torch_store, "big", manifest) == data

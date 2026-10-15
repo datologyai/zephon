@@ -8,11 +8,15 @@ subprocess. ``torch://`` connects to torchrun's c10d ``TCPStore`` at
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
+import struct
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -28,6 +32,12 @@ class KVStore(ABC):
 
     poll_interval_s: float = 0.05
     """Delay between checks in the default polling ``wait``."""
+
+    max_value_bytes: int | None = None
+    """Largest value one write may carry, or None for no limit.
+
+    :func:`stage_value` splits larger values into chunks of this size.
+    """
 
     @abstractmethod
     def get(self, key: str) -> bytes | None:
@@ -117,6 +127,9 @@ class TorchKVStore(KVStore):
     """
 
     poll_interval_s = 0.01
+    # The libuv server drops the connection on any value above 8 MiB it
+    # receives; replies, including multi_get, have no such limit.
+    max_value_bytes = 4 * 1024 * 1024
 
     def __init__(self, host: str, port: int, *, timeout_s: float) -> None:
         self.host = host
@@ -238,6 +251,81 @@ def _parse_port(value: object, source: str) -> int | None:
     if not 0 < port < 65536:
         raise ValueError(f"{source} is not a valid port: {value!r}")
     return port
+
+
+# ---------- Values larger than one write ----------
+
+_MAGIC = b"ZV1"
+_INLINE = b"I"
+_CHUNKED = b"C"
+_WRITE_ID_BYTES = 16
+_HEADER_BYTES = len(_MAGIC) + 1 + _WRITE_ID_BYTES
+# Total size, chunk count, and a digest of the whole value.
+_CHUNKED_INFO = struct.Struct(">QI16s")
+
+
+@dataclass(frozen=True)
+class StagedValue:
+    """A value whose chunks are written; publish ``manifest`` at the key."""
+
+    manifest: bytes
+    chunk_keys: list[str]
+
+
+def stage_value(store: KVStore, key: str, data: bytes) -> StagedValue:
+    """Write ``data``'s chunks and return the manifest to publish at ``key``.
+
+    A value that fits in one write travels inside its manifest. A larger one is
+    split into chunks under a write ID unique to this publication, so retries
+    and competing publishers never mix chunks. Callers publish the manifest
+    last, from the same client, so a reader that sees it also sees its chunks.
+    """
+    write_id = uuid.uuid4().bytes
+    limit = store.max_value_bytes
+    if limit is None or _HEADER_BYTES + len(data) <= limit:
+        return StagedValue(_MAGIC + _INLINE + write_id + data, [])
+    count = math.ceil(len(data) / limit)
+    chunk_keys = [f"{key}/{write_id.hex()}/chunk/{i}" for i in range(count)]
+    # One write per chunk: a batched write would exceed the limit as a whole.
+    for i, chunk_key in enumerate(chunk_keys):
+        store.set(chunk_key, data[i * limit : (i + 1) * limit])
+    info = _CHUNKED_INFO.pack(len(data), count, _digest(data))
+    return StagedValue(_MAGIC + _CHUNKED + write_id + info, chunk_keys)
+
+
+def read_staged_value(store: KVStore, key: str, manifest: bytes) -> bytes:
+    """Return the complete value that ``manifest``, read from ``key``, names.
+
+    Raise if the manifest is malformed or the reassembled value doesn't match
+    the size and digest it records.
+    """
+    if not manifest.startswith(_MAGIC) or len(manifest) < _HEADER_BYTES:
+        raise RuntimeError(f"Value at {key} has no valid manifest")
+    kind = manifest[len(_MAGIC) : len(_MAGIC) + 1]
+    write_id = manifest[len(_MAGIC) + 1 : _HEADER_BYTES]
+    body = manifest[_HEADER_BYTES:]
+    if kind == _INLINE:
+        return body
+    if kind != _CHUNKED or len(body) != _CHUNKED_INFO.size:
+        raise RuntimeError(f"Value at {key} has no valid manifest")
+    size, count, digest = _CHUNKED_INFO.unpack(body)
+    chunk_keys = [f"{key}/{write_id.hex()}/chunk/{i}" for i in range(count)]
+    chunks = store.get_many(chunk_keys)
+    missing = [k for k, chunk in zip(chunk_keys, chunks) if chunk is None]
+    if missing:
+        raise RuntimeError(
+            f"Value at {key} is missing {len(missing)} of {count} chunks, e.g. {missing[0]}"
+        )
+    data = b"".join(chunk for chunk in chunks if chunk is not None)
+    if len(data) != size or _digest(data) != digest:
+        raise RuntimeError(
+            f"Value at {key} doesn't match its manifest: {len(data)} of {size} bytes"
+        )
+    return data
+
+
+def _digest(data: bytes) -> bytes:
+    return hashlib.blake2b(data, digest_size=16).digest()
 
 
 register_kv_store("torch", TorchKVStore.from_uri)

@@ -2,6 +2,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -1059,3 +1060,70 @@ def test_cleanup_in_forked_child_keeps_the_result(
     leader.cleanup()
     monkeypatch.undo()
     assert leader._read_result(round_id) == {"progress": {"0": 7}}
+
+
+_SMALL_WRITE_BYTES = 64
+
+
+class _RecordingStore(InMemoryKVStore):
+    """Small writes, so shards and results are chunked; records every key."""
+
+    max_value_bytes = _SMALL_WRITE_BYTES
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.written: set[str] = set()
+
+    def set(self, key: str, value: bytes) -> None:
+        assert len(value) <= _SMALL_WRITE_BYTES
+        self.written.add(key)
+        super().set(key, value)
+
+
+def test_kv_rounds_move_values_larger_than_one_write() -> None:
+    store = _RecordingStore()
+    blob = "x" * 500
+
+    def make(rank: int, worker_id: int) -> KVCoordinator:
+        return KVCoordinator(
+            RuntimeOptions(
+                run_id="chunked",
+                aggregate_serializer="json",
+                aggregate_compressor="none",
+            ),
+            store,
+            global_rank=rank,
+            world_size=2,
+            plan_id="test-plan",
+            worker_info=lambda: (worker_id, 2),
+        )
+
+    def merge(shards: list[dict[str, Any]]) -> dict[str, Any]:
+        return {**_merge_progress(shards), "blob": blob}
+
+    mapping = {0: [0, 1]}
+    members = [
+        (make(rank, worker), rank, [worker]) for rank in (0, 1) for worker in (0, 1)
+    ]
+    with ThreadPoolExecutor(max_workers=len(members)) as pool:
+        for _ in range(3):
+            futures = [
+                pool.submit(
+                    coordinator.aggregate,
+                    replace(
+                        _round(rank, lanes, mapping, leader=index == 0),
+                        local={
+                            **_round(rank, lanes, mapping, leader=False).local,
+                            "blob": blob,
+                        },
+                    ),
+                    merge,
+                )
+                for index, (coordinator, rank, lanes) in enumerate(members)
+            ]
+            results = [future.result(timeout=10) for future in futures]
+            assert results == [{"progress": {"0": 7, "1": 7}, "blob": blob}] * 4
+    assert any("/state/" in key and "/chunk/" in key for key in store.written)
+    assert any("/outcome/" in key and "/chunk/" in key for key in store.written)
+    members[0][0].cleanup()
+    assert store.data == {}

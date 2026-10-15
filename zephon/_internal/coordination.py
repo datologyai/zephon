@@ -25,7 +25,12 @@ from typing import Any, Protocol, TypeVar, cast
 
 from zephon._internal.checkpoint import AggregationCodec
 from zephon._internal.io.storage import RouterStorageBackend
-from zephon._internal.kvstore import KVStore, open_kv_store
+from zephon._internal.kvstore import (
+    KVStore,
+    open_kv_store,
+    read_staged_value,
+    stage_value,
+)
 from zephon.options import DEFAULT_RUN_ID, RuntimeOptions
 
 T = TypeVar("T")
@@ -864,10 +869,16 @@ class KVCoordinator(RoundCoordinator):
     - ``{round}/outcome``: the merged result or the leader's failure, written
       conditionally so a later failure can't replace a published result.
     - ``{round}/ack/{participant}``: each follower's acknowledgement.
+
+    Shards, acknowledgements and the result are stored as manifests (see
+    :func:`~zephon._internal.kvstore.stage_value`): a value too large for one
+    write is split into chunks that are written first and deleted with it.
     """
 
     _RESULT = b"R"
     _FAILURE = b"F"
+    # Far below any write limit, even at four UTF-8 bytes per character.
+    _MAX_FAILURE_CHARS = 64 * 1024
 
     def __init__(
         self,
@@ -890,6 +901,8 @@ class KVCoordinator(RoundCoordinator):
             poll_backoff=False,
         )
         self._store = store
+        # Chunk keys of the values this process published, deleted with them.
+        self._chunks: dict[str, list[str]] = {}
 
     @property
     def _namespace(self) -> str:
@@ -943,7 +956,7 @@ class KVCoordinator(RoundCoordinator):
         return [self._state_key(round_id, p) for p in participants]
 
     def _publish_shard(self, round_id: str, data: bytes) -> None:
-        self._store.set(self._shard_location(round_id), data)
+        self._put(self._shard_location(round_id), data)
         # Appended on the same connection after the shard, so a leader that
         # sees this participant can already read its shard.
         self._store.append(
@@ -966,19 +979,27 @@ class KVCoordinator(RoundCoordinator):
         return payload["round"], time.time() - payload["ts"]
 
     def _put(self, location: str, data: bytes) -> None:
-        self._store.set(location, data)
+        staged = stage_value(self._store, location, data)
+        self._store.set(location, staged.manifest)
+        self._chunks[location] = staged.chunk_keys
 
     def _read(self, location: str) -> bytes | None:
-        return self._store.get(location)
+        return self._read_many([location])[0]
 
     def _read_many(self, locations: list[str]) -> list[bytes | None]:
-        return self._store.get_many(locations)
+        return [
+            None if manifest is None else read_staged_value(self._store, loc, manifest)
+            for loc, manifest in zip(locations, self._store.get_many(locations))
+        ]
 
     def _exists(self, location: str) -> bool:
         return self._store.exists(location)
 
     def _delete(self, location: str) -> None:
+        # Manifest first, so no reader finds it with chunks missing.
         self._store.delete(location)
+        for chunk_key in self._chunks.pop(location, ()):
+            self._store.delete(chunk_key)
 
     # ---------- Native waits and a single outcome value ----------
 
@@ -996,18 +1017,23 @@ class KVCoordinator(RoundCoordinator):
         return rid
 
     def _publish_result(self, round_id: str, data: bytes) -> None:
-        outcome = self._RESULT + data
-        if (
-            self._store.set_if_absent(self._result_location(round_id), outcome)
-            != outcome
-        ):
+        outcome_key = self._result_location(round_id)
+        staged = stage_value(self._store, outcome_key, data)
+        outcome = self._RESULT + staged.manifest
+        # The manifest's write ID is unique, so a match means this call won.
+        if self._store.set_if_absent(outcome_key, outcome) != outcome:
+            for chunk_key in staged.chunk_keys:
+                self._delete_best_effort(chunk_key)
             raise RuntimeError(
-                f"Round {round_id} already has an outcome at {self._result_location(round_id)}"
+                f"Round {round_id} already has an outcome at {outcome_key}"
             )
+        self._chunks[outcome_key] = staged.chunk_keys
 
     def _publish_failure(self, round_id: str, message: str) -> None:
+        # Truncate by character so the notice stays valid UTF-8.
+        notice = message[: self._MAX_FAILURE_CHARS].encode("utf-8")
         self._store.set_if_absent(
-            self._result_location(round_id), self._FAILURE + message.encode("utf-8")
+            self._result_location(round_id), self._FAILURE + notice
         )
 
     def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
@@ -1026,7 +1052,9 @@ class KVCoordinator(RoundCoordinator):
         outcome = self._store.get(outcome_key)
         if not outcome or outcome[:1] != self._RESULT:
             return None
-        return self._decode_state(outcome_key, outcome[1:])
+        return self._decode_state(
+            outcome_key, read_staged_value(self._store, outcome_key, outcome[1:])
+        )
 
 
 def make_coordinator(
