@@ -31,6 +31,7 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 """
 
 import ctypes
+import dataclasses
 import multiprocessing as mp
 import os
 import sys
@@ -46,9 +47,12 @@ from zephon._internal.checkpoint import (
     ENGINE_VERSION,
     EngineStateV2,
 )
-from zephon._internal.coordination import AggregationRound, FileCoordinator
+from zephon._internal.coordination import (
+    AggregationRound,
+    CheckpointCoordinator,
+    make_coordinator,
+)
 from zephon._internal.graph import Plan
-from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.stores.multi import (
     finalize_dataset_catalogs,
     has_cacheable_dataset,
@@ -174,10 +178,10 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
         pass
 
 
-# Per-rank state-dict fields that must be dict-equal across same-DP-group,
-# same-owned-lane-set peers at checkpoint time — the caller is expected to
-# barrier all ranks (e.g. torch.distributed.barrier()) before
-# pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
+# Per-rank state-dict fields that must agree across same-DP-group peers at
+# checkpoint time — lane by lane, and for rr_next_idx per worker-split key —
+# so the caller is expected to barrier all ranks (e.g.
+# torch.distributed.barrier()) before pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
 # lane_ws_state, epoch_boundaries) may legitimately differ across peers due
 # to async prefetch and are taken wholesale from one representative.
 _DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_next_idx")
@@ -413,13 +417,15 @@ class Engine:
         ] = []
         self._build_runners()
 
-        self._coordinator = FileCoordinator(
+        self._coordinator: CheckpointCoordinator = make_coordinator(
             self._opts,
             global_rank=self._world.global_rank,
             world_size=self._world.world_size,
             plan_id=self._plan.plan_id,
             worker_info=get_torch_worker_info,
         )
+        if self._takes_part_in_rounds():
+            self._coordinator.check_ready()
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
         # This calls close() to clean up runners/queues/semaphores, then
@@ -436,18 +442,6 @@ class Engine:
             assert cs is not None, (
                 "No chunk size hint for current work source, determinism breaks potentially"
             )
-
-    @property
-    def _agg_backend(self) -> RouterStorageBackend:
-        return self._coordinator.backend
-
-    @property
-    def _agg_dir(self) -> str:
-        return self._coordinator.agg_dir
-
-    @property
-    def _round_file(self) -> str:
-        return self._coordinator.round_file
 
     @property
     def _last_round_id(self) -> str | None:
@@ -999,6 +993,40 @@ class Engine:
             if emit_boundary is not None:
                 yield self._make_flush_sentinel(lane_id, boundary_cid=emit_boundary)
 
+    def _takes_part_in_rounds(self) -> bool:
+        """Whether this worker's checkpoints go through the coordinator.
+
+        The engine uses this both to check coordination storage at startup and
+        in ``state_dict``. A single active worker on a single rank has nothing
+        to exchange, and idle workers don't take part either.
+        """
+        if not self._owned_lanes:
+            # Idle workers return their local state. Ideally they would also
+            # receive the merged checkpoint, but the coordinator only guarantees
+            # participation for active workers. For example, if idle workers joined:
+            # - The leader (rank 0, worker 0) opens a round.
+            # - Active workers 0 and 1 join it and publish their state shards.
+            # - Once the required ranks and lanes are covered, the leader merges
+            #   the shards, publishes the result, and can close the round to joins.
+            # - Idle worker 2, slow to call state_dict(), tries to join, but the
+            #   round announcement may no longer be available, or the coordinator
+            #   may reject joins because the round has already completed.
+            # It could then time out waiting for a round to join. Returning the
+            # merged checkpoint here would require explicit coordinator support
+            # for late idle readers, beyond the active participants in the round.
+            #
+            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
+            # snapshot for all workers, so idle workers' local results do not
+            # replace the merged checkpoint. Regular PyTorch DataLoader does not
+            # forward state_dict() calls to workers, and Zephon without a DataLoader
+            # has no multiple workers per rank. These consumers therefore do not
+            # require an idle worker to return the merged checkpoint.
+            return False
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
+        _, workers_per_rank = get_torch_worker_info()
+        active_here = self._active_workers(workers_per_rank, lanes_all)
+        return not (self._world.world_size == 1 and active_here == 1)
+
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)
         a = min(num_workers, L)
@@ -1313,19 +1341,16 @@ class Engine:
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
 
-    def notify(
+    def notify_completion(
         self,
         lane_id: int,
         entries: Iterable[ContributorRef],
-        record_cursor: SampleCursor | None = None,
     ) -> None:
-        """Record delivery progress for ``lane_id`` and evict completed chunks.
+        """Record contributor completion without advancing replay or evicting.
 
-        ``entries`` describe contributors that have been emitted. An epoch can
-        be evicted once this lane has a recorded flush boundary and every base
-        offset in its chunks has produced a contributor (or tombstone) with
-        ``is_last_child=True``. ``record_cursor`` pins its epoch and is stored
-        as the per-lane sentinel for equality-based replay.
+        Tombstones can overtake buffered payloads, including earlier siblings
+        of a closing child. Completion alone therefore cannot authorize
+        eviction, even when no replay cursor has been recorded yet.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts
@@ -1333,7 +1358,6 @@ class Engine:
         done = self._offset_done[lane_id]
         done_count = self._offset_done_count[lane_id]
 
-        # 1) Update per-offset completion state
         for entry in entries:
             cursor = entry.cursor
             cid = cursor.chunk_id
@@ -1350,6 +1374,30 @@ class Engine:
             if entry.is_last_child and not done[cid].is_set(off):
                 done[cid].set(off)
                 done_count[cid] += 1
+
+    def notify(
+        self,
+        lane_id: int,
+        entries: Iterable[ContributorRef],
+        record_cursor: SampleCursor | None = None,
+    ) -> None:
+        """Record delivery progress for ``lane_id`` and evict completed chunks.
+
+        ``entries`` describe contributors that have been delivered. An epoch
+        can be evicted once this lane has a recorded flush boundary and every
+        base offset in its chunks has produced a contributor (or tombstone)
+        with ``is_last_child=True``. ``record_cursor`` pins its epoch and is
+        stored as the per-lane sentinel for equality-based replay. Passing
+        no cursor releases that pin at pipeline drain.
+
+        Tombstones must use ``notify_completion()`` instead: they update only
+        completion bits, leaving reclamation to a real delivery or drain.
+        """
+        # 1) Update per-offset completion state.
+        self.notify_completion(lane_id, entries)
+        inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        done = self._offset_done[lane_id]
+        done_count = self._offset_done_count[lane_id]
 
         # 2) Per-epoch eviction: walk epoch boundaries bottom-up, evict
         #    completed epochs contiguously from the lowest.
@@ -1697,42 +1745,18 @@ class Engine:
             return state.to_dict()
 
     def state_dict(self) -> dict[str, Any]:
-        # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
-        if len(self._owned_lanes) == 0:
-            # Idle workers return their local state. Ideally they would also
-            # receive the merged checkpoint, but the coordinator only guarantees
-            # participation for active workers. For example, if idle workers joined:
-            # - The leader (rank 0, worker 0) opens a round.
-            # - Active workers 0 and 1 join it and publish their state shards.
-            # - Once the required ranks and lanes are covered, the leader merges
-            #   the shards, publishes the result, and can close the round to joins.
-            # - Idle worker 2, slow to call state_dict(), tries to join, but the
-            #   round announcement may no longer be available, or the coordinator
-            #   may reject joins because the round has already completed.
-            # It could then time out waiting for a round to join. Returning the
-            # merged checkpoint here would require explicit coordinator support
-            # for late idle readers, beyond the active participants in the round.
-            #
-            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
-            # snapshot for all workers, so idle workers' local results do not
-            # replace the merged checkpoint. Regular PyTorch DataLoader does not
-            # forward state_dict() calls to workers, and Zephon without a DataLoader
-            # has no multiple workers per rank. These consumers therefore do not
-            # require an idle worker to return the merged checkpoint.
+        if not self._takes_part_in_rounds():
+            if self._owned_lanes:
+                # Single rank, single active worker: no merge, and this owner
+                # covers every lane, so check the window counts locally.
+                self._check_mid_window_counts(
+                    local.get("lane_emitted") or {},
+                    int(self._world.canonical_replicas),
+                )
             return local
 
-        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
-        worker_id, workers_per_rank = get_torch_worker_info()
-        active_here = self._active_workers(workers_per_rank, lanes_all)
-        if self._world.world_size == 1 and active_here == 1:
-            # Fast path has no merge; this owner covers every lane, so check locally.
-            self._check_mid_window_counts(
-                local.get("lane_emitted") or {},
-                int(self._world.canonical_replicas),
-            )
-            return local
-
+        worker_id, _ = get_torch_worker_info()
         # Round setup
         is_leader = self._world.global_rank == 0 and worker_id == 0
         return self._coordinator.aggregate(
@@ -1748,13 +1772,13 @@ class Engine:
     def _dedupe_dp_group_peers(
         self, states: list[EngineStateV2]
     ) -> list[EngineStateV2]:
-        """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
+        """Keep one rank's shards per DP group, checking its MP peers agree.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
-        group owns the same canonical lanes and contributes a state shard; their
-        lane-keyed entries would collide in the downstream merge. One rep
-        per ``(dp_group_id, owned-lane-set)`` group survives, with
-        ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
+        group owns the same canonical lanes and contributes state shards; their
+        lane-keyed entries would collide in the downstream merge. The shards of
+        the group's lowest global rank survive, and every other rank's
+        ``_DELIVERY_SYNCED_FIELDS`` are strict-checked against them.
 
         Operates on typed ``EngineStateV2`` so callers can run schema
         migration and cross-shard global-invariant checks BEFORE dedupe —
@@ -1762,37 +1786,60 @@ class Engine:
         ``last_round_id``, ``checkpoint_reload_count``) between same-DP-group
         peers would be silently hidden when peers are dropped.
 
-        Why the lane-set component (not just ``dp_group_id``): with
-        ``workers_per_rank > 1`` multiple DataLoader workers on the same
-        rank split their DP group's lanes into disjoint subsets (see
-        ``_owned_lanes``); those state shards are complementary partitions,
-        not duplicates, and must not be collapsed. At
-        ``workers_per_rank=1`` the lane-set is redundant and grouping
-        collapses to ``dp_group_id``.
+        Why per rank rather than per shard: with ``workers_per_rank > 1`` the
+        DataLoader workers on a rank split their DP group's lanes into disjoint
+        subsets (see ``_owned_lanes``), and peers may split them differently,
+        e.g. two workers on one rank and one on another. A rank's shards are
+        complementary partitions, so lane-keyed fields are compared lane by
+        lane. ``rr_next_idx`` is keyed by worker split, so peers' entries are
+        kept alongside the representative's for ranks that resume with that
+        split; an entry two peers share must agree.
         """
-        groups: dict[tuple[int, frozenset[int]], list[EngineStateV2]] = {}
+        by_group: dict[int, dict[int, list[EngineStateV2]]] = {}
         for st in states:
-            dp_id = int(st.world["dp_group_id"])
-            lane_set = frozenset(int(k) for k in st.progress)
-            groups.setdefault((dp_id, lane_set), []).append(st)
+            by_rank = by_group.setdefault(int(st.world["dp_group_id"]), {})
+            by_rank.setdefault(int(st.world["global_rank"]), []).append(st)
 
         chosen: list[EngineStateV2] = []
-        for (dp_id, lane_set), group in groups.items():
+        for dp_id, by_rank in by_group.items():
             # Deterministic representative: lowest global_rank wins.
-            rep = min(group, key=lambda st: int(st.world["global_rank"]))
-            for st in group:
-                if st is rep:
+            rep_rank = min(by_rank)
+            rep = by_rank[rep_rank]
+            progress = {int(lane): p for st in rep for lane, p in st.progress.items()}
+            cursors = {
+                int(lane): c for st in rep for lane, c in st.replay_cursors.items()
+            }
+            rr_next_idx = {key: v for st in rep for key, v in st.rr_next_idx.items()}
+
+            def _diverged(
+                fname: str, rank: int, detail: str, dp_id: int = dp_id
+            ) -> RuntimeError:
+                return RuntimeError(
+                    f"DP group {dp_id} delivery-state divergence on {fname!r} "
+                    f"({detail}) between rank {rep_rank} and rank {rank}. Did "
+                    f"all ranks barrier before calling pipe.checkpoint()?"
+                )
+
+            for rank, shards in sorted(by_rank.items()):
+                if rank == rep_rank:
                     continue
-                for fname in _DELIVERY_SYNCED_FIELDS:
-                    if getattr(st, fname) != getattr(rep, fname):
-                        raise RuntimeError(
-                            f"DP group {dp_id} delivery-state divergence on "
-                            f"{fname!r} (lanes={sorted(lane_set)}) between rank "
-                            f"{int(rep.world['global_rank'])} and rank "
-                            f"{int(st.world['global_rank'])}. Did all ranks "
-                            f"barrier before calling pipe.checkpoint()?"
-                        )
-            chosen.append(rep)
+                for st in shards:
+                    peer_cursors = {
+                        int(lane): c for lane, c in st.replay_cursors.items()
+                    }
+                    for lane_s, p in st.progress.items():
+                        lane = int(lane_s)
+                        if progress.get(lane) != p:
+                            raise _diverged("progress", rank, f"lane {lane}")
+                        if cursors.get(lane) != peer_cursors.get(lane):
+                            raise _diverged("replay_cursors", rank, f"lane {lane}")
+                    for key, value in st.rr_next_idx.items():
+                        if key in rr_next_idx and rr_next_idx[key] != value:
+                            raise _diverged("rr_next_idx", rank, f"key {key!r}")
+                        rr_next_idx[key] = value
+            # Carry peers' worker-split entries on the first representative shard.
+            chosen.append(dataclasses.replace(rep[0], rr_next_idx=rr_next_idx))
+            chosen.extend(rep[1:])
         return chosen
 
     def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:

@@ -77,15 +77,43 @@ acts as the leader that combines the progress of the other instances into a sing
 checkpoint.
 
 Whenever `world_size` is greater than 1, every `Pipeline` instance must also be configured
-with 1) a common `aggregate_dir` option that all of the participating instances can read
-and write to, either as a shared filesystem directory or as a prefix in object storage and
-2) a `run_id` that is unique to this training run so that different jobs that share the
-same `aggregate_dir` do not collide with each other.
+with 1) a shared place to exchange checkpoint state, which is usually a common
+`aggregate_dir` that all of the participating instances can read and write to, either as
+a shared filesystem directory or as a prefix in object storage and 2) a `run_id` that is
+unique to this training run so that different jobs that share the same `aggregate_dir` do
+not collide with each other.
 
 ```{literalinclude} ../../../examples/guide/pipelines/coordination_identity.py
 :language: python
 :caption: examples/guide/pipelines/coordination_identity.py
 ```
+
+If your nodes don't share a filesystem or bucket with read-after-write consistency, you
+can set `aggregate_store` instead of `aggregate_dir` (but not both). With
+`aggregate_store="torch://"`, the `Pipeline` instances exchange checkpoint state through
+the TCPStore at `MASTER_ADDR`/`MASTER_PORT` that your job might already be using for
+`torch.distributed`, so there's no extra storage to set up; use `torch://host:port` to
+point at a different store. Both options support the same setups, whether a rank has no
+DataLoader workers, several of them, or more workers than it has lanes. On a single node,
+though, a local `aggregate_dir` (e.g., in `/tmp/`) is usually the simpler choice, even
+with many GPUs.
+
+```{literalinclude} ../../../examples/guide/pipelines/coordination_store.py
+:language: python
+:caption: examples/guide/pipelines/coordination_store.py
+```
+
+Zephon connects to the store but doesn't start it, so it needs to be running by the time
+the `Pipeline` starts. Under `torchrun`, the launcher's agent runs it for you. If you set
+`TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1` or launch some other way, rank 0 starts it inside
+`torch.distributed.init_process_group()`, so call that before iterating the `Pipeline`,
+and keep rank 0 running until every rank has finished its last checkpoint. Zephon checks
+that it can reach the store when a `Pipeline` that takes part in checkpoints starts, so a
+misconfigured store fails right away instead of at the first checkpoint.
+
+The store holds everything in the memory of the process that runs it. During a checkpoint,
+that includes every instance's state and the combined checkpoint, which each instance then
+reads in full, so a very large checkpoint is better served by `aggregate_dir`.
 
 Every `Pipeline` instance that is part of the same coordination group must call
 `Pipeline.checkpoint()` at the same training step. If one of them does not, the leader

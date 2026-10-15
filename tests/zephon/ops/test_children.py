@@ -12,49 +12,57 @@ def test_contribution_refs_default_to_meta_cursor() -> None:
     assert refs[0].is_last_child is True
 
 
-def test_spawn_child_builds_child_lineage_and_ref() -> None:
+@pytest.mark.parametrize("closing", [False, True])
+def test_spawn_child_builds_child_lineage_and_ref(closing: bool) -> None:
     parent = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=1, chunk_offset=0)
-    child = spawn_child(parent, 5, is_last_child=True)
+    child = spawn_child(parent, 5, is_last_child=closing)
     assert child.lineage[-1] == 5
     assert len(child.contributors) == 1
     ref = child.contributors[0]
     assert ref.cursor == SampleCursor(1, 0, parent.sample_id, child.lineage)
-    assert ref.is_last_child is True
+    assert ref.is_last_child is closing
 
 
-def test_spawn_child_raises_if_parent_already_closed() -> None:
-    base = SampleMeta(
-        sample_id=(0, 0, 1),
-        lane_id=0,
-        chunk_id=1,
-        chunk_offset=0,
-        tags={
-            "_contributors": (ContributorRef(SampleCursor(1, 0, (0, 0, 1), ()), True),)
-        },
-    )
-    with pytest.raises(ValueError):
-        _ = spawn_child(base, 1, is_last_child=True)
+@pytest.mark.parametrize("closing", [False, True])
+def test_spawn_child_transfers_parent_completion_to_final_child(closing: bool) -> None:
+    base = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=1, chunk_offset=0)
+    parent = spawn_child(base, 1, is_last_child=closing)
+    first = spawn_child(parent, 0)
+    last = spawn_child(parent, 1, is_last_child=True)
+
+    assert first.lineage == (1, 0)
+    assert last.lineage == (1, 1)
+    assert first.contributors == (ContributorRef(parent.contributors[0].cursor, False),)
+    assert last.contributors == parent.contributors
+    assert parent.contributors[0].is_last_child is closing
 
 
-def test_spawn_child_propagates_contributors_and_can_close_them() -> None:
+def test_spawn_child_preserves_mixed_packed_contributors() -> None:
     contribs = (
         ContributorRef(cursor=SampleCursor(1, 0, (0, 0, 1), (0,)), is_last_child=False),
-        ContributorRef(cursor=SampleCursor(1, 1, (0, 0, 2), (0,)), is_last_child=False),
+        ContributorRef(cursor=SampleCursor(1, 1, (0, 0, 2), (0,)), is_last_child=True),
     )
-    parent = SampleMeta(
-        sample_id=(0, 0, 9),
+    parent = pack_meta(
+        SampleCursor(2, 3, (0, 0, 9), (4,)),
+        contribs,
         lane_id=0,
-        chunk_id=2,
-        chunk_offset=3,
-        tags={"_contributors": contribs},
+        component_sample_counts={0: 2},
     )
-    child = spawn_child(parent, 2, is_last_child=True)
-    assert child.lineage[-1] == 2
-    assert child.contributors != contribs  # new tuple
-    assert all(ref.is_last_child for ref in child.contributors)
-    assert {ref.cursor for ref in child.contributors} == {
-        ref.cursor for ref in contribs
-    }
+    first = spawn_child(parent, 0)
+    last = spawn_child(parent, 1, is_last_child=True)
+
+    assert first.contributors == tuple(
+        ContributorRef(ref.cursor, False) for ref in contribs
+    )
+    assert last.contributors == contribs
+    assert last.lineage == (4, 1)
+    assert parent.contributors == contribs
+
+
+def test_spawn_child_rejects_closing_tombstone() -> None:
+    parent = tombstone_meta(ContributorRef(SampleCursor(1, 0, (0, 0, 1))), lane_id=0)
+    with pytest.raises(ValueError, match="Cannot spawn a closing child from tombstone"):
+        spawn_child(parent, 0, is_last_child=True)
 
 
 def test_pack_and_tombstone_helpers() -> None:

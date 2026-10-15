@@ -14,6 +14,7 @@ import pytest
 from tests._helpers import mk_dataset
 from zephon._internal.engine import Engine
 from zephon._internal.graph import Graph
+from zephon._internal.notify import _apply_notify_args, _ContributorNotify
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.ops.fetch import FetchOp
@@ -679,6 +680,64 @@ def _build_minimal_engine(monkeypatch: Any) -> Engine:
 
 def _lane_chunk(cid: int) -> WorkChunk:
     return WorkChunk(components={"default": [(0, 0, cid)]})
+
+
+@pytest.mark.parametrize("cursor_cid", [None, 0, 2])
+def test_tombstone_completion_waits_for_delivery_to_evict(
+    monkeypatch: pytest.MonkeyPatch, cursor_cid: int | None
+) -> None:
+    """Completion-only notifications retain even fully closed epochs."""
+    eng = _build_minimal_engine(monkeypatch)
+    try:
+        cursors = [
+            SampleCursor(chunk_id=cid, chunk_offset=0, sample_id=(0, 0, cid))
+            for cid in range(4)
+        ]
+        for cid in range(4):
+            eng.inflight_chunks_per_lane[0][cid] = _lane_chunk(cid)
+        eng._epoch_boundaries[0] = [2, 4]
+        if cursor_cid is not None:
+            eng._lane_last_cursor[0] = cursors[cursor_cid]
+        previous_cursors = dict(eng._lane_last_cursor)
+        previous_progress = dict(eng._lane_progress)
+
+        # All closing children are dropped, but their earlier siblings may
+        # still be buffered. Test both before any delivery and with a cursor
+        # in either epoch: controls cannot evict in any of these cases.
+        args = _ContributorNotify(
+            lane_id=0,
+            entries=[ContributorRef(cursor, True) for cursor in cursors],
+            record_cursor=cursors[-1],
+            delivered=False,
+        )
+        _apply_notify_args(eng, args)
+        _apply_notify_args(eng, args)  # Completion is idempotent during replay.
+        assert eng._offset_done_count[0] == dict.fromkeys(range(4), 1)
+        assert all(eng._offset_done[0][cid].is_set(0) for cid in range(4))
+        assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+        assert eng._epoch_boundaries[0] == [2, 4]
+        assert eng._lane_last_cursor == previous_cursors
+        assert eng._lane_progress == previous_progress
+        assert not eng._lane_emitted
+
+        # The first real output pins its epoch even though all bits are set.
+        eng.notify(0, [], record_cursor=cursors[0])
+        assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+        assert eng._lane_last_cursor[0] == cursors[0]
+
+        # Delivery from the next epoch can reclaim the preceding one.
+        eng.notify(0, [], record_cursor=cursors[2])
+        assert list(eng.inflight_chunks_per_lane[0]) == [2, 3]
+        assert set(eng._offset_done[0]) == {2, 3}
+        assert eng._lane_last_cursor[0] == cursors[2]
+
+        # Final drain releases the pin and cleans up completion state.
+        eng.notify(0, [], record_cursor=None)
+        assert not eng.inflight_chunks_per_lane[0]
+        assert not eng._offset_done[0]
+        assert not eng._offset_done_count[0]
+    finally:
+        eng.close()
 
 
 def _phase2_boundary_cids(eng: Engine, lane: int) -> list[int]:
