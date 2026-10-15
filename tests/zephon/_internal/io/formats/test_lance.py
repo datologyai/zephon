@@ -3,8 +3,9 @@
 
 """Lance discovery, version pinning, refusals and projected shard reads."""
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from zephon._internal.io.formats.lance_manifest import (
     dataset_root_of,
     latest_manifest_path,
 )
+from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
 from zephon.io import StoreOptions
@@ -53,36 +55,58 @@ def dataset_path(tmp_path: Path, pa: Any) -> Path:
     return path
 
 
-def _rows(path: Path, shard_ids: list[int] | None = None) -> list[dict]:
-    """Read every shard of ``path`` through the format handler, in shard order."""
-    handler = LanceFormat()
-    storage = LocalFSBackend(root=Path("/"))
-    manifest = handler.resolve_root(str(path), storage)
-    counts, meta = handler.discover(manifest, storage)
-    data_root = Path(dataset_root_of(manifest)) / "data"
-    dataset = Dataset(
-        name="ds", backend={"kind": "lance", "path": manifest, "shards": meta}
-    )
-    locators = handler.build_locators(dataset)
-    opener = LanceShardOpener(StoreOptions())
-    out: list[dict] = []
-    try:
-        for shard_id in shard_ids if shard_ids is not None else sorted(counts):
-            locator = locators[shard_id]
-            raw = data_root / locator.raw.basename
-            shard = opener.open_shard(
-                locator,
-                LocalShardRef(
-                    raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
-                    extra=locator.extra,
-                ),
+class _Store:
+    """Discovery plus a store-scoped opener, wired as the shard store wires them."""
+
+    def __init__(self, path: Path) -> None:
+        handler = LanceFormat()
+        storage = LocalFSBackend(root=Path("/"))
+        self.manifest = handler.resolve_root(str(path), storage)
+        self.counts, meta = handler.discover(self.manifest, storage)
+        self.locators = handler.build_locators(
+            Dataset(
+                name="ds",
+                backend={"kind": "lance", "path": self.manifest, "shards": meta},
             )
-            assert len(shard) == counts[shard_id]
+        )
+        self._data_root = Path(dataset_root_of(self.manifest)) / "data"
+        self._opener = LanceShardOpener(StoreOptions())
+
+    def open(self, shard_id: int) -> RandomAccessShard:
+        """Open one shard from its cached data file, as the resolver would hand it over."""
+        locator = self.locators[shard_id]
+        raw = self._data_root / locator.raw.basename
+        return self._opener.open_shard(
+            locator,
+            LocalShardRef(
+                raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
+                extra=locator.extra,
+            ),
+        )
+
+    def rows(self, shard_ids: list[int] | None = None) -> list[dict]:
+        """Read whole shards in shard order."""
+        out: list[dict] = []
+        for shard_id in self.counts if shard_ids is None else shard_ids:
+            shard = self.open(shard_id)
+            assert len(shard) == self.counts[shard_id]
             out.extend(shard.getsamples(list(range(len(shard)))))
             shard.close()
+        return out
+
+
+@contextmanager
+def _store(path: Path) -> Iterator[_Store]:
+    store = _Store(path)
+    try:
+        yield store
     finally:
-        opener.close()
-    return out
+        store._opener.close()
+
+
+def _rows(path: Path, shard_ids: list[int] | None = None) -> list[dict]:
+    with _store(path) as store:
+        return store.rows(shard_ids)
 
 
 def _data_file_path(data_file: Any) -> str:
@@ -171,36 +195,15 @@ def test_catalog_carries_the_pinned_manifest_to_every_shard(dataset_path: Path) 
 
 def test_row_order_and_duplicates_are_preserved(dataset_path: Path) -> None:
     rows = _rows(dataset_path, shard_ids=[0])
-    handler = LanceFormat()
-    storage = LocalFSBackend(root=Path("/"))
-    manifest = handler.resolve_root(str(dataset_path), storage)
-    _counts, meta = handler.discover(manifest, storage)
-    dataset = Dataset(
-        name="ds", backend={"kind": "lance", "path": manifest, "shards": meta}
-    )
-    locator = handler.build_locators(dataset)[0]
-    raw = dataset_path / "data" / locator.raw.basename
-    opener = LanceShardOpener(StoreOptions())
-    try:
-        shard = opener.open_shard(
-            locator,
-            LocalShardRef(
-                raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
-                extra=locator.extra,
-            ),
-        )
-        requested = [3, 0, 3, 1]
+    requested = [3, 0, 3, 1]
 
-        got = shard.getsamples(requested)
+    with _store(dataset_path) as store:
+        got = store.open(0).getsamples(requested)
 
-        assert [_as_plain(row) for row in got] == [
-            _as_plain(rows[i]) for i in requested
-        ]
-        # Duplicate rows must not share a mutable container.
-        got[0]["text"] = "changed"
-        assert got[2]["text"] != "changed"
-    finally:
-        opener.close()
+    assert [_as_plain(row) for row in got] == [_as_plain(rows[i]) for i in requested]
+    # Duplicate rows must not share a mutable container.
+    got[0]["text"] = "changed"
+    assert got[2]["text"] != "changed"
 
 
 def test_one_shard_reads_from_several_threads(tmp_path: Path, pa: Any) -> None:
@@ -210,61 +213,30 @@ def test_one_shard_reads_from_several_threads(tmp_path: Path, pa: Any) -> None:
 
     path = tmp_path / "shared.lance"
     lance.write_dataset(_table(pa, 200), str(path), max_rows_per_file=200)
-    handler = LanceFormat()
-    storage = LocalFSBackend(root=Path("/"))
-    manifest = handler.resolve_root(str(path), storage)
-    _counts, meta = handler.discover(manifest, storage)
-    dataset = Dataset(
-        name="ds", backend={"kind": "lance", "path": manifest, "shards": meta}
-    )
-    locator = handler.build_locators(dataset)[0]
-    raw = path / "data" / locator.raw.basename
-    local_ref = LocalShardRef(
-        raw=LocalShardFile(path=raw, bytes=raw.stat().st_size), extra=locator.extra
-    )
-    opener = LanceShardOpener(StoreOptions())
 
-    def read(seed: int) -> bool:
-        generator = random.Random(seed)
-        for _ in range(20):
-            wanted = generator.sample(range(200), 6)
-            shard = opener.open_shard(locator, local_ref)
-            rows = shard.getsamples(wanted)
-            shard.close()
-            if [int(row["id"]) for row in rows] != wanted:
-                return False
-        return True
+    with _store(path) as store:
 
-    try:
+        def read(seed: int) -> bool:
+            generator = random.Random(seed)
+            for _ in range(20):
+                wanted = generator.sample(range(200), 6)
+                shard = store.open(0)
+                rows = shard.getsamples(wanted)
+                shard.close()
+                if [int(row["id"]) for row in rows] != wanted:
+                    return False
+            return True
+
         with ThreadPoolExecutor(max_workers=8) as pool:
             assert all(pool.map(read, range(16)))
-    finally:
-        opener.close()
 
 
 def test_out_of_range_index_raises(dataset_path: Path) -> None:
-    handler = LanceFormat()
-    storage = LocalFSBackend(root=Path("/"))
-    manifest = handler.resolve_root(str(dataset_path), storage)
-    _counts, meta = handler.discover(manifest, storage)
-    dataset = Dataset(
-        name="ds", backend={"kind": "lance", "path": manifest, "shards": meta}
-    )
-    locator = handler.build_locators(dataset)[0]
-    raw = dataset_path / "data" / locator.raw.basename
-    opener = LanceShardOpener(StoreOptions())
-    try:
-        shard = opener.open_shard(
-            locator,
-            LocalShardRef(
-                raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
-                extra=locator.extra,
-            ),
-        )
+    with _store(dataset_path) as store:
+        shard = store.open(0)
+
         with pytest.raises(IndexError):
             shard.getsamples([len(shard)])
-    finally:
-        opener.close()
 
 
 def test_deleted_rows_are_skipped(tmp_path: Path, pa: Any) -> None:
