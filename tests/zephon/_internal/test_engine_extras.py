@@ -3,67 +3,13 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.engine import make_engine as _mk_engine_with_opts
+from tests.helpers.engine import seed_inflight_state as _seed_inflight_state
 from zephon._internal.checkpoint._schemas import EngineStateV2
 from zephon._internal.engine import Engine, get_torch_worker_info, inside_torch_worker
-from zephon._internal.graph import Graph
-from zephon._internal.ops.delay import DelayById
-from zephon._internal.planner import Planner
-from zephon._internal.runtime_spec import resolve_runtime_spec
 from zephon._internal.stream import LanePtr
-from zephon.options import RuntimeOptions
 from zephon.types import ContributorRef, SampleBatch, SampleMeta, SampleRecord
-from zephon.work.base import WorkChunk, WorkSource
-
-
-class _DummyWorkSource(WorkSource):
-    def __init__(self) -> None:
-        super().__init__()
-
-    @property
-    def datasets_by_id(self) -> dict[int, Any]:  # type: ignore[override]
-        return {}
-
-    def component_ids(self) -> dict[str, int]:
-        return {"X": 0, "Y": 1}
-
-    def next_chunk(self) -> Any:  # pragma: no cover - not used here
-        return None
-
-    def state_dict(self) -> dict[str, Any]:  # pragma: no cover - minimal
-        return {"ws": 1}
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:  # pragma: no cover
-        assert "ws" in state or state == {}
-
-    def supports_indexing(self) -> bool:  # pragma: no cover
-        return False
-
-    def __len__(self) -> int:  # pragma: no cover
-        return 0
-
-    def sample_id_at(self, index: int) -> Any:  # pragma: no cover
-        raise NotImplementedError
-
-
-def _mk_engine_with_opts(**opts: Any) -> Engine:
-    g = Graph()
-    g.add("delay", DelayById(max_delay_ms=0.0))
-    plan = Planner().make_plan(g)
-    work = _DummyWorkSource()
-    # Provide a default aggregate_dir when simulating multi-rank setups
-    o = dict(opts)
-    try:
-        ws = int(o.get("world_size", 1))
-    except Exception:
-        ws = 1
-    if ws > 1 and not o.get("aggregate_dir"):
-        import os
-        import tempfile
-
-        o["aggregate_dir"] = os.path.join(tempfile.gettempdir(), "zephon_test_agg")
-    opts = RuntimeOptions(**o)
-    spec = resolve_runtime_spec(plan, opts)
-    return Engine(plan, opts, work, spec)
+from zephon.work.base import WorkChunk
 
 
 def test_world_mapping_contiguous_and_interleaved() -> None:
@@ -566,16 +512,6 @@ class TestParallelismValidation:
 # =============================================================================
 
 
-def _seed_inflight_state(eng: Engine, *, chunk_id: int = 0) -> None:
-    """Populate inflight chunks, progress, and lane_next_cid for owned lanes."""
-    for lane in eng._world.lanes_for_dp_group[eng._world.dp_group_id]:
-        eng.inflight_chunks_per_lane[lane][chunk_id] = WorkChunk(
-            components={"X": [(1, 2, 3)]}, seed=lane * 10 + chunk_id
-        )
-        eng._lane_progress[lane] = LanePtr(chunk_id=chunk_id, offset=0)  # type: ignore[index]
-        eng._lane_next_cid[lane] = chunk_id + 1  # type: ignore[attr-defined]
-
-
 class TestMergeStateDictsSharedDPGroup:
     """``_merge_state_dicts`` handles same-DP-group peer state files.
 
@@ -861,6 +797,50 @@ class TestDedupeDpGroupPeers:
         assert len(chosen) == 2
         kept_lane_sets = {frozenset(int(k) for k in st.progress) for st in chosen}
         assert kept_lane_sets == {frozenset({0}), frozenset({1})}
+
+    def test_peers_with_different_worker_splits_merge(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """Rank 0 splits lanes 0 and 1 across two workers; its MP peer, rank 1,
+        owns both on one worker. Rank 0's shards survive, and rank 1's
+        worker-split RR entry is kept for a resume with one worker."""
+        rank0 = [
+            _mk_typed_state(
+                global_rank=0, dp_group_id=0, lanes=[0], rr_next_idx={"0/2:0": 0}
+            ),
+            _mk_typed_state(
+                global_rank=0, dp_group_id=0, lanes=[1], rr_next_idx={"1/2:1": 0}
+            ),
+        ]
+        rank1 = _mk_typed_state(
+            global_rank=1, dp_group_id=0, lanes=[0, 1], rr_next_idx={"0/1:0,1": 1}
+        )
+        chosen = dedupe_engine._dedupe_dp_group_peers([*rank0, rank1])
+        assert [int(st.world["global_rank"]) for st in chosen] == [0, 0]
+        assert {frozenset(int(k) for k in st.progress) for st in chosen} == {
+            frozenset({0}),
+            frozenset({1}),
+        }
+        assert chosen[0].rr_next_idx == {"0/2:0": 0, "1/2:1": 0, "0/1:0,1": 1}
+
+    def test_peer_with_different_worker_split_must_agree_per_lane(
+        self, dedupe_engine: Engine
+    ) -> None:
+        rank0 = [
+            _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[0]),
+            _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[1]),
+        ]
+        rank1 = _mk_typed_state(
+            global_rank=1,
+            dp_group_id=0,
+            lanes=[0, 1],
+            progress={
+                0: {"chunk_id": 0, "offset": 0},
+                1: {"chunk_id": 0, "offset": 3},
+            },
+        )
+        with pytest.raises(RuntimeError, match=r"'progress' \(lane 1\).*rank 1"):
+            dedupe_engine._dedupe_dp_group_peers([*rank0, rank1])
 
     def test_three_peers_collapse_to_single_rep(self, dedupe_engine: Engine) -> None:
         """All three TP/PP peers (matching delivery) collapse to the lowest-rank rep."""
