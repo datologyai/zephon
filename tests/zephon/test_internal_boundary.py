@@ -162,6 +162,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
     ),
+    # Verify that a cached Lance shard lands under the pinned version's data root.
+    "tests/integration/test_lance_integration.py": frozenset(
+        {"zephon._internal.io.stores.multi:build_multi_dataset_store"}
+    ),
     # Verify native cache sharing and deterministic eviction recovery across the store.
     "tests/integration/test_vortex_integration.py": frozenset(
         {
