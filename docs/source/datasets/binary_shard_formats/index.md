@@ -24,11 +24,12 @@ you need to maintain another copy of your training data.
 
 **How does Dataset discovery work for it?** litData and Mosaic Data Shards (MDS) normally
 ship with an `index.json` file that describes the contents, serialization schema, and
-compression settings for a collection of shards in that format. The third BSF that Zephon
-supports, Vortex, does not have an `index.json` file that ships with the format itself,
-but similar to Parquet and JSONL, Zephon still supports having such an index to speed up
-the instantiation. We added an indexing tool in Zephon to construct these indexes offline
-from a set of Vortex shards.
+compression settings for a collection of shards in that format. Vortex does not have an
+`index.json` file that ships with the format itself, but similar to Parquet and JSONL,
+Zephon still supports having such an index to speed up the instantiation. We added an
+indexing tool in Zephon to construct these indexes offline from a set of Vortex shards.
+Lance needs neither: its own table manifest already lists every fragment, its data file
+and its row count, which is exactly what an index would hold.
 
 **Reading Binary Shards in Zephon.** Each subpage contains a runnable example that writes
 a small dataset in that format, configures a `Dataset` to collect its metadata, and uses a
@@ -40,4 +41,5 @@ a small dataset in that format, configures a `Dataset` to collect its metadata, 
 litdata
 mosaic
 vortex
+lance
 ```
