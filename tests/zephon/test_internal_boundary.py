@@ -91,6 +91,14 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.coordination:make_coordinator",
         }
     ),
+    # TorchKVStore and chunked values against real in-process TCPStore servers.
+    "tests/integration/test_torch_kv_store.py": frozenset(
+        {
+            "zephon._internal.kvstore:TorchKVStore",
+            "zephon._internal.kvstore:read_staged_value",
+            "zephon._internal.kvstore:stage_value",
+        }
+    ),
     # Persisted LitData fixtures need the internal index treespec representation.
     "tests/helpers/litdata_chunks.py": frozenset(
         {"zephon._internal.io.formats.litdata_support:support"}
