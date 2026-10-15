@@ -64,8 +64,8 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
             pipe.map_transform(lambda p: p)
         else:
             # Each source produces children of length 8, 8, 1. Dropping the
-            # closing child sets every completion bit before shuffle emits
-            # its buffered siblings. There is no delivered cursor yet.
+            # closing child sets every completion bit in an epoch before
+            # shuffle emits its buffered siblings.
             pipe.tokenize(
                 tokenizer_id="__fallback__",
                 field="text",
@@ -74,7 +74,8 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
                 special_tokens="none",
             )
             pipe.map_transform(_drop_short_child)
-            pipe.shuffle(seed=7)
+            # Four epochs exercise reclamation during iteration, before drain.
+            pipe.shuffle(seed=7).options(flush_every_k_chunks=2)
         if batched:
             pipe.batch(2)
         return pipe.options(
@@ -105,10 +106,16 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
     resumed.restore(checkpoint)
     if not monotone and not batched and not mtp_mode:
         # Checkpoint again after replay has rebuilt completion state from
-        # dropped prefix records. One inline case covers this extra transition.
+        # dropped prefix records and delivery enters the second epoch.
+        # One inline case explicitly verifies reclamation before final drain.
         iterator = iter(resumed)
         try:
-            prefix.append(_identity(next(iterator)))
+            # Two chunks per epoch, two surviving children per chunk: the
+            # fifth output enters the second epoch (one was consumed above).
+            prefix.extend(_identity(next(iterator)) for _ in range(4))
+            engine = resumed._engine
+            assert engine is not None
+            assert {0, 1}.isdisjoint(engine.inflight_chunks_per_lane[0])
             checkpoint = resumed.checkpoint()
         finally:
             iterator.close()
