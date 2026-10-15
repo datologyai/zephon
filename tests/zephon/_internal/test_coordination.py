@@ -1156,3 +1156,22 @@ def test_engine_checks_coordination_storage_at_startup(
             world_size=2,
             global_rank=1,
         )
+
+
+def test_torch_store_endpoint_is_needed_only_by_coordinating_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch.distributed")
+    from tests.helpers.engine import make_engine
+
+    monkeypatch.delenv("MASTER_ADDR", raising=False)
+    monkeypatch.delenv("MASTER_PORT", raising=False)
+    # A single active worker on a single rank never coordinates.
+    make_engine(aggregate_store="torch://", canonical_replicas=2).close()
+    with pytest.raises(ValueError, match="MASTER_ADDR/MASTER_PORT are not set"):
+        make_engine(
+            aggregate_store="torch://",
+            canonical_replicas=2,
+            world_size=2,
+            global_rank=1,
+        )

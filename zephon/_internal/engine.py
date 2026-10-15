@@ -996,10 +996,31 @@ class Engine:
     def _takes_part_in_rounds(self) -> bool:
         """Whether this worker's checkpoints go through the coordinator.
 
-        Idle workers return their local state, and a single active worker on a
-        single rank has nothing to exchange; see ``state_dict``.
+        The engine uses this both to check coordination storage at startup and
+        in ``state_dict``. A single active worker on a single rank has nothing
+        to exchange, and idle workers don't take part either.
         """
         if not self._owned_lanes:
+            # Idle workers return their local state. Ideally they would also
+            # receive the merged checkpoint, but the coordinator only guarantees
+            # participation for active workers. For example, if idle workers joined:
+            # - The leader (rank 0, worker 0) opens a round.
+            # - Active workers 0 and 1 join it and publish their state shards.
+            # - Once the required ranks and lanes are covered, the leader merges
+            #   the shards, publishes the result, and can close the round to joins.
+            # - Idle worker 2, slow to call state_dict(), tries to join, but the
+            #   round announcement may no longer be available, or the coordinator
+            #   may reject joins because the round has already completed.
+            # It could then time out waiting for a round to join. Returning the
+            # merged checkpoint here would require explicit coordinator support
+            # for late idle readers, beyond the active participants in the round.
+            #
+            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
+            # snapshot for all workers, so idle workers' local results do not
+            # replace the merged checkpoint. Regular PyTorch DataLoader does not
+            # forward state_dict() calls to workers, and Zephon without a DataLoader
+            # has no multiple workers per rank. These consumers therefore do not
+            # require an idle worker to return the merged checkpoint.
             return False
         lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
         _, workers_per_rank = get_torch_worker_info()
@@ -1704,42 +1725,18 @@ class Engine:
             return state.to_dict()
 
     def state_dict(self) -> dict[str, Any]:
-        # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
-        if len(self._owned_lanes) == 0:
-            # Idle workers return their local state. Ideally they would also
-            # receive the merged checkpoint, but the coordinator only guarantees
-            # participation for active workers. For example, if idle workers joined:
-            # - The leader (rank 0, worker 0) opens a round.
-            # - Active workers 0 and 1 join it and publish their state shards.
-            # - Once the required ranks and lanes are covered, the leader merges
-            #   the shards, publishes the result, and can close the round to joins.
-            # - Idle worker 2, slow to call state_dict(), tries to join, but the
-            #   round announcement may no longer be available, or the coordinator
-            #   may reject joins because the round has already completed.
-            # It could then time out waiting for a round to join. Returning the
-            # merged checkpoint here would require explicit coordinator support
-            # for late idle readers, beyond the active participants in the round.
-            #
-            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
-            # snapshot for all workers, so idle workers' local results do not
-            # replace the merged checkpoint. Regular PyTorch DataLoader does not
-            # forward state_dict() calls to workers, and Zephon without a DataLoader
-            # has no multiple workers per rank. These consumers therefore do not
-            # require an idle worker to return the merged checkpoint.
+        if not self._takes_part_in_rounds():
+            if self._owned_lanes:
+                # Single rank, single active worker: no merge, and this owner
+                # covers every lane, so check the window counts locally.
+                self._check_mid_window_counts(
+                    local.get("lane_emitted") or {},
+                    int(self._world.canonical_replicas),
+                )
             return local
 
-        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
-        worker_id, workers_per_rank = get_torch_worker_info()
-        active_here = self._active_workers(workers_per_rank, lanes_all)
-        if self._world.world_size == 1 and active_here == 1:
-            # Fast path has no merge; this owner covers every lane, so check locally.
-            self._check_mid_window_counts(
-                local.get("lane_emitted") or {},
-                int(self._world.canonical_replicas),
-            )
-            return local
-
+        worker_id, _ = get_torch_worker_info()
         # Round setup
         is_leader = self._world.global_rank == 0 and worker_id == 0
         return self._coordinator.aggregate(

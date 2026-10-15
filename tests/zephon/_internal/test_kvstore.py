@@ -69,8 +69,10 @@ def test_polling_wait_checks_readiness_without_budget() -> None:
 def test_torch_store_uri_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MASTER_ADDR", raising=False)
     monkeypatch.delenv("MASTER_PORT", raising=False)
+    # The environment is read on first use, not when the store is built.
+    unresolved = open_kv_store("torch://", timeout_s=1.0)
     with pytest.raises(ValueError, match="MASTER_ADDR"):
-        open_kv_store("torch://", timeout_s=1.0)
+        _ = unresolved.host
     store = open_kv_store("torch://node-0:1234", timeout_s=7.0)
     assert isinstance(store, TorchKVStore)
     assert (store.host, store.port, store._timeout_s) == ("node-0", 1234, 7.0)
@@ -113,8 +115,9 @@ def test_torch_store_rejects_ambiguous_uris(uri: str, error: str) -> None:
 def test_torch_store_names_invalid_master_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MASTER_ADDR", "leader")
     monkeypatch.setenv("MASTER_PORT", "not-a-port")
+    store = open_kv_store("torch://", timeout_s=1.0)
     with pytest.raises(ValueError, match="MASTER_PORT is not a valid port"):
-        open_kv_store("torch://", timeout_s=1.0)
+        store.check_ready()
 
 
 def test_duplicate_scheme_registration_is_rejected(

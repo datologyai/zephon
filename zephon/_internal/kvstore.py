@@ -135,12 +135,40 @@ class TorchKVStore(KVStore):
     # receives; replies, including multi_get, have no such limit.
     max_value_bytes = 4 * 1024 * 1024
 
-    def __init__(self, host: str, port: int, *, timeout_s: float) -> None:
-        self.host = host
-        self.port = port
+    def __init__(
+        self, host: str | None = None, port: int | None = None, *, timeout_s: float
+    ) -> None:
+        """Without ``host`` and ``port``, use MASTER_ADDR/MASTER_PORT.
+
+        Those are read on first use rather than here, so a worker that never
+        coordinates doesn't need them.
+        """
+        self._host = host
+        self._port = port
         self._timeout_s = timeout_s
         self._store: Any = None  # TCPStore; torch is an optional import
         self._pid: int | None = None
+
+    @property
+    def host(self) -> str:
+        return self._endpoint()[0]
+
+    @property
+    def port(self) -> int:
+        return self._endpoint()[1]
+
+    def _endpoint(self) -> tuple[str, int]:
+        if self._host is None or self._port is None:
+            host = os.environ.get("MASTER_ADDR")
+            port = _parse_port(os.environ.get("MASTER_PORT"), "MASTER_PORT")
+            if not host or port is None:
+                raise ValueError(
+                    "aggregate_store='torch://' names no host and port, and "
+                    "MASTER_ADDR/MASTER_PORT are not set; use torch://host:port "
+                    "or launch with torchrun"
+                )
+            self._host, self._port = host, port
+        return self._host, self._port
 
     @classmethod
     def from_uri(cls, uri: str, timeout_s: float) -> TorchKVStore:
@@ -151,14 +179,7 @@ class TorchKVStore(KVStore):
         if parsed.params or parsed.query or parsed.fragment:
             raise ValueError(f"{uri!r} may name only a host and port")
         if not parsed.netloc:
-            host = os.environ.get("MASTER_ADDR")
-            port = _parse_port(os.environ.get("MASTER_PORT"), "MASTER_PORT")
-            if not host or port is None:
-                raise ValueError(
-                    f"{uri!r} names no host and port, and MASTER_ADDR/MASTER_PORT "
-                    "are not set; use torch://host:port or launch with torchrun"
-                )
-            return cls(host, port, timeout_s=timeout_s)
+            return cls(timeout_s=timeout_s)
         try:
             explicit_port = parsed.port
         except ValueError as exc:
@@ -174,8 +195,13 @@ class TorchKVStore(KVStore):
         except Exception as exc:
             # Don't reuse a client in an unknown state; reconnect next time.
             self._store = None
+            where = (
+                f"{self._host}:{self._port}"
+                if self._host is not None
+                else "MASTER_ADDR/MASTER_PORT"
+            )
             raise RuntimeError(
-                f"TCPStore {op} of {key!r} at {self.host}:{self.port} failed: {exc}"
+                f"TCPStore {op} of {key!r} at {where} failed: {exc}"
             ) from exc
 
     def _client(self) -> Any:
@@ -183,9 +209,10 @@ class TorchKVStore(KVStore):
         if self._store is None or self._pid != pid:
             import torch.distributed as dist
 
+            host, port = self._endpoint()
             self._store = dist.TCPStore(
-                self.host,
-                self.port,
+                host,
+                port,
                 is_master=False,
                 timeout=timedelta(seconds=self._timeout_s),
                 wait_for_workers=False,
@@ -205,11 +232,12 @@ class TorchKVStore(KVStore):
                 "aggregate_store='torch://...' needs torch.distributed, which this "
                 "PyTorch build doesn't include"
             )
+        host, port = self._endpoint()
         try:
             self.exists("zephon/ready")
         except RuntimeError as exc:
             raise RuntimeError(
-                f"Can't reach the checkpoint TCPStore at {self.host}:{self.port} "
+                f"Can't reach the checkpoint TCPStore at {host}:{port} "
                 f"within {self._timeout_s}s. It must be running before the Pipeline "
                 "starts: torchrun's agent provides one, but with "
                 "TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1 or outside torchrun, call "
