@@ -221,10 +221,11 @@ class RoundCoordinator(ABC):
     the consumed result is retained as a closed-round marker until the next
     successful round or a cleanup call.
 
-    Subclasses map round artifacts to storage locations and implement reading,
-    writing, deleting, and discovering them. They may also override how the
-    result and a failure notice are published, waited for, and read, for
-    example to keep both in one conditionally written value.
+    The protocol lives here; every storage step it needs is an abstract method
+    that each subclass implements: where round artifacts live, how they are
+    written, read, discovered and deleted, and how the result and a failure
+    notice are published, waited for and read (files keep them separate, a
+    key-value store keeps both in one conditionally written value).
     """
 
     def __init__(
@@ -313,57 +314,50 @@ class RoundCoordinator(ABC):
     @abstractmethod
     def _delete(self, location: str) -> None: ...
 
-    # ---------- Storage with defaults that subclasses may override ----------
-
+    @abstractmethod
     def _publish_shard(self, round_id: str, data: bytes) -> None:
         """Publish this process's shard where ``_list_shards`` will find it."""
-        self._put(self._shard_location(round_id), data)
 
+    @abstractmethod
     def _read_many(self, locations: list[str]) -> list[bytes | None]:
-        """Read several values; override to batch them."""
-        return [self._read(location) for location in locations]
+        """Read several values, as ``_read`` would each."""
 
+    @abstractmethod
     def _wait_for_announcement(self, timeout: float) -> str | None:
-        """Poll until a joinable round is announced; return None on timeout."""
-        return self._wait_value(self._read_open_round_id, timeout)
+        """Wait until ``_read_open_round_id`` reports a joinable round.
 
+        Return its ID, or None on timeout.
+        """
+
+    @abstractmethod
     def _close_round(self, round_id: str) -> None:
         """Stop new participants from joining once every shard is in."""
-        self._delete(self._announcement_location)
 
-    # ---------- Round outcome, overridable as a unit ----------
+    # ---------- Round outcome, implemented by subclasses ----------
 
+    @abstractmethod
     def _publish_result(self, round_id: str, data: bytes) -> None:
-        result = self._result_location(round_id)
-        assert not self._exists(result)
-        self._put(result, data)
+        """Publish the round's encoded result.
 
+        A failure notice published earlier must not be overwritten by it, nor
+        may a later failure notice revoke it.
+        """
+
+    @abstractmethod
     def _publish_failure(self, round_id: str, message: str) -> None:
-        self._put(self._failure_location(round_id), message.encode("utf-8"))
+        """Tell followers the leader failed before publishing a result."""
 
+    @abstractmethod
     def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
         """Wait for the round's result; return False on timeout.
 
         Raise if the leader reported a failure instead. A published result
         takes precedence over a failure notice, which never revokes it.
         """
-        result = self._result_location(round_id)
-        failure = self._failure_location(round_id)
 
-        def _result_ready() -> bool:
-            if self._exists(result):
-                return True
-            message = self._read_text(failure)
-            if message is not None:
-                raise RuntimeError(
-                    f"Checkpoint round {round_id} failed on leader: {message}"
-                )
-            return False
-
-        return self._wait_until(_result_ready, timeout)
-
+    @abstractmethod
     def _read_result(self, round_id: str) -> dict | None:
-        return self._read_aggregation_state(self._result_location(round_id))
+        """Return the decoded result, or None if it can't be read."""
 
     # ---------- Shared helpers ----------
 
@@ -657,11 +651,11 @@ class RoundCoordinator(ABC):
         self._put(self._ack_location(my_shard), b"ok")
         return merged
 
-    def check_ready(self) -> None:
-        """Nothing to check beyond what construction already did."""
+    @abstractmethod
+    def check_ready(self) -> None: ...
 
-    def prepare_restore(self) -> None:
-        """Nothing to prepare: the round namespace includes ``reload_count``."""
+    @abstractmethod
+    def prepare_restore(self) -> None: ...
 
     def cleanup(self) -> None:
         """Delete the retained result of the last fully acknowledged round.
@@ -862,6 +856,51 @@ class FileCoordinator(RoundCoordinator):
     def _delete(self, location: str) -> None:
         self.backend.delete(location)
 
+    def _publish_shard(self, round_id: str, data: bytes) -> None:
+        self._put(self._shard_location(round_id), data)
+
+    def _read_many(self, locations: list[str]) -> list[bytes | None]:
+        return [self._read(location) for location in locations]
+
+    def _wait_for_announcement(self, timeout: float) -> str | None:
+        return self._wait_value(self._read_open_round_id, timeout)
+
+    def _close_round(self, round_id: str) -> None:
+        self._delete(self._announcement_location)
+
+    # The result and a failure notice are separate files; followers check for
+    # the result first, so a later failure notice never revokes it.
+
+    def _publish_result(self, round_id: str, data: bytes) -> None:
+        result = self._result_location(round_id)
+        assert not self._exists(result)
+        self._put(result, data)
+
+    def _publish_failure(self, round_id: str, message: str) -> None:
+        self._put(self._failure_location(round_id), message.encode("utf-8"))
+
+    def _wait_for_outcome(self, round_id: str, timeout: float) -> bool:
+        result = self._result_location(round_id)
+        failure = self._failure_location(round_id)
+
+        def _result_ready() -> bool:
+            if self._exists(result):
+                return True
+            message = self._read_text(failure)
+            if message is not None:
+                raise RuntimeError(
+                    f"Checkpoint round {round_id} failed on leader: {message}"
+                )
+            return False
+
+        return self._wait_until(_result_ready, timeout)
+
+    def _read_result(self, round_id: str) -> dict | None:
+        return self._read_aggregation_state(self._result_location(round_id))
+
+    def check_ready(self) -> None:
+        """Nothing to check: construction already created ``aggregate_dir``."""
+
     def prepare_restore(self) -> None:
         self.backend.mkdir(self.agg_dir, parents=True, exist_ok=True)
 
@@ -935,6 +974,9 @@ class KVCoordinator(RoundCoordinator):
     def check_ready(self) -> None:
         self._store.check_ready()
 
+    def prepare_restore(self) -> None:
+        """Nothing to prepare: the namespace includes ``reload_count``."""
+
     # ---------- RoundCoordinator storage ----------
 
     @property
@@ -980,7 +1022,7 @@ class KVCoordinator(RoundCoordinator):
         )
 
     def _close_round(self, round_id: str) -> None:
-        super()._close_round(round_id)
+        self._delete(self._announcement_location)
         self._delete_best_effort(self._participants_key(round_id))
 
     def _write_announcement(self, round_id: str) -> None:

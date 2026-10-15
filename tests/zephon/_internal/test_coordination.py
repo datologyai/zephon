@@ -769,6 +769,24 @@ class _DictCoordinator(RoundCoordinator):
         with self._lock:
             self._store.pop(location, None)
 
+    def _publish_shard(self, round_id: str, data: bytes) -> None:
+        self._put(self._shard_location(round_id), data)
+
+    def _read_many(self, locations: list[str]) -> list[bytes | None]:
+        return [self._read(location) for location in locations]
+
+    def _wait_for_announcement(self, timeout: float) -> str | None:
+        return self._wait_value(self._read_open_round_id, timeout)
+
+    def _close_round(self, round_id: str) -> None:
+        self._delete(self._announcement_location)
+
+    def check_ready(self) -> None:
+        pass
+
+    def prepare_restore(self) -> None:
+        pass
+
 
 def test_round_protocol_runs_over_non_file_storage() -> None:
     # Two MP ranks share one DP group; two workers per rank split its lanes.
