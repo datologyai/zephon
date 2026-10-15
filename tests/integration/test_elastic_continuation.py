@@ -6,6 +6,7 @@ import multiprocessing as mp
 from collections import Counter, defaultdict
 from pathlib import Path
 from queue import Empty
+from typing import cast
 
 import pytest
 
@@ -477,6 +478,76 @@ def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
+
+
+def test_checkpoint_resume_nested_tokenized_children() -> None:
+    """Nested fan-out preserves closing flags and resumes within either parent."""
+    from zephon.ops.children import spawn_child
+    from zephon.types import SampleCursor, SampleRecord
+
+    def split_text(records: list[SampleRecord]) -> list[SampleRecord]:
+        return [
+            SampleRecord(
+                meta=spawn_child(record.meta, index, is_last_child=index == 1),
+                payload={"text": "word " * length},
+            )
+            for record in records
+            for index, length in enumerate((5, 9))
+        ]
+
+    def identity(record: SampleRecord) -> tuple[SampleCursor, tuple[int, ...]]:
+        payload = cast(dict[str, list[int]], record.payload)
+        return record.meta.cursor, tuple(payload["input_ids"])
+
+    def build() -> PublicPipeline:
+        dataset = Dataset.from_dict("d", {0: InMemoryShard([{}, {}])})
+        work = StaticMixtureWorkSource([dataset], {"d": 1.0}, chunk_size=1, seed=3)
+        return (
+            PublicPipeline(work)
+            .add_op("split_text", process_many=split_text, preserves_cursor_order=True)
+            .tokenize(
+                tokenizer_id="__fallback__",
+                field="text",
+                max_length=4,
+                split_long_samples=True,
+                special_tokens="none",
+            )
+            .options(
+                runner="threads",
+                deterministic=True,
+                canonical_replicas=1,
+                max_workers=2,
+            )
+        )
+
+    records = list(build())
+    assert [record.meta.lineage for record in records] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+    ] * 2
+    assert [
+        (record.meta.chunk_id, record.meta.lineage)
+        for record in records
+        if any(ref.is_last_child for ref in record.meta.contributors)
+    ] == [(0, (1, 2)), (1, (1, 2))]
+
+    baseline = [identity(record) for record in records]
+    # Cut within a non-final parent, within a final parent, and after advancing
+    # to the next source chunk so the earlier chunk has been evicted.
+    for count in (1, 3, 6):
+        pipe = build()
+        iterator = iter(pipe)
+        try:
+            prefix = [identity(next(iterator)) for _ in range(count)]
+            checkpoint = pipe.checkpoint()
+        finally:
+            iterator.close()
+        resumed = build()
+        resumed.restore(checkpoint)
+        assert prefix + [identity(record) for record in resumed] == baseline, count
 
 
 # ---- 3) Scale-down equivalence, no batch (simulate N ranks vs. 1 rank)
