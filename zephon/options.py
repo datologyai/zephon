@@ -139,7 +139,7 @@ class RuntimeOptions:
     mtp_prefetch: int | None = None
     # Automatically capture a checkpoint from the MTP subprocess after normal
     # iteration completion.  Set to False when multi-rank aggregation is not
-    # available (e.g. no aggregate_dir, or ranks run sequentially rather than
+    # available (e.g. no aggregate_dir/aggregate_store, or ranks run sequentially rather than
     # in parallel).
     mtp_auto_checkpoint: bool = True
 
@@ -197,11 +197,15 @@ class RuntimeOptions:
     # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
     # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None
+    # Key-value store URI for checkpoint aggregation, used instead of
+    # aggregate_dir (set at most one). "torch://" uses torchrun's TCPStore at
+    # MASTER_ADDR/MASTER_PORT; "torch://host:port" names one explicitly.
+    aggregate_store: str | None = None
     # Timeout budget for one checkpoint, shared by all of its coordination waits
     # (joining the round, collecting shards, the merged result, and reader
-    # acknowledgements). Raised to at least 90s for cloud storage. Blocking
-    # storage operations and merge/codec work are not interrupted, so a
-    # checkpoint can take longer than this in wall-clock time.
+    # acknowledgements). Raised to at least 90s for a cloud aggregate_dir.
+    # Blocking storage operations and merge/codec work are not interrupted, so
+    # a checkpoint can take longer than this in wall-clock time.
     aggregate_timeout_s: float = 180.0
     # Serialization format for intermediate aggregation files ("json" or "msgpack").
     aggregate_serializer: str = "msgpack"

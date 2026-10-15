@@ -101,6 +101,7 @@ def _build_pipe_params(
     mapping_strategy: str = "contiguous",
     allow_latency_flush_in_deterministic: bool = True,
     aggregate_dir: str | None = None,
+    aggregate_store: str | None = None,
     run_id: str | None = None,
     op_queue_capacity: int | None = None,
     mtp_mode: bool = False,
@@ -140,6 +141,7 @@ def _build_pipe_params(
         max_workers=8,
         allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
         aggregate_dir=aggregate_dir,
+        aggregate_store=aggregate_store,
         mtp_mode=mtp_mode,
         **({"run_id": run_id} if run_id is not None else {}),
         **(
@@ -1103,6 +1105,7 @@ def _rank_worker_proc(
     ckpt_barrier: "mp.Barrier",
     ckpt_q: "mp.Queue",  # emits (rank, merged_ckpt)
     op_queue_capacity: int | None = None,
+    aggregate_store: str | None = None,
 ) -> None:
     pipe = _build_pipe_params(
         ds,
@@ -1115,7 +1118,8 @@ def _rank_worker_proc(
         dp_degree=ranks,
         dp_group_id=rank,
         mapping_strategy=mapping_strategy,
-        aggregate_dir=tmp_path_str,
+        aggregate_dir=None if aggregate_store else tmp_path_str,
+        aggregate_store=aggregate_store,
         run_id=run_id,
         op_queue_capacity=op_queue_capacity,
     )
@@ -1159,6 +1163,7 @@ def _phase_run_and_checkpoint_mp(
     tmp_path: Path | None,
     start_ckpt: dict | None,
     op_queue_capacity: int | None = None,
+    aggregate_store: str | None = None,
 ) -> tuple[list[list[str]], dict]:
     """
     Run one phase concurrently across `ranks`; return (windows_out, merged_ckpt).
@@ -1202,6 +1207,7 @@ def _phase_run_and_checkpoint_mp(
                 ckpt_barrier=ckpt_barrier,
                 ckpt_q=ckpt_q,
                 op_queue_capacity=op_queue_capacity,
+                aggregate_store=aggregate_store,
             ),
             daemon=False,
         )
@@ -1277,9 +1283,10 @@ def _phase_run_and_checkpoint_mp(
 # ---------- the one-for-one torchdata-style test (no DataLoader) ----------
 
 
+@pytest.mark.parametrize("coordination", ["file", "torch"])
 @pytest.mark.parametrize("op_queue_capacity", [4, 256])
 def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
-    tmp_path: Path, op_queue_capacity: int
+    tmp_path: Path, op_queue_capacity: int, coordination: str
 ) -> None:
     """
     Mirror tests/integration/test_dataloader_elasticity.py but without the DataLoader:
@@ -1290,7 +1297,17 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
     - Build 'truth' windows once from a single-rank pipeline (no checkpoints).
     - Run each phase under multiprocessing, take a merged checkpoint, and resume.
     - Compare each MP window to the truth window using multiset equality.
+
+    ``coordination="torch"`` aggregates over a c10d TCPStore instead of files.
     """
+    aggregate_store: str | None = None
+    if coordination == "torch":
+        dist = pytest.importorskip("torch.distributed")
+        store_server = dist.TCPStore(
+            "127.0.0.1", 0, is_master=True, wait_for_workers=False
+        )
+        aggregate_store = f"torch://127.0.0.1:{store_server.port}"
+
     GLOBAL = 64
     WINDOWS_PER_PHASE = 4
     TOTAL_WINDOWS = WINDOWS_PER_PHASE * 3
@@ -1338,6 +1355,7 @@ def test_mp_scale_down_then_up_with_microbatch_change_no_dataloader(
             tmp_path=phase_tmp,  # required only because ranks>1 in all phases here
             start_ckpt=start_ckpt,
             op_queue_capacity=op_queue_capacity,
+            aggregate_store=aggregate_store,
         )
         got_all.extend(phase_windows)
 
