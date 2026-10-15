@@ -28,6 +28,11 @@ class KVStore(ABC):
     Writes from one client become visible to other clients in the order that
     client made them, but not necessarily by the time ``set`` returns; readers
     wait for keys rather than assuming a write is already visible.
+
+    Values are nonempty: ``set``, ``set_if_absent`` and ``append`` reject empty
+    bytes for every implementation, since TCPStore's conditional write can't
+    tell an empty value from a missing key. Implementations provide the
+    underscored methods.
     """
 
     poll_interval_s: float = 0.05
@@ -47,17 +52,26 @@ class KVStore(ABC):
     def get(self, key: str) -> bytes | None:
         """Return the value for ``key``, or None if it does not exist."""
 
-    @abstractmethod
     def set(self, key: str, value: bytes) -> None:
         """Write ``value`` to ``key``, replacing any existing value."""
+        self._set(key, _nonempty(value, "set", key))
 
-    @abstractmethod
     def set_if_absent(self, key: str, value: bytes) -> bytes:
         """Write ``value`` only if ``key`` does not exist; return the stored value."""
+        return self._set_if_absent(key, _nonempty(value, "set_if_absent", key))
 
-    @abstractmethod
     def append(self, key: str, value: bytes) -> None:
         """Atomically append ``value`` to ``key``, creating it if absent."""
+        self._append(key, _nonempty(value, "append", key))
+
+    @abstractmethod
+    def _set(self, key: str, value: bytes) -> None: ...
+
+    @abstractmethod
+    def _set_if_absent(self, key: str, value: bytes) -> bytes: ...
+
+    @abstractmethod
+    def _append(self, key: str, value: bytes) -> None: ...
 
     @abstractmethod
     def exists(self, key: str) -> bool: ...
@@ -86,6 +100,12 @@ class KVStore(ABC):
             if remaining <= 0:
                 return False
             time.sleep(min(self.poll_interval_s, remaining))
+
+
+def _nonempty(value: bytes, op: str, key: str) -> bytes:
+    if not value:
+        raise ValueError(f"KVStore.{op} of {key!r}: values must be nonempty")
+    return value
 
 
 KVStoreFactory = Callable[[str, float], KVStore]
@@ -258,17 +278,18 @@ class TorchKVStore(KVStore):
             )
         return [self.get(key) for key in keys]
 
-    def set(self, key: str, value: bytes) -> None:
+    def _set(self, key: str, value: bytes) -> None:
         self._call("set", key, lambda store: store.set(key, value))
 
-    def set_if_absent(self, key: str, value: bytes) -> bytes:
-        # With an empty expected value, compare_set writes only if the key is
-        # absent, and returns the stored value either way.
+    def _set_if_absent(self, key: str, value: bytes) -> bytes:
+        # With an empty expected value, compare_set writes if the key is absent
+        # (or empty, which the base class never stores), and returns the
+        # stored value either way.
         return self._call(
             "compare_set", key, lambda store: store.compare_set(key, "", value)
         )
 
-    def append(self, key: str, value: bytes) -> None:
+    def _append(self, key: str, value: bytes) -> None:
         self._call("append", key, lambda store: store.append(key, value))
 
     def exists(self, key: str) -> bool:

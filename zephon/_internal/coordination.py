@@ -913,7 +913,8 @@ class KVCoordinator(RoundCoordinator):
             poll_backoff=False,
         )
         self._store = store
-        # Chunk keys of the values this process published, deleted with them.
+        # Chunk keys of the chunked values this process published, deleted
+        # with them; values that fit in one write need no entry.
         self._chunks: dict[str, list[str]] = {}
 
     @property
@@ -996,7 +997,8 @@ class KVCoordinator(RoundCoordinator):
     def _put(self, location: str, data: bytes) -> None:
         staged = stage_value(self._store, location, data)
         self._store.set(location, staged.manifest)
-        self._chunks[location] = staged.chunk_keys
+        if staged.chunk_keys:
+            self._chunks[location] = staged.chunk_keys
 
     def _read(self, location: str) -> bytes | None:
         return self._read_many([location])[0]
@@ -1042,7 +1044,8 @@ class KVCoordinator(RoundCoordinator):
             raise RuntimeError(
                 f"Round {round_id} already has an outcome at {outcome_key}"
             )
-        self._chunks[outcome_key] = staged.chunk_keys
+        if staged.chunk_keys:
+            self._chunks[outcome_key] = staged.chunk_keys
 
     def _publish_failure(self, round_id: str, message: str) -> None:
         # Truncate by character so the notice stays valid UTF-8.

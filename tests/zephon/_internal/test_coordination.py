@@ -1074,10 +1074,10 @@ class _RecordingStore(InMemoryKVStore):
         super().__init__()
         self.written: set[str] = set()
 
-    def set(self, key: str, value: bytes) -> None:
+    def _set(self, key: str, value: bytes) -> None:
         assert len(value) <= _SMALL_WRITE_BYTES
         self.written.add(key)
-        super().set(key, value)
+        super()._set(key, value)
 
 
 def test_kv_rounds_move_values_larger_than_one_write() -> None:
@@ -1175,3 +1175,30 @@ def test_torch_store_endpoint_is_needed_only_by_coordinating_workers(
             world_size=2,
             global_rank=1,
         )
+
+
+def test_kv_coordinator_tracks_only_chunked_values() -> None:
+    store = InMemoryKVStore()
+    leader, follower = (
+        KVCoordinator(
+            RuntimeOptions(run_id="tracking", aggregate_compressor="none"),
+            store,
+            global_rank=rank,
+            world_size=2,
+            plan_id="test-plan",
+            worker_info=lambda: (0, 1),
+        )
+        for rank in (0, 1)
+    )
+    mapping = {0: [0], 1: [1]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for _ in range(3):
+            futures = [
+                pool.submit(
+                    c.aggregate, _round(r, [r], mapping, leader=r == 0), _merge_progress
+                )
+                for r, c in enumerate((leader, follower))
+            ]
+            [future.result(timeout=10) for future in futures]
+    # Nothing here exceeds one write, so no process keeps any bookkeeping.
+    assert leader._chunks == {} and follower._chunks == {}

@@ -22,15 +22,15 @@ class InMemoryKVStore(KVStore):
         with self._lock:
             return self.data.get(key)
 
-    def set(self, key: str, value: bytes) -> None:
+    def _set(self, key: str, value: bytes) -> None:
         with self._lock:
             self.data[key] = value
 
-    def set_if_absent(self, key: str, value: bytes) -> bytes:
+    def _set_if_absent(self, key: str, value: bytes) -> bytes:
         with self._lock:
             return self.data.setdefault(key, value)
 
-    def append(self, key: str, value: bytes) -> None:
+    def _append(self, key: str, value: bytes) -> None:
         with self._lock:
             self.data[key] = self.data.get(key, b"") + value
 

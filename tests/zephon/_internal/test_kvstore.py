@@ -220,3 +220,11 @@ def test_torch_store_readiness_passes_for_a_running_store(
     torch_store: TorchKVStore,
 ) -> None:
     torch_store.check_ready()
+
+
+@pytest.mark.parametrize("op", ["set", "set_if_absent", "append"])
+def test_empty_values_are_rejected(op: str) -> None:
+    store = InMemoryKVStore()
+    with pytest.raises(ValueError, match="values must be nonempty"):
+        getattr(store, op)("k", b"")
+    assert store.data == {}
