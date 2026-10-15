@@ -89,6 +89,21 @@ def test_pipeline_reads_every_row_once(
         assert vector.tolist() == [float(identifier), float(identifier + 1)]
 
 
+@pytest.mark.parametrize("runner", ["threads", "process"])
+def test_deleted_rows_never_reach_the_pipeline(
+    tmp_path: Path, pa: Any, runner: str
+) -> None:
+    path = tmp_path / "ds.lance"
+    _write(path, pa)
+    lance.dataset(str(path)).delete("id % 3 = 0")
+
+    records = _run(path, runner, tmp_path / "cache")
+
+    assert sorted(record.payload["id"] for record in records) == [
+        i for i in range(_ROWS) if i % 3
+    ]
+
+
 def test_cached_shards_land_under_the_data_root(tmp_path: Path, pa: Any) -> None:
     """The pinned manifest keys the catalog; shards still resolve under ``data/``."""
     path = tmp_path / "ds.lance"

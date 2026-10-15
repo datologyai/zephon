@@ -261,6 +261,51 @@ def test_out_of_range_index_raises(dataset_path: Path) -> None:
             shard.getsamples([len(shard)])
 
 
+def test_deleted_rows_are_skipped(tmp_path: Path, pa: Any, write: Write) -> None:
+    path = tmp_path / "deleted.lance"
+    write(_table(pa, 10), path, max_rows_per_file=4)
+    lance.dataset(str(path)).delete("id in (0, 2, 5, 9)")
+
+    rows = _rows(path)
+
+    assert [row["id"] for row in rows] == [1, 3, 4, 6, 7, 8]
+    _assert_matches_pylance(path, rows)
+
+
+def test_emptied_fragments_leave_the_shard_set(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
+) -> None:
+    """Lance drops a fragment whose rows are all deleted, so no shard is empty."""
+    path = tmp_path / "gap.lance"
+    write(_table(pa, 8), path, max_rows_per_file=4)
+    lance.dataset(str(path)).delete("id < 4")
+
+    counts, _meta = LanceFormat().discover(str(path), storage)
+
+    assert list(counts.values()) == [4]
+    _assert_matches_pylance(path, _rows(path))
+
+
+def test_dense_deletions_use_a_bitmap_tombstone(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
+    """Lance switches tombstone encodings by density; both must read the same."""
+    path = tmp_path / "dense.lance"
+    rows = 40000
+    write(
+        pa.table({"id": pa.array(range(rows), pa.int64())}),
+        path,
+        max_rows_per_file=rows,
+    )
+    lance.dataset(str(path)).delete("id % 2 = 0")
+    fragment = lance.dataset(str(path)).get_fragments()[0]
+    assert fragment.metadata.deletion_file.file_type == "bitmap"
+
+    read = _rows(path)
+
+    assert [row["id"] for row in read] == list(range(1, rows, 2))
+
+
 def test_nested_columns_map_to_the_right_file_columns(
     tmp_path: Path, pa: Any, write: Write
 ) -> None:
@@ -337,15 +382,6 @@ def test_renamed_columns_use_the_manifest_name(
     _assert_matches_pylance(path, rows)
 
 
-def test_deleted_rows_are_refused(tmp_path: Path, pa: Any, write: Write) -> None:
-    path = tmp_path / "deleted.lance"
-    write(_table(pa, 10), path, max_rows_per_file=4)
-    lance.dataset(str(path)).delete("id in (0, 5)")
-
-    with pytest.raises(ValueError, match="has deleted rows"):
-        LanceFormat().discover(str(path), LocalFSBackend(root=Path("/")))
-
-
 def test_two_pinned_versions_do_not_share_an_opened_fragment(
     tmp_path: Path, pa: Any, write: Write
 ) -> None:
@@ -361,6 +397,21 @@ def test_two_pinned_versions_do_not_share_an_opened_fragment(
         assert new.manifest != old.manifest
 
         assert set(new.rows()[0]) == {"id", "body", "vec"}
+
+
+def test_two_pinned_versions_do_not_share_a_deletion_vector(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
+    """A delete leaves the data file alone, so both versions read one path."""
+    path = tmp_path / "versions.lance"
+    write(_table(pa, 4), path, max_rows_per_file=4)
+    with _store(path) as old:
+        assert [row["id"] for row in old.rows()] == [0, 1, 2, 3]
+        lance.dataset(str(path)).delete("id = 1")
+
+        new = _Store(path, opener=old._opener)
+
+        assert [row["id"] for row in new.rows()] == [0, 2, 3]
 
 
 def test_multi_file_fragments_are_refused(
