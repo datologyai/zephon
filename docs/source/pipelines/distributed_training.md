@@ -91,11 +91,12 @@ not collide with each other.
 If your nodes don't share a filesystem or bucket with read-after-write consistency, you
 can set `aggregate_store` instead of `aggregate_dir` (but not both). With
 `aggregate_store="torch://"`, the `Pipeline` instances exchange checkpoint state through
-the TCPStore at `MASTER_ADDR`/`MASTER_PORT` that your job already uses for
+the TCPStore at `MASTER_ADDR`/`MASTER_PORT` that your job might already be using for
 `torch.distributed`, so there's no extra storage to set up; use `torch://host:port` to
 point at a different store. Both options support the same setups, whether a rank has no
 DataLoader workers, several of them, or more workers than it has lanes. On a single node,
-though, a local `aggregate_dir` is usually the simpler choice, even with many GPUs.
+though, a local `aggregate_dir` (e.g., in `/tmp/`) is usually the simpler choice, even
+with many GPUs.
 
 ```{literalinclude} ../../../examples/guide/pipelines/coordination_store.py
 :language: python
@@ -107,15 +108,12 @@ the `Pipeline` starts. Under `torchrun`, the launcher's agent runs it for you. I
 `TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1` or launch some other way, rank 0 starts it inside
 `torch.distributed.init_process_group()`, so call that before iterating the `Pipeline`,
 and keep rank 0 running until every rank has finished its last checkpoint. Zephon checks
-that it can reach the store when each `Pipeline` starts, so a misconfigured store fails
-right away instead of at the first checkpoint.
+that it can reach the store when a `Pipeline` that takes part in checkpoints starts, so a
+misconfigured store fails right away instead of at the first checkpoint.
 
-The store holds everything in the memory of the process that runs it. During a
-checkpoint, that includes every instance's state and the combined checkpoint, which each
-instance then reads in full, so a very large checkpoint is better served by
-`aggregate_dir`. A unique `run_id` matters here as well, since it keeps runs that share a
-store apart. Zephon cleans up after each successful checkpoint, but a failed one can leave
-its state in the store until the store restarts.
+The store holds everything in the memory of the process that runs it. During a checkpoint,
+that includes every instance's state and the combined checkpoint, which each instance then
+reads in full, so a very large checkpoint is better served by `aggregate_dir`.
 
 Every `Pipeline` instance that is part of the same coordination group must call
 `Pipeline.checkpoint()` at the same training step. If one of them does not, the leader
