@@ -39,6 +39,10 @@ class KVStore(ABC):
     :func:`stage_value` splits larger values into chunks of this size.
     """
 
+    def check_ready(self) -> None:
+        """Raise if the store can't be reached; called before training starts."""
+        self.exists("zephon/ready")
+
     @abstractmethod
     def get(self, key: str) -> bytes | None:
         """Return the value for ``key``, or None if it does not exist."""
@@ -188,6 +192,29 @@ class TorchKVStore(KVStore):
             )
             self._pid = pid
         return self._store
+
+    def check_ready(self) -> None:
+        try:
+            import torch.distributed as dist
+        except ImportError as exc:
+            raise RuntimeError(
+                "aggregate_store='torch://...' needs PyTorch with torch.distributed"
+            ) from exc
+        if not dist.is_available():
+            raise RuntimeError(
+                "aggregate_store='torch://...' needs torch.distributed, which this "
+                "PyTorch build doesn't include"
+            )
+        try:
+            self.exists("zephon/ready")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Can't reach the checkpoint TCPStore at {self.host}:{self.port} "
+                f"within {self._timeout_s}s. It must be running before the Pipeline "
+                "starts: torchrun's agent provides one, but with "
+                "TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1 or outside torchrun, call "
+                "torch.distributed.init_process_group() first."
+            ) from exc
 
     def get(self, key: str) -> bytes | None:
         # TCPStore.get blocks until the key exists, so check first.

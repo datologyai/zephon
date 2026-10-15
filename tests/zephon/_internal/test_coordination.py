@@ -1127,3 +1127,32 @@ def test_kv_rounds_move_values_larger_than_one_write() -> None:
     assert any("/outcome/" in key and "/chunk/" in key for key in store.written)
     members[0][0].cleanup()
     assert store.data == {}
+
+
+def test_engine_checks_coordination_storage_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.helpers.engine import make_engine
+
+    check_ready = Mock()
+
+    class _Store(InMemoryKVStore):
+        def check_ready(self) -> None:
+            check_ready()
+
+    monkeypatch.setitem(kvstore._REGISTRY, "memory", lambda _uri, _t: _Store())
+    make_engine(aggregate_store="memory://", canonical_replicas=2)
+    check_ready.assert_not_called()
+    make_engine(
+        aggregate_store="memory://", canonical_replicas=2, world_size=2, global_rank=0
+    )
+    check_ready.assert_called_once()
+
+    check_ready.side_effect = RuntimeError("store is down")
+    with pytest.raises(RuntimeError, match="store is down"):
+        make_engine(
+            aggregate_store="memory://",
+            canonical_replicas=2,
+            world_size=2,
+            global_rank=1,
+        )

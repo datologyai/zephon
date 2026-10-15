@@ -100,6 +100,15 @@ class CheckpointCoordinator(Protocol):
         """
         ...
 
+    def check_ready(self) -> None:
+        """Raise if this participant can't use its coordination storage.
+
+        The engine calls this when a participant is built, if it will take part
+        in rounds, so a misconfigured setup fails before training starts rather
+        than at the first checkpoint.
+        """
+        ...
+
     def prepare_restore(self) -> None:
         """Prepare an isolated namespace for the restored stream's rounds.
 
@@ -648,6 +657,9 @@ class RoundCoordinator(ABC):
         self._put(self._ack_location(my_shard), b"ok")
         return merged
 
+    def check_ready(self) -> None:
+        """Nothing to check beyond what construction already did."""
+
     def prepare_restore(self) -> None:
         """Nothing to prepare: the round namespace includes ``reload_count``."""
 
@@ -918,6 +930,9 @@ class KVCoordinator(RoundCoordinator):
 
     def _state_key(self, round_id: str, participant: str) -> str:
         return f"{self._namespace}/{round_id}/state/{participant}"
+
+    def check_ready(self) -> None:
+        self._store.check_ready()
 
     # ---------- RoundCoordinator storage ----------
 

@@ -423,6 +423,8 @@ class Engine:
             plan_id=self._plan.plan_id,
             worker_info=get_torch_worker_info,
         )
+        if self._takes_part_in_rounds():
+            self._coordinator.check_ready()
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
         # This calls close() to clean up runners/queues/semaphores, then
@@ -989,6 +991,19 @@ class Engine:
 
             if emit_boundary is not None:
                 yield self._make_flush_sentinel(lane_id, boundary_cid=emit_boundary)
+
+    def _takes_part_in_rounds(self) -> bool:
+        """Whether this worker's checkpoints go through the coordinator.
+
+        Idle workers return their local state, and a single active worker on a
+        single rank has nothing to exchange; see ``state_dict``.
+        """
+        if not self._owned_lanes:
+            return False
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
+        _, workers_per_rank = get_torch_worker_info()
+        active_here = self._active_workers(workers_per_rank, lanes_all)
+        return not (self._world.world_size == 1 and active_here == 1)
 
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)

@@ -199,3 +199,21 @@ def test_torch_store_moves_values_above_its_write_limit(
     manifest = torch_store.get("big")
     assert manifest is not None
     assert read_staged_value(torch_store, "big", manifest) == data
+
+
+def test_torch_store_readiness_names_the_endpoint() -> None:
+    pytest.importorskip("torch.distributed")
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    store = TorchKVStore("127.0.0.1", port, timeout_s=1.0)
+    with pytest.raises(RuntimeError, match=f"127.0.0.1:{port}.*init_process_group"):
+        store.check_ready()
+
+
+def test_torch_store_readiness_passes_for_a_running_store(
+    torch_store: TorchKVStore,
+) -> None:
+    torch_store.check_ready()

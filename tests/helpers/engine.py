@@ -55,7 +55,7 @@ def make_engine(**opts: Any) -> Engine:
         ws = int(o.get("world_size", 1))
     except Exception:
         ws = 1
-    if ws > 1 and not o.get("aggregate_dir"):
+    if ws > 1 and not o.get("aggregate_dir") and not o.get("aggregate_store"):
         o["aggregate_dir"] = os.path.join(tempfile.gettempdir(), "zephon_test_agg")
     opts = RuntimeOptions(**o)
     spec = resolve_runtime_spec(plan, opts)
