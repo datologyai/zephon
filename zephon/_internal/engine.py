@@ -1341,19 +1341,16 @@ class Engine:
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
 
-    def notify(
+    def notify_completion(
         self,
         lane_id: int,
         entries: Iterable[ContributorRef],
-        record_cursor: SampleCursor | None = None,
     ) -> None:
-        """Record delivery progress for ``lane_id`` and evict completed chunks.
+        """Record contributor completion without advancing replay or evicting.
 
-        ``entries`` describe contributors that have been emitted. An epoch can
-        be evicted once this lane has a recorded flush boundary and every base
-        offset in its chunks has produced a contributor (or tombstone) with
-        ``is_last_child=True``. ``record_cursor`` pins its epoch and is stored
-        as the per-lane sentinel for equality-based replay.
+        Tombstones can overtake buffered payloads, including earlier siblings
+        of a closing child. Completion alone therefore cannot authorize
+        eviction, even when no replay cursor has been recorded yet.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts
@@ -1361,7 +1358,6 @@ class Engine:
         done = self._offset_done[lane_id]
         done_count = self._offset_done_count[lane_id]
 
-        # 1) Update per-offset completion state
         for entry in entries:
             cursor = entry.cursor
             cid = cursor.chunk_id
@@ -1378,6 +1374,30 @@ class Engine:
             if entry.is_last_child and not done[cid].is_set(off):
                 done[cid].set(off)
                 done_count[cid] += 1
+
+    def notify(
+        self,
+        lane_id: int,
+        entries: Iterable[ContributorRef],
+        record_cursor: SampleCursor | None = None,
+    ) -> None:
+        """Record delivery progress for ``lane_id`` and evict completed chunks.
+
+        ``entries`` describe contributors that have been delivered. An epoch
+        can be evicted once this lane has a recorded flush boundary and every
+        base offset in its chunks has produced a contributor (or tombstone)
+        with ``is_last_child=True``. ``record_cursor`` pins its epoch and is
+        stored as the per-lane sentinel for equality-based replay. Passing
+        no cursor releases that pin at pipeline drain.
+
+        Tombstones must use ``notify_completion()`` instead: they update only
+        completion bits, leaving reclamation to a real delivery or drain.
+        """
+        # 1) Update per-offset completion state.
+        self.notify_completion(lane_id, entries)
+        inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        done = self._offset_done[lane_id]
+        done_count = self._offset_done_count[lane_id]
 
         # 2) Per-epoch eviction: walk epoch boundaries bottom-up, evict
         #    completed epochs contiguously from the lowest.
