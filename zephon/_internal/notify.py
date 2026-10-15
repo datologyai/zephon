@@ -23,11 +23,10 @@ from zephon.types import (
 class _MonotoneNotify(NamedTuple):
     """Lightweight args for ``engine.notify_monotone()``.
 
-    ``delivered`` is True when the notified item is actually yielded to the
-    consumer at the pipeline tail (a real batch or record) and False for
-    control items (tombstones, sentinels) that are notified but never
-    delivered. It feeds the per-lane delivery counters used for mid-window
-    checkpoint detection.
+    ``delivered`` classifies the item: True for a real output record or batch,
+    False for a control item such as a tombstone. It is not an acknowledgment
+    flag that changes after delivery. It controls both bookkeeping dispatch
+    and the per-lane delivery counters used for mid-window checkpoint detection.
     """
 
     lane_id: int
@@ -38,8 +37,10 @@ class _MonotoneNotify(NamedTuple):
 
 
 class _ContributorNotify(NamedTuple):
-    """Lightweight args for ``engine.notify()``.
+    """Lightweight contributor args for non-monotone bookkeeping.
 
+    Real outputs use ``engine.notify()``; tombstones use only
+    ``engine.notify_completion()``.
     See :class:`_MonotoneNotify` for the meaning of ``delivered``.
     """
 
@@ -106,14 +107,28 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
 
 
 def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
-    """Dispatch pre-extracted notify args to the engine."""
+    """Dispatch a notification object through either engine bookkeeping path.
+
+    ``notify`` is the argument object. Its type encodes the planner's choice,
+    already made in ``_extract_notify_args()``: ``_MonotoneNotify`` selects
+    the monotone shortcut; ``_ContributorNotify`` selects completion bitmaps.
+    This shared dispatcher calls the corresponding engine method.
+
+    Inline iteration extracts and applies args immediately before yielding.
+    MTP stores the lightweight args when producing an item and applies them
+    on the consumer's ACK, so producing ahead does not advance delivery state.
+    """
     if not notify.delivered:
+        # Tombstone: callers filter out flush sentinels before notification.
         # Controls can overtake buffered payloads. They are neither monotone
         # watermarks nor replay cursors, and cannot trigger epoch eviction.
         if isinstance(notify, _ContributorNotify):
+            # Non-monotone tombstone: update completion bits only.
             engine.notify_completion(notify.lane_id, notify.entries)
+        # Monotone tombstone: ignore it; real outputs establish progress.
         return
 
+    # Real output: dispatch the pipeline mode encoded in the notification type.
     if isinstance(notify, _MonotoneNotify):
         engine.notify_monotone(
             notify.lane_id, notify.max_chunk_id, notify.add_k, notify.max_cursor
