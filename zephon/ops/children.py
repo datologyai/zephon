@@ -35,14 +35,15 @@ def spawn_child(
 
     new_lineage = parent.lineage + (int(child_idx),)
     if parent.contributors:
-        refs = (
-            parent.contributors
-            if is_last_child
-            else tuple(
+        if is_last_child:
+            # Preserve the parent's contributors, including their closing flags.
+            refs = parent.contributors
+        else:
+            # Preserve every contributor's identity, but clear its closing flag.
+            refs = tuple(
                 ContributorRef(cursor=ref.cursor, is_last_child=False)
                 for ref in parent.contributors
             )
-        )
     else:
         cursor = SampleCursor(
             parent.chunk_id, parent.chunk_offset, parent.sample_id, new_lineage
