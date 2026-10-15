@@ -1,15 +1,20 @@
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
-from zephon._internal.coordination import AggregationRound, FileCoordinator
+from zephon._internal.coordination import (
+    AggregationRound,
+    FileCoordinator,
+    RoundCoordinator,
+)
 from zephon.options import RuntimeOptions
 
 
@@ -656,3 +661,122 @@ def test_cleanup_removes_retained_result_idempotently(tmp_path: Path) -> None:
 
     assert not merged_files[0].exists()
     assert other_run.read_bytes() == b"other checkpoint"
+
+
+class _DictCoordinator(RoundCoordinator):
+    """Round protocol over a shared dict, standing in for a key-value store."""
+
+    def __init__(
+        self, store: dict[str, bytes], lock: Lock, *, rank: int, worker_id: int
+    ) -> None:
+        super().__init__(
+            RuntimeOptions(run_id="dict", aggregate_compressor="none"),
+            global_rank=rank,
+            world_size=2,
+            plan_id="test-plan",
+            worker_info=lambda: (worker_id, 2),
+            timeout_s=5.0,
+            poll_base_s=0.001,
+            poll_backoff=False,
+        )
+        self._store, self._lock = store, lock
+        self._participant = f"r{rank}_w{worker_id}_p{os.getpid()}"
+
+    @property
+    def _announcement_location(self) -> str:
+        return f"{self._scoped_run_id()}/round"
+
+    def _shard_location(self, round_id: str) -> str:
+        return f"{self._scoped_run_id()}/{round_id}/state/{self._participant}"
+
+    def _result_location(self, round_id: str) -> str:
+        return f"{self._scoped_run_id()}/{round_id}/merged"
+
+    def _failure_location(self, round_id: str) -> str:
+        return f"{self._scoped_run_id()}/{round_id}/failed"
+
+    def _ack_location(self, shard_location: str) -> str:
+        return shard_location.replace("/state/", "/ack/")
+
+    def _ack_name(self, shard_location: str) -> str:
+        return shard_location.rsplit("/", 1)[1]
+
+    def _list_ack_names(self, round_id: str) -> list[str]:
+        prefix = f"{self._scoped_run_id()}/{round_id}/ack/"
+        with self._lock:
+            return [k[len(prefix) :] for k in self._store if k.startswith(prefix)]
+
+    def _list_shards(self, round_id: str) -> list[str]:
+        prefix = f"{self._scoped_run_id()}/{round_id}/state/"
+        with self._lock:
+            return [k for k in self._store if k.startswith(prefix)]
+
+    def _write_announcement(self, round_id: str) -> None:
+        self._put(self._announcement_location, round_id.encode())
+
+    def _read_announcement(self) -> tuple[str, float] | None:
+        raw = self._read(self._announcement_location)
+        return None if raw is None else (raw.decode(), 0.0)
+
+    def _put(self, location: str, data: bytes) -> None:
+        with self._lock:
+            self._store[location] = data
+
+    def _read(self, location: str) -> bytes | None:
+        with self._lock:
+            return self._store.get(location)
+
+    def _exists(self, location: str) -> bool:
+        with self._lock:
+            return location in self._store
+
+    def _delete(self, location: str) -> None:
+        with self._lock:
+            self._store.pop(location, None)
+
+
+def test_round_protocol_runs_over_non_file_storage() -> None:
+    # Two MP ranks share one DP group; two workers per rank split its lanes.
+    store: dict[str, bytes] = {}
+    lock = Lock()
+    participants = [(rank, worker) for rank in range(2) for worker in range(2)]
+    coordinators = [
+        _DictCoordinator(store, lock, rank=rank, worker_id=worker)
+        for rank, worker in participants
+    ]
+    merge = Mock(
+        side_effect=lambda shards: {
+            "progress": {k: v for s in shards for k, v in s["progress"].items()}
+        }
+    )
+    with ThreadPoolExecutor(max_workers=len(participants)) as pool:
+        for step in range(2):
+            futures = [
+                pool.submit(
+                    coordinator.aggregate,
+                    AggregationRound(
+                        local={
+                            "world": {
+                                "global_rank": rank,
+                                "dp_group_id": 0,
+                                "mapping": {0: [0, 1]},
+                            },
+                            "progress": {worker: step},
+                        },
+                        is_leader=rank == worker == 0,
+                        expected_ranks=frozenset({0, 1}),
+                        expected_lanes=frozenset({0, 1}),
+                    ),
+                    merge,
+                )
+                for coordinator, (rank, worker) in zip(coordinators, participants)
+            ]
+            expected = {"progress": {0: step, 1: step}}
+            assert [f.result(timeout=10) for f in futures] == [expected] * 4
+            assert len(merge.call_args.args[0]) == 4
+            # Only the retained result of this round remains.
+            round_id = coordinators[0].last_round_id
+            assert list(store) == [f"dict-0/{round_id}/merged"]
+
+    coordinators[0].cleanup()
+    assert store == {}
