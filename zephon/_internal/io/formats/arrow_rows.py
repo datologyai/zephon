@@ -160,16 +160,35 @@ def _is_numeric_type(kind: Any, pa: Any) -> bool:
     )
 
 
+def _numpy_dtype(kind: Any, pa: Any) -> np.dtype:
+    """Return the NumPy dtype of an Arrow integer or floating-point type."""
+    if pa.types.is_floating(kind):
+        code = "f"
+    elif pa.types.is_signed_integer(kind):
+        code = "i"
+    else:
+        code = "u"
+    return np.dtype(f"{code}{kind.bit_width // 8}")
+
+
 def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
     """Return a read-only numeric array, or None for nulls or unsupported types."""
     if array.null_count:
         return None
     kind = array.type
-    if (
-        pa.types.is_integer(kind)
-        or pa.types.is_floating(kind)
-        or pa.types.is_boolean(kind)
-    ):
+    if pa.types.is_integer(kind) or pa.types.is_floating(kind):
+        # View the data buffer directly. ``to_numpy`` goes through pyarrow's
+        # pandas writer, which releases the GIL; with many reading threads,
+        # taking it back costs more than the conversion.
+        values = np.frombuffer(
+            array.buffers()[1] or b"",
+            dtype=_numpy_dtype(kind, pa),
+            count=len(array),
+            offset=array.offset * kind.bit_width // 8,
+        )
+        values.setflags(write=False)
+        return values
+    if pa.types.is_boolean(kind):
         values = array.to_numpy(zero_copy_only=False)
         # Unpacked boolean buffers must also be read-only.
         values.setflags(write=False)
