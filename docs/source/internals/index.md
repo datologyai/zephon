@@ -18,7 +18,8 @@ change without notice, so we have tried to write down the contract it implements
 name things the way you would reach them: the operator you called, the option you set, the
 class you would subclass. The contract is the part that is stable. If we rework a
 mechanism described here, the guarantees should survive it even though the code will not
-look the same.
+look the same. The one exception is the `WorkSource` interface itself, which is still
+settling and may change between releases.
 
 The five pages build on each other, so they are worth reading in order. [WorkSources and
 Work Chunks](worksources_and_work_chunks.md) explains where the data order comes from in

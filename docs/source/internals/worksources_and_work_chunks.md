@@ -2,9 +2,9 @@
 
 [WorkSources: The Training Curriculum](../worksources/index.md) describes a `WorkSource`
 from the outside. You hand it datasets and mixture weights, and it decides what your model
-sees and in what order. This page describes the contract underneath that: what Zephon
+sees and in what order. This page describes the interface underneath that: what Zephon
 actually calls, what it is allowed to assume, and how the one implementation that ships
-with it satisfies that contract.
+with it satisfies that interface.
 
 This is the base case of the induction that [Elastic Determinism](elastic_determinism.md)
 rests on. Every claim we make about reproducible data order reduces, eventually, to the
@@ -12,10 +12,10 @@ claim that a `WorkSource` bound to a given lane produces the same pointers in th
 order for a given seed, and everything downstream is a deterministic function of that.
 
 `WorkSource` and `WorkChunk` live in `zephon.work`. Unlike most of what the Internals
-section describes, they are an interface you are meant to implement against, and you need
-them if you want a curriculum that the built-in static mixture cannot express.
+section describes, they are an interface you would implement against if you wanted a
+curriculum that the built-in static mixture cannot express.
 
-**The contract.** This is the whole of what Zephon ever calls on your source:
+**The interface.** This is the whole of what Zephon currently calls on a source:
 
 ```python
 class MyWorkSource(WorkSource):
@@ -85,8 +85,9 @@ Three further hooks are optional, and the built-in source implements all of them
   shift the mixture mid-run.
 - `supports_indexing()`, `__len__()` and `sample_id_at(index)` let a source back a
   map-style dataset. Together with a plan whose operators are all `indexable`, they are
-  what `Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves them
-  raising `NotImplementedError`, and `Pipeline.is_indexable` reports `False`.
+  what `Pipeline.to_indexable_torch_dataset()` needs. A streaming-only source leaves
+  `supports_indexing()` returning `False` and the other two raising `NotImplementedError`,
+  and `Pipeline.is_indexable` reports `False`.
 
 **Work chunks.** A `WorkChunk` is the unit of work that travels from your source into
 Zephon. It is a bundle of sample pointers grouped by mixture component, with no payloads

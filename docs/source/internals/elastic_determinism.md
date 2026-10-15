@@ -26,24 +26,26 @@ per-lane ordering that the rest of this page depends on is exactly what gets rel
 (execution-parameters-are-not-data-parameters)=
 
 **Execution parameters are not data parameters.** The most useful property Zephon has is a
-negative one: **changing how a `Pipeline` runs never changes what it produces.** None of
-the execution settings appear anywhere in the data path, including the runner type, the
-parallelism of each operator, the queue depths, the prefetch settings, and the per-device
-microbatch size. You can tune a `Pipeline` for a week and the experiment you ran on the
-first day is still comparable to the one you run on the last.
+negative one: **changing how a `Pipeline` runs never changes what it produces.** Execution
+settings (the runner type, the parallelism of each operator, the queue depths, the prefetch
+settings, and the worker counts) never appear anywhere in the data path. You can tune them
+for a week and the experiment you ran on the first day is still comparable to the one you
+run on the last.
+
+Batch shape (the microbatch size and the number of batches per step) and
+`flush_every_k_chunks` are a different matter: they are data settings. Batch shape decides
+which samples land together, and `flush_every_k_chunks` decides where packing and mixture
+operators cut their buffers, so changing either changes the sample stream of any pipeline
+that packs. Fix them at the start of a run, like the seed and `canonical_replicas`.
 
 The two mechanisms that buy you this, sequence-number reordering and the single-threaded
 accumulator, are the ones [How Pipelines Run](../pipelines/how_pipelines_run.md)
 introduces and [Operators and Runners](operators_and_runners.md) takes apart.
 
-This is less common than you might expect, because most loaders do couple the two.
-[Megatron Energon](https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html)
-documents that reproducibility requires the global worker count
+Not every loader separates the two. [Megatron
+Energon](https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html), for
+example, documents that reproducibility requires the global worker count
 (`world_size * num_workers`) to stay fixed, so tuning the loader costs you the comparison.
-[Mosaic
-Streaming](https://docs.mosaicml.com/projects/streaming/en/latest/distributed_training/elastic_determinism.html)
-avoids that with a careful partitioning algorithm, but requires a constant global batch
-size across runs. In both cases a knob you would like to treat as free is not free.
 
 **The problem with partitioning by GPU.** The naive way to distribute data is to partition
 it across the physical GPU count, so that with 8 GPUs, GPU *k* takes every eighth sample.
@@ -78,9 +80,10 @@ Resume with dp_degree = 8:
   group 0: [0]  group 1: [1]  group 2: [2]  group 3: [3]  group 4: [4]  ...
 ```
 
-Two things cannot change across a resume without changing the curriculum: the seed and
-`canonical_replicas`. The per-lane order is a function of both, so changing either
-produces a different global schedule, and Zephon refuses to restore a checkpoint whose
+The per-lane order is a function of the seed and `canonical_replicas`, so both are fixed
+for the lifetime of a run. The seed is stored in the checkpoint and restored from it, so a
+resume always continues with the original seed whatever the new `Pipeline` was configured
+with. `canonical_replicas` is checked instead: Zephon refuses to restore a checkpoint whose
 `canonical_replicas` does not match.
 
 **Samples do not travel in separate lane streams.** 
