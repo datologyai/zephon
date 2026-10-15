@@ -798,6 +798,50 @@ class TestDedupeDpGroupPeers:
         kept_lane_sets = {frozenset(int(k) for k in st.progress) for st in chosen}
         assert kept_lane_sets == {frozenset({0}), frozenset({1})}
 
+    def test_peers_with_different_worker_splits_merge(
+        self, dedupe_engine: Engine
+    ) -> None:
+        """Rank 0 splits lanes 0 and 1 across two workers; its MP peer, rank 1,
+        owns both on one worker. Rank 0's shards survive, and rank 1's
+        worker-split RR entry is kept for a resume with one worker."""
+        rank0 = [
+            _mk_typed_state(
+                global_rank=0, dp_group_id=0, lanes=[0], rr_next_idx={"0/2:0": 0}
+            ),
+            _mk_typed_state(
+                global_rank=0, dp_group_id=0, lanes=[1], rr_next_idx={"1/2:1": 0}
+            ),
+        ]
+        rank1 = _mk_typed_state(
+            global_rank=1, dp_group_id=0, lanes=[0, 1], rr_next_idx={"0/1:0,1": 1}
+        )
+        chosen = dedupe_engine._dedupe_dp_group_peers([*rank0, rank1])
+        assert [int(st.world["global_rank"]) for st in chosen] == [0, 0]
+        assert {frozenset(int(k) for k in st.progress) for st in chosen} == {
+            frozenset({0}),
+            frozenset({1}),
+        }
+        assert chosen[0].rr_next_idx == {"0/2:0": 0, "1/2:1": 0, "0/1:0,1": 1}
+
+    def test_peer_with_different_worker_split_must_agree_per_lane(
+        self, dedupe_engine: Engine
+    ) -> None:
+        rank0 = [
+            _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[0]),
+            _mk_typed_state(global_rank=0, dp_group_id=0, lanes=[1]),
+        ]
+        rank1 = _mk_typed_state(
+            global_rank=1,
+            dp_group_id=0,
+            lanes=[0, 1],
+            progress={
+                0: {"chunk_id": 0, "offset": 0},
+                1: {"chunk_id": 0, "offset": 3},
+            },
+        )
+        with pytest.raises(RuntimeError, match=r"'progress' \(lane 1\).*rank 1"):
+            dedupe_engine._dedupe_dp_group_peers([*rank0, rank1])
+
     def test_three_peers_collapse_to_single_rep(self, dedupe_engine: Engine) -> None:
         """All three TP/PP peers (matching delivery) collapse to the lowest-rank rep."""
         peers = [

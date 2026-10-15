@@ -31,6 +31,7 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 """
 
 import ctypes
+import dataclasses
 import multiprocessing as mp
 import os
 import sys
@@ -177,10 +178,10 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
         pass
 
 
-# Per-rank state-dict fields that must be dict-equal across same-DP-group,
-# same-owned-lane-set peers at checkpoint time — the caller is expected to
-# barrier all ranks (e.g. torch.distributed.barrier()) before
-# pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
+# Per-rank state-dict fields that must agree across same-DP-group peers at
+# checkpoint time — lane by lane, and for rr_next_idx per worker-split key —
+# so the caller is expected to barrier all ranks (e.g.
+# torch.distributed.barrier()) before pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
 # lane_ws_state, epoch_boundaries) may legitimately differ across peers due
 # to async prefetch and are taken wholesale from one representative.
 _DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_next_idx")
@@ -1754,13 +1755,13 @@ class Engine:
     def _dedupe_dp_group_peers(
         self, states: list[EngineStateV2]
     ) -> list[EngineStateV2]:
-        """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
+        """Keep one rank's shards per DP group, checking its MP peers agree.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
-        group owns the same canonical lanes and contributes a state shard; their
-        lane-keyed entries would collide in the downstream merge. One rep
-        per ``(dp_group_id, owned-lane-set)`` group survives, with
-        ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
+        group owns the same canonical lanes and contributes state shards; their
+        lane-keyed entries would collide in the downstream merge. The shards of
+        the group's lowest global rank survive, and every other rank's
+        ``_DELIVERY_SYNCED_FIELDS`` are strict-checked against them.
 
         Operates on typed ``EngineStateV2`` so callers can run schema
         migration and cross-shard global-invariant checks BEFORE dedupe —
@@ -1768,37 +1769,60 @@ class Engine:
         ``last_round_id``, ``checkpoint_reload_count``) between same-DP-group
         peers would be silently hidden when peers are dropped.
 
-        Why the lane-set component (not just ``dp_group_id``): with
-        ``workers_per_rank > 1`` multiple DataLoader workers on the same
-        rank split their DP group's lanes into disjoint subsets (see
-        ``_owned_lanes``); those state shards are complementary partitions,
-        not duplicates, and must not be collapsed. At
-        ``workers_per_rank=1`` the lane-set is redundant and grouping
-        collapses to ``dp_group_id``.
+        Why per rank rather than per shard: with ``workers_per_rank > 1`` the
+        DataLoader workers on a rank split their DP group's lanes into disjoint
+        subsets (see ``_owned_lanes``), and peers may split them differently,
+        e.g. two workers on one rank and one on another. A rank's shards are
+        complementary partitions, so lane-keyed fields are compared lane by
+        lane. ``rr_next_idx`` is keyed by worker split, so peers' entries are
+        kept alongside the representative's for ranks that resume with that
+        split; an entry two peers share must agree.
         """
-        groups: dict[tuple[int, frozenset[int]], list[EngineStateV2]] = {}
+        by_group: dict[int, dict[int, list[EngineStateV2]]] = {}
         for st in states:
-            dp_id = int(st.world["dp_group_id"])
-            lane_set = frozenset(int(k) for k in st.progress)
-            groups.setdefault((dp_id, lane_set), []).append(st)
+            by_rank = by_group.setdefault(int(st.world["dp_group_id"]), {})
+            by_rank.setdefault(int(st.world["global_rank"]), []).append(st)
 
         chosen: list[EngineStateV2] = []
-        for (dp_id, lane_set), group in groups.items():
+        for dp_id, by_rank in by_group.items():
             # Deterministic representative: lowest global_rank wins.
-            rep = min(group, key=lambda st: int(st.world["global_rank"]))
-            for st in group:
-                if st is rep:
+            rep_rank = min(by_rank)
+            rep = by_rank[rep_rank]
+            progress = {int(lane): p for st in rep for lane, p in st.progress.items()}
+            cursors = {
+                int(lane): c for st in rep for lane, c in st.replay_cursors.items()
+            }
+            rr_next_idx = {key: v for st in rep for key, v in st.rr_next_idx.items()}
+
+            def _diverged(
+                fname: str, rank: int, detail: str, dp_id: int = dp_id
+            ) -> RuntimeError:
+                return RuntimeError(
+                    f"DP group {dp_id} delivery-state divergence on {fname!r} "
+                    f"({detail}) between rank {rep_rank} and rank {rank}. Did "
+                    f"all ranks barrier before calling pipe.checkpoint()?"
+                )
+
+            for rank, shards in sorted(by_rank.items()):
+                if rank == rep_rank:
                     continue
-                for fname in _DELIVERY_SYNCED_FIELDS:
-                    if getattr(st, fname) != getattr(rep, fname):
-                        raise RuntimeError(
-                            f"DP group {dp_id} delivery-state divergence on "
-                            f"{fname!r} (lanes={sorted(lane_set)}) between rank "
-                            f"{int(rep.world['global_rank'])} and rank "
-                            f"{int(st.world['global_rank'])}. Did all ranks "
-                            f"barrier before calling pipe.checkpoint()?"
-                        )
-            chosen.append(rep)
+                for st in shards:
+                    peer_cursors = {
+                        int(lane): c for lane, c in st.replay_cursors.items()
+                    }
+                    for lane_s, p in st.progress.items():
+                        lane = int(lane_s)
+                        if progress.get(lane) != p:
+                            raise _diverged("progress", rank, f"lane {lane}")
+                        if cursors.get(lane) != peer_cursors.get(lane):
+                            raise _diverged("replay_cursors", rank, f"lane {lane}")
+                    for key, value in st.rr_next_idx.items():
+                        if key in rr_next_idx and rr_next_idx[key] != value:
+                            raise _diverged("rr_next_idx", rank, f"key {key!r}")
+                        rr_next_idx[key] = value
+            # Carry peers' worker-split entries on the first representative shard.
+            chosen.append(dataclasses.replace(rep[0], rr_next_idx=rr_next_idx))
+            chosen.extend(rep[1:])
         return chosen
 
     def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
