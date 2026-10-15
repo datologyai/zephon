@@ -107,6 +107,13 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
 
 def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
     """Dispatch pre-extracted notify args to the engine."""
+    if not notify.delivered:
+        # Controls can overtake buffered payloads. They are neither monotone
+        # watermarks nor replay cursors, and cannot trigger epoch eviction.
+        if isinstance(notify, _ContributorNotify):
+            engine.notify_completion(notify.lane_id, notify.entries)
+        return
+
     if isinstance(notify, _MonotoneNotify):
         engine.notify_monotone(
             notify.lane_id, notify.max_chunk_id, notify.add_k, notify.max_cursor
@@ -117,8 +124,7 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
         )
     # Both delivery paths funnel through here (inline _notify_item and the MTP
     # ACK handler), so tail counters cover every pipeline shape.
-    if notify.delivered:
-        engine.record_delivery(notify.lane_id)
+    engine.record_delivery(notify.lane_id)
 
 
 def _notify_item(engine: Any, item: StreamItem, use_monotone: bool) -> None:
