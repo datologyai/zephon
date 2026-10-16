@@ -25,10 +25,10 @@ from zephon._internal.io.formats.base import (
 from zephon._internal.io.formats.base import (
     get_format as _get_format,
 )
-from zephon._internal.io.formats.lance_manifest import (
+from zephon._internal.io.formats.lance_support.manifest import (
     is_lance_dataset as _is_lance_dataset,
 )
-from zephon._internal.io.formats.lance_manifest import (
+from zephon._internal.io.formats.lance_support.manifest import (
     is_manifest_path as _is_lance_manifest,
 )
 from zephon._internal.io.index import find_and_load_index as _find_and_load_index

@@ -4,7 +4,7 @@
 """Lance dataset discovery and indexed sample reads.
 
 Zephon reads Lance through its open formats rather than its dataset library.
-The table manifest (parsed in :mod:`lance_manifest`, no ``pylance``) is the
+The table manifest (parsed in :mod:`lance_support.manifest`, no ``pylance``) is the
 shard index; one fragment is one shard, and that fragment's ``.lance`` data
 file flows through the ordinary resolver/cache path like a Vortex or Parquet
 shard. ``pylance`` is used only to decode pages, through its file-level reader.
@@ -16,10 +16,7 @@ What a fragment may *not* do here is spread its columns over several data
 files, which ``add_columns`` produces: a shard resolves exactly one file, so
 such a fragment is refused at discovery with the remedy in the message.
 
-Unsupported cases are refused at discovery rather than mid-run, with one
-exception discovery cannot see: dropped columns leave the manifest unable to
-say on its own how many columns their files hold, which only the file itself
-settles.
+Unsupported cases are refused at discovery rather than mid-run.
 """
 
 from __future__ import annotations
@@ -37,7 +34,7 @@ from zephon._internal.io.formats.arrow_rows import (
     configure_pyarrow,
 )
 from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
-from zephon._internal.io.formats.lance_manifest import (
+from zephon._internal.io.formats.lance_support.manifest import (
     DATA_DIR,
     FLAG_DATA_OVERLAYS,
     FLAG_FRAGMENT_TREE,
@@ -81,6 +78,13 @@ def _require_lance() -> ModuleType:
     return _lance_file
 
 
+# ``compact_files()`` skips a fragment it cannot merge, so only a rewrite always works.
+_REWRITE = (
+    "rewrite the dataset (e.g. lance.write_dataset(lance.dataset(src), dst)) "
+    "so each fragment is one file holding exactly the schema's columns"
+)
+
+
 def _reject(manifest_path: str, reason: str) -> ValueError:
     return ValueError(f"Unsupported Lance dataset at {manifest_path}: {reason}")
 
@@ -93,13 +97,10 @@ class _FragmentPlan:
     file_bytes: int
     physical_rows: int
     num_rows: int
-    # Dataset column name -> its slot in ``order``. The name is the manifest's,
-    # which a rename updates without rewriting the file.
+    # Dataset column name -> its column number in the file. The name is the
+    # manifest's, which a rename updates without rewriting the file.
     columns: tuple[tuple[str, int], ...]
-    # The file's columns as the schema accounts for them, one slot each, with a
-    # dropped column's slot ``None``. Slots become file column numbers only once
-    # the file's own count is known (see ``_file_columns``).
-    order: tuple[int | None, ...]
+    file_columns: int
 
 
 def _validate_schema(manifest: LanceManifest, manifest_path: str) -> None:
@@ -158,8 +159,7 @@ def _fragment_plan(
         )
         raise _reject(
             manifest_path,
-            f"{where} {detail}; a Zephon shard resolves one file, so compact "
-            "the dataset (lance.dataset(...).optimize.compact_files()) first",
+            f"{where} {detail}; a Zephon shard resolves one file, so {_REWRITE}",
         )
     data_file = data_files[0]
     if data_file.has_base_id:
@@ -177,6 +177,12 @@ def _fragment_plan(
         raise _reject(manifest_path, f"{where}'s data file lives outside the dataset")
 
     order = manifest.column_order(data_file.field_ids)
+    if None in order:
+        # The file keeps a dropped column, but the schema no longer says its width.
+        raise _reject(
+            manifest_path,
+            f"{where} still stores a dropped column; {_REWRITE}",
+        )
     columns: list[tuple[str, int]] = []
     # fmt: off
     for field in manifest.top_level_fields():
@@ -201,7 +207,7 @@ def _fragment_plan(
         physical_rows=fragment.physical_rows,
         num_rows=fragment.num_rows,
         columns=tuple(columns),
-        order=tuple(order),
+        file_columns=len(order),
     )
 
 
@@ -244,54 +250,19 @@ class _OpenFragment:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _file_columns(plan: _FragmentPlan, path: Path, file_count: int) -> list[int]:
-    """Resolve each dataset column to a column number in the file itself.
-
-    A dropped column keeps its data in the file but loses its arity from the
-    schema, so ``order`` gives every dropped *leaf* a slot: exact for a dropped
-    scalar, list or fixed-size list, and one slot too many per extra leaf of a
-    dropped struct. The file's own column count says how many slots are
-    surplus, and a single run of dropped slots absorbs all of them wherever it
-    splits internally — the surviving columns after it shift by the same amount
-    either way. Two such runs would each need their own share, which nothing
-    records, so that is refused rather than guessed.
-    """
-    surplus = len(plan.order) - file_count
-    if surplus < 0:
-        raise ValueError(
-            f"Lance file {path} holds {file_count} columns, more than the "
-            f"{len(plan.order)} its manifest entry accounts for"
-        )
-    shift_from = len(plan.order)
-    if surplus:
-        runs = [
-            index
-            for index, slot in enumerate(plan.order)
-            if slot is None and (index == 0 or plan.order[index - 1] is not None)
-        ]
-        if len(runs) != 1:
-            raise ValueError(
-                f"Lance file {path} holds {file_count} columns against the "
-                f"{len(plan.order)} its manifest entry accounts for, and the "
-                "dropped columns cannot be matched up: rewrite the dataset "
-                "(lance.dataset(...).optimize.compact_files()) so its files "
-                "match its schema."
-            )
-        shift_from = runs[0]
-    return [
-        slot - surplus if slot >= shift_from else slot for _name, slot in plan.columns
-    ]
-
-
 def _open_fragment(path: Path, plan: _FragmentPlan) -> _OpenFragment:
     """Open ``path`` projected to the dataset's columns, by file column index."""
     lance_file = _require_lance()
     probe = lance_file.LanceFileReader(str(path))
     file_names: list[str] = list(probe.metadata().schema.names)
-    columns = _file_columns(plan, path, len(file_names))
+    if len(file_names) != plan.file_columns:
+        raise ValueError(
+            f"Lance file {path} holds {len(file_names)} columns, but its "
+            f"manifest entry accounts for {plan.file_columns}"
+        )
     # Lance rejects duplicate field names at write time, so projecting the
     # positions back to names is unambiguous.
-    wanted = [file_names[column] for column in columns]
+    wanted = [file_names[column] for _name, column in plan.columns]
     names = tuple(name for name, _column in plan.columns)
     rename = None if tuple(wanted) == names else names
     if wanted == file_names:
@@ -388,8 +359,8 @@ class LanceShardOpener:
         path = local_ref.raw.path
         # Key on the version too: two datasets pinned to different versions of
         # one directory share their unchanged data files, and without the cache
-        # they share the local path as well, but a column dropped between the
-        # two gives each a different projection of the same file.
+        # they share the local path as well, but a rename between them changes
+        # the column names.
         opened = self._fragments.get_or_load(
             f"{manifest_path}\0{file_cache_key(path)}",
             lambda: _open_fragment(path, fragment),

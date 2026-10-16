@@ -5,15 +5,18 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 import pytest
 
+from tests.helpers.storage import _install_obstore_stubs
 from zephon._internal.io.formats.lance import LanceFormat, LanceShardOpener
-from zephon._internal.io.formats.lance_manifest import (
+from zephon._internal.io.formats.lance_support.manifest import (
     dataset_root_of,
     latest_manifest_path,
+    manifest_names,
+    read_manifest,
 )
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.local import LocalFSBackend
@@ -48,10 +51,24 @@ def _table(pa: Any, count: int, start: int = 0) -> Any:
     )
 
 
+Write = Callable[..., None]
+
+
+# 2.0 lists a struct's own field id among the file's columns; 2.1+ only its leaves.
+@pytest.fixture(params=["2.0", "2.1", None], ids=["v2.0", "v2.1", "default"])
+def write(request: pytest.FixtureRequest) -> Write:
+    def write(data: Any, path: Path, **kwargs: Any) -> None:
+        if request.param is not None:
+            kwargs.setdefault("data_storage_version", request.param)
+        lance.write_dataset(data, str(path), **kwargs)
+
+    return write
+
+
 @pytest.fixture
-def dataset_path(tmp_path: Path, pa: Any) -> Path:
+def dataset_path(tmp_path: Path, pa: Any, write: Write) -> Path:
     path = tmp_path / "ds.lance"
-    lance.write_dataset(_table(pa, 10), str(path), max_rows_per_file=4)
+    write(_table(pa, 10), path, max_rows_per_file=4)
     return path
 
 
@@ -207,13 +224,15 @@ def test_row_order_and_duplicates_are_preserved(dataset_path: Path) -> None:
     assert got[2]["text"] != "changed"
 
 
-def test_one_shard_reads_from_several_threads(tmp_path: Path, pa: Any) -> None:
+def test_one_shard_reads_from_several_threads(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
     """A retained reader is shared across fetch threads; pylance rejects reentry."""
     import random
     from concurrent.futures import ThreadPoolExecutor
 
     path = tmp_path / "shared.lance"
-    lance.write_dataset(_table(pa, 200), str(path), max_rows_per_file=200)
+    write(_table(pa, 200), path, max_rows_per_file=200)
 
     with _store(path) as store:
 
@@ -240,21 +259,12 @@ def test_out_of_range_index_raises(dataset_path: Path) -> None:
             shard.getsamples([len(shard)])
 
 
-def test_dropped_columns_are_not_read(tmp_path: Path, pa: Any) -> None:
-    path = tmp_path / "dropped.lance"
-    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=6)
-    lance.dataset(str(path)).drop_columns(["text"])
-
-    rows = _rows(path)
-
-    assert set(rows[0]) == {"id", "vec"}
-    _assert_matches_pylance(path, rows)
-
-
-def test_nested_columns_map_to_the_right_file_columns(tmp_path: Path, pa: Any) -> None:
+def test_nested_columns_map_to_the_right_file_columns(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
     """A list or struct spans several schema fields but one column in the file."""
     path = tmp_path / "nested.lance"
-    lance.write_dataset(
+    write(
         pa.table(
             {
                 "tags": pa.array([["a", "b"], ["c"]], pa.list_(pa.string())),
@@ -262,7 +272,7 @@ def test_nested_columns_map_to_the_right_file_columns(tmp_path: Path, pa: Any) -
                 "id": pa.array([0, 1], pa.int64()),
             }
         ),
-        str(path),
+        path,
     )
 
     rows = _rows(path)
@@ -272,91 +282,51 @@ def test_nested_columns_map_to_the_right_file_columns(tmp_path: Path, pa: Any) -
     _assert_matches_pylance(path, rows)
 
 
-def test_a_dropped_nested_column_does_not_shift_the_rest(
-    tmp_path: Path, pa: Any
+def test_dropped_columns_are_refused(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
 ) -> None:
-    """The file keeps the dropped column's columns, so positions must skip them."""
-    path = tmp_path / "nested_drop.lance"
-    lance.write_dataset(
-        pa.table(
-            {
-                "tags": pa.array([["a", "b"], ["c"]], pa.list_(pa.string())),
-                "pair": pa.array([{"x": 1, "y": "l"}, {"x": 2, "y": "r"}]),
-                "id": pa.array([0, 1], pa.int64()),
-            }
-        ),
-        str(path),
-    )
-    lance.dataset(str(path)).drop_columns(["pair"])
+    path = tmp_path / "dropped.lance"
+    write(_table(pa, 6), path, max_rows_per_file=6)
+    lance.dataset(str(path)).drop_columns(["text"])
 
-    rows = _rows(path)
-
-    assert set(rows[0]) == {"tags", "id"}
-    _assert_matches_pylance(path, rows)
+    with pytest.raises(ValueError, match="still stores a dropped column"):
+        LanceFormat().discover(str(path), storage)
 
 
-def test_two_adjacent_dropped_columns_do_not_shift_the_rest(
-    tmp_path: Path, pa: Any
+def test_compacting_a_lone_fragment_keeps_a_dropped_column(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
 ) -> None:
-    """Dropped columns stay in the file, so each needs a slot of its own."""
-    path = tmp_path / "two_drops.lance"
-    lance.write_dataset(
-        pa.table({name: pa.array([1, 2], pa.int64()) for name in "abcd"}), str(path)
-    )
-    lance.dataset(str(path)).drop_columns(["b", "c"])
+    """Compaction leaves a lone fragment's file as it is."""
+    path = tmp_path / "dropped.lance"
+    write(_table(pa, 6), path, max_rows_per_file=6)
+    lance.dataset(str(path)).drop_columns(["text"])
+    lance.dataset(str(path)).optimize.compact_files()
 
-    rows = _rows(path)
-
-    assert [dict(row) for row in rows] == [{"a": 1, "d": 1}, {"a": 2, "d": 2}]
-    _assert_matches_pylance(path, rows)
+    with pytest.raises(ValueError, match="rewrite the dataset"):
+        LanceFormat().discover(str(path), storage)
 
 
-def test_a_dropped_struct_column_is_absorbed(tmp_path: Path, pa: Any) -> None:
-    """Its leaves are gone from the schema; the file's count says how many."""
-    path = tmp_path / "drop_struct.lance"
-    lance.write_dataset(
-        pa.table(
-            {
-                "a": pa.array([1, 2], pa.int64()),
-                "pair": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}]),
-                "d": pa.array([5, 6], pa.int64()),
-            }
-        ),
-        str(path),
-    )
-    lance.dataset(str(path)).drop_columns(["pair"])
+def test_rewriting_makes_a_dropped_column_dataset_readable(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
+    path = tmp_path / "dropped.lance"
+    write(_table(pa, 6), path, max_rows_per_file=6)
+    lance.dataset(str(path)).drop_columns(["text"])
+    rewritten = tmp_path / "rewritten.lance"
+    write(lance.dataset(str(path)), rewritten)
 
-    rows = _rows(path)
+    rows = _rows(rewritten)
 
-    assert [dict(row) for row in rows] == [{"a": 1, "d": 5}, {"a": 2, "d": 6}]
-    _assert_matches_pylance(path, rows)
+    assert set(rows[0]) == {"id", "vec"}
+    _assert_matches_pylance(rewritten, rows)
 
 
-def test_two_separate_dropped_runs_are_refused(tmp_path: Path, pa: Any) -> None:
-    """Nothing records how many columns each run gave up, so neither is guessed."""
-    path = tmp_path / "drop_runs.lance"
-    lance.write_dataset(
-        pa.table(
-            {
-                "a": pa.array([1, 2], pa.int64()),
-                "pair": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}]),
-                "b": pa.array([3, 4], pa.int64()),
-                "c": pa.array([5, 6], pa.int64()),
-                "d": pa.array([7, 8], pa.int64()),
-            }
-        ),
-        str(path),
-    )
-    lance.dataset(str(path)).drop_columns(["pair", "c"])
-
-    with pytest.raises(ValueError, match="cannot be matched up"):
-        _rows(path)
-
-
-def test_renamed_columns_use_the_manifest_name(tmp_path: Path, pa: Any) -> None:
+def test_renamed_columns_use_the_manifest_name(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
     """A rename updates the manifest only; the data file keeps the old name."""
     path = tmp_path / "renamed.lance"
-    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=6)
+    write(_table(pa, 6), path, max_rows_per_file=6)
     lance.dataset(str(path)).alter_columns({"path": "text", "name": "body"})
 
     rows = _rows(path)
@@ -365,9 +335,9 @@ def test_renamed_columns_use_the_manifest_name(tmp_path: Path, pa: Any) -> None:
     _assert_matches_pylance(path, rows)
 
 
-def test_deleted_rows_are_refused(tmp_path: Path, pa: Any) -> None:
+def test_deleted_rows_are_refused(tmp_path: Path, pa: Any, write: Write) -> None:
     path = tmp_path / "deleted.lance"
-    lance.write_dataset(_table(pa, 10), str(path), max_rows_per_file=4)
+    write(_table(pa, 10), path, max_rows_per_file=4)
     lance.dataset(str(path)).delete("id in (0, 5)")
 
     with pytest.raises(ValueError, match="has deleted rows"):
@@ -375,25 +345,27 @@ def test_deleted_rows_are_refused(tmp_path: Path, pa: Any) -> None:
 
 
 def test_two_pinned_versions_do_not_share_an_opened_fragment(
-    tmp_path: Path, pa: Any
+    tmp_path: Path, pa: Any, write: Write
 ) -> None:
     """Versions share unchanged data files, and without the cache, local paths."""
     path = tmp_path / "versions.lance"
-    lance.write_dataset(_table(pa, 4), str(path), max_rows_per_file=4)
+    write(_table(pa, 4), path, max_rows_per_file=4)
     with _store(path) as old:
         assert set(old.rows()[0]) == {"id", "text", "vec"}
-        lance.dataset(str(path)).drop_columns(["text"])
+        lance.dataset(str(path)).alter_columns({"path": "text", "name": "body"})
         # A second dataset pinned to the newer version, served by the same
         # opener, reading the same unchanged file from the same path.
         new = _Store(path, opener=old._opener)
         assert new.manifest != old.manifest
 
-        assert set(new.rows()[0]) == {"id", "vec"}
+        assert set(new.rows()[0]) == {"id", "body", "vec"}
 
 
-def test_multi_file_fragments_are_refused(tmp_path: Path, pa: Any) -> None:
+def test_multi_file_fragments_are_refused(
+    tmp_path: Path, pa: Any, write: Write
+) -> None:
     path = tmp_path / "added.lance"
-    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=3)
+    write(_table(pa, 6), path, max_rows_per_file=3)
     lance.dataset(str(path)).add_columns({"doubled": "id * 2"})
 
     with pytest.raises(ValueError, match="spans 2 data files"):
@@ -401,10 +373,10 @@ def test_multi_file_fragments_are_refused(tmp_path: Path, pa: Any) -> None:
 
 
 def test_compacting_makes_a_multi_file_dataset_readable(
-    tmp_path: Path, pa: Any
+    tmp_path: Path, pa: Any, write: Write
 ) -> None:
     path = tmp_path / "added.lance"
-    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=3)
+    write(_table(pa, 6), path, max_rows_per_file=3)
     lance.dataset(str(path)).add_columns({"doubled": "id * 2"})
     lance.dataset(str(path)).optimize.compact_files()
 
@@ -414,7 +386,7 @@ def test_compacting_makes_a_multi_file_dataset_readable(
     _assert_matches_pylance(path, rows)
 
 
-def test_blob_columns_are_refused(tmp_path: Path, pa: Any) -> None:
+def test_blob_columns_are_refused(tmp_path: Path, pa: Any, write: Write) -> None:
     schema = pa.schema(
         [
             pa.field("id", pa.int64()),
@@ -426,7 +398,7 @@ def test_blob_columns_are_refused(tmp_path: Path, pa: Any) -> None:
         ]
     )
     path = tmp_path / "blob.lance"
-    lance.write_dataset(
+    write(
         pa.table(
             {
                 "id": pa.array(range(4), pa.int64()),
@@ -434,7 +406,7 @@ def test_blob_columns_are_refused(tmp_path: Path, pa: Any) -> None:
             },
             schema=schema,
         ),
-        str(path),
+        path,
     )
 
     with pytest.raises(ValueError, match="blob column"):
@@ -481,3 +453,85 @@ def test_known_but_irrelevant_flags_are_accepted(
     counts, _meta = LanceFormat().discover(manifest_path, storage)
 
     assert sum(counts.values()) == 10
+
+
+def test_stable_row_ids_stay_out_of_the_data_columns(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
+) -> None:
+    """Lineage columns among the data columns would shift every position."""
+    path = tmp_path / "stable.lance"
+    write(_table(pa, 10), path, max_rows_per_file=4, enable_stable_row_ids=True)
+    lance.dataset(str(path)).delete("id in (1, 6)")
+    # Compaction moves rows, so Lance has to record their lineage.
+    lance.dataset(str(path)).optimize.compact_files()
+    manifest = read_manifest(storage, latest_manifest_path(storage, str(path)))
+    assert manifest.reader_feature_flags & 2  # stable row ids
+    assert all(fragment.deletion is None for fragment in manifest.fragments)
+
+    rows = _rows(path)
+
+    assert set(rows[0]) == {"id", "text", "vec"}
+    _assert_matches_pylance(path, rows)
+
+
+def test_discovery_through_object_storage_walks_a_stale_hint(
+    tmp_path: Path, pa: Any, write: Write, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remote discovery never downloads a data file."""
+    import json
+    import sys
+
+    from zephon._internal.io.storage.s3 import S3Backend
+
+    state = _install_obstore_stubs(monkeypatch)
+    path = tmp_path / "remote.lance"
+    write(_table(pa, 10), path, max_rows_per_file=4)
+    lance.write_dataset(
+        _table(pa, 6, start=100), str(path), mode="append", max_rows_per_file=4
+    )
+    # As left by a writer that crashed before updating the hint.
+    (path / "_versions" / "latest_version_hint.json").write_text(
+        json.dumps({"version": 1})
+    )
+    for file in path.rglob("*"):
+        if file.is_file():
+            key = f"ds.lance/{file.relative_to(path).as_posix()}"
+            state["objects"][("bucket", key)] = file.read_bytes()
+
+    probed: list[str] = []
+    obstore = sys.modules["obstore"]
+    head = obstore.head
+
+    def recording_head(store: Any, key: str) -> Any:
+        probed.append(key)
+        return head(store, key)
+
+    monkeypatch.setattr(obstore, "head", recording_head)
+
+    backend = S3Backend()
+    download = backend.download
+
+    def small_downloads_only(src: str, dst: str, timeout: float | None = None) -> None:
+        if not src.endswith(".json"):
+            pytest.fail(f"discovery downloaded {src}")
+        download(src, dst, timeout)
+
+    monkeypatch.setattr(backend, "download", small_downloads_only)
+
+    handler = LanceFormat()
+    manifest = handler.resolve_root("s3://bucket/ds.lance", backend)
+    counts, meta = handler.discover(manifest, backend)
+
+    v2, v3 = manifest_names(2)[0], manifest_names(3)
+    assert manifest == f"s3://bucket/ds.lance/_versions/{v2}"
+    assert sum(counts.values()) == 16
+    # Walked past the hint, stopping at the first missing version.
+    assert f"ds.lance/_versions/{v2}" in probed
+    assert all(f"ds.lance/_versions/{name}" in probed for name in v3)
+    ranged = {call["key"] for call in state["range_calls"]}
+    assert ranged == {f"ds.lance/_versions/{v2}"}
+    assert {shard["raw"]["basename"] for shard in meta.values()} <= {
+        key.rsplit("/", 1)[1]
+        for _bucket, key in state["objects"]
+        if key.startswith("ds.lance/data/")
+    }
