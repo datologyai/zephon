@@ -62,6 +62,7 @@ Most of what Zephon can read is behind optional extras, so you only install what
 | `zephon[streaming]` | MosaicML Streaming / MDS shards |
 | `zephon[litdata]` | LitData shards |
 | `zephon[vortex]` | Vortex shards (Python 3.11+) |
+| `zephon[lance]` | Lance datasets, one shard per fragment |
 | `zephon[ray]` | The experimental Ray runner |
 
 For example, to train on Parquet data in S3: `uv pip install "zephon[cloud,parquet]"`.
@@ -79,7 +80,7 @@ from zephon import Pipeline
 from zephon.io import Dataset
 from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
-# 1. Describe the data: a directory of JSONL, Parquet, MDS, LitData, or Vortex shards
+# 1. Describe the data: a directory of JSONL, Parquet, MDS, LitData, Vortex, or Lance shards
 dataset = Dataset.from_path("train", "/data/train/")
 
 # 2. Decide what to train on, and in what order

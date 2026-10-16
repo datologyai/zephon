@@ -9,6 +9,7 @@ _INITIALIZED_FORMATS: set[str] = set()
 
 _FORMAT_MODULES: dict[str, str] = {
     "jsonl": "zephon._internal.io.formats.jsonl",
+    "lance": "zephon._internal.io.formats.lance",
     "mds": "zephon._internal.io.formats.mds",
     "parquet": "zephon._internal.io.formats.parquet",
     "vortex": "zephon._internal.io.formats.vortex",
