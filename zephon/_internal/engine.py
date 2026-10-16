@@ -974,13 +974,10 @@ class Engine:
         When ``flush_every_k_chunks > 0``, a flush sentinel SampleRecord is
         injected after every K-th chunk.  In Phase 1 (replay), sentinels are
         re-injected at stored epoch boundary positions.
-
-        Cumulative ``WorkChunk.source_exhausted`` stamps use the same
-        ``_iter_chunk`` path in both phases. Each component is notified once
-        per lane stream; a fresh stream replays the knowledge from its first
-        stamped chunk without additional engine checkpoint state.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        # Later chunks retain earlier source_exhausted entries. Start empty on
+        # restore so new accumulators hear again which datasets have run out.
         announced: set[str] = set()
 
         # Phase 1: replay restored inflight chunks first (ascending chunk_id).
@@ -1002,8 +999,8 @@ class Engine:
             chunk = inflight_lane[cid]
             # Store mixture for restored chunks (may already exist, but idempotent)
             self._store_chunk_mixture(lane_id, cid, chunk)
-            # Replay yields the entire chunk. Elastic continuation can be affected
-            # when a batch crosses chunk boundaries.
+            # Replay full chunks to rebuild operator state. ReplayFilter removes
+            # already-delivered records before batching (or at the pipeline tail).
             yield from self._iter_chunk(lane_id, cid, chunk, announced)
 
         # Trailing boundary: if a boundary exceeds all inflight cids, the
