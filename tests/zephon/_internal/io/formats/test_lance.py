@@ -3,6 +3,7 @@
 
 """Lance discovery, version pinning, refusals and projected shard reads."""
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -16,6 +17,7 @@ from zephon._internal.io.formats.lance_support.manifest import (
     dataset_root_of,
     latest_manifest_path,
     manifest_names,
+    manifest_version,
     read_manifest,
 )
 from zephon._internal.io.protocols import RandomAccessShard
@@ -522,7 +524,11 @@ def test_discovery_through_object_storage_walks_a_stale_hint(
     manifest = handler.resolve_root("s3://bucket/ds.lance", backend)
     counts, meta = handler.discover(manifest, backend)
 
-    v2, v3 = manifest_names(2)[0], manifest_names(3)
+    # Whichever naming scheme this pylance writes.
+    v2 = next(
+        name for name in os.listdir(path / "_versions") if manifest_version(name) == 2
+    )
+    v3 = manifest_names(3)
     assert manifest == f"s3://bucket/ds.lance/_versions/{v2}"
     assert sum(counts.values()) == 16
     # Walked past the hint, stopping at the first missing version.
