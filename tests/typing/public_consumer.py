@@ -29,7 +29,15 @@ from zephon.observability import (
     MTPQueueStats,
     PrefetchTimingSummary,
 )
-from zephon.ops import BaseOp, DomainGroups, OpContext, OpTraits, StageInfo
+from zephon.ops import (
+    BaseOp,
+    ContentLossPolicy,
+    DomainGroups,
+    LossScope,
+    OpContext,
+    OpTraits,
+    StageInfo,
+)
 from zephon.options import IpcTransport, RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SampleNumeric, SamplePayload
 from zephon.validation import ValidationReport
@@ -152,3 +160,11 @@ class IdentityOp(BaseOp):
             sid: SampleId = e.meta.sample_id
             _ = sid
         return elems
+
+
+def scoped_chat(pipe: Pipeline) -> Pipeline:
+    scope: LossScope = "after_last_user"
+    policy: ContentLossPolicy = "drop"
+    return pipe.expand_chat().tokenize_chat(
+        tokenizer_id="model", loss_scope=scope, on_content_loss=policy
+    )

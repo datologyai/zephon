@@ -9,6 +9,9 @@ Hugging Face tokenizer), the batch/output type aliases,
 implementation used when no tokenizer is configured and throughout the tests —
 and :func:`load_hf_tokenizer`, the retrying HF loader shared by the tokenize
 ops.
+
+Chat helpers select assistant messages, map generated ranges to token masks,
+and isolate HF's compiled-template caches between threads.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 from tenacity import (
     retry,
     retry_if_not_exception_type,
@@ -36,11 +40,12 @@ from tenacity import (
 
 from zephon._internal.utils.thread_utils import suppress_library_threads
 from zephon._internal.utils.torch_compat import _tensor_lock_ctx
+from zephon.ops.config import LossScope
 
 if TYPE_CHECKING:
-    import numpy as np
     import tensorflow as tf
     import torch
+    from transformers import BatchEncoding, PreTrainedTokenizerFast
 
 TokenBatch: TypeAlias = Union[
     "np.ndarray",
@@ -62,6 +67,69 @@ class TokenizerLike(Protocol):
     def __call__(
         self, texts: Sequence[str] | str, **kwargs: Any
     ) -> TokenizerOutput: ...
+
+
+def encode_rendered_text(
+    tokenizer: PreTrainedTokenizerFast,
+    text: str,
+    *,
+    max_length: int | None = None,
+    return_offsets_mapping: bool = False,
+) -> BatchEncoding:
+    """Tokenize rendered text without adding specials; truncate at an explicit cap."""
+    kwargs: dict[str, Any] = {"add_special_tokens": False}
+    if max_length is not None:
+        kwargs.update(truncation=True, max_length=max_length)
+    if return_offsets_mapping:
+        kwargs["return_offsets_mapping"] = True
+    return tokenizer(text, **kwargs)
+
+
+def thread_salted_template(template: str) -> str:
+    """Return ``template`` plus a per-thread no-op salt expression.
+
+    HF caches compiled chat templates process-wide by template text, and masked
+    renders mutate AssistantTracker state on the cached object; the salt gives
+    each thread its own template. An expression tag survives ``lstrip_blocks``
+    untouched, and jinja's trailing-newline strip is replicated here, so the
+    salted render is byte-identical.
+    """
+    for newline in ("\r\n", "\r", "\n"):
+        if template.endswith(newline):
+            template = template[: -len(newline)]
+            break
+    return template + f'{{{{ "zephon-render-slot-{threading.get_ident()}" and "" }}}}'
+
+
+def selected_assistant_indices(
+    messages: Sequence[Mapping[str, Any]], scope: LossScope
+) -> set[int]:
+    """Select raw assistant indices before rendering or truncation."""
+    assistants = {
+        i for i, message in enumerate(messages) if message.get("role") == "assistant"
+    }
+    if scope == "after_last_user":
+        users = [
+            i for i, message in enumerate(messages) if message.get("role") == "user"
+        ]
+        return {i for i in assistants if users and i > users[-1]}
+    return assistants
+
+
+def generation_mask(
+    encoding: Any, spans: Sequence[tuple[int, int, int, int]], owners: set[int]
+) -> np.ndarray:
+    """Map selected generated ranges with HF's endpoint and early-break rules."""
+    mask = np.zeros(len(encoding["input_ids"]), dtype=np.uint8)
+    for owner, start, end, _ in spans:
+        start_token = encoding.char_to_token(0, start)
+        end_token = encoding.char_to_token(0, end - 1)
+        if start_token is None:
+            break
+        if owner in owners:
+            stop = end_token + 1 if end_token else len(mask)
+            mask[start_token:stop] = 1
+    return mask
 
 
 def fallback_tokenizer() -> TokenizerLike:

@@ -18,6 +18,7 @@ from zephon import Pipeline as PublicPipeline
 from zephon.ops import Accumulator, BaseOp, CountingAccumulator, OpTraits, ReadyBatch
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.validation import (
+    Issue,
     ValidationError,
     ValidationReport,
     preflight_tokenizers,
@@ -32,6 +33,25 @@ def _empty_pipeline() -> PublicPipeline:
 
 def _codes(report: ValidationReport) -> list[str]:
     return [i.code for i in report.issues]
+
+
+def test_report_formats_issues_with_and_without_doc_links() -> None:
+    report = ValidationReport(
+        [
+            Issue("error", "LOCAL", "chat", "Fix the template", doc_link=""),
+            Issue(
+                "warning",
+                "LINKED",
+                "chat",
+                "See the guide",
+                doc_link="https://example.com",
+            ),
+        ]
+    )
+    formatted = report.format()
+    assert "Fix the template" in formatted
+    assert formatted.count("→") == 1
+    assert "→ https://example.com" in formatted
 
 
 # ---------------------------------------------------------------------------
@@ -1699,7 +1719,7 @@ def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
     assert report.ok, report.format()
     assert loads == ["fake-model"]
 
-    # Preflight must not load or cache state on the pipeline-owned operator.
+    # Preflight must not initialize the pipeline-owned tokenizer.
     (op,) = _tokenize_ops(pipe)
     assert op.tok is None
     assert op._tokenizer_instantiated is False
@@ -1747,3 +1767,81 @@ def test_preflight_aggregates_issues_in_graph_order(
     assert [i.code for i in report.issues] == ["TOKENIZER_PREFLIGHT_FAILED"] * 2
     assert "text-model" in report.issues[0].message
     assert "chat-model" in report.issues[1].message
+
+
+@pytest.fixture
+def chat_scope_tokenizer() -> Any:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    return make_fast_tokenizer()
+
+
+def test_public_verifier_requires_stock_identity_and_marker_coverage(
+    chat_scope_tokenizer: Any,
+) -> None:
+    from tests.helpers.chat import (
+        CYCLE,
+        TAGGED_TEMPLATE,
+        UNTAGGED_TEMPLATE,
+    )
+    from zephon.validation import verify_chat_template
+
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, stock_template=UNTAGGED_TEMPLATE
+    )
+    assert report.ok, report.format()
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        stock_template=UNTAGGED_TEMPLATE + "extra",
+    )
+    assert not report.ok
+    assert any(i.code == "CHAT_STOCK_IDENTITY" for i in report.errors)
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, probes=[{"messages": CYCLE}]
+    )
+    assert any(i.code == "CHAT_REQUIRED_CONTENT" for i in report.errors)
+
+
+def test_probe_coverage_uses_requested_scope(chat_scope_tokenizer: Any) -> None:
+    import copy
+
+    from tests.helpers.chat import (
+        CYCLE,
+        TAGGED_TEMPLATE,
+    )
+    from zephon.validation import verify_chat_template
+
+    messages = copy.deepcopy(CYCLE)
+    messages.extend(
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "yes"},
+        ]
+    )
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        probes=[{"messages": messages}],
+    )
+    assert report.ok, report.format()
+    messages[-1]["reasoning_content"] = "yes"
+    report = verify_chat_template(
+        chat_scope_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        probes=[{"messages": messages}],
+    )
+    assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)
+
+
+def test_chat_verifier_rejects_invalid_scope(chat_scope_tokenizer: Any) -> None:
+    from tests.helpers.chat import TAGGED_TEMPLATE
+    from zephon.validation import verify_chat_template
+
+    report = verify_chat_template(
+        chat_scope_tokenizer, TAGGED_TEMPLATE, loss_scope="last_assistant"
+    )
+    assert not report.ok
+    assert any("invalid loss_scope" in issue.message for issue in report.errors)

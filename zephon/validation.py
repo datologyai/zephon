@@ -32,11 +32,13 @@ import dataclasses
 import inspect
 import pickle
 import textwrap
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict, get_args
 
 from zephon._internal.ops.tokenize_base import TokenizeBase as _TokenizeBase
 from zephon.ops.accumulators import Accumulator
+from zephon.ops.config import LossScope
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 if TYPE_CHECKING:
@@ -92,7 +94,8 @@ class ValidationReport:
             lines.append(
                 f"  [{issue.severity}] {issue.code} in {issue.op_name!r}: {issue.message}"
             )
-            lines.append(f"      → {issue.doc_link}")
+            if issue.doc_link:
+                lines.append(f"      → {issue.doc_link}")
         return "\n".join(lines)
 
 
@@ -1611,9 +1614,9 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
 def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
     """Return tokenizer initialization failures for a pipeline.
 
-    Each tokenizer operator is deep-copied before its lazy initialization runs,
-    leaving pipeline-owned operators unchanged. This may download tokenizer
-    files.
+    Each tokenizer operator is initialized through a deep copy. Successful
+    template checks are retained for worker reuse; tokenizer loading and setup
+    failures stay on the copy. This may download tokenizer files.
 
     Args:
         pipeline: Pipeline to inspect.
@@ -1629,6 +1632,7 @@ def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
         try:
             probe = copy.deepcopy(op)
             probe._setup_tokenizer()
+            op._cache_preflight_result(probe)
         except Exception as exc:
             report.issues.append(
                 Issue(
@@ -1642,9 +1646,118 @@ def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
     return report
 
 
+class _RequiredChatTemplateProbe(TypedDict):
+    messages: list[Mapping[str, Any]]
+
+
+class ChatTemplateProbe(_RequiredChatTemplateProbe, total=False):
+    """Template fixture with optional render context and marker expectations."""
+
+    kwargs: Mapping[str, Any]
+    markers: Mapping[str, int]
+    required_markers: Sequence[str]
+
+
+def verify_chat_template(
+    tokenizer: Any,
+    chat_template: str | None = None,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    probes: Sequence[ChatTemplateProbe] | None = None,
+    loss_scope: LossScope = "after_last_user",
+    stock_template: str | None = None,
+) -> ValidationReport:
+    """Check generation ownership, content coverage and HF token-mask parity.
+
+    ``after_last_user`` runs these checks automatically. This entry point is
+    useful for template CI, extra fixtures and tagged/stock comparisons.
+
+    Check your template: every selected assistant's reasoning, tool calls,
+    answer and any end-of-turn token must appear inside its own ``{% generation %}``
+    blocks, within its message loop. Keep user/tool-result text and content read
+    from other messages outside those blocks. Inspect rendered text and loss
+    masks on representative inputs, because automatic probes can miss
+    content-dependent errors.
+
+    Probes retain literal substring, prefix and suffix controls in message text.
+    Exact text comparisons and length thresholds beyond emptiness are rejected
+    when detected on content fields or their assignment aliases. Coverage checks
+    include ``content``, ``reasoning_content``, ``reasoning`` and ``thinking``.
+
+    Args:
+        tokenizer: HF-compatible fast tokenizer.
+        chat_template: Tagged Jinja source; None uses the tokenizer's template.
+        chat_template_kwargs: Static render context.
+        loss_scope: Message selection to verify, usually ``after_last_user``.
+        probes: Extra fixtures with ``messages`` and optional ``kwargs``.
+            By default text is replaced with ownership markers. To supply
+            exact fixture text, provide ``markers`` (marker to message index)
+            and ``required_markers`` (markers that must appear).
+        stock_template: Optional inference template for render-identity checks.
+
+    Returns:
+        Findings for mandatory probes and extra fixtures. Unexecuted generation
+        sites are warnings; structural, ownership and parity failures are errors.
+    """
+    from zephon._internal.utils.chat_template import TemplateVerifier, _issue
+
+    try:
+        if loss_scope not in get_args(LossScope):
+            raise ValueError(f"invalid loss_scope: {loss_scope!r}")
+        template = (
+            chat_template if chat_template is not None else tokenizer.chat_template
+        )
+        if not isinstance(template, str) or not template:
+            raise ValueError("a generation-tagged chat template is required")
+        if not getattr(tokenizer, "is_fast", False):
+            raise ValueError("a fast tokenizer is required")
+        verifier = TemplateVerifier(
+            tokenizer, template, chat_template_kwargs or {}, loss_scope
+        )
+        report = verifier.setup_report()
+        fixtures = list(probes or ())
+        if stock_template is not None:
+            fixtures.insert(
+                0,
+                {
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "answer"},
+                    ]
+                },
+            )
+        for probe in fixtures:
+            kwargs = {**(chat_template_kwargs or {}), **probe.get("kwargs", {})}
+            report.issues.extend(
+                verifier.verify(
+                    probe["messages"],
+                    kwargs,
+                    markers=probe.get("markers"),
+                    required_markers=probe.get("required_markers", ()),
+                    stock_template=stock_template,
+                ).issues
+            )
+        uncovered = verifier.template.sites.keys() - verifier.executed_sites
+        if uncovered:
+            report.issues.append(
+                _issue(
+                    "CHAT_UNCOVERED_GENERATION",
+                    f"Generation sites not exercised (site, line): {[(site, verifier.template.sites[site]) for site in sorted(uncovered)]}",
+                    warning=True,
+                )
+            )
+        return report
+    except Exception as error:
+        return ValidationReport(
+            [_issue("CHAT_TEMPLATE_INVALID", f"{type(error).__name__}: {error}")]
+        )
+
+
 __all__ = [
+    "ChatTemplateProbe",
     "Issue",
     "ValidationError",
     "ValidationReport",
     "preflight_tokenizers",
+    "verify_chat_template",
 ]
