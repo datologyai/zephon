@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import IO, Any, Mapping
 
 import pytest
+from filelock import BaseFileLock
 
 import zephon._internal.io.resolvers.cache.manager as manager_mod
 from tests._catalog_helpers import catalog_set_from_locators
@@ -1300,18 +1301,10 @@ def test_duplicate_name_rejected_across_inmem_and_file_backed(
 
 
 def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> None:
-    """session.json with live owners + missing SHM must fall back to stale branch.
+    """Missing SHM triggers recovery even when session.json records live owners.
 
-    Reproduces the CI failure where the creator had already unlinked SHM
-    while joiners were still registered as live owners of the session.
-    The join attempt must not raise FileNotFoundError — it must
-    gracefully downgrade into the no-live-owners branch.
-
-    Exercising the *live_owners* path (rather than the empty-owners
-    stale-session path) requires mgr1 to stay alive when mgr2 is
-    constructed, so session.json still names an active owner. Closing
-    mgr1 first would zero the owner count and route through the
-    stale-session branch instead, bypassing the recovery logic.
+    Keeping mgr1 open makes mgr2 attempt JOIN, discover missing SHM, and rebuild
+    the session while preserving cached files under ``persist_state=True``.
     """
     from zephon._internal.io.resolvers.cache.shared_state import CacheSharedState
 
@@ -1326,24 +1319,18 @@ def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> No
     try:
         mgr1.resolve(loc)
 
-        # mgr1 is still alive — session.json records us as a live owner.
-        # Unlink SHM behind mgr1's back to simulate /dev/shm cleanup or a
-        # creator-exits-first race on an older manager build.
+        # Simulate external /dev/shm cleanup while mgr1 remains registered.
         session = json.loads(mgr1._session_path.read_text(encoding="utf-8"))
         shm_names = session["shm_names"]
         assert session["owners"], "sanity: mgr1 should be registered as owner"
         CacheSharedState.unlink_by_names(shm_names)
 
-        # Construct mgr2 while mgr1 is still alive. mgr2 must hit the
-        # live_owners + FileNotFoundError branch specifically (not the
-        # empty-owners stale-session branch) and recover.
+        # mgr2 attempts to join the live session and recovers from missing SHM.
         mgr2 = _make_manager(cache_root, storage, [loc], persist_state=True)
         try:
             ref = mgr2.resolve(loc)
             assert ref.raw.path.exists()
-            # After recovery, session.json is rewritten with fresh SHM
-            # names. Verify the new SHM is actually attached by both
-            # managers independently from mgr2's perspective.
+            # The replacement session records fresh SHM names for mgr2.
             new_session = json.loads(mgr2._session_path.read_text(encoding="utf-8"))
             assert new_session["shm_names"] != shm_names
         finally:
@@ -1573,12 +1560,12 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finalizer / .reset.lock interaction (#20)
+# Finalizer and session-lock coordination
 # ---------------------------------------------------------------------------
 
 
 def _run_bounded(fn: Any, timeout: float = 10.0) -> Any:
-    """Run *fn* on a worker thread so a deadlock fails the test instead of hanging it."""
+    """Run *fn* on a daemon thread and wait at most *timeout* seconds for it."""
     result: list[Any] = []
     errors: list[BaseException] = []
 
@@ -1643,9 +1630,9 @@ def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
 ) -> None:
     """GC finalizing an old manager mid-acquisition of ``.reset.lock`` must not hang.
 
-    The injected window matches the CI stack in #20: the new manager's
-    ``FileLock`` holds the OS lock but hasn't returned from ``_acquire``
-    when the old manager's ``weakref.finalize`` callback runs.
+    The new manager's ``FileLock`` holds the OS lock but is still inside
+    ``_acquire`` when the old manager's ``weakref.finalize`` callback runs.
+    The finalizer must return so acquisition can finish and release the lock.
     """
     cache_root, storage, loc = _single_shard_setup(tmp_path)
     mgr1 = _make_manager(cache_root, storage, [loc], persist_state=True)
@@ -1677,8 +1664,7 @@ def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
     monkeypatch.setattr(manager_mod, "FileLock", orig_filelock)
     try:
         assert not mgr1._close_finalizer.alive, "finalizer never ran in the window"
-        # mgr1's release was deferred, so mgr2 may have joined alongside it;
-        # once the deferred release lands, mgr2 is the only instance.
+        # Wait for queued cleanup to leave mgr2 as the only registered instance.
         _wait_for_instances(cache_root, owner_key, 1)
         assert mgr2.resolve(loc).cache_hit is True
         assert mgr2._shared is not None
@@ -1713,7 +1699,7 @@ def test_finalizers_defer_while_this_thread_holds_reset_lock(tmp_path: Path) -> 
             with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
                 for mgr in doomed:
                     mgr._close_finalizer()
-                # Nothing could be applied while the lock was held.
+                # No owner release can run while this lock is held.
                 assert _owner_instances(cache_root, owner_key) == 5
 
         _run_bounded(finalize_under_held_lock)
@@ -1780,12 +1766,14 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
 
     orig_release_locked = manager_mod._release_session_owner_locked
 
-    def release_with_nested_gc(session_path: Path, key: str) -> None:
+    def release_with_nested_gc(
+        session_path: Path, key: str, session_id: str | None
+    ) -> None:
         if inner._close_finalizer.alive:
             inner._close_finalizer()
-            # The inner release was queued, not applied.
+            # The inner owner remains counted while its release is queued.
             assert _owner_instances(cache_root, owner_key) == 3
-        orig_release_locked(session_path, key)
+        orig_release_locked(session_path, key, session_id)
 
     monkeypatch.setattr(
         manager_mod, "_release_session_owner_locked", release_with_nested_gc
@@ -1857,3 +1845,89 @@ def test_forked_child_does_not_inherit_deferred_releases(tmp_path: Path) -> None
     finally:
         survivor.close()
     assert _owner_instances(cache_root, owner_key) == 0
+
+
+@pytest.mark.parametrize("manager_kind", ["creator", "joiner"])
+@pytest.mark.parametrize("release_mode", ["close", "finalizer", "deferred"])
+def test_old_manager_release_preserves_replacement_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_kind: str,
+    release_mode: str,
+) -> None:
+    """Cleanup for a replaced session preserves the current owners and SHM."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    old = _make_manager(cache_root, storage, [loc], persist_state=True)
+    if manager_kind == "joiner":
+        creator = old
+        old = _make_manager(cache_root, storage, [loc], persist_state=True)
+        creator.close()
+    old.resolve(loc)
+    old_session = json.loads(old._session_path.read_text(encoding="utf-8"))
+    owner_key = old._owner_key
+    assert _owner_instances(cache_root, owner_key) == 1
+
+    # Missing SHM triggers a new session even though this process is still alive.
+    manager_mod.CacheSharedState.unlink_by_names(old_session["shm_names"])
+    release_done = threading.Event()
+    if release_mode == "deferred":
+        original_init = CacheManager._run_session_state_machine
+        original_release = manager_mod._release_session_owner
+
+        def init_with_pending_release(self: CacheManager) -> None:
+            # Initialization holds a different FileLock on the same path, so
+            # the finalizer queues its release before the session is replaced.
+            old._close_finalizer()
+            original_init(self)
+
+        def release_and_signal(
+            reset_lock: BaseFileLock,
+            session_path: Path,
+            key: str,
+            session_id: str | None,
+        ) -> None:
+            original_release(reset_lock, session_path, key, session_id)
+            if session_id == old_session["session_id"]:
+                release_done.set()
+
+        monkeypatch.setattr(
+            CacheManager, "_run_session_state_machine", init_with_pending_release
+        )
+        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
+
+    new: CacheManager | None = None
+    try:
+        new = _make_manager(cache_root, storage, [loc], persist_state=True)
+        if release_mode == "close":
+            old.close()
+        elif release_mode == "finalizer":
+            old._close_finalizer()
+        else:
+            assert release_done.wait(5.0), "deferred release did not finish"
+
+        assert not old._close_finalizer.alive
+        assert old._shared is not None
+        assert old._shared._closed
+        current = json.loads(new._session_path.read_text(encoding="utf-8"))
+        assert current["session_id"] != old_session["session_id"]
+        assert current["shm_names"] != old_session["shm_names"]
+        assert _owner_instances(cache_root, owner_key) == 1
+        assert all(_shm_exists(name) for name in current["shm_names"].values())
+        assert new.resolve(loc).cache_hit
+
+        # A peer joins the replacement session without rebuilding its state.
+        peer = _make_manager(cache_root, storage, [loc], persist_state=True)
+        try:
+            assert peer._shared is not None
+            assert peer._shared.shm_names == current["shm_names"]
+            assert _owner_instances(cache_root, owner_key) == 2
+        finally:
+            peer.close()
+        assert _owner_instances(cache_root, owner_key) == 1
+    finally:
+        old.close()
+        if new is not None:
+            new.close()
+
+    assert _owner_instances(cache_root, owner_key) == 0
+    assert all(not _shm_exists(name) for name in current["shm_names"].values())
