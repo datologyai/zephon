@@ -203,44 +203,41 @@ the closing responsibilities it carries.
 
 (reacting-to-source-exhaustion)=
 
-**Reacting to Source Exhaustion.** Custom accumulators can override
-`on_source_exhausted(lane_id, component_id)` to react when a dataset will supply no more
-source samples. The engine injects this notification at most once per lane stream and component,
-immediately after its last sample in the exhaustion chunk, or before the lane's next
-chunk if that chunk contains none of the component. A restored stream re-sends it at the
-same point: before the first replayed chunk if exhaustion came earlier, otherwise after
-the last source sample in the replayed exhaustion chunk. A lane with no chunk at or
-after exhaustion receives no notification; an operator must still close normally.
+**When a dataset runs out.** Suppose our operator holds back records from dataset B
+while waiting for more records from A. If A runs out, we may want to let B continue.
+Zephon reports this through an end-of-dataset (EOD) sentinel. Your accumulator can react
+by overriding `on_source_exhausted(lane_id, component_id)`; by default, it does nothing.
 
-This is a source fact, not a drain barrier. Any batching stage, including fetch and
-order-preserving maps, can let the notification overtake records buffered upstream.
-Handle later records according to the operator's explicit policy; the notification alone
-is not a reason to consider them invalid. Even the next observed flush is not a general
-drainage guarantee: the notification may pass a stalled batch flush while later chunks
-remain buffered upstream. The notification is permanent and is not
-re-sent after `flush(reset=True)`, so retain any exhaustion knowledge you need across
-resets. Reactions must be lane-scoped, idempotent, and deterministic given input order so
-replay reproduces them. Do not depend on the historical order of different components'
-exhaustion: replay may reconstruct several facts together from a stamp sorted by name.
-Return `ReadyBatch` values exactly as from `push_many`; the
-runner dispatches them through `process_many`. The default hook leaves buffers alone
-and returns no batches.
+This tells us something different from a change to the target mixture. The target says
+which proportions we want to produce. A curriculum might remove A for a while and bring
+it back later. An EOD sentinel says that A will supply no more source samples in this
+lane. That fact is permanent for the run, regardless of what the target mixture says.
 
-The notification itself closes no contributor offsets and never advances checkpoint
-delivery progress. If your hook drops buffered records, emit their tombstones with
-`tombstones_for_record` as for any other discard; those tombstones report source
-completion without claiming that buffered payloads have been delivered. Tombstones must
-be in **tombstone-only `ReadyBatch`es**, separate from data: runners route a batch according
-to its first element. This also applies to `push_many` and `flush`.
+For example, `ensure_mixture` can stop waiting for A and continue correcting the mixture
+of the remaining datasets. An EOD sentinel lets it do this before records carrying an
+updated target arrive. It also works when the operator has an explicit `mixture`
+override instead of following the source's target. It only relaxes the target for
+components listed in `WorkSource.continues_after_exhaustion()`. The built-in
+`StaticMixtureWorkSource` leaves this empty, so its stop and repeat policies keep their
+existing behavior. A custom operator can read the corresponding component ids from
+`ctx.get("continues_after_exhaustion", frozenset())` during setup or accumulator
+construction. Components outside that set can still send EOD sentinels; they do not
+cause `ensure_mixture` to relax its target.
 
-Operators that need the source's policy can read
-`ctx.get("continues_after_exhaustion", frozenset())` in `setup(OpContext)` or
-`accumulator(ctx=...)`. This static `frozenset[int]` contains the ids of components whose
-exhaustion the source can continue past, mapped from `WorkSource.continues_after_exhaustion()`.
-It defaults to empty. Notifications are delivered for every permanently exhausted
-component, including those outside this set; the set controls the operator's reaction.
-For example, `ensure_mixture` stops waiting only for components in this set. Keep any
-cross-call state in the accumulator, not in `process_many`.
+There is one catch: A can still have records buffered upstream, for example in a shuffle
+or packer. Those records may reach your operator after the sentinel, so you still need to
+decide how to handle them. `ensure_mixture` interleaves them with records from the remaining
+datasets. Its bounded mode preserves leftovers at flush, whereas strict mode drops them.
+Your operator may need a different policy, but it should not assume that receiving EOD
+means it has already seen every record from that dataset.
+
+As with other stateful behavior, keep this knowledge in the accumulator, separately for
+each lane. Remember exhausted components across `flush(reset=True)`, since the sentinel
+is not repeated after a reset. Make the reaction deterministic and safe to repeat so it
+also works after restoring a checkpoint. The hook returns `ReadyBatch` values just like
+`push_many`; if it drops records, use `tombstones_for_record` and return the tombstones in
+separate batches from data. Keep the usual `flush` handling too: EOD describes an
+individual dataset running out, rather than the whole pipeline finishing.
 
 **Operator validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and
