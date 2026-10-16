@@ -9,7 +9,7 @@ and stored. You can think of Vortex as a modern Parquet with fast random access.
 read more about the Vortex format's structure in the
 [project's documentation](https://docs.vortex.dev/).
 
-**Preparing Vortex Shards.** To use the Vortex format with Zephon, install the project
+**Preparing Vortex shards.** To use the Vortex format with Zephon, install the project
 with the `vortex` extra which includes the `vortex-data` dependency (note that Vortex
 requires Python >= 3.11):
 
@@ -43,7 +43,7 @@ without requiring Zephon to load each Vortex shard individually:
 :caption: examples/guide/datasets/vortex_index.sh
 ```
 
-**Reading Vortex Shards in Zephon.** Once the Vortex files have been written, you can
+**Reading Vortex shards in Zephon.** Once the Vortex files have been written, you can
 define a `Dataset` object by passing the dataset location and the `fmt="vortex"` argument
 to the `Dataset.from_path` function. Zephon will infer the format if `fmt` is not passed.
 You can then use the `DatasetInspector` to examine the decoded sample payloads:
@@ -61,7 +61,7 @@ Vortex structs return dictionaries keyed by field name, including single-field s
 Files containing bare values, such as strings or numeric lists, return those values
 directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
 
-**Caching Reads.** Zephon caches Vortex metadata and encoded file segments in memory to
+**Caching reads.** Zephon caches Vortex metadata and encoded file segments in memory to
 speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
 shard cache. You can adjust their sizes through the pipeline's `io_options`; these are
 the defaults:
@@ -79,7 +79,7 @@ Set either limit to zero to disable that cache. The metadata limit counts footer
 segment size is a memory target that Vortex can exceed. Decoded samples and other memory
 use are additional, so allow some headroom when planning memory usage.
 
-**Worker Threads.** Vortex uses a background thread pool shared by readers in the same
+**Worker threads.** Vortex uses a background thread pool shared by readers in the same
 process. Zephon defaults to one background worker to avoid multiplying thread counts
 across fetch processes and training ranks. Fetch threads can still read concurrently.
 You can change the pool size through the pipeline's `io_options`:

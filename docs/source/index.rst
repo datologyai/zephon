@@ -13,7 +13,7 @@ reference documents the public classes and functions that the guide refers to.
 
 .. toctree::
    :maxdepth: 2
-   :caption: User Guide
+   :caption: User guide
 
    basic_concepts
    why_zephon
@@ -24,7 +24,7 @@ reference documents the public classes and functions that the guide refers to.
 
 .. toctree::
    :maxdepth: 1
-   :caption: API Reference
+   :caption: API reference
 
    api/datasets
    api/worksources

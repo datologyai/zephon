@@ -1,4 +1,4 @@
-# Distributed Training
+# Distributed training
 
 Most of the examples in this user guide (well, probably all of them, now that I think
 about it) have used a single `Pipeline` feeding a single training loop. Real training runs
@@ -10,7 +10,7 @@ also have expert parallelism — EP). This page explains what Zephon needs to kn
 that division, how to derive this information from your training run's topology, and how
 to plan a run so that it can later be resumed on a different number of GPUs.
 
-**One Pipeline Per Rank.** Of all of the different ways that a training job can be
+**One pipeline per rank.** Of all of the different ways that a training job can be
 parallelized, the one that we care about the most from a Zephon perspective is the
 data-parallelism dimension. Each data-parallel group needs its own unique, non-overlapping
 slice of the training curriculum, while all of the ranks within the same data-parallel
@@ -28,7 +28,7 @@ in a distributed training job needs to know two pieces of information: its *data
 so it can determine which samples to produce, and its *coordination identity* so it can
 determine how to participate in the checkpointing process.
 
-**Data Identity: Which Samples To Produce.** The data identity of a `Pipeline` is
+**Data identity: which samples to produce.** The data identity of a `Pipeline` is
 defined via two options:
 
 1. the `dp_degree`, which is the number of independent data streams in the job, equivalent
@@ -67,7 +67,7 @@ and use its size and local rank as `dp_degree` and `dp_group_id`:
 Note that if you do not explicitly set `dp_degree` and `dp_group_id`, they will default to
 `world_size` and `global_rank`, which is correct for a job that only uses data parallelism.
 
-**Coordination Identity: Which Pipelines Checkpoint Together.** The coordination
+**Coordination identity: which pipelines checkpoint together.** The coordination
 identity of a `Pipeline` is defined by the `world_size` and `global_rank` options, and
 it describes the set of `Pipeline` instances that take checkpoints together. The
 `world_size` is simply the number of `Pipeline` instances that participate in each
@@ -122,13 +122,13 @@ which is set to three minutes by default) expires, and then the checkpoint opera
 fail. When the leader's `checkpoint()` call returns, every other instance has its copy of
 the checkpoint as well, so there's no need for a barrier afterwards. The details of when
 to take a checkpoint and how to restore it are covered in
-[Checkpointing and Resuming Pipelines](checkpointing_and_resuming.md).
+[Checkpointing and resuming pipelines](checkpointing_and_resuming.md).
 
 In many jobs, the coordination identity is simply the global rank and the world size of
 the training job itself. But it doesn't have to be set this way, and up next we explain
 why it might not be.
 
-**Choosing Which Ranks Build A Pipeline.** Because the peer ranks within a single
+**Choosing which ranks build a pipeline.** Because the peer ranks within a single
 data-parallel group all produce the same batches, a training job has a choice to make
 about which of these ranks need to build a `Pipeline` at all. There are two common
 strategies for doing this with different tradeoffs.
@@ -141,7 +141,7 @@ identical batches, but they never have to exchange data with each other. In prac
 redundant work is rarely a bottleneck, since the model training loop (including the
 forward and backward passes and any collective communication steps) tends to dominate the
 time of each training step. This is the approach that our TorchTitan integration takes, as
-discussed in [Training Integrations](../training_integrations.md).
+discussed in [Training integrations](../training_integrations.md).
 
 It is also possible to configure things such that only some of the ranks need to build a
 `Pipeline`. Some frameworks build each batch on one rank of a model-parallel group and
@@ -149,7 +149,7 @@ then broadcast it to the others, so only the ranks that actually load data need 
 `Pipeline`. In this situation, the coordination identity should describe only the
 instances that actually load data, since those are the only ones that need to participate
 in checkpoints. Our Megatron integration (see
-[Training Integrations](../training_integrations.md)) builds a `Pipeline` on
+[Training integrations](../training_integrations.md)) builds a `Pipeline` on
 tensor-parallel rank 0 of the model pipeline stage that consumes the batch, and only the
 first of these stages saves the data loader state, so exactly one `Pipeline` per
 data-parallel group participates in each checkpoint. It therefore uses the data-parallel
@@ -168,7 +168,7 @@ that call `checkpoint()` — no more, no less.
 
 (planning-for-elasticity)=
 
-**Planning For Elasticity.** Training runs don't always finish on the hardware that they
+**Planning for elasticity.** Training runs don't always finish on the hardware that they
 started on. A job that starts on 64 GPUs may need to be resumed on 32 after a
 preemption, or scaled up to 128 GPUs if more capacity is needed. Zephon supports this by
 dividing the training curriculum into a fixed number of logical data streams called
@@ -213,7 +213,7 @@ start of a run because they cannot be changed later.
    integrations check for this condition at startup and will raise an error if this
    doesn't hold.
 
-**Sharing a Node.** Because every rank that loads data will need to run its own
+**Sharing a node.** Because every rank that loads data will need to run its own
 `Pipeline`, keep in mind that a node that has 8 GPUs will be running 8 independent
 `Pipeline` instances, each with its own memory buffers and workers for fetching and
 transforming data. These instances may end up competing with each other (and with the

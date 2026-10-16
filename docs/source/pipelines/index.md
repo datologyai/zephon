@@ -1,4 +1,4 @@
-# Pipelines: From a Curriculum to Training Batches
+# Pipelines: from a curriculum to training batches
 
 A `Pipeline` turns the curriculum defined by a `WorkSource` into the batches of tensors
 that are consumed by your training loop. It fetches the underlying records defined in the
@@ -30,7 +30,7 @@ pipeline might look something like this:
 
 This kind of simple pipeline definition is appropriate when the data you are training on
 has mostly been prepared offline. The `batch` operator groups records into `SampleBatch`
-objects, which [Building Training Batches](building_training_batches.md) shows how to
+objects, which [Building training batches](building_training_batches.md) shows how to
 convert into tensors for your model.
 
 Most training frameworks are happy to consume data from any kind of Python iterable, like

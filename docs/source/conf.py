@@ -11,6 +11,7 @@ from pathlib import Path
 # This file lives at docs/source/conf.py, so project root is two levels up.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "_ext"))
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
@@ -30,6 +31,8 @@ extensions = [
     "sphinx.ext.intersphinx",
     "myst_parser",
     "sphinx_copybutton",
+    # Local: page-local contents from `**Lead-in.**` paragraphs (docs/source/_ext).
+    "leadin_toc",
 ]
 
 templates_path = ["_templates"]
