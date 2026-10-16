@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import signal
 import threading
 import time
 import weakref
@@ -1760,6 +1761,47 @@ def test_close_waits_for_reset_lock_under_contention(tmp_path: Path) -> None:
     assert _owner_instances(cache_root, owner_key) == 0
 
 
+def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC firing a second finalizer mid-release must defer, not deadlock.
+
+    The outer finalizer holds ``.reset.lock`` while it rewrites
+    ``session.json``; an allocation there can collect another manager,
+    whose finalizer then finds the lock held by this same thread.
+    """
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    outer = _make_manager(cache_root, storage, [loc], persist_state=True)
+    inner = _make_manager(cache_root, storage, [loc], persist_state=True)
+    owner_key = survivor._owner_key
+    assert _owner_instances(cache_root, owner_key) == 3
+
+    orig_release_locked = manager_mod._release_session_owner_locked
+
+    def release_with_nested_gc(session_path: Path, key: str) -> None:
+        if inner._close_finalizer.alive:
+            inner._close_finalizer()
+            # The inner release was queued, not applied.
+            assert _owner_instances(cache_root, owner_key) == 3
+        orig_release_locked(session_path, key)
+
+    monkeypatch.setattr(
+        manager_mod, "_release_session_owner_locked", release_with_nested_gc
+    )
+    try:
+        _run_bounded(outer._close_finalizer)
+        assert not outer._close_finalizer.alive
+        assert not inner._close_finalizer.alive
+        _wait_for_instances(cache_root, owner_key, 1)
+        assert survivor._shared is not None
+        assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
+    finally:
+        survivor.close()
+    assert _owner_instances(cache_root, owner_key) == 0
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
 def test_forked_child_does_not_inherit_deferred_releases(tmp_path: Path) -> None:
     """A child must not replay a parent's queued release against live owners."""
@@ -1793,9 +1835,17 @@ def test_forked_child_does_not_inherit_deferred_releases(tmp_path: Path) -> None
                 os._exit(0)
 
             os.close(write_fd)
-            try:
-                child_pending = os.read(read_fd, 64).decode()
+
+            def read_child_result() -> tuple[str, int]:
+                pending = os.read(read_fd, 64).decode()
                 _, status = os.waitpid(child_pid, 0)
+                return pending, status
+
+            try:
+                child_pending, status = _run_bounded(read_child_result)
+            except AssertionError:
+                os.kill(child_pid, signal.SIGKILL)
+                raise
             finally:
                 os.close(read_fd)
         assert os.waitstatus_to_exitcode(status) == 0
