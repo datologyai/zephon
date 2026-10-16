@@ -26,7 +26,9 @@ def _drop_short_child(payload: dict[str, Any]) -> dict[str, Any] | None:
     return payload if len(payload["input_ids"]) == 8 else None
 
 
-@pytest.mark.parametrize("source_exhaustion", [False, True], ids=["repeat", "eod"])
+@pytest.mark.parametrize(
+    "source_exhaustion", [False, True], ids=["repeat", "source-exhaustion"]
+)
 @pytest.mark.parametrize(
     ("monotone", "batched", "runner", "mtp_mode"),
     [
@@ -58,6 +60,7 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
             chunk_size=1,
             seed=3,
             exhausted_policy="stop" if source_exhaustion else "repeat",
+            stop_after_passes=None if source_exhaustion else 1,
         )
         pipe = Pipeline(work)
         if monotone:

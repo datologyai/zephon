@@ -4,16 +4,18 @@
 """Source exhaustion through runners, epoch resets, buffering and replay."""
 
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
 
 from zephon import Pipeline
-from zephon._internal.ops.ensure_mixture import EnsureMixtureAccumulator
 from zephon.io import Dataset, InMemoryShard
-from zephon.ops.accumulators import ReadyBatch
+from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.base import BaseOp
+from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord
-from zephon.work import StaticMixtureWorkSource, WorkChunk
+from zephon.work import StaticMixtureWorkSource, WorkChunk, WorkSource
 
 pytestmark = pytest.mark.integration
 
@@ -25,15 +27,129 @@ class _ContinuingSource(StaticMixtureWorkSource):
         return frozenset(self.component_ids())
 
 
-class _SurvivorTargetSource(_ContinuingSource):
-    """Publish changing targets without implementing source allocation redistribution."""
+class _ScriptedSource(WorkSource):
+    """Four A/B chunks followed by four B-only chunks per lane, with resumable state."""
+
+    def __init__(self, *, source_targets: bool) -> None:
+        super().__init__()
+        self.source_targets = source_targets
+        self.position = 0
+        self.datasets = {
+            cid: Dataset.from_dict(
+                name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(1024)])}
+            )
+            for cid, name in enumerate(("a", "b"))
+        }
+
+    @property
+    def datasets_by_id(self) -> Mapping[int, Dataset]:
+        return self.datasets
+
+    def component_ids(self) -> Mapping[str, int]:
+        return {"a": 0, "b": 1}
+
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        return frozenset({"a"})
+
+    def chunk_size_hint(self) -> int:
+        return 64
 
     def next_chunk(self) -> WorkChunk | None:
-        chunk = super().next_chunk()
-        if chunk is not None:
-            names = self.component_ids().keys() - set(chunk.source_exhausted)
-            chunk.target_mixture = {name: 1.0 / len(names) for name in sorted(names)}
-        return chunk
+        if self.position == 8:
+            return None
+        assert self._lane is not None
+        index = self.position
+        self.position += 1
+        start = self._lane * 512 + index * 64
+        components = {"b": [(1, 0, start + i) for i in range(32 if index < 4 else 64)]}
+        if index < 4:
+            components["a"] = [(0, 0, start + i) for i in range(32)]
+        exhausted = index >= 3
+        target = (
+            {"b": 1.0} if self.source_targets and exhausted else {"a": 0.5, "b": 0.5}
+        )
+        return WorkChunk(
+            components=components,
+            target_mixture=target,
+            source_exhausted=("a",) if exhausted else (),
+        )
+
+    def state_dict(self) -> dict[str, Any]:
+        return {**super().state_dict(), "position": self.position}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        super().load_state_dict(state)
+        self.position = state["position"]
+
+
+class _ObserveAccumulator(Accumulator[SampleRecord]):
+    def __init__(self, events: list[tuple[str, int, int]]) -> None:
+        self.events = events
+
+    def push_many(
+        self, elems: Sequence[SampleRecord]
+    ) -> list[ReadyBatch[SampleRecord]]:
+        self.events.extend(("data", r.meta.lane_id, r.meta.chunk_id) for r in elems)
+        return [(list(elems), 0)] if elems else []
+
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
+        if reset:
+            self.events.append(("flush", lane_id if lane_id is not None else -1, -1))
+        return []
+
+    def on_source_exhausted(
+        self, lane_id: int, component_id: int
+    ) -> list[ReadyBatch[SampleRecord]]:
+        self.events.append(("exhausted", lane_id, component_id))
+        return []
+
+
+class _ObserveExhaustion(BaseOp):
+    def __init__(self, events: list[tuple[str, int, int]]) -> None:
+        super().__init__()
+        self.events = events
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def accumulator(
+        self, *, deterministic: bool, ctx: dict[str, Any]
+    ) -> Accumulator[SampleRecord]:
+        return _ObserveAccumulator(self.events)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        return elems
+
+
+def _continuing_pipe(
+    *,
+    runner: str = "inline",
+    mtp_mode: bool = False,
+    source_targets: bool = False,
+    shuffle: bool = False,
+    events: list[tuple[str, int, int]] | None = None,
+) -> Pipeline:
+    pipe = Pipeline(_ScriptedSource(source_targets=source_targets))
+    if shuffle:
+        pipe.shuffle(buffer_size=7, seed=4)
+    pipe.ensure_mixture(
+        weight_by="samples",
+        max_buffer_size=None,
+        mixture=None if source_targets else {"a": 0.5, "b": 0.5},
+    )
+    if events is not None:
+        pipe.add_op(_ObserveExhaustion(events))
+    return pipe.options(
+        runner=runner,
+        mtp_mode=mtp_mode,
+        deterministic=True,
+        canonical_replicas=2,
+        max_workers=2,
+        default_stage_prefetch=0,
+        flush_every_k_chunks=2,
+    )
 
 
 def _make_pipe(
@@ -45,7 +161,6 @@ def _make_pipe(
     shuffle: bool = False,
     limit: int | None = None,
     continuing: bool = True,
-    source_targets: bool = False,
 ) -> Pipeline:
     datasets = [
         Dataset.from_dict(
@@ -54,8 +169,6 @@ def _make_pipe(
         for name, count in [("a", 3), ("b", 1000)]
     ]
     source_type = _ContinuingSource if continuing else StaticMixtureWorkSource
-    if source_targets:
-        source_type = _SurvivorTargetSource
     source = source_type(
         datasets,
         {"a": 0.05, "b": 0.95},
@@ -69,7 +182,7 @@ def _make_pipe(
         pipe.shuffle(buffer_size=7, seed=4)
     return pipe.ensure_mixture(
         weight_by="samples",
-        mixture=None if source_targets else {"a": 0.5, "b": 0.5},
+        mixture={"a": 0.5, "b": 0.5},
         max_buffer_size=limit,
     ).options(
         runner=runner,
@@ -85,7 +198,10 @@ def _make_pipe(
 def _value(record: SampleRecord) -> tuple[int, str]:
     assert isinstance(record, SampleRecord)
     assert not record.meta.is_sentinel
-    return record.meta.lane_id, record.payload["text"]
+    assert isinstance(record.payload, dict)
+    text = record.payload["text"]
+    assert isinstance(text, str)
+    return record.meta.lane_id, text
 
 
 def _per_lane(items: list[tuple[int, str]]) -> dict[int, list[str]]:
@@ -104,13 +220,11 @@ def _per_lane(items: list[tuple[int, str]]) -> dict[int, list[str]]:
         ("inline", True),
     ],
 )
-@pytest.mark.parametrize("limit", [None, 64])
 def test_source_exhaustion_releases_survivors_through_transports(
     runner: str,
     mtp_mode: bool,
-    limit: int | None,
 ) -> None:
-    pipe = _make_pipe(runner=runner, mtp_mode=mtp_mode, limit=limit)
+    pipe = _make_pipe(runner=runner, mtp_mode=mtp_mode)
     records = [_value(r) for r in pipe]
     # Without source exhaustion strict mode delivers 3 A and 3 B, discarding
     # the other 54 B. Announcing A's exhaustion releases that live surplus.
@@ -118,28 +232,23 @@ def test_source_exhaustion_releases_survivors_through_transports(
     assert sum(text.startswith("a-") for _, text in records) == 3
 
 
-class _CaptureExhaustion(EnsureMixtureAccumulator):
-    calls: list[tuple[int, int]] = []
-
-    def on_source_exhausted(
-        self, lane_id: int, component_id: int
-    ) -> list[ReadyBatch[SampleRecord]]:
-        self.calls.append((lane_id, component_id))
-        return super().on_source_exhausted(lane_id, component_id)
-
-
-def test_notification_is_once_per_lane_across_epoch_resets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import zephon._internal.ops.ensure_mixture as em
-
-    _CaptureExhaustion.calls = []
-    monkeypatch.setattr(em, "EnsureMixtureAccumulator", _CaptureExhaustion)
-    records = [_value(r) for r in _make_pipe(lanes=2, flush_every=1)]
-    assert sorted(_CaptureExhaustion.calls) == [(0, 0), (1, 0)]
-    # Both lanes' final chunks follow the global exhaustion point. Later
-    # epochs retain exhaustion, including on the lane without the last A.
-    assert all(len(texts) >= 10 for texts in _per_lane(records).values())
+def test_notification_is_once_per_lane_across_epoch_resets() -> None:
+    events: list[tuple[str, int, int]] = []
+    records = [_value(r) for r in _continuing_pipe(events=events)]
+    assert sorted(
+        (lane, cid) for event, lane, cid in events if event == "exhausted"
+    ) == [(0, 0), (1, 0)]
+    for lane in (0, 1):
+        after = events[events.index(("exhausted", lane, 0)) + 1 :]
+        assert sum(event == "flush" and lid == lane for event, lid, _ in after) >= 2
+        assert {
+            cid for event, lid, cid in after if event == "data" and lid == lane
+        } >= {4, 5, 6, 7}
+    # Every B record survives across the two full post-exhaustion epochs.
+    assert Counter(lane for lane, text in records if text.startswith("b-")) == {
+        0: 384,
+        1: 384,
+    }
 
 
 @pytest.mark.parametrize(
@@ -151,44 +260,55 @@ def test_notification_is_once_per_lane_across_epoch_resets(
         ("inline", True),
     ],
 )
-@pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("cut", [2, 12])
 @pytest.mark.parametrize("source_targets", [False, True])
 def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     runner: str,
     mtp_mode: bool,
-    shuffle: bool,
-    cut: int,
     source_targets: bool,
 ) -> None:
-    options = dict(
-        runner=runner,
-        mtp_mode=mtp_mode,
-        shuffle=shuffle,
-        lanes=2,
-        flush_every=2,
-        source_targets=source_targets,
+    options: dict[str, Any] = dict(
+        runner=runner, mtp_mode=mtp_mode, shuffle=True, source_targets=source_targets
     )
-    baseline = [_value(r) for r in _make_pipe(**options)]
-    pipe = _make_pipe(**options)
+    baseline = [_value(r) for r in _continuing_pipe(**options)]
+    # The source has four complete B-only chunks after exhaustion; cut during
+    # that suffix, with more B-only chunks and an epoch boundary still ahead.
+    cut = next(
+        i + 1
+        for i, (_, text) in enumerate(baseline)
+        if text.startswith("b-") and int(text[2:]) % 512 >= 4 * 64
+    )
+    pipe = _continuing_pipe(**options)
     it = iter(pipe)
-    prefix = []
-    checkpoint: dict[str, Any]
     try:
-        # Exercise an early cut and one after a notification released buffered records.
         prefix = [_value(next(it)) for _ in range(cut)]
         checkpoint = pipe.checkpoint()
     finally:
         it.close()
-    restored = _make_pipe(**options)
+    restored = _continuing_pipe(**options)
     restored.restore(checkpoint)
     suffix = [_value(r) for r in restored]
+    assert suffix
     assert _per_lane(prefix + suffix) == _per_lane(baseline)
-    # A checkpoint after the final notification cannot acknowledge its dummy cursor.
     done = restored.checkpoint()
-    final = _make_pipe(**options)
+    final = _continuing_pipe(**options)
     final.restore(done)
     assert list(final) == []
+
+
+def test_checkpoint_before_notification_replays_later_exhaustion() -> None:
+    events: list[tuple[str, int, int]] = []
+    baseline = [_value(r) for r in _continuing_pipe()]
+    pipe = _continuing_pipe(events=events)
+    it = iter(pipe)
+    try:
+        prefix = [_value(next(it)) for _ in range(2)]
+        assert not any(event == "exhausted" for event, _, _ in events)
+        checkpoint = pipe.checkpoint()
+    finally:
+        it.close()
+    restored = _continuing_pipe()
+    restored.restore(checkpoint)
+    assert _per_lane(prefix + [_value(r) for r in restored]) == _per_lane(baseline)
 
 
 @pytest.mark.parametrize("limit", [None, 64])

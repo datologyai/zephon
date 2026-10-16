@@ -21,13 +21,6 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
-    # Observe per-lane exhaustion delivery to the real mixture accumulator.
-    "tests/integration/test_source_exhaustion.py": frozenset(
-        {
-            "zephon._internal.ops.ensure_mixture:EnsureMixtureAccumulator",
-            "zephon._internal.ops.ensure_mixture",
-        }
-    ),
     # In-memory backends keep index tests independent of cloud services.
     "tests/helpers/storage.py": frozenset(
         {"zephon._internal.io.storage:StorageBackend"}
