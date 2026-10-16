@@ -755,13 +755,6 @@ def _aggregate_worker(
             ckpt = pipe.checkpoint()
             ckpt_q.put((rank, ckpt))
         finally:
-            # Re-wait on ckpt_barrier as a done-barrier: without it the
-            # leader can exit and trigger Engine.__del__ -> _clean_merged
-            # (deleting merged_<rid>.ckpt) before followers read it.
-            try:
-                ckpt_barrier.wait(timeout=60.0)
-            except Exception:
-                pass
             try:
                 it.close()
             except Exception:

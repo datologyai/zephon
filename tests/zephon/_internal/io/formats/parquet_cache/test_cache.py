@@ -374,7 +374,7 @@ def test_thrashing_warns_once_per_participant_after_node_wide_eviction(
     assert all("thrashing across this node" in message for message in warnings)
     assert all("had previously been evicted" in message for message in warnings)
     assert all(
-        "io_options.parquet_rg_cache.limit_bytes" in message for message in warnings
+        "io_options.parquet.rg_cache.limit_bytes" in message for message in warnings
     )
     assert first_stats["reloads"] >= 1
     assert first_stats["thrash_warned"] == 1

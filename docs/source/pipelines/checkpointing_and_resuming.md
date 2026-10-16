@@ -96,10 +96,11 @@ checkpoint actually contains and how a restore rebuilds operator state from it.
 **Checkpointing in distributed training jobs.** In distributed training, each rank sees
 only a portion of the overall job's data loading progress, so Zephon combines the progress
 of every participating `Pipeline` into a single checkpoint. For this to work, each
-`Pipeline` needs a coordination identity along with a shared `aggregate_dir` and `run_id`,
-as described in [Distributed training](distributed_training.md). The aggregation directory
-is only used while a checkpoint is being assembled, and you don't need to keep the
-directory around in order to resume a run from the checkpoint later.
+`Pipeline` needs a coordination identity along with a shared `aggregate_dir` (or an
+`aggregate_store`, such as torchrun's TCPStore) and a `run_id`, as described in
+[Distributed training](distributed_training.md). The aggregation directory or store is
+only used while a checkpoint is being assembled, and you don't need to keep it around in
+order to resume a run from the checkpoint later.
 
 Every `Pipeline` that is counted in the `world_size` must call `checkpoint()` at the same
 training step, even though only one of them (the `Pipeline` that has `global_rank=0`) will

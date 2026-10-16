@@ -57,7 +57,7 @@ class ParquetCacheRuntime:
 
 
 def _resolved_cache_root(options: StoreOptions) -> tuple[Path, bool]:
-    configured = options.parquet_rg_cache.root
+    configured = options.parquet.rg_cache.root
     if configured is None:
         raw_root = Path(options.cache.root).expanduser().resolve()
         return raw_root / PARQUET_RG_CACHE_SUBDIR, False
@@ -70,7 +70,7 @@ def _resolved_cache_root(options: StoreOptions) -> tuple[Path, bool]:
             or raw_root in decoded_root.parents
         ):
             raise ValueError(
-                "Custom parquet_rg_cache.root must not equal, contain, or be contained "
+                "Custom parquet.rg_cache.root must not equal, contain, or be contained "
                 + f"by the raw cache root ({raw_root}); omit it to use the reserved "
                 + f"{PARQUET_RG_CACHE_SUBDIR} child"
             )
@@ -100,17 +100,28 @@ def build_parquet_cache_runtime(
     """Build the cache and shared opener used by one multi-dataset store."""
     global _legacy_environment_warned
 
+    entries = options.metadata_cache_entries
     decoded = options.resolved_parquet_rg_cache()
     if decoded.enabled is not True or catalog_set is None:
         return ParquetCacheRuntime(
-            opener=ParquetShardOpener(decoded_cache=None, index=None),
+            opener=ParquetShardOpener(
+                decoded_cache=None,
+                index=None,
+                metadata_cache_entries=entries,
+                use_threads=options.parquet.use_threads,
+            ),
             cache=None,
         )
 
     index = ParquetRGIndex(catalog_set)
     if index.num_row_groups == 0:
         return ParquetCacheRuntime(
-            opener=ParquetShardOpener(decoded_cache=None, index=None),
+            opener=ParquetShardOpener(
+                decoded_cache=None,
+                index=None,
+                metadata_cache_entries=entries,
+                use_threads=options.parquet.use_threads,
+            ),
             cache=None,
         )
 
@@ -119,7 +130,7 @@ def build_parquet_cache_runtime(
         _legacy_environment_warned = True
         logger.warning(
             "ZEPHON_PARQUET_RG_CACHE_BYTES is obsolete and ignored; configure "
-            "parquet_rg_cache.limit_bytes for the node-wide on-disk cache."
+            "parquet.rg_cache.limit_bytes for the node-wide on-disk cache."
         )
 
     root, is_custom = _resolved_cache_root(options)
@@ -161,7 +172,12 @@ def build_parquet_cache_runtime(
         index = None
 
     return ParquetCacheRuntime(
-        opener=ParquetShardOpener(decoded_cache=cache, index=index),
+        opener=ParquetShardOpener(
+            decoded_cache=cache,
+            index=index,
+            metadata_cache_entries=entries,
+            use_threads=options.parquet.use_threads,
+        ),
         cache=cache,
     )
 

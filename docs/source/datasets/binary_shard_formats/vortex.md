@@ -56,3 +56,34 @@ You can then use the `DatasetInspector` to examine the decoded sample payloads:
 Note that Vortex handles compression operations within the file format itself, so Zephon
 reads the `.vortex` files directly without requiring an extra, decompressed copy of the
 shard to be created.
+
+Vortex structs return dictionaries keyed by field name, including single-field structs.
+Files containing bare values, such as strings or numeric lists, return those values
+directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
+
+**Caching reads.** Zephon caches Vortex metadata and encoded file segments in memory to
+speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
+shard cache. You can adjust their sizes through the pipeline's `io_options`; these are
+the defaults:
+
+```python
+pipeline.options(
+    io_options={
+        "metadata_cache_entries": 256,
+        "vortex": {"segment_cache_bytes": "64mb"},
+    }
+)
+```
+
+Set either limit to zero to disable that cache. The metadata limit counts footers; the
+segment size is a memory target that Vortex can exceed. Decoded samples and other memory
+use are additional, so allow some headroom when planning memory usage.
+
+**Worker threads.** Vortex uses a background thread pool shared by readers in the same
+process. Zephon defaults to one background worker to avoid multiplying thread counts
+across fetch processes and training ranks. Fetch threads can still read concurrently.
+You can change the pool size through the pipeline's `io_options`:
+
+```python
+pipeline.options(io_options={"vortex": {"worker_threads": 1}})
+```

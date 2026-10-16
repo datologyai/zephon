@@ -97,8 +97,11 @@ EXPECTED_ALL = {
         "CacheOptions",
         "Dataset",
         "InMemoryShard",
+        "ArrowOptions",
+        "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
+        "VortexOptions",
     ],
     "zephon.types": [
         "ChunkId",
@@ -179,8 +182,11 @@ EXPECTED_ALL = {
     ],
     "zephon.io.options": [
         "CacheOptions",
+        "ArrowOptions",
+        "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
+        "VortexOptions",
         "parse_size_bytes",
     ],
     "zephon.observability.config": [

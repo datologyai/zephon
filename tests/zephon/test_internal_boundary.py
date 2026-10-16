@@ -21,6 +21,25 @@ _FORBIDDEN = re.compile(
 
 # Exact direct imports allowed outside the mirrored internal test tree.
 _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
+    # In-memory backends keep index tests independent of cloud services.
+    "tests/helpers/storage.py": frozenset(
+        {"zephon._internal.io.storage:StorageBackend"}
+    ),
+    # Shared-storage and lazy-payload checks exercise real process transport.
+    "tests/integration/test_process_payload_memory.py": frozenset(
+        {
+            "zephon._internal.graph:Node",
+            "zephon._internal.graph:Stage",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.runners.process:ProcessStageRunner",
+            "zephon._internal.runners:process",
+            "zephon._internal.stream:resolve_lazy_payloads",
+            "zephon._internal.utils.shm_coalesce:PayloadMemoryPolicy",
+            "zephon._internal.utils.shm_coalesce:_ShmBytes",
+            "zephon._internal.utils.shm_coalesce:_shared_numpy_storage",
+            "zephon._internal.utils.shm_coalesce:prepare_microbatch",
+        }
+    ),
     # Control-service crash/startup tests require real internal runners and stages.
     "tests/integration/test_process_control_services.py": frozenset(
         {
@@ -46,6 +65,38 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.catalog:io",
             "zephon._internal.io.catalog.builder:pack_locators",
             "zephon._internal.io.types:ShardLocator",
+        }
+    ),
+    # Engine fixtures shared by engine unit tests and coordination integration.
+    "tests/helpers/engine.py": frozenset(
+        {
+            "zephon._internal.engine:Engine",
+            "zephon._internal.graph:Graph",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.planner:Planner",
+            "zephon._internal.runtime_spec:resolve_runtime_spec",
+            "zephon._internal.stream:LanePtr",
+        }
+    ),
+    # In-memory fake for the internal checkpoint key-value store interface.
+    "tests/helpers/kvstore.py": frozenset({"zephon._internal.kvstore:KVStore"}),
+    # Checkpoint coordinators over real TCPStore processes and the engine merge.
+    "tests/integration/test_kv_coordination.py": frozenset(
+        {
+            "zephon._internal.checkpoint:AggregationCodec",
+            "zephon._internal.coordination:AggregationRound",
+            "zephon._internal.coordination:FileCoordinator",
+            "zephon._internal.coordination:KVCoordinator",
+            "zephon._internal.coordination:RoundCoordinator",
+            "zephon._internal.coordination:make_coordinator",
+        }
+    ),
+    # TorchKVStore and chunked values against real in-process TCPStore servers.
+    "tests/integration/test_torch_kv_store.py": frozenset(
+        {
+            "zephon._internal.kvstore:TorchKVStore",
+            "zephon._internal.kvstore:read_staged_value",
+            "zephon._internal.kvstore:stage_value",
         }
     ),
     # Persisted LitData fixtures need the internal index treespec representation.
@@ -79,6 +130,14 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.prefetch:PrefetchOp",
         }
     ),
+    # Inspect native thread pools inside real fetch workers after reader setup.
+    "tests/integration/test_reader_options.py": frozenset(
+        {
+            "zephon._internal:pipeline",
+            "zephon._internal.ops.fetch:FetchOp",
+            "zephon._internal.stream:EngineSample",
+        }
+    ),
     # The standalone op is an independent oracle for the pipeline path.
     "tests/integration/test_tokenize_chat_pipeline.py": frozenset(
         {"zephon._internal.ops.tokenize_chat:TokenizeChat"}
@@ -102,6 +161,19 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     # Internal retry constants make SHM exhaustion deterministic.
     "tests/integration/test_shm_backpressure.py": frozenset(
         {"zephon._internal.utils.shm"}
+    ),
+    # Verify native cache sharing and deterministic eviction recovery across the store.
+    "tests/integration/test_vortex_integration.py": frozenset(
+        {
+            "zephon._internal.io.formats.vortex:VortexFormat",
+            "zephon._internal.io.resolvers.base:ShardResolver",
+            "zephon._internal.io.stores.multi:build_multi_dataset_store",
+            "zephon._internal.io.stores.resilient:ResilientShard",
+            "zephon._internal.io.types:LocalShardFile",
+            "zephon._internal.io.types:LocalShardRef",
+            "zephon._internal.io.types:ShardFile",
+            "zephon._internal.io.types:ShardLocator",
+        }
     ),
     # Inspector lifecycle coverage verifies its internal cache owner is closed.
     "tests/zephon/debug/test_inspector.py": frozenset(

@@ -479,15 +479,18 @@ class TestParquetMetadataLifecycle:
 
         assert calls == 0
 
+    @pytest.mark.parametrize("metadata_entries", [0, 1])
     def test_parquet_misses_reuse_lazily_loaded_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        metadata_entries: int,
     ) -> None:
         local_ref, locator = _metadata_lifecycle_refs(tmp_path)
         opener = ParquetShardOpener(
             decoded_cache=None,
             index=None,
+            metadata_cache_entries=metadata_entries,
         )
         calls = 0
         read_metadata = pq.read_metadata
@@ -500,10 +503,38 @@ class TestParquetMetadataLifecycle:
         monkeypatch.setattr(pq, "read_metadata", counting_read_metadata)
         first = opener.open_shard(locator, local_ref)
         first.getsamples([0])
+        first.close()
+        path = local_ref.raw.path
+        replacement = path.with_suffix(".replacement")
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
         second = opener.open_shard(locator, local_ref)
         second.getsamples([1])
+        second.close()
 
-        assert calls == 1
+        assert calls == (1 if metadata_entries else 2)
+
+
+def test_single_column_samples_survive_close(tmp_path: Path) -> None:
+    import numpy as np
+
+    path = tmp_path / "tokens.parquet"
+    array = pa.array([[1, 2], None, [], [3]], type=pa.list_(pa.uint32()))
+    pq.write_table(pa.table({"tokens": array}), path, row_group_size=2)
+    shard = ParquetShard(path, [{"num_rows": 2}, {"num_rows": 2}])
+    try:
+        single = shard[0]
+        rows = shard.getsamples([3, 1, 0, 3, 2])
+    finally:
+        shard.close()
+    assert single["tokens"].tolist() == [1, 2]
+    assert rows[1] == {"tokens": None}
+    for row, expected in zip(
+        (rows[0], rows[2], rows[3], rows[4]), ([3], [1, 2], [3], []), strict=True
+    ):
+        assert row["tokens"].dtype == np.uint32
+        assert not row["tokens"].flags.writeable
+        assert row["tokens"].tolist() == expected
 
 
 def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
@@ -545,8 +576,7 @@ def test_roundtrip_through_parquet_with_fixed_size_list(tmp_path: Path) -> None:
 
 
 def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
-    """Take-based decode keeps variable-length list cells as writable numpy
-    arrays (not Python lists), including across a row-group boundary."""
+    """Variable-length numeric lists return read-only arrays across row groups."""
     import numpy as np
 
     list_arr = pa.array(
@@ -569,7 +599,7 @@ def test_shard_variable_list_preserves_numpy_via_take(tmp_path):
     row = shard[1]
     assert isinstance(row["tok"], np.ndarray)
     assert row["tok"].dtype == np.int64
-    assert row["tok"].flags.writeable  # Materialization copies list cells
+    assert not row["tok"].flags.writeable
     np.testing.assert_array_equal(row["tok"], [3, 4, 5])
 
     # getsamples spanning both row groups, arbitrary order.

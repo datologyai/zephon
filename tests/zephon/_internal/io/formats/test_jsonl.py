@@ -48,7 +48,7 @@ def test_jsonl_create_index(tmp_path: Path) -> None:
     _write_jsonl(tmp_path / "a.jsonl", [{"i": 0}])
 
     result = JsonlIndexBuilder().create_index(tmp_path, progress=False)
-    data = json.loads(result.read_text(encoding="utf-8"))
+    data = json.loads(Path(result).read_text(encoding="utf-8"))
 
     assert data["format_version"] == 1
     assert [shard["basename"] for shard in data["shards"]] == [
@@ -434,7 +434,7 @@ def test_jsonl_index_rescans_invalid_compressed_raw_size(
 ) -> None:
     """Incomplete compression metadata must not bypass file discovery."""
     _write_compressed_jsonl(tmp_path / "a.jsonl.gz", [{"i": 0}], "gzip")
-    index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    index_path = Path(JsonlIndexBuilder().create_index(tmp_path, progress=False))
     data = json.loads(index_path.read_text(encoding="utf-8"))
     if raw_size is None:
         del data["shards"][0]["extra"]["raw_bytes"]
@@ -468,7 +468,7 @@ def test_jsonl_index_rescans_invalid_metadata(
     tmp_path: Path, invalid_fields: dict[str, object]
 ) -> None:
     _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}, {"i": 1}])
-    index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+    index_path = Path(JsonlIndexBuilder().create_index(tmp_path, progress=False))
     data = json.loads(index_path.read_text(encoding="utf-8"))
     data["shards"][0].update({"num_rows": 99, **invalid_fields})
     index_path.write_text(json.dumps(data), encoding="utf-8")
@@ -497,7 +497,7 @@ def test_jsonl_index_rescans_invalid_shard_containers(
 def test_jsonl_counts_probe_each_index_once(tmp_path: Path, index_state: str) -> None:
     _write_jsonl(tmp_path / "data.jsonl", [{"i": 0}])
     if index_state != "missing":
-        index_path = JsonlIndexBuilder().create_index(tmp_path, progress=False)
+        index_path = Path(JsonlIndexBuilder().create_index(tmp_path, progress=False))
         if index_state == "invalid":
             data = json.loads(index_path.read_text(encoding="utf-8"))
             del data["shards"][0]["num_rows"]

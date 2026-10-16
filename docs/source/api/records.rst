@@ -31,14 +31,17 @@ operator and payload signatures.
    only breaks ties.
 
 .. py:data:: SampleNumeric
-   :type: int | float | complex
+   :type: int | float | complex | _NumpyNumber
 
-   The numeric types a payload may hold.
+   The numeric types a payload may hold, including NumPy scalars.
+   ``_NumpyNumber`` denotes ``numpy.number[Any]``.
 
 .. py:data:: SamplePayloadAtom
-   :type: bytes | memoryview | str | SampleNumeric | SamplePayloadArray
+   :type: bytes | memoryview | str | SampleNumeric | _NumpyTemporal | SamplePayloadArray | None
 
    A payload leaf: anything that is not a list or a dict of further payloads.
+   ``_NumpyTemporal`` denotes ``numpy.datetime64 | numpy.timedelta64``;
+   ``None`` represents a null value.
 
 .. py:data:: SamplePayload
    :type: SamplePayloadAtom | list[SamplePayload] | dict[Any, SamplePayload]

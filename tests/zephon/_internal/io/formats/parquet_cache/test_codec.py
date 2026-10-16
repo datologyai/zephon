@@ -65,9 +65,13 @@ def test_exact_measure_stream_write_and_mapped_owned_rows(tmp_path: Path) -> Non
     assert np.array_equal(rows[1]["fixed"], np.array([1, 2]))
     assert rows[1]["nested"] == {"x": 1, "y": "u"}
     assert rows[0]["dictionary"] == "red"
-    rows[0]["tokens"][0] = 99
+    assert not rows[0]["tokens"].flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        rows[0]["tokens"][0] = 99
     assert rows[2]["tokens"][0] == 3
-    rows[0]["fixed"][0] = 99
+    assert not rows[0]["fixed"].flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        rows[0]["fixed"][0] = 99
     assert rows[2]["fixed"][0] == 5
 
 
@@ -86,6 +90,27 @@ def test_identity_mismatch_is_rejected_before_row_materialization(
             DecodedRGIdentity("sha256:" + "de" * 32),
             exact_bytes=measured,
         )
+
+
+def test_single_column_values_survive_mapping_close(tmp_path: Path) -> None:
+    codec = ArrowRGFileCodec()
+    array = pa.array([[1, 2], None, []], type=pa.list_(pa.uint32()))
+    table = pa.table({"value": array})
+    measured = codec.measure(table, _IDENTITY)
+    destination = tmp_path / "single.arrow"
+    codec.write(table, _IDENTITY, destination, exact_bytes=measured)
+    with codec.open_mapped(destination, _IDENTITY, exact_bytes=measured) as mapped:
+        rows = mapped.take_and_materialize([1, 0, 1, 2])
+    destination.unlink()
+    for row, index in zip(rows, [1, 0, 1, 2], strict=True):
+        expected = array[index].as_py()
+        value = row["value"]
+        if isinstance(value, np.ndarray):
+            assert value.tolist() == expected
+            assert value.dtype == np.uint32
+            assert not value.flags.writeable
+        else:
+            assert value == expected
 
 
 def test_measurement_mismatch_removes_private_temp(tmp_path: Path) -> None:

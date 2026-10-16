@@ -48,3 +48,62 @@ while creating the dataset.
 :language: python
 :caption: examples/guide/datasets/parquet_dataset.py
 ```
+
+## Sample payloads
+
+Each sample is a dictionary keyed by column name, even for single-column files.
+Parquet and Vortex use the same conversion rules for top-level columns:
+
+| Stored value | Sample value |
+| --- | --- |
+| Missing value | `None` |
+| Integer or floating-point scalar | NumPy scalar preserving its dtype |
+| Timestamp or date | `np.datetime64` |
+| Duration | `np.timedelta64` |
+| String, bytes, boolean, or decimal | Python `str`, `bytes`, `bool`, or `decimal.Decimal` |
+| Numeric list without null elements | Read-only NumPy array preserving dtype and fixed-size nested shapes |
+| List with null elements or variable-length nesting | Python list preserving `None` and nesting |
+| Struct | Dictionary, with nested values converted to Python types |
+
+Call `.copy()` if you need to modify a numeric array. Numeric lists inside structs
+remain Python lists. Temporal scalars preserve their stored units and precision;
+timezone-bearing timestamps represent the UTC instant without retaining the timezone name.
+
+## Reader configuration
+
+**Caching reads.** Zephon caches up to 256 Parquet footers in memory per fetch replica.
+The `metadata_cache_entries` option controls this limit for both Parquet and Vortex;
+zero disables it. Wide files with many row groups have larger footers and may need a
+smaller limit.
+
+The decoded row-group cache avoids repeatedly decoding the same data. It stores files
+locally and shares them across fetch processes on the same machine. It is enabled with
+the shard cache by default; use `parquet.rg_cache` to change its location or size, or
+set `enabled=False` to disable it. For example:
+
+```python
+pipeline.options(
+    io_options={
+        "metadata_cache_entries": 256,
+        "parquet": {"rg_cache": {"limit_bytes": "4gb"}},
+    }
+)
+```
+
+**Worker threads.** Arrow's CPU and I/O pools are shared within each process, including
+by other formats that use Arrow. Zephon defaults both pools to one thread to avoid
+multiplying thread counts across fetch processes and training ranks. Parquet also
+reads columns sequentially by default; separate fetches can still run concurrently.
+These are the defaults:
+
+```python
+pipeline.options(
+    io_options={
+        "arrow": {"cpu_threads": 1, "io_threads": 1},
+        "parquet": {"use_threads": False},
+    }
+)
+```
+
+Set `parquet.use_threads=True` to decode columns through Arrow's CPU pool. Increasing
+`arrow.cpu_threads` alone does not enable parallel column decoding.
