@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from zephon._internal.io.formats.lance_manifest import (
+from zephon._internal.io.formats.lance_support.manifest import (
     dataset_root_of,
     is_lance_dataset,
     is_manifest_path,
