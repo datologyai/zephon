@@ -542,6 +542,8 @@ class CacheManager(ShardResolver):
                     # - a pid-reuse collision where the recorded owner pid
                     #   refers to an unrelated process;
                     # - OS-level /dev/shm cleanup (containers, reboots);
+                    # - a separately launched Python process whose resource tracker
+                    #   unlinks SHM on exit, even if the process only attached;
                     # - a crashed creator that unlinked before peers detached.
                     logger.warning(
                         "session.json at %s names live owners but SHM is "
