@@ -5,7 +5,9 @@ import errno
 import json
 import logging
 import os
+import queue
 import shutil
+import threading
 import time
 import uuid
 import weakref
@@ -132,77 +134,179 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
+# Owner releases that GC finalizers cannot apply immediately. GC can interrupt
+# an allocation while the same thread holds or is acquiring ``.reset.lock``
+# through another ``FileLock`` instance. Waiting for that lock would deadlock
+# the interrupted thread, so finalizers enqueue with reentrant ``SimpleQueue.put``.
+# One daemon thread applies queued releases under the lock. While their session
+# remains current, queued managers still count as owners and keep its SHM names alive.
+# Pending releases are not guaranteed to finish at interpreter exit. A later
+# manager initialization prunes ownership for processes that are no longer alive.
+_deferred_releases: "queue.SimpleQueue[tuple[BaseFileLock, Path, str, str | None]]" = (
+    queue.SimpleQueue()
+)
+_release_thread_lock = threading.Lock()
+_release_thread: threading.Thread | None = None
+
+
+def _run_deferred_releases() -> None:
+    while True:
+        reset_lock, session_path, owner_key, session_id = _deferred_releases.get()
+        with contextlib.suppress(Exception):
+            _release_session_owner(reset_lock, session_path, owner_key, session_id)
+
+
+def _ensure_deferred_release_thread() -> None:
+    """Start the deferred-release thread during manager initialization.
+
+    Never call from finalizer context: acquiring ``_release_thread_lock`` or
+    starting a thread can block on a lock held by the interrupted thread.
+    """
+    global _release_thread
+    with _release_thread_lock:
+        if _release_thread is None or not _release_thread.is_alive():
+            _release_thread = threading.Thread(
+                target=_run_deferred_releases,
+                name="zephon-cache-owner-release",
+                daemon=True,
+            )
+            _release_thread.start()
+
+
+def _reset_deferred_releases_after_fork() -> None:
+    # Only the parent's worker may apply its queued releases. Replaying them in
+    # the child can remove a live parent's ownership and unlink SHM still in use.
+    # The child also needs a fresh mutex because the thread holding an inherited
+    # lock may not survive the fork.
+    global _deferred_releases, _release_thread_lock, _release_thread
+    _deferred_releases = queue.SimpleQueue()
+    _release_thread_lock = threading.Lock()
+    _release_thread = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_deferred_releases_after_fork)
+
+
 def _close_cache_manager_resources(
     shared: "CacheSharedState | None",
     reset_lock: "BaseFileLock",
     session_path: Path,
     owner_key: str,
+    session_id: str | None,
+    *,
+    blocking: bool = False,
 ) -> None:
     """Release all resources owned by a ``CacheManager``.
 
     Designed for use as a ``weakref.finalize`` callback: receives the
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
+
+    GC cleanup (``blocking=False``) tries ``reset_lock`` once and queues the
+    release on contention: waiting could block the interrupted lock holder.
+    Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
+    the release synchronously. Local SHM handles close in either case.
     """
     with contextlib.suppress(Exception):
-        _release_session_owner(reset_lock, session_path, owner_key)
+        if blocking:
+            _release_session_owner(reset_lock, session_path, owner_key, session_id)
+        else:
+            _release_session_owner_or_defer(
+                reset_lock, session_path, owner_key, session_id
+            )
     if shared is not None:
         shared.close()
+
+
+def _release_session_owner_or_defer(
+    reset_lock: "BaseFileLock",
+    session_path: Path,
+    owner_key: str,
+    session_id: str | None,
+) -> None:
+    """Release session ownership from a finalizer without waiting for the lock.
+
+    If acquisition fails, enqueue with reentrant ``SimpleQueue.put``. This path
+    must not acquire ``_release_thread_lock`` or start the background worker.
+    """
+    try:
+        reset_lock.acquire(timeout=0)
+    except Exception:
+        _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
+        return
+    try:
+        _release_session_owner_locked(session_path, owner_key, session_id)
+    finally:
+        reset_lock.release()
 
 
 def _release_session_owner(
     reset_lock: "BaseFileLock",
     session_path: Path,
     owner_key: str,
+    session_id: str | None,
 ) -> None:
-    """Remove *owner_key* from the session owner list.
-
-    Module-level helper so it can be called from a ``weakref.finalize``
-    callback (where ``self`` is already dead). Owner key format is
-    ``f"{pid}-{start_time_ns}"`` (or legacy ``str(pid)`` for sessions
-    written by older versions).
-
-    When removal drops the last live owner, the session's SHM segments
-    are unlinked here but ``session.json`` itself is preserved (with an
-    empty ``owners`` list) so the next manager init can see the
-    fingerprint and route to RESUME via the ``persist_state=True``
-    path. This is the ONLY place the cache normally unlinks SHM —
-    ``CacheSharedState.close`` deliberately leaves segment names alive
-    so peer managers can keep attaching while any owner remains.
-    """
     with reset_lock:
-        if not session_path.exists():
-            return
-        try:
-            session = json.loads(session_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        owners = session.get("owners", {})
-        entry = owners.get(owner_key)
-        if isinstance(entry, dict):
-            instances = int(entry.get("instances", 1))
-            if instances > 1:
-                entry["instances"] = instances - 1
-                owners[owner_key] = entry
-                session["owners"] = owners
-                _atomic_write_json(session_path, session)
-                return
-        owners.pop(owner_key, None)
-        session["owners"] = owners
-        if owners:
+        _release_session_owner_locked(session_path, owner_key, session_id)
+
+
+def _release_session_owner_locked(
+    session_path: Path,
+    owner_key: str,
+    session_id: str | None,
+) -> None:
+    """Release one manager instance from *owner_key*'s session ownership.
+
+    Only apply the release if ``session_id`` still matches the current session.
+    Each process has one owner entry counting its managers. Decrement that
+    entry's instance count and remove the entry when the count reaches zero.
+    Owner keys use ``f"{pid}-{start_time_ns}"`` or the legacy ``str(pid)`` form.
+
+    Removing the last owner unlinks the session's SHM segments. This is the
+    normal last-owner unlink path: ``CacheSharedState.close`` only closes local
+    handles, keeping segment names available for peers while any owner remains.
+    Preserve ``session.json`` with an empty owner map so ``persist_state=True``
+    can use its fingerprint to resume cached disk files.
+
+    Caller must hold the session's ``reset_lock``.
+    """
+    if not session_path.exists():
+        return
+    try:
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    # Owner keys identify processes, so they can recur in a replacement session.
+    # Cleanup only applies to the session this manager created or joined.
+    if session.get("session_id") != session_id:
+        return
+    owners = session.get("owners", {})
+    entry = owners.get(owner_key)
+    if isinstance(entry, dict):
+        instances = int(entry.get("instances", 1))
+        if instances > 1:
+            entry["instances"] = instances - 1
+            owners[owner_key] = entry
+            session["owners"] = owners
             _atomic_write_json(session_path, session)
             return
-        # Last owner: free the OS-level SHM names promptly so /dev/shm
-        # doesn't carry them between runs. Deliberately KEEP session.json
-        # (with empty owners) so the next manager init can see the
-        # fingerprint and route to RESUME instead of FIRST_INIT, which is
-        # what makes persist_state=True survive process exits. The stored
-        # shm_names become stale here but unlink_by_names is idempotent
-        # on missing segments, so the next init's reset paths remain safe.
-        shm_names = session.get("shm_names")
-        if isinstance(shm_names, dict):
-            CacheSharedState.unlink_by_names(shm_names)
+    owners.pop(owner_key, None)
+    session["owners"] = owners
+    if owners:
         _atomic_write_json(session_path, session)
+        return
+    # Last owner: free the OS-level SHM names promptly so /dev/shm
+    # doesn't carry them between runs. Deliberately KEEP session.json
+    # (with empty owners) so the next manager init can see the
+    # fingerprint and route to RESUME instead of FIRST_INIT, which is
+    # what makes persist_state=True survive process exits. The stored
+    # shm_names become stale here but unlink_by_names is idempotent
+    # on missing segments, so the next init's reset paths remain safe.
+    shm_names = session.get("shm_names")
+    if isinstance(shm_names, dict):
+        CacheSharedState.unlink_by_names(shm_names)
+    _atomic_write_json(session_path, session)
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -351,6 +455,8 @@ class CacheManager(ShardResolver):
         # session.json. The lock is released only after session.json names
         # the newly-created SHM and our pid appears in the owners list.
         self._shared: CacheSharedState | None = None
+        self._session_id: str | None = None
+        _ensure_deferred_release_thread()
         with self._reset_lock:
             self._state_dir.mkdir(parents=True, exist_ok=True)
             self._run_session_state_machine()
@@ -375,6 +481,7 @@ class CacheManager(ShardResolver):
             self._reset_lock,
             self._session_path,
             self._owner_key,
+            self._session_id,
         )
 
         # Enforce the limit on this node's disk, reusing the reconcile tally.
@@ -435,6 +542,8 @@ class CacheManager(ShardResolver):
                     # - a pid-reuse collision where the recorded owner pid
                     #   refers to an unrelated process;
                     # - OS-level /dev/shm cleanup (containers, reboots);
+                    # - a separately launched Python process whose resource tracker
+                    #   unlinks SHM on exit, even if the process only attached;
                     # - a crashed creator that unlinked before peers detached.
                     logger.warning(
                         "session.json at %s names live owners but SHM is "
@@ -480,8 +589,9 @@ class CacheManager(ShardResolver):
         }
         if self._start_time_ns is not None:
             owner_entry["process_start_ns"] = int(self._start_time_ns)
+        self._session_id = str(uuid.uuid4())
         session = {
-            "session_id": str(uuid.uuid4()),
+            "session_id": self._session_id,
             "session_started_ns": time.time_ns(),
             "fingerprint": self._fingerprint,
             "summary": self._summary,
@@ -515,6 +625,7 @@ class CacheManager(ShardResolver):
         # is identical to what the original creator would have written.
         session.setdefault("summary", self._summary)
         _atomic_write_json(self._session_path, session)
+        self._session_id = session.get("session_id")
 
     def _load_session(self) -> Optional[dict]:
         if not self._session_path.exists():
@@ -723,10 +834,13 @@ class CacheManager(ShardResolver):
             )
 
     def close(self) -> None:
-        # Delegate to the finalizer which handles session owner release +
-        # shared state cleanup. Calling it is idempotent — a second call
-        # (or GC triggering it later) is a harmless no-op.
-        self._close_finalizer()
+        # Detach the finalizer so repeated close() calls and later GC cannot
+        # release this manager twice. Explicit close waits for the session lock
+        # and attempts the owner release before returning.
+        detached = self._close_finalizer.detach()
+        if detached is not None:
+            _, _, args, _ = detached
+            _close_cache_manager_resources(*args, blocking=True)
 
     def touch(self, locator: ShardLocator) -> None:
         """Record a shard access without taking the global lock."""

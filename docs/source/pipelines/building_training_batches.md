@@ -1,4 +1,4 @@
-# Building Training Batches
+# Building training batches
 
 The final step of a `Pipeline` is turning the stream of prepared records into the batches
 that the training loop consumes. This happens in Zephon in two parts: the `batch` operator
@@ -7,7 +7,7 @@ on the `Pipeline` groups records together and returns a `SampleBatch` object, an
 fields that your model training loop expects. This page covers both of these essential
 bits of functionality to bridge the gap between your data loader pipeline and your model.
 
-**Grouping Records Into Batches.** The `batch` operator should generally be the last
+**Grouping records into batches.** The `batch` operator should generally be the last
 operator in a `Pipeline`, and it is the only one that is always required for training. It
 collects records into groups of `microbatch_size` records each and returns a `SampleBatch`
 object that wraps those records and the metadata they accumulated as they moved through
@@ -25,7 +25,7 @@ in order to return incomplete batches as well. Note that in a `Pipeline` that us
 this includes a short batch at each flush — not just at the end of the run. With the
 default `drop_last=True` setting, flushes never produce short batches.
 
-**From a Packed Record to a Training Batch.** Here is what the `to_training()` method
+**From a packed record to a training batch.** Here is what the `to_training()` method
 produces from a single packed record that contains two (extremely) short documents, `A`
 and `B`:
 
@@ -46,7 +46,7 @@ Each row of this diagram is something that the model needs from the batch: the t
 it reads, the tokens that it should predict, which of those predictions should be used to
 update the model weights, and how the tokens in the record are related to each other.
 
-**What the Model Reads and Predicts.** A language model learns by predicting each token
+**What the model reads and predicts.** A language model learns by predicting each token
 from the tokens that came before it, so the inputs to the model and the labels it predicts
 come from the same sequence, just offset by one position. For our example, this starts
 when the model reads `BOS` and should predict `a1`, then reads `a1` and should predict
@@ -57,7 +57,7 @@ than the input record that they are constructed from, so if you are training a m
 a context length of `L`, you should pack your sequences to `L + 1` tokens, which is what
 we do in our own training framework integrations.
 
-**Which Predictions Matter.** Some of the labels in a batch are predictions that we don't
+**Which predictions matter.** Some of the labels in a batch are predictions that we don't
 actually want the model to learn from. The `to_training()` method needs to mark each of
 these with an "ignore" value (`-100` by default) so that they do not contribute to the
 loss. There are three different types of labels that we do not want to predict on:
@@ -82,7 +82,7 @@ separate `loss_mask` tensor (which can be provided via the `return_loss_mask=Tru
 setting) or a count of the labels that should count toward the loss so that they can do
 normalization of the loss across microbatches (via `return_num_valid_tokens=True`).
 
-**How Tokens Relate to Each Other.** When documents are packed together, the model sees
+**How tokens relate to each other.** When documents are packed together, the model sees
 one long sequence, but the tokens that it contains belong to separate documents. The
 `pack_flat` operator records this structure as a list of position indices that resets to
 zero at the beginning of each document, and the downstream model can use that information
@@ -135,7 +135,7 @@ and it's always a question of the recipe: you might want to disable cross-docume
 attention but not mask the loss between document boundaries, or vice versa, etc. Zephon
 provides merely the knobs to enable such different recipes.
 
-**Matching Your Framework.** Everything up to this point affects what the model learns.
+**Matching your framework.** Everything up to this point affects what the model learns.
 The remaining options on `to_training` are purely mechanical to help you arrange the
 output the way that your training loop expects to receive it. The `rename_fields` option
 allows you to map from Zephon's field names onto the ones your framework uses (e.g.,
@@ -152,11 +152,11 @@ same set of choices here:
 :caption: examples/guide/pipelines/to_training_integrations.py
 ```
 
-The [Training Integrations](../training_integrations.md) page explains the context behind
+The [Training integrations](../training_integrations.md) page explains the context behind
 each of these choices, and the API reference for `SampleBatch.to_training` describes every
 option in detail.
 
-**Other Kinds of Data.** The `to_training` method is currently designed for token
+**Other kinds of data.** The `to_training` method is currently designed for token
 sequences. If you are training on other kinds of data, like images or audio, you can build
 the tensors for your model directly from the payloads of the records in each
 `SampleBatch`:

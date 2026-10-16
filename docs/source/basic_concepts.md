@@ -1,4 +1,4 @@
-# Basic Concepts
+# Basic concepts
 
 Zephon is a data loader: it's the component of your model training stack that is
 responsible for turning your raw input data (think strings or jpegs) into the form that
@@ -25,7 +25,7 @@ name and the path (cloud or local) to your data. Zephon discovers the shards and
 sample counts, providing the metadata needed to plan a training run without keeping the
 full collection of samples in memory. You can dive deeper into the data formats that
 Zephon supports out of the box and their various pros/cons for different model training
-use cases in [Working with Datasets](datasets/index.md).
+use cases in [Working with datasets](datasets/index.md).
 
 A `WorkSource` defines the training curriculum: which samples to select from the available
 `Dataset`s, how to mix them, how to shuffle them, and how often they should be repeated
@@ -34,7 +34,7 @@ work, but leaves the actual fetching and parsing of the samples that the shards 
 the downstream `Pipeline`. This separation allows you to re-use the same underlying data
 for different training curricula without needing to reorganize the stored data, and to
 change the data processing pipeline without impacting the curriculum.
-[WorkSources: The Training Curriculum](worksources/index.md) does a deep dive into the
+[WorkSources: the training curriculum](worksources/index.md) does a deep dive into the
 `StaticMixtureWorkSource` that is the primary `WorkSource` implementation that Zephon
 currently ships with and is the workhorse (see what I did there?) for mixing and combining
 samples into an overall curriculum.
@@ -46,6 +46,6 @@ those samples to prepare them for training. We refer to these processing steps a
 a regular Python iterable. Depending on how your data has been prepared, these operators
 may be as simple as tokenization or batching or they may involve a sequence of complex
 built-in or user-defined transformations.
-[Pipelines: From a Curriculum to Training Batches](pipelines/index.md) goes into detail on
+[Pipelines: from a curriculum to training batches](pipelines/index.md) goes into detail on
 the different kinds of operators that Zephon supports and how you can adapt them to fit
 the needs of your model training loop.

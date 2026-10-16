@@ -35,6 +35,15 @@ class FormatHandler(ShardOpener, Protocol):
 
     kind: str
 
+    def resolve_root(self, path: str, storage: StorageBackend) -> str:
+        """Return the root that discovery and the catalog should key on.
+
+        Formats over a mutable source pin ``path`` to one immutable snapshot
+        here (Lance resolves a dataset directory to its latest manifest), so
+        every node discovers the same shards. The default is ``path`` itself.
+        """
+        return path
+
     @contextmanager
     def create_opener(
         self, catalog_set: "CatalogSet | None", options: "StoreOptions"

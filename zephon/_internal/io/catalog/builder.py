@@ -37,7 +37,7 @@ class DatasetHeader:
     """Small, immutable description of what to (re)build and where it points."""
 
     name: str  # logical alias; never part of the fingerprint/file
-    root: str  # what discover() reads; what ShardLocator.root needs
+    root: str  # what discover() reads; ShardLocator.root unless a format pins it
     format: str  # which handler to rebuild with
     path: str | None  # diagnostics only
 
@@ -218,11 +218,21 @@ def pack_locators(
 
     dense = shard_ids == list(range(count))
     fingerprint = _fingerprint(header.format, header.root, columns)
+    # Shards resolve against their locators' root, which a discovery root that
+    # a format pinned (a Lance manifest) does not equal; the two are the same
+    # string for every other format.
+    shard_roots = {loc.root for loc in ordered}
+    if len(shard_roots) > 1:
+        raise ValueError(
+            f"Shard locators for {header.name!r} span several roots: "
+            f"{sorted(shard_roots)}"
+        )
+    shard_root = shard_roots.pop() if shard_roots else header.root
 
     header_fields = {
         "schema_version": SCHEMA_VERSION,
         "format": header.format,
-        "root": header.root,
+        "root": shard_root,
         "path": header.path,
         "shard_count": count,
         "dense": dense,

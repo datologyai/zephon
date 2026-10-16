@@ -1,4 +1,4 @@
-# Inspecting and Tuning Pipelines
+# Inspecting and tuning pipelines
 
 Once you have defined the `Dataset`, `WorkSource`, and the set of `Pipeline` operators
 that you want to apply during data preparation, the next thing to focus on is ensuring
@@ -22,7 +22,7 @@ workloads. This page explains how to inspect those settings, measure and underst
 a `Pipeline` is spending its time during data loading, and adjust the execution parameters
 to ensure that the data pipeline does not become a bottleneck.
 
-**Measuring Where The Time Goes.** Before starting an actual training run, run the
+**Measuring where the time goes.** Before starting an actual training run, run the
 `Pipeline` with representative data on hardware that matches the specifications you expect
 to use during training. Starting a particular `Pipeline` run may require downloading
 shards, initializing the tokenizer, and filling buffers or bins, so it is useful to
@@ -63,11 +63,11 @@ appreciate contributions around this area and are also excited to look into this
 the project matures.
 :::
 
-**Fetching Remote Data.** When training on datasets that are kept in object storage, the
+**Fetching remote data.** When training on datasets that are kept in object storage, the
 initial fetch operation the `Pipeline` implicitly performs may need to wait for the shard
 to be downloaded (and possibly decompressed) before the requested records can be read. The
 caching settings described in
-[Storage Backends and Shard Cache](../datasets/storage_backends_and_shard_cache.md)
+[Storage backends and shard cache](../datasets/storage_backends_and_shard_cache.md)
 control where downloaded shards live and how much local storage is available for them. The
 Pipeline's `prefetch` operation complements that cache by looking ahead at what samples
 will be needed soon and downloading those shards before the `fetch` operator needs to open
@@ -88,7 +88,7 @@ useful when downloading and decompressing shards from remote stores contributes
 meaningfully to fetch latency; it is unnecessary when all of the training data can easily
 fit in fast local storage.
 
-**Adjusting Processing and Prefetching Training Batches.** Every `Pipeline` operator
+**Adjusting processing and prefetching training batches.** Every `Pipeline` operator
 except for `batch` exposes a `parallelism` argument that can be used to increase the
 amount of compute resources devoted to them in a way that is appropriate for the operator:
 

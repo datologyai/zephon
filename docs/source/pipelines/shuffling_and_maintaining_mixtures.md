@@ -1,4 +1,4 @@
-# Shuffling and Maintaining Mixtures
+# Shuffling and maintaining mixtures
 
 The `WorkSource` determines the initial curriculum for a training run and determines how
 the underlying `Dataset`s are traversed and their samples are interleaved. But once a
@@ -7,7 +7,7 @@ resulting record stream may have a different local order or mixture than the one
 `WorkSource` originally planned. This page covers the operations that the `Pipeline` API
 supports to address these effects before records are prepared for training.
 
-**Shuffling Records.** Given that we already covered shuffling at the WorkSource level
+**Shuffling records.** Given that we already covered shuffling at the WorkSource level
 earlier in the guide, you may be surprised (or even delighted?) to encounter another page
 on shuffling within our `Pipeline` documentation. While `WorkSource` shuffle settings
 control how the samples within a particular `Dataset` are ordered overall, it is possible
@@ -29,7 +29,7 @@ buffer at each flush boundary.
 :caption: examples/guide/pipelines/shuffle.py
 ```
 
-**Keeping The Mixture on Target.** For most pipelines, the `StaticMixtureWorkSource` is
+**Keeping the mixture on target.** For most pipelines, the `StaticMixtureWorkSource` is
 sufficient to keep your mixture on target, with `TokenEstimation` enabled if you need a
 token-aware mix. However, there are a couple of situations where you may want to add an
 `ensure_mixture` operator to your pipeline. It works similarly to a shuffle; it keeps a

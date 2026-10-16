@@ -1,4 +1,4 @@
-# Storage Backends and Shard Cache
+# Storage backends and shard cache
 
 Zephon can read datasets from a variety of sources: local paths, distributed filesystems,
 directly from object storage systems, from data services like
@@ -17,7 +17,7 @@ on their shard cache. The rest of this page describes how to configure and use t
 effectively. Depending on your distributed filesystem/FUSE setup, you might also want to
 rely on Zephon's cache.
 
-**Reading from Object Storage.** The `path` argument that you provide in the
+**Reading from object storage.** The `path` argument that you provide in the
 `Dataset.from_path` method can have the form of a URI like `s3://bucket/prefix`,
 `gcs://bucket/prefix`, `az://container/prefix`, or `hf://org/name/split`. In the case of
 `s3`, `gcs`, or `az`, Zephon will collect the shard metadata and handle downloads from the
@@ -55,7 +55,7 @@ samples. Having one file per sample would, especially for cases with smaller sam
 as text, have too much overhead per download. The downside of this approach, however, is
 that a truly global shuffle is extremely expensive — we might fetch an entire shard to
 only access a single sample in it. Rather, as discussed in
-[Shuffling and Repeating Samples](../worksources/shuffling_and_repeating_samples.md) we
+[Shuffling and repeating samples](../worksources/shuffling_and_repeating_samples.md) we
 can shuffle the shard order, within the shards, and maintain a tumbling shuffle window
 across the shards. We recommend shards of 64–256 MB.
 
