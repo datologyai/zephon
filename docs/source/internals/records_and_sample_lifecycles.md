@@ -79,9 +79,11 @@ The invariant that matters for fan-out is this one:
 
 That signal is the `is_last_child` flag on a `ContributorRef`, which tells Zephon that
 nothing further will arrive for that base offset and the corresponding slot in the chunk
-can be marked closed. `spawn_child` does this bookkeeping for you, and it raises if you
-try to close a base offset that is already closed, which guards you against the most
-damaging mistake available here.
+can be marked closed. `spawn_child` does this bookkeeping for you. When you split a record
+that already carries contributors, only its final child inherits the parent's closing
+flag, and every earlier child gets a non-closing copy, so splitting a split record cannot
+close the source early. The **Splitting Records** section of [User-Defined
+Operators](../pipelines/user_defined_operators.md) walks through an example.
 
 **Fan-in: many records, one output.** Two built-in operations go the other way.
 
@@ -143,16 +145,19 @@ Without a tombstone:              With a tombstone:
   ✗ unbounded memory                chunk 10 evicts once its other offsets close
 ```
 
-Tombstones are tagged in the metadata and flow through the `Pipeline` like ordinary
-records, but Zephon strips them at the delivery boundary once they have been counted, so
-they take part in eviction and your model never sees them.
+Tombstones are tagged in the metadata, and the runners treat them as control items: a
+tombstone emitted upstream of your operator bypasses its accumulator and `process_many`
+entirely and travels on to delivery, so your operator never sees one. At delivery a
+tombstone only marks its offset complete. It does not advance the replay cursor, and it
+does not trigger eviction on its own, and your model never sees it.
 
-The rule, then, is to **always emit tombstones when you drop records**, regardless of what
-else the `Pipeline` contains. Zephon decides at compile time whether a `Pipeline` uses the
-monotone or the epoch-based eviction path, based on operator traits, and your operator has
-no way of knowing which one it will end up on. Tombstones are harmless on the monotone
-path and mandatory on the epoch-based one, so emitting them unconditionally is the only
-choice that is correct in both cases.
+The only tombstones you need to think about are
+the ones your own operator creates. The rule is to **always emit them when you drop
+records**, regardless of what else the `Pipeline` contains. Zephon decides at compile
+time whether a `Pipeline` uses the monotone or the epoch-based eviction path, based on
+operator traits. Your operator has no way of knowing which one it will end up on.
+Tombstones are harmless on the monotone path and mandatory on the epoch-based one, so
+emitting them unconditionally is the only choice that is correct in both cases.
 
 (chunks-are-the-unit-of-state)=
 
@@ -198,6 +203,7 @@ tracking:
 
 ```python
 from zephon.ops.children import spawn_child
+from zephon.types import SampleRecord
 
 for i, sequence in enumerate(sequences):
     meta = spawn_child(
@@ -205,14 +211,17 @@ for i, sequence in enumerate(sequences):
         child_idx=i,
         is_last_child=(i == len(sequences) - 1),
     )
-    yield SampleRecord(meta=meta, payload=sequence)
+    out.append(SampleRecord(meta=meta, payload=sequence))
 ```
 
 `pack_meta(primary_cursor, contributors, *, lane_id, component_sample_counts, ...)` builds
 the metadata for a packed record. The `primary_cursor` is that record's replay identity
-and has to be unique within the lane; `first_input.meta.cursor.child(0)` is a reliable
-pattern. The `contributors` argument gathers every input's `contribution_refs()` so that
-Zephon learns which base offsets the packed record closes.
+and has to be unique within the lane. `first_input.meta.cursor.child(0)` is only unique
+when each input leads at most one packed record. If one input can lead several, as when
+the built-in packer wraps a long sequence across bins, derive the index from the input
+instead: the built-in packer uses `cursor.child(first.start)`, the offset at which that
+input's fragment begins. The `contributors` argument gathers every input's
+`contribution_refs()` so that Zephon learns which base offsets the packed record closes.
 
 `tombstone_meta(ref, lane_id)` builds a single tombstone from a closing contributor, and
 `tombstones_for_record(record)` wraps the loop you would otherwise write by hand,
@@ -221,7 +230,7 @@ returning one tombstone per closing contributor and an empty list when none are 
 ```python
 from zephon.ops.children import tombstones_for_record
 
-yield from tombstones_for_record(dropped_record)
+out.extend(tombstones_for_record(dropped_record))
 ```
 
 **Who owes tombstones.** It depends on how you added your code, and the difference catches
@@ -243,8 +252,8 @@ needs to know:
 | Trait | Default | Meaning |
 |---|---|---|
 | `preserves_cursor_order` | Required, no default | Records leave in the same chunk/offset order they arrived. `False` for anything that shuffles, packs, or buffers across chunks. |
-| `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the planner forces its parallelism to 1. |
-| `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Disables time-based flushing in deterministic mode. |
+| `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1. |
+| `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect ([#49](https://github.com/datologyai/zephon/issues/49)). |
 | `indexable` | `True` | The operator preserves indexability through the plan. |
 | `parallelism` | `1` | Suggested worker count, used when the plan does not override it. |
 
@@ -254,11 +263,12 @@ operator that reorders records while claiming to preserve cursor order puts the 
 on the monotone eviction path, which will happily evict chunks that replay still needs.
 Claiming `False` when you did not have to is merely a little slower.
 
-**The pitfalls, in order of how much they hurt.** The worst is closing a base offset
-twice, meaning two records with `is_last_child=True` for the same offset, which
-double-counts in Zephon's bitmap and can evict a chunk early. `spawn_child` raises on the
-obvious version of this, but a hand-rolled operator can still manage it. A
-non-deterministic `primary_cursor` on a packed record means replay cannot find its target
-on resume. Dropping tombstones inside your operator before they reach Zephon stalls
-eviction silently. And claiming the wrong `preserves_cursor_order`, as above, loses data
-outright.
+**The pitfalls, in order of how much they hurt.** The worst is closing a base offset too
+early, meaning a record with `is_last_child=True` that reaches Zephon before its siblings
+have been delivered, which lets the chunk evict while replay still needs it. Closing an
+offset twice is harmless, because the bitmap ignores repeats; it is the timing that
+matters. `spawn_child` hands the closing flag only to the final child, but a hand-rolled
+operator can still get this wrong. A non-deterministic `primary_cursor` on a packed record
+means replay cannot find its target on resume. Forgetting to emit a tombstone for a
+closing record your operator drops stalls eviction silently. And claiming the wrong
+`preserves_cursor_order`, as above, loses data outright.

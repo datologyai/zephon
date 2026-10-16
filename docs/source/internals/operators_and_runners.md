@@ -47,8 +47,8 @@ order lives in the accumulator.
 the micro-batch as the small group of elements Zephon hands to a worker for a single
 `process_many` call. Their sizes are
 per-operator, chosen for the work involved: fetching and tokenization use 64, text
-decoding uses 128, a `map_transform` uses 64 unless you say otherwise, and `batch` uses
-whatever `microbatch_size` requested. With four workers on a tokenizer, four
+decoding uses 128, a `map_transform` uses 64, and `batch` uses whatever
+`microbatch_size` requested. With four workers on a tokenizer, four
 micro-batches of 64 are in flight at once, so 256 samples are being tokenized concurrently
 while each call still sees a sensible 64.
 
@@ -61,8 +61,10 @@ operator's input stream and its worker pool. It receives elements from upstream 
 decides when enough of them are ready, and hands a micro-batch off to be dispatched.
 
 What we guarantee is that it runs **serially**: the runner never calls into it from two
-threads at once, and elements always arrive in upstream order. In the current runner implementations this is achieved by a dedicated pump thread per operator, but the architectural contract is simply that the accumulator is never invoked in parallel with itself. The workers run the stateless `process_many`, and the accumulator decides
-what each worker sees.
+threads at once, and elements always arrive in upstream order. The `threads` and `process`
+runners achieve this with a dedicated pump thread per operator, and the `inline` runner
+runs everything on the calling thread. The accumulator is never invoked in parallel with itself.
+The workers run the stateless `process_many`, and the accumulator decides what each worker sees.
 
 <figure class="zephon-post zephon-embed">
   <iframe src="../_static/embeds/operator-detail.html" height="551" loading="lazy"
@@ -119,14 +121,19 @@ the elements the accumulator has seen, never on timing.
 **Built-in accumulators.** `PassthroughAccumulator` emits whatever arrives, immediately, with no
 buffering and no state, and the replay filter uses it. `CountingAccumulator` buffers per
 lane and emits when a lane reaches `max_batch`, and it is what most operators use: fetch,
-decode, tokenize, map transforms, and batching, which uses a `CountingAccumulator`
-subclass that adds `drop_last`. Lane keying lives in `CountingAccumulator` itself, which
-is what makes a per-lane flush sentinel able to reset one lane alone.
+decode, tokenize, map transforms, and batching. Batching uses a `CountingAccumulator`
+subclass that adds a chunk-aware `try_epoch_reset`, so a stalled flush sentinel can be
+released as soon as every pre-boundary record has left the buffer, and that defaults to
+`drop_last=True`. Lane keying lives in `CountingAccumulator` itself, which is what makes a
+per-lane flush sentinel able to reset one lane alone.
 
-In non-deterministic mode `CountingAccumulator` can also flush on a latency bound
-(`max_latency_ms`), emitting a partial micro-batch rather than waiting for a bursty stream
-to fill one. In deterministic mode Zephon disables that, so micro-batch boundaries depend
-only on counts and never on the clock.
+`CountingAccumulator` can also flush on a latency bound (`max_latency_ms`), emitting a
+partial micro-batch rather than waiting for a bursty stream to fill one. There is no
+global switch that turns this off in deterministic mode. Each built-in operator passes
+`max_latency_ms=None` from its own `accumulator()` when `deterministic` is set, so its
+micro-batch boundaries depend only on counts and never on the clock. A custom operator
+that builds a `CountingAccumulator` with a latency bound has to do the same: `accumulator()`
+receives `deterministic`, so check it and drop the latency bound when it is `True`.
 
 The specialised ones ship with the operators that need them, and you never construct one
 yourself. The accumulator behind `pack_sequences` keeps per-lane bins and emits when a
@@ -134,13 +141,14 @@ bin's remaining capacity drops below the minimum useful sequence length or when 
 bins are open. The one behind `ensure_mixture` keeps per-lane buffers grouped by mixture
 component and uses smooth weighted round-robin to emit in the order that best tracks the
 target ratios. `shuffle` has two, picked by its `algorithm` argument: a reservoir
-accumulator for the default `"streaming"`, and a block accumulator for `"block"` and
-`"block_warmup"`.
+accumulator for the default `"streaming"`, and a warmup block accumulator for
+`"block_warmup"`. Plain `"block"` needs neither: it is a `CountingAccumulator` with
+`max_batch` set to the buffer size, and the shuffling happens on the workers.
 
 **How runners keep the order.** Beyond the `inline`, `threads` and `process` runners that
-[How Pipelines Run](../pipelines/how_pipelines_run.md) describes, there is a Ray-backed
-`remote` runner for stages you add with `placement="remote"`. From the accumulator's point
-of view all four behave identically.
+[How Pipelines Run](../pipelines/how_pipelines_run.md) describes, there is an
+experimental Ray-backed `remote` runner for stages you add with `placement="remote"`.
+From the accumulator's point of view all four behave identically.
 
 The mechanism behind that is a reorder buffer. Zephon tags each micro-batch with a
 monotonically increasing **sequence number** before dispatch, holds out-of-order

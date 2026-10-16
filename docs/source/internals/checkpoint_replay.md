@@ -290,37 +290,49 @@ one; gathered together, they are:
 - Do not plan on stalling. We support it for `batch(drop_last=True)` and nothing else.
 
 **Multi-rank aggregation.** Each rank owns a subset of lanes, but a complete checkpoint
-has to cover all of them, so the ranks merge their states through a shared directory using
-a leader-follower protocol. The leader is global rank 0, DataLoader worker 0.
+has to cover all of them, so the ranks merge their states through shared coordination
+storage using a leader-follower protocol. That storage is either a shared directory
+(`aggregate_dir`, a local or shared filesystem or object storage) or a key-value store
+(`aggregate_store`, where `"torch://"` uses the TCPStore that torchrun already runs). The
+protocol is the same over both. The leader is global rank 0, DataLoader worker 0.
 
 ```
-Leader                     aggregate_dir                   Followers
+Leader                     shared storage                  Followers
   │                            │                               │
-  │── publish round id ───────>│                               │
+  │── announce round id ──────>│                               │
   │                            │<────── read round id ─────────│
   │── write own state ────────>│                               │
   │                            │<────── write states ──────────│
-  │── poll: all ranks seen,    │                               │
-  │   all lanes covered? ─────>│                               │
-  │── merge, write merged ────>│                               │
-  │                            │<────── poll for merged ───────│
+  │── wait: every rank covers  │                               │
+  │   all its lanes? ─────────>│                               │
+  │── close round              │                               │
+  │   (delete announcement) ──>│                               │
+  │── merge, publish merged ──>│                               │
+  │── delete own state ───────>│                               │
+  │                            │<────── wait for merged ───────│
   │                            │─────── read merged ──────────>│
-  │── delete own state,        │                               │
-  │   previous merged file,    │                               │
-  │   round file ─────────────>│                               │
+  │                            │<── delete own state, ack ─────│
+  │── wait for every ack ─────>│                               │
+  │── delete acks, previous    │                               │
+  │   round's merged ─────────>│                               │
 ```
 
-The leader's wait condition is stricter than it might look. It holds until it has seen a
-state file from every rank in the `world_size` **and** the union of their lane progress
-covers every one of the `canonical_replicas` lanes. Both conditions have to hold, so a
-rank that reports in with no lanes does not satisfy the coverage check on its own. If
-`aggregate_timeout_s` expires first, the error names the missing ranks and the missing
-lanes, which is usually enough for you to find the rank that forgot to call
-`checkpoint()`.
+The leader's wait condition is stricter than it might look. It is not enough for the
+lanes reported across all ranks to add up to every one of the `canonical_replicas`: each
+rank has to report every lane its DP group owns, so that a model-parallel peer in the same
+DP group can't stand in for a DataLoader worker that is running late. The leader also
+checks that every state it receives agrees with its own lane mapping, and raises on a
+mismatch rather than waiting for it to resolve itself.
 
-The current round's merged file stays in place until the next checkpoint round, so a
-straggler can still read it, and the leader deletes the previous round's merged file when
-it writes the new one. State files are written with the configured serializer and
-compressor, msgpack and zstd by default, rather than as plain text, and are named by rank,
-DataLoader worker and pid so that several workers on one rank do not collide. Against
-object storage the polling backs off exponentially, capped at five seconds.
+`aggregate_timeout_s` is one budget for the whole round, not a limit per wait. If it runs
+out while the leader is still collecting states, the error tells you which ranks and lanes
+are missing, which is usually enough to find the rank that forgot to call `checkpoint()`.
+If the leader fails before publishing the merged result, it publishes a failure notice
+instead, so the followers fail straight away rather than waiting out the timeout.
+
+Because the leader waits for every ack, nobody is still reading the merged result when
+`aggregate()` returns. We keep it around anyway as a marker that the round is closed, and
+delete it once the next round has been fully acknowledged or the `Pipeline` shuts down; if
+the acks time out, it stays for the followers that haven't read it yet. States are written
+with msgpack and zstd by default. Against object storage the polling backs off
+exponentially, capped at five seconds, while the TCPStore uses its own blocking waits.
