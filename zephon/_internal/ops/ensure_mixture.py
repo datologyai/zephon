@@ -266,6 +266,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             state.total_buffered += 1
             affected_lanes.add(lane_id)
 
+        # Phase 2: Select from the buffered records, batching output per lane.
         for lane_id in affected_lanes:
             ready.extend(self._emit_ready(lane_id, self._lanes[lane_id]))
         return ready
@@ -280,6 +281,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         drain_target = (
             int(self._config.drain_target_ratio * max_buf) if max_buf is not None else 0
         )
+        # Buffer pressure permits suboptimal choices until the lower threshold
+        # is reached. After that, continue only with normal selection/drain slots.
         while self._has_buffered_samples(state):
             record = self._emit_one(
                 lane_id, state, force=force and state.total_buffered > drain_target
@@ -542,30 +545,49 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     ) -> SampleRecord | None:
         """Select an on-target record or one periodic retired record.
 
+        Selection priority:
+        0. Drain one obsolete record when its interleaving slot is due.
+        1. Emit a single-component record for SWRR's ideal component.
+        2. Pick the best packed record contributing to the ideal component.
+        3. Fall back to the best available single-component record.
+        4. Fall back to the best available packed record.
+        5. Force-drain obsolete records when no on-target records remain.
+
+        Priorities 3 and 4 require forced emission or an unconfigured target;
+        otherwise, wait for the ideal component after checking priority 0.
         Forced emissions may bypass the interval to bound memory or finish a
         lossless flush. Strict flushes discard instead of calling this path.
         """
+        # Priority 0: One shared FIFO slot for retired content, including mixed
+        # packs. This prevents either a large backlog or a long absence from
+        # granting an exhausted component a burst of catch-up emissions.
         obsolete = self._should_drain_obsolete(state)
         if obsolete:
             item = state.obsolete_buffer.popleft()
         else:
             ideal = state.swrr.peek() if state.swrr is not None else None
+            # A live but unavailable ideal component still blocks normal output.
+            # Exhaustion removes its target share; mere scarcity does not.
             if not force and not self._can_emit_optimal(state, ideal):
                 return None
 
             available = {cid for cid, buf in state.buffers.items() if buf}
             if ideal in available:
+                # Priority 1: Prefer the ideal component's single-record queue.
                 assert ideal is not None
                 record, weight = state.buffers[ideal].popleft()
                 item = _BufferedRecord(record, {ideal: weight})
             else:
-                # Packed benefit scoring uses the same survivor-only deficits.
+                # Priority 2: First restrict packed candidates to those serving
+                # the ideal component. A candidate takes precedence over the
+                # single-component fallback below.
                 candidates = [
                     (idx, packed)
                     for idx, packed in enumerate(state.multi_component_buffer)
                     if ideal is not None and ideal in packed.contributions
                 ]
                 if not candidates and available:
+                    # Priority 3: Best available single-component fallback.
                     chosen = state.swrr.select(available) if state.swrr else None
                     if chosen is None:
                         chosen = min(available)
@@ -573,7 +595,11 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     item = _BufferedRecord(record, {chosen: weight})
                 elif candidates or state.multi_component_buffer:
                     if not candidates:
+                        # Priority 4: No ideal-serving pack or single record is
+                        # available; score all remaining on-target packs.
                         candidates = list(enumerate(state.multi_component_buffer))
+                    # Both packed paths score all contributions against the same
+                    # survivor-only deficits used by single-component selection.
                     deficits = state.swrr.get_deficits() if state.swrr else {}
                     best_idx, _ = max(
                         candidates,
@@ -584,6 +610,9 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     )
                     item = self._take_multi(state, best_idx)
                 elif force and state.obsolete_buffer:
+                    # Priority 5: Preserve the remaining retired tail under
+                    # buffer pressure or bounded flush, even without live data
+                    # to interleave. Strict flush discards this tail instead.
                     item = state.obsolete_buffer.popleft()
                     obsolete = True
                 else:
