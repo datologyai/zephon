@@ -475,3 +475,30 @@ def test_arrow_configuration_is_lazy_and_applied_after_import() -> None:
         check=True,
         timeout=30,
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "dtype"),
+    [
+        (pa.int8(), np.int8),
+        (pa.int16(), np.int16),
+        (pa.int32(), np.int32),
+        (pa.int64(), np.int64),
+        (pa.uint8(), np.uint8),
+        (pa.uint16(), np.uint16),
+        (pa.uint32(), np.uint32),
+        (pa.uint64(), np.uint64),
+        (pa.float16(), np.float16),
+        (pa.float32(), np.float32),
+        (pa.float64(), np.float64),
+    ],
+)
+def test_numeric_lists_view_every_width(kind: Any, dtype: Any) -> None:
+    values = pa.array(np.arange(6, dtype=dtype))
+    array = pa.FixedSizeListArray.from_arrays(values, 2).slice(1)
+    rows = _column_values(array, pa)
+
+    assert rows[0].dtype == dtype
+    np.testing.assert_array_equal(rows[0], [2, 3])
+    np.testing.assert_array_equal(rows[1], [4, 5])
+    assert not rows[0].flags.writeable
