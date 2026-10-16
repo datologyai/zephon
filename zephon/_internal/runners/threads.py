@@ -330,8 +330,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         if not batch or context.stop_event.is_set():
             return
 
-        # Sentinel batches (tombstones, flush signals) bypass process_many
-        # entirely — they are control signals that operators should never see.
+        # Sentinel batches (tombstones, flush, and EOD) bypass process_many.
         # Create a RunnerResult inline and stash it in _local_results so the
         # pump thread never blocks on result_queue (see _local_results docstring).
         if is_sentinel(batch[0]):

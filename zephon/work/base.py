@@ -13,7 +13,7 @@ from zephon._internal.checkpoint import (
     WORK_CHUNK_VERSION as _WORK_CHUNK_VERSION,
 )
 from zephon._internal.checkpoint import (
-    WorkChunkStateV2 as _WorkChunkStateV2,
+    WorkChunkStateV3 as _WorkChunkStateV3,
 )
 from zephon._internal.utils.swrr import swrr_iterate as _swrr_iterate
 from zephon.io.dataset import Dataset
@@ -73,11 +73,20 @@ class WorkChunk:
     mixture here because their chunks deliberately carry a different sample
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
+    Continuing sources may remove exhausted components from this target, but
+    must keep their identities in :meth:`WorkSource.component_ids` for late records.
+
+    ``source_exhausted`` must list every component whose final source sample was
+    produced in this or an earlier chunk. Each lane emits an EOD notification
+    after that component's last sample in its first such chunk, or before the
+    chunk if absent. This also applies on replay. Buffered data may arrive after
+    EOD; lanes with no such chunk receive no notification.
     """
 
     components: SamplesPerComponent
     seed: int | None = None
     target_mixture: Mapping[str, float] | None = None
+    source_exhausted: tuple[str, ...] = ()
 
     ### INTERNAL ATTRIBUTES ###
     _order_cache: list[SourcedSampleId] | None = field(
@@ -88,6 +97,16 @@ class WorkChunk:
     _total_samples: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        names = self.source_exhausted
+        if (
+            not isinstance(names, (tuple, list))
+            or any(not isinstance(n, str) or not n for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError(
+                "source_exhausted must be a tuple or list of unique non-empty names"
+            )
+        self.source_exhausted = tuple(sorted(names))
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
         if self.target_mixture is not None:
@@ -267,12 +286,13 @@ class WorkChunk:
             items = self.components.get(name, [])
             comps_serial.append((name, [list(sid) for sid in items]))
 
-        state = _WorkChunkStateV2(
+        state = _WorkChunkStateV3(
             version=_WORK_CHUNK_VERSION,
             seed=None if self.seed is None else int(self.seed),
             components=comps_serial,
             component_order=list(self._component_order),
             total_samples=int(self._total_samples),
+            source_exhausted=sorted(self.source_exhausted),
             target_mixture=(
                 None
                 if self.target_mixture is None
@@ -284,7 +304,7 @@ class WorkChunk:
     @classmethod
     def from_state(cls, payload: Mapping[str, Any]) -> "WorkChunk":
         """Rebuild a WorkChunk from state_dict()."""
-        ckpt = _WorkChunkStateV2.load(payload)
+        ckpt = _WorkChunkStateV3.load(payload)
 
         comps: dict[str, list[SampleId]] = {}
         for name, items in ckpt.components:
@@ -300,6 +320,7 @@ class WorkChunk:
             components=comps,
             seed=ckpt.seed,
             target_mixture=ckpt.target_mixture,
+            source_exhausted=tuple(ckpt.source_exhausted),
         )
 
         if (
@@ -424,6 +445,21 @@ class WorkSource(ABC):
         non-negative ints, not necessarily dense.
         """
         raise NotImplementedError()
+
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        """Components whose exhaustion allows the source to keep producing.
+
+        Return a subset of :meth:`component_ids`, fixed across lanes and restores.
+        Operators receive the corresponding ``frozenset[int]`` in
+        ``ctx.get("continues_after_exhaustion", frozenset())`` during setup and
+        accumulator construction. EOD notifications are independent of this policy.
+
+        The default is empty. For listed components, ``ensure_mixture`` removes
+        their weight on EOD, even from an explicit mixture override, and handles
+        late records through ``obsolete_drain_rate``. Later chunk targets may
+        omit these components.
+        """
+        return frozenset()
 
     def chunk_size_hint(self) -> int | None:
         """Return fixed chunk size if constant.

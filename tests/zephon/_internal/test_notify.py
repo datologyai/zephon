@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from zephon._internal.engine import Engine
 from zephon._internal.notify import (
     _apply_notify_args,
     _ContributorNotify,
@@ -14,6 +15,7 @@ from zephon._internal.notify import (
     _MonotoneNotify,
     _notify_item,
     is_tombstone,
+    should_notify,
 )
 from zephon.types import (
     ContributorRef,
@@ -232,3 +234,46 @@ class TestDeliveredFlag:
         _notify_item(engine, b, use_monotone=False)
         engine.record_delivery.assert_called_once_with(2)
         engine.notify.assert_called_once()
+
+
+class TestShouldNotify:
+    def test_normal_record(self):
+        assert should_notify(_record()) is True
+
+    def test_tombstone_must_notify(self):
+        # Tombstones exist to close contributor offsets.
+        assert should_notify(_record(tombstone=True)) is True
+
+    def test_flush_sentinel_skipped(self):
+        meta = SampleMeta(
+            sample_id=(0, 0, 0),
+            lane_id=0,
+            chunk_id=0,
+            chunk_offset=0,
+            tags={"_flush_sentinel": True},
+        )
+        assert should_notify(SampleRecord(meta=meta, payload=None)) is False
+
+    def test_source_exhausted_skipped(self):
+        # EOD's dummy cursor must not overwrite replay progress or complete chunk 0.
+        meta = SampleMeta(
+            sample_id=(0, 0, 0),
+            lane_id=0,
+            chunk_id=0,
+            chunk_offset=0,
+            tags={"_source_exhausted": 0},
+        )
+        assert should_notify(SampleRecord(meta=meta, payload=None)) is False
+
+    def test_batch_notifies(self):
+        assert should_notify(_batch(_record())) is True
+
+
+@pytest.mark.parametrize("monotone", [False, True])
+def test_extract_rejects_non_notifiable_controls(monotone: bool) -> None:
+    for control in (
+        Engine._make_flush_sentinel(0),
+        Engine._make_source_exhausted_sentinel(0, 0),
+    ):
+        with pytest.raises(ValueError, match="cannot notify progress"):
+            _extract_notify_args(control, monotone)

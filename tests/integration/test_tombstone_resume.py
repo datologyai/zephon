@@ -27,14 +27,17 @@ def _drop_short_child(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 @pytest.mark.parametrize(
-    ("monotone", "batched", "runner", "mtp_mode"),
+    ("monotone", "batched", "runner", "mtp_mode", "source_exhaustion"),
     [
-        pytest.param(True, False, "threads", False, id="monotone-records"),
-        pytest.param(True, True, "threads", False, id="monotone-batches"),
-        pytest.param(False, False, "threads", False, id="shuffle-records"),
-        pytest.param(False, True, "threads", False, id="shuffle-batches"),
-        pytest.param(True, False, "process", False, id="process-runner"),
-        pytest.param(False, False, "threads", True, id="mtp-ack"),
+        pytest.param(True, False, "threads", False, False, id="monotone-records"),
+        pytest.param(True, True, "threads", False, False, id="monotone-batches"),
+        pytest.param(False, False, "threads", False, False, id="shuffle-records"),
+        pytest.param(False, True, "threads", False, False, id="shuffle-batches"),
+        pytest.param(True, False, "process", False, False, id="process-runner"),
+        pytest.param(False, False, "threads", True, False, id="mtp-ack"),
+        # EOD must leave delivery unchanged in both progress modes, including MTP.
+        pytest.param(True, True, "inline", False, True, id="eod-monotone-batches"),
+        pytest.param(False, False, "threads", True, True, id="eod-mtp-shuffle"),
     ],
 )
 def test_resume_when_tombstones_overtake_buffered_payloads(
@@ -42,6 +45,7 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
     mtp_mode: bool,
     batched: bool,
     monotone: bool,
+    source_exhaustion: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The test tokenizer hashes words with Python's hash(); keep its token
@@ -55,11 +59,13 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
             {"d": 1.0},
             chunk_size=1,
             seed=3,
+            exhausted_policy="stop" if source_exhaustion else "repeat",
+            stop_after_passes=None if source_exhaustion else 1,
         )
         pipe = Pipeline(work)
         if monotone:
-            # The map buffers real records while tombstones bypass it.
-            # A downstream batch alone does not reproduce the original bug.
+            # The map buffers data while tombstones and EOD pass through.
+            # EOD's dummy cursor must not count as completion or delivery.
             pipe.map_transform(_drop_ids)
             pipe.map_transform(lambda p: p)
         else:

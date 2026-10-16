@@ -47,8 +47,9 @@ class Accumulator(ABC, Generic[T]):
 
         Called both at upstream close (default, ``reset=False``) and
         mid-stream by flush sentinels (``reset=True``).  Mid-stream flushes
-        must fully reset internal state so the accumulator is indistinguishable
-        from a freshly constructed instance.
+        must reset epoch-local state so replay reproduces the same output.
+        Keep source-exhaustion state across resets; notifications are not repeated
+        (see :meth:`on_source_exhausted`).
 
         Flush sentinels are injected **per lane**, so a mid-stream flush is
         scoped to ``lane_id``: only that lane's state is emitted and reset,
@@ -58,9 +59,8 @@ class Accumulator(ABC, Generic[T]):
         (used at upstream close, when every lane is done).
 
         Args:
-            reset: True when triggered by a flush sentinel mid-stream
-                (the accumulator must reset to fresh state), False when
-                called at upstream close.
+            reset: True for a mid-stream flush: reset epoch-local state but keep
+                source-exhaustion state. False at upstream close.
             lane_id: When set, flush only this lane.  When None, flush all
                 lanes.
 
@@ -91,6 +91,29 @@ class Accumulator(ABC, Generic[T]):
         """
         return False
 
+    def on_source_exhausted(
+        self, lane_id: int, component_id: int
+    ) -> list[ReadyBatch[T]]:
+        """Handle an EOD notification for a component in this lane.
+
+        The source has permanently run out, but buffered records may still arrive,
+        even through order-preserving operators. The default leaves buffers untouched.
+
+        Called at most once per component per lane stream. Keep exhaustion state
+        across ``flush(reset=True)``; some lanes close without a notification.
+        Restore replays notifications, possibly in a different order across
+        components. Reactions must be lane-scoped, idempotent, and deterministic
+        for a given input order.
+
+        The ``continues_after_exhaustion`` context entry describes the source's
+        continuation policy; it does not suppress notifications. See
+        :doc:`/pipelines/user_defined_operators` for usage.
+
+        Return ready batches as in :meth:`push_many`. Keep tombstones in separate
+        batches from data.
+        """
+        return []
+
     def try_epoch_reset(
         self, boundary_chunk_id: int, lane_id: int | None = None
     ) -> bool:
@@ -99,12 +122,9 @@ class Accumulator(ABC, Generic[T]):
         Called when a flush sentinel was stalled (held behind buffered data)
         and the runner wants to check whether the accumulator can now be reset.
 
-        Returns True if and only if future outputs are equivalent to a fresh
-        accumulator on the retained suffix — i.e., the accumulator's behavior
-        going forward is indistinguishable from one that was freshly constructed
-        and fed only the records still in the buffer.  When returning True, the
-        method must also perform any necessary state reset (e.g., clearing SWRR
-        emission history).
+        Return True only after resetting state so future outputs match a fresh
+        accumulator fed the retained records, with the same source-exhaustion
+        state. This includes clearing ordering history such as SWRR counters.
 
         The default implementation is conservative: it returns True only when
         there is no pending data at all.  Accumulators that buffer
