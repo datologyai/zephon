@@ -26,10 +26,10 @@ reference documents the public classes and functions that the guide refers to.
    :maxdepth: 1
    :caption: API Reference
 
-   api/zephon_pipeline
-   api/zephon_io
-   api/zephon_work
-   api/zephon_ops
-   api/zephon_types
-   api/zephon_observability
-   api/zephon_build_index
+   api/datasets
+   api/worksources
+   api/pipeline
+   api/operators
+   api/records
+   api/runtime
+   api/tools

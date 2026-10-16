@@ -28,6 +28,7 @@ from zephon._internal.io.formats.parquet_cache.control import DecodedRGState
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.formats.parquet_cache.session import ParquetRGSession
 from zephon._internal.io.ofd_lock import OFDLease
+from zephon.types import SamplePayload
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class ParquetRGCache:
         slot: int,
         local_indices: list[int],
         decode: Callable[[], Any],
-    ) -> list[dict[str, object]]:
+    ) -> list[SamplePayload]:
         """Read a mapped hit or decode once, always returning owned rows."""
         self._check_usable()
         if not local_indices:
@@ -199,7 +200,7 @@ class ParquetRGCache:
         self,
         slot: int,
         local_indices: list[int],
-    ) -> list[dict[str, object]] | None:
+    ) -> list[SamplePayload] | None:
         lease = self._admission.try_ready_shared(slot)
         if lease is None:
             return None
@@ -226,7 +227,7 @@ class ParquetRGCache:
         self,
         slot: int,
         local_indices: list[int],
-    ) -> list[dict[str, object]]:
+    ) -> list[SamplePayload]:
         snapshot = self._session.control.slot(slot)
         if snapshot.state is not DecodedRGState.READY:
             raise RuntimeError(f"Decoded RG slot {slot} is no longer READY")
@@ -519,7 +520,7 @@ class ParquetRGCache:
             "groups decoded into the cache after it filled had previously been "
             "evicted and were re-decoded (%.1f%%; cache cap %.2f GiB). The shuffle "
             "working set exceeds the decoded cache; raise it via "
-            "io_options.parquet_rg_cache.limit_bytes to cut redundant decode work.",
+            "io_options.parquet.rg_cache.limit_bytes to cut redundant decode work.",
             warning_reloads,
             warning_publications,
             min(100.0, 100.0 * warning_reloads / warning_publications),

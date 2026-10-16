@@ -1383,6 +1383,12 @@ class Pipeline:
 
     def options(self, **hints: Any) -> "Pipeline":
         # TODO(MaxiBoether): Support in addition to dict options just typed options using dataclasses.
+        for old, new in (
+            ("shm_min_size", "shm_min_item_bytes"),
+            ("coalesce_tensors", "shm_coalesce"),
+        ):
+            if old in hints:
+                raise TypeError(f"'{old}' is no longer supported. Use '{new}' instead.")
         for key, value in hints.items():
             if not hasattr(self._options, key):
                 warnings.warn(

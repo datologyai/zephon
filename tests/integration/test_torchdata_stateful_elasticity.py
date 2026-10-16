@@ -2,8 +2,10 @@
 
 import multiprocessing as mp
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Empty
+from threading import Barrier
 
 import pytest
 
@@ -61,6 +63,7 @@ def _build_pipe(
     dp_group_id: int = 0,
     mapping_strategy: str = "contiguous",
     tmp_path: Path = Path("/tmp/pytest_zephon"),
+    aggregate_store: str | None = None,
 ) -> PublicPipeline:
     # Keep prefetch off and threads minimal to avoid shutdown races on partial consumption.
     work = StaticMixtureWorkSource(
@@ -93,7 +96,8 @@ def _build_pipe(
         default_stage_prefetch=2,
         prefetch_batches=2,
         max_workers=8,
-        aggregate_dir=tmp_path,
+        aggregate_dir=None if aggregate_store else tmp_path,
+        aggregate_store=aggregate_store,
         run_id=run_id,
     )
 
@@ -185,7 +189,6 @@ def _node_worker_proc(
         merged = dl.state_dict()  # triggers file-based aggregation in your Engine
         ckpt_q.put((rank, merged))
     finally:
-        ckpt_barrier.wait(timeout=45.0)  # wait that everybody is done at the end
         try:
             del it
         except Exception:
@@ -315,6 +318,73 @@ def _phase_run_and_checkpoint_mp(
         for p in procs:
             if p.is_alive():
                 p.terminate()
+
+
+@pytest.mark.skipif(
+    StatefulDataLoader is None, reason="torchdata.StatefulDataLoader not available"
+)
+@pytest.mark.parametrize("coordination", ["file", "torch"])
+def test_model_parallel_ranks_checkpoint_with_multiple_dataloader_workers(
+    tmp_path: Path, coordination: str
+) -> None:
+    """Exercise TorchData wiring; gated coordinator tests pin the shutdown race.
+
+    ``coordination="torch"`` aggregates through a TCPStore that this process
+    hosts; each spawned DataLoader worker connects to it.
+    """
+    aggregate_store = None
+    if coordination == "torch":
+        dist = pytest.importorskip("torch.distributed")
+        store_server = dist.TCPStore(
+            "127.0.0.1", 0, is_master=True, wait_for_workers=False
+        )
+        aggregate_store = f"torch://127.0.0.1:{store_server.port}"
+    barrier = Barrier(2)
+
+    def checkpoint_rank(rank: int) -> list[dict]:
+        pipe = _build_pipe(
+            _make_dataset("mp", 128),
+            "mp-workers",
+            with_batch=False,
+            canonical_replicas=2,
+            world_size=2,
+            global_rank=rank,
+            dp_degree=1,
+            dp_group_id=0,
+            tmp_path=tmp_path,
+            aggregate_store=aggregate_store,
+        )
+        assert StatefulDataLoader is not None
+        dl = StatefulDataLoader(
+            pipe.to_torch_dataset(),
+            batch_size=None,
+            num_workers=2,
+            multiprocessing_context="spawn",
+            in_order=True,
+        )
+        it = iter(dl)
+        checkpoints = []
+        try:
+            for _ in range(3):
+                for _ in range(4):
+                    next(it)
+                barrier.wait(timeout=30)
+                snapshots = dl.state_dict()["_snapshot"]["_worker_snapshots"]
+                # Compare Zephon's merged state; each loader has its own RNG.
+                state = snapshots["worker_0"]["dataset_state"]["engine"]
+                assert state is not None
+                assert set(map(int, state["progress"])) == {0, 1}
+                checkpoints.append(state)
+        finally:
+            # No post-checkpoint barrier: leader cleanup must be safe immediately.
+            del it
+        return checkpoints
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(checkpoint_rank, rank) for rank in range(2)]
+        results = [future.result(timeout=60) for future in futures]
+    assert len(results[0]) == 3
+    assert results[0] == results[1]
 
 
 @pytest.mark.skipif(

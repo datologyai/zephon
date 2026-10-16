@@ -12,7 +12,14 @@ from zephon._internal.utils.ipc import (
     DEFAULT_IPC_TRANSPORT,
     DEFAULT_MTP_BUFFER_BYTES,
 )
-from zephon._internal.utils.shm_coalesce import DEFAULT_SHM_MIN_SIZE
+from zephon._internal.utils.shm_coalesce import (
+    DEFAULT_SHM_COMPACT_ABOVE_RATIO,
+    DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES,
+    DEFAULT_SHM_MAX_COALESCED_BYTES,
+    DEFAULT_SHM_MIN_FORWARD_BYTES,
+    DEFAULT_SHM_MIN_ITEM_BYTES,
+    DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES,
+)
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
 from zephon.work.base import MixtureReadConfig
@@ -132,7 +139,7 @@ class RuntimeOptions:
     mtp_prefetch: int | None = None
     # Automatically capture a checkpoint from the MTP subprocess after normal
     # iteration completion.  Set to False when multi-rank aggregation is not
-    # available (e.g. no aggregate_dir, or ranks run sequentially rather than
+    # available (e.g. no aggregate_dir/aggregate_store, or ranks run sequentially rather than
     # in parallel).
     mtp_auto_checkpoint: bool = True
 
@@ -159,11 +166,28 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
 
     # === IPC serialization ===
-    # Coalesce all tensors in a microbatch by dtype into a single SHM
-    # buffer before serialization. Reduces POSIX SHM segments from N to K
-    # (K = number of distinct dtypes). Only consumed by process runners.
-    coalesce_tensors: bool = True
-    shm_min_size: int = DEFAULT_SHM_MIN_SIZE
+    # Disable Zephon SHM preparation for process-worker outputs. Ordinary
+    # multiprocessing reducers still apply; Torch may still use shared storage.
+    shm_enabled: bool = True
+    # Coalesce eligible output payloads in a microbatch by dtype into SHM buffers
+    # before serialization. Reduces POSIX SHM segments from N to K; coalesced
+    # groups are split at shm_max_coalesced_bytes. Only consumed by process runners.
+    # Disabling coalescing still applies transport thresholds and view compaction.
+    shm_coalesce: bool = True
+    # Minimum item size eligible for new SHM; forwarding existing SHM bypasses it.
+    shm_min_item_bytes: int = DEFAULT_SHM_MIN_ITEM_BYTES
+    # Minimum useful bytes per new allocation in a message (default: 1 MiB).
+    shm_min_new_allocation_bytes: int = DEFAULT_SHM_MIN_NEW_ALLOCATION_BYTES
+    # Minimum summed view bytes per existing allocation in this message to keep
+    # that allocation. Smaller totals enter the same allocation path as private data.
+    shm_min_forward_bytes: int = DEFAULT_SHM_MIN_FORWARD_BYTES
+    # Compact shared views when the backing/useful ratio exceeds the ratio limit
+    # and savings reach the byte minimum. A None ratio disables compaction.
+    shm_compact_above_ratio: float | None = DEFAULT_SHM_COMPACT_ABOVE_RATIO
+    shm_compact_min_savings_bytes: int = DEFAULT_SHM_COMPACT_MIN_SAVINGS_BYTES
+    # Bound coalesced allocations; larger individual values remain unsplit.
+    # None permits unlimited coalescing. Compacted views follow the same rule.
+    shm_max_coalesced_bytes: int | None = DEFAULT_SHM_MAX_COALESCED_BYTES
 
     # ProcessStageRunner only.  Re-dispatches per crashed seq before
     # giving up; 0 disables.  In non-deterministic mode an exhausted
@@ -173,7 +197,15 @@ class RuntimeOptions:
     # Where all workers/ranks dump their local state. For multi-node, must be a shared filesystem
     # (e.g., NFS) or cloud storage (s3://bucket/path or gs://bucket/path).
     aggregate_dir: str | None = None
-    # How long to wait for all contributors and for the merged file.
+    # Key-value store URI for checkpoint aggregation, used instead of
+    # aggregate_dir (set at most one). "torch://" uses torchrun's TCPStore at
+    # MASTER_ADDR/MASTER_PORT; "torch://host:port" names one explicitly.
+    aggregate_store: str | None = None
+    # Timeout budget for one checkpoint, shared by all of its coordination waits
+    # (joining the round, collecting shards, the merged result, and reader
+    # acknowledgements). Raised to at least 90s for a cloud aggregate_dir.
+    # Blocking storage operations and merge/codec work are not interrupted, so
+    # a checkpoint can take longer than this in wall-clock time.
     aggregate_timeout_s: float = 180.0
     # Serialization format for intermediate aggregation files ("json" or "msgpack").
     aggregate_serializer: str = "msgpack"

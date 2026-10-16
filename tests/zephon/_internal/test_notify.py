@@ -214,9 +214,18 @@ class TestDeliveredFlag:
         engine = MagicMock()
         r = _record(lane=3, tombstone=True)
         _notify_item(engine, r, use_monotone=True)
+        # Monotone tombstones must not advance the watermark or allocate
+        # completion bitmaps. Real deliveries provide all progress needed.
+        assert engine.mock_calls == []
+
+    def test_apply_only_records_completion_for_non_monotone_tombstones(self) -> None:
+        engine = MagicMock()
+        r = _record(lane=3, tombstone=True)
+        _notify_item(engine, r, use_monotone=False)
+        engine.notify_completion.assert_called_once_with(3, r.meta.contribution_refs())
+        engine.notify.assert_not_called()
+        engine.notify_monotone.assert_not_called()
         engine.record_delivery.assert_not_called()
-        # The tombstone is still notified for eviction bookkeeping.
-        engine.notify_monotone.assert_called_once()
 
     def test_apply_records_delivery_for_batches(self):
         engine = MagicMock()

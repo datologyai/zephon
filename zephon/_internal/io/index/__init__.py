@@ -4,8 +4,8 @@
 """Index utilities for zephon datasets.
 
 Provides utilities for finding/loading index files (index_reader) and
-building index.json for fast dataset discovery (index_builder, vortex_index,
-parquet_index).
+building index.json for fast dataset discovery (index_builder and the
+format-specific index modules).
 """
 
 from zephon._internal.io.index.index_builder import (

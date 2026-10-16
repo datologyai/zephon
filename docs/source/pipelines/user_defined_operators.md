@@ -173,6 +173,34 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `batch_shape_sensitive` indicates your output depends on how records were grouped, which
   disables latency-based grouping.
 
+**Splitting Records.** When an operator turns one record into several, construct each
+child's metadata with `spawn_child` from `zephon.ops.children`. Give the children
+deterministic indices in emission order and set `is_last_child=True` only on the final
+child of that immediate parent. The helper appends the index to the parent's lineage
+so that every child has its own replay identity.
+
+A contributor's closing flag means that this record carries responsibility for
+completing the original source sample; it does not mean completion has already been
+reported. If you split a record again, only its final child inherits that responsibility.
+Splitting a non-closing parent produces no closing children, even though you still mark
+its locally final child with `is_last_child=True` when calling the helper.
+
+For example, splitting a source into children `(0,)` and `(1,)`, then splitting each
+again, gives:
+
+| Child lineage | Carries the source's closing flag |
+| --- | --- |
+| `(0, 0)` | No |
+| `(0, 1)` | No |
+| `(1, 0)` | No |
+| `(1, 1)` | Yes |
+
+For packed inputs, the same rule applies separately to each contributor: the final child
+inherits the parent's existing flags, including any non-closing ones. Earlier children
+keep the contributor cursors but clear all closing flags. If you drop a record instead
+of splitting it, use `tombstones_for_record` from the same module to emit tombstones for
+the closing responsibilities it carries.
+
 **Reacting to Source Exhaustion.** Custom accumulators can override
 `on_source_exhausted(lane_id, component_id)` to react when a dataset will supply no more
 source samples. The engine injects this notification once per lane stream and component,
@@ -189,6 +217,11 @@ resets. Reactions must be lane-scoped, idempotent, and deterministic given input
 replay reproduces them. Return `ReadyBatch` values exactly as from `push_many`; the
 runner dispatches them through `process_many`. The default hook leaves buffers alone
 and returns no batches.
+
+The notification itself closes no contributor offsets and never advances checkpoint
+delivery progress. If your hook drops buffered records, emit their tombstones with
+`tombstones_for_record` as for any other discard; those tombstones report source
+completion without claiming that buffered payloads have been delivered.
 
 Operators that need the source's policy can read
 `ctx.get("continues_after_exhaustion", frozenset())` in `setup(OpContext)` or

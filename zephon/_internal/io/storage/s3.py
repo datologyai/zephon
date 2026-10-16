@@ -40,6 +40,23 @@ def _get_aws_region_from_env_and_files(profile: str = "default") -> str | None:
     return None
 
 
+def _client_options(endpoint: str | None) -> dict[str, Any]:
+    """Build obstore client options for an S3 store.
+
+    obstore rejects ``http://`` endpoints unless ``allow_http`` is set in the
+    client options, and it does not read ``AWS_ALLOW_HTTP`` from the
+    environment. Enable it for plain-HTTP endpoints (MinIO, moto, LocalStack,
+    in-cluster S3) and when ``AWS_ALLOW_HTTP`` is truthy.
+    """
+    options: dict[str, Any] = {"timeout": "120s"}
+    allow_http_env = os.environ.get("AWS_ALLOW_HTTP", "").strip().lower()
+    if (endpoint and endpoint.strip().lower().startswith("http://")) or (
+        allow_http_env in ("1", "true", "yes")
+    ):
+        options["allow_http"] = True
+    return options
+
+
 def _get_aws_credentials_from_env_and_files() -> dict[str, str] | None:
     """Read AWS credentials from environment variables and standard AWS files.
 
@@ -178,7 +195,7 @@ class S3Backend(ObstoreBackend):
             config["request_payer"] = True
 
         store = S3Store.from_url(
-            f"s3://{bucket}", config=config, client_options={"timeout": "120s"}
+            f"s3://{bucket}", config=config, client_options=_client_options(endpoint)
         )
         self._stores[bucket] = store
         return store
@@ -199,7 +216,7 @@ class S3Backend(ObstoreBackend):
             config["aws_region"] = region
 
         store = S3Store.from_url(
-            f"s3://{bucket}", config=config, client_options={"timeout": "120s"}
+            f"s3://{bucket}", config=config, client_options=_client_options(endpoint)
         )
         self._unsigned_stores[bucket] = store
         return store

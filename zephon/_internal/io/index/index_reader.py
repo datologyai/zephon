@@ -22,6 +22,7 @@ INDEX_FILENAMES: list[str] = ["index.json", "_index.json"]
 
 # Command that materializes an index.json for each indexable format.
 _INDEX_BUILD_COMMANDS: dict[str, str] = {
+    "jsonl": "python -m zephon.build_index jsonl {path}",
     "parquet": "python -m zephon.build_index parquet {path}",
     "vortex": "python -m zephon.build_index vortex {path}",
 }
@@ -70,7 +71,8 @@ def warn_missing_index(path: str, fmt: str, *, num_shards: int | None = None) ->
 
     Args:
         path: Dataset directory being scanned.
-        fmt: Format kind (``"parquet"``, ``"vortex"``); selects the build hint.
+        fmt: Format kind (``"jsonl"``, ``"parquet"``, ``"vortex"``); selects
+            the build hint.
         num_shards: Number of shards about to be scanned, if known.
     """
     if path in _warned_paths:

@@ -5,6 +5,7 @@ from typing import Any
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon.types import SampleRecord
+from zephon.work import WorkSource
 
 
 def _payload_dict(record: SampleRecord) -> dict[str, Any]:
@@ -78,3 +79,13 @@ def test_is_indexable_reflects_work_source() -> None:
     non_indexable_ws = FakeIndexableWorkSource(ds, chunk_size=2)
     non_indexable_pipe = PublicPipeline(non_indexable_ws).decode_text().batch(2)
     assert not non_indexable_pipe.is_indexable
+
+
+class _StreamingOnlyWorkSource(FakeIndexableWorkSource):
+    supports_indexing = WorkSource.supports_indexing
+
+
+def test_is_indexable_is_false_for_source_without_indexing_override() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "x"}, {"text": "y"}])
+    pipe = PublicPipeline(_StreamingOnlyWorkSource(ds, chunk_size=2)).decode_text()
+    assert not pipe.is_indexable

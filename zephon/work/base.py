@@ -422,7 +422,7 @@ class WorkSource(ABC):
         return ws
 
     def supports_indexing(self) -> bool:
-        raise NotImplementedError()
+        return False
 
     def __len__(self) -> int:
         raise NotImplementedError()

@@ -34,6 +34,7 @@ from zephon._internal.io.storage import (
 from zephon._internal.io.storage import (
     StorageBackend as _StorageBackend,
 )
+from zephon._internal.io.suffixes import JSONL_SUFFIXES as _JSONL_SUFFIXES
 from zephon._internal.io.suffixes import detect_format as _detect_format
 from zephon.io.memory import InMemoryShard
 
@@ -166,7 +167,8 @@ class Dataset:
           ``config`` and ``chunks``
         - ``mds`` directories containing ``index.json`` structured with
           ``shards``
-        - ``jsonl`` directories where ``*.jsonl`` files act as shards
+        - ``jsonl`` directories where ``*.jsonl`` files act as shards, with an
+          optional Zephon ``index.json`` for fast discovery
 
         Special URI schemes:
 
@@ -295,7 +297,7 @@ def _classify_index_payload(data: _IndexData) -> str:
         if "chunks" in data and "config" in data:
             return "litdata"
         if "shards" in data:
-            # Could be MDS, Parquet, or Vortex index
+            # Could be MDS, JSONL, Parquet, or Vortex index.
             # Check if shards have Parquet-specific fields in extra
             shards = data.get("shards", [])
             if shards:
@@ -304,5 +306,8 @@ def _classify_index_payload(data: _IndexData) -> str:
                     extra = first_shard.get("extra", {})
                     if isinstance(extra, dict) and "row_groups" in extra:
                         return "parquet"
+                    basename = first_shard.get("basename")
+                    if isinstance(basename, str) and basename.endswith(_JSONL_SUFFIXES):
+                        return "jsonl"
             return "mds"
     return "mds"

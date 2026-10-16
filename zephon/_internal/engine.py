@@ -31,28 +31,28 @@ and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane 
 """
 
 import ctypes
+import dataclasses
 import multiprocessing as mp
 import os
-import re
 import sys
-import tempfile
 import threading
-import time
 import traceback
 import warnings
 import weakref
 from collections import defaultdict, deque
 from multiprocessing.context import BaseContext
-from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, TypeVar, cast
+from typing import Any, Iterable, Iterator, cast
 
 from zephon._internal.checkpoint import (
     ENGINE_VERSION,
-    AggregationCodec,
     EngineStateV2,
 )
+from zephon._internal.coordination import (
+    AggregationRound,
+    CheckpointCoordinator,
+    make_coordinator,
+)
 from zephon._internal.graph import Plan
-from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.stores.multi import (
     finalize_dataset_catalogs,
     has_cacheable_dataset,
@@ -76,7 +76,7 @@ from zephon.observability.stats import (
     PrefetchTimingSummary,
     PumpTimingSummary,
 )
-from zephon.options import DEFAULT_RUN_ID, RuntimeOptions
+from zephon.options import RuntimeOptions
 from zephon.types import (
     ChunkId,
     ContributorRef,
@@ -90,8 +90,6 @@ from zephon.types import (
 )
 from zephon.work import WorkSource
 from zephon.work.base import WorkChunk
-
-T = TypeVar("T")
 
 # Set ZEPHON_DEBUG_EVICT=1 to log per-eviction diagnostics from the Engine
 # hot path. Useful for debugging chunk-eviction / lane-progress issues; off
@@ -160,7 +158,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
     checks for leaks, even in free-threaded Python where GC is deferred.
 
     Calls close() first (to clean up runners, queues, and semaphores),
-    then _clean_merged() (to clean up temporary files).
+    then _clean_merged() (to release retained checkpoint coordinator resources).
     """
     try:
         engine = engine_ref()
@@ -172,7 +170,7 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
             if callable(close_fn):
                 close_fn()
         finally:
-            # Always clean merged files, even if close() fails
+            # Always release checkpoint coordinator resources, even if close() fails
             cm = getattr(engine, "_clean_merged", None)
             if callable(cm):
                 cm()
@@ -180,12 +178,10 @@ def _call_engine_cleanup(engine_ref: weakref.ReferenceType["Engine"]):
         pass
 
 
-_RELOAD_SUFFIX = re.compile(r"-(\d+)$")
-
-# Per-rank state-dict fields that must be dict-equal across same-DP-group,
-# same-owned-lane-set peers at checkpoint time — the caller is expected to
-# barrier all ranks (e.g. torch.distributed.barrier()) before
-# pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
+# Per-rank state-dict fields that must agree across same-DP-group peers at
+# checkpoint time — lane by lane, and for rr_next_idx per worker-split key —
+# so the caller is expected to barrier all ranks (e.g.
+# torch.distributed.barrier()) before pipe.checkpoint(). Production-side fields (inflight, lane_next_cid,
 # lane_ws_state, epoch_boundaries) may legitimately differ across peers due
 # to async prefetch and are taken wholesale from one representative.
 _DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_next_idx")
@@ -198,7 +194,7 @@ _DELIVERY_SYNCED_FIELDS: tuple[str, ...] = ("progress", "replay_cursors", "rr_ne
 # Zephon separates two orthogonal concerns for distributed training:
 #
 # 1. GLOBAL COORDINATION (world_size, global_rank)
-#    - Used for: leader election, checkpoint aggregation, state file naming
+#    - Used for: leader election, checkpoint aggregation, state shard identification
 #    - global_rank must be unique per rank
 #    - Leader is global_rank == 0
 #
@@ -333,8 +329,6 @@ class Engine:
                 )
                 _flush_k = 0
             self._flush_every_k_chunks = _flush_k
-        self._warned_once_about_runid = False
-        self._checkpoint_reload_count = 0
         self._checkpoint_lock = threading.Lock()
         self._inflight_shm: ctypes.Array[ctypes.c_int] | None = None
         self._rr_next_idx: dict[str, int] = {}
@@ -426,50 +420,19 @@ class Engine:
         ] = []
         self._build_runners()
 
-        self._using_fresh_tmp = False
-        if self._world.world_size == 1:
-            # Single-node: auto if not provided
-            base = self._opts.aggregate_dir or os.path.join(
-                tempfile.gettempdir(), f"zephon_state_r{self._world.global_rank}"
-            )
-            self._using_fresh_tmp = (
-                self._opts.aggregate_dir is None or self._opts.aggregate_dir == ""
-            )
-        else:
-            # Multi-node: must be provided (shared FS or cloud storage)
-            if not self._opts.aggregate_dir:
-                raise RuntimeError(
-                    "RuntimeOptions.aggregate_dir must be set for multi-node checkpoint aggregation."
-                )
-            base = self._opts.aggregate_dir
-
-        # Initialize storage backend and aggregation codec for checkpoint I/O
-        self._agg_backend = RouterStorageBackend()
-        self._agg_codec = AggregationCodec(
-            serializer=self._opts.aggregate_serializer,
-            compressor=self._opts.aggregate_compressor,
+        self._coordinator: CheckpointCoordinator = make_coordinator(
+            self._opts,
+            global_rank=self._world.global_rank,
+            world_size=self._world.world_size,
+            plan_id=self._plan.plan_id,
+            worker_info=get_torch_worker_info,
         )
-
-        # Detect cloud storage and adjust timeouts for higher latency
-        base = str(base)  # Handle Path objects
-        self._agg_is_cloud = self._agg_backend.is_cloud_path(base)
-        if self._agg_is_cloud:
-            # Floor: guard against user-provided values that are too low for cloud I/O.
-            self._agg_timeout_s = max(self._opts.aggregate_timeout_s, 90.0)
-            self._agg_poll_base = 0.5  # 500ms base poll interval
-        else:
-            self._agg_timeout_s = self._opts.aggregate_timeout_s
-            self._agg_poll_base = 0.05  # 50ms base poll interval
-            # Resolve local paths; cloud paths stay as-is
-            base = str(Path(base).resolve())
-
-        self._agg_base = base.rstrip("/")
-        self._agg_backend.mkdir(self._agg_base, parents=True, exist_ok=True)
-        self._last_round_id: str | None = None
-        self._previous_merged_file: str | None = None
+        if self._takes_part_in_rounds():
+            self._coordinator.check_ready()
 
         # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        # This calls close() to clean up runners/queues/semaphores, then _clean_merged() for temp files.
+        # This calls close() to clean up runners/queues/semaphores, then
+        # _clean_merged() to release retained checkpoint coordinator resources.
         self._closed = False
 
         self._cleanup_finalizer = weakref.finalize(
@@ -484,53 +447,20 @@ class Engine:
             )
 
     @property
-    def _round_file(self) -> str:
-        return f"{self._agg_dir}/round.current"
+    def _last_round_id(self) -> str | None:
+        return self._coordinator.last_round_id
+
+    @_last_round_id.setter
+    def _last_round_id(self, value: str | None) -> None:
+        self._coordinator.last_round_id = value
 
     @property
-    def _agg_dir(self) -> str:
-        def _normalize_run_dir_name(
-            name: str,
-        ) -> str:  # Drop a trailing "-<int>" if present
-            m = _RELOAD_SUFFIX.search(name)
-            return name[: m.start()] if m else name
+    def _checkpoint_reload_count(self) -> int:
+        return self._coordinator.reload_count
 
-        run_id = self._opts.run_id
-        using_default = False
-        # Names (not full paths) of subdirectories in _agg_base, used to warn
-        # about potential run ID collisions when using the default run ID.
-        existing_subdir_names: list[str] = []
-
-        if run_id.startswith(DEFAULT_RUN_ID):
-            existing_subdir_names = self._agg_backend.listdir(self._agg_base)
-            using_default = True
-            # If users don't provide a run ID, we want to help them not shoot themselves in the foot.
-            run_id = f"{run_id}-{self._opts.canonical_replicas}-{self._world.world_size}-{self._plan.plan_id}"
-
-        # Avoid having to use a new run id with every reload
-        run_id = f"{run_id}-{self._checkpoint_reload_count}"
-        current_run_dir = f"{self._agg_base}/{run_id}"
-        cur_norm = _normalize_run_dir_name(run_id)
-        result = f"{current_run_dir}/.zephon_agg"
-
-        if (
-            not self._using_fresh_tmp
-            and using_default
-            and not self._warned_once_about_runid
-            and existing_subdir_names
-        ):
-            existing_norms = {
-                _normalize_run_dir_name(name) for name in existing_subdir_names
-            }
-            if existing_norms != {cur_norm}:
-                # Potentially we can also only warn if the plan id or canonical replicas change since that probably really causes a semantic change but we better just tell the user early this is not the. best idea.
-                print(
-                    f"Warning! No run id has been supplied. This can cause issues in checkpointing if the same aggregate_dir ({self._agg_base}) is used across multiple runs. Your current supplied directory contains data from other runs (or your world changed), which might indicate that you re-use that directory (or use it for other purposes as well). Zephon adjusted the run id to {run_id} to avoid problems, but if you choose to run exactly the same pipeline twice in the samed directory, issues might still occur without providing a run id.\n\nOffending subdirs: {existing_subdir_names}",
-                    file=sys.stderr,
-                )
-                self._warned_once_about_runid = True
-
-        return result
+    @_checkpoint_reload_count.setter
+    def _checkpoint_reload_count(self, value: int) -> None:
+        self._coordinator.reload_count = value
 
     def __del__(self) -> None:
         try:
@@ -539,12 +469,9 @@ class Engine:
             pass
 
     def _clean_merged(self) -> None:
-        if self._previous_merged_file is not None:
-            self._log(
-                f"We are cleaning up the previous checkpoint synchronization file ({self._previous_merged_file}). If you face a timeout error after this, it means that your main rank/worker exits before all workers have consumed the checkpoint. You should ensure all workers have completed the checkpoint (e.g., via a barrier) if you checkpoint at the end of training. If no error occurs, all is well."
-            )
-            self._agg_backend.delete(self._previous_merged_file)
-            self._previous_merged_file = None
+        coordinator = getattr(self, "_coordinator", None)
+        if coordinator is not None:
+            coordinator.cleanup()
 
     def __getstate__(self):
         # We rather fail explicitly here for now to avoid problems with runners.
@@ -768,8 +695,7 @@ class Engine:
                         spec.worker_cap,
                         queue_capacity=spec.queue_capacity,
                         mp_context=self._mp_context,
-                        coalesce_tensors=spec.coalesce_tensors,
-                        shm_min_size=spec.shm_min_size,
+                        memory_policy=spec.memory_policy,
                         max_worker_retries=spec.max_worker_retries,
                         ipc_transport=spec.ipc_transport,
                         ipc_buffer_bytes=spec.ipc_buffer_bytes,
@@ -1116,6 +1042,40 @@ class Engine:
             if emit_boundary is not None:
                 yield self._make_flush_sentinel(lane_id, boundary_cid=emit_boundary)
 
+    def _takes_part_in_rounds(self) -> bool:
+        """Whether this worker's checkpoints go through the coordinator.
+
+        The engine uses this both to check coordination storage at startup and
+        in ``state_dict``. A single active worker on a single rank has nothing
+        to exchange, and idle workers don't take part either.
+        """
+        if not self._owned_lanes:
+            # Idle workers return their local state. Ideally they would also
+            # receive the merged checkpoint, but the coordinator only guarantees
+            # participation for active workers. For example, if idle workers joined:
+            # - The leader (rank 0, worker 0) opens a round.
+            # - Active workers 0 and 1 join it and publish their state shards.
+            # - Once the required ranks and lanes are covered, the leader merges
+            #   the shards, publishes the result, and can close the round to joins.
+            # - Idle worker 2, slow to call state_dict(), tries to join, but the
+            #   round announcement may no longer be available, or the coordinator
+            #   may reject joins because the round has already completed.
+            # It could then time out waiting for a round to join. Returning the
+            # merged checkpoint here would require explicit coordinator support
+            # for late idle readers, beyond the active participants in the round.
+            #
+            # TorchData's compatibility layer (torchdata_compat.py) uses worker 0's
+            # snapshot for all workers, so idle workers' local results do not
+            # replace the merged checkpoint. Regular PyTorch DataLoader does not
+            # forward state_dict() calls to workers, and Zephon without a DataLoader
+            # has no multiple workers per rank. These consumers therefore do not
+            # require an idle worker to return the merged checkpoint.
+            return False
+        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
+        _, workers_per_rank = get_torch_worker_info()
+        active_here = self._active_workers(workers_per_rank, lanes_all)
+        return not (self._world.world_size == 1 and active_here == 1)
+
     def _active_workers(self, num_workers: int, lanes_all: list[int]) -> int:
         L = len(lanes_all)
         a = min(num_workers, L)
@@ -1430,19 +1390,16 @@ class Engine:
             if previous is None or max_cursor > previous:
                 self._lane_last_cursor[lane_id] = max_cursor
 
-    def notify(
+    def notify_completion(
         self,
         lane_id: int,
         entries: Iterable[ContributorRef],
-        record_cursor: SampleCursor | None = None,
     ) -> None:
-        """Record delivery progress for ``lane_id`` and evict completed chunks.
+        """Record contributor completion without advancing replay or evicting.
 
-        ``entries`` describe contributors that have been emitted. An epoch can
-        be evicted once this lane has a recorded flush boundary and every base
-        offset in its chunks has produced a contributor (or tombstone) with
-        ``is_last_child=True``. ``record_cursor`` pins its epoch and is stored
-        as the per-lane sentinel for equality-based replay.
+        Tombstones can overtake buffered payloads, including earlier siblings
+        of a closing child. Completion alone therefore cannot authorize
+        eviction, even when no replay cursor has been recorded yet.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
         # Per-chunk bitmaps track which offsets are closed; counts are popcounts
@@ -1450,7 +1407,6 @@ class Engine:
         done = self._offset_done[lane_id]
         done_count = self._offset_done_count[lane_id]
 
-        # 1) Update per-offset completion state
         for entry in entries:
             cursor = entry.cursor
             cid = cursor.chunk_id
@@ -1467,6 +1423,30 @@ class Engine:
             if entry.is_last_child and not done[cid].is_set(off):
                 done[cid].set(off)
                 done_count[cid] += 1
+
+    def notify(
+        self,
+        lane_id: int,
+        entries: Iterable[ContributorRef],
+        record_cursor: SampleCursor | None = None,
+    ) -> None:
+        """Record delivery progress for ``lane_id`` and evict completed chunks.
+
+        ``entries`` describe contributors that have been delivered. An epoch
+        can be evicted once this lane has a recorded flush boundary and every
+        base offset in its chunks has produced a contributor (or tombstone)
+        with ``is_last_child=True``. ``record_cursor`` pins its epoch and is
+        stored as the per-lane sentinel for equality-based replay. Passing
+        no cursor releases that pin at pipeline drain.
+
+        Tombstones must use ``notify_completion()`` instead: they update only
+        completion bits, leaving reclamation to a real delivery or drain.
+        """
+        # 1) Update per-offset completion state.
+        self.notify_completion(lane_id, entries)
+        inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        done = self._offset_done[lane_id]
+        done_count = self._offset_done_count[lane_id]
 
         # 2) Per-epoch eviction: walk epoch boundaries bottom-up, evict
         #    completed epochs contiguously from the lowest.
@@ -1813,249 +1793,41 @@ class Engine:
             )
             return state.to_dict()
 
-    # ---------- FS utilities ----------
-    def _read_text(self, path: str) -> str | None:
-        try:
-            with self._agg_backend.open(path, "r") as f:
-                return str(f.read())
-        except Exception:
-            return None
-
-    def _read_aggregation_state(self, path: str) -> dict | None:
-        try:
-            with self._agg_backend.open(path, "rb") as f:
-                raw = f.read()
-        except Exception:
-            return None
-        try:
-            return self._agg_codec.decode(raw)
-        except Exception as exc:
-            self._log(f"Failed to decode aggregation state at {path}: {exc!r}")
-            return None
-
-    def _wait_until(self, pred: Callable[[], bool], timeout: float) -> bool:
-        deadline = time.time() + timeout
-        delay = self._agg_poll_base
-        while time.time() < deadline:
-            if pred():
-                return True
-            time.sleep(min(delay, max(0, deadline - time.time())))
-            # Exponential backoff for cloud, capped at 5s
-            if self._agg_is_cloud:
-                delay = min(delay * 1.5, 5.0)
-        return False
-
-    # ---------- Round / paths ----------
-
-    def _publish_new_round_id(self) -> str:
-        rid = str(int(time.time() * 1e9))  # monotonic-ish
-        self._agg_backend.put(self._round_file, rid.encode("utf-8"))
-        self._last_round_id = rid
-        return rid
-
-    def _read_open_round_id(self) -> str | None:
-        rid = (self._read_text(self._round_file) or "").strip()
-        if not rid:
-            return None
-
-        # This is a practically relevant guard in case users do neither supply a run id nor a fresh aggregate directory. With this check we at least avoid stale state if it is obviously old.
-        try:
-            stat = self._agg_backend.stat(self._round_file)
-            age_s = time.time() - stat["mtime"]
-        except OSError:
-            return None  # File doesn't exist or access denied
-        if age_s > self._agg_timeout_s + 30:
-            return None
-
-        # Guard: if we already consumed this rid, skip if our own shard for
-        # this rid exists. Under fork, a child can inherit _last_round_id==rid
-        # from the parent before it has published; in that case we must proceed.
-        if self._last_round_id is not None and rid == self._last_round_id:
-            try:
-                my_fp = self._state_file_path(rid)
-            except Exception:
-                my_fp = None
-            if not my_fp or self._agg_backend.exists(my_fp):
-                return None
-
-        # only "open" if merged for this rid doesn't exist yet
-        if not self._agg_backend.exists(self._merged_file_path(rid)):
-            return rid
-        return None
-
-    def _wait_value(
-        self,
-        supplier: Callable[[], T | None],
-        timeout: float,
-    ) -> T | None:
-        deadline = time.time() + timeout
-        delay = self._agg_poll_base
-        while time.time() < deadline:
-            val = supplier()
-            if val is not None:
-                return val
-            time.sleep(min(delay, max(0, deadline - time.time())))
-            if self._agg_is_cloud:
-                delay = min(delay * 1.5, 5.0)
-        return None
-
-    def _open_round_id(self, is_leader: bool) -> str:
-        if is_leader:
-            return self._publish_new_round_id()
-
-        rid = self._wait_value(self._read_open_round_id, self._agg_timeout_s)
-        if rid is None:
-            raise RuntimeError(f"Timeout waiting for round id at {self._round_file}")
-        return rid
-
-    def _state_file_path(self, round_id: str) -> str:
-        wid, _ = get_torch_worker_info()
-        pid = os.getpid()
-        return f"{self._agg_dir}/state_r{self._world.global_rank}_w{wid}_p{pid}_{round_id}.ckpt"
-
-    def _merged_file_path(self, round_id: str) -> str:
-        return f"{self._agg_dir}/merged_{round_id}.ckpt"
-
-    def _list_state_files(self, round_id: str) -> list[str]:
-        pattern = f"{self._agg_dir}/state_r*_w*_p*_{round_id}.ckpt"
-        return self._agg_backend.glob(pattern)
-
-    def _read_states_for_round(
-        self,
-        round_id: str,
-        *,
-        seen: dict[str, dict[str, Any]] | None = None,
-        covered: set[int] | None = None,
-    ) -> tuple[dict[str, dict[str, Any]], set[int]]:
-        """Read per-rank state files for *round_id*.
-
-        When *seen* and *covered* are supplied, only newly appeared files are
-        fetched — previously read files are skipped.  This turns repeated
-        polling from O(N * polls) GETs into O(N) total.
-        """
-        if seen is None:
-            seen = {}
-        if covered is None:
-            covered = set()
-        for fp in self._list_state_files(round_id):
-            if fp in seen:
-                continue
-            st = self._read_aggregation_state(fp)
-            if st is None:
-                continue
-            seen[fp] = st
-            for k in st.get("progress", {}):
-                covered.add(int(k))
-        return seen, covered
-
-    def _log(self, msg: str) -> None:
-        worker_id, workers_per_rank = get_torch_worker_info()
-        print(
-            f"[PR {self._world.global_rank}][PID {os.getpid()}][Worker {worker_id}/{workers_per_rank - 1}] {msg}",
-            file=sys.stderr,
-        )
-
     def state_dict(self) -> dict[str, Any]:
-        # Fast path: single node & single active worker → just return local
         local = self._state_dict_local()
-        if len(self._owned_lanes) == 0:
-            # Idle workers just return their local state
-            # In the best case, they would also read the aggregate checkpoint to have a complete return
-            # The problem is that we cannot ensure this:
-            # Leader (rank 0, worker 0) publishes round_id
-            # Worker 0 & 1 successfully read the round_id, write their state files
-            # Leader sees all lanes covered, merges states, writes merged file, deletes round file
-            # Worker 2 (slow to call state_dict()) tries to read round_id, but:
-            # The round file might be deleted already, OR
-            # The round file exists but the merged file ALSO exists, causing _read_open_round_id() to return None due to this check:
-            #
-            # The thing is that for torchdata in the end we only return worker 0 results anyways due to our torchdata_compat.py
-            # so it doesn't really matter. For regular torch dataloader, state_dict() does not work anyways by design (it does not forward to workers)
-            # And in regular Zephon without a DL, we don't have multiple workers per rank. Hence, this is fine, but if there is a better solution we should improve this.
+        if not self._takes_part_in_rounds():
+            if self._owned_lanes:
+                # Single rank, single active worker: no merge, and this owner
+                # covers every lane, so check the window counts locally.
+                self._check_mid_window_counts(
+                    local.get("lane_emitted") or {},
+                    int(self._world.canonical_replicas),
+                )
             return local
 
-        lanes_all = self._world.lanes_for_dp_group[self._world.dp_group_id]
-        worker_id, workers_per_rank = get_torch_worker_info()
-        active_here = self._active_workers(workers_per_rank, lanes_all)
-        if self._world.world_size == 1 and active_here == 1:
-            # Fast path has no merge; this owner covers every lane, so check locally.
-            self._check_mid_window_counts(
-                local.get("lane_emitted") or {},
-                int(self._world.canonical_replicas),
-            )
-            return local
-
+        worker_id, _ = get_torch_worker_info()
         # Round setup
         is_leader = self._world.global_rank == 0 and worker_id == 0
-        round_id = self._open_round_id(is_leader)
-        self._last_round_id = round_id
-        my_path = self._state_file_path(round_id)
-        self._agg_backend.put(my_path, self._agg_codec.encode(local))
-
-        merged_path = self._merged_file_path(round_id)
-        if is_leader:
-            expected_lanes = set(range(int(self._world.canonical_replicas)))
-            expected_ranks = set(range(int(self._world.world_size)))
-            seen: dict[str, dict[str, Any]] = {}
-            covered: set[int] = set()
-
-            def _have_full_coverage() -> bool:
-                self._read_states_for_round(round_id, seen=seen, covered=covered)
-                ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
-                return ranks_seen == expected_ranks and expected_lanes.issubset(covered)
-
-            if not self._wait_until(_have_full_coverage, self._agg_timeout_s):
-                ranks_seen = {int(s["world"]["global_rank"]) for s in seen.values()}
-                missing_ranks = sorted(expected_ranks - ranks_seen)
-                missing_lanes = sorted(expected_lanes - covered)
-                raise RuntimeError(
-                    f"[PID {os.getpid()}] Aggregation timeout after "
-                    f"{self._agg_timeout_s}s. Missing ranks={missing_ranks}; "
-                    f"missing lanes={missing_lanes}; "
-                    f"files={len(self._list_state_files(round_id))}"
-                )
-
-            # States already cached from polling above.
-            merged = self._merge_state_dicts(list(seen.values()))
-            assert not self._agg_backend.exists(merged_path)
-            merged_bytes = self._agg_codec.encode(merged)
-            self._agg_backend.put(merged_path, merged_bytes)
-            # Roundtrip so the leader's return value is byte-identical to
-            # what followers read back (json would otherwise stringify keys).
-            merged = self._agg_codec.decode(merged_bytes)
-            self._agg_backend.delete(my_path)
-            if self._previous_merged_file is not None:
-                self._agg_backend.delete(self._previous_merged_file)
-            self._previous_merged_file = merged_path
-            # Safe: by the coverage check above every rank has already read
-            # round.current and is now waiting on merged_path.
-            self._agg_backend.delete(self._round_file)
-            return merged
-
-        # Followers: wait for merged file
-        ok = self._wait_until(
-            lambda: self._agg_backend.exists(merged_path), self._agg_timeout_s
+        return self._coordinator.aggregate(
+            AggregationRound(
+                local=local,
+                is_leader=is_leader,
+                expected_ranks=frozenset(range(int(self._world.world_size))),
+                expected_lanes=frozenset(range(int(self._world.canonical_replicas))),
+            ),
+            merge=self._merge_state_dicts,
         )
-        if not ok:
-            raise RuntimeError(
-                f"[PID {os.getpid()}] Timed out after {self._agg_timeout_s}s waiting for merged checkpoint at {merged_path}"
-            )
-        merged = self._read_aggregation_state(merged_path)
-        self._agg_backend.delete(my_path)
-        if merged is None:
-            raise RuntimeError(f"Failed to read merged checkpoint {merged_path}")
-        return merged
 
     def _dedupe_dp_group_peers(
         self, states: list[EngineStateV2]
     ) -> list[EngineStateV2]:
-        """Collapse same-DP-group, same-owned-lane-set duplicates to one rep.
+        """Keep one rank's shards per DP group, checking its MP peers agree.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
-        group owns the same canonical lanes and writes a state file; their
-        lane-keyed entries would collide in the downstream merge. One rep
-        per ``(dp_group_id, owned-lane-set)`` group survives, with
-        ``_DELIVERY_SYNCED_FIELDS`` strict-checked across the group.
+        group owns the same canonical lanes and contributes state shards; their
+        lane-keyed entries would collide in the downstream merge. The shards of
+        the group's lowest global rank survive, and every other rank's
+        ``_DELIVERY_SYNCED_FIELDS`` are strict-checked against them.
 
         Operates on typed ``EngineStateV2`` so callers can run schema
         migration and cross-shard global-invariant checks BEFORE dedupe —
@@ -2063,37 +1835,60 @@ class Engine:
         ``last_round_id``, ``checkpoint_reload_count``) between same-DP-group
         peers would be silently hidden when peers are dropped.
 
-        Why the lane-set component (not just ``dp_group_id``): with
-        ``workers_per_rank > 1`` multiple DataLoader workers on the same
-        rank split their DP group's lanes into disjoint subsets (see
-        ``_owned_lanes``); those state files are complementary partitions,
-        not duplicates, and must not be collapsed. At
-        ``workers_per_rank=1`` the lane-set is redundant and grouping
-        collapses to ``dp_group_id``.
+        Why per rank rather than per shard: with ``workers_per_rank > 1`` the
+        DataLoader workers on a rank split their DP group's lanes into disjoint
+        subsets (see ``_owned_lanes``), and peers may split them differently,
+        e.g. two workers on one rank and one on another. A rank's shards are
+        complementary partitions, so lane-keyed fields are compared lane by
+        lane. ``rr_next_idx`` is keyed by worker split, so peers' entries are
+        kept alongside the representative's for ranks that resume with that
+        split; an entry two peers share must agree.
         """
-        groups: dict[tuple[int, frozenset[int]], list[EngineStateV2]] = {}
+        by_group: dict[int, dict[int, list[EngineStateV2]]] = {}
         for st in states:
-            dp_id = int(st.world["dp_group_id"])
-            lane_set = frozenset(int(k) for k in st.progress)
-            groups.setdefault((dp_id, lane_set), []).append(st)
+            by_rank = by_group.setdefault(int(st.world["dp_group_id"]), {})
+            by_rank.setdefault(int(st.world["global_rank"]), []).append(st)
 
         chosen: list[EngineStateV2] = []
-        for (dp_id, lane_set), group in groups.items():
+        for dp_id, by_rank in by_group.items():
             # Deterministic representative: lowest global_rank wins.
-            rep = min(group, key=lambda st: int(st.world["global_rank"]))
-            for st in group:
-                if st is rep:
+            rep_rank = min(by_rank)
+            rep = by_rank[rep_rank]
+            progress = {int(lane): p for st in rep for lane, p in st.progress.items()}
+            cursors = {
+                int(lane): c for st in rep for lane, c in st.replay_cursors.items()
+            }
+            rr_next_idx = {key: v for st in rep for key, v in st.rr_next_idx.items()}
+
+            def _diverged(
+                fname: str, rank: int, detail: str, dp_id: int = dp_id
+            ) -> RuntimeError:
+                return RuntimeError(
+                    f"DP group {dp_id} delivery-state divergence on {fname!r} "
+                    f"({detail}) between rank {rep_rank} and rank {rank}. Did "
+                    f"all ranks barrier before calling pipe.checkpoint()?"
+                )
+
+            for rank, shards in sorted(by_rank.items()):
+                if rank == rep_rank:
                     continue
-                for fname in _DELIVERY_SYNCED_FIELDS:
-                    if getattr(st, fname) != getattr(rep, fname):
-                        raise RuntimeError(
-                            f"DP group {dp_id} delivery-state divergence on "
-                            f"{fname!r} (lanes={sorted(lane_set)}) between rank "
-                            f"{int(rep.world['global_rank'])} and rank "
-                            f"{int(st.world['global_rank'])}. Did all ranks "
-                            f"barrier before calling pipe.checkpoint()?"
-                        )
-            chosen.append(rep)
+                for st in shards:
+                    peer_cursors = {
+                        int(lane): c for lane, c in st.replay_cursors.items()
+                    }
+                    for lane_s, p in st.progress.items():
+                        lane = int(lane_s)
+                        if progress.get(lane) != p:
+                            raise _diverged("progress", rank, f"lane {lane}")
+                        if cursors.get(lane) != peer_cursors.get(lane):
+                            raise _diverged("replay_cursors", rank, f"lane {lane}")
+                    for key, value in st.rr_next_idx.items():
+                        if key in rr_next_idx and rr_next_idx[key] != value:
+                            raise _diverged("rr_next_idx", rank, f"key {key!r}")
+                        rr_next_idx[key] = value
+            # Carry peers' worker-split entries on the first representative shard.
+            chosen.append(dataclasses.replace(rep[0], rr_next_idx=rr_next_idx))
+            chosen.extend(rep[1:])
         return chosen
 
     def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2346,7 +2141,7 @@ class Engine:
 
         self._last_round_id = ckpt.last_round_id
         self._checkpoint_reload_count = ckpt.checkpoint_reload_count + 1
-        self._agg_backend.mkdir(self._agg_dir, parents=True, exist_ok=True)
+        self._coordinator.prepare_restore()
 
         # rr_next_idx is lane-set-keyed, shared by DP peers. Keep only the entry
         # this worker uses so stale copies of other pointers can't collide in

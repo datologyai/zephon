@@ -8,7 +8,6 @@ import logging
 import os
 import threading
 from abc import abstractmethod
-from collections import defaultdict
 from io import BytesIO, FileIO
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
@@ -86,7 +85,6 @@ class _SerializedItemLoader(BaseItemLoader):
         self._chunks = [dict(chunk) for chunk in chunks]
         self._serializers = dict(serializers)
         self._data_format = list(self._config["data_format"])
-        self._shift_idx = len(self._data_format) * 4
         self.region_of_interest = region_of_interest
 
         for fmt in self._data_format:
@@ -142,6 +140,7 @@ class PyTreeLoader(_SerializedItemLoader):
         region_of_interest: Optional[list[tuple[int, int]]] = None,
     ) -> None:
         super().setup(config, chunks, serializers, region_of_interest)
+        self._shift_idx = len(self._data_format) * 4
         flag = self._config.get("return_flat_leaves")
         if isinstance(flag, bool):
             self._return_flat_leaves = flag
@@ -333,21 +332,16 @@ class PyTreeLoader(_SerializedItemLoader):
         return head + body, None
 
 
-class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch tensors
+class TokensLoader(_SerializedItemLoader):
     """Loader specialised for token-block shards produced by LitData."""
 
     def __init__(self, block_size: int | None = None) -> None:
-        dependencies._ensure_torch()
         super().__init__()
         self._block_size = block_size
         self._mmaps: dict[int, np.memmap] = {}
         self._buffers: dict[int, memoryview] = {}
-        self._counter = defaultdict(int)
         self._dtype: Any = None
-        self._chunk_filepaths: dict[str, bool] = {}
-        self._offsets: dict[int, np.ndarray] = {}
-        self._header_bytes: dict[int, int] = {}
-        self._blocks_per_item: dict[int, np.ndarray] = {}
+        self._frombuffer = np.frombuffer
         self._elem_size: Optional[int] = None
 
     def setup(
@@ -357,20 +351,19 @@ class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch 
         serializers: Mapping[str, Serializer],
         region_of_interest: Optional[list[tuple[int, int]]] = None,
     ) -> None:
-        dependencies._ensure_torch()
         super().setup(config, chunks, serializers, region_of_interest)
-        self._shift_idx = 0
 
         serializer_name, dtype_index = self._data_format[0].split(":")
         if serializer_name not in ["no_header_numpy", "no_header_tensor"]:
             raise ValueError("Unsupported data format for tokens loader")
 
         if serializer_name == "no_header_tensor":
+            torch = dependencies._ensure_torch()
+            self._frombuffer = torch.frombuffer
             self._dtype = dependencies._TORCH_DTYPES_MAPPING[int(dtype_index)]
-            self._elem_size = int(
-                dependencies._ensure_torch().empty((), dtype=self._dtype).element_size()
-            )
+            self._elem_size = int(torch.empty((), dtype=self._dtype).element_size())
         else:
+            self._frombuffer = np.frombuffer
             self._dtype = dependencies._NUMPY_DTYPES_MAPPING[int(dtype_index)]
             self._elem_size = int(np.dtype(self._dtype).itemsize)  # type: ignore[arg-type]
 
@@ -383,7 +376,6 @@ class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch 
                 if isinstance(chunk_bytes, int) and isinstance(chunk_size, int):
                     header_bytes = (1 + chunk_size + 1) * 4
                     payload = max(chunk_bytes - header_bytes, 0)
-                    payload = max(payload - (chunk_size * self._shift_idx), 0)
                     chunk["dim"] = payload // elem_size
 
         if all(chunk.get("dim") is None for chunk in self._chunks):
@@ -408,36 +400,22 @@ class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch 
         return intervals
 
     def _load_chunk(self, chunk_index: int, chunk_filepath: str) -> None:
-        self._counter[chunk_index] += 1
-        if chunk_index in self._mmaps:
-            return
         chunk = self._chunks[chunk_index]
         header_bytes = (1 + int(chunk["chunk_size"]) + 1) * 4
         mmap = np.memmap(chunk_filepath, mode="r", order="C", offset=header_bytes)
         self._mmaps[chunk_index] = mmap
         self._buffers[chunk_index] = memoryview(mmap)  # type: ignore
-        self._header_bytes[chunk_index] = header_bytes
-        offsets = np.memmap(
-            chunk_filepath,
-            mode="r",
-            dtype=np.uint32,
-            order="C",
-            offset=4,
-            shape=(int(chunk["chunk_size"]) + 1,),
-        )
-        self._offsets[chunk_index] = np.array(offsets, copy=True)
-        elem_size = self._elem_size
-        assert elem_size is not None and self._block_size is not None
-        shift_idx = self._shift_idx
-        blocks = []
-        for i in range(int(chunk["chunk_size"])):
-            item_total = int(
-                self._offsets[chunk_index][i + 1] - self._offsets[chunk_index][i]
+
+    def _ensure_chunk(
+        self, chunk_index: int, chunk_filepath: str, filesize_bytes: int
+    ) -> None:
+        if chunk_index in self._mmaps:
+            return
+        if os.stat(chunk_filepath).st_size < filesize_bytes:
+            raise FileNotFoundError(
+                f"Chunk file not found or incomplete: {chunk_filepath}"
             )
-            payload = max(item_total - shift_idx, 0)
-            tokens = payload // elem_size
-            blocks.append(tokens // self._block_size)
-        self._blocks_per_item[chunk_index] = np.array(blocks, dtype=np.int64)
+        self._load_chunk(chunk_index, chunk_filepath)
 
     def load_item_from_chunk(
         self,
@@ -447,73 +425,46 @@ class TokensLoader(_SerializedItemLoader):  # pragma: no cover - requires torch 
         begin: int,
         filesize_bytes: int,
     ) -> Any:
-        assert self._block_size is not None
-        if chunk_filepath in self._chunk_filepaths and not os.path.isfile(
-            chunk_filepath
-        ):
-            del self._chunk_filepaths[chunk_filepath]
-        if chunk_filepath not in self._chunk_filepaths:
-            if (
-                not os.path.exists(chunk_filepath)
-                or os.stat(chunk_filepath).st_size < filesize_bytes
-            ):
-                raise FileNotFoundError(
-                    f"Chunk file not found or incomplete: {chunk_filepath}"
-                )
-            self._chunk_filepaths[chunk_filepath] = True
-        self._load_chunk(chunk_index, chunk_filepath)
+        self._ensure_chunk(chunk_index, chunk_filepath, filesize_bytes)
+        return self._copy_block(chunk_index, index - begin)
 
-        buffer_view = self._buffers[chunk_index]
-        buffer = buffer_view.tobytes()
-        block_idx_in_chunk = index - begin
-        blocks_per_item = self._blocks_per_item[chunk_index]
-        cumsum = np.cumsum(blocks_per_item)
-        item_idx = int(np.searchsorted(cumsum, block_idx_in_chunk, side="right"))
-        prev = int(cumsum[item_idx - 1]) if item_idx > 0 else 0
-        within_item_block = int(block_idx_in_chunk - prev)
+    def load_items_from_chunk(
+        self,
+        indices: list[int],
+        chunk_index: int,
+        chunk_filepath: str,
+        begin: int,
+        filesize_bytes: int,
+    ) -> list[Any]:
+        """Map the chunk once and copy the requested token-stream blocks."""
+        if not indices:
+            return []
+        self._ensure_chunk(chunk_index, chunk_filepath, filesize_bytes)
+        return [self._copy_block(chunk_index, index - begin) for index in indices]
+
+    def _copy_block(self, chunk_index: int, block_idx_in_chunk: int) -> Any:
         elem_size = self._elem_size
         assert elem_size is not None and self._block_size is not None
-        start_abs = (
-            int(self._offsets[chunk_index][item_idx])
-            + self._shift_idx
-            + within_item_block * self._block_size * elem_size
-        )
-        rel_offset = start_abs - self._header_bytes[chunk_index]
-
-        _t = dependencies._ensure_torch()
-        if (
-            _t is not None
-            and self._dtype in dependencies._TORCH_DTYPES_MAPPING.values()
-        ):
-            return _t.frombuffer(
-                buffer, dtype=self._dtype, count=self._block_size, offset=rel_offset
-            )
-        return np.frombuffer(
-            buffer, dtype=self._dtype, count=self._block_size, offset=rel_offset
-        )
+        # LitData token blocks span item boundaries within each chunk.
+        block_bytes = self._block_size * elem_size
+        offset = block_idx_in_chunk * block_bytes
+        # Own only the requested block: the returned array/tensor must outlive
+        # shard close/eviction without keeping a private copy of the whole chunk.
+        buffer = bytearray(self._buffers[chunk_index][offset : offset + block_bytes])
+        return self._frombuffer(buffer, dtype=self._dtype, count=self._block_size)
 
     def delete(self, chunk_index: int, chunk_filepath: str) -> None:
+        self.close(chunk_index)
         if os.path.exists(chunk_filepath):
-            if chunk_index in self._buffers:
-                del self._buffers[chunk_index]
-            mm = self._mmaps.pop(chunk_index, None)
-            if mm is not None:
-                raw_mmap = getattr(mm, "_mmap", None)
-                if raw_mmap is not None and hasattr(raw_mmap, "close"):
-                    raw_mmap.close()
-                del self._counter[chunk_index]
             os.remove(chunk_filepath)
 
     def close(self, chunk_index: int) -> None:
-        self._counter[chunk_index] -= 1
-        if self._counter[chunk_index] == 0:
-            if chunk_index in self._buffers:
-                del self._buffers[chunk_index]
-            mm = self._mmaps.pop(chunk_index, None)
-            if mm is not None:
-                raw_mmap = getattr(mm, "_mmap", None)
-                if raw_mmap is not None and hasattr(raw_mmap, "close"):
-                    raw_mmap.close()
+        self._buffers.pop(chunk_index, None)
+        mm = self._mmaps.pop(chunk_index, None)
+        if mm is not None:
+            raw_mmap = getattr(mm, "_mmap", None)
+            if raw_mmap is not None:
+                raw_mmap.close()
 
     @classmethod
     def encode_data(

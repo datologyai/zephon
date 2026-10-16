@@ -3,7 +3,7 @@
 
 """Operators that pull raw samples from the shard store."""
 
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional
 
 from zephon._internal.io.catalog import set_catalog_dir
 from zephon._internal.io.protocols import MultiDatasetShardStore
@@ -16,7 +16,7 @@ from zephon.observability.stats import FetchTimingDelta
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
 from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
-from zephon.types import SampleMeta, SamplePayload, SampleRecord
+from zephon.types import SampleMeta, SampleRecord
 
 
 class FetchOp(BaseOp):
@@ -74,9 +74,7 @@ class FetchOp(BaseOp):
             row_raw, _ = got
         else:
             row_raw = got
-        row = cast(
-            SamplePayload, row_raw
-        )  # TODO(MaxiBoether): improve typing on what shards return.
+        row = row_raw
         meta = SampleMeta(
             sample_id=sample_id,
             lane_id=lane_id,
@@ -180,9 +178,7 @@ class FetchOp(BaseOp):
                 component_id,
                 sample_id,
             ), row_raw in zip(items_sorted, rows, strict=True):
-                row = cast(
-                    SamplePayload, row_raw
-                )  # TODO(MaxiBoether): improve typing on what shards return.
+                row = row_raw
                 meta = SampleMeta(
                     sample_id=sample_id,
                     lane_id=lane_id,

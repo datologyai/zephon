@@ -1,6 +1,11 @@
+import io
 import sys
 import types
+from collections.abc import Iterator
 from pathlib import Path
+from typing import IO, Any
+
+from zephon._internal.io.storage import StorageBackend
 
 
 def _install_boto3_stubs(monkeypatch) -> type[Exception]:
@@ -157,6 +162,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     Returns a state dict that can be used to configure mock behavior:
     - state["objects"]: dict mapping (bucket, key) -> bytes
     - state["configs"]: list of configs passed to from_url
+    - state["client_options"]: list of S3 client_options passed to from_url
     - state["store_type"]: list of store types used ("s3", "gcs" or "azure")
     """
     from datetime import datetime, timezone
@@ -168,6 +174,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     state = {
         "objects": {},  # (bucket, key) -> bytes
         "configs": [],  # track configs passed to from_url
+        "client_options": [],  # track client_options passed to from_url
         "store_type": [],  # track which store type was used
         "range_calls": [],  # track byte-range reads
     }
@@ -180,6 +187,7 @@ def _install_obstore_stubs(monkeypatch) -> dict:
             store._url = url
             store._client_options = client_options or {}
             state["configs"].append(config or {})
+            state["client_options"].append(client_options or {})
             state["store_type"].append("s3")
             return store
 
@@ -287,10 +295,32 @@ def _install_obstore_stubs(monkeypatch) -> dict:
     return state
 
 
+class MemoryStorage(StorageBackend):
+    """In-memory files for isolated index-builder tests."""
+
+    def __init__(self, root: str, files: dict[str, bytes]) -> None:
+        self.root = root
+        self.files = {f"{root}/{name}": data for name, data in files.items()}
+
+    def walk(self, path: str) -> Iterator[tuple[str, int]]:
+        prefix = path.rstrip("/") + "/"
+        for name, data in reversed(self.files.items()):
+            if name.startswith(prefix):
+                yield name[len(prefix) :], len(data)
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> IO[bytes] | IO[str]:
+        data = self.files[path]
+        return io.BytesIO(data) if "b" in mode else io.StringIO(data.decode("utf-8"))
+
+    def put(self, path: str, data: bytes) -> None:
+        self.files[path] = data
+
+
 __all__ = [
     "_install_boto3_stubs",
     "_install_obstore_stubs",
     "_FakeS3Client",
     "_FakePaginator",
     "_FakeGCSClient",
+    "MemoryStorage",
 ]

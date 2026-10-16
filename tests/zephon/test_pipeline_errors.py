@@ -17,9 +17,13 @@ from zephon.types import (
 class _StubEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[int, list[ContributorRef], SampleCursor | None]] = []
+        self.completion_calls: list[tuple[int, list[ContributorRef]]] = []
         self.monotone_calls: list[tuple[int, int, list[SampleCursor] | None]] = []
         self.delivery_calls: list[int] = []
         self.inflight_chunks_per_lane: dict[int, dict[int, object]] = {}
+
+    def notify_completion(self, lane_id: int, entries: list[ContributorRef]) -> None:
+        self.completion_calls.append((lane_id, list(entries)))
 
     def notify(
         self,
@@ -115,5 +119,7 @@ def test_yield_while_notifying_drops_tombstones() -> None:
 
     out = list(Pipeline._yield_while_notifying(pipe, [tomb, kept]))
     assert out == [kept]
-    # tombstone still notified for progress
-    assert len(stub.calls) == 2
+    assert stub.completion_calls == [(0, list(tomb.meta.contribution_refs()))]
+    assert len(stub.calls) == 1
+    assert stub.calls[0][2] == kept.meta.cursor
+    assert stub.delivery_calls == [0]

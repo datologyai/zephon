@@ -13,26 +13,34 @@ Key features:
 - Dual discovery: index.json (fast) or direct metadata reads (fallback)
 """
 
+from __future__ import annotations
+
 import bisect
 import logging
 import os
 import struct
-import threading
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from numbers import Integral
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 import numpy as np
 
 from zephon._internal.io.catalog.extra_codec import EncodedExtra, register_extra_codec
-from zephon._internal.io.formats.arrow_rows import require_pyarrow, take_and_materialize
+from zephon._internal.io.formats.arrow_rows import (
+    configure_pyarrow,
+    require_pyarrow,
+    take_and_materialize,
+)
 from zephon._internal.io.formats.base import (
     FormatHandler,
+    ShardOpener,
     register_format,
 )
+from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache_key
 from zephon._internal.io.formats.parquet_cache.cache import ParquetRGCache
 from zephon._internal.io.formats.parquet_cache.index import ParquetRGIndex
 from zephon._internal.io.index import find_and_load_index, warn_missing_index
@@ -41,9 +49,12 @@ from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage.base import StorageBackend
 from zephon._internal.io.suffixes import PARQUET_SUFFIXES
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
+    from zephon._internal.io.catalog import CatalogSet
     from zephon.io.dataset import Dataset
+    from zephon.io.options import StoreOptions
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +83,15 @@ class ParquetShard(RandomAccessShard):
         decoded_cache: ParquetRGCache | None = None,
         rg_slot_start: int | None = None,
         metadata_loader: Callable[[], Any] | None = None,
+        *,
+        use_threads: bool = False,
     ) -> None:
         _ensure_pyarrow()
 
         self._path = path
         self._row_groups = row_groups
         self._metadata_loader = metadata_loader
+        self._use_threads = use_threads
         self._decoded_cache = decoded_cache
         self._rg_slot_start = rg_slot_start
         if (decoded_cache is None) != (rg_slot_start is None):
@@ -115,14 +129,14 @@ class ParquetShard(RandomAccessShard):
         local_idx = index - self._rg_boundaries[rg_id]
         return rg_id, local_idx
 
-    def __getitem__(self, index: int) -> dict[str, object]:
+    def __getitem__(self, index: int) -> SamplePayload:
         """Single record random access.
 
         Args:
             index: Record index (0-based)
 
         Returns:
-            Record as dictionary
+            Single-column value or dictionary of column values
 
         Raises:
             IndexError: If index is out of bounds
@@ -132,7 +146,7 @@ class ParquetShard(RandomAccessShard):
 
         return self.getsamples([index])[0]
 
-    def getsamples(self, indices: list[int]) -> list[dict[str, object]]:
+    def getsamples(self, indices: list[int]) -> list[SamplePayload]:
         """Bulk read one RG at a time, restoring original ordering/duplicates."""
         if not indices:
             return []
@@ -158,9 +172,9 @@ class ParquetShard(RandomAccessShard):
                     else None
                 )
                 pq_file = pq.ParquetFile(self._path, metadata=metadata)
-            return pq_file.read_row_group(rg_id, use_threads=False)
+            return pq_file.read_row_group(rg_id, use_threads=self._use_threads)
 
-        results: list[dict[str, object] | None] = [None] * len(indices)
+        results: list[SamplePayload] = [None] * len(indices)
         for rg_id, items in rg_groups.items():
             local_indices = [local_idx for _, local_idx in items]
             if self._decoded_cache is None:
@@ -172,11 +186,10 @@ class ParquetShard(RandomAccessShard):
                     local_indices=local_indices,
                     decode=lambda rg_id=rg_id: decode(rg_id),
                 )
-            for (orig_pos, _), row in zip(items, rows):
+            for (orig_pos, _), row in zip(items, rows, strict=True):
                 results[orig_pos] = row
 
-        assert all(row is not None for row in results)
-        return cast(list[dict[str, object]], results)
+        return results
 
     def __len__(self) -> int:
         """Return total number of records in shard."""
@@ -197,6 +210,58 @@ def _row_groups_from_ref(
     return row_groups
 
 
+def _read_parquet_metadata(path: str, storage: StorageBackend, *, size: int) -> Any:
+    """Read Parquet metadata without downloading the entire object when possible.
+
+    Because the footer size is unknown, you can't do a single "read footer" call
+    without first knowing its length. The prefetch is an optimization:
+
+    1. Read up to 64 KB from the end (_PARQUET_FOOTER_PREFETCH_BYTES).
+    2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
+    3. Check if the footer fits in the prefetch – if footer_size <= prefetch_size,
+       use the prefetched bytes.
+    4. Otherwise, do a second read – if the footer is larger than 64 KB, read
+       exactly footer_size bytes from the correct offset.
+
+    For most Parquet files, the footer is well under 64 KB, so one read is enough.
+    The prefetch avoids:
+    - A tiny read of just 8 bytes (which can be inefficient on some backends).
+    - A second read in the common case.
+    """
+    pa, pq = _ensure_pyarrow()
+
+    if size < 8:
+        raise ValueError(f"File too small to be a valid Parquet file: {path}")
+
+    # 1. Read up to 64 KB from the end.
+    prefetch_size = min(size, _PARQUET_FOOTER_PREFETCH_BYTES)
+    footer_start = size - prefetch_size
+    footer = storage.read_range(path, footer_start, length=prefetch_size)
+    if len(footer) != prefetch_size:
+        raise ValueError(f"Incomplete Parquet footer prefetch for {path}")
+
+    # 2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
+    trailer = footer[-8:]
+    if trailer[4:] != b"PAR1":
+        raise ValueError(f"Invalid Parquet footer trailer for {path}")
+
+    metadata_len = struct.unpack("<I", trailer[:4])[0]
+    footer_size = metadata_len + 8
+    if footer_size > size:
+        raise ValueError(f"Invalid Parquet footer size for {path}")
+
+    if footer_size > len(footer):
+        # 4. Footer larger than prefetch – read exactly footer_size bytes.
+        footer = storage.read_range(path, size - footer_size, length=footer_size)
+        if len(footer) != footer_size:
+            raise ValueError(f"Incomplete Parquet footer read for {path}")
+    else:
+        # 3. Use the prefetched bytes.
+        footer = footer[-footer_size:]
+
+    return pq.read_metadata(pa.BufferReader(footer))
+
+
 class ParquetFormat(FormatHandler):
     """Format handler for Parquet datasets.
 
@@ -207,58 +272,21 @@ class ParquetFormat(FormatHandler):
 
     kind = "parquet"
 
-    def _read_metadata_only(
-        self, path: str, storage: StorageBackend, *, size: int
-    ) -> Any:
-        """Read Parquet metadata without downloading the entire object when possible.
+    @contextmanager
+    def create_opener(
+        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+    ) -> Iterator[ShardOpener]:
+        """Own the footer and decoded row-group caches for one store."""
+        from zephon._internal.io.formats.parquet_cache.runtime import (
+            build_parquet_cache_runtime,
+        )
 
-        Because the footer size is unknown, you can't do a single "read footer" call
-        without first knowing its length. The prefetch is an optimization:
-
-        1. Read up to 64 KB from the end (_PARQUET_FOOTER_PREFETCH_BYTES).
-        2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
-        3. Check if the footer fits in the prefetch – if footer_size <= prefetch_size,
-           use the prefetched bytes.
-        4. Otherwise, do a second read – if the footer is larger than 64 KB, read
-           exactly footer_size bytes from the correct offset.
-
-        For most Parquet files, the footer is well under 64 KB, so one read is enough.
-        The prefetch avoids:
-        - A tiny read of just 8 bytes (which can be inefficient on some backends).
-        - A second read in the common case.
-        """
-        pa, pq = _ensure_pyarrow()
-
-        if size < 8:
-            raise ValueError(f"File too small to be a valid Parquet file: {path}")
-
-        # 1. Read up to 64 KB from the end.
-        prefetch_size = min(size, _PARQUET_FOOTER_PREFETCH_BYTES)
-        footer_start = size - prefetch_size
-        footer = storage.read_range(path, footer_start, length=prefetch_size)
-        if len(footer) != prefetch_size:
-            raise ValueError(f"Incomplete Parquet footer prefetch for {path}")
-
-        # 2. Parse the last 8 bytes – get metadata_len and verify "PAR1".
-        trailer = footer[-8:]
-        if trailer[4:] != b"PAR1":
-            raise ValueError(f"Invalid Parquet footer trailer for {path}")
-
-        metadata_len = struct.unpack("<I", trailer[:4])[0]
-        footer_size = metadata_len + 8
-        if footer_size > size:
-            raise ValueError(f"Invalid Parquet footer size for {path}")
-
-        if footer_size > len(footer):
-            # 4. Footer larger than prefetch – read exactly footer_size bytes.
-            footer = storage.read_range(path, size - footer_size, length=footer_size)
-            if len(footer) != footer_size:
-                raise ValueError(f"Incomplete Parquet footer read for {path}")
-        else:
-            # 3. Use the prefetched bytes.
-            footer = footer[-footer_size:]
-
-        return pq.read_metadata(pa.BufferReader(footer))
+        configure_pyarrow(options.arrow)
+        runtime = build_parquet_cache_runtime(catalog_set, options)
+        try:
+            yield runtime.opener
+        finally:
+            runtime.close()
 
     def discover(
         self, path: str, storage: StorageBackend
@@ -361,7 +389,7 @@ class ParquetFormat(FormatHandler):
             stats = storage.stat(full_path)
             size = int(stats.get("size", 0))
 
-            metadata = self._read_metadata_only(full_path, storage, size=size)
+            metadata = _read_parquet_metadata(full_path, storage, size=size)
 
             # Extract row group info
             row_groups = []
@@ -514,20 +542,20 @@ class ParquetShardOpener:
     Parquet shards. The cache and index are owned by the surrounding store.
     """
 
-    _METADATA_CACHE_MAX_SIZE = 256
-
     def __init__(
         self,
         *,
         decoded_cache: ParquetRGCache | None,
         index: ParquetRGIndex | None,
+        metadata_cache_entries: int,
+        use_threads: bool = False,
     ) -> None:
         if (decoded_cache is None) != (index is None):
             raise ValueError("Decoded RG cache and index must be provided together")
         self._decoded_cache = decoded_cache
         self._index = index
-        self._metadata_cache: OrderedDict[Path, Any] = OrderedDict()
-        self._metadata_lock = threading.Lock()
+        self._use_threads = use_threads
+        self._metadata_cache = MetadataCache[str, Any](metadata_cache_entries)
 
     def open_shard(
         self,
@@ -554,27 +582,15 @@ class ParquetShardOpener:
             decoded_cache=self._decoded_cache,
             rg_slot_start=slot_start,
             metadata_loader=lambda: self._get_cached_metadata(local_ref.raw.path),
+            use_threads=self._use_threads,
         )
 
     def _get_cached_metadata(self, path: Path) -> Any:
-        with self._metadata_lock:
-            metadata = self._metadata_cache.get(path)
-            if metadata is not None:
-                self._metadata_cache.move_to_end(path)
-                return metadata
+        def load() -> Any:
+            _, pq = _ensure_pyarrow()
+            return pq.read_metadata(path)
 
-        _, pq = _ensure_pyarrow()
-        metadata = pq.read_metadata(path)
-
-        with self._metadata_lock:
-            existing = self._metadata_cache.get(path)
-            if existing is not None:
-                self._metadata_cache.move_to_end(path)
-                return existing
-            self._metadata_cache[path] = metadata
-            while len(self._metadata_cache) > self._METADATA_CACHE_MAX_SIZE:
-                self._metadata_cache.popitem(last=False)
-            return metadata
+        return self._metadata_cache.get_or_load(file_cache_key(path), load)
 
 
 class _ParquetExtraCodec:

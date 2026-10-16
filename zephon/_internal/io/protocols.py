@@ -1,7 +1,11 @@
 """Core shard IO protocols."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Protocol
+
+from zephon.types import SamplePayload
 
 
 @dataclass(slots=True)
@@ -30,17 +34,16 @@ class RandomAccessShard(Protocol):
     ``getsamples`` accepts indices in arbitrary order, including duplicates.
     Returned rows (and per-sample stats, when present) must preserve that order
     and include one entry per requested index without modifying ``indices``.
+    Rows follow ``SamplePayload``, including scalar and array payloads.
     """
 
     def __getitem__(
         self, index: int
-    ) -> dict[str, object] | tuple[dict[str, object], SampleLoadStats]: ...
+    ) -> SamplePayload | tuple[SamplePayload, SampleLoadStats]: ...
 
     def getsamples(
         self, indices: list[int]
-    ) -> (
-        list[dict[str, object]] | tuple[list[dict[str, object]], list[SampleLoadStats]]
-    ): ...
+    ) -> list[SamplePayload] | tuple[list[SamplePayload], list[SampleLoadStats]]: ...
 
     def __len__(self) -> int: ...
 

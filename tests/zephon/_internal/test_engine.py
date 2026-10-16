@@ -3,9 +3,9 @@ import logging
 import re
 import threading
 import time
-import types
 import weakref
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -14,10 +14,18 @@ import pytest
 
 from tests._helpers import mk_dataset
 from zephon._internal.engine import Engine
-from zephon._internal.graph import Graph
+from zephon._internal.graph import Graph, Plan
+from zephon._internal.mtp import _ACK, _handle_ctrl_msg
+from zephon._internal.notify import (
+    _apply_notify_args,
+    _ContributorNotify,
+    _extract_notify_args,
+    should_notify,
+)
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.ops.fetch import FetchOp
+from zephon._internal.pipeline import Pipeline
 from zephon._internal.planner import Planner
 from zephon._internal.runners.inline import InlineStageRunner
 from zephon._internal.runners.process import ProcessStageRunner
@@ -27,7 +35,7 @@ from zephon._internal.utils.disk import InsufficientCacheSpaceError
 from zephon.io.dataset import Dataset
 from zephon.io.options import CacheOptions, StoreOptions
 from zephon.options import RuntimeOptions
-from zephon.types import ContributorRef, SampleCursor, SampleRecord
+from zephon.types import ContributorRef, SampleCursor, SampleMeta, SampleRecord
 from zephon.work.base import MixtureReadConfig, MixtureReadMode, WorkChunk, WorkSource
 from zephon.work.static_mixture import StaticMixtureWorkSource
 
@@ -96,8 +104,8 @@ def test_engine_reproducible_weighted_random() -> None:
     assert first == second
 
 
-def test_engine_cleanup_finalizer_removes_previous_merged(
-    monkeypatch, tmp_path
+def test_engine_cleanup_finalizer_releases_coordinator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Avoid building runners to keep setup minimal for this finalizer test.
     monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
@@ -109,12 +117,8 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
     spec = resolve_runtime_spec(plan, opts)
     eng = Engine(plan, opts, work, spec)
 
-    called = {"flag": False}
-
-    def patched_clean(self: Engine) -> None:
-        called["flag"] = True
-
-    eng._clean_merged = types.MethodType(patched_clean, eng)
+    cleanup = Mock()
+    monkeypatch.setattr(eng._coordinator, "cleanup", cleanup)
     fin = eng._cleanup_finalizer
     eng_ref = weakref.ref(eng)
     eng = None
@@ -125,7 +129,7 @@ def test_engine_cleanup_finalizer_removes_previous_merged(
         gc.collect()
         time.sleep(0.01)
 
-    assert called["flag"] is True
+    cleanup.assert_called()
     assert fin.alive is False
     assert eng_ref() is None
 
@@ -684,6 +688,145 @@ def _build_minimal_engine(monkeypatch: Any) -> Engine:
 
 def _lane_chunk(cid: int) -> WorkChunk:
     return WorkChunk(components={"default": [(0, 0, cid)]})
+
+
+@pytest.mark.parametrize("cursor_cid", [None, 0, 2])
+def test_tombstone_completion_waits_for_delivery_to_evict(
+    monkeypatch: pytest.MonkeyPatch, cursor_cid: int | None
+) -> None:
+    """Completion-only notifications retain even fully closed epochs."""
+    eng = _build_minimal_engine(monkeypatch)
+    try:
+        cursors = [
+            SampleCursor(chunk_id=cid, chunk_offset=0, sample_id=(0, 0, cid))
+            for cid in range(4)
+        ]
+        for cid in range(4):
+            eng.inflight_chunks_per_lane[0][cid] = _lane_chunk(cid)
+        eng._epoch_boundaries[0] = [2, 4]
+        if cursor_cid is not None:
+            eng._lane_last_cursor[0] = cursors[cursor_cid]
+        previous_cursors = dict(eng._lane_last_cursor)
+        previous_progress = dict(eng._lane_progress)
+
+        # All closing children are dropped, but their earlier siblings may
+        # still be buffered. Test both before any delivery and with a cursor
+        # in either epoch: controls cannot evict in any of these cases.
+        args = _ContributorNotify(
+            lane_id=0,
+            entries=[ContributorRef(cursor, True) for cursor in cursors],
+            record_cursor=cursors[-1],
+            delivered=False,
+        )
+        _apply_notify_args(eng, args)
+        _apply_notify_args(eng, args)  # Completion is idempotent during replay.
+        assert eng._offset_done_count[0] == dict.fromkeys(range(4), 1)
+        assert all(eng._offset_done[0][cid].is_set(0) for cid in range(4))
+        assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+        assert eng._epoch_boundaries[0] == [2, 4]
+        assert eng._lane_last_cursor == previous_cursors
+        assert eng._lane_progress == previous_progress
+        assert not eng._lane_emitted
+
+        # The first real output pins its epoch even though all bits are set.
+        eng.notify(0, [], record_cursor=cursors[0])
+        assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+        assert eng._lane_last_cursor[0] == cursors[0]
+
+        # Delivery from the next epoch can reclaim the preceding one.
+        eng.notify(0, [], record_cursor=cursors[2])
+        assert list(eng.inflight_chunks_per_lane[0]) == [2, 3]
+        assert set(eng._offset_done[0]) == {2, 3}
+        assert eng._lane_last_cursor[0] == cursors[2]
+
+        # Final drain releases the pin and cleans up completion state.
+        eng.notify(0, [], record_cursor=None)
+        assert not eng.inflight_chunks_per_lane[0]
+        assert not eng._offset_done[0]
+        assert not eng._offset_done_count[0]
+    finally:
+        eng.close()
+
+
+@pytest.mark.parametrize("use_monotone", [True, False])
+@pytest.mark.parametrize("tail", ["inline", "mtp-ack"])
+def test_exhaustion_and_tombstones_cannot_advance_delivery(
+    monkeypatch: pytest.MonkeyPatch, use_monotone: bool, tail: str
+) -> None:
+    """Both tail paths separate source facts, offset completion, and delivery."""
+    eng = _build_minimal_engine(monkeypatch)
+    try:
+        for cid in range(4):
+            eng.inflight_chunks_per_lane[0][cid] = _lane_chunk(cid)
+        eng._epoch_boundaries[0] = [2, 4]
+        previous_cursors = dict(eng._lane_last_cursor)
+        previous_progress = dict(eng._lane_progress)
+        dropped = SampleRecord(
+            meta=SampleMeta(
+                sample_id=(0, 0, 3), lane_id=0, chunk_id=3
+            ).with_tombstone(),
+            payload=None,
+        )
+        controls = [
+            Engine._make_source_exhausted_sentinel(0, 0),
+            dropped,
+            Engine._make_source_exhausted_sentinel(0, 1),
+            Engine._make_flush_sentinel(0, boundary_cid=4),
+        ]
+        record = SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+            payload={"value": "still buffered when the controls passed"},
+        )
+
+        def assert_only_completion() -> None:
+            # Tombstones may close real offsets in non-monotone mode. EOD and
+            # flush notifications must not close their dummy chunk-0 offset.
+            assert eng._offset_done_count.get(0, {}) == ({} if use_monotone else {3: 1})
+            assert eng._lane_last_cursor == previous_cursors
+            assert eng._lane_progress == previous_progress
+            assert not eng._lane_emitted
+            assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+            assert eng._epoch_boundaries[0] == [2, 4]
+
+        if tail == "inline":
+            pipe = Pipeline(_DummyWorkSource())
+            pipe._engine = eng
+            pipe._plan = Plan(
+                stages=[],
+                explain="",
+                indexable=False,
+                preserves_cursor_order=use_monotone,
+            )
+
+            def source() -> Iterator[SampleRecord]:
+                yield from controls
+                assert_only_completion()
+                yield record
+
+            iterator = pipe._yield_while_notifying(source())
+            assert next(iterator) is record
+            iterator.close()  # Do not invoke the unconditional end-of-stream cleanup.
+        else:
+            # Use the producer's admission gate and the real MTP ACK dispatcher,
+            # without launching a subprocess for this bookkeeping-only test.
+            items = [*controls, record]
+            pending = {
+                seq: _extract_notify_args(item, use_monotone)
+                for seq, item in enumerate(items)
+                if should_notify(item)
+            }
+            assert set(pending) == {1, 4}  # Tombstone and real output only.
+            for seq in range(len(controls)):
+                assert not _handle_ctrl_msg(_ACK, seq, pending, eng, Mock())
+            assert_only_completion()
+            assert not _handle_ctrl_msg(_ACK, 4, pending, eng, Mock())
+            assert pending == {}
+
+        assert eng._lane_last_cursor[0] == record.meta.cursor
+        assert eng._lane_emitted[0] == 1
+        assert list(eng.inflight_chunks_per_lane[0]) == [0, 1, 2, 3]
+    finally:
+        eng.close()
 
 
 def _phase2_boundary_cids(eng: Engine, lane: int) -> list[int]:

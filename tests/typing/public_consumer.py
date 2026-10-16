@@ -9,6 +9,8 @@ public typing surface and is checked by its own invocation.
 
 from __future__ import annotations
 
+import numpy as np
+
 from zephon import (
     Dataset,
     InMemoryShard,
@@ -29,7 +31,7 @@ from zephon.observability import (
 )
 from zephon.ops import BaseOp, DomainGroups, OpContext, OpTraits, StageInfo
 from zephon.options import IpcTransport, RuntimeOptions
-from zephon.types import SampleBatch, SampleId
+from zephon.types import SampleBatch, SampleId, SampleNumeric, SamplePayload
 from zephon.validation import ValidationReport
 
 
@@ -76,6 +78,20 @@ def inspect_dataset() -> None:
         _ = (row, rows)
 
 
+def numeric_payloads() -> list[SamplePayload]:
+    numbers: list[SampleNumeric] = [
+        1,
+        1.5,
+        1 + 2j,
+        np.int8(-1),
+        np.int64(2**63 - 1),
+        np.uint64(2**64 - 1),
+        np.float32(1.5),
+        np.complex64(1 + 2j),
+    ]
+    return [*numbers]
+
+
 def inspect_stats(pipe: Pipeline) -> MTPQueueStats | None:
     return pipe.mtp_queue_stats()
 
@@ -104,7 +120,7 @@ def preflight(pipe: Pipeline) -> ValidationReport:
 
 
 def make_index(dataset_dir: str) -> str:
-    return str(build_index("parquet", dataset_dir))
+    return build_index("parquet", dataset_dir)
 
 
 def pack_grouped(pipe: Pipeline) -> Pipeline:

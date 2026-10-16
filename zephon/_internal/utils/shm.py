@@ -111,9 +111,8 @@ def shm_has_free_space(threshold: float = _SHM_FREE_THRESHOLD) -> bool:
 def wait_for_shm_space(label: str, *, threshold: float = _SHM_FREE_THRESHOLD) -> int:
     """Block with exponential-jittered backoff until ``/dev/shm`` has free space.
 
-    Intended for use after a ``share_memory_()`` or ``shm_open()`` failure.
-    The caller should catch the ``ENOSPC`` exception, call this function to
-    wait, then retry the allocation.
+    After a shared-memory allocation failure, the caller should check
+    :func:`is_shm_error`, call this function to wait, then retry the allocation.
 
     Returns the number of backoff sleeps performed (``0`` if space was
     already available on the first check).
