@@ -82,7 +82,7 @@ nothing further will arrive for that base offset and the corresponding slot in t
 can be marked closed. `spawn_child` does this bookkeeping for you. When you split a record
 that already carries contributors, only its final child inherits the parent's closing
 flag, and every earlier child gets a non-closing copy, so splitting a split record cannot
-close the source early. The **Splitting Records** section of [User-Defined
+close the source early. The **Splitting records** section of [User-Defined
 Operators](../pipelines/user_defined_operators.md) walks through an example.
 
 **Fan-in: many records, one output.** Two built-in operations go the other way.
@@ -205,6 +205,8 @@ tracking:
 from zephon.ops.children import spawn_child
 from zephon.types import SampleRecord
 
+# Inside process_many(): `out` is the list it returns.
+out = []
 for i, sequence in enumerate(sequences):
     meta = spawn_child(
         parent.meta,
@@ -230,6 +232,7 @@ returning one tombstone per closing contributor and an empty list when none are 
 ```python
 from zephon.ops.children import tombstones_for_record
 
+# Inside process_many(), as above.
 out.extend(tombstones_for_record(dropped_record))
 ```
 

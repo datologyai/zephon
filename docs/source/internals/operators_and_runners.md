@@ -62,9 +62,10 @@ decides when enough of them are ready, and hands a micro-batch off to be dispatc
 
 What we guarantee is that it runs **serially**: the runner never calls into it from two
 threads at once, and elements always arrive in upstream order. The `threads` and `process`
-runners achieve this with a dedicated pump thread per operator, and the `inline` runner
-runs everything on the calling thread. The accumulator is never invoked in parallel with itself.
-The workers run the stateless `process_many`, and the accumulator decides what each worker sees.
+runners drive each accumulator from a single thread of its own, and the `inline` runner runs
+everything on the calling thread. The accumulator is never invoked in parallel with itself.
+The workers run the stateless `process_many`, and the accumulator decides what each worker
+sees.
 
 <figure class="zephon-post zephon-embed">
   <iframe src="../_static/embeds/operator-detail.html" height="551" loading="lazy"

@@ -331,8 +331,9 @@ If the leader fails before publishing the merged result, it publishes a failure 
 instead, so the followers fail straight away rather than waiting out the timeout.
 
 Because the leader waits for every ack, nobody is still reading the merged result when
-`aggregate()` returns. We keep it around anyway as a marker that the round is closed, and
-delete it once the next round has been fully acknowledged or the `Pipeline` shuts down; if
-the acks time out, it stays for the followers that haven't read it yet. States are written
-with msgpack and zstd by default. Against object storage the polling backs off
-exponentially, capped at five seconds, while the TCPStore uses its own blocking waits.
+the leader's `checkpoint()` call returns. We keep it around anyway as a marker that the
+round is closed, and delete it once the next round has been fully acknowledged or the
+`Pipeline` shuts down; if the acks time out, it stays for the followers that haven't read
+it yet. States are written with msgpack and zstd by default. Against object storage the
+polling backs off exponentially, capped at five seconds, while the TCPStore uses its own
+blocking waits.
