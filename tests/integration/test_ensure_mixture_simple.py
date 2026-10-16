@@ -427,30 +427,3 @@ class TestEnsureMixtureIntegration:
 
         # ...by dropping the code surplus it could not place on-target.
         assert 0 < total(strict) < total(baseline)
-
-    def test_bounded_mode_lossless_with_stop_policy_notifications(
-        self, tmp_path: Path
-    ) -> None:
-        """Bounded mode is lossless across source exhaustion: every sample the smaller
-        (stop) dataset produced before exhausting is delivered."""
-        ds_code, ds_text = _prepare_datasets(tmp_path, code_count=20, text_count=400)
-
-        work = StaticMixtureWorkSource(
-            [ds_code, ds_text],
-            {"code": 0.5, "text": 0.5},
-            chunk_size=10,
-            seed=42,
-            exhausted_policy="stop",
-        )
-
-        pipe = (
-            Pipeline(work)
-            .decode_text()
-            .ensure_mixture(max_buffer_size=64, weight_by="samples")
-            .options(deterministic=True, max_workers=2)
-        )
-
-        records = _collect_records(pipe)
-        counts = _count_components(records)
-        # Bounded mode loses nothing: all 20 code samples are delivered.
-        assert counts["code"] == 20

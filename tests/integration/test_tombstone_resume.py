@@ -27,17 +27,18 @@ def _drop_short_child(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 @pytest.mark.parametrize(
-    "source_exhaustion", [False, True], ids=["repeat", "source-exhaustion"]
-)
-@pytest.mark.parametrize(
-    ("monotone", "batched", "runner", "mtp_mode"),
+    ("monotone", "batched", "runner", "mtp_mode", "source_exhaustion"),
     [
-        pytest.param(True, False, "threads", False, id="monotone-records"),
-        pytest.param(True, True, "threads", False, id="monotone-batches"),
-        pytest.param(False, False, "threads", False, id="shuffle-records"),
-        pytest.param(False, True, "threads", False, id="shuffle-batches"),
-        pytest.param(True, False, "process", False, id="process-runner"),
-        pytest.param(False, False, "threads", True, id="mtp-ack"),
+        pytest.param(True, False, "threads", False, False, id="monotone-records"),
+        pytest.param(True, True, "threads", False, False, id="monotone-batches"),
+        pytest.param(False, False, "threads", False, False, id="shuffle-records"),
+        pytest.param(False, True, "threads", False, False, id="shuffle-batches"),
+        pytest.param(True, False, "process", False, False, id="process-runner"),
+        pytest.param(False, False, "threads", True, False, id="mtp-ack"),
+        # EOD has no delivery cursor: exercise both progress paths, including
+        # the subprocess ACK path, without multiplying the baseline matrix.
+        pytest.param(True, True, "inline", False, True, id="eod-monotone-batches"),
+        pytest.param(False, False, "threads", True, True, id="eod-mtp-shuffle"),
     ],
 )
 def test_resume_when_tombstones_overtake_buffered_payloads(

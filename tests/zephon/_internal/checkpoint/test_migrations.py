@@ -624,17 +624,20 @@ def test_v4_to_v5_does_not_mutate_input():
     assert not hasattr(v4, "token_deficits")
 
 
-def test_work_chunk_v1_migrates_with_none_target_and_no_exhaustion():
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_work_chunk_migrates_without_exhaustion(version: int) -> None:
     raw = {
-        "version": 1,
+        "version": version,
         "seed": 3,
         "components": [("a", [[0, 0, 0], [0, 0, 1]])],
         "component_order": ["a"],
         "total_samples": 2,
     }
+    if version == 2:
+        raw["target_mixture"] = {"a": 1.0}
     migrated = migrate("work_chunk", raw)
     assert migrated["version"] == 3
-    assert migrated["target_mixture"] is None
+    assert migrated["target_mixture"] == (None if version == 1 else {"a": 1.0})
     assert migrated["source_exhausted"] == []
     assert migrated["components"] == [("a", [[0, 0, 0], [0, 0, 1]])]
 

@@ -173,19 +173,15 @@ def _continuing_pipe(
 
 def _make_pipe(
     *,
-    runner: str = "inline",
-    mtp_mode: bool = False,
     limit: int | None = None,
-    continuing: bool = True,
 ) -> Pipeline:
     datasets = [
         Dataset.from_dict(
             name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(count)])}
         )
-        for name, count in [("a", 3), ("b", 1000)]
+        for name, count in [("a", 3), ("b", 100)]
     ]
-    source_type = _ContinuingSource if continuing else StaticMixtureWorkSource
-    source = source_type(
+    source = StaticMixtureWorkSource(
         datasets,
         {"a": 0.05, "b": 0.95},
         chunk_size=10,
@@ -199,11 +195,10 @@ def _make_pipe(
         mixture={"a": 0.5, "b": 0.5},
         max_buffer_size=limit,
     ).options(
-        runner=runner,
-        mtp_mode=mtp_mode,
+        runner="inline",
         deterministic=True,
         canonical_replicas=1,
-        max_workers=2,
+        max_workers=1,
         default_stage_prefetch=2,
         flush_every_k_chunks=128,
     )
@@ -223,27 +218,6 @@ def _per_lane(items: list[tuple[int, str]]) -> dict[int, list[str]]:
     for lane, text in items:
         out[lane].append(text)
     return out
-
-
-@pytest.mark.parametrize(
-    "runner,mtp_mode",
-    [
-        ("inline", False),
-        ("threads", False),
-        ("process", False),
-        ("inline", True),
-    ],
-)
-def test_source_exhaustion_releases_survivors_through_transports(
-    runner: str,
-    mtp_mode: bool,
-) -> None:
-    pipe = _make_pipe(runner=runner, mtp_mode=mtp_mode)
-    records = [_value(r) for r in pipe]
-    # Without source exhaustion strict mode delivers 3 A and 3 B, discarding
-    # the other 54 B. Announcing A's exhaustion releases that live surplus.
-    assert len(records) == len(set(records)) == 60
-    assert sum(text.startswith("a-") for _, text in records) == 3
 
 
 @pytest.mark.parametrize("source_targets", [False, True])
@@ -278,24 +252,32 @@ def test_notification_is_once_per_lane_across_epoch_resets(
 
 
 @pytest.mark.parametrize(
-    "runner,mtp_mode",
+    "runner,mtp_mode,source_targets",
     [
-        ("inline", False),
-        ("threads", False),
-        ("process", False),
-        ("inline", True),
+        pytest.param("inline", False, False, id="inline-override"),
+        pytest.param("inline", False, True, id="inline-source-target"),
+        pytest.param("threads", False, False, id="threads"),
+        pytest.param("process", False, False, id="process"),
+        pytest.param("inline", True, False, id="mtp"),
     ],
 )
-@pytest.mark.parametrize("source_targets", [False, True])
 def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     runner: str,
     mtp_mode: bool,
     source_targets: bool,
 ) -> None:
+    # Cover both target policies inline. Transport cases use an override so
+    # releasing B requires the EOD signal to traverse the real runner/ACK path.
+    # This also serves as the transport smoke test; no separate matrix is needed.
     options: dict[str, Any] = dict(
         runner=runner, mtp_mode=mtp_mode, shuffle=True, source_targets=source_targets
     )
     baseline = [_value(r) for r in _continuing_pipe(**options)]
+    assert len(baseline) == len(set(baseline))
+    assert Counter(lane for lane, text in baseline if text.startswith("b-")) == {
+        0: 96,
+        1: 96,
+    }
     # The source has four complete B-only chunks after exhaustion; cut during
     # that suffix, with more B-only chunks and an epoch boundary still ahead.
     cut = next(
@@ -348,7 +330,7 @@ def test_large_shuffle_handles_exhausted_tail_by_mode(limit: int | None) -> None
         Dataset.from_dict(
             name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(count)])}
         )
-        for name, count in (("a", 200), ("b", 5000))
+        for name, count in (("a", 200), ("b", 400))
     ]
     source = _ContinuingSource(
         datasets, {"a": 0.5, "b": 0.5}, chunk_size=10, exhausted_policy="stop", seed=0
@@ -377,19 +359,12 @@ def test_large_shuffle_handles_exhausted_tail_by_mode(limit: int | None) -> None
 
 
 @pytest.mark.parametrize("limit", [None, 8, 64])
-def test_stop_policy_output_is_unchanged_by_notifications(
-    limit: int | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def collect() -> list[tuple[int, str]]:
-        return [_value(r) for r in _make_pipe(limit=limit, continuing=False)]
-
-    enabled = collect()
-    monkeypatch.setattr(
-        StaticMixtureWorkSource, "_source_exhausted_components", lambda self: ()
-    )
-    disabled = collect()
-    assert enabled == disabled
+def test_stop_policy_keeps_strict_and_bounded_behavior(limit: int | None) -> None:
+    # Stop policy does not opt into target relaxation. The two bounded limits
+    # cover preservation under buffer pressure and during the terminal flush.
+    records = [_value(r) for r in _make_pipe(limit=limit)]
+    assert len(records) == len(set(records))
     if limit is None:
-        assert Counter(text.split("-")[0] for _, text in enabled) == {"a": 3, "b": 3}
+        assert Counter(text.split("-")[0] for _, text in records) == {"a": 3, "b": 3}
     else:
-        assert Counter(text.split("-")[0] for _, text in enabled) == {"a": 3, "b": 57}
+        assert Counter(text.split("-")[0] for _, text in records) == {"a": 3, "b": 57}

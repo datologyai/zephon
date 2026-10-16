@@ -18,16 +18,68 @@ import pytest
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon._internal.mtp import (
+    _ACK,
     _CHECKPOINT,
     _CHECKPOINT_ERROR,
     MTPPipeline,
+    _handle_ctrl_msg,
     _lower_thread_priority,
     _prefetch_capacity,
     _Prefetcher,
     _StopSentinel,
 )
+from zephon._internal.notify import _ContributorNotify, _MonotoneNotify
 from zephon._internal.runners.queue import NamedQueue, QueueFeederError
-from zephon.types import SampleBatch, SampleRecord
+from zephon.types import ContributorRef, SampleBatch, SampleCursor, SampleRecord
+
+
+@pytest.mark.parametrize("use_monotone", [True, False])
+def test_ack_dispatch_separates_controls_completion_and_delivery(
+    use_monotone: bool,
+) -> None:
+    # Only records and tombstones enter pending. Control ACKs have no entry;
+    # test the dispatcher directly without starting a subprocess.
+    engine, connection = mock.Mock(), mock.Mock()
+    dropped = SampleCursor(3, 0, (0, 0, 3))
+    record = SampleCursor(0, 0, (0, 0, 0))
+    if use_monotone:
+        pending = {
+            1: _MonotoneNotify(0, 3, 1, dropped, delivered=False),
+            3: _MonotoneNotify(0, 0, 1, record),
+        }
+    else:
+        pending = {
+            1: _ContributorNotify(0, [ContributorRef(dropped, True)], dropped, False),
+            3: _ContributorNotify(0, [ContributorRef(record, True)], record),
+        }
+    assert not _handle_ctrl_msg(_ACK, 0, pending, engine, connection)
+    assert engine.mock_calls == []
+    assert not _handle_ctrl_msg(_ACK, 1, pending, engine, connection)
+    assert not _handle_ctrl_msg(_ACK, 2, pending, engine, connection)
+    assert set(pending) == {3}
+    engine.record_delivery.assert_not_called()
+    engine.notify.assert_not_called()
+    engine.notify_monotone.assert_not_called()
+    if use_monotone:
+        engine.notify_completion.assert_not_called()
+    else:
+        engine.notify_completion.assert_called_once_with(
+            0, [ContributorRef(dropped, True)]
+        )
+
+    assert not _handle_ctrl_msg(_ACK, 3, pending, engine, connection)
+    assert not pending
+    engine.record_delivery.assert_called_once_with(0)
+    if use_monotone:
+        engine.notify_monotone.assert_called_once_with(0, 0, 1, record)
+    else:
+        engine.notify.assert_called_once_with(
+            0, [ContributorRef(record, True)], record_cursor=record
+        )
+    # Duplicate ACKs must not count a delivery twice.
+    before = list(engine.mock_calls)
+    assert not _handle_ctrl_msg(_ACK, 3, pending, engine, connection)
+    assert engine.mock_calls == before
 
 
 class _CheckpointFailingWorkSource(FakeIndexableWorkSource):
