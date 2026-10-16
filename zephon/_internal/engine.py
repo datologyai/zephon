@@ -357,8 +357,16 @@ class Engine:
             id_to_component[component_id] = name
         self._component_to_id: dict[str, int] = declared
         self._id_to_component = id_to_component
+        continuing = work.continues_after_exhaustion()
+        if not isinstance(continuing, frozenset) or any(
+            not isinstance(name, str) or name not in declared for name in continuing
+        ):
+            raise ValueError(
+                "WorkSource.continues_after_exhaustion() must return a frozenset "
+                "of names declared by component_ids()"
+            )
         base_ctx["continues_after_exhaustion"] = frozenset(
-            self._get_component_id(name) for name in work.continues_after_exhaustion()
+            self._get_component_id(name) for name in continuing
         )
         # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
         self._chunk_mixtures: dict[tuple[LaneId, ChunkId], dict[int, float]] = {}
@@ -912,6 +920,18 @@ class Engine:
         self, lane_id: LaneId, cid: int, chunk: WorkChunk, announced: set[str]
     ) -> Iterator[EngineSample | SampleRecord]:
         """Notify once after the last component sample, or up front if absent."""
+        missing = announced.difference(chunk.source_exhausted)
+        if missing:
+            raise ValueError(
+                f"source_exhausted must be cumulative: lane {lane_id}, chunk {cid} "
+                f"drops {sorted(missing)}"
+            )
+        revived = [name for name in announced if chunk.components.get(name)]
+        if revived:
+            raise ValueError(
+                f"lane {lane_id}, chunk {cid} contains samples from previously "
+                f"source-exhausted components {sorted(revived)}"
+            )
         remaining: dict[str, int] = {}
         for name in chunk.source_exhausted:
             if name in announced:
@@ -924,10 +944,13 @@ class Engine:
                 yield self._make_source_exhausted_sentinel(
                     lane_id, self._get_component_id(name)
                 )
-        # Replay yields the entire chunk. Elastic continuation can be affected
-        # when a batch crosses chunk boundaries.
+        get_id = self._get_component_id
+        if not remaining:
+            for offset, (sample_id, name) in enumerate(chunk):
+                yield (sample_id, lane_id, cid, offset, get_id(name))
+            return
         for offset, (sample_id, name) in enumerate(chunk):
-            component_id = self._get_component_id(name)
+            component_id = get_id(name)
             yield (sample_id, lane_id, cid, offset, component_id)
             left = remaining.get(name)
             if left is not None:
@@ -979,6 +1002,8 @@ class Engine:
             chunk = inflight_lane[cid]
             # Store mixture for restored chunks (may already exist, but idempotent)
             self._store_chunk_mixture(lane_id, cid, chunk)
+            # Replay yields the entire chunk. Elastic continuation can be affected
+            # when a batch crosses chunk boundaries.
             yield from self._iter_chunk(lane_id, cid, chunk, announced)
 
         # Trailing boundary: if a boundary exceeds all inflight cids, the

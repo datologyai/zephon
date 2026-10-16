@@ -35,7 +35,8 @@ class SmoothWeightedRoundRobin(Generic[K]):
         emissions from all components, including retired ones. On each selection step:
 
         1) Compute deficit for each available component:
-           deficit[k] = T[k] * total_emitted - E[k]
+           target_total = sum(E[j] for j in T)
+           deficit[k] = T[k] * max(1, target_total) - E[k]
 
            This represents how much component k is "owed" relative to its target.
            Positive deficit means underrepresented; negative means overrepresented.
@@ -153,7 +154,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def get_deficits(self) -> dict[K, float]:
         """Get current deficit per component for benefit scoring.
 
-        Deficit = target * total_emitted - emitted. Positive deficit means the
+        Deficit = target * max(1, in-target emitted mass) - emitted. Positive deficit means the
         component is "owed" more emissions. Used by ensure_mixture to score
         multi-component samples by how well they reduce overall deficit.
 
@@ -165,7 +166,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
         Returns:
             Dict mapping component -> deficit (positive = underserved).
         """
-        total = sum(self._emitted[k] for k in self._target)
+        total = sum(self._emitted.get(k, 0.0) for k in self._target)
         effective_total = max(1.0, total)
         return {
             k: self._target[k] * effective_total - self._emitted[k]

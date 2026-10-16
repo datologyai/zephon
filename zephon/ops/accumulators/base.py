@@ -60,7 +60,7 @@ class Accumulator(ABC, Generic[T]):
 
         Args:
             reset: True when triggered by a flush sentinel mid-stream
-                (the accumulator must reset to fresh state), False when
+                (reset epoch-local state, retaining permanent source facts), False when
                 called at upstream close.
             lane_id: When set, flush only this lane.  When None, flush all
                 lanes.
@@ -97,16 +97,18 @@ class Accumulator(ABC, Generic[T]):
     ) -> list[ReadyBatch[T]]:
         """React to permanent exhaustion of a component's source in this lane.
 
-        The engine injects this notification once per lane stream and component,
+        The engine injects this notification at most once per lane stream and component,
         immediately after its last source sample in the exhaustion chunk, or
         before the lane's next chunk if that chunk contains none of it. Replay
         uses the same point; if exhaustion predates the replayed chunks, the
-        notification precedes the first replayed chunk.
+        notification precedes the first replayed chunk. A lane with no chunk at
+        or after exhaustion receives no notification; do not wait for one to close.
 
-        This is a hint, not a drain barrier: records held upstream (by a shuffle,
-        packer, or stalled batch flush) can arrive later and must be handled
-        normally. Reactions must be lane-scoped, idempotent, and deterministic
-        given input order. Keep any needed exhaustion knowledge across
+        This is a hint, not a drain barrier: any batching stage, including fetch
+        or an order-preserving map, can let it overtake buffered records. Reactions must be lane-scoped, idempotent, and deterministic
+        given input order. Do not rely on the historical order of different
+        components' exhaustion: replay may reconstruct them together from a
+        cumulative stamp, sorted by name. Keep any needed exhaustion knowledge across
         ``flush(reset=True)``: resets do not cause another notification.
 
         Source policy is separate from this fact. ``setup(OpContext)`` and
@@ -114,7 +116,8 @@ class Accumulator(ABC, Generic[T]):
         frozenset())``, a static ``frozenset[int]`` of components whose exhaustion
         allows the source to continue. Notifications also fire outside that set.
 
-        Returned batches are dispatched like :meth:`push_many` output. The
+        Returned batches are dispatched like :meth:`push_many` output. Keep
+        tombstones in separate tombstone-only batches, never mixed with data. The
         default is a no-op that leaves buffered data alone. See
         :doc:`/pipelines/user_defined_operators` for the authoring contract.
         """
@@ -129,7 +132,8 @@ class Accumulator(ABC, Generic[T]):
         and the runner wants to check whether the accumulator can now be reset.
 
         Returns True if and only if future outputs are equivalent to a fresh
-        accumulator on the retained suffix — i.e., the accumulator's behavior
+        accumulator with the same permanent source facts on the retained suffix —
+        i.e., the accumulator's behavior
         going forward is indistinguishable from one that was freshly constructed
         and fed only the records still in the buffer.  When returning True, the
         method must also perform any necessary state reset (e.g., clearing SWRR

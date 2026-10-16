@@ -273,6 +273,9 @@ class BaseOperatorState:
                             e.meta.lane_id, component_id
                         )
                     )
+                    # The hook may have emitted the records holding an older
+                    # flush back. Recheck its normal reset condition; exhaustion
+                    # alone never makes a stalled flush safe to release.
                     self._try_release_stalled_sentinels(ready)
                     ready.append(([e], 0))
                 elif e.meta.is_flush_sentinel:

@@ -17,6 +17,7 @@ from zephon._internal.ops.ensure_mixture import (
 )
 from zephon.ops.base import OpContext
 from zephon.types import ContributorRef, SampleCursor, SampleMeta, SampleRecord
+from zephon.work import WorkChunk
 
 
 def _assert_tombstones_only(ready, expected_count=None):
@@ -102,6 +103,7 @@ def _make_accumulator_with_chunk_mixture(
     chunk_mixture: dict[int, float],
     weight_by: str = "samples",
     warn_tolerance: float | None = None,
+    warn_warmup: float = 1000.0,
     max_buffer_size: int | None = 1,
     drain_target_ratio: float = 0.8,
     obsolete_drain_rate: float = 0.1,
@@ -111,6 +113,7 @@ def _make_accumulator_with_chunk_mixture(
     config = _make_config(
         weight_by=weight_by,
         warn_tolerance=warn_tolerance,
+        warn_warmup=warn_warmup,
         max_buffer_size=max_buffer_size,
         drain_target_ratio=drain_target_ratio,
         obsolete_drain_rate=obsolete_drain_rate,
@@ -157,6 +160,7 @@ class TestSourceExhaustion:
         b = [_rec(i + 10, component_id=1) for i in range(20)]
         out = _flatten_ready(acc.push_many(b))
         assert [r for r in out if _get_component(r.meta) == 1] == b
+        # The already emitted A used one of the ten normal emissions in slot 1.
         assert [i for i, r in enumerate(out) if _get_component(r.meta) == 0] == [9, 20]
         assert not acc.has_pending_data()
 
@@ -206,7 +210,6 @@ class TestSourceExhaustion:
         late = _rec(2, chunk=1)
         assert acc.push_many([late]) == []
         assert acc._lanes[0].swrr is not None
-        assert acc._lanes[0].swrr.target_ratios == {}
         flushed = _flatten_ready(acc.flush())
         assert len(flushed) == 3
         assert all(r.meta.tombstone == (limit is None) for r in flushed)
@@ -269,10 +272,13 @@ class TestSourceExhaustion:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 0.5, 1: 0.5},
             max_buffer_size=None,
+            warn_tolerance=0.01,
+            warn_warmup=2,
             continues_after_exhaustion=frozenset({0, 1}),
         )
-        acc._config.warn_tolerance = 0.01
-        acc._config.warn_warmup = 0
+        assert (
+            len(_flatten_ready(acc.push_many([_rec(0), _rec(1, component_id=1)]))) == 2
+        )
         acc.on_source_exhausted(0, 0)
         acc.push_many([_rec(i, component_id=1) for i in range(5)])
         assert not recwarn
@@ -319,7 +325,7 @@ class TestSourceExhaustion:
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 0.5, 1: 0.25, 2: 0.15, 3: 0.1},
-            max_buffer_size=64,
+            max_buffer_size=64 if terminal_flush else 2,
             continues_after_exhaustion=frozenset({0}),
         )
         acc.on_source_exhausted(0, 0)
@@ -339,7 +345,6 @@ class TestSourceExhaustion:
             assert acc.push_many([c, d]) == []  # Live B is still owed next.
             assert _flatten_ready(acc.flush()) == expected
         else:
-            acc._config.max_buffer_size = 2
             assert _flatten_ready(acc.push_many([c, d])) == expected[:1]
         # The first history distinguishes raw deficits; the second distinguishes
         # incorrectly renormalizing away live, unavailable B as well as dead A.
@@ -358,7 +363,7 @@ class TestSourceExhaustion:
         acc = _make_accumulator_with_chunk_mixture(
             target,
             weight_by=weight_by,
-            max_buffer_size=64 if force else None,
+            max_buffer_size=2 if force else None,
             continues_after_exhaustion=frozenset({0}),
         )
         acc.on_source_exhausted(0, 0)
@@ -370,7 +375,9 @@ class TestSourceExhaustion:
                     sample_id=(0, 0, i),
                     lane_id=0,
                     chunk_id=0,
-                    component_sample_counts=counts,
+                    component_sample_counts=dict.fromkeys(counts, 1)
+                    if weight_by == "auto"
+                    else counts,
                     component_token_counts=counts,
                 ),
                 payload={"value": i},
@@ -380,15 +387,116 @@ class TestSourceExhaustion:
         assert len(_flatten_ready(acc.push_many([pack(0, history_counts)]))) == 1
         large = pack(1, {1: 1, 2: 10})
         small = pack(2, {1: 1, 2: 1})
-        if force:
-            acc._config.max_buffer_size = 2
         out = _flatten_ready(acc.push_many([small, large]))
         assert out[0] == large
 
 
 class TestRetiredRecords:
+    def test_sparse_counted_chunks_can_retire_then_restore_a_component(self) -> None:
+        chunks = [
+            WorkChunk(components={"a": [(0, 0, 0)], "b": [(1, 0, 0)]}),
+            WorkChunk(components={"b": [(1, 0, 1)]}),
+            WorkChunk(components={"a": [(0, 0, 1)], "b": [(1, 0, 2)]}),
+        ]
+        ids = {"a": 0, "b": 1}
+        acc = EnsureMixtureAccumulator(
+            _make_config(max_buffer_size=None),
+            get_chunk_mixture=lambda lane, cid: {
+                ids[name]: weight for name, weight in chunks[cid].mixture.items()
+            },
+        )
+        old_a = [_rec(i) for i in range(3)]
+        assert _flatten_ready(acc.push_many(old_a)) == old_a[:1]
+        b = [_rec(10 + i, component_id=1, chunk=1) for i in range(2)]
+        assert _flatten_ready(acc.push_many(b)) == b
+        # Cumulative exhaustion is absent: a later counted chunk legitimately
+        # restores A, including records already waiting in the obsolete queue.
+        new_a = _rec(20, chunk=2)
+        assert _flatten_ready(acc.push_many([new_a])) == old_a[1:]
+
+    def test_zero_weight_obsolete_record_uses_drain_slot(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.5},
+            weight_by="auto",
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0}),
+        )
+        acc.on_source_exhausted(0, 0)
+        empty = self.pack(0, {0: 1}, token_counts={0: 0})
+        live = [_rec(i, component_id=1, tokens=3) for i in range(1, 21)]
+        out = _flatten_ready(acc.push_many([empty, *live]))
+        assert out == live[:10] + [empty] + live[10:]
+        assert acc.flush() == []
+
+    def test_explicit_override_relaxes_only_permitted_exhaustion(self) -> None:
+        config = _make_config(max_buffer_size=None)
+        config.mixture_override_by_id = {0: 0.5, 1: 0.5}
+        config.continues_after_exhaustion = frozenset({0})
+        acc = EnsureMixtureAccumulator(
+            config, get_chunk_mixture=lambda lane, cid: {1: 1}
+        )
+        live = [_rec(i, component_id=1) for i in range(5)]
+        assert acc.push_many(live) == []  # Override takes precedence over source.
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == live
+
+    def test_two_exhaustions_keep_survivors_flowing(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 0.5, 1: 0.3, 2: 0.2},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
+        )
+        live = [_rec(i, component_id=2) for i in range(20)]
+        assert acc.push_many(live) == []
+        assert acc.on_source_exhausted(0, 0) == []
+        assert _flatten_ready(acc.on_source_exhausted(0, 1)) == live
+        obsolete = [_rec(100), _rec(101, component_id=1)]
+        assert _flatten_ready(acc.push_many(obsolete)) == obsolete[:1]
+        next_live = [_rec(200 + i, component_id=2) for i in range(10)]
+        assert _flatten_ready(acc.push_many(next_live)) == next_live + obsolete[1:]
+
+    def test_reset_rebuilds_target_for_same_chunk_suffix(self) -> None:
+        acc = EnsureMixtureAccumulator(
+            _make_config(max_buffer_size=None),
+            get_chunk_mixture=lambda lane, cid: {1: 1},
+        )
+        first = _rec(0, component_id=1, chunk=5)
+        assert _flatten_ready(acc.push_many([first])) == [first]
+        assert acc.flush(reset=True) == []
+        # An upstream Batch may release an older stalled flush after emitting
+        # part of chunk 5. The remaining suffix still needs chunk 5's target:
+        # keeping the hwm while clearing SWRR would treat it as unconfigured.
+        assert acc.push_many([_rec(1, chunk=5)]) == []
+        live = _rec(2, component_id=1, chunk=5)
+        assert _flatten_ready(acc.push_many([live])) == [live]
+
+    def test_bounded_flush_preserves_contiguous_obsolete_tail(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture({1: 1}, max_buffer_size=64)
+        obsolete = [_rec(i) for i in range(6)]
+        live = [_rec(100 + i, component_id=1) for i in range(10)]
+        emitted = _flatten_ready(acc.push_many([*obsolete, *live]))
+        assert emitted == live + obsolete[:1]
+        assert _flatten_ready(acc.flush(reset=True)) == obsolete[1:]
+
+    def test_buffer_pressure_may_exceed_obsolete_interval(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {1: 1}, max_buffer_size=4, drain_target_ratio=0.5
+        )
+        obsolete = [_rec(i) for i in range(8)]
+        emitted = []
+        for record in obsolete:
+            emitted.extend(_flatten_ready(acc.push_many([record])))
+        # Preservation takes priority even with no ordinary records to earn slots.
+        assert emitted == obsolete[:6]
+        assert _flatten_ready(acc.flush()) == obsolete[6:]
+
     @staticmethod
-    def pack(i: int, counts: dict[int, int], *, chunk: int = 0) -> SampleRecord:
+    def pack(
+        i: int,
+        counts: dict[int, int],
+        *,
+        chunk: int = 0,
+        token_counts: dict[int, int] | None = None,
+    ) -> SampleRecord:
         return SampleRecord(
             meta=SampleMeta(
                 sample_id=(0, 0, i),
@@ -396,7 +504,7 @@ class TestRetiredRecords:
                 chunk_id=chunk,
                 chunk_offset=i,
                 component_sample_counts=counts,
-                component_token_counts=counts,
+                component_token_counts=counts if token_counts is None else token_counts,
             ),
             payload={"value": i},
         )
@@ -411,17 +519,19 @@ class TestRetiredRecords:
             continues_after_exhaustion=frozenset({0}),
         )
         # Balanced history must not become a survivor catch-up burst either.
-        history = self.pack(0, {0: 50, 1: 30, 2: 20})
+        history = self.pack(
+            0, {0: 50, 1: 30, 2: 20}, token_counts={0: 150, 1: 90, 2: 60}
+        )
         assert _flatten_ready(acc.push_many([history])) == [history]
         acc.on_source_exhausted(0, 0)
-        survivors = [_rec(i, component_id=1 + (i % 2), tokens=1) for i in range(1, 201)]
+        survivors = [_rec(i, component_id=1 + (i % 2), tokens=3) for i in range(1, 201)]
         before = _flatten_ready(acc.push_many(survivors))
         assert sum(_get_component(r.meta) == 1 for r in before[:100]) == 60
         # A has been absent for many intervals. Only one slot is immediately due.
-        late = [_rec(1000 + i, tokens=1) for i in range(10)]
+        late = [_rec(1000 + i, tokens=7) for i in range(10)]
         first = _flatten_ready(acc.push_many(late))
         assert first == late[:1]
-        more = [_rec(2000 + i, component_id=1 + (i % 2), tokens=1) for i in range(200)]
+        more = [_rec(2000 + i, component_id=1 + (i % 2), tokens=3) for i in range(200)]
         output = first + _flatten_ready(acc.push_many(more))
         positions = [i for i, r in enumerate(output) if _get_component(r.meta) == 0]
         assert len(positions) == 10
@@ -438,16 +548,22 @@ class TestRetiredRecords:
             continues_after_exhaustion=frozenset({0}),
         )
         acc.on_source_exhausted(0, 0)
-        initial = [_rec(i, component_id=1 + i % 2, tokens=1) for i in range(20)]
+        initial = [_rec(i, component_id=1 + i % 2, tokens=3) for i in range(20)]
         assert len(_flatten_ready(acc.push_many(initial))) == 20
-        packed = self.pack(100, {0: 1, 1: 4})
+        packed = self.pack(100, {0: 1, 1: 4}, token_counts={0: 7, 1: 15})
         assert _flatten_ready(acc.push_many([packed])) == [packed]
         # Its four B contributions must be accounted for, despite using one slot.
-        c = [_rec(200 + i, component_id=2, tokens=1) for i in range(4)]
+        c = [
+            _rec(200 + i, component_id=2, tokens=3)
+            for i in range(5 if weight_by == "auto" else 4)
+        ]
         assert _flatten_ready(acc.push_many(c)) == c
-        later = self.pack(101, {0: 2, 1: 1})
+        later = self.pack(101, {0: 2, 1: 1}, token_counts={0: 14, 1: 3})
         assert acc.push_many([later]) == []
-        normal = [_rec(300 + i, component_id=1 + i % 2, tokens=1) for i in range(6)]
+        normal = [
+            _rec(300 + i, component_id=1 + i % 2, tokens=3)
+            for i in range(5 if weight_by == "auto" else 6)
+        ]
         assert _flatten_ready(acc.push_many(normal)) == normal + [later]
         assert later.meta.component_sample_counts == {0: 2, 1: 1}
 
@@ -469,7 +585,7 @@ class TestRetiredRecords:
         assert acc.push_many(retired) == []
         ordinary = [_rec(100 + i, component_id=2) for i in range(30)]
         out = _flatten_ready(acc.push_many(ordinary))
-        assert [out[i] for i in (10, 21, 32)] == retired
+        assert [out[10 + 11 * k] for k in range(3)] == retired
         assert len(out) == 33
         assert not acc.has_pending_data()
 
@@ -478,7 +594,11 @@ class TestRetiredRecords:
         acc = _make_accumulator_with_chunk_mixture(
             {1: 1}, weight_by=weight_by, max_buffer_size=None
         )
-        packed = self.pack(0, {0: 0, 1: 4})
+        packed = self.pack(
+            0,
+            {0: 1, 1: 1} if weight_by == "auto" else {0: 0, 1: 4},
+            token_counts={0: 0, 1: 4},
+        )
         assert _flatten_ready(acc.push_many([packed])) == [packed]
 
     @pytest.mark.parametrize("weight_by", ["samples", "auto"])
@@ -489,7 +609,9 @@ class TestRetiredRecords:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 1}, weight_by=weight_by, max_buffer_size=limit
         )
-        record = self.pack(0, {0: 0})
+        record = self.pack(
+            0, {0: 1} if weight_by == "auto" else {0: 0}, token_counts={0: 0}
+        )
         assert _flatten_ready(acc.push_many([record])) == [record]
         assert not acc.has_pending_data()
         assert acc.flush() == []
@@ -564,7 +686,6 @@ class TestRetiredRecords:
         out = _flatten_ready(acc.push_many(survivors))
         assert out[:-1] == survivors
         assert out[-1].payload["value"] == 2
-        assert acc._lanes[0].swrr.target_ratios == {1: 1.0}
 
     def test_no_target_still_passes_mixed_records(self) -> None:
         acc = EnsureMixtureAccumulator(_make_config(max_buffer_size=None))
@@ -1599,8 +1720,7 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
         )
 
     def test_mid_stream_flush_resets_emission_counters(self) -> None:
-        """After flush(reset=True), emitted_by_component and
-        total_emitted must be zero (fresh state)."""
+        """A reset clears epoch-local warning warmup and selection history."""
         acc = _make_accumulator_with_chunk_mixture({0: 0.5, 1: 0.5}, max_buffer_size=50)
         records = [_rec(i, component_id=i % 2, chunk=0) for i in range(10)]
         acc.push_many(records)
@@ -1617,10 +1737,6 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
             f"total_emitted should be 0 after mid-stream flush, "
             f"got {lane_state.total_emitted}"
         )
-        assert all(v == 0.0 for v in lane_state.emitted_by_component.values()), (
-            f"emitted_by_component should be zeroed after mid-stream flush, "
-            f"got {dict(lane_state.emitted_by_component)}"
-        )
 
     def test_mid_stream_flush_produces_fresh_equivalent_state(self) -> None:
         """After flush(reset=True), internal state must match a fresh accumulator.
@@ -1630,7 +1746,9 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
         flush() forgets to reset it.
         """
         mixture: dict[int, float] = {0: 0.7, 1: 0.3}
-        acc = _make_accumulator_with_chunk_mixture(mixture, max_buffer_size=50)
+        acc = _make_accumulator_with_chunk_mixture(
+            mixture, max_buffer_size=50, continues_after_exhaustion=frozenset({2})
+        )
 
         # Build up state across multiple chunks
         records = [_rec(i, component_id=i % 2, chunk=0) for i in range(10)]
@@ -1640,9 +1758,10 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
         # Verify state is non-trivial before flush
         lane_state = acc._lanes[0]
         assert lane_state.total_emitted > 0
-        assert lane_state.current_chunk_id is not None
+        assert lane_state.target_chunk_id is not None
         assert lane_state.swrr is not None
 
+        acc.on_source_exhausted(0, 2)
         acc.flush(reset=True)
 
         # After mid-stream flush, every field on _LaneState must match
@@ -1656,6 +1775,9 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
         for field_name in [f.name for f in lane_state.__dataclass_fields__.values()]:
             live_val = getattr(lane_state, field_name)
             fresh_val = getattr(fresh, field_name)
+            if field_name == "source_exhausted":
+                assert live_val == {2}  # Permanent facts survive epoch-local reset.
+                continue
             # Buffers are drained (empty deques remain keyed by component)
             # rather than replaced, so check that no actual records remain.
             if field_name == "buffers":
@@ -1831,7 +1953,7 @@ def test_strict_flush_reset_clears_state_like_fresh_accumulator() -> None:
     state = acc._lanes[0]
     assert not acc.has_pending_data()
     assert state.swrr is None
-    assert state.current_chunk_id is None
+    assert state.target_chunk_id is None
     assert state.total_emitted == 0.0
     assert state.emissions_since_obsolete_drain == 0
 

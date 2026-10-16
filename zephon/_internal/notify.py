@@ -88,9 +88,12 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
         return _ContributorNotify(lane_id, contributors, record_cursor)
 
     if isinstance(item, SampleRecord):
+        if not should_notify(item):
+            raise ValueError(
+                "Flush and source-exhaustion controls cannot notify progress"
+            )
         lane_id = item.meta.lane_id
-        # Sentinels never reach the consumer; replayed-and-dropped records arrive
-        # as tombstones, so excluding them prevents double-counting on resume.
+        # Tombstones close real offsets but are not consumer deliveries.
         delivered = not item.meta.tombstone
         if use_monotone:
             return _MonotoneNotify(
@@ -164,10 +167,7 @@ def should_notify(item: StreamItem) -> bool:
     them would mark false chunk-0 progress and overwrite the lane's replay
     cursor, potentially causing restored records to be skipped.
     """
-    if not isinstance(item, SampleRecord):
-        return True
-    tags = item.meta.tags
-    return not (tags.get("_flush_sentinel") or "_source_exhausted" in tags)
+    return not is_sentinel(item) or is_tombstone(item)
 
 
 def source_exhausted_component(item: StreamItem) -> int | None:

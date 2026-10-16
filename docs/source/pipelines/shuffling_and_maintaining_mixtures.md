@@ -68,52 +68,56 @@ lost data and more memory use):
 :caption: examples/guide/pipelines/ensure_mixture_unbounded_buffer.py
 ```
 
-**When a Dataset Runs Out.** When a non-repeating dataset contributes its last source
-sample, Zephon inserts a source-exhaustion notification immediately after that sample.
-The same happens on the final allowed pass of a dataset with `max_repeats`. An ordinary
-repeat boundary does not trigger this notification.
+**When a Dataset Runs Out.** `StaticMixtureWorkSource` does not opt into relaxing
+mixture enforcement on exhaustion: its stop and repeat policies keep their targets.
+Custom sources declare the components they can continue without through
+`WorkSource.continues_after_exhaustion()`. For those components, both bounded and strict
+`ensure_mixture` remove the exhausted share and renormalize survivors. A 50:30:20 A/B/C
+target becomes 60:40 B/C when A exhausts. This also relaxes an explicit `mixture` override;
+the override otherwise takes precedence over source targets.
 
-The notification is a source fact; how `ensure_mixture` reacts depends on the source's
-policy. `WorkSource.continues_after_exhaustion()` declares the components whose exhaustion
-allows the source to keep producing. For those components, both bounded and strict modes
-remove the exhausted share immediately and renormalize the surviving target shares.
-For example, if A runs out in a 50:30:20 A/B/C target, the
-remaining B/C target is 60:40. Custom sources can opt in now; `StaticMixtureWorkSource`
-currently declares no such components. A continuing source may also publish the
-survivor-only `WorkChunk.target_mixture`; it need not retain exhausted components.
+At the engine, a source-exhaustion notification follows the component's final source
+sample, or precedes a lane's next chunk if that component is absent. A lane that receives
+no chunk at or after exhaustion receives no notification. Any batching stage, including
+fetch and order-preserving maps, can let the notification overtake buffered data.
+A final `max_repeats` pass can announce permanent exhaustion; ordinary repetition and a
+`stop_after_passes` run boundary do not.
+
+A continuing source may publish survivor-only `WorkChunk.target_mixture` values.
 Within each replay epoch, the operator adopts targets only from increasing chunk IDs,
-so late records cannot restore an older chunk's target. An explicit `mixture` override
-still takes precedence over source weights, with the same permitted exhaustion filtering.
+so late records cannot restore an older target. Flushes reset epoch-local selection
+history and target ordering; permanent exhaustion knowledge persists.
 
-For components outside that set, the notification does not change mixture enforcement.
-Strict mode (`max_buffer_size=None`) still drops surplus it cannot place on target at
-flush boundaries, including end of stream. Bounded mode still drains its remaining
-buffer at the final flush. This preserves the behavior of the existing
-[stop and repeat policies](../worksources/shuffling_and_repeating_samples.md).
-An ordinary repeat boundary or the `stop_after_passes` run boundary does not announce
-permanent exhaustion of repeating datasets.
+Records containing positive contributions outside the target are **obsolete**. A record
+with no component in the target is also obsolete, even if its weight is zero. A packed
+record is indivisible and uses a drain slot as a whole; zero-count metadata for an
+obsolete component does not retire a pack that still serves the target. Its live
+contributions count toward the surviving mixture; obsolete contributions do not inflate
+survivor deficits.
 
-The notification can arrive before records held by an upstream shuffle or packer.
-Those records become obsolete when their component leaves the target. They are interleaved
-using `obsolete_drain_rate`: the default `0.1` emits one obsolete record after ten normal
-records, if available. The interval counts output records, including packed records,
-and saves at most one slot while obsolete records are absent. Late A cannot build up
-an entitlement to compensate for B/C output during its absence. Set the rate to `0`
-to disable periodic drainage.
+`obsolete_drain_rate` interleaves one obsolete record after `int(1 / rate)` normal records,
+if available. Thus its effective share is `1 / (int(1 / rate) + 1)`: the default `0.1` is
+one in eleven outputs (about 9.1%), `0.3` is one in four, and values above `0.5` all
+alternate (50%). The interval counts output records, including packed records, not tokens.
+At most one slot is saved while obsolete records are absent. Late A cannot accumulate
+catch-up credit during its absence. Set the rate to `0` to disable periodic drainage.
+This is fixed interleaving, not gradual weight decay. Arbitrary curriculum changes to
+survivors' relative weights can still cause historical catch-up.
 
-A packed record with any positive off-target contribution uses a drain slot as a whole.
-Its live contributions still count toward the surviving mixture; retired contributions
-do not inflate survivor deficits. Zero-count metadata entries do not retire a record.
-This spaces whole records, rather than guaranteeing a particular retired-token share
-or gradually decaying weights. Arbitrary curriculum changes to the surviving weights
-can still cause historical catch-up; this mechanism addresses component removal.
+Both modes allow periodic drainage during normal output. **Strict mode discards all
+withheld leftovers at every flush**, including obsolete tails. This can discard a large
+fraction of a late tail: with no saved slot and 5000 obsolete A plus 5000 ordinary B
+records available before a flush, the default interval admits 500 A and discards the
+remaining 4500 (90%). The discard log identifies how many discarded records were obsolete.
 
-Both modes allow periodic drainage during normal output. Strict mode discards withheld
-leftovers at every flush, including exhausted tails; it never forces a final preservation
-burst. Bounded mode may exceed the interval under buffer pressure and drains every
-remaining record at flush. If only A remains, preserving it can produce an A-only ending.
+**Bounded mode preserves every buffered record at every flush.** Buffer-pressure drains
+and flushes may exceed the interval and emit a contiguous obsolete tail, even when live
+records were available earlier in the drain. The fixed allowance prevents accumulated
+catch-up credit; it does not guarantee a maximum run length under preservation pressure.
+When all target components have exhausted, no normal selection is possible. At most one
+saved obsolete slot can be used; strict flushes discard the rest, while bounded mode
+emits it under pressure or at flush.
 
-The notification is not proof that processing has finished. Observing the next flush is
-not a general substitute: a notification can pass a stalled batch flush while records
-from later chunks are still buffered upstream. Flushes reset selection history and target
-ordering for replay; cumulative source-exhaustion knowledge persists.
+Source-exhaustion notifications do not prove downstream drainage. See
+[the operator-author contract](user_defined_operators.md#reacting-to-source-exhaustion)
+for ordering and replay caveats.

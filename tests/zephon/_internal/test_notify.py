@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from zephon._internal.engine import Engine
 from zephon._internal.notify import (
     _apply_notify_args,
     _ContributorNotify,
@@ -267,3 +268,13 @@ class TestShouldNotify:
 
     def test_batch_notifies(self):
         assert should_notify(_batch(_record())) is True
+
+
+@pytest.mark.parametrize("monotone", [False, True])
+def test_extract_rejects_non_notifiable_controls(monotone: bool) -> None:
+    for control in (
+        Engine._make_flush_sentinel(0),
+        Engine._make_source_exhausted_sentinel(0, 0),
+    ):
+        with pytest.raises(ValueError, match="cannot notify progress"):
+            _extract_notify_args(control, monotone)

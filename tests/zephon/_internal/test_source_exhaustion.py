@@ -3,6 +3,8 @@
 
 """Source-exhaustion notifications are emitted immediately after the final source sample."""
 
+import pytest
+
 from zephon._internal.engine import Engine
 from zephon._internal.notify import should_notify, source_exhausted_component
 from zephon._internal.stream import EngineSample
@@ -22,6 +24,22 @@ class _StubEngine:
 
     def _get_component_id(self, name: str) -> int:
         return self._ids.setdefault(name, len(self._ids))
+
+
+@pytest.mark.parametrize("revived", [False, True])
+def test_source_contract_violations_fail_at_next_chunk(revived: bool) -> None:
+    stub = _StubEngine()
+    announced: set[str] = set()
+    first = WorkChunk(components={"a": [(0, 0, 0)]}, source_exhausted=("a",))
+    list(Engine._iter_chunk(stub, 0, 0, first, announced))
+    bad = WorkChunk(
+        components={"a" if revived else "b": [(0, 0, 1)]},
+        source_exhausted=("a",) if revived else (),
+    )
+    with pytest.raises(
+        ValueError, match="previously source-exhausted|must be cumulative"
+    ):
+        list(Engine._iter_chunk(stub, 0, 1, bad, announced))
 
 
 def _weave(
@@ -62,7 +80,10 @@ def test_notification_is_once_per_stream_and_restored_from_cumulative_stamp() ->
 def test_absent_announcements_have_stable_order() -> None:
     chunk = WorkChunk(components={"data": [(0, 0, 0)]}, source_exhausted=("z", "a"))
     stub, items = _weave(chunk)
-    assert list(stub._ids) == ["a", "z", "data"]
+    assert [source_exhausted_component(r) for r in _sentinels(items)] == [
+        stub._ids["a"],
+        stub._ids["z"],
+    ]
     assert len(_sentinels(items)) == 2
     assert not isinstance(items[-1], SampleRecord)
 
@@ -98,7 +119,9 @@ def test_sentinel_immediately_after_last_sample_of_exhausted_component() -> None
     restored = WorkChunk.from_state(chunk.state_dict())
     assert _weave(restored, lane_id=3)[1] == items
     # Sample count and order are untouched by the weaving.
-    assert len([i for i in items if not isinstance(i, SampleRecord)]) == 6
+    assert [(i[0], i[4]) for i in items if not isinstance(i, SampleRecord)] == [
+        (sample_id, stub._ids[name]) for sample_id, name in chunk
+    ]
 
 
 def test_sentinel_before_chunk_when_component_absent() -> None:
@@ -153,3 +176,14 @@ def test_make_source_exhausted_sentinel_is_excluded_control_signal() -> None:
     assert sentinel.meta.chunk_id == 0
     assert sentinel.meta.chunk_offset == 0
     assert not should_notify(sentinel)
+
+
+def test_v2_migration_supplies_empty_exhaustion_stamp() -> None:
+    from zephon._internal.checkpoint import migrate
+
+    state = WorkChunk(components={}).state_dict()
+    state["version"] = 2
+    del state["source_exhausted"]
+    migrated = migrate("work_chunk", state)
+    assert migrated["version"] == 3
+    assert migrated["source_exhausted"] == []

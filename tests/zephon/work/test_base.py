@@ -636,3 +636,9 @@ def test_worksource_prime_is_a_noop_accepting_keyword_context():
 
 def test_worksource_continuation_policy_defaults_empty() -> None:
     assert WorkSource().continues_after_exhaustion() == frozenset()
+
+
+def test_checkpoint_canonicalizes_reassigned_exhaustion_stamp() -> None:
+    chunk = WorkChunk(components={})
+    chunk.source_exhausted = ("z", "a")
+    assert WorkChunk.from_state(chunk.state_dict()).source_exhausted == ("a", "z")

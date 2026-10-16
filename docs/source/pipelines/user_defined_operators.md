@@ -201,32 +201,42 @@ keep the contributor cursors but clear all closing flags. If you drop a record i
 of splitting it, use `tombstones_for_record` from the same module to emit tombstones for
 the closing responsibilities it carries.
 
+(reacting-to-source-exhaustion)=
+
 **Reacting to Source Exhaustion.** Custom accumulators can override
 `on_source_exhausted(lane_id, component_id)` to react when a dataset will supply no more
-source samples. The engine injects this notification once per lane stream and component,
+source samples. The engine injects this notification at most once per lane stream and component,
 immediately after its last sample in the exhaustion chunk, or before the lane's next
 chunk if that chunk contains none of the component. A restored stream re-sends it at the
 same point: before the first replayed chunk if exhaustion came earlier, otherwise after
-the last source sample in the replayed exhaustion chunk.
+the last source sample in the replayed exhaustion chunk. A lane with no chunk at or
+after exhaustion receives no notification; an operator must still close normally.
 
-This is a hint, not a drain barrier. A shuffle, packer, or held batch flush can let the
-notification overtake records buffered upstream. Handle those records normally when they
-arrive; do not discard them as late stragglers. The notification is permanent and is not
+This is a source fact, not a drain barrier. Any batching stage, including fetch and
+order-preserving maps, can let the notification overtake records buffered upstream.
+Handle later records according to the operator's explicit policy; the notification alone
+is not a reason to consider them invalid. Even the next observed flush is not a general
+drainage guarantee: the notification may pass a stalled batch flush while later chunks
+remain buffered upstream. The notification is permanent and is not
 re-sent after `flush(reset=True)`, so retain any exhaustion knowledge you need across
 resets. Reactions must be lane-scoped, idempotent, and deterministic given input order so
-replay reproduces them. Return `ReadyBatch` values exactly as from `push_many`; the
+replay reproduces them. Do not depend on the historical order of different components'
+exhaustion: replay may reconstruct several facts together from a stamp sorted by name.
+Return `ReadyBatch` values exactly as from `push_many`; the
 runner dispatches them through `process_many`. The default hook leaves buffers alone
 and returns no batches.
 
 The notification itself closes no contributor offsets and never advances checkpoint
 delivery progress. If your hook drops buffered records, emit their tombstones with
 `tombstones_for_record` as for any other discard; those tombstones report source
-completion without claiming that buffered payloads have been delivered.
+completion without claiming that buffered payloads have been delivered. Tombstones must
+be in **tombstone-only `ReadyBatch`es**, separate from data: runners route a batch according
+to its first element. This also applies to `push_many` and `flush`.
 
 Operators that need the source's policy can read
 `ctx.get("continues_after_exhaustion", frozenset())` in `setup(OpContext)` or
 `accumulator(ctx=...)`. This static `frozenset[int]` contains the component ids the source
-keeps producing past once exhausted, mapped from `WorkSource.continues_after_exhaustion()`.
+can keep producing without after they exhaust, mapped from `WorkSource.continues_after_exhaustion()`.
 It defaults to empty. Notifications are delivered for every permanently exhausted
 component, including those outside this set; the set controls the operator's reaction.
 For example, `ensure_mixture` stops waiting only for components in this set. Keep any

@@ -79,8 +79,10 @@ class WorkChunk:
 
     ``source_exhausted`` is cumulative: every chunk must list all components
     whose final source sample has been produced in this or an earlier chunk.
-    The engine notifies downstream operators immediately after the component's
-    last sample, or before this chunk if absent, including on replay.
+    The engine injects the notification immediately after the component's last
+    source sample, or before this chunk if absent, including on replay. Any
+    downstream batching stage can let it overtake buffered data. A lane with no
+    later chunk receives no notification.
     """
 
     components: SamplesPerComponent
@@ -103,7 +105,9 @@ class WorkChunk:
             or any(not isinstance(n, str) or not n for n in names)
             or len(set(names)) != len(names)
         ):
-            raise ValueError("source_exhausted must contain unique non-empty names")
+            raise ValueError(
+                "source_exhausted must be a tuple or list of unique non-empty names"
+            )
         self.source_exhausted = tuple(sorted(names))
         self._component_order = tuple(self.components.keys())
         self._total_samples = sum(len(items) for items in self.components.values())
@@ -290,7 +294,7 @@ class WorkChunk:
             components=comps_serial,
             component_order=list(self._component_order),
             total_samples=int(self._total_samples),
-            source_exhausted=list(self.source_exhausted),
+            source_exhausted=sorted(self.source_exhausted),
             target_mixture=(
                 None
                 if self.target_mixture is None
@@ -455,7 +459,8 @@ class WorkSource(ABC):
 
         The default is empty: exhaustion does not relax downstream mixture
         enforcement. For opted-in components, ``ensure_mixture`` removes their
-        share on notification and interleaves in-flight records as obsolete
+        share on notification, including from an explicit operator mixture
+        override, and interleaves in-flight records as obsolete
         content. Later chunk targets may omit them. Strict flushes may discard
         their remaining records, just like other withheld surplus.
         """

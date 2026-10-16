@@ -294,12 +294,9 @@ class WorkChunkStateV2(WorkChunkStateV1):
 
 @dataclass(frozen=True, kw_only=True)
 class WorkChunkStateV3(WorkChunkStateV2):
-    """Persist cumulative source exhaustion with each chunk for deterministic replay.
+    """Persist cumulative exhaustion so live and replayed chunks announce alike.
 
-    Names identify components whose final source sample was produced in this
-    or an earlier chunk. The engine uses the same persisted stamp for live
-    and replayed chunks, recovering notifications at the appropriate source
-    positions. Required; the v2->v3 migration fills ``[]``.
+    The v2-to-v3 migration supplies an empty stamp; older readers reject v3.
     """
 
     version: int = 3

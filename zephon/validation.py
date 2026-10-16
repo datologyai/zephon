@@ -1093,8 +1093,8 @@ def _check_acc_reset_yields_fresh(
                     "After flush(reset=True), the accumulator produced "
                     "different output than a freshly constructed one fed the "
                     "same data (sample IDs or payloads diverged). Reset must "
-                    "restore the accumulator to a state indistinguishable "
-                    "from __init__."
+                    "restore epoch-local state (retaining permanent source facts) "
+                    "to match fresh construction with the same source facts."
                 ),
             )
         ]

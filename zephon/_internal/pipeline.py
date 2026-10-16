@@ -973,10 +973,12 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
-        When the source continues without an exhausted component, both modes
-        remove its target share and interleave its late records without catch-up
-        bursts. Strict flushes still discard leftovers. See
-        :doc:`/pipelines/shuffling_and_maintaining_mixtures` for the semantics.
+        For components in ``WorkSource.continues_after_exhaustion()`` (none for
+        ``StaticMixtureWorkSource``), both modes remove the exhausted target share
+        and renormalize survivors. Late records have a fixed interleaving allowance,
+        with no accumulated catch-up credit. Bounded forced drains and flushes may
+        emit a contiguous obsolete tail; strict flushes discard it. See
+        :doc:`/pipelines/shuffling_and_maintaining_mixtures`.
 
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
@@ -985,8 +987,7 @@ class Pipeline:
                 component stays scarce. Pass ``None`` to instead **drop** the surplus
                 it cannot place on-target — at every epoch boundary and at end of
                 stream. This enforces the mixture at the cost of dropping data.
-                If the source continues without an exhausted component, enforce
-                the renormalized surviving target instead. Use strict mode when
+                Use strict mode when
                 an exact mixture matters more than keeping every sample. How much
                 is dropped depends on the stream's skew and on ``flush_every_k_chunks``
                 (smaller → more dropped). ensure_mixture is always non-monotonic, so
@@ -998,8 +999,11 @@ class Pipeline:
             drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
                 the buffer down to this fraction of max_buffer_size before stopping.
                 Default is 0.8 (drain to 80% of max).  Ignored when ``max_buffer_size=None``.
-            obsolete_drain_rate: Emit one obsolete record after ``int(1 / rate)``
-                normal records, if available. Default 0.1 means one after ten;
+            obsolete_drain_rate: Obsolete records contain off-target content or
+                have no component in the target. Emit one after ``int(1 / rate)``
+                normal records, if available. The effective share is
+                ``1 / (int(1 / rate) + 1)``: default 0.1 means one in eleven;
+                values above 0.5 all alternate (50%).
                 0 disables periodic drainage. A packed record with any positive
                 off-target contribution uses one slot. Bounded forced drains and
                 flushes may exceed this rate; strict flushes discard leftovers.
@@ -1013,7 +1017,8 @@ class Pipeline:
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived
-                from chunk mixture via engine context.
+                from chunk mixture via engine context. Permitted source exhaustion
+                also removes components from this explicit override.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.
 
@@ -1585,7 +1590,8 @@ class Pipeline:
         Walks every user-supplied operator (those built by :meth:`add_op`)
         and runs a smoke test that checks: ``process_many`` is stateless
         across calls, the accumulator conserves samples on push+flush,
-        ``flush(reset=True)`` leaves the accumulator in a fresh state, and
+        ``flush(reset=True)`` resets epoch-local state while retaining permanent
+        source facts, and
         ``has_pending_data()`` mirrors reality.  See the
         ``zephon.validation`` module for the full check list and the
         "Accumulators and Operators" page in the published documentation
@@ -1801,19 +1807,17 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon._internal.notify import _notify_item, is_sentinel
+        from zephon._internal.notify import _notify_item, is_sentinel, should_notify
 
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            if is_sentinel(item):
-                if isinstance(item, SampleRecord) and item.meta.tombstone:
-                    _notify_item(engine, item, use_monotone)
-                continue
-            _notify_item(engine, item, use_monotone)
-            yield item
+            if should_notify(item):
+                _notify_item(engine, item, use_monotone)
+            if not is_sentinel(item):
+                yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,
         # notify() pins the record_cursor's chunk to keep it in inflight
