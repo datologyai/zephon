@@ -13,7 +13,7 @@ from zephon._internal.ops.ensure_mixture import EnsureMixtureAccumulator
 from zephon.io import Dataset, InMemoryShard
 from zephon.ops.accumulators import ReadyBatch
 from zephon.types import SampleRecord
-from zephon.work import StaticMixtureWorkSource
+from zephon.work import StaticMixtureWorkSource, WorkChunk
 
 pytestmark = pytest.mark.integration
 
@@ -25,6 +25,17 @@ class _ContinuingSource(StaticMixtureWorkSource):
         return frozenset(self.component_ids())
 
 
+class _SurvivorTargetSource(_ContinuingSource):
+    """Publish changing targets without implementing source allocation redistribution."""
+
+    def next_chunk(self) -> WorkChunk | None:
+        chunk = super().next_chunk()
+        if chunk is not None:
+            names = self.component_ids().keys() - set(chunk.source_exhausted)
+            chunk.target_mixture = {name: 1.0 / len(names) for name in sorted(names)}
+        return chunk
+
+
 def _make_pipe(
     *,
     runner: str = "inline",
@@ -34,6 +45,7 @@ def _make_pipe(
     shuffle: bool = False,
     limit: int | None = None,
     continuing: bool = True,
+    source_targets: bool = False,
 ) -> Pipeline:
     datasets = [
         Dataset.from_dict(
@@ -42,6 +54,8 @@ def _make_pipe(
         for name, count in [("a", 3), ("b", 1000)]
     ]
     source_type = _ContinuingSource if continuing else StaticMixtureWorkSource
+    if source_targets:
+        source_type = _SurvivorTargetSource
     source = source_type(
         datasets,
         {"a": 0.05, "b": 0.95},
@@ -55,7 +69,7 @@ def _make_pipe(
         pipe.shuffle(buffer_size=7, seed=4)
     return pipe.ensure_mixture(
         weight_by="samples",
-        mixture={"a": 0.5, "b": 0.5},
+        mixture=None if source_targets else {"a": 0.5, "b": 0.5},
         max_buffer_size=limit,
     ).options(
         runner=runner,
@@ -139,14 +153,21 @@ def test_notification_is_once_per_lane_across_epoch_resets(
 )
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("cut", [2, 12])
+@pytest.mark.parametrize("source_targets", [False, True])
 def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     runner: str,
     mtp_mode: bool,
     shuffle: bool,
     cut: int,
+    source_targets: bool,
 ) -> None:
     options = dict(
-        runner=runner, mtp_mode=mtp_mode, shuffle=shuffle, lanes=2, flush_every=2
+        runner=runner,
+        mtp_mode=mtp_mode,
+        shuffle=shuffle,
+        lanes=2,
+        flush_every=2,
+        source_targets=source_targets,
     )
     baseline = [_value(r) for r in _make_pipe(**options)]
     pipe = _make_pipe(**options)
@@ -171,7 +192,7 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
 
 
 @pytest.mark.parametrize("limit", [None, 64])
-def test_large_shuffle_keeps_exhausted_dataset_records(limit: int | None) -> None:
+def test_large_shuffle_handles_exhausted_tail_by_mode(limit: int | None) -> None:
     """Notifications may pass most of A while its records remain in shuffle."""
     datasets = [
         Dataset.from_dict(
@@ -195,8 +216,14 @@ def test_large_shuffle_keeps_exhausted_dataset_records(limit: int | None) -> Non
         )
     )
     values = [_value(r) for r in pipe]
-    assert len(values) == len(set(values)) == 400
-    assert Counter(text.split("-")[0] for _, text in values) == {"a": 200, "b": 200}
+    assert len(values) == len(set(values))
+    counts = Counter(text.split("-")[0] for _, text in values)
+    assert counts["b"] == 200
+    if limit is None:
+        # Strict mode interleaves what fits, then drops the withheld A tail.
+        assert 0 < counts["a"] < 200
+    else:
+        assert counts["a"] == 200
 
 
 @pytest.mark.parametrize("limit", [None, 8, 64])

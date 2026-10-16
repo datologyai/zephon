@@ -974,7 +974,8 @@ class Pipeline:
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
         When the source continues without an exhausted component, both modes
-        stop waiting for it while retaining late records on target. See
+        remove its target share and interleave its late records without catch-up
+        bursts. Strict flushes still discard leftovers. See
         :doc:`/pipelines/shuffling_and_maintaining_mixtures` for the semantics.
 
         Args:
@@ -997,9 +998,11 @@ class Pipeline:
             drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
                 the buffer down to this fraction of max_buffer_size before stopping.
                 Default is 0.8 (drain to 80% of max).  Ignored when ``max_buffer_size=None``.
-            obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
-                components (those no longer in the current mixture target). Default is
-                0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample.
+            obsolete_drain_rate: Emit one obsolete record after ``int(1 / rate)``
+                normal records, if available. Default 0.1 means one after ten;
+                0 disables periodic drainage. A packed record with any positive
+                off-target contribution uses one slot. Bounded forced drains and
+                flushes may exceed this rate; strict flushes discard leftovers.
             weight_by: How to compute sample weights. Options:
 
                 - ``auto`` (default): Auto-detect token field from common names
