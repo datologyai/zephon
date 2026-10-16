@@ -119,5 +119,5 @@ saved obsolete slot can be used; strict flushes discard the rest, while bounded 
 emits it under pressure or at flush.
 
 Source-exhaustion notifications do not prove downstream drainage. See
-[the operator-author contract](user_defined_operators.md#reacting-to-source-exhaustion)
+{ref}`the operator-author contract <reacting-to-source-exhaustion>`
 for ordering and replay caveats.
