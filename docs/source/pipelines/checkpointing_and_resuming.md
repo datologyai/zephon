@@ -89,7 +89,9 @@ or regroup records, like those that need to shuffle or pack, it means the chunks
 processed since the most recent flush, so the `flush_every_k_chunks` setting also limits
 how much work a restore operation has to redo. The
 [How pipelines run](how_pipelines_run.md) page describes this mechanism and the tradeoffs
-involved with it in more detail.
+involved with it in more detail, and
+[Checkpoint Replay and Bounded Recovery](../internals/checkpoint_replay.md) covers what a
+checkpoint actually contains and how a restore rebuilds operator state from it.
 
 **Checkpointing in distributed training jobs.** In distributed training, each rank sees
 only a portion of the overall job's data loading progress, so Zephon combines the progress
@@ -111,7 +113,7 @@ for the TorchTitan and Megatron-LM distributed training frameworks.
 
 **Elastic resumption.** Suppose that a training run starts on eight data-parallel ranks,
 but after preemption, only four of the ranks are available. If the run was planned for
-elasticity (see the discussion on this in {ref}`Planning for Elasticity <planning-for-elasticity>`), you can resume it on the
+elasticity (see the discussion on this in {ref}`planning for elasticity <planning-for-elasticity>`), you can resume it on the
 remaining four ranks without losing your place in the curriculum. Build the `Pipeline`
 with the new topology (i.e., the new `dp_degree`, `dp_group_id`, `world_size`, and
 `global_rank` values) but with the same `canonical_replicas` value that the original run
@@ -125,6 +127,6 @@ used, and then restore the checkpoint as usual:
 `Pipeline.restore()` reassigns the lanes of logical data to the new ranks. With
 `canonical_replicas=8`, each of the four ranks now processes two lanes apiece. No samples
 are skipped or processed twice, and if the run follows the batches-per-step rule described
-in {ref}`Planning for Elasticity <planning-for-elasticity>`, each global
+in {ref}`planning for elasticity <planning-for-elasticity>`, each global
 training step contains exactly the same samples it would have on the original eight ranks.
 Zephon refuses to restore a checkpoint if the `canonical_replicas` value has changed.

@@ -213,3 +213,8 @@ These last two are reported as warnings; the rest will error and stop the pipeli
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
 own operators and is not validated this way.
+
+If your operator splits records, merges them, or drops them, it owes the engine some
+bookkeeping so that progress tracking and checkpointing keep working.
+[Records and Sample Lifecycles](../internals/records_and_sample_lifecycles.md) covers the
+helpers that handle it and the contract behind them.
