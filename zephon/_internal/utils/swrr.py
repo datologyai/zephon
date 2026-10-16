@@ -30,8 +30,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
     Intuition:
         Each component 'k' has a normalized target weight T[k] (summing to 1.0).
-        We track how much each component has emitted (E[k]) and the total emitted.
-        On each selection step:
+        We track how much each component has emitted (E[k]). Selection uses the
+        total emitted by components in the current target; monitoring retains
+        emissions from all components, including retired ones. On each selection step:
 
         1) Compute deficit for each available component:
            deficit[k] = T[k] * total_emitted - E[k]
@@ -43,9 +44,10 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
         3) Emit one item from the chosen component
 
-        4) Record the emission: E[k] += weight, total += weight
-           This increases total_emitted, raising everyone's "fair share", while
-           only the emitting component's E[k] increases, reducing its deficit.
+        4) Record the emission: E[k] += weight
+           If k is in the current target, this also increases the selection total,
+           raising everyone's "fair share" while reducing k's deficit. Off-target
+           contributions do not change the surviving components' deficits.
 
     Properties:
         - Over time, emits in proportion to target weights.
@@ -56,9 +58,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
     Edge cases:
         - When total_emitted=0 (initial state), we use effective_total=1.0 so that
           deficits equal target weights, selecting the highest-weighted component first.
-        - If a component runs out of items, it's removed from the available set.
-          The algorithm naturally adapts since deficit is only computed for available
-          components.
+        - select() restricts candidates to available components; peek() considers
+          every target. Unavailability alone does not remove a component's share
+          or emitted mass. Call update_target() to remove it from the target.
         - Components with zero or negative weight are filtered out during initialization.
 
     Args:

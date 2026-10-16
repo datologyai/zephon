@@ -419,25 +419,22 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         For token-based modes: uses component_token_counts if available,
         otherwise distributes the total token count proportionally by sample counts.
 
-        Returns a dict mapping component_id -> weight for this sample.
+        Returns a dict mapping component_id -> weight for this sample. Keep zero
+        weights so zero-weight records retain their component identity for selection.
         """
         meta = record.meta
 
         if self._config.weight_by == "samples":
             # Sample-weighted: each original sample counts as 1
             return {
-                cid: float(count)
-                for cid, count in meta.component_sample_counts.items()
-                if count > 0
+                cid: float(count) for cid, count in meta.component_sample_counts.items()
             }
 
         # Token-weighted mode
         if meta.component_token_counts is not None:
             # Token counts already computed (e.g., packing after tokenization)
             return {
-                cid: float(count)
-                for cid, count in meta.component_token_counts.items()
-                if count > 0
+                cid: float(count) for cid, count in meta.component_token_counts.items()
             }
 
         # Token counts not available - distribute total tokens by sample count ratio.
@@ -452,11 +449,11 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         return {
             cid: total_weight * (count / total_samples)
             for cid, count in meta.component_sample_counts.items()
-            if count > 0
         }
 
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
         """Adopt a chunk target or the explicit operator override."""
+        # An explicit operator mixture takes precedence over source chunk targets.
         target = self._config.mixture_override_by_id
         if not target and self._get_chunk_mixture is not None:
             target = self._get_chunk_mixture(lane_id, chunk_id)
@@ -474,9 +471,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 if weight > 0 and cid not in state.source_exhausted
             }
             # An exhausted-to-empty target is different from no configured target.
+            # SWRR normalizes the surviving weights in either path.
             if state.swrr is None:
+                # Sorted component IDs make initial tie-breaking deterministic.
                 state.swrr = SmoothWeightedRoundRobin(target, sorted(target))
             else:
+                # Preserve emission history and tie order across target updates.
                 state.swrr.update_target(target)
 
         old_components = previous.keys() if previous is not None else None
@@ -511,7 +511,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     ) -> None:
         """Keep any record containing retired content out of normal selection."""
         if state.swrr is not None and any(
-            cid not in state.swrr.target_ratios for cid in contributions
+            weight > 0 and cid not in state.swrr.target_ratios
+            for cid, weight in contributions.items()
         ):
             state.obsolete_buffer.append(_BufferedRecord(record, contributions))
         elif len(contributions) == 1:
@@ -539,6 +540,30 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             if not state.multi_component_counts[cid]:
                 del state.multi_component_counts[cid]
         return multi
+
+    def _emit_single(
+        self, lane_id: int, state: _LaneState, component_id: int
+    ) -> SampleRecord:
+        """Account for a single-component emission without allocating a packed wrapper."""
+        record, weight = state.buffers[component_id].popleft()
+        if state.swrr is not None:
+            state.swrr.record(component_id, weight)
+        state.emitted_by_component[component_id] += weight
+        state.total_emitted += weight
+        self._finish_emission(lane_id, state, obsolete=False)
+        return record
+
+    def _finish_emission(
+        self, lane_id: int, state: _LaneState, *, obsolete: bool
+    ) -> None:
+        """Update record-based drainage spacing independently of contribution weights."""
+        if obsolete:
+            state.emissions_since_obsolete_drain = 0
+        elif self._obsolete_interval is not None:
+            state.emissions_since_obsolete_drain = min(
+                state.emissions_since_obsolete_drain + 1, self._obsolete_interval
+            )
+        self._check_ratios(lane_id, state)
 
     def _emit_one(
         self, lane_id: int, state: _LaneState, *, force: bool = False
@@ -575,8 +600,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             if ideal in available:
                 # Priority 1: Prefer the ideal component's single-record queue.
                 assert ideal is not None
-                record, weight = state.buffers[ideal].popleft()
-                item = _BufferedRecord(record, {ideal: weight})
+                return self._emit_single(lane_id, state, ideal)
             else:
                 # Priority 2: First restrict packed candidates to those serving
                 # the ideal component. A candidate takes precedence over the
@@ -591,8 +615,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     chosen = state.swrr.select(available) if state.swrr else None
                     if chosen is None:
                         chosen = min(available)
-                    record, weight = state.buffers[chosen].popleft()
-                    item = _BufferedRecord(record, {chosen: weight})
+                    return self._emit_single(lane_id, state, chosen)
                 elif candidates or state.multi_component_buffer:
                     if not candidates:
                         # Priority 4: No ideal-serving pack or single record is
@@ -625,13 +648,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         for cid, weight in item.contributions.items():
             state.emitted_by_component[cid] += weight
             state.total_emitted += weight
-        if obsolete:
-            state.emissions_since_obsolete_drain = 0
-        elif self._obsolete_interval is not None:
-            state.emissions_since_obsolete_drain = min(
-                state.emissions_since_obsolete_drain + 1, self._obsolete_interval
-            )
-        self._check_ratios(lane_id, state)
+        self._finish_emission(lane_id, state, obsolete=obsolete)
         return item.record
 
     def _check_ratios(self, lane_id: int, state: _LaneState) -> None:
@@ -645,6 +662,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if state.swrr is None:
             return
 
+        # Monitoring retains all emitted contributions, but compare live ratios
+        # within the current target so retired content cannot dilute survivors.
         actual_ratios = state.swrr.get_actual_ratios()
         target = state.swrr.target_ratios
         actual_total = sum(actual_ratios.get(cid, 0.0) for cid in target)

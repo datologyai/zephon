@@ -481,6 +481,19 @@ class TestRetiredRecords:
         packed = self.pack(0, {0: 0, 1: 4})
         assert _flatten_ready(acc.push_many([packed])) == [packed]
 
+    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    @pytest.mark.parametrize("limit", [None, 64])
+    def test_zero_weight_record_keeps_component_identity(
+        self, weight_by, limit
+    ) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 1}, weight_by=weight_by, max_buffer_size=limit
+        )
+        record = self.pack(0, {0: 0})
+        assert _flatten_ready(acc.push_many([record])) == [record]
+        assert not acc.has_pending_data()
+        assert acc.flush() == []
+
     @pytest.mark.parametrize("limit", [None, 64])
     def test_disabled_drain_and_flush_policy(self, limit) -> None:
         acc = _make_accumulator_with_chunk_mixture(
