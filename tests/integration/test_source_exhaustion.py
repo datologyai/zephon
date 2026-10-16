@@ -268,7 +268,6 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
 ) -> None:
     # Cover both target policies inline. Transport cases use an override so
     # releasing B requires the EOD signal to traverse the real runner/ACK path.
-    # This also serves as the transport smoke test; no separate matrix is needed.
     options: dict[str, Any] = dict(
         runner=runner, mtp_mode=mtp_mode, shuffle=True, source_targets=source_targets
     )

@@ -478,9 +478,8 @@ class TestRetiredRecords:
         first = _rec(0, component_id=1, chunk=5)
         assert _flatten_ready(acc.push_many([first])) == [first]
         assert acc.flush(reset=True) == []
-        # An upstream Batch may release an older stalled flush after emitting
-        # part of chunk 5. The remaining suffix still needs chunk 5's target:
-        # keeping the hwm while clearing SWRR would treat it as unconfigured.
+        # An upstream Batch may release a stalled flush partway through chunk 5.
+        # Records after the reset must reload chunk 5's target.
         assert acc.push_many([_rec(1, chunk=5)]) == []
         live = _rec(2, component_id=1, chunk=5)
         assert _flatten_ready(acc.push_many([live])) == [live]
@@ -501,7 +500,7 @@ class TestRetiredRecords:
         emitted = []
         for record in obsolete:
             emitted.extend(_flatten_ready(acc.push_many([record])))
-        # Preservation takes priority even with no ordinary records to earn slots.
+        # Buffer pressure forces output even without live records to interleave.
         assert emitted == obsolete[:6]
         assert _flatten_ready(acc.flush()) == obsolete[6:]
 
@@ -1802,7 +1801,7 @@ class TestEnsureMixtureAccumulatorMidStreamFlush:
             live_val = getattr(lane_state, field_name)
             fresh_val = getattr(fresh, field_name)
             if field_name == "source_exhausted":
-                assert live_val == {2}  # Permanent facts survive epoch-local reset.
+                assert live_val == {2}  # Exhaustion survives an epoch reset.
                 continue
             # Buffers are drained (empty deques remain keyed by component)
             # rather than replaced, so check that no actual records remain.

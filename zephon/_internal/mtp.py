@@ -331,10 +331,8 @@ def _mtp_worker(
             # scope), so pending never holds full payloads.  All items
             # including tombstones go through the ACK path to preserve
             # notification ordering.
-            # Flush and source-exhaustion sentinels have dummy cursors — skip
-            # tracking to avoid corrupting engine state. When the consumer ACKs a
-            # sentinel's seq, pending.pop returns None and the notify is
-            # simply skipped.
+            # Flush and EOD have dummy cursors. Omit them from pending so their
+            # ACKs cannot report false progress to the engine.
             if should_notify(item):
                 pending[seq] = _extract_notify_args(item, use_monotone)
 

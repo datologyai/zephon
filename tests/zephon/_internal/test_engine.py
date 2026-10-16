@@ -966,7 +966,7 @@ def _sentinels(items: list[EngineSample | SampleRecord]) -> list[SampleRecord]:
 
 
 class TestSourceExhaustion:
-    """Chunk weaving without creating an engine, runners or checkpoint services."""
+    """EOD placement in a lane's chunk stream."""
 
     @pytest.mark.parametrize(
         "revived,match",
@@ -1053,7 +1053,7 @@ class TestSourceExhaustion:
         assert sentinel_pos < len(items) - 1  # Other data remains in this chunk.
         restored = WorkChunk.from_state(chunk.state_dict())
         assert _weave(restored, lane_id=3)[1] == items
-        # Sample count and order are untouched by the weaving.
+        # Inserting EOD preserves sample count and order.
         assert [(i[0], i[4]) for i in items if not isinstance(i, SampleRecord)] == [
             (sample_id, stub._ids[name]) for sample_id, name in chunk
         ]
@@ -1095,9 +1095,7 @@ class TestSourceExhaustion:
         assert items.index(sentinels[1]) == b_positions[-1] + 1
 
     def test_make_source_exhausted_sentinel_is_excluded_control_signal(self) -> None:
-        """The source-exhaustion notification carries a dummy cursor, is tagged so the runner can
-        dispatch it, and is excluded from engine notification (so it can never
-        overwrite a lane's replay cursor)."""
+        """EOD is a control record whose dummy cursor must not report progress."""
         sentinel = Engine._make_source_exhausted_sentinel(lane_id=4, component_id=2)
         assert isinstance(sentinel, SampleRecord)
         assert source_exhausted_component(sentinel) is not None

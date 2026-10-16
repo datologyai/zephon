@@ -30,9 +30,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
     Intuition:
         Each component 'k' has a normalized target weight T[k] (summing to 1.0).
-        We track how much each component has emitted (E[k]). Selection uses the
-        total emitted by components in the current target; monitoring retains
-        emissions from all components, including retired ones. On each selection step:
+        We track each component's emissions (E[k]). Selection counts only
+        components in the current target; monitoring counts all emissions.
+        On each selection step:
 
         1) Compute deficit for each available component:
            target_total = sum(E[j] for j in T)
@@ -46,9 +46,8 @@ class SmoothWeightedRoundRobin(Generic[K]):
         3) Emit one item from the chosen component
 
         4) Record the emission: E[k] += weight
-           If k is in the current target, this also increases the selection total,
-           raising everyone's "fair share" while reducing k's deficit. Off-target
-           contributions do not change the surviving components' deficits.
+           On-target emissions increase target_total and adjust all deficits.
+           Off-target emissions do not affect selection.
 
     Properties:
         - Over time, emits in proportion to target weights.
@@ -59,9 +58,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
     Edge cases:
         - When total_emitted=0 (initial state), we use effective_total=1.0 so that
           deficits equal target weights, selecting the highest-weighted component first.
-        - select() restricts candidates to available components; peek() considers
-          every target. Unavailability alone does not remove a component's share
-          or emitted mass. Call update_target() to remove it from the target.
+        - select() considers available components; peek() considers all targets.
+          Unavailable components still count toward target_total until removed
+          by update_target().
         - Components with zero or negative weight are filtered out during initialization.
 
     Args:
@@ -85,7 +84,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
         self._total: float = 0.0
 
     def peek(self) -> K | None:
-        """Return the highest-deficit component in the current target.
+        """Return the ideal component (highest deficit) ignoring availability.
 
         This is used for adaptive buffering: if the ideal component is available
         in the buffer, we can emit immediately. If not, we should buffer until
@@ -152,22 +151,15 @@ class SmoothWeightedRoundRobin(Generic[K]):
             self._total += weight
 
     def get_deficits(self) -> dict[K, float]:
-        """Get current deficit per component for benefit scoring.
+        """Return each target component's deficit; positive means underserved.
 
-        Deficit = target * max(1, in-target emitted mass) - emitted. Positive
-        deficit means the component is "owed" more emissions. Used by
-        ensure_mixture to score multi-component samples by how well they reduce
-        overall deficit.
-
-        Only emitted contributions from components in the current target count
-        toward its total. Retired contributions (including parts of packed
-        records) must not create catch-up debt for the surviving components.
-        Live but unavailable components still count toward that total.
-
-        Returns:
-            Dict mapping component -> deficit (positive = underserved).
+        Deficit = target * max(1, target_total) - emitted. Only contributions from
+        components in the current target count toward target_total, including
+        those currently unavailable. Off-target contributions from mixed packs
+        do not affect these deficits.
         """
         total = sum(self._emitted.get(k, 0.0) for k in self._target)
+        # With no on-target history, deficits equal target weights.
         effective_total = max(1.0, total)
         return {
             k: self._target[k] * effective_total - self._emitted.get(k, 0.0)
@@ -177,8 +169,8 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def update_target(self, new_target: dict[K, float]) -> None:
         """Update target weights while preserving emission history.
 
-        Removed components no longer affect survivor deficits. This does not
-        interpolate weights or rebase history for arbitrary curriculum changes.
+        Removed components no longer affect deficits. Weights change immediately;
+        past emissions are neither rescaled nor reset.
 
         Args:
             new_target: New target weights (will be normalized).

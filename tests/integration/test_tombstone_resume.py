@@ -35,8 +35,7 @@ def _drop_short_child(payload: dict[str, Any]) -> dict[str, Any] | None:
         pytest.param(False, True, "threads", False, False, id="shuffle-batches"),
         pytest.param(True, False, "process", False, False, id="process-runner"),
         pytest.param(False, False, "threads", True, False, id="mtp-ack"),
-        # EOD has no delivery cursor: exercise both progress paths, including
-        # the subprocess ACK path, without multiplying the baseline matrix.
+        # EOD must leave delivery unchanged in both progress modes, including MTP.
         pytest.param(True, True, "inline", False, True, id="eod-monotone-batches"),
         pytest.param(False, False, "threads", True, True, id="eod-mtp-shuffle"),
     ],
@@ -65,10 +64,8 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
         )
         pipe = Pipeline(work)
         if monotone:
-            # The map buffers real records while tombstones bypass it.
-            # A downstream batch alone does not reproduce the original bug.
-            # With stop policy, source exhaustion also bypasses buffered outputs;
-            # its dummy cursor must not enter completion or delivery bookkeeping.
+            # The map buffers data while tombstones and EOD pass through.
+            # EOD's dummy cursor must not count as completion or delivery.
             pipe.map_transform(_drop_ids)
             pipe.map_transform(lambda p: p)
         else:

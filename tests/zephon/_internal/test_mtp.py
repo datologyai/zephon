@@ -37,8 +37,7 @@ from zephon.types import ContributorRef, SampleBatch, SampleCursor, SampleRecord
 def test_ack_dispatch_separates_controls_completion_and_delivery(
     use_monotone: bool,
 ) -> None:
-    # Only records and tombstones enter pending. Control ACKs have no entry;
-    # test the dispatcher directly without starting a subprocess.
+    # Only data and tombstones enter pending; flush and EOD ACKs have no entry.
     engine, connection = mock.Mock(), mock.Mock()
     dropped = SampleCursor(3, 0, (0, 0, 3))
     record = SampleCursor(0, 0, (0, 0, 0))

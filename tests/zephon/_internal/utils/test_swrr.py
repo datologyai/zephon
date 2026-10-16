@@ -599,7 +599,7 @@ class TestSwrrIterateWithIntegerKeys:
 
 
 class TestSWRRTargetRemoval:
-    """Retired emitted mass must not distort the surviving target."""
+    """Off-target emissions do not affect the remaining components' deficits."""
 
     @pytest.mark.parametrize("weight", [1.0, 7.0])
     def test_unequal_survivors_keep_relative_proportions(self, weight: float) -> None:

@@ -94,6 +94,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
             )
         lane_id = item.meta.lane_id
         # Tombstones close real offsets but are not consumer deliveries.
+        # Counting replayed-and-dropped records would count them twice.
         delivered = not item.meta.tombstone
         if use_monotone:
             return _MonotoneNotify(
@@ -122,9 +123,8 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
     on the consumer's ACK, so producing ahead does not advance delivery state.
     """
     if not notify.delivered:
-        # Tombstone: callers exclude flush and source-exhaustion notifications.
-        # Controls can overtake buffered payloads. They are neither monotone
-        # watermarks nor replay cursors, and cannot trigger epoch eviction.
+        # Only tombstones reach this branch. They may overtake buffered data,
+        # so completion must not advance the delivery cursor or evict an epoch.
         if isinstance(notify, _ContributorNotify):
             # Non-monotone tombstone: update completion bits only.
             engine.notify_completion(notify.lane_id, notify.entries)
@@ -161,11 +161,10 @@ def is_sentinel(item: StreamItem) -> bool:
 
 
 def should_notify(item: StreamItem) -> bool:
-    """Notify data and tombstones, which close real contributor offsets.
+    """Whether an item reports real offset progress: data or a tombstone.
 
-    Flush and source-exhaustion notifications carry dummy cursors. Notifying
-    them would mark false chunk-0 progress and overwrite the lane's replay
-    cursor, potentially causing restored records to be skipped.
+    Flush and EOD have dummy cursors; reporting them would falsely complete
+    chunk 0 and overwrite the lane's replay cursor.
     """
     return not is_sentinel(item) or is_tombstone(item)
 

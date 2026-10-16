@@ -913,13 +913,17 @@ class Engine:
     def _make_source_exhausted_sentinel(
         lane_id: LaneId, component_id: int
     ) -> SampleRecord:
-        """Announce source exhaustion, without promising downstream drainage."""
+        """Create an EOD control record; buffered data may still arrive later."""
         return Engine._make_control_record(lane_id, {"_source_exhausted": component_id})
 
     def _iter_chunk(
         self, lane_id: LaneId, cid: int, chunk: WorkChunk, announced: set[str]
     ) -> Iterator[EngineSample | SampleRecord]:
-        """Notify once after the last component sample, or up front if absent."""
+        """Yield samples and each component's EOD once per lane stream.
+
+        EOD follows the component's last sample in this chunk, or precedes the
+        chunk if the component is absent. Live input and replay use this path.
+        """
         missing = announced.difference(chunk.source_exhausted)
         if missing:
             raise ValueError(

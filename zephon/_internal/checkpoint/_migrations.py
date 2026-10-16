@@ -183,7 +183,7 @@ def _work_chunk_v1_to_v2(v1: WorkChunkStateV1) -> dict[str, Any]:
 
 
 def _work_chunk_v2_to_v3(v2: WorkChunkStateV2) -> dict[str, Any]:
-    """Old chunks carry no source-exhaustion announcements."""
+    """Add an empty exhaustion list to v2 chunks."""
     d = v2.to_dict()
     d["source_exhausted"] = []
     return d

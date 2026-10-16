@@ -73,16 +73,14 @@ class WorkChunk:
     mixture here because their chunks deliberately carry a different sample
     composition (long-doc components contribute fewer pointers); the counted
     :attr:`mixture` stays composition-derived for within-chunk interleaving.
-    Continuing sources may remove exhausted components from this target.
-    Downstream correctors handle their in-flight records separately; component
-    identities remain in :meth:`WorkSource.component_ids` for the source's lifetime.
+    Continuing sources may remove exhausted components from this target, but
+    must keep their identities in :meth:`WorkSource.component_ids` for late records.
 
-    ``source_exhausted`` is cumulative: every chunk must list all components
-    whose final source sample has been produced in this or an earlier chunk.
-    The engine injects the notification immediately after the component's last
-    source sample, or before this chunk if absent, including on replay. Any
-    downstream batching stage can let it overtake buffered data. A lane with no
-    later chunk receives no notification.
+    ``source_exhausted`` must list every component whose final source sample was
+    produced in this or an earlier chunk. Each lane emits an EOD notification
+    after that component's last sample in its first such chunk, or before the
+    chunk if absent. This also applies on replay. Buffered data may arrive after
+    EOD; lanes with no such chunk receive no notification.
     """
 
     components: SamplesPerComponent
@@ -451,18 +449,15 @@ class WorkSource(ABC):
     def continues_after_exhaustion(self) -> frozenset[str]:
         """Components whose exhaustion allows the source to keep producing.
 
-        A static subset of :meth:`component_ids`, fixed across lanes and
-        checkpoint restores. Operators receive the corresponding component ids
-        as ``ctx.get("continues_after_exhaustion", frozenset())`` during setup
-        and accumulator construction. Notifications still flow for every
-        permanently exhausted component, independently of this policy.
+        Return a subset of :meth:`component_ids`, fixed across lanes and restores.
+        Operators receive the corresponding ``frozenset[int]`` in
+        ``ctx.get("continues_after_exhaustion", frozenset())`` during setup and
+        accumulator construction. EOD notifications are independent of this policy.
 
-        The default is empty: exhaustion does not relax downstream mixture
-        enforcement. For opted-in components, ``ensure_mixture`` removes their
-        share on notification, including from an explicit operator mixture
-        override, and interleaves in-flight records as obsolete
-        content. Later chunk targets may omit them. Strict flushes may discard
-        their remaining records, just like other withheld surplus.
+        The default is empty. For listed components, ``ensure_mixture`` removes
+        their weight on EOD, even from an explicit mixture override, and handles
+        late records through ``obsolete_drain_rate``. Later chunk targets may
+        omit these components.
         """
         return frozenset()
 

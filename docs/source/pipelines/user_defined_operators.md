@@ -218,8 +218,8 @@ of the remaining datasets. An EOD sentinel lets it do this before records carryi
 updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
-`StaticMixtureWorkSource` leaves this empty, so its stop and repeat policies keep their
-existing behavior. A custom operator can read the corresponding component ids from
+`StaticMixtureWorkSource` leaves this empty, so EOD does not relax mixture enforcement
+under its stop or repeat policies. A custom operator can read the corresponding ids from
 `ctx.get("continues_after_exhaustion", frozenset())` during setup or accumulator
 construction. Components outside that set can still send EOD sentinels; they do not
 cause `ensure_mixture` to relax its target.

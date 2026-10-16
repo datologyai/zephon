@@ -540,8 +540,7 @@ def test_workchunk_from_state_preserves_target_through_reorder():
 
 
 def test_workchunk_sample_mode_state_dict_is_current_with_null_target():
-    """An unstamped chunk serialises to the current shape with
-    ``target_mixture: None`` — the write path never emits an older version."""
+    """Sample-weighted chunks use the current schema with ``target_mixture: None``."""
     chunk = WorkChunk(
         components={"A": make_ids(0, 0, 2), "B": make_ids(1, 0, 1)}, seed=9
     )

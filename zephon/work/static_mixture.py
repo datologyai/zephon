@@ -2366,12 +2366,10 @@ class StaticMixtureWorkSource(WorkSource):
         return self._perm_order[slot]
 
     def _source_exhausted_components(self) -> tuple[str, ...]:
-        """Derive permanent exhaustion from the committed, checkpointed cursors.
+        """List permanently exhausted components after a successful chunk.
 
-        Called only for successfully produced chunks assigned to this lane.
-        The cumulative stamp lets a restored stream recover source facts.
-        Ordinary repeat boundaries (including stop_after_passes) do not imply
-        permanent exhaustion.
+        Uses checkpointed cursors so replay recovers the same exhaustion state.
+        Repeat boundaries (including stop_after_passes) do not count.
         """
         cfg = self._alloc_config
         return tuple(

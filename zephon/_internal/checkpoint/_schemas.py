@@ -294,9 +294,9 @@ class WorkChunkStateV2(WorkChunkStateV1):
 
 @dataclass(frozen=True, kw_only=True)
 class WorkChunkStateV3(WorkChunkStateV2):
-    """Persist cumulative exhaustion so live and replayed chunks announce alike.
+    """Checkpointed chunk, including all components exhausted so far.
 
-    The v2-to-v3 migration supplies an empty stamp; older readers reject v3.
+    Migration from v2 supplies an empty exhaustion list; older readers reject v3.
     """
 
     version: int = 3

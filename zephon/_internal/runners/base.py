@@ -188,10 +188,8 @@ class BaseOperatorState:
         The accumulator runs on the pump thread (serial) and maintains
         any cross-invocation state needed for deterministic batching.
 
-        Sentinel records bypass ``push_many`` and ``process_many`` and are
-        emitted as individual ready batches. Source-exhaustion notifications
-        invoke ``on_source_exhausted`` first, without flushing or resetting
-        the accumulator.
+        Sentinels bypass ``push_many`` and ``process_many`` as individual batches.
+        EOD first calls ``on_source_exhausted``, without flushing or resetting.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
         to drain that lane's buffered data before the sentinel passes
@@ -262,7 +260,8 @@ class BaseOperatorState:
                     self._try_release_stalled_sentinels(ready)
                     pre_sentinel = []
 
-                # Only tombstones close real offsets; other controls have dummy cursors.
+                # Tombstone chunk ids constrain epoch eviction even though they
+                # bypass the accumulator. Flush and EOD have dummy cursors.
                 if e.meta.tombstone:
                     self._update_epoch_floor([e])
 
@@ -273,9 +272,8 @@ class BaseOperatorState:
                             e.meta.lane_id, component_id
                         )
                     )
-                    # The hook may have emitted the records holding an older
-                    # flush back. Recheck its normal reset condition; exhaustion
-                    # alone never makes a stalled flush safe to release.
+                    # Hook output may unblock a stalled flush. Release it only
+                    # if the accumulator's normal reset condition is satisfied.
                     self._try_release_stalled_sentinels(ready)
                     ready.append(([e], 0))
                 elif e.meta.is_flush_sentinel:
