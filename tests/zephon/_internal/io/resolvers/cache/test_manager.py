@@ -1301,10 +1301,18 @@ def test_duplicate_name_rejected_across_inmem_and_file_backed(
 
 
 def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> None:
-    """Missing SHM triggers recovery even when session.json records live owners.
+    """session.json with live owners + missing SHM must fall back to stale branch.
 
-    Keeping mgr1 open makes mgr2 attempt JOIN, discover missing SHM, and rebuild
-    the session while preserving cached files under ``persist_state=True``.
+    Reproduces the CI failure where the creator had already unlinked SHM
+    while joiners were still registered as live owners of the session.
+    The join attempt must not raise FileNotFoundError — it must
+    gracefully downgrade into the no-live-owners branch.
+
+    Exercising the *live_owners* path (rather than the empty-owners
+    stale-session path) requires mgr1 to stay alive when mgr2 is
+    constructed, so session.json still names an active owner. Closing
+    mgr1 first would zero the owner count and route through the
+    stale-session branch instead, bypassing the recovery logic.
     """
     from zephon._internal.io.resolvers.cache.shared_state import CacheSharedState
 
@@ -1319,18 +1327,24 @@ def test_join_recovers_when_shm_missing_behind_live_owners(tmp_path: Path) -> No
     try:
         mgr1.resolve(loc)
 
-        # Simulate external /dev/shm cleanup while mgr1 remains registered.
+        # mgr1 is still alive — session.json records us as a live owner.
+        # Unlink SHM behind mgr1's back to simulate /dev/shm cleanup or a
+        # creator-exits-first race on an older manager build.
         session = json.loads(mgr1._session_path.read_text(encoding="utf-8"))
         shm_names = session["shm_names"]
         assert session["owners"], "sanity: mgr1 should be registered as owner"
         CacheSharedState.unlink_by_names(shm_names)
 
-        # mgr2 attempts to join the live session and recovers from missing SHM.
+        # Construct mgr2 while mgr1 is still alive. mgr2 must hit the
+        # live_owners + FileNotFoundError branch specifically (not the
+        # empty-owners stale-session branch) and recover.
         mgr2 = _make_manager(cache_root, storage, [loc], persist_state=True)
         try:
             ref = mgr2.resolve(loc)
             assert ref.raw.path.exists()
-            # The replacement session records fresh SHM names for mgr2.
+            # After recovery, session.json is rewritten with fresh SHM
+            # names. Verify the new SHM is actually attached by both
+            # managers independently from mgr2's perspective.
             new_session = json.loads(mgr2._session_path.read_text(encoding="utf-8"))
             assert new_session["shm_names"] != shm_names
         finally:
@@ -1565,7 +1579,7 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
 
 
 def _run_bounded(fn: Any, timeout: float = 10.0) -> Any:
-    """Run *fn* on a daemon thread and wait at most *timeout* seconds for it."""
+    """Run *fn* on a daemon thread; fail if it exceeds *timeout* seconds."""
     result: list[Any] = []
     errors: list[BaseException] = []
 
@@ -1664,7 +1678,8 @@ def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
     monkeypatch.setattr(manager_mod, "FileLock", orig_filelock)
     try:
         assert not mgr1._close_finalizer.alive, "finalizer never ran in the window"
-        # Wait for queued cleanup to leave mgr2 as the only registered instance.
+        # mgr1 remains counted while its release is queued, so mgr2 can join
+        # alongside it. Wait for cleanup to leave mgr2 as the only instance.
         _wait_for_instances(cache_root, owner_key, 1)
         assert mgr2.resolve(loc).cache_hit is True
         assert mgr2._shared is not None
