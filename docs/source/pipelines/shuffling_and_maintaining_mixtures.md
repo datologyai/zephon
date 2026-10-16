@@ -70,8 +70,8 @@ lost data and more memory use):
 
 **When a Dataset Runs Out.** `StaticMixtureWorkSource` does not opt into relaxing
 mixture enforcement on exhaustion: its stop and repeat policies keep their targets.
-Custom sources declare the components they can continue without through
-`WorkSource.continues_after_exhaustion()`. For those components, both bounded and strict
+Custom sources list in `WorkSource.continues_after_exhaustion()` the components whose
+exhaustion the source can continue past. For those components, both bounded and strict
 `ensure_mixture` remove the exhausted share and renormalize survivors. A 50:30:20 A/B/C
 target becomes 60:40 B/C when A exhausts. This also relaxes an explicit `mixture` override;
 the override otherwise takes precedence over source targets.
@@ -85,17 +85,17 @@ A final `max_repeats` pass can announce permanent exhaustion; ordinary repetitio
 
 A continuing source may publish survivor-only `WorkChunk.target_mixture` values.
 Within each replay epoch, the operator adopts targets only from increasing chunk IDs,
-so late records cannot restore an older target. Flushes reset epoch-local selection
-history and target ordering; permanent exhaustion knowledge persists.
+so late records cannot restore an older target. Epoch flushes (`reset=True`) reset
+selection history and target ordering; permanent exhaustion knowledge persists.
 
 Records containing positive contributions outside the target are **obsolete**. A record
 with no component in the target is also obsolete, even if its weight is zero. A packed
 record is indivisible and uses a drain slot as a whole; zero-count metadata for an
-obsolete component does not retire a pack that still serves the target. Its live
-contributions count toward the surviving mixture; obsolete contributions do not inflate
-survivor deficits.
+obsolete component does not make a pack obsolete if it still serves the target. Its
+in-target contributions count toward the surviving mixture; obsolete contributions do
+not inflate survivor deficits.
 
-`obsolete_drain_rate` interleaves one obsolete record after `int(1 / rate)` normal records,
+`obsolete_drain_rate` interleaves one obsolete record after `int(1 / rate)` ordinary records,
 if available. Thus its effective share is `1 / (int(1 / rate) + 1)`: the default `0.1` is
 one in eleven outputs (about 9.1%), `0.3` is one in four, and values above `0.5` all
 alternate (50%). The interval counts output records, including packed records, not tokens.
@@ -106,17 +106,18 @@ survivors' relative weights can still cause historical catch-up.
 
 Both modes allow periodic drainage during normal output. **Strict mode discards all
 withheld leftovers at every flush**, including obsolete tails. This can discard a large
-fraction of a late tail: with no saved slot and 5000 obsolete A plus 5000 ordinary B
-records available before a flush, the default interval admits 500 A and discards the
-remaining 4500 (90%). The discard log identifies how many discarded records were obsolete.
+fraction of a late tail: assume 5000 obsolete A records are buffered, no slot is saved,
+and 5000 ordinary B records emit before the next flush. The default interval admits
+500 A and discards the remaining 4500 (90%). The discard log identifies how many
+discarded records were obsolete.
 
 **Bounded mode preserves every buffered record at every flush.** Buffer-pressure drains
-and flushes may exceed the interval and emit a contiguous obsolete tail, even when live
-records were available earlier in the drain. The fixed allowance prevents accumulated
+and flushes may exceed the interval and emit a contiguous obsolete tail, even when
+ordinary records were available earlier in the drain. The fixed allowance prevents accumulated
 catch-up credit; it does not guarantee a maximum run length under preservation pressure.
-When all target components have exhausted, no normal selection is possible. At most one
+When all target components have exhausted, no ordinary selection is possible. At most one
 saved obsolete slot can be used; strict flushes discard the rest, while bounded mode
-emits it under pressure or at flush.
+emits them under pressure or at flush.
 
 Source-exhaustion notifications do not prove downstream drainage. See
 {ref}`the operator-author contract <reacting-to-source-exhaustion>`

@@ -17,7 +17,16 @@ from zephon.ops.traits import OpTraits
 from zephon.types import SampleRecord
 from zephon.work import StaticMixtureWorkSource, WorkChunk, WorkSource
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    # The pass-through observer intentionally omits process_many validation samples.
+    pytest.mark.filterwarnings(
+        "ignore:(?s).*OP_INSTANCE_RUNTIME_CHECKS_SKIPPED in '_ObserveExhaustion':UserWarning"
+    ),
+]
+
+_CHUNK_SIZE = 16
+_LANE_SIZE = 8 * _CHUNK_SIZE
 
 
 class _ContinuingSource(StaticMixtureWorkSource):
@@ -36,7 +45,12 @@ class _ScriptedSource(WorkSource):
         self.position = 0
         self.datasets = {
             cid: Dataset.from_dict(
-                name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(1024)])}
+                name,
+                {
+                    0: InMemoryShard(
+                        [{"text": f"{name}-{i}"} for i in range(2 * _LANE_SIZE)]
+                    )
+                },
             )
             for cid, name in enumerate(("a", "b"))
         }
@@ -52,7 +66,7 @@ class _ScriptedSource(WorkSource):
         return frozenset({"a"})
 
     def chunk_size_hint(self) -> int:
-        return 64
+        return _CHUNK_SIZE
 
     def next_chunk(self) -> WorkChunk | None:
         if self.position == 8:
@@ -60,10 +74,11 @@ class _ScriptedSource(WorkSource):
         assert self._lane is not None
         index = self.position
         self.position += 1
-        start = self._lane * 512 + index * 64
-        components = {"b": [(1, 0, start + i) for i in range(32 if index < 4 else 64)]}
+        start = self._lane * _LANE_SIZE + index * _CHUNK_SIZE
+        count_b = _CHUNK_SIZE // 2 if index < 4 else _CHUNK_SIZE
+        components = {"b": [(1, 0, start + i) for i in range(count_b)]}
         if index < 4:
-            components["a"] = [(0, 0, start + i) for i in range(32)]
+            components["a"] = [(0, 0, start + i) for i in range(_CHUNK_SIZE // 2)]
         exhausted = index >= 3
         target = (
             {"b": 1.0} if self.source_targets and exhausted else {"a": 0.5, "b": 0.5}
@@ -131,7 +146,11 @@ def _continuing_pipe(
     shuffle: bool = False,
     events: list[tuple[str, int, int]] | None = None,
 ) -> Pipeline:
-    pipe = Pipeline(_ScriptedSource(source_targets=source_targets))
+    # Match fetch batching to source chunks so the exhaustion boundary still
+    # follows fetched data from the preceding chunks.
+    pipe = Pipeline(_ScriptedSource(source_targets=source_targets)).fetch(
+        max_batch=_CHUNK_SIZE
+    )
     if shuffle:
         pipe.shuffle(buffer_size=7, seed=4)
     pipe.ensure_mixture(
@@ -156,9 +175,6 @@ def _make_pipe(
     *,
     runner: str = "inline",
     mtp_mode: bool = False,
-    lanes: int = 1,
-    flush_every: int = 128,
-    shuffle: bool = False,
     limit: int | None = None,
     continuing: bool = True,
 ) -> Pipeline:
@@ -178,8 +194,6 @@ def _make_pipe(
         seed=0,
     )
     pipe = Pipeline(source)
-    if shuffle:
-        pipe.shuffle(buffer_size=7, seed=4)
     return pipe.ensure_mixture(
         weight_by="samples",
         mixture={"a": 0.5, "b": 0.5},
@@ -188,10 +202,10 @@ def _make_pipe(
         runner=runner,
         mtp_mode=mtp_mode,
         deterministic=True,
-        canonical_replicas=lanes,
+        canonical_replicas=1,
         max_workers=2,
         default_stage_prefetch=2,
-        flush_every_k_chunks=flush_every,
+        flush_every_k_chunks=128,
     )
 
 
@@ -232,9 +246,15 @@ def test_source_exhaustion_releases_survivors_through_transports(
     assert sum(text.startswith("a-") for _, text in records) == 3
 
 
-def test_notification_is_once_per_lane_across_epoch_resets() -> None:
+@pytest.mark.parametrize("source_targets", [False, True])
+def test_notification_is_once_per_lane_across_epoch_resets(
+    source_targets: bool,
+) -> None:
     events: list[tuple[str, int, int]] = []
-    records = [_value(r) for r in _continuing_pipe(events=events)]
+    records = [
+        _value(r)
+        for r in _continuing_pipe(events=events, source_targets=source_targets)
+    ]
     assert sorted(
         (lane, cid) for event, lane, cid in events if event == "exhausted"
     ) == [(0, 0), (1, 0)]
@@ -246,8 +266,14 @@ def test_notification_is_once_per_lane_across_epoch_resets() -> None:
         } >= {4, 5, 6, 7}
     # Every B record survives across the two full post-exhaustion epochs.
     assert Counter(lane for lane, text in records if text.startswith("b-")) == {
-        0: 384,
-        1: 384,
+        0: 96,
+        1: 96,
+    }
+    # Source-published removal makes the last A chunk obsolete before its EOD.
+    expected_a = 25 if source_targets else 32
+    assert Counter(lane for lane, text in records if text.startswith("a-")) == {
+        0: expected_a,
+        1: expected_a,
     }
 
 
@@ -275,7 +301,7 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
     cut = next(
         i + 1
         for i, (_, text) in enumerate(baseline)
-        if text.startswith("b-") and int(text[2:]) % 512 >= 4 * 64
+        if text.startswith("b-") and int(text[2:]) % _LANE_SIZE >= 4 * _CHUNK_SIZE
     )
     pipe = _continuing_pipe(**options)
     it = iter(pipe)
@@ -297,7 +323,7 @@ def test_source_exhaustion_checkpoint_replays_with_upstream_buffers(
 
 def test_checkpoint_before_notification_replays_later_exhaustion() -> None:
     events: list[tuple[str, int, int]] = []
-    baseline = [_value(r) for r in _continuing_pipe()]
+    baseline = [_value(r) for r in _continuing_pipe(events=[])]
     pipe = _continuing_pipe(events=events)
     it = iter(pipe)
     try:
@@ -306,9 +332,13 @@ def test_checkpoint_before_notification_replays_later_exhaustion() -> None:
         checkpoint = pipe.checkpoint()
     finally:
         it.close()
-    restored = _continuing_pipe()
+    restored_events: list[tuple[str, int, int]] = []
+    restored = _continuing_pipe(events=restored_events)
     restored.restore(checkpoint)
     assert _per_lane(prefix + [_value(r) for r in restored]) == _per_lane(baseline)
+    assert sorted(
+        (lane, cid) for event, lane, cid in restored_events if event == "exhausted"
+    ) == [(0, 0), (1, 0)]
 
 
 @pytest.mark.parametrize("limit", [None, 64])

@@ -382,16 +382,23 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             # An early-close drain is never consumed, so don't spend the warning on it.
             if not self._discard_warned and not in_shutdown_flush():
                 self._discard_warned = True
+                advice = (
+                    "Raise flush_every_k_chunks to give buffered records more time. "
+                )
+                if discarded_obsolete:
+                    advice += (
+                        "For obsolete tails, consider raising obsolete_drain_rate. "
+                    )
                 logger.warning(
                     "EnsureMixture strict mode discarded %d record(s) across %d "
                     "lane(s), including %d obsolete record(s), to respect the "
                     "target and drain allowance (%d dropped cumulatively "
-                    "on this rank). Raise flush_every_k_chunks to discard less "
-                    "often; further discards on this rank are logged at DEBUG.",
+                    "on this rank). %sFurther discards on this rank are logged at DEBUG.",
                     discarded,
                     discarded_lanes,
                     discarded_obsolete,
                     self._total_discarded,
+                    advice,
                 )
             else:
                 logger.debug(
@@ -522,7 +529,11 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     def _buffer_record(
         self, state: _LaneState, record: SampleRecord, contributions: dict[int, float]
     ) -> None:
-        """Keep any record containing retired content out of normal selection."""
+        """Keep obsolete records out of normal selection.
+
+        With a target, any positive off-target contribution or the absence of
+        all target components makes a record obsolete, even at zero weight.
+        """
         target = state.swrr.target_ratios if state.swrr is not None else None
         if len(contributions) == 1:
             cid, weight = next(iter(contributions.items()))
@@ -750,10 +761,9 @@ class EnsureMixture(BaseOp):
             force-emits, so the mixture may drift if a component stays scarce.
             ``None`` removes the cap and instead *discards* the surplus it cannot
             place on-target, on every flush (epoch boundaries and end of stream):
-            the mixture is enforced at the cost of dropping data. Useful when
-            a component is rare in the
-            stream (e.g. on-the-fly tokenization of a small, non-repeating
-            dataset). Memory is then bounded only by
+            the mixture is enforced at the cost of dropping data. Useful when a
+            component is rare in the stream (e.g. on-the-fly tokenization of a
+            small, non-repeating dataset). Memory is then bounded only by
             ``flush_every_k_chunks``, which also bounds how much is dropped: a
             smaller value flushes (and discards the unplaced surplus) sooner,
             leaving the scarce component less time to absorb the buffer.

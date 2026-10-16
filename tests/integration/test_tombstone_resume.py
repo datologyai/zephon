@@ -66,7 +66,7 @@ def test_resume_when_tombstones_overtake_buffered_payloads(
         if monotone:
             # The map buffers real records while tombstones bypass it.
             # A downstream batch alone does not reproduce the original bug.
-            # With stop policy, EOD also bypasses the map's buffered outputs;
+            # With stop policy, source exhaustion also bypasses buffered outputs;
             # its dummy cursor must not enter completion or delivery bookkeeping.
             pipe.map_transform(_drop_ids)
             pipe.map_transform(lambda p: p)

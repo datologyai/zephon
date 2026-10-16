@@ -235,8 +235,8 @@ to its first element. This also applies to `push_many` and `flush`.
 
 Operators that need the source's policy can read
 `ctx.get("continues_after_exhaustion", frozenset())` in `setup(OpContext)` or
-`accumulator(ctx=...)`. This static `frozenset[int]` contains the component ids the source
-can keep producing without after they exhaust, mapped from `WorkSource.continues_after_exhaustion()`.
+`accumulator(ctx=...)`. This static `frozenset[int]` contains the ids of components whose
+exhaustion the source can continue past, mapped from `WorkSource.continues_after_exhaustion()`.
 It defaults to empty. Notifications are delivered for every permanently exhausted
 component, including those outside this set; the set controls the operator's reaction.
 For example, `ensure_mixture` stops waiting only for components in this set. Keep any

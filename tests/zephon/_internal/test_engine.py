@@ -996,12 +996,21 @@ def test_component_ids_reject_invalid_vocabulary(
         Engine(plan, opts, _InvalidVocab(), spec)
 
 
-def test_continuation_policy_rejects_undeclared_component(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param("common", id="bare-string"),
+        pytest.param({"common"}, id="mutable-set"),
+        pytest.param(frozenset({1}), id="non-string-name"),
+        pytest.param(frozenset({"undeclared"}), id="undeclared-name"),
+    ],
+)
+def test_continuation_policy_rejects_invalid_return(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: Any
 ) -> None:
     class _InvalidPolicy(_DummyWorkSource):
-        def continues_after_exhaustion(self) -> frozenset[str]:
-            return frozenset({"undeclared"})
+        def continues_after_exhaustion(self) -> Any:
+            return bad
 
     monkeypatch.setattr(Engine, "_build_runners", lambda self: None)
     g = Graph()
@@ -1009,5 +1018,5 @@ def test_continuation_policy_rejects_undeclared_component(
     plan = Planner().make_plan(g)
     opts = RuntimeOptions(aggregate_dir=str(tmp_path))
     spec = resolve_runtime_spec(plan, opts)
-    with pytest.raises(ValueError, match="not in the work source's"):
+    with pytest.raises(ValueError, match=r"continues_after_exhaustion\(\) must return"):
         Engine(plan, opts, _InvalidPolicy(), spec)

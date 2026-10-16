@@ -209,7 +209,6 @@ class TestSourceExhaustion:
         assert acc.push_many([_rec(1, component_id=2, chunk=1)]) == []
         late = _rec(2, chunk=1)
         assert acc.push_many([late]) == []
-        assert acc._lanes[0].swrr is not None
         flushed = _flatten_ready(acc.flush())
         assert len(flushed) == 3
         assert all(r.meta.tombstone == (limit is None) for r in flushed)
@@ -428,16 +427,33 @@ class TestRetiredRecords:
         assert out == live[:10] + [empty] + live[10:]
         assert acc.flush() == []
 
-    def test_explicit_override_relaxes_only_permitted_exhaustion(self) -> None:
+    def test_zero_weight_pack_without_target_components_uses_drain_slot(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {2: 1}, weight_by="auto", max_buffer_size=None
+        )
+        empty = self.pack(0, {0: 1, 1: 1}, token_counts={0: 0, 1: 0})
+        ordinary = [_rec(i, component_id=2, tokens=3) for i in range(1, 21)]
+        assert _flatten_ready(acc.push_many([empty, *ordinary])) == (
+            ordinary[:10] + [empty] + ordinary[10:]
+        )
+        assert acc.flush() == []
+
+    @pytest.mark.parametrize("permitted", [False, True])
+    def test_explicit_override_relaxes_only_permitted_exhaustion(
+        self, permitted: bool
+    ) -> None:
         config = _make_config(max_buffer_size=None)
         config.mixture_override_by_id = {0: 0.5, 1: 0.5}
-        config.continues_after_exhaustion = frozenset({0})
+        config.continues_after_exhaustion = frozenset({0}) if permitted else frozenset()
         acc = EnsureMixtureAccumulator(
             config, get_chunk_mixture=lambda lane, cid: {1: 1}
         )
         live = [_rec(i, component_id=1) for i in range(5)]
         assert acc.push_many(live) == []  # Override takes precedence over source.
-        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == live
+        assert _flatten_ready(acc.on_source_exhausted(0, 0)) == (
+            live if permitted else []
+        )
+        assert acc.has_pending_data() == (not permitted)
 
     def test_two_exhaustions_keep_survivors_flowing(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
@@ -632,7 +648,9 @@ class TestRetiredRecords:
         else:
             assert flushed == [retired]
 
-    def test_strict_retired_pack_discard_closes_all_contributors(self) -> None:
+    def test_strict_retired_pack_discard_closes_all_contributors(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         acc = _make_accumulator_with_chunk_mixture({2: 1}, max_buffer_size=None)
         refs = tuple(
             ContributorRef(SampleCursor(0, i, (0, 0, i)), is_last_child=True)
@@ -641,7 +659,15 @@ class TestRetiredRecords:
         packed = self.pack(4, {0: 1, 1: 1})
         packed.meta = packed.meta.with_contributors(refs)
         assert acc.push_many([packed]) == []
-        tombstones = _assert_tombstones_only(acc.flush(reset=True), expected_count=2)
+        with caplog.at_level(
+            logging.WARNING, logger="zephon._internal.ops.ensure_mixture"
+        ):
+            tombstones = _assert_tombstones_only(
+                acc.flush(reset=True), expected_count=2
+            )
+        # One discarded pack produces two completion tombstones, not two discards.
+        assert "including 1 obsolete record(s)" in caplog.text
+        assert "obsolete_drain_rate" in caplog.text
         assert [r.meta.cursor for r in tombstones] == [ref.cursor for ref in refs]
         assert not acc.has_pending_data()
 

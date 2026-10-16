@@ -154,9 +154,10 @@ class SmoothWeightedRoundRobin(Generic[K]):
     def get_deficits(self) -> dict[K, float]:
         """Get current deficit per component for benefit scoring.
 
-        Deficit = target * max(1, in-target emitted mass) - emitted. Positive deficit means the
-        component is "owed" more emissions. Used by ensure_mixture to score
-        multi-component samples by how well they reduce overall deficit.
+        Deficit = target * max(1, in-target emitted mass) - emitted. Positive
+        deficit means the component is "owed" more emissions. Used by
+        ensure_mixture to score multi-component samples by how well they reduce
+        overall deficit.
 
         Only emitted contributions from components in the current target count
         toward its total. Retired contributions (including parts of packed
@@ -169,7 +170,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
         total = sum(self._emitted.get(k, 0.0) for k in self._target)
         effective_total = max(1.0, total)
         return {
-            k: self._target[k] * effective_total - self._emitted[k]
+            k: self._target[k] * effective_total - self._emitted.get(k, 0.0)
             for k in self._target
         }
 

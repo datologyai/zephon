@@ -104,11 +104,12 @@ class Accumulator(ABC, Generic[T]):
         notification precedes the first replayed chunk. A lane with no chunk at
         or after exhaustion receives no notification; do not wait for one to close.
 
-        This is a hint, not a drain barrier: any batching stage, including fetch
-        or an order-preserving map, can let it overtake buffered records. Reactions must be lane-scoped, idempotent, and deterministic
-        given input order. Do not rely on the historical order of different
-        components' exhaustion: replay may reconstruct them together from a
-        cumulative stamp, sorted by name. Keep any needed exhaustion knowledge across
+        This is a source fact, not a drain barrier: any batching stage, including
+        fetch or an order-preserving map, can let it overtake buffered records.
+        Reactions must be lane-scoped, idempotent, and deterministic given input
+        order. Do not rely on the historical order of different components'
+        exhaustion: replay may reconstruct them together from a cumulative stamp,
+        sorted by name. Keep any needed exhaustion knowledge across
         ``flush(reset=True)``: resets do not cause another notification.
 
         Source policy is separate from this fact. ``setup(OpContext)`` and
@@ -133,11 +134,10 @@ class Accumulator(ABC, Generic[T]):
 
         Returns True if and only if future outputs are equivalent to a fresh
         accumulator with the same permanent source facts on the retained suffix —
-        i.e., the accumulator's behavior
-        going forward is indistinguishable from one that was freshly constructed
-        and fed only the records still in the buffer.  When returning True, the
-        method must also perform any necessary state reset (e.g., clearing SWRR
-        emission history).
+        i.e., the accumulator's behavior going forward is indistinguishable from
+        one initialized with those source facts and fed only the records still
+        in the buffer. When returning True, the method must also perform any
+        necessary state reset (e.g., clearing SWRR emission history).
 
         The default implementation is conservative: it returns True only when
         there is no pending data at all.  Accumulators that buffer

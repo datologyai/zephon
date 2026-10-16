@@ -26,8 +26,13 @@ class _StubEngine:
         return self._ids.setdefault(name, len(self._ids))
 
 
-@pytest.mark.parametrize("revived", [False, True])
-def test_source_contract_violations_fail_at_next_chunk(revived: bool) -> None:
+@pytest.mark.parametrize(
+    "revived,match",
+    [(False, "must be cumulative"), (True, "previously source-exhausted")],
+)
+def test_source_contract_violations_fail_at_next_chunk(
+    revived: bool, match: str
+) -> None:
     stub = _StubEngine()
     announced: set[str] = set()
     first = WorkChunk(components={"a": [(0, 0, 0)]}, source_exhausted=("a",))
@@ -36,9 +41,7 @@ def test_source_contract_violations_fail_at_next_chunk(revived: bool) -> None:
         components={"a" if revived else "b": [(0, 0, 1)]},
         source_exhausted=("a",) if revived else (),
     )
-    with pytest.raises(
-        ValueError, match="previously source-exhausted|must be cumulative"
-    ):
+    with pytest.raises(ValueError, match=match):
         list(Engine._iter_chunk(stub, 0, 1, bad, announced))
 
 

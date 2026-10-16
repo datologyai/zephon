@@ -88,7 +88,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
         return _ContributorNotify(lane_id, contributors, record_cursor)
 
     if isinstance(item, SampleRecord):
-        if not should_notify(item):
+        if item.meta.is_sentinel and not item.meta.tombstone:
             raise ValueError(
                 "Flush and source-exhaustion controls cannot notify progress"
             )

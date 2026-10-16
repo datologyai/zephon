@@ -987,12 +987,12 @@ class Pipeline:
                 component stays scarce. Pass ``None`` to instead **drop** the surplus
                 it cannot place on-target — at every epoch boundary and at end of
                 stream. This enforces the mixture at the cost of dropping data.
-                Use strict mode when
-                an exact mixture matters more than keeping every sample. How much
-                is dropped depends on the stream's skew and on ``flush_every_k_chunks``
-                (smaller → more dropped). ensure_mixture is always non-monotonic, so
-                that cadence defaults to 8; in strict mode the buffer is then discarded
-                on roughly every flush. If drops are too frequent, raise
+                Use strict mode when an exact mixture matters more than keeping
+                every sample. How much is dropped depends on the stream's skew
+                and on ``flush_every_k_chunks`` (smaller → more dropped).
+                ensure_mixture is always non-monotonic, so that cadence defaults
+                to 8; in strict mode the buffer is then discarded on roughly
+                every flush. If drops are too frequent, raise
                 ``flush_every_k_chunks`` above the default to give scarce components
                 more time to absorb the buffer (at the cost of holding more in memory
                 between flushes).
@@ -1807,16 +1807,17 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon._internal.notify import _notify_item, is_sentinel, should_notify
+        from zephon._internal.notify import _notify_item, is_sentinel, is_tombstone
 
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            if should_notify(item):
+            sentinel = is_sentinel(item)
+            if not sentinel or is_tombstone(item):
                 _notify_item(engine, item, use_monotone)
-            if not is_sentinel(item):
+            if not sentinel:
                 yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,
