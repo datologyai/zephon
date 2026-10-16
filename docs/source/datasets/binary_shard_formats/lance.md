@@ -53,6 +53,11 @@ shards; pass a manifest directly to read an older version:
 :caption: examples/guide/datasets/lance_pin_version.py
 ```
 
+**Deleted rows.** Lance deletes rows by recording tombstones rather than rewriting data
+files. Zephon reports the surviving row count per shard and maps each row it reads past
+the deleted ones, so a dataset you have called `delete()` on reads correctly and needs no
+compaction.
+
 **What Zephon refuses.** Every unsupported case is rejected during discovery, with the
 reason and the remedy in the message, so a run never fails halfway through:
 
@@ -60,7 +65,6 @@ reason and the remedy in the message, so a run never fails halfway through:
 |---|---|---|
 | A fragment whose columns span several data files, which `add_columns` and `merge` produce | A Zephon shard resolves exactly one file through the shard cache | Rewrite the dataset: `lance.write_dataset(lance.dataset(src), dst)`; `compact_files()` leaves a fragment it has nothing to merge with untouched |
 | A data file still holding a column that `drop_columns` removed | A drop rewrites only the manifest, which then no longer says where the remaining columns sit in the file | Rewrite the dataset |
-| A fragment with deleted rows | The surviving rows are not the file's rows, so an index means two different things | Compact with `materialize_deletions=True` |
 | Blob columns (`lance-encoding:blob`) | Their values live outside the fragment's data files | Store the payloads as ordinary binary columns |
 | Data overlay files | Reading only the base values would return rows a later update has already replaced | Compact the dataset |
 | Legacy v1 data files | Zephon reads the v2 file format | Rewrite with `data_storage_version="2.0"` or newer |
@@ -68,8 +72,9 @@ reason and the remedy in the message, so a run never fails halfway through:
 | Fragments stored in an external fragment tree | The fragment list is not in the manifest | — |
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
-**Caching reads.** Zephon retains opened Lance readers per fetch replica, separately from
-the on-disk shard cache. The retention limit is `metadata_cache_entries`, additionally capped well below a
+**Caching reads.** Zephon retains opened fragments — a projected Lance reader plus that
+fragment's decoded tombstones — per fetch replica, separately from the on-disk shard
+cache. The retention limit is `metadata_cache_entries`, additionally capped well below a
 typical open-file limit because each entry holds an open file handle. Set it to zero to
 disable retention.
 

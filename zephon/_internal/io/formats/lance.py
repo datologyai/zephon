@@ -15,6 +15,9 @@ shards would share one cached file) nor merged (two fragments are two files).
 What a fragment may *not* do here is spread its columns over several data
 files, which ``add_columns`` produces: a shard resolves exactly one file, so
 such a fragment is refused at discovery with the remedy in the message.
+Deleted rows are supported — the shard reports the surviving row count and maps
+each logical row onto its physical offset through the fragment's deletion
+vector.
 
 Unsupported cases are refused at discovery rather than mid-run.
 """
@@ -34,8 +37,13 @@ from zephon._internal.io.formats.arrow_rows import (
     configure_pyarrow,
 )
 from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
+from zephon._internal.io.formats.lance_support.deletions import (
+    DeletionVector,
+    read_deletion_vector,
+)
 from zephon._internal.io.formats.lance_support.manifest import (
     DATA_DIR,
+    DELETIONS_DIR,
     FLAG_DATA_OVERLAYS,
     FLAG_FRAGMENT_TREE,
     KNOWN_READER_FLAGS,
@@ -101,6 +109,8 @@ class _FragmentPlan:
     # manifest's, which a rename updates without rewriting the file.
     columns: tuple[tuple[str, int], ...]
     file_columns: int
+    deletion_basename: str | None
+    num_deleted_rows: int
 
 
 def _validate_schema(manifest: LanceManifest, manifest_path: str) -> None:
@@ -194,12 +204,11 @@ def _fragment_plan(
         columns.append((field.name, order.index(field.id)))
     # fmt: on
 
-    if fragment.deletion is not None:
+    deletion = fragment.deletion
+    if deletion is not None and deletion.has_base_id:
         raise _reject(
             manifest_path,
-            f"{where} has deleted rows, which Zephon cannot skip yet; compact "
-            "the dataset with materialize_deletions=True so no tombstones "
-            "remain",
+            f"{where}'s deletion file lives under another dataset's base path",
         )
     return _FragmentPlan(
         basename=data_file.path,
@@ -208,6 +217,8 @@ def _fragment_plan(
         num_rows=fragment.num_rows,
         columns=tuple(columns),
         file_columns=len(order),
+        deletion_basename=deletion.basename if deletion else None,
+        num_deleted_rows=deletion.num_deleted_rows if deletion else 0,
     )
 
 
@@ -236,7 +247,7 @@ def _plan_dataset(storage: StorageBackend, manifest_path: str) -> _DatasetPlan:
 
 @dataclass(frozen=True)
 class _OpenFragment:
-    """One fragment ready to read, as a reader projected to the schema.
+    """One fragment ready to read: a projected reader and its tombstones.
 
     Shards are opened per read while this entry is retained, so two fetch
     threads reading one shard share the reader. pylance's reader rejects a
@@ -247,10 +258,13 @@ class _OpenFragment:
     # Set when the file's own column names differ from the dataset's, which a
     # rename produces: Lance updates the manifest and leaves the file alone.
     rename: tuple[str, ...] | None
+    deletion: DeletionVector | None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _open_fragment(path: Path, plan: _FragmentPlan) -> _OpenFragment:
+def _open_fragment(
+    path: Path, plan: _FragmentPlan, deletion: DeletionVector | None
+) -> _OpenFragment:
     """Open ``path`` projected to the dataset's columns, by file column index."""
     lance_file = _require_lance()
     probe = lance_file.LanceFileReader(str(path))
@@ -266,9 +280,9 @@ def _open_fragment(path: Path, plan: _FragmentPlan) -> _OpenFragment:
     names = tuple(name for name, _column in plan.columns)
     rename = None if tuple(wanted) == names else names
     if wanted == file_names:
-        return _OpenFragment(probe, rename)
+        return _OpenFragment(probe, rename, deletion)
     reader = lance_file.LanceFileReader(str(path), columns=wanted)
-    return _OpenFragment(reader, rename)
+    return _OpenFragment(reader, rename, deletion)
 
 
 class LanceShard(RandomAccessShard):
@@ -300,7 +314,8 @@ class LanceShard(RandomAccessShard):
         if fragment is None:
             raise RuntimeError("LanceShard has been closed")
 
-        rows = indices
+        deletion = fragment.deletion
+        rows = deletion.to_physical(indices) if deletion else indices
         # The file reader requires strictly increasing indices, so duplicate and
         # out-of-order requests read each row once and are reordered afterwards.
         if all(a < b for a, b in zip(rows, rows[1:])):
@@ -342,6 +357,24 @@ class LanceShardOpener:
                 self._plans[manifest_path] = plan
             return plan
 
+    def _load_fragment(
+        self, path: Path, root: str, fragment: _FragmentPlan
+    ) -> _OpenFragment:
+        """Open the data file and, when the fragment has one, its tombstones.
+
+        The tombstone file is small and lives beside the data under the dataset
+        root, not in the shard cache, so it is read through storage here.
+        """
+        deletion = None
+        if fragment.deletion_basename is not None:
+            deletion = read_deletion_vector(
+                self._storage,
+                os.path.join(root, DELETIONS_DIR, fragment.deletion_basename),
+                expected_deleted=fragment.num_deleted_rows,
+                physical_rows=fragment.physical_rows,
+            )
+        return _open_fragment(path, fragment, deletion)
+
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
@@ -359,11 +392,11 @@ class LanceShardOpener:
         path = local_ref.raw.path
         # Key on the version too: two datasets pinned to different versions of
         # one directory share their unchanged data files, and without the cache
-        # they share the local path as well, but a rename between them changes
-        # the column names.
+        # they share the local path as well, but a delete or a rename between
+        # them changes which rows or names that file yields.
         opened = self._fragments.get_or_load(
             f"{manifest_path}\0{file_cache_key(path)}",
-            lambda: _open_fragment(path, fragment),
+            lambda: self._load_fragment(path, plan.root, fragment),
         )
         return LanceShard(opened, length=fragment.num_rows)
 
