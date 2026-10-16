@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from zephon._internal.io.formats.lance_deletions import (
+from zephon._internal.io.formats.lance_support.deletions import (
     DeletionVector,
     _parse_roaring,
     read_deletion_vector,

@@ -37,7 +37,7 @@ from zephon._internal.io.formats.arrow_rows import (
     configure_pyarrow,
 )
 from zephon._internal.io.formats.base import FormatHandler, ShardOpener, register_format
-from zephon._internal.io.formats.lance_deletions import (
+from zephon._internal.io.formats.lance_support.deletions import (
     DeletionVector,
     read_deletion_vector,
 )
