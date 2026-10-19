@@ -149,15 +149,20 @@ class _AllocationConfig:
 def _is_unbounded(cfg: _AllocationConfig) -> bool:
     """True when nothing can ever force termination.
 
-    Only a stream where *every* dataset repeats uncapped runs forever; a single
-    ``"stop"`` or capped-``"repeat"`` dataset bounds it, as does ``stop_after_passes``.
+    Redistributing datasets eventually leave the mix. Any remaining uncapped
+    repeats run forever unless a stop policy, repeat cap, or pass floor ends the run.
     """
     if cfg.stop_after_passes is not None:
         return False
-    return all(
-        cfg.exhausted_policy[name] == "repeat" and cfg.max_repeats[name] is None
-        for name in cfg.component_order
-    )
+    has_repeat = False
+    for name in cfg.component_order:
+        policy = cfg.exhausted_policy[name]
+        if policy == "redistribute":
+            continue
+        if policy != "repeat" or cfg.max_repeats[name] is not None:
+            return False
+        has_repeat = True
+    return has_repeat
 
 
 def _effective_remaining_samples(
@@ -238,7 +243,7 @@ def _average_quota_remaining_samples(
     cursors: Mapping[str, "_DatasetCursor"],
     per_chunk_draws: Mapping[str, float],
 ) -> int:
-    """Samples left until the first finite component runs out.
+    """Estimate samples until a stop/cap, or all redistributing tails, run out.
 
     ``per_chunk_draws`` is each component's average draws per chunk (see
     :func:`_stop_after_passes_remaining_samples`, which handles the
@@ -246,6 +251,29 @@ def _average_quota_remaining_samples(
     """
     if cfg.stop_after_passes is not None:
         return _stop_after_passes_remaining_samples(cfg, cursors, per_chunk_draws)
+    if "redistribute" in cfg.exhausted_policy.values():
+        # Redistribution preserves relative rates among survivors. In units of
+        # the original allocation rate, only stop/capped-repeat components set
+        # a deadline; each redistributing component contributes up to its tail.
+        deadline = math.inf
+        for name in cfg.component_order:
+            if cfg.exhausted_policy[name] == "redistribute":
+                continue
+            remaining = _effective_remaining_samples(cfg, name, cursors[name])
+            if remaining is not None:
+                deadline = min(deadline, remaining / per_chunk_draws[name])
+        if math.isinf(deadline):
+            if _is_unbounded(cfg):
+                return 0  # __len__ rejects unbounded sources before reaching here.
+            return sum(cursor.remaining for cursor in cursors.values())
+        return int(
+            sum(
+                min(cursors[name].remaining, per_chunk_draws[name] * deadline)
+                if cfg.exhausted_policy[name] == "redistribute"
+                else per_chunk_draws[name] * deadline
+                for name in cfg.component_order
+            )
+        )
     chunks_possible: float = math.inf
     for name in cfg.component_order:
         avg_quota = per_chunk_draws[name]
@@ -955,6 +983,36 @@ class AllocationStrategy(ABC):
 
     def __init__(self, config: _AllocationConfig) -> None:
         self._config = config
+        self._redistributing = frozenset(
+            name
+            for name in config.component_order
+            if config.exhausted_policy[name] == "redistribute"
+        )
+
+    def _active_weights(
+        self, cursors: Mapping[str, _DatasetCursor]
+    ) -> dict[str, float]:
+        """Derive the next target from checkpointed cursors, retaining stable ids."""
+        weights = self._config.weights
+        if not self._redistributing:
+            return weights
+        active = {
+            name: weight
+            for name, weight in weights.items()
+            if name not in self._redistributing or cursors[name].remaining > 0
+        }
+        if len(active) == len(weights):
+            return weights
+        total = sum(active.values())
+        return {name: weight / total for name, weight in active.items()}
+
+    def _max_repeat_shares(self, shares: Mapping[str, float]) -> dict[str, float]:
+        """Worst repeat demand after every redistributing component has left."""
+        if not self._redistributing:
+            return dict(shares)
+        survivors = {n: w for n, w in shares.items() if n not in self._redistributing}
+        total = sum(survivors.values())
+        return {name: weight / total for name, weight in survivors.items()}
 
     @abstractmethod
     def produce(
@@ -1034,14 +1092,17 @@ class AllocationStrategy(ABC):
         """
         return True
 
-    def target_mixture(self) -> dict[str, float] | None:
+    def target_mixture(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, float] | None:
         """Per-chunk target the engine must enforce, or None to count the chunk.
 
         Token mode emits a deliberately sample-skewed chunk and hands the engine
         the declared token target instead of the counted composition; sample
-        modes have nothing to declare.
+        modes stamp a target when redistribution is enabled, so sparse or partial
+        chunks do not replace the intended target with their counted composition.
         """
-        return None
+        return dict(self._active_weights(cursors)) if self._redistributing else None
 
     def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
         """Guard the repeat retry loop against datasets too small to refill a chunk.
@@ -1061,13 +1122,6 @@ class AllocationStrategy(ABC):
         mp_context: Any = None,
     ) -> None:
         """Calibrate per-run state (no-op outside token mode; idempotent)."""
-
-    def _check_no_redistribute(self) -> None:
-        for name in self._config.component_order:
-            if self._config.exhausted_policy[name] == "redistribute":
-                raise NotImplementedError(
-                    "Exhausted policy 'redistribute' not implemented"
-                )
 
 
 class QuotaAllocationStrategy(AllocationStrategy):
@@ -1092,7 +1146,7 @@ class QuotaAllocationStrategy(AllocationStrategy):
 
         components: dict[str, list[SampleId]] = {}
         for name in self._config.component_order:
-            quota = quotas[name]
+            quota = quotas.get(name, 0)
             if quota <= 0:
                 continue
             cursor = cursors[name]
@@ -1139,16 +1193,17 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         quota exceeds ``chunk_size``, so the bound is capped there.
         """
         cfg = self._config
+        shares = self._max_repeat_shares(cfg.weights)
 
         def required(n: str) -> int:
-            share = cfg.weights[n] * cfg.chunk_size
+            share = shares[n] * cfg.chunk_size
             if share.is_integer():
                 return int(share)
             return min(math.ceil(share) + 1, cfg.chunk_size)
 
         def formula(n: str) -> str:
-            share = f"weight={cfg.weights[n]:.4g} * chunk_size={cfg.chunk_size}"
-            if (cfg.weights[n] * cfg.chunk_size).is_integer():
+            share = f"max_weight={shares[n]:.4g} * chunk_size={cfg.chunk_size}"
+            if (shares[n] * cfg.chunk_size).is_integer():
                 return share
             return f"min(ceil({share}) + 1, chunk_size)"
 
@@ -1156,7 +1211,9 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
 
     # -- quota computation ------------------------------------------------
 
-    def _advance_accumulators(self) -> dict[str, int]:
+    def _advance_accumulators(
+        self, weights: Mapping[str, float] | None = None
+    ) -> dict[str, int]:
         """Advance accumulators and return per-component quotas for this chunk.
 
         Uses Bresenham-style fractional accumulation:
@@ -1175,11 +1232,18 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         back-to-back over-allocation.
         """
         cfg = self._config
+        if weights is None:
+            weights = cfg.weights
+        component_order = (
+            cfg.component_order
+            if not self._redistributing
+            else tuple(name for name in cfg.component_order if name in weights)
+        )
         quotas: dict[str, int] = {}
         total = 0
 
-        for name in cfg.component_order:
-            self._accumulators[name] += cfg.weights[name] * cfg.chunk_size
+        for name in component_order:
+            self._accumulators[name] += weights[name] * cfg.chunk_size
             q = int(self._accumulators[name])  # truncation toward zero
             self._accumulators[name] -= q
             quotas[name] = q
@@ -1190,7 +1254,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         if deficit > 0:
             # Give extra slots to components with largest fractional remainder.
             order = sorted(
-                enumerate(cfg.component_order),
+                enumerate(component_order),
                 key=lambda pair: (-self._accumulators[pair[1]], pair[0]),
             )
             for _, name in order:
@@ -1205,7 +1269,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         elif deficit < 0:
             # Remove slots from components with smallest fractional remainder.
             order = sorted(
-                enumerate(cfg.component_order),
+                enumerate(component_order),
                 key=lambda pair: (self._accumulators[pair[1]], pair[0]),
             )
             for _, name in order:
@@ -1231,21 +1295,37 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
     ) -> dict[str, int] | None:
         """Accumulator-based chunk production (default)."""
         cfg = self._config
-        self._check_no_redistribute()
+        weights = self._active_weights(cursors)
+        if not weights:
+            return None
+        reset_carry = any(
+            name not in weights and self._accumulators[name] != 0.0
+            for name in self._redistributing
+        )
 
         # Compute quotas, then verify cursors can fulfill them.
         # On exhaustion with repeat policy: rollback accumulators, reset
         # the exhausted cursor, and retry.
         while True:
             saved = dict(self._accumulators)
-            quotas = self._advance_accumulators()
+            if reset_carry:
+                # Retiring nonzero fractional debt unbalances the survivors'
+                # rounding ledger. Restart rounding once at this boundary;
+                # cleared retired entries also preserve this choice on restore.
+                # Keep saved intact so a terminal attempt still rolls back.
+                self._accumulators = dict.fromkeys(cfg.component_order, 0.0)
+            quotas = self._advance_accumulators(weights)
 
             needs_retry = False
             for name in cfg.component_order:
-                quota = quotas[name]
+                quota = quotas.get(name, 0)
                 cursor = cursors[name]
                 if cursor.remaining < quota:
-                    if cfg.exhausted_policy[name] == "repeat":
+                    if cfg.exhausted_policy[name] == "redistribute":
+                        # Keep the tail and finish a short chunk. Renormalize the
+                        # next chunk, whose target no longer includes this source.
+                        quotas[name] = cursor.remaining
+                    elif cfg.exhausted_policy[name] == "repeat":
                         ds_max = cfg.max_repeats[name]
                         # Roll back this chunk's accumulator advance before any
                         # terminal None: otherwise a checkpoint taken after the
@@ -1369,18 +1449,25 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
 
     # -- fixed-quota computation ------------------------------------------
 
-    def _compute_chunk_quota(self) -> dict[str, int]:
+    def _compute_chunk_quota(
+        self, weights: Mapping[str, float] | None = None
+    ) -> dict[str, int]:
         """Largest-remainder allocation for legacy fixed-quota mode."""
         cfg = self._config
-        component_count = len(cfg.component_order)
+        if weights is None:
+            weights = cfg.weights
+        order = tuple(name for name in cfg.component_order if name in weights)
+        if not order:
+            return {}
+        component_count = len(order)
         base_slots = component_count
         remaining_slots = cfg.chunk_size - base_slots
-        quota: dict[str, int] = dict.fromkeys(cfg.component_order, 1)
+        quota: dict[str, int] = dict.fromkeys(order, 1)
         warn_components: list[str] = []
         entries: list[tuple[float, int, str]] = []
 
-        for position, name in enumerate(cfg.component_order):
-            weight = cfg.weights[name]
+        for position, name in enumerate(order):
+            weight = weights[name]
             ideal = cfg.chunk_size * weight
             if ideal < 1.0:
                 warn_components.append(name)
@@ -1417,7 +1504,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
 
         if warn_components:
             joined = ", ".join(warn_components)
-            min_weight = min(cfg.weights[n] for n in warn_components)
+            min_weight = min(weights[n] for n in warn_components)
             min_chunk_size = math.ceil(1.0 / min_weight)
             min_proportion = 1.0 / cfg.chunk_size
             raise ValueError(
@@ -1441,14 +1528,22 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     ) -> dict[str, int] | None:
         """Legacy fixed-quota chunk production (pre-accumulator checkpoints)."""
         cfg = self._config
-        self._check_no_redistribute()
+        if self._redistributing:
+            weights = self._active_weights(cursors)
+            if weights.keys() != self._chunk_quota.keys():
+                self._chunk_quota = self._compute_chunk_quota(weights)
+        if not self._chunk_quota:
+            return None
+        quotas = dict(self._chunk_quota)
 
         # Check exhaustion per component and either stop or reset.
         for name in cfg.component_order:
-            quota = self._chunk_quota[name]
+            quota = quotas.get(name, 0)
             cursor = cursors[name]
             if cursor.remaining < quota:
-                if cfg.exhausted_policy[name] == "repeat":
+                if cfg.exhausted_policy[name] == "redistribute":
+                    quotas[name] = cursor.remaining
+                elif cfg.exhausted_policy[name] == "repeat":
                     ds_max = cfg.max_repeats[name]
                     if ds_max is not None and cursor._epoch >= ds_max:
                         return None  # hit repeat cap
@@ -1456,7 +1551,19 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
                 else:
                     return None  # "stop" policy
 
-        return dict(self._chunk_quota)
+        return quotas
+
+    def validate_liveness(self, cursors: dict[str, _DatasetCursor]) -> None:
+        if self._redistributing:
+            quotas = self._compute_chunk_quota(
+                self._max_repeat_shares(self._config.weights)
+            )
+            _validate_repeat_liveness(
+                self._config,
+                cursors,
+                lambda n: quotas[n],
+                lambda n: f"maximum redistributed quota={quotas[n]}",
+            )
 
     # -- length estimation ------------------------------------------------
 
@@ -1466,6 +1573,10 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
         if not self._chunk_quota:
             return 0
         cfg = self._config
+        if self._redistributing:
+            return _average_quota_remaining_samples(
+                cfg, cursors, {n: w * cfg.chunk_size for n, w in cfg.weights.items()}
+            )
         chunk_capacity = cfg.chunk_size
         chunks_possible: float = math.inf
         for name in cfg.component_order:
@@ -1639,12 +1750,18 @@ class TokenAwareStrategy(AllocationStrategy):
     ) -> dict[str, list[SampleId]] | None:
         """Draw one chunk with token-cost weighted SWRR deficits."""
         cfg = self._config
-        self._check_no_redistribute()
+        active_weights = self._active_weights(cursors)
+        if not active_weights:
+            return None
         cost_table = self._ensure_cost_table()
 
-        order = cfg.component_order
+        order = (
+            cfg.component_order
+            if not self._redistributing
+            else tuple(name for name in cfg.component_order if name in active_weights)
+        )
         n = len(order)
-        weights = [cfg.weights[name] for name in order]
+        weights = [active_weights[name] for name in order]
         cursor_list = [cursors[name] for name in order]
         cost = cost_table.cost  # bound once; called per draw
         snapshot = self._snapshot(cursors)
@@ -1672,6 +1789,10 @@ class TokenAwareStrategy(AllocationStrategy):
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
+                    if cfg.exhausted_policy[name] == "redistribute":
+                        # Commit this tail before removing the component from the
+                        # next target. Stop/repeat still roll back whole attempts.
+                        break
                     # Roll back the partial attempt before deciding whether this
                     # is a repeat retry or a fixed-point terminal state.
                     self._restore(cursors, snapshot)
@@ -1716,12 +1837,14 @@ class TokenAwareStrategy(AllocationStrategy):
             if retry:
                 continue
 
-            self._deficits = {name: deficits[i] for i, name in enumerate(order)}
+            self._deficits.update({name: deficits[i] for i, name in enumerate(order)})
             return {name: samples for name, samples in zip(order, drawn) if samples}
 
-    def target_mixture(self) -> dict[str, float] | None:
+    def target_mixture(
+        self, cursors: dict[str, _DatasetCursor]
+    ) -> dict[str, float] | None:
         """Declared token mixture for downstream enforcement."""
-        return dict(self._config.weights)
+        return dict(self._active_weights(cursors))
 
     # -- length estimation --------------------------------------------------
 
@@ -1743,18 +1866,28 @@ class TokenAwareStrategy(AllocationStrategy):
         cfg = self._config
         if not any(policy == "repeat" for policy in cfg.exhausted_policy.values()):
             return
-        shares = self.effective_shares()
+        shares = self._max_repeat_shares(self.effective_shares())
+
+        def required(name: str) -> int:
+            bound = math.ceil(
+                shares[name] * cfg.chunk_size * self._TOKEN_LIVENESS_SAFETY
+            )
+            # No component can supply more than the entire chunk. Redistribution
+            # can leave a single repeat component, whose demand is exactly that.
+            return min(cfg.chunk_size, bound) if self._redistributing else bound
+
+        def formula(name: str) -> str:
+            bound = (
+                f"ceil(effective_share={shares[name]:.4g} * "
+                f"chunk_size={cfg.chunk_size} * safety={self._TOKEN_LIVENESS_SAFETY})"
+            )
+            return f"min(chunk_size, {bound})" if self._redistributing else bound
+
         _validate_repeat_liveness(
             cfg,
             cursors,
-            lambda n: math.ceil(
-                shares[n] * cfg.chunk_size * self._TOKEN_LIVENESS_SAFETY
-            ),
-            lambda n: (
-                f"ceil(effective_share={shares[n]:.4g} * "
-                f"chunk_size={cfg.chunk_size} * "
-                f"safety={self._TOKEN_LIVENESS_SAFETY})"
-            ),
+            required,
+            formula,
         )
 
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
@@ -1892,6 +2025,12 @@ class StaticMixtureWorkSource(WorkSource):
     (e.g. one repeats forever as padding while another drives termination when
     exhausted).
 
+    ``exhausted_policy="redistribute"`` consumes a dataset once, then removes it
+    from allocation and renormalizes the surviving weights. Its final samples may
+    form a short chunk, whose target is the mixture at the start of that chunk;
+    subsequent chunks publish the survivor target. The source ends when all
+    components are exhausted, or a mixed-in stop policy or repeat cap ends the run.
+
     ``stop_after_passes`` is the minimum number of full passes per dataset: every
     dataset repeats and the run stops once all have been traversed that many
     times. The slowest dataset is seen exactly this many times and triggers the
@@ -1991,6 +2130,11 @@ class StaticMixtureWorkSource(WorkSource):
                 )
 
         self._knobs_by_name: dict[str, _DatasetKnobs] = {}
+        can_redistribute = (
+            "redistribute" in exhausted_policy.values()
+            if isinstance(exhausted_policy, Mapping)
+            else exhausted_policy == "redistribute"
+        )
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
@@ -2007,7 +2151,9 @@ class StaticMixtureWorkSource(WorkSource):
             self._knobs_by_name[ds.name] = knobs
             cursor = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), knobs)
 
-            if cursor.remaining <= 0:
+            # Redistribution needs empty cursors too: they either leave the mix
+            # immediately, or enforce another component's stop/repeat policy.
+            if cursor.remaining <= 0 and not can_redistribute:
                 # Should not happen due to validate_for call
                 print(f"Unexpected: cursor for ds {dataset_id} has 0 remaining items.")
                 self._weights.pop(ds.name)
@@ -2261,6 +2407,14 @@ class StaticMixtureWorkSource(WorkSource):
         """
         return dict(self._dataset_ids)
 
+    def continues_after_exhaustion(self) -> frozenset[str]:
+        """Components configured with ``exhausted_policy="redistribute"``."""
+        return frozenset(
+            name
+            for name, policy in self._alloc_config.exhausted_policy.items()
+            if policy == "redistribute"
+        )
+
     # ------------------------------------------------------------------
     # Token-aware priming
     # ------------------------------------------------------------------
@@ -2321,18 +2475,24 @@ class StaticMixtureWorkSource(WorkSource):
             "Please assign lane for WorkSource before requesting chunk."
         )
         while True:
+            g = self._global_chunk_index
+            owned = self._lane_for_chunk(g) == (self._lane % self._canon)
+            # A boundary chunk keeps the target it was allocated against. EOD
+            # announces its exhausted components; subsequent targets omit them.
+            target_mixture = (
+                self._strategy.target_mixture(self._cursors) if owned else None
+            )
             components = self._strategy.produce(self._cursors)
             if not components:
                 return None
             self._recompute_total_samples()
-            g = self._global_chunk_index
             self._global_chunk_index += 1
-            if self._lane_for_chunk(g) != (self._lane % self._canon):
+            if not owned:
                 continue
             return WorkChunk(
                 components=components,
                 seed=self._seed,
-                target_mixture=self._strategy.target_mixture(),
+                target_mixture=target_mixture,
                 source_exhausted=self._source_exhausted_components(),
             )
 
@@ -2386,11 +2546,6 @@ class StaticMixtureWorkSource(WorkSource):
         """Returns the number of available samples across all chunks that can be yielded."""
         if hasattr(self, "_alloc_config"):
             cfg = self._alloc_config
-            for name in cfg.component_order:
-                if cfg.exhausted_policy[name] == "redistribute":
-                    raise NotImplementedError(
-                        "Exhausted policy 'redistribute' not implemented"
-                    )
             if _is_unbounded(cfg):
                 raise TypeError(
                     "len() is not defined for an infinite work source "

@@ -2763,16 +2763,17 @@ def test_multilane_no_duplicate_chunks() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_redistribute_raises_not_implemented() -> None:
-    """Redistribute policy is accepted but raises at construction (via len)."""
+def test_redistribute_preserves_a_single_dataset_tail() -> None:
     ds = make_dataset("alpha", 50)
-    with pytest.raises(NotImplementedError, match="redistribute"):
-        StaticMixtureWorkSource(
-            datasets=[ds],
-            mixture={"alpha": 1.0},
-            chunk_size=5,
-            exhausted_policy="redistribute",
-        )
+    source = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"alpha": 1.0},
+        chunk_size=16,
+        exhausted_policy="redistribute",
+    ).clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(source.next_chunk, None))
+    assert [len(chunk) for chunk in chunks] == [16, 16, 16, 2]
+    assert chunks[-1].source_exhausted == ("alpha",)
 
 
 # ---------------------------------------------------------------------------

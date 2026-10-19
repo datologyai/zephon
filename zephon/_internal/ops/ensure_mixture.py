@@ -728,8 +728,8 @@ class EnsureMixture(BaseOp):
     in this lane; buffered records may still arrive. For components listed by
     ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
     target, including explicit overrides, and renormalizes the remaining weights.
-    ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
-    in both modes.
+    ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
+    Late records follow ``obsolete_drain_rate`` in both modes.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission
