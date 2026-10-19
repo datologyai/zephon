@@ -452,9 +452,10 @@ class WorkSource(ABC):
         Return a subset of :meth:`component_ids`, fixed across lanes and restores.
         The engine marks each end-of-data (EOD) sentinel with this policy. The runner
         exposes the observed exhausted component ids that permit continuation as
-        ``SourceExhaustion.continuing``, available to accumulators through
-        ``ctx["get_source_exhaustion"](lane_id)``. EOD sentinels are emitted
-        independently of this policy.
+        ``SourceExhaustion.continuing``. Accumulators obtain the callback with
+        ``ctx.get("get_source_exhaustion")``; it may be absent during validation
+        (see :meth:`~zephon.ops.accumulators.Accumulator.on_source_exhausted`).
+        EOD sentinels are emitted independently of this policy.
 
         The default is empty. For listed components, ``ensure_mixture`` removes
         their weight when the sentinel arrives, even from an explicit mixture
