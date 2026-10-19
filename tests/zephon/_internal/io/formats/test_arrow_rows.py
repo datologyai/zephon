@@ -355,16 +355,68 @@ def test_row_order_across_different_column_chunk_boundaries() -> None:
             assert np.shares_memory(row["vector"], chunk.values.to_numpy())
 
 
-@pytest.mark.parametrize("dtype", [pa.int16(), pa.uint64(), pa.float32()])
-def test_single_numeric_column_returns_typed_scalars(dtype: Any) -> None:
-    rows = arrow_table_to_samples(pa.table({"value": pa.array([1, 2], type=dtype)}))
-    assert all(isinstance(row["value"], np.generic) for row in rows)
-    assert all(
-        row["value"].dtype
-        == pa.array([], type=dtype).to_numpy(zero_copy_only=False).dtype
-        for row in rows
-    )
-    assert rows == [{"value": 1}, {"value": 2}]
+@pytest.fixture(
+    params=[
+        np.int8,
+        np.int16,
+        np.int32,
+        np.int64,
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.uint64,
+        np.float16,
+        np.float32,
+        np.float64,
+    ],
+    ids=lambda dtype: np.dtype(dtype).name,
+)
+def numeric_dtype(request: pytest.FixtureRequest) -> Any:
+    return request.param
+
+
+def test_single_numeric_column_returns_typed_scalars(numeric_dtype: Any) -> None:
+    dtype = np.dtype(numeric_dtype)
+    if dtype.kind == "f":
+        data = [0, -0.0, 1.5, np.nan, np.inf, -np.inf]
+    else:
+        limits = np.iinfo(dtype)
+        data = [0, limits.min, limits.max]
+    expected = np.array(data, dtype=dtype)[1:]
+    array = pa.array(np.array(data, dtype=dtype)).slice(1)
+    view = _column_values(array, pa)
+    assert isinstance(view, np.ndarray)
+    assert view.dtype == dtype
+    assert not view.flags.writeable
+    assert view.ctypes.data == array.buffers()[1].address + dtype.itemsize
+
+    table = pa.table({"value": array})
+    rows = arrow_table_to_samples(table)
+    del array, table
+    gc.collect()
+
+    assert view.tobytes() == expected.tobytes()
+    scalars = []
+    for row in rows:
+        assert isinstance(row, dict)
+        assert type(row["value"]) is numeric_dtype
+        scalars.append(row["value"])
+    actual = np.array(scalars, dtype=dtype)
+    # Compare bits to preserve integer limits, signed zero and NaN values.
+    assert actual.tobytes() == expected.tobytes()
+
+
+def test_empty_numeric_columns_keep_dtype(numeric_dtype: Any) -> None:
+    for array in (
+        pa.array(np.array([], dtype=numeric_dtype)),
+        pa.array(np.array([1, 2], dtype=numeric_dtype)).slice(1, 0),
+    ):
+        values = _column_values(array, pa)
+        assert isinstance(values, np.ndarray)
+        assert values.dtype == numeric_dtype
+        assert values.shape == (0,)
+        assert not values.flags.writeable
+        assert arrow_table_to_samples(pa.table({"value": array})) == []
 
 
 @pytest.mark.parametrize(
@@ -475,3 +527,84 @@ def test_arrow_configuration_is_lazy_and_applied_after_import() -> None:
         check=True,
         timeout=30,
     )
+
+
+def test_numeric_lists_view_every_width(numeric_dtype: Any) -> None:
+    values = pa.array(np.arange(6, dtype=numeric_dtype))
+    array = pa.FixedSizeListArray.from_arrays(values, 2).slice(1)
+    rows = _column_values(array, pa)
+
+    assert rows[0].dtype == numeric_dtype
+    np.testing.assert_array_equal(rows[0], [2, 3])
+    np.testing.assert_array_equal(rows[1], [4, 5])
+    assert not rows[0].flags.writeable
+
+
+@pytest.mark.parametrize(
+    ("kind", "storage", "dtype"),
+    [
+        (pa.int8(), np.int8, np.int8),
+        (pa.uint32(), np.uint32, np.uint32),
+        (pa.int64(), np.int64, np.int64),
+        (pa.float16(), np.float16, np.float16),
+        (pa.float64(), np.float64, np.float64),
+        (pa.timestamp("ns", tz="UTC"), np.int64, "M8[ns]"),
+        (pa.timestamp("s"), np.int64, "M8[s]"),
+        (pa.date32(), np.int32, "M8[D]"),
+        (pa.date64(), np.int64, "M8[ms]"),
+        (pa.duration("us"), np.int64, "m8[us]"),
+    ],
+)
+@pytest.mark.parametrize("offset", [0, 3, 11])
+def test_fixed_width_scalars_survive_unaligned_slices(
+    kind: Any, storage: Any, dtype: Any, offset: int
+) -> None:
+    raw = (np.arange(40) % 7).astype(storage)
+    mask = raw == 2
+    array = pa.array(raw, mask=mask).view(kind).slice(offset, 21)
+    dense = pa.array(raw).view(kind).slice(offset, 21)
+    expected = raw[offset : offset + 21].astype(dtype)
+    present = ~mask[offset : offset + 21]
+
+    rows = _column_values(array, pa)
+    assert [row is None for row in rows] == list(~present)
+    for row, value in zip(np.asarray(rows, dtype=object)[present], expected[present]):
+        assert row == value
+        assert row.dtype == np.dtype(dtype)
+
+    values = _column_values(dense, pa)
+    np.testing.assert_array_equal(values, expected)
+    assert values.dtype == np.dtype(dtype)
+    assert not values.flags.writeable
+
+
+@pytest.mark.parametrize("kind", [pa.int32(), pa.date32(), pa.float64()])
+def test_empty_fixed_width_arrays_have_no_values(kind: Any) -> None:
+    for array in (pa.array([], type=kind), pa.array([1, 0], type=kind)[2:]):
+        assert len(_column_values(array, pa)) == 0
+
+
+@pytest.mark.parametrize("kind", [pa.list_, pa.large_list, pa.list_view])
+@pytest.mark.parametrize("offset", [0, 5, 9])
+def test_list_bitmaps_unpack_from_unaligned_offsets(kind: Any, offset: int) -> None:
+    items = [
+        None if row % 4 == 1 else [bool((row + i) % 3) for i in range(row % 3)]
+        for row in range(30)
+    ]
+    array = pa.array(items, type=kind(pa.bool_())).slice(offset, 17)
+
+    rows = _column_values(array, pa)
+    for row, expected in zip(rows, items[offset : offset + 17]):
+        if expected is None:
+            assert row is None
+        else:
+            assert row.dtype == np.bool_
+            assert row.tolist() == expected
+            assert not row.flags.writeable
+
+    # List views without numeric children compact through Python conversion.
+    strings = pa.array(
+        [None if item is None else [str(v) for v in item] for item in items],
+        type=kind(pa.string()),
+    ).slice(offset, 17)
+    assert _column_values(strings, pa) == strings.to_pylist()
