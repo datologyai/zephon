@@ -131,7 +131,8 @@ class Accumulator(ABC, Generic[T]):
         call, including after ``flush(reset=True)``. EOD sentinels are emitted
         regardless of continuation policy. See :doc:`/pipelines/user_defined_operators`.
 
-        Return ready batches as in :meth:`push_many`. Keep tombstones in separate
+        Return ready batches as in :meth:`push_many`. If dropping records, emit
+        their tombstones with :func:`~zephon.ops.tombstones_for_record` in separate
         batches from data.
         """
         return []
