@@ -21,8 +21,10 @@ class SourceExhaustion:
     """Immutable source facts observed by one operator in one lane.
 
     ``exhausted`` contains all components whose EOD reached the operator.
-    ``continuing`` is the subset whose source policy permits continuing without
-    them. The runner updates this snapshot before calling the exhaustion hook.
+    ``continuing`` is the subset listed by
+    :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
+    permits continuing without them. The runner updates this snapshot before
+    calling the exhaustion hook.
     """
 
     exhausted: frozenset[int] = frozenset()
@@ -117,13 +119,15 @@ class Accumulator(ABC, Generic[T]):
         without a notification. Reactions must be lane-scoped and deterministic
         for a given input order. Restore reconstructs runner state from notices.
 
-        The runner retains exhaustion across epoch resets. The accumulator-only
-        ``ctx["get_source_exhaustion"](lane_id)`` service returns a
-        :class:`SourceExhaustion` snapshot, including continuation permissions.
-        It is a local call, updated before this hook runs. Cached snapshots may
-        be discarded on reset and refreshed on first use and in this hook;
-        ordinary batches need no polling. Notifications are independent of
-        continuation policy. See :doc:`/pipelines/user_defined_operators`.
+        The accumulator-only ``ctx["get_source_exhaustion"](lane_id)`` service
+        returns a :class:`SourceExhaustion` snapshot of what this operator has
+        seen on that lane: ``exhausted`` contains every component whose EOD
+        reached it, and ``continuing`` is the subset the source permits
+        continuing without, per ``WorkSource.continues_after_exhaustion()``.
+        The runner updates it before calling this hook and retains it across
+        epoch resets. It is a cheap local call, available during any accumulator
+        call, including after ``flush(reset=True)``. Notifications are independent
+        of continuation policy. See :doc:`/pipelines/user_defined_operators`.
 
         Return ready batches as in :meth:`push_many`. Keep tombstones in separate
         batches from data.

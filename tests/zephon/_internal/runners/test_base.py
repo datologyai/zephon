@@ -734,7 +734,6 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     runner = InlineStageRunner(
         stage,
         ctx_services=_ctx_services(),
-        continues_after_exhaustion=frozenset({2}),
         max_workers=1,
         deterministic=True,
         stage_output_mode="stream_items",
@@ -757,7 +756,9 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     state.enqueue([_flush_sentinel(lane_id=3)])
     assert state._get_source_exhaustion(3) is snapshot
     assert hooks == [(3, 7)]  # No synthetic hook on epoch reset.
-    permitted = Engine._make_source_exhausted_sentinel(lane_id=3, component_id=2)
+    permitted = Engine._make_source_exhausted_sentinel(
+        lane_id=3, component_id=2, continues=True
+    )
     state.enqueue([permitted, _rec(6, lane_id=3)])
     assert observed[-1] == SourceExhaustion(frozenset({2, 7}), frozenset({2}))
     assert snapshot == SourceExhaustion(frozenset({7}))  # Immutable old snapshot.

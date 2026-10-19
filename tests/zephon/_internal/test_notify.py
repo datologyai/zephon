@@ -16,6 +16,7 @@ from zephon._internal.notify import (
     _notify_item,
     is_tombstone,
     should_notify,
+    source_exhaustion_continues,
 )
 from zephon.types import (
     ContributorRef,
@@ -263,7 +264,11 @@ class TestShouldNotify:
             chunk_offset=0,
             tags={"_source_exhausted": 0},
         )
-        assert should_notify(SampleRecord(meta=meta, payload=None)) is False
+        notice = SampleRecord(meta=meta, payload=None)
+        assert should_notify(notice) is False
+        assert (
+            source_exhaustion_continues(notice) is False
+        )  # Missing policy defaults off.
 
     def test_batch_notifies(self):
         assert should_notify(_batch(_record())) is True
@@ -274,6 +279,16 @@ def test_extract_rejects_non_notifiable_controls(monotone: bool) -> None:
     for control in (
         Engine._make_flush_sentinel(0),
         Engine._make_source_exhausted_sentinel(0, 0),
+        Engine._make_source_exhausted_sentinel(0, 0, continues=True),
     ):
         with pytest.raises(ValueError, match="cannot notify progress"):
             _extract_notify_args(control, monotone)
+
+
+@pytest.mark.parametrize("continues", [False, True])
+def test_source_exhaustion_continuation_flag(continues: bool) -> None:
+    notice = Engine._make_source_exhausted_sentinel(0, 0, continues=continues)
+    assert source_exhaustion_continues(notice) is continues
+    assert not should_notify(notice)
+    assert not source_exhaustion_continues(_record())
+    assert not source_exhaustion_continues(_batch(_record()))

@@ -450,9 +450,10 @@ class WorkSource(ABC):
         """Components whose exhaustion allows the source to keep producing.
 
         Return a subset of :meth:`component_ids`, fixed across lanes and restores.
-        The runner combines this policy with observed EOD notices. Accumulators
-        can read ``ctx["get_source_exhaustion"](lane_id).continuing`` for the
-        exhausted component ids that permit continuation. EOD notifications are
+        The engine marks each EOD notice with this policy. The runner exposes
+        the observed exhausted component ids that permit continuation as
+        ``SourceExhaustion.continuing``, available to accumulators through
+        ``ctx["get_source_exhaustion"](lane_id)``. EOD notifications are
         independent of this policy.
 
         The default is empty. For listed components, ``ensure_mixture`` removes

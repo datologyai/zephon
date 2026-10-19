@@ -58,7 +58,7 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
-from zephon._internal.notify import is_sentinel
+from zephon._internal.notify import SOURCE_EXHAUSTION_CONTINUES_TAG, is_sentinel
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
 from zephon._internal.replay import ReplayConfigService
@@ -674,7 +674,6 @@ class Engine:
                 stage_index=spec.stage_index,
                 tracking_mode=runner_tracking_mode,
                 stage_output_mode=spec.output_mode,
-                continues_after_exhaustion=self._continues_after_exhaustion,
             )
 
             if spec.runner_type == "threads":
@@ -912,10 +911,16 @@ class Engine:
 
     @staticmethod
     def _make_source_exhausted_sentinel(
-        lane_id: LaneId, component_id: int
+        lane_id: LaneId, component_id: int, *, continues: bool = False
     ) -> SampleRecord:
         """Create an EOD control record; buffered data may still arrive later."""
-        return Engine._make_control_record(lane_id, {"_source_exhausted": component_id})
+        return Engine._make_control_record(
+            lane_id,
+            {
+                "_source_exhausted": component_id,
+                SOURCE_EXHAUSTION_CONTINUES_TAG: continues,
+            },
+        )
 
     def _iter_chunk(
         self, lane_id: LaneId, cid: int, chunk: WorkChunk, announced: set[str]
@@ -946,8 +951,11 @@ class Engine:
                 remaining[name] = count
             else:
                 announced.add(name)
+                component_id = self._get_component_id(name)
                 yield self._make_source_exhausted_sentinel(
-                    lane_id, self._get_component_id(name)
+                    lane_id,
+                    component_id,
+                    continues=component_id in self._continues_after_exhaustion,
                 )
         get_id = self._get_component_id
         if not remaining:
@@ -963,7 +971,11 @@ class Engine:
                 if left == 1:
                     del remaining[name]
                     announced.add(name)
-                    yield self._make_source_exhausted_sentinel(lane_id, component_id)
+                    yield self._make_source_exhausted_sentinel(
+                        lane_id,
+                        component_id,
+                        continues=component_id in self._continues_after_exhaustion,
+                    )
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.

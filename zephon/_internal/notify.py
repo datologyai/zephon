@@ -19,6 +19,8 @@ from zephon.types import (
     StreamItem,
 )
 
+SOURCE_EXHAUSTION_CONTINUES_TAG = "_source_exhaustion_continues"
+
 
 class _MonotoneNotify(NamedTuple):
     """Lightweight args for ``engine.notify_monotone()``.
@@ -175,3 +177,10 @@ def source_exhausted_component(item: StreamItem) -> int | None:
         return None
     component = item.meta.tags.get("_source_exhausted")
     return int(component) if component is not None else None
+
+
+def source_exhaustion_continues(item: StreamItem) -> bool:
+    """Whether an EOD notice permits continuation without its component."""
+    return isinstance(item, SampleRecord) and bool(
+        item.meta.tags.get(SOURCE_EXHAUSTION_CONTINUES_TAG, False)
+    )

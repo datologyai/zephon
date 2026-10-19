@@ -19,6 +19,7 @@ from zephon._internal.notify import (
     _ContributorNotify,
     should_notify,
     source_exhausted_component,
+    source_exhaustion_continues,
 )
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
@@ -949,6 +950,7 @@ class _StubEngine:
 
     def __init__(self) -> None:
         self._ids: dict[str, int] = {}
+        self._continues_after_exhaustion: frozenset[int] = frozenset()
 
     def _get_component_id(self, name: str) -> int:
         return self._ids.setdefault(name, len(self._ids))
@@ -968,6 +970,42 @@ def _sentinels(items: list[EngineSample | SampleRecord]) -> list[SampleRecord]:
 
 class TestSourceExhaustion:
     """EOD placement in a lane's chunk stream."""
+
+    @pytest.mark.parametrize("present", [False, True])
+    def test_continuation_policy_on_live_and_replayed_notices(
+        self, present: bool
+    ) -> None:
+        stub = _StubEngine()
+        stub._ids = {"allowed": 7, "stop": 2, "live": 11}
+        stub._continues_after_exhaustion = frozenset({7})
+        components = {"live": [(2, 0, 0)]}
+        if present:
+            components.update({"allowed": [(0, 0, 0)], "stop": [(1, 0, 0)]})
+        chunk = WorkChunk(
+            components=components, source_exhausted=("allowed", "stop"), seed=1
+        )
+        announced: set[str] = set()
+        items = list(Engine._iter_chunk(stub, 3, 7, chunk, announced))
+        notices = _sentinels(items)
+        assert {
+            source_exhausted_component(n): source_exhaustion_continues(n)
+            for n in notices
+        } == {7: True, 2: False}
+        for notice in notices:
+            component = source_exhausted_component(notice)
+            positions = [
+                i
+                for i, item in enumerate(items)
+                if not isinstance(item, SampleRecord) and item[4] == component
+            ]
+            if present:
+                assert items.index(notice) == positions[-1] + 1
+            else:
+                assert items.index(notice) < 2  # Both absent components precede data.
+        # The flag is regenerated from the same policy, including when the
+        # original EOD preceded the replay window and is announced up front.
+        restored = WorkChunk.from_state(chunk.state_dict())
+        assert list(Engine._iter_chunk(stub, 3, 7, restored, set())) == items
 
     @pytest.mark.parametrize(
         "revived,match",

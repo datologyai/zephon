@@ -757,7 +757,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         queue_capacity: int = 4,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
-        continues_after_exhaustion: frozenset[int] = frozenset(),
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
@@ -830,7 +829,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             prefetch_capacity=prefetch_capacity,
             deterministic=deterministic,
             allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
-            continues_after_exhaustion=continues_after_exhaustion,
             stage_index=stage_index,
             tracking_mode=tracking_mode,
             stage_output_mode=stage_output_mode,
@@ -926,7 +924,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         deterministic: bool,
         ctx_proto: dict[str, Any],
         allow_latency_flush: bool,
-        continues_after_exhaustion: frozenset[int],
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,
@@ -936,7 +933,6 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             deterministic=deterministic,
             ctx_proto=ctx_proto,
             allow_latency_flush=allow_latency_flush,
-            continues_after_exhaustion=continues_after_exhaustion,
             stage_index=stage_index,
             stage_name=stage_name,
             op_index=op_index,
@@ -2093,7 +2089,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         Invocation boundaries are defined by the operator's accumulator.
         Each batch is sent to workers as-is.
 
-        Sentinel batches (tombstones, flush, and EOD) bypass worker execution.
+        Sentinel batches (tombstones, flush signals) bypass worker execution
+        entirely — they are control signals that operators should never see.
         A RunnerResult is created inline and stashed in ``_local_results``
         so the pump thread never writes to the IPC result pipe.
         """

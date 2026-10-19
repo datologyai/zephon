@@ -222,8 +222,9 @@ components listed in `WorkSource.continues_after_exhaustion()`. The built-in
 under its stop or repeat policies. In `accumulator()`, save the local callable
 `ctx["get_source_exhaustion"]`. Calling it with a lane id returns an immutable
 `SourceExhaustion` snapshot: `exhausted` contains all observed exhausted component ids,
-and `continuing` is the subset whose policy permits continuation. Components outside
-that subset still send EOD sentinels; they do not cause `ensure_mixture` to relax its
+and `continuing` is the subset listed by `WorkSource.continues_after_exhaustion()`.
+The engine marks each notice with that policy. Components outside that subset still
+send EOD sentinels; they do not cause `ensure_mixture` to relax its
 target. This service is available only to accumulators, not worker `setup` or
 `process_many`, and never makes an IPC roundtrip.
 
@@ -236,10 +237,9 @@ means it has already seen every record from that dataset.
 
 The runner owns these facts per operator and lane, updating them before invoking the
 hook at most once per component. It retains them across epoch flushes and reconstructs
-them from replayed notices on checkpoint restore. Your accumulator can reset to fresh:
-read a snapshot on first use after reset and refresh it in the hook, with no polling
-on ordinary batches. Keep the reaction lane-scoped and deterministic for a given input
-order. The hook returns `ReadyBatch` values just like
+them from replayed notices on checkpoint restore. The snapshot is available during any
+accumulator call, including after `flush(reset=True)`. Keep the reaction lane-scoped
+and deterministic for a given input order. The hook returns `ReadyBatch` values just like
 `push_many`; if it drops records, use `tombstones_for_record` and return the tombstones in
 separate batches from data. Keep the usual `flush` handling too: EOD describes an
 individual dataset running out, rather than the whole pipeline finishing.

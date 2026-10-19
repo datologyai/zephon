@@ -110,9 +110,8 @@ class _LaneState:
     total_emitted: float = 0.0
     # Counter for obsolete interleaving: counts emissions since last obsolete drain
     emissions_since_obsolete_drain: int = 0
-    # Disposable snapshot of exhaustion that permits continuation. None reloads
-    # from the runner on first use; hooks refresh it without per-batch polling.
-    source_exhausted: frozenset[int] | None = None
+    # Snapshot of SourceExhaustion.continuing; None until first read after construction or reset.
+    removed_by_exhaustion: frozenset[int] | None = None
 
 
 class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
@@ -300,7 +299,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if component_id not in exhausted:
             return []
         state = self._lanes[lane_id]
-        state.source_exhausted = exhausted
+        state.removed_by_exhaustion = exhausted
         if state.swrr is not None:
             self._set_target(state, state.swrr.target_ratios)
         # Release buffered survivors now; there may be no further input.
@@ -448,8 +447,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
         """Adopt the operator override, or the chunk target if no override is set."""
-        if state.source_exhausted is None:
-            state.source_exhausted = (
+        if state.removed_by_exhaustion is None:
+            state.removed_by_exhaustion = (
                 self._get_source_exhaustion(lane_id).continuing
                 if self._get_source_exhaustion is not None
                 else frozenset()
@@ -461,7 +460,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
     def _set_target(self, state: _LaneState, target: dict[int, float] | None) -> None:
         """Filter out exhausted components and update buffer eligibility."""
-        assert state.source_exhausted is not None
+        assert state.removed_by_exhaustion is not None
         previous = state.swrr.target_ratios if state.swrr is not None else None
         if target is None:
             state.swrr = None  # No target configured: unrestricted output.
@@ -469,7 +468,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             target = {
                 cid: weight
                 for cid, weight in target.items()
-                if weight > 0 and cid not in state.source_exhausted
+                if weight > 0 and cid not in state.removed_by_exhaustion
             }
             # Keep an empty SWRR target distinct from unrestricted output.
             if state.swrr is None:

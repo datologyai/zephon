@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Sequence, TypeVar
 
 from zephon._internal.graph import Node, Stage
-from zephon._internal.notify import is_sentinel, source_exhausted_component
+from zephon._internal.notify import (
+    is_sentinel,
+    source_exhausted_component,
+    source_exhaustion_continues,
+)
 from zephon._internal.observability.stopwatch import Stopwatch
 from zephon._internal.ops.batch import Batch
 from zephon._internal.stream import (
@@ -47,7 +51,6 @@ class BaseOperatorState:
     node: Node
     deterministic: bool
     ctx_proto: dict[str, Any]
-    continues_after_exhaustion: frozenset[int] = frozenset()
     allow_latency_flush: bool = False
     stage_index: int = 0
     stage_name: str = ""
@@ -287,7 +290,7 @@ class BaseOperatorState:
                     if component_id in previous.exhausted:
                         continue  # Do not repeat either the hook or the notice.
                     continuing = previous.continuing
-                    if component_id in self.continues_after_exhaustion:
+                    if source_exhaustion_continues(e):
                         continuing = continuing | {component_id}
                     # Advance only after preceding data entered this accumulator.
                     # Epoch flushes retain these facts; restore replays notices.
@@ -382,7 +385,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         prefetch_capacity: int = 0,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
-        continues_after_exhaustion: frozenset[int] = frozenset(),
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: str = "microbatches",
@@ -412,7 +414,6 @@ class StageRunnerBase(Generic[StateT], ABC):
                 deterministic=deterministic,
                 ctx_proto=self._ctx_services,
                 allow_latency_flush=allow_latency_flush_in_deterministic,
-                continues_after_exhaustion=continues_after_exhaustion,
                 stage_index=stage_index,
                 stage_name=self._stage_name,
                 collect_op_stats=collect_op_stats,
@@ -431,7 +432,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         deterministic: bool,
         ctx_proto: dict[str, Any],
         allow_latency_flush: bool,
-        continues_after_exhaustion: frozenset[int],
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,

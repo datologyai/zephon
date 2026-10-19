@@ -234,7 +234,6 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         queue_capacity: int = 4,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
-        continues_after_exhaustion: frozenset[int] = frozenset(),
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
@@ -248,7 +247,6 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             prefetch_capacity=prefetch_capacity,
             deterministic=deterministic,
             allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
-            continues_after_exhaustion=continues_after_exhaustion,
             stage_index=stage_index,
             tracking_mode=tracking_mode,
             stage_output_mode=stage_output_mode,
@@ -262,7 +260,6 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         deterministic: bool,
         ctx_proto: dict[str, Any],
         allow_latency_flush: bool,
-        continues_after_exhaustion: frozenset[int],
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,
@@ -272,7 +269,6 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             deterministic=deterministic,
             ctx_proto=ctx_proto,
             allow_latency_flush=allow_latency_flush,
-            continues_after_exhaustion=continues_after_exhaustion,
             stage_index=stage_index,
             stage_name=stage_name,
             op_index=op_index,
@@ -334,7 +330,8 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         if not batch or context.stop_event.is_set():
             return
 
-        # Sentinel batches (tombstones, flush, and EOD) bypass process_many.
+        # Sentinel batches (tombstones, flush signals) bypass process_many
+        # entirely — they are control signals that operators should never see.
         # Create a RunnerResult inline and stash it in _local_results so the
         # pump thread never blocks on result_queue (see _local_results docstring).
         if is_sentinel(batch[0]):
