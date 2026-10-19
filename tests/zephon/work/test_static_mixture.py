@@ -480,11 +480,9 @@ def test_shuffle_block_size_auto_with_all_empty_datasets_raises_clearly() -> Non
 
 
 def test_shuffle_block_size_none_with_all_empty_datasets_raises_clear_error() -> None:
-    """No sentinel involved: the empty-shard-list case must still fail loudly,
-    via the standard 'No datasets with positive weight' guard rather than a
-    confusing 'max() iterable argument is empty'."""
+    """The default repeat policy rejects empty inputs through its liveness guard."""
     empty = Dataset.from_dict("empty", {})
-    with pytest.raises(ValueError, match="No datasets with positive weight"):
+    with pytest.raises(ValueError, match="has 0 samples but repeat policy requires"):
         StaticMixtureWorkSource(
             [empty],
             {empty.name: 1.0},

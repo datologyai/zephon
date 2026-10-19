@@ -292,12 +292,54 @@ def test_redistribute_discards_retired_fractional_debt() -> None:
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
-def test_mixed_empty_stop_component_still_stops_source(mode: str) -> None:
-    source = _source(
-        mode, {"a": 5, "b": 0}, exhausted_policy={"a": "redistribute", "b": "stop"}
-    ).clone_for_lane(0, 1)
+@pytest.mark.parametrize(
+    "policy", ["stop", {"a": "stop", "b": "stop"}, {"a": "redistribute", "b": "stop"}]
+)
+def test_empty_stop_component_keeps_its_policy(
+    mode: str, policy: str | dict[str, str]
+) -> None:
+    source = _source(mode, {"a": 5, "b": 0}, exhausted_policy=policy).clone_for_lane(
+        0, 1
+    )
     assert len(source) == 0
     assert source.next_chunk() is None
+    checkpoint = source.state_dict()
+    source.load_state_dict(checkpoint)
+    assert source.next_chunk() is None
+    assert source.state_dict() == checkpoint
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        "repeat",
+        {"a": "stop", "b": "repeat"},
+        {"a": "redistribute", "b": "repeat"},
+    ],
+)
+def test_empty_repeat_component_fails_liveness(
+    mode: str, policy: str | dict[str, str] | None
+) -> None:
+    with pytest.raises(
+        ValueError, match="Dataset 'b' has 0 samples but repeat policy requires"
+    ):
+        _source(mode, {"a": 16, "b": 0}, exhausted_policy=policy)
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_mixture_dict_order_does_not_change_redistribution(mode: str) -> None:
+    sizes = {"a": 2, "b": 9, "c": 11}
+    original = _source(mode, sizes, {"a": 0.5, "b": 0.25, "c": 0.25}).clone_for_lane(
+        0, 1
+    )
+    reordered = _source(mode, sizes, {"c": 0.25, "b": 0.25, "a": 0.5}).clone_for_lane(
+        0, 1
+    )
+    assert [c.state_dict() for c in _chunks(original)] == [
+        c.state_dict() for c in _chunks(reordered)
+    ]
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])

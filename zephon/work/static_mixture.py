@@ -248,6 +248,8 @@ def _average_quota_remaining_samples(
     ``per_chunk_draws`` is each component's average draws per chunk (see
     :func:`_stop_after_passes_remaining_samples`, which handles the
     ``stop_after_passes`` case). Uncapped repeats contribute no finite limit.
+    All-redistribute lengths are exact; mixed-policy estimates can be high or
+    low because of quota rounding, variable token costs and terminal rollback.
     """
     if cfg.stop_after_passes is not None:
         return _stop_after_passes_remaining_samples(cfg, cursors, per_chunk_draws)
@@ -991,8 +993,11 @@ class AllocationStrategy(ABC):
 
     def _active_weights(
         self, cursors: Mapping[str, _DatasetCursor]
-    ) -> dict[str, float]:
-        """Derive the next target from checkpointed cursors, retaining stable ids."""
+    ) -> Mapping[str, float]:
+        """Normalized weights of components still active per checkpointed cursors.
+
+        Treat the result as read-only: it may share the config's weight mapping.
+        """
         weights = self._config.weights
         if not self._redistributing:
             return weights
@@ -1005,6 +1010,13 @@ class AllocationStrategy(ABC):
             return weights
         total = sum(active.values())
         return {name: weight / total for name, weight in active.items()}
+
+    def _active_order(self, weights: Mapping[str, float]) -> tuple[str, ...]:
+        """Keep dataset order for tie-breaking, regardless of mixture dict order."""
+        order = self._config.component_order
+        if len(weights) == len(order):
+            return order
+        return tuple(name for name in order if name in weights)
 
     def _max_repeat_shares(self, shares: Mapping[str, float]) -> dict[str, float]:
         """Worst repeat demand after every redistributing component has left."""
@@ -1211,9 +1223,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
 
     # -- quota computation ------------------------------------------------
 
-    def _advance_accumulators(
-        self, weights: Mapping[str, float] | None = None
-    ) -> dict[str, int]:
+    def _advance_accumulators(self, weights: Mapping[str, float]) -> dict[str, int]:
         """Advance accumulators and return per-component quotas for this chunk.
 
         Uses Bresenham-style fractional accumulation:
@@ -1232,13 +1242,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
         back-to-back over-allocation.
         """
         cfg = self._config
-        if weights is None:
-            weights = cfg.weights
-        component_order = (
-            cfg.component_order
-            if not self._redistributing
-            else tuple(name for name in cfg.component_order if name in weights)
-        )
+        component_order = self._active_order(weights)
         quotas: dict[str, int] = {}
         total = 0
 
@@ -1310,7 +1314,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
             saved = dict(self._accumulators)
             if reset_carry:
                 # Retiring nonzero fractional debt unbalances the survivors'
-                # rounding ledger. Restart rounding once at this boundary;
+                # rounding ledger. Restart all rounding, survivors included;
                 # cleared retired entries also preserve this choice on restore.
                 # Keep saved intact so a terminal attempt still rolls back.
                 self._accumulators = dict.fromkeys(cfg.component_order, 0.0)
@@ -1456,7 +1460,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
         cfg = self._config
         if weights is None:
             weights = cfg.weights
-        order = tuple(name for name in cfg.component_order if name in weights)
+        order = self._active_order(weights)
         if not order:
             return {}
         component_count = len(order)
@@ -1755,11 +1759,7 @@ class TokenAwareStrategy(AllocationStrategy):
             return None
         cost_table = self._ensure_cost_table()
 
-        order = (
-            cfg.component_order
-            if not self._redistributing
-            else tuple(name for name in cfg.component_order if name in active_weights)
-        )
+        order = self._active_order(active_weights)
         n = len(order)
         weights = [active_weights[name] for name in order]
         cursor_list = [cursors[name] for name in order]
@@ -1837,6 +1837,8 @@ class TokenAwareStrategy(AllocationStrategy):
             if retry:
                 continue
 
+            # Argmax only depends on relative deficits, so unlike sample quota
+            # rounding it needs no zero-sum reset. Retain retired checkpoint keys.
             self._deficits.update({name: deficits[i] for i, name in enumerate(order)})
             return {name: samples for name, samples in zip(order, drawn) if samples}
 
@@ -1874,6 +1876,7 @@ class TokenAwareStrategy(AllocationStrategy):
             )
             # No component can supply more than the entire chunk. Redistribution
             # can leave a single repeat component, whose demand is exactly that.
+            # Preserve the existing validation bound for non-redistributing runs.
             return min(cfg.chunk_size, bound) if self._redistributing else bound
 
         def formula(name: str) -> str:
@@ -2130,11 +2133,6 @@ class StaticMixtureWorkSource(WorkSource):
                 )
 
         self._knobs_by_name: dict[str, _DatasetKnobs] = {}
-        can_redistribute = (
-            "redistribute" in exhausted_policy.values()
-            if isinstance(exhausted_policy, Mapping)
-            else exhausted_policy == "redistribute"
-        )
         for dataset_id, ds in enumerate(self._datasets):
             self._dataset_ids[ds.name] = dataset_id
             self._datasets_by_id[dataset_id] = ds
@@ -2151,24 +2149,11 @@ class StaticMixtureWorkSource(WorkSource):
             self._knobs_by_name[ds.name] = knobs
             cursor = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), knobs)
 
-            # Redistribution needs empty cursors too: they either leave the mix
-            # immediately, or enforce another component's stop/repeat policy.
-            if cursor.remaining <= 0 and not can_redistribute:
-                # Should not happen due to validate_for call
-                print(f"Unexpected: cursor for ds {dataset_id} has 0 remaining items.")
-                self._weights.pop(ds.name)
-                self._knobs_by_name.pop(ds.name)
-                continue
+            # Keep empty cursors: their own policy governs exhaustion, and repeat
+            # liveness validation below rejects datasets that cannot supply a chunk.
             self._cursors[ds.name] = cursor
 
-        if not self._weights:
-            raise ValueError("No datasets with positive weight and non-empty cursors")
-
-        component_order = tuple(
-            ds.name for ds in self._datasets if ds.name in self._weights
-        )
-        if not component_order:
-            raise ValueError("No active mixture components available")
+        component_order = tuple(dataset_names)
 
         self._seed = seed
         active_names = list(component_order)
