@@ -1,5 +1,6 @@
 import pickle
 import random
+import warnings
 from typing import Any
 
 import numpy as np
@@ -1008,17 +1009,51 @@ def test_load_rejects_conflicting_policy() -> None:
         ws_load.load_state_dict(state)
 
 
-def test_max_repeats_warns_with_stop_policy() -> None:
-    """max_repeats with stop policy emits a warning."""
-    ds = make_dataset("alpha", 10)
-    with pytest.warns(RuntimeWarning, match="max_repeats.*no effect"):
+@pytest.mark.parametrize("policy", ["stop", "redistribute"])
+@pytest.mark.parametrize(
+    "knob,value",
+    [("max_repeats", 3), ("reshuffle_on_repeat", False), ("reshuffle_on_repeat", True)],
+)
+def test_repeat_settings_warn_for_explicit_nonrepeat_entries(
+    policy: str, knob: str, value: int | bool
+) -> None:
+    """Explicit repeat-only settings on non-repeat components warn once."""
+    with pytest.warns(RuntimeWarning, match=rf"{knob}\['a'\].*no effect") as caught:
         StaticMixtureWorkSource(
-            [ds],
-            {ds.name: 1.0},
-            chunk_size=5,
-            exhausted_policy="stop",
-            max_repeats=3,
+            [make_dataset("a", 4), make_dataset("b", 4)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=2,
+            exhausted_policy={"a": policy, "b": "repeat"},
+            **{knob: {"a": value, "b": value}},
         )
+    assert len(caught) == 1
+
+
+@pytest.mark.parametrize("policy", ["stop", "redistribute"])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"max_repeats": 3, "reshuffle_on_repeat": True},
+        {"max_repeats": 3, "reshuffle_on_repeat": False},
+        {"max_repeats": {"b": 3}, "reshuffle_on_repeat": {"b": False}},
+        {"max_repeats": {"a": None}, "reshuffle_on_repeat": {}},
+    ],
+)
+def test_repeat_settings_do_not_warn_for_scalars_or_repeat_entries(
+    policy: str, settings: dict[str, Any]
+) -> None:
+    """Defaults and shared repeat settings are valid for mixed-policy sources."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        StaticMixtureWorkSource(
+            [make_dataset("a", 4), make_dataset("b", 4)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=2,
+            exhausted_policy={"a": policy, "b": "repeat"},
+            **settings,
+        )
+    assert not caught
 
 
 def test_repeat_max_repeats() -> None:

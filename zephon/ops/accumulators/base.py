@@ -27,7 +27,9 @@ class SourceExhaustion:
     calling :meth:`Accumulator.on_source_exhausted`.
 
     ``final_component`` identifies the EOD that completed exhaustion of all
-    declared source components. It does not mean buffered records have drained.
+    components declared by :meth:`~zephon.work.WorkSource.component_ids` on this
+    lane. It stays ``None`` if any declared component is never announced exhausted,
+    even one that emits no records. It does not mean buffered records have drained.
     """
 
     exhausted: frozenset[int] = frozenset()

@@ -226,7 +226,7 @@ There is one catch: A can still have records buffered upstream, for example in a
 or packer. Those records may reach your operator after the sentinel, so you still need to
 decide how to handle them. `ensure_mixture` interleaves them with records from the remaining
 components. Its bounded mode preserves leftovers at flush, whereas strict mode drops them.
-Strict mode keeps the final source component eligible while its remaining records arrive.
+Both modes keep the final source component eligible while its remaining records arrive.
 Your operator may need a different policy, but it should not assume that receiving an
 EOD sentinel means it has already seen every record from that component.
 

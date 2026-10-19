@@ -527,11 +527,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         }
 
     def _exhaustion_removals(self, exhaustion: SourceExhaustion) -> frozenset[int]:
-        """Keep the final source component eligible under the existing strict target."""
-        if (
-            self._config.max_buffer_size is None
-            and exhaustion.final_component is not None
-        ):
+        """Keep the final source component eligible under the existing target."""
+        if exhaustion.final_component is not None:
             # The runner retains this fact across epoch resets and reconstructs it
             # on replay. Never add a component excluded by the target/override.
             return exhaustion.continuing - {exhaustion.final_component}
@@ -903,7 +900,7 @@ class EnsureMixture(BaseOp):
     target, including explicit overrides, and renormalizes the remaining weights.
     ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
     Late records follow ``obsolete_drain_rate`` in both modes.
-    Strict mode keeps the final source component eligible if it is in the target;
+    Both modes keep the final source component eligible if it is in the target;
     its EOD does not retire that component's in-flight tail.
 
     Adaptive behavior:

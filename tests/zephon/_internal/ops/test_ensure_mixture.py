@@ -164,7 +164,7 @@ def _flatten_ready(ready: list) -> list[SampleRecord]:
 class TestSourceExhaustion:
     @pytest.mark.parametrize("limit", [None, 64])
     @pytest.mark.parametrize("override", [False, True])
-    def test_final_component_remains_eligible_only_in_strict_mode_after_reset(
+    def test_final_component_remains_eligible_after_reset(
         self, limit: int | None, override: bool
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
@@ -182,15 +182,13 @@ class TestSourceExhaustion:
         for epoch in range(2):
             a = _rec(2 * epoch + 1, component_id=0, chunk=epoch)
             b = _rec(2 * epoch + 2, component_id=1, chunk=epoch)
-            assert _flatten_ready(acc.push_many([a, b])) == (
-                [b] if limit is None else []
-            )
+            assert _flatten_ready(acc.push_many([a, b])) == [b]
             flushed = _flatten_ready(acc.flush(reset=True))
             if limit is None:
                 assert len(flushed) == 1 and flushed[0].meta.tombstone
                 assert flushed[0].meta.sample_id == a.meta.sample_id
             else:
-                assert flushed == [a, b]  # Bounded final-tail handling is unchanged.
+                assert flushed == [a]  # B already flowed; bounded mode preserves A.
         context = acc._get_source_exhaustion
         assert isinstance(context, _ExhaustionContext)
         assert context.reads == [
@@ -201,12 +199,13 @@ class TestSourceExhaustion:
         ]  # Initial load, EODs, then one reset reload.
 
     @pytest.mark.parametrize("reset", [False, True])
+    @pytest.mark.parametrize("limit", [None, 64])
     def test_final_component_does_not_override_explicit_exclusion(
-        self, reset: bool
+        self, reset: bool, limit: int | None
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
             {1: 1},
-            max_buffer_size=None,
+            max_buffer_size=limit,
             continues_after_exhaustion=frozenset({0, 1}),
         )
         acc._config.mixture_override_by_id = {0: 1}
@@ -214,14 +213,19 @@ class TestSourceExhaustion:
         _notify_exhaustion(acc, 0, 1, final=True)
         if reset:
             acc.flush(reset=True)
-        assert acc.push_many([_rec(0, component_id=1)]) == []
+        excluded = _rec(0, component_id=1)
+        assert acc.push_many([excluded]) == []
         flushed = _flatten_ready(acc.flush())
-        assert len(flushed) == 1 and flushed[0].meta.tombstone
+        if limit is None:
+            assert len(flushed) == 1 and flushed[0].meta.tombstone
+        else:
+            assert flushed == [excluded]
 
-    def test_final_component_exception_is_lane_scoped(self) -> None:
+    @pytest.mark.parametrize("limit", [None, 64])
+    def test_final_component_exception_is_lane_scoped(self, limit: int | None) -> None:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 0.5, 1: 0.5},
-            max_buffer_size=None,
+            max_buffer_size=limit,
             continues_after_exhaustion=frozenset({0, 1}),
         )
         for lane in (0, 1):
@@ -232,7 +236,8 @@ class TestSourceExhaustion:
         b = _rec(1, component_id=1, lane=1)
         assert _flatten_ready(acc.push_many([a, b])) == [a]
         flushed = _flatten_ready(acc.flush())
-        assert len(flushed) == 1 and flushed[0].meta.tombstone
+        assert len(flushed) == 1
+        assert flushed[0].meta.tombstone == (limit is None)
         assert flushed[0].meta.lane_id == 1
 
     def test_snapshot_refreshes_only_on_notification_or_after_reset(self) -> None:
@@ -519,13 +524,14 @@ class TestSourceExhaustion:
 
 class TestRetiredRecords:
     @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    @pytest.mark.parametrize("limit", [None, 64])
     def test_final_component_does_not_admit_mixed_retired_content(
-        self, weight_by: str
+        self, weight_by: str, limit: int | None
     ) -> None:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 0.5, 1: 0.5},
             weight_by=weight_by,
-            max_buffer_size=None,
+            max_buffer_size=limit,
             continues_after_exhaustion=frozenset({0, 1}),
         )
         _notify_exhaustion(acc, 0, 0)
@@ -534,7 +540,10 @@ class TestRetiredRecords:
         final = self.pack(1, {1: 2}, token_counts={1: 8})
         assert _flatten_ready(acc.push_many([mixed, final])) == [final]
         flushed = _flatten_ready(acc.flush())
-        assert flushed and all(record.meta.tombstone for record in flushed)
+        if limit is None:
+            assert flushed and all(record.meta.tombstone for record in flushed)
+        else:
+            assert flushed == [mixed]
 
     def test_sparse_counted_chunks_can_retire_then_restore_a_component(self) -> None:
         chunks = [

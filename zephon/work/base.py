@@ -443,6 +443,9 @@ class WorkSource(ABC):
         ever emit (curriculum stages included), so ids are a pure function of
         config across ranks, topology changes, and resumes. Ids are unique
         non-negative ints, not necessarily dense.
+
+        The final EOD is recognized only after every declared component has been
+        announced exhausted on that lane, including components that emit no records.
         """
         raise NotImplementedError()
 
@@ -459,7 +462,7 @@ class WorkSource(ABC):
         The default is empty. For listed components, ``ensure_mixture`` removes
         their weight when the sentinel arrives, even from an explicit mixture
         override, and handles late records through ``obsolete_drain_rate``. Later
-        chunk targets may omit these components. Strict mode keeps the final source
+        chunk targets may omit these components. Both modes keep the final source
         component eligible if it is in the target, so its remaining records can drain.
         """
         return frozenset()

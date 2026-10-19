@@ -2238,15 +2238,22 @@ class StaticMixtureWorkSource(WorkSource):
             name="max_repeats",
         )
 
-        for ds_name, mr in max_repeats_map.items():
-            if mr is not None and exhausted_policy_map[ds_name] != "repeat":
-                warnings.warn(
-                    f"max_repeats['{ds_name}']={mr} has no effect with "
-                    f"exhausted_policy['{ds_name}']="
-                    f"'{exhausted_policy_map[ds_name]}'",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        # Scalar repeat settings can serve just the repeating part of a mixed
+        # source. Warn only when a non-repeat component is explicitly named.
+        for name, spec in (
+            ("max_repeats", max_repeats),
+            ("reshuffle_on_repeat", reshuffle_on_repeat),
+        ):
+            if isinstance(spec, Mapping):
+                for ds_name, value in spec.items():
+                    if value is not None and exhausted_policy_map[ds_name] != "repeat":
+                        warnings.warn(
+                            f"{name}['{ds_name}']={value} has no effect with "
+                            f"exhausted_policy['{ds_name}']="
+                            f"'{exhausted_policy_map[ds_name]}'",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
         self._alloc_config = _AllocationConfig(
             component_order=component_order,
