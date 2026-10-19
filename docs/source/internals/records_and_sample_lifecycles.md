@@ -1,4 +1,4 @@
-# Records and Sample Lifecycles
+# Records and sample lifecycles
 
 A sample starts as three integers and ends as a row in a tensor. On the way it may be
 split into four sequences, three of which get packed with fragments of other documents
@@ -161,7 +161,7 @@ emitting them unconditionally is the only choice that is correct in both cases.
 
 (chunks-are-the-unit-of-state)=
 
-**Chunks are the unit of state.** [How Pipelines Run](../pipelines/how_pipelines_run.md)
+**Chunks are the unit of state.** [How pipelines run](../pipelines/how_pipelines_run.md)
 explains that Zephon tracks progress by chunk and that a chunk is complete once every
 record derived from it has been delivered. The bookkeeping above is how it knows:
 contributors and tombstones close offsets, and a chunk whose offsets are all closed leaves
@@ -186,7 +186,7 @@ WorkSource           Engine                       Operators            Training 
     │                   │                             │ (tombstones stripped)│
 ```
 
-[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers how Zephon decides
+[Checkpoint replay and bounded recovery](checkpoint_replay.md) covers how Zephon decides
 that a chunk is safe to drop, which turns out to be considerably more subtle than "all its
 offsets are closed" once packing and shuffling are in the `Pipeline`.
 

@@ -180,7 +180,7 @@ partitioned among the data-parallel groups the current run has:
 :caption: examples/guide/pipelines/canonical_replicas.py
 ```
 
-[Elastic Determinism](../internals/elastic_determinism.md) explains how lanes are fed, how
+[Elastic determinism](../internals/elastic_determinism.md) explains how lanes are fed, how
 their outputs are recombined, and exactly which pieces of state survive a topology change.
 
 With `canonical_replicas=8`, a run with 8 data-parallel groups assigns one lane to each
@@ -222,7 +222,7 @@ start of a run because they cannot be changed later.
 transforming data. These instances may end up competing with each other (and with the
 training process itself) for CPU cores, memory, and network bandwidth, so be sure that
 when you are sizing the `parallelism` and other settings described in [Inspecting and
-Tuning Pipelines](inspecting_and_tuning_pipelines.md) that you are scaling the
+tuning pipelines](inspecting_and_tuning_pipelines.md) that you are scaling the
 per-`Pipeline` values down as the number of `Pipeline` instances on each node goes up,
 and double-check `Pipeline.explain()` to verify the total number of threads and
 processes that will be running on each node before you launch at scale.

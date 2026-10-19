@@ -7,7 +7,7 @@ those built-ins plus the `map_transform` operator (see
 examine the case where these options are not enough; e.g. your data has a peculiar schema,
 or where a filtering decision depends on samples you have already seen, or where a
 transformation is expensive or different enough that you need fine-tuned control over how
-it is batched and parallelised.
+it is batched and parallelized.
 
 Whenever you call any operator such as `tokenize` or `pack_flat`, the machinery is exactly
 the same whether it is a Zephon-shipped operator or a custom one. This means that a custom
@@ -216,5 +216,5 @@ own operators and is not validated this way.
 
 If your operator splits records, merges them, or drops them, it owes the engine some
 bookkeeping so that progress tracking and checkpointing keep working.
-[Records and Sample Lifecycles](../internals/records_and_sample_lifecycles.md) covers the
+[Records and sample lifecycles](../internals/records_and_sample_lifecycles.md) covers the
 helpers that handle it and the contract behind them.
