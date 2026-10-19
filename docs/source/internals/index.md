@@ -8,8 +8,8 @@ may also just want to check for yourself that the guarantees the rest of the gui
 really are guarantees.
 
 None of this is required reading in order to use Zephon. If you only want to know which
-knobs exist and what they do, [How Pipelines Run](../pipelines/how_pipelines_run.md) and
-[Inspecting and Tuning Pipelines](../pipelines/inspecting_and_tuning_pipelines.md) are
+knobs exist and what they do, [How pipelines run](../pipelines/how_pipelines_run.md) and
+[Inspecting and tuning pipelines](../pipelines/inspecting_and_tuning_pipelines.md) are
 where you want to be.
 
 **A warning about stability.** These pages describe behaviour rather than implementation.
@@ -22,13 +22,13 @@ look the same. The one exception is the `WorkSource` interface itself, which is 
 settling and may change between releases.
 
 The five pages build on each other, so they are worth reading in order. [WorkSources and
-Work Chunks](worksources_and_work_chunks.md) explains where the data order comes from in
+work chunks](worksources_and_work_chunks.md) explains where the data order comes from in
 the first place, and what a curriculum of your own would have to implement. [Elastic
-Determinism](elastic_determinism.md) explains the logical partitioning that makes that
-order independent of the number of GPUs. [Operators and Runners](operators_and_runners.md)
+determinism](elastic_determinism.md) explains the logical partitioning that makes that
+order independent of the number of GPUs. [Operators and runners](operators_and_runners.md)
 explains how an operator can run across sixteen workers and still make the same decisions
-it would have made on one. [Records and Sample
-Lifecycles](records_and_sample_lifecycles.md) explains how an individual record is
+it would have made on one. [Records and sample
+lifecycles](records_and_sample_lifecycles.md) explains how an individual record is
 identified, how it splits and merges, and how the engine knows when it is finished with
-it. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) puts the four together
+it. [Checkpoint replay and bounded recovery](checkpoint_replay.md) puts the four together
 and explains how a checkpoint stays small and a restore stays fast.

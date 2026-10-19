@@ -1,4 +1,4 @@
-# Elastic Determinism
+# Elastic determinism
 
 [Why Zephon?](../why_zephon.md) claims that a run resumed on a different number of GPUs
 sees the same global batches, and [Distributed
@@ -39,8 +39,8 @@ operators cut their buffers, so changing either changes the sample stream of any
 that packs. Fix them at the start of a run, like the seed and `canonical_replicas`.
 
 The two mechanisms that buy you this, sequence-number reordering and the single-threaded
-accumulator, are the ones [How Pipelines Run](../pipelines/how_pipelines_run.md)
-introduces and [Operators and Runners](operators_and_runners.md) takes apart.
+accumulator, are the ones [How pipelines run](../pipelines/how_pipelines_run.md)
+introduces and [Operators and runners](operators_and_runners.md) takes apart.
 
 Not every loader separates the two. [Megatron
 Energon](https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html), for

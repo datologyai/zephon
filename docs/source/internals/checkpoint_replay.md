@@ -1,6 +1,6 @@
-# Checkpoint Replay and Bounded Recovery
+# Checkpoint replay and bounded recovery
 
-[Checkpointing and Resuming Pipelines](../pipelines/checkpointing_and_resuming.md) says
+[Checkpointing and resuming pipelines](../pipelines/checkpointing_and_resuming.md) says
 that a checkpoint records which work chunks were finished and which were still in
 progress, and that a restore rebuilds operator state by re-processing a bounded number of
 recent chunks. This page is about how Zephon works out which chunks those are, which is
@@ -49,12 +49,12 @@ What goes into that last one is up to the implementation. For `StaticMixtureWork
 the sample sequence is fully determined by the datasets, the seed, the shuffle knobs and
 the lane, so the state is a compact set of per-dataset cursor positions plus mixture
 bookkeeping, and restoring it is instantaneous no matter how far into training you are.
-[WorkSources and Work Chunks](worksources_and_work_chunks.md) covers what those cursors
+[WorkSources and work chunks](worksources_and_work_chunks.md) covers what those cursors
 are and what the rest of the contract requires of a source you write yourself.
 
 Alongside these sit the replay cursor per lane, the lane progress pointers, and the
 round-robin position discussed in
-{ref}`Elastic Determinism <what-actually-survives-a-topology-change>`.
+{ref}`Elastic determinism <what-actually-survives-a-topology-change>`.
 
 One thing is deliberately absent. The per-offset completion bitmaps are runtime-only, and
 Zephon rebuilds them as the replayed chunks flow through the `Pipeline` and re-trigger
@@ -124,7 +124,7 @@ depends on emission history, and to shuffling, whose buffers span chunk boundari
 Our resolution is the **flush sentinel**. Every `flush_every_k_chunks` chunks per lane,
 Zephon injects one that forces the history-dependent accumulators to emit everything and
 reset to a clean state, as described in
-{ref}`Operators and Runners <flush-sentinels-and-stalling>`. Sentinels divide the stream
+{ref}`Operators and runners <flush-sentinels-and-stalling>`. Sentinels divide the stream
 into **epochs**, and each epoch starts from a state that replay can reproduce without any
 of the preceding chunks:
 
@@ -136,7 +136,7 @@ Epoch 0          Epoch 1          Epoch 2
            (flush)          (flush)
 ```
 
-[How Pipelines Run](../pipelines/how_pipelines_run.md) covers the trade that
+[How pipelines run](../pipelines/how_pipelines_run.md) covers the trade that
 `flush_every_k_chunks` controls. What that page leaves implicit is what a flush costs at
 the operator level, since each one interrupts an accumulator mid-stride: the packer emits
 partially filled bins and pays for them in padding, the shuffle buffer emits a smaller
@@ -153,7 +153,7 @@ occupies a position in its chunk, and operators may split it into several childr
 merge children from different offsets into one packed record, so an offset only closes
 once all of its children have been delivered. Zephon learns that from the `is_last_child`
 flags on contributor metadata, and from tombstones when a filter drops the last child
-standing (see {ref}`Records and Sample Lifecycles <contributors-and-tombstones>`). A
+standing (see {ref}`Records and sample lifecycles <contributors-and-tombstones>`). A
 bitmap per chunk records which offsets are closed, with a popcount alongside so that "is
 this chunk complete?" stays O(1).
 

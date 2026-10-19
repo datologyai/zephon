@@ -1,4 +1,4 @@
-# WorkSources and Work Chunks
+# WorkSources and work chunks
 
 [WorkSources: The Training Curriculum](../worksources/index.md) describes a `WorkSource`
 from the outside. You hand it datasets and mixture weights, and it decides what your model
@@ -6,7 +6,7 @@ sees and in what order. This page describes the interface underneath that: what 
 actually calls, what it is allowed to assume, and how the one implementation that ships
 with it satisfies that interface.
 
-This is the base case of the induction that [Elastic Determinism](elastic_determinism.md)
+This is the base case of the induction that [Elastic determinism](elastic_determinism.md)
 rests on. Every claim we make about reproducible data order reduces, eventually, to the
 claim that a `WorkSource` bound to a given lane produces the same pointers in the same
 order for a given seed, and everything downstream is a deterministic function of that.
@@ -71,7 +71,7 @@ The required ones fall into five groups:
   produces the same sequence as if the source had never been interrupted. The base class
   stores the lane identity and refuses a restore whose `lane_id` or `canonical_replicas`
   does not match, which is the first line of defence against the silent curriculum change
-  that [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) describes.
+  that [Checkpoint replay and bounded recovery](checkpoint_replay.md) describes.
 
 Three further hooks are optional, and the built-in source implements all of them:
 

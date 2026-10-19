@@ -216,5 +216,5 @@ own operators and is not validated this way.
 
 If your operator splits records, merges them, or drops them, it owes the engine some
 bookkeeping so that progress tracking and checkpointing keep working.
-[Records and Sample Lifecycles](../internals/records_and_sample_lifecycles.md) covers the
+[Records and sample lifecycles](../internals/records_and_sample_lifecycles.md) covers the
 helpers that handle it and the contract behind them.
