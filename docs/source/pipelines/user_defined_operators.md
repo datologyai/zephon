@@ -203,9 +203,11 @@ the closing responsibilities it carries.
 
 (reacting-to-source-exhaustion)=
 
-**When a dataset runs out.** Suppose our operator holds back records from dataset B
-while waiting for more records from A. If A runs out, we may want to let B continue.
-Zephon reports this through an end-of-dataset (EOD) sentinel. `WorkChunk.source_exhausted`
+**When a mixture component runs out.** Components can represent datasets, languages,
+or other source-defined categories. Suppose our operator holds back records from
+component B while waiting for more records from A. These could be English and German
+records from the same dataset. If A runs out, we may want to let B continue.
+Zephon reports this through an end-of-data (EOD) sentinel. `WorkChunk.source_exhausted`
 records the source exhaustion that causes the engine to emit this sentinel. Your
 accumulator handles it through `on_source_exhausted(lane_id, component_id)`; by default,
 this hook does nothing.
@@ -216,7 +218,7 @@ it back later. An EOD sentinel says that A will supply no more source samples in
 lane. That fact is permanent for the run, regardless of what the target mixture says.
 
 For example, `ensure_mixture` can stop waiting for A and continue correcting the mixture
-of the remaining datasets. An EOD sentinel lets it do this before records carrying an
+of the remaining components. An EOD sentinel lets it do this before records carrying an
 updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
@@ -233,9 +235,9 @@ This service is available only to accumulators, not worker `setup` or
 There is one catch: A can still have records buffered upstream, for example in a shuffle
 or packer. Those records may reach your operator after the sentinel, so you still need to
 decide how to handle them. `ensure_mixture` interleaves them with records from the remaining
-datasets. Its bounded mode preserves leftovers at flush, whereas strict mode drops them.
+components. Its bounded mode preserves leftovers at flush, whereas strict mode drops them.
 Your operator may need a different policy, but it should not assume that receiving an
-EOD sentinel means it has already seen every record from that dataset.
+EOD sentinel means it has already seen every record from that component.
 
 The runner owns these facts per operator and lane, updating them before invoking the
 hook at most once per component. It retains them across epoch flushes and reconstructs
@@ -244,7 +246,7 @@ accumulator call, including after `flush(reset=True)`. Keep the reaction lane-sc
 and deterministic for a given input order. The hook returns `ReadyBatch` values just like
 `push_many`; if it drops records, use `tombstones_for_record` and return the tombstones in
 separate batches from data. Keep the usual `flush` handling too: an EOD sentinel describes an
-individual dataset running out, rather than the whole pipeline finishing.
+individual mixture component running out, rather than the whole pipeline finishing.
 
 **Operator validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and

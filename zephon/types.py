@@ -289,7 +289,7 @@ class SampleMeta:
 
     @property
     def is_sentinel(self) -> bool:
-        """True for tombstones, flush sentinels, and end-of-dataset (EOD) sentinels."""
+        """True for tombstones, flush sentinels, and end-of-data (EOD) sentinels."""
         return bool(
             self.tags.get("_tombstone")
             or self.tags.get("_flush_sentinel")

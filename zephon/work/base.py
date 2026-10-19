@@ -66,6 +66,7 @@ class WorkChunk:
     ``components`` stores each mixture component (for example, ``"German"``) and
     the ordered sample identifiers that belong to it.  Mapping insertion order is used
     as a stable tie-breaker whenever behaviour depends on component ordering.
+    Components may represent datasets, languages, or other source-defined categories.
 
     ``target_mixture``, when set, is the per-component target the engine should
     deliver to downstream mixture correctors (``ensure_mixture``) *instead of*
@@ -78,7 +79,7 @@ class WorkChunk:
 
     ``source_exhausted`` records permanent source exhaustion: list every component
     whose final source sample was produced in this or an earlier chunk. The engine
-    emits an end-of-dataset (EOD) sentinel in each lane after that component's last
+    emits an end-of-data (EOD) sentinel in each lane after that component's last
     sample in its first such chunk, or before the chunk if absent. This also applies
     on replay. Buffered data may arrive after the EOD sentinel; lanes with no such
     chunk receive no EOD sentinel.
@@ -450,8 +451,8 @@ class WorkSource(ABC):
     def continues_after_exhaustion(self) -> frozenset[str]:
         """Components the source permits continuing without after their EOD sentinel.
 
-        An end-of-dataset (EOD) sentinel reports permanent source exhaustion;
-        buffered records may still arrive afterward.
+        An end-of-data (EOD) sentinel reports permanent source exhaustion for one
+        mixture component in a lane; buffered records may still arrive afterward.
 
         Return a subset of :meth:`component_ids`, fixed across lanes and restores.
         The engine marks each EOD sentinel with this policy. The runner exposes

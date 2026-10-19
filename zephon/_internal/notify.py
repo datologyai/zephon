@@ -92,7 +92,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
     if isinstance(item, SampleRecord):
         if item.meta.is_sentinel and not item.meta.tombstone:
             raise ValueError(
-                "Flush and end-of-dataset (EOD) sentinels cannot notify progress"
+                "Flush and end-of-data (EOD) sentinels cannot notify progress"
             )
         lane_id = item.meta.lane_id
         # Tombstones close real offsets but are not consumer deliveries.

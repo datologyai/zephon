@@ -18,11 +18,11 @@ ReadyBatch = tuple[list[T], int]
 
 @dataclass(frozen=True)
 class SourceExhaustion:
-    """Immutable end-of-dataset (EOD) sentinel state for one operator lane.
+    """Immutable end-of-data (EOD) sentinel state for one operator lane.
 
-    Each sentinel reports permanent source exhaustion; buffered records may still
-    arrive afterward. ``exhausted`` contains all components whose EOD sentinel
-    reached the operator.
+    Each sentinel reports permanent source exhaustion for one mixture component;
+    buffered records may still arrive afterward. ``exhausted`` contains all
+    components whose EOD sentinel reached the operator.
     ``continuing`` is the subset listed by
     :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
     permits continuing without them. The runner updates this snapshot before
@@ -112,10 +112,11 @@ class Accumulator(ABC, Generic[T]):
     def on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[T]]:
-        """Handle an end-of-dataset (EOD) sentinel for a component in this lane.
+        """Handle an end-of-data (EOD) sentinel for a component in this lane.
 
-        The source has permanently run out, but buffered records may still arrive,
-        even through order-preserving operators. The default leaves buffers untouched.
+        The source has permanently run out of samples for this mixture component
+        in this lane, but buffered records may still arrive, even through
+        order-preserving operators. The default leaves buffers untouched.
 
         Called at most once per component per lane stream; some lanes close
         without an EOD sentinel. Reactions must be lane-scoped and deterministic

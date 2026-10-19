@@ -913,7 +913,7 @@ class Engine:
     def _make_source_exhausted_sentinel(
         lane_id: LaneId, component_id: int, *, continues: bool = False
     ) -> SampleRecord:
-        """Create an end-of-dataset (EOD) sentinel; buffered data may arrive later."""
+        """Create an end-of-data (EOD) sentinel; buffered data may arrive later."""
         return Engine._make_control_record(
             lane_id,
             {

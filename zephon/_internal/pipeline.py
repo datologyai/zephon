@@ -973,10 +973,12 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
-        An end-of-dataset (EOD) sentinel reports that a component has no more source
-        samples; buffered records may still arrive afterward. On receiving it, this
-        operator removes the component from the target, including explicit overrides,
-        if listed by ``WorkSource.continues_after_exhaustion()``, and renormalizes the
+        An end-of-data (EOD) sentinel reports that the work source has no more samples
+        for one mixture component in this lane; buffered records may still arrive
+        afterward. Components can represent datasets, languages, or other
+        source-defined categories. On receiving the sentinel, this operator removes
+        the component from the target, including explicit overrides, if listed by
+        ``WorkSource.continues_after_exhaustion()``, and renormalizes the
         remaining weights. ``StaticMixtureWorkSource`` lists none. Late records follow
         ``obsolete_drain_rate`` in both modes.
 
