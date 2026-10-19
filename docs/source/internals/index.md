@@ -1,4 +1,4 @@
-# Under the Hood
+# Overview
 
 The rest of this guide describes Zephon from the outside: what you configure, what you
 call, and what comes back out. This section describes it from the inside. You will want it
@@ -32,13 +32,3 @@ Lifecycles](records_and_sample_lifecycles.md) explains how an individual record 
 identified, how it splits and merges, and how the engine knows when it is finished with
 it. [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) puts the four together
 and explains how a checkpoint stays small and a restore stays fast.
-
-```{toctree}
-:maxdepth: 2
-
-worksources_and_work_chunks
-elastic_determinism
-operators_and_runners
-records_and_sample_lifecycles
-checkpoint_replay
-```
