@@ -6,7 +6,7 @@
 import copy
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from zephon.ops.base import BaseOp
 from zephon.ops.children import spawn_child, tombstones_for_record
@@ -31,15 +31,24 @@ class ExpandChat(BaseOp):
 
     Multiple prefixes append original user-query ordinals to cursor lineage;
     unanswered queries leave gaps. A sole prefix retains the parent's lineage.
-    Siblings own independent nested payloads; the final prefix consumes the source.
+    Deep mode gives siblings independent nested payloads; shallow mode shares
+    nested values. The final prefix consumes the source.
 
     """
 
-    def __init__(self, *, field: str = "messages") -> None:
+    def __init__(
+        self,
+        *,
+        field: str = "messages",
+        copy_mode: Literal["deep", "shallow"] = "deep",
+    ) -> None:
         super().__init__()
         if any(not part for part in field.split(".")):
             raise ValueError("field must name a non-empty messages payload path")
+        if copy_mode not in ("deep", "shallow"):
+            raise ValueError("copy_mode must be 'deep' or 'shallow'")
         self.field = field
+        self.copy_mode = copy_mode
         self._field_path = tuple(field.split("."))
         self._warned_no_user = False
 
@@ -81,8 +90,8 @@ class ExpandChat(BaseOp):
     ) -> dict[str, Any]:
         """Copy containers along the field path and replace the message sequence.
 
-        ``chat.messages: [U1, A1, U2, A2] -> [U1, A1]``; other fields are shared
-        until process_many deep-copies the non-final siblings.
+        ``chat.messages: [U1, A1, U2, A2] -> [U1, A1]``; nested values are shared.
+        Deep mode copies non-final payloads in process_many.
         """
         result = current = dict(payload)
         source = payload
@@ -142,9 +151,8 @@ class ExpandChat(BaseOp):
                 last = index == len(prefixes) - 1
                 meta = spawn_child(record.meta, ordinal, is_last_child=last)
                 payload = self._prefix_payload(record.payload, messages[:end])
-                # Siblings own independent nested data; the final prefix consumes
-                # the source objects after all earlier prefixes have been copied.
-                if not last:
+                # Deep mode isolates siblings; the final prefix consumes the source.
+                if self.copy_mode == "deep" and not last:
                     payload = copy.deepcopy(payload)
                 out.append(
                     SampleRecord(
