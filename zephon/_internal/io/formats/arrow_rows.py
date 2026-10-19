@@ -30,7 +30,7 @@ own their mutable Python containers.
 
 Fixed-width buffers are read with ``np.frombuffer``, not ``Array.to_numpy``.
 ``to_numpy`` goes through pyarrow's pandas writer, which releases the GIL. With
-many reading threads, taking the GIL back costs more than the conversion.
+many reading threads, taking the GIL back can cost more than the conversion.
 """
 
 from __future__ import annotations
@@ -219,8 +219,11 @@ def _validity(array: Any) -> np.ndarray:
     return _bits(bitmap, array.offset, len(array))
 
 
-def _view(array: Any, pa: Any) -> np.ndarray:
-    """Return a read-only array of fixed-width values; null slots are undefined."""
+def _fixed_width_values(array: Any, pa: Any) -> np.ndarray:
+    """Return read-only fixed-width values; null slots are undefined.
+
+    Numeric buffers are viewed directly; booleans unpack and date32 widens.
+    """
     kind = array.type
     data = array.buffers()[1]
 
@@ -252,7 +255,7 @@ def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
         or pa.types.is_floating(kind)
         or pa.types.is_boolean(kind)
     ):
-        return _view(array, pa)
+        return _fixed_width_values(array, pa)
     if pa.types.is_fixed_size_list(kind):
         size = kind.list_size
         child = array.values.slice(array.offset * size, len(array) * size)
@@ -282,7 +285,7 @@ def _lists_for_python(array: Any, pa: Any) -> Any:
         # Offsets [2, 0, 1], sizes [2, 2, 2] over [a,b,c,d] cast to [[],[a],[]].
         # Flatten follows sizes and offsets, including gaps, overlaps and nulls.
         values = _lists_for_python(array.flatten(), pa)
-        sizes = _view(array.sizes, pa)
+        sizes = _fixed_width_values(array.sizes, pa)
         if mask is not None:
             sizes = np.where(_validity(array), sizes, 0)
         offsets = np.empty(len(array) + 1, dtype=np.int64)
@@ -346,14 +349,14 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
             or pa.types.is_duration(kind)
         ):
             # Python conversion can require pandas or lose nanosecond precision.
-            values = _view(array, pa)
+            values = _fixed_width_values(array, pa)
             if not array.null_count:
                 return values
             valid = _validity(array)
             return [value if present else None for value, present in zip(values, valid)]
         if pa.types.is_integer(kind) or pa.types.is_floating(kind):
             # A view keeps the dtype; null slots are replaced per row.
-            numbers = _view(array, pa)
+            numbers = _fixed_width_values(array, pa)
             if not array.null_count:
                 return numbers
             valid = _validity(array)
@@ -390,9 +393,9 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
         starts = (np.arange(len(array)) + array.offset) * kind.list_size
         ends = starts + kind.list_size
     else:
-        offsets = _view(array.offsets, pa)
+        offsets = _fixed_width_values(array.offsets, pa)
         starts = offsets if is_view else offsets[:-1]
-        ends = starts + _view(array.sizes, pa) if is_view else offsets[1:]
+        ends = starts + _fixed_width_values(array.sizes, pa) if is_view else offsets[1:]
     return [
         numbers[start:end] if valid is None or valid[row] else None
         for row, (start, end) in enumerate(zip(starts, ends))
