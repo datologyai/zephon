@@ -25,6 +25,12 @@ from zephon._internal.io.formats.base import (
 from zephon._internal.io.formats.base import (
     get_format as _get_format,
 )
+from zephon._internal.io.formats.lance_support.manifest import (
+    is_lance_dataset as _is_lance_dataset,
+)
+from zephon._internal.io.formats.lance_support.manifest import (
+    is_manifest_path as _is_lance_manifest,
+)
 from zephon._internal.io.index import find_and_load_index as _find_and_load_index
 from zephon._internal.io.index.index_types import IndexData as _IndexData
 from zephon._internal.io.protocols import RandomAccessShard as _RandomAccessShard
@@ -59,7 +65,7 @@ class Dataset:
 
     Backend kinds used by the internal store builder:
 
-    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``: ``kind`` and
+    - ``litdata``/``mds``/``jsonl``/``parquet``/``vortex``/``lance``: ``kind`` and
       ``path`` (no per-shard ``shards`` graph — that lives in the catalog now)
     - ``inmem``: ``kind`` and ``shards`` (``dict[int, InMemoryShard]``)
 
@@ -169,6 +175,9 @@ class Dataset:
           ``shards``
         - ``jsonl`` directories where ``*.jsonl`` files act as shards, with an
           optional Zephon ``index.json`` for fast discovery
+        - ``lance`` dataset directories, one shard per fragment. Discovery pins
+          the dataset to its latest version and ``path`` becomes that version's
+          manifest; pass a ``_versions/*.manifest`` path to pin an earlier one.
 
         Special URI schemes:
 
@@ -199,7 +208,9 @@ class Dataset:
             root_path = Path(path)
             if not root_path.exists():
                 raise FileNotFoundError(f"Dataset path does not exist: {root_path}")
-            if not root_path.is_dir():
+            # A Lance manifest is the one file that names a dataset root: it
+            # pins a version.
+            if not root_path.is_dir() and not _is_lance_manifest(str(root_path)):
                 raise ValueError(f"Dataset path must be a directory: {root_path}")
             root_path = root_path.resolve()
             root_str = str(root_path)
@@ -216,6 +227,7 @@ class Dataset:
 
         _ensure_builtin_formats(required={kind})
         handler = _get_format(kind)
+        root_str = handler.resolve_root(root_str, storage)
         ids, counts = _discover_counts(handler, root_str, storage)
         # ids()/counts() hand these arrays out shared (the work-source cursor
         # gathers from them in place); freeze them so an in-place edit fails loud.
@@ -277,6 +289,8 @@ __all__ = ["Dataset"]
 def _auto_detect_format(
     storage: _RouterStorageBackend, root_str: str, root_path: Path | None
 ) -> str | None:
+    if _is_lance_manifest(root_str):
+        return "lance"
     result = _find_and_load_index(root_str, storage)
     if result is not None:
         return _classify_index_payload(result)
@@ -289,7 +303,12 @@ def _auto_detect_format(
         except Exception:
             entries = []
 
-    return _detect_format(entries)
+    detected = _detect_format(entries)
+    # A Lance dataset directory holds only subdirectories, so nothing above it
+    # matches; probe for its version directory last.
+    if detected is None and _is_lance_dataset(storage, root_str):
+        return "lance"
+    return detected
 
 
 def _classify_index_payload(data: _IndexData) -> str:

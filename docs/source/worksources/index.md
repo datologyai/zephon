@@ -1,4 +1,4 @@
-# WorkSources: The Training Curriculum
+# WorkSources: the training curriculum
 
 **The center of Zephon.** The `WorkSource` defines the training curriculum: which samples
 Zephon should use, and the order they reach the pipeline in. The WorkSource uses the
@@ -32,7 +32,10 @@ resulting curriculum reproducible across training runs.
 
 The remaining subpages explain how to use `StaticMixtureWorkSource` to combine samples
 from multiple `Dataset`s, how to size the work chunks appropriately, and how to control
-how samples are ordered and repeated during training.
+how samples are ordered and repeated during training. If you want to write a `WorkSource`
+of your own, or simply want to know how the built-in one decides what goes in a chunk,
+[WorkSources and Work Chunks](../internals/worksources_and_work_chunks.md) documents the
+interface and the implementation behind it.
 
 :::{note}
 **Future WorkSources.** We're working on support for more advanced WorkSources, e.g. for

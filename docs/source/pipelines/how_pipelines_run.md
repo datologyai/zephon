@@ -1,4 +1,4 @@
-# How Pipelines Run
+# How pipelines run
 
 A `Pipeline` definition reads like a sequence of steps: fetch the records, tokenize them,
 pack them, shuffle them, and batch them. But underneath the hood, Zephon is executing
@@ -12,10 +12,10 @@ come up in the rest of this guide. First, why changing the settings that control
 `Pipeline` runs never changes the data that it produces, and why certain stateful
 operations like shuffling and packing samples behave the way that they do. This page
 introduces Zephon's runtime execution model, while the subsequent
-[Inspecting and Tuning Pipelines](inspecting_and_tuning_pipelines.md) page covers how to
+[Inspecting and tuning pipelines](inspecting_and_tuning_pipelines.md) page covers how to
 measure and adjust it.
 
-**From Operators To Stages.** When your code begins iterating over a `Pipeline`, Zephon
+**From operators to stages.** When your code begins iterating over a `Pipeline`, Zephon
 first compiles the chain of operators into an execution plan. Consecutive operators are
 grouped together into **stages**, and each stage is executed by a **runner** that
 determines how the work in that stage is run. Right now, the default runner is `threads`,
@@ -44,7 +44,7 @@ prepares ahead of the training loop (`final_prefetch`). You don't need to config
 this yourself, but it's a useful reference when you want to understand where the resources
 that a `Pipeline` uses are going.
 
-**Parallelism Without Changing The Data.** When an operator runs with multiple workers,
+**Parallelism without changing the data.** When an operator runs with multiple workers,
 Zephon hands its input records out to those workers in small groups that we call
 **micro-batches**. Micro-batches are an internal grouping for processing efficiently, and
 are not the same thing as the batches you pass to training (apologies for this; naming
@@ -59,6 +59,8 @@ that state in a single-threaded component (the *accumulator*) that sees every re
 order, while only the stateless part of their work is handed out to the parallel workers.
 This means that the decisions that the operators make, like which records get packed
 together, never depend on how the work was divided up among the workers.
+[Operators and Runners](../internals/operators_and_runners.md) describes both
+mechanisms, and the contract they impose on an operator, in detail.
 
 Together, these two properties mean that the execution settings of a `Pipeline` are purely
 performance settings. Changing them can make a `Pipeline` run faster or slower, but it
@@ -71,8 +73,8 @@ If you don't need determinism for a particular run, setting
 order they finish, which may reduce latency at the cost of the ordering guarantees
 described above.
 
-**Tracking Progress Through Chunks.** Recall from the
-[Basic Concepts](../basic_concepts.md) that a `WorkSource` hands out the training
+**Tracking progress through chunks.** Recall from the
+[Basic concepts](../basic_concepts.md) that a `WorkSource` hands out the training
 curriculum as a sequence of work chunks, which are groups of samples that are fetched and
 processed together. Chunks are also how Zephon tracks the progress of a `Pipeline`: as
 records move through the operators, Zephon keeps track of which chunk each of them came
@@ -98,6 +100,10 @@ holding and return to a clean state, so that a restored `Pipeline` only needs to
 re-process the chunks since the most recent flush sentinel in order to rebuild the
 operators' state exactly.
 
+The bookkeeping that decides when a chunk is finished, and the reasons a flush sentinel is
+the only safe place to start a replay from, are covered in
+[Checkpoint Replay and Bounded Recovery](../internals/checkpoint_replay.md).
+
 Zephon only sends flush sentinels when a `Pipeline` includes an operator that reorders or
 regroups records, like `shuffle`, `ensure_mixture`, or one of the packing operators. In
 that case, a flush will happen every eight work chunks by default, which can be modified
@@ -107,22 +113,22 @@ each flush produces (which are detailed on the individual operator pages in the 
 this document), but comes at the cost of more memory usage and more work for Zephon to do
 when a `Pipeline` is restored from a checkpoint.
 
-**Buffering Ahead of the Training Loop.** The last stage of a `Pipeline` maintains a
+**Buffering ahead of the training loop.** The last stage of a `Pipeline` maintains a
 buffer of finished batches that are ready for the training loop, which smooths out short
 variations in how long each batch takes to prepare. Zephon derives the size of this
 buffer, along with the sizes of the queues between operators and stages, from the number
 of workers that are available on each machine. The
-[Inspecting and Tuning Pipelines](inspecting_and_tuning_pipelines.md) page gives more
+[Inspecting and tuning pipelines](inspecting_and_tuning_pipelines.md) page gives more
 detail on when and how you should change them.
 
 By default, the `Pipeline` machinery for running stages runs inside of the training
 process, where they can compete with the training loop for Python's global interpreter
 lock. Using `Pipeline.options(mtp_mode=True)` runs the `Pipeline` in a separate process
 instead, such that only finished training-ready batches are handed back to the main
-training process. Both of our [Training Integrations](../training_integrations.md) enable
+training process. Both of our [Training integrations](../training_integrations.md) enable
 this mode for their pipelines, and we generally recommend it for production runs.
 
 Finally, keep in mind that in a distributed training run, every rank that loads data will
-run its own `Pipeline` instance. The [Distributed Training](distributed_training.md) page
+run its own `Pipeline` instance. The [Distributed training](distributed_training.md) page
 covers how these `Pipeline` instances can be configured to divide up the training
 curriculum and share the compute resources on each node.

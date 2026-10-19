@@ -9,7 +9,7 @@ text, numerical arrays, and images. If you already have data preparation tooling
 writes MDS shards for MosaicML Streaming, you can use those shards directly in Zephon
 without needing to convert them to another file format.
 
-**Preparing MDS Shards.** To use the MDS format with Zephon, install the project with the
+**Preparing MDS shards.** To use the MDS format with Zephon, install the project with the
 `mds` extra, which includes the MosaicML `streaming` library and the dependencies needed
 for reading both uncompressed shards and shards compressed using Zstandard:
 
@@ -32,7 +32,7 @@ can use the `ndarray` encoding. Each record that you write must provide values t
 compatible with its declared encoding. More details and examples are available in the
 [MosaicML Streaming data preparation guide](https://docs.mosaicml.com/projects/streaming/en/latest/preparing_datasets/basic_dataset_conversion.html).
 
-**Reading MDS Shards.** Once the MDS files have been written, you can define a `Dataset`
+**Reading MDS shards.** Once the MDS files have been written, you can define a `Dataset`
 by passing in the dataset location to the `Dataset.from_path` function with the
 `fmt="mds"` argument. Zephon will infer the format if `fmt` is not passed. You can then use
 a `DatasetInspector` to examine the decoded sample payloads:

@@ -45,6 +45,10 @@ parquet = [
 vortex = [
     "vortex-data>=0.88.0; python_version >= '3.11'",
 ]
+lance = [
+    "pylance>=1.0.0",
+    "zephon[parquet]",
+]
 cloud = [
     "obstore>=0.11.0",
 ]
@@ -104,7 +108,9 @@ test = [
     "pytest-rerunfailures>=14.0",
     "obstore>=0.11.0",
     "zephon[ray]",
-    "pydantic>=2.0.0",
+    # pylance imports lance-namespace's pydantic models eagerly, and they fail
+    # to build a schema on 2.0/2.0.1; pylance declares no floor of its own.
+    "pydantic>=2.0.3",
     "attrs>=21.0.0",
     "transformers>=4.52.0",
 ]
