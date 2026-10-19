@@ -854,6 +854,7 @@ class Pipeline:
         self,
         *,
         field: str = "messages",
+        copy_mode: Literal["deep", "shallow"] = "deep",
         placement: str = "auto",
         parallelism: int | None = None,
     ) -> "Pipeline":
@@ -872,12 +873,19 @@ class Pipeline:
 
         Args:
             field: Dot-separated payload path of the messages list.
+            copy_mode: ``"deep"`` (default) isolates nested data between prefixes,
+                copying repeated history and other mutable payload fields.
+                ``"shallow"`` copies containers along ``field`` and slices the
+                message sequence, sharing messages and other nested values to
+                reduce copying and memory use. Downstream ops must not mutate
+                shared values in shallow mode. Both modes may reuse input objects
+                for the sole or final prefix.
             placement: Execution placement, usually shared with tokenization.
             parallelism: Worker count override.
         """
         self._tail = self._graph.add(
             "expand_chat",
-            ExpandChat(field=field),
+            ExpandChat(field=field, copy_mode=copy_mode),
             self._tail,
             placement=placement,
             parallelism=parallelism,
