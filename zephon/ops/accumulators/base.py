@@ -127,12 +127,14 @@ class Accumulator(ABC, Generic[T]):
         for a given input order. Restore reconstructs runner state from replayed
         sentinels.
 
-        The accumulator-only ``ctx["get_source_exhaustion"](lane_id)`` service
-        returns a :class:`SourceExhaustion` snapshot of what this operator has
-        seen on that lane: ``exhausted`` contains every component whose EOD
+        Obtain the accumulator-only callback with ``ctx.get("get_source_exhaustion")``.
+        It may be ``None`` during validation, which uses an empty context; use
+        ``SourceExhaustion()`` (no observed exhaustion) in that case. Otherwise,
+        calling it with ``lane_id`` returns a :class:`SourceExhaustion` snapshot
+        of what this operator has seen: ``exhausted`` contains every component whose EOD
         sentinel reached it, and ``continuing`` is the subset the source permits
         continuing without, per ``WorkSource.continues_after_exhaustion()``.
-        The runner updates it before calling this hook and retains it across
+        At runtime, the runner updates it before this hook and retains it across
         epoch resets. It is a cheap local call, available during any accumulator
         call, including after ``flush(reset=True)``. EOD sentinels are emitted
         regardless of continuation policy. See :doc:`/pipelines/user_defined_operators`.
