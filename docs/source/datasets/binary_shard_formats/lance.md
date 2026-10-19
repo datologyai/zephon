@@ -72,11 +72,12 @@ reason and the remedy in the message, so a run never fails halfway through:
 | Fragments stored in an external fragment tree | The fragment list is not in the manifest | — |
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
-**Caching reads.** Zephon retains opened fragments — a projected Lance reader plus that
-fragment's decoded tombstones — per fetch replica, separately from the on-disk shard
-cache. The retention limit is `metadata_cache_entries`, additionally capped well below a
-typical open-file limit because each entry holds an open file handle. Set it to zero to
-disable retention.
+**Caching reads.** Zephon retains each fragment's decoded metadata — its column
+projection and its tombstones — per fetch replica, separately from the on-disk shard
+cache, and keeps no file open between reads. The retention limit is
+`metadata_cache_entries`; set it to zero to disable retention. Each shard open still reads
+the data file's footer, because pylance's file reader cannot reuse one it has already
+decoded.
 
 ```python
 pipeline.options(io_options={"metadata_cache_entries": 256})

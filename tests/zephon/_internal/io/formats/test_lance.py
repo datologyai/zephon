@@ -103,7 +103,7 @@ class _Store:
         return self._opener.open_shard(
             locator,
             LocalShardRef(
-                raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
+                raw=LocalShardFile(path=raw, bytes=locator.raw.bytes),
                 extra=locator.extra,
             ),
         )
@@ -233,7 +233,6 @@ def test_row_order_and_duplicates_are_preserved(dataset_path: Path) -> None:
 def test_one_shard_reads_from_several_threads(
     tmp_path: Path, pa: Any, write: Write
 ) -> None:
-    """A retained reader is shared across fetch threads; pylance rejects reentry."""
     import random
     from concurrent.futures import ThreadPoolExecutor
 
@@ -255,6 +254,20 @@ def test_one_shard_reads_from_several_threads(
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             assert all(pool.map(read, range(16)))
+
+
+def test_an_evicted_data_file_is_not_served_from_a_retained_reader(
+    dataset_path: Path,
+) -> None:
+    """An open reader keeps an unlinked file readable, hiding the eviction."""
+    with _store(dataset_path) as store:
+        shard = store.open(0)
+        shard.getsamples([0])
+        shard.close()
+        (dataset_path / "data" / store.locators[0].raw.basename).unlink()
+
+        with pytest.raises(ValueError, match="Not found"):
+            store.open(0)
 
 
 def test_out_of_range_index_raises(dataset_path: Path) -> None:
