@@ -190,6 +190,30 @@ def test_reads_match_pylance(dataset_path: Path) -> None:
     _assert_matches_pylance(dataset_path, _rows(dataset_path))
 
 
+def test_count_only_discovery_agrees_with_discovery(
+    dataset_path: Path, storage: LocalFSBackend
+) -> None:
+    lance.dataset(str(dataset_path)).delete("id in (1, 6)")
+    handler = LanceFormat()
+
+    ids, counts = handler.discover_counts(str(dataset_path), storage)
+    shard_index, _meta = handler.discover(str(dataset_path), storage)
+
+    assert ids.tolist() == sorted(shard_index)
+    assert counts.tolist() == [shard_index[i] for i in sorted(shard_index)]
+
+
+def test_count_only_discovery_refuses_what_discovery_refuses(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
+) -> None:
+    path = tmp_path / "multi.lance"
+    write(_table(pa, 4), path)
+    lance.dataset(str(path)).add_columns({"extra": "id * 2"})
+
+    with pytest.raises(ValueError, match="spans 2 data files"):
+        LanceFormat().discover_counts(str(path), storage)
+
+
 def test_auto_detection_and_version_pinning(dataset_path: Path, pa: Any) -> None:
     first = Dataset.from_path("ds", str(dataset_path))
     assert first.backend["kind"] == "lance"

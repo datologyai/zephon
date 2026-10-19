@@ -32,6 +32,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
+import numpy as np
+
 from zephon._internal.io.formats.arrow_rows import (
     arrow_table_to_samples,
     configure_pyarrow,
@@ -499,6 +501,19 @@ class LanceFormat(FormatHandler):
                 "extra": {"manifest": manifest_path},
             }
         return shard_index, shard_meta
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Count-only discovery: read each fragment's row count from the manifest.
+
+        Skips the per-shard locator metadata and the data-file ``stat`` that
+        ``discover`` falls back to when a writer left a file size unset. Runs
+        the same validation, so it refuses what ``discover`` refuses.
+        """
+        plan = _plan_dataset(storage, self.resolve_root(path, storage))
+        counts = [fragment.num_rows for fragment in plan.fragments]
+        return np.arange(len(counts), dtype=np.int64), np.array(counts, dtype=np.int64)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         """Build locators rooted at the pinned version's ``data/`` directory."""
