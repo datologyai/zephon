@@ -77,9 +77,15 @@ class _BufferedRecord:
     contributions: dict[int, float]  # component_id -> weight
 
 
-@dataclass
+@dataclass(eq=False)
 class _RetirementGroup:
-    """Components removed together, weighted by their last effective target."""
+    """One effective-target removal, weighted by the previous target.
+
+    Separate EODs make separate groups, even within one source chunk. Groups
+    drain oldest available first, before the unknown-weight FIFO fallback.
+    Epoch resets forget the groups; the first target can recover exhausted
+    components' weights together, but not their previous retirement order.
+    """
 
     weights: dict[int, float]
     singles: dict[int, deque[_BufferedRecord]] = field(
@@ -593,6 +599,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if old_components is not None and new_components is not None:
             removed = old_components - new_components
             added = new_components - old_components
+            # Additions can make obsolete records live again. Removals can move
+            # a fallback pack into a new retirement group.
             if not (
                 any(
                     state.buffers.get(cid) or state.multi_component_counts.get(cid)
@@ -679,12 +687,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if not retired_components:
             retired_components = contributions.keys() - target.keys()
         groups = {
-            id(state.retirement_by_component[cid])
+            state.retirement_by_component[cid]
             for cid in retired_components
             if cid in state.retirement_by_component
         }
         for group in state.retirement_groups:
-            if id(group) in groups:
+            if group in groups:
                 group.append(item)
                 break
         else:
@@ -694,8 +702,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     def _take_obsolete(self, state: _LaneState) -> _BufferedRecord:
         """Use one shared slot; empty earlier groups never hold up later ones."""
         state.obsolete_count -= 1
-        if state.obsolete_buffer:
-            return state.obsolete_buffer.popleft()
+        # The fallback may refill forever (e.g. a component excluded by an
+        # override). It must not starve known retirement tails.
         for group in state.retirement_groups:
             if group.counts:
                 item = group.take()
@@ -706,6 +714,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     if other is not None and other is not group and cid in other.counts:
                         other.selector().record(cid, weight)
                 return item
+        if state.obsolete_buffer:
+            return state.obsolete_buffer.popleft()
         raise AssertionError("obsolete count has no buffered record")
 
     def _should_drain_obsolete(self, state: _LaneState) -> bool:
@@ -924,9 +934,10 @@ class EnsureMixture(BaseOp):
             count toward the mixture. At most one slot is saved while the queue
             is empty. Bounded forced drains and flushes may exceed this rate;
             strict flushes discard leftovers.
-            Components removed together share their last relative target weights
-            within drain slots, preferring the oldest group with available records.
-            Groups reset on epoch flush; unknown former weights use FIFO drainage.
+            Within an epoch, components removed by one target change drain in
+            proportion to their former weights. Separate EODs drain in notice
+            order when their records are available. Other off-target records
+            follow in arrival order.
         weight_by: How to compute sample weights. Options:
             - "auto" (default): Auto-detect token field from common names
               (input_ids, tokens, token_ids, ids). Raises if not found.

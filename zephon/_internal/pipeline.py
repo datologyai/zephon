@@ -1008,6 +1008,10 @@ class Pipeline:
                 count toward the mixture. At most one slot is saved while the queue
                 is empty. Bounded forced drains and flushes may exceed this rate;
                 strict flushes discard leftovers.
+                Within an epoch, components removed by one target change drain in
+                proportion to their former weights. Separate EODs drain in notice
+                order when their records are available. Other off-target records
+                follow in arrival order.
             weight_by: How to compute sample weights. Options:
 
                 - ``auto`` (default): Auto-detect token field from common names
