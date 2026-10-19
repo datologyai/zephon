@@ -867,6 +867,147 @@ class TestRetiredRecords:
         assert _flatten_ready(acc.push_many([packed])) == [packed]
 
 
+class TestRetirementGroups:
+    @staticmethod
+    def accumulator(targets, *, weight_by="samples", limit=None):
+        return EnsureMixtureAccumulator(
+            _make_config(weight_by=weight_by, max_buffer_size=limit),
+            get_chunk_mixture=lambda lane, chunk: targets[chunk],
+        )
+
+    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    def test_drain_slots_follow_previous_contribution_ratios(self, weight_by) -> None:
+        acc = self.accumulator([{0: 9, 1: 1}, {2: 1}], weight_by=weight_by)
+        retired = [
+            _rec(100 * cid + i, component_id=cid, tokens=9 if cid == 0 else 1)
+            for cid in (0, 1)
+            for i in range(20)
+        ]
+        live = [_rec(200 + i, component_id=2, chunk=1, tokens=1) for i in range(100)]
+        out = _flatten_ready(acc.push_many(retired + live))
+        drained = out[10::11]
+        assert len(out) == 110
+        assert [r for r in out if r not in drained] == live
+        # With nine-token A records, five A and five B already give 90:10.
+        expected_a = 9 if weight_by == "samples" else 5
+        assert sum(_get_component(r.meta) == 0 for r in drained) == expected_a
+
+    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    def test_packs_credit_all_retired_and_live_contributions(self, weight_by) -> None:
+        acc = self.accumulator([{0: 9, 1: 1}, {2: 1}], weight_by=weight_by)
+        packs = [TestRetiredRecords.pack(i, {0: 8, 1: 1, 2: 4}) for i in range(3)]
+        b = [_rec(10 + i, component_id=1, tokens=1) for i in range(3)]
+        live = [_rec(20 + i, component_id=2, chunk=1, tokens=1) for i in range(20)]
+        out = _flatten_ready(acc.push_many(packs + b + live))
+        assert out[10::11] == packs[:2]
+        selector = acc._lanes[0].swrr
+        assert selector is not None
+        assert selector.total_emitted == 46  # 20 live + 2 * (8 A + 1 B + 4 C)
+        assert selector.get_actual_ratios()[2] == pytest.approx(28 / 46)
+
+    def test_groups_share_slots_and_skip_empty_older_groups(self) -> None:
+        acc = self.accumulator([{0: 9, 1: 1}, {2: 1}, {3: 1}])
+        a = _rec(0)
+        b = _rec(1, component_id=1)
+        c = _rec(2, component_id=2, chunk=1)
+        live = [_rec(10 + i, component_id=3, chunk=2) for i in range(30)]
+        out = _flatten_ready(acc.push_many([a, b, c, *live]))
+        assert out[10::11] == [a, b, c]
+        # A late record rejoins its old group; no separate allowance was saved.
+        late_a = _rec(100)
+        late_c = _rec(101, component_id=2, chunk=1)
+        assert acc.push_many([late_c, late_a]) == []
+        more = [_rec(200 + i, component_id=3, chunk=2) for i in range(20)]
+        assert _flatten_ready(acc.push_many(more))[10::11] == [late_a, late_c]
+
+    def test_absent_component_does_not_accumulate_catch_up_debt(self) -> None:
+        acc = self.accumulator([{0: 1, 1: 9}, {2: 1}])
+        a = [_rec(i) for i in range(20)]
+        live = [_rec(100 + i, component_id=2, chunk=1) for i in range(100)]
+        assert _flatten_ready(acc.push_many(a + live))[10::11] == a[:10]
+        b = [_rec(200 + i, component_id=1) for i in range(20)]
+        more = [_rec(300 + i, component_id=2, chunk=1) for i in range(100)]
+        out = _flatten_ready(acc.push_many(b + more))
+        assert sum(_get_component(r.meta) == 0 for r in out[10::11]) == 1
+
+    def test_retirement_uses_last_effective_weights(self) -> None:
+        acc = self.accumulator([{0: 9, 1: 1}, {0: 2, 1: 8}, {2: 1}])
+        old = [_rec(i, component_id=i % 2) for i in range(40)]
+        changed = _rec(40, chunk=1)
+        live = [_rec(100 + i, component_id=2, chunk=2) for i in range(100)]
+        out = _flatten_ready(acc.push_many([*old, changed, *live]))
+        assert sum(_get_component(r.meta) == 0 for r in out[10::11]) == 2
+
+    def test_cross_group_pack_credits_later_group_before_its_first_slot(self) -> None:
+        acc = self.accumulator([{0: 1}, {1: 1, 2: 1}, {3: 1}])
+        packed = TestRetiredRecords.pack(0, {0: 1, 1: 8})
+        b = [_rec(10 + i, component_id=1, chunk=1) for i in range(3)]
+        c = [_rec(20 + i, component_id=2, chunk=1) for i in range(3)]
+        live = [_rec(100 + i, component_id=3, chunk=2) for i in range(30)]
+        out = _flatten_ready(acc.push_many([packed, *b, *c, *live]))
+        assert out[10::11] == [packed, c[0], c[1]]
+
+    def test_unrelated_retirement_keeps_existing_group_history(self) -> None:
+        acc = self.accumulator([{0: 1, 1: 1}, {2: 1}, {3: 1}])
+        old = [_rec(i, component_id=i % 2) for i in range(10)]
+        live = [_rec(100 + i, component_id=2, chunk=1) for i in range(10)]
+        first = _flatten_ready(acc.push_many(old + live))
+        assert first[-1] == old[0]
+        # Retiring C must not restart the A/B selector and select A twice.
+        more = [_rec(200 + i, component_id=3, chunk=2) for i in range(10)]
+        assert _flatten_ready(acc.push_many(more))[-1] == old[1]
+
+    def test_reintroduction_splits_groups_and_reclassifies_cross_group_pack(
+        self,
+    ) -> None:
+        acc = self.accumulator([{0: 9, 1: 1}, {2: 1}, {0: 1}, {3: 1}])
+        pack = TestRetiredRecords.pack(0, {0: 9, 1: 1, 2: 1})
+        c = _rec(1, component_id=2, chunk=1)
+        new_a = _rec(2, chunk=2)
+        live = [_rec(10 + i, component_id=3, chunk=3) for i in range(30)]
+        out = _flatten_ready(acc.push_many([pack, c, new_a, *live]))
+        assert out[10::11] == [pack, c, new_a]
+        assert not acc.has_pending_data()
+
+    @pytest.mark.parametrize("limit", [None, 1000])
+    def test_flush_policy_and_fresh_replay_suffix(self, limit) -> None:
+        targets = [{0: 9, 1: 1}, {2: 1}]
+        acc = self.accumulator(targets, limit=limit)
+        old = [_rec(i, component_id=i % 2) for i in range(6)]
+        live = _rec(10, component_id=2, chunk=1)
+        assert _flatten_ready(acc.push_many([*old, live])) == [live]
+        tail = _flatten_ready(acc.flush(reset=True))
+        assert len(tail) == len(old)
+        if limit is None:
+            assert all(r.meta.tombstone for r in tail)
+        else:
+            assert {r.meta.sample_id for r in tail} == {r.meta.sample_id for r in old}
+        assert acc._lanes[0] == _LaneState()
+        # The suffix begins in the same chunk after a delayed upstream flush.
+        # With no old target in this epoch, both executions use FIFO fallback.
+        suffix = [
+            _rec(20, component_id=1, chunk=1),
+            _rec(21, chunk=1),
+            *[_rec(100 + i, component_id=2, chunk=1) for i in range(20)],
+        ]
+        replay = self.accumulator(targets, limit=limit)
+        assert acc.push_many(suffix) == replay.push_many(suffix)
+
+    def test_reset_recovers_exhausted_weights_from_first_target(self) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 9, 1: 1, 2: 10},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
+        )
+        _notify_exhaustion(acc, 0, 0)
+        _notify_exhaustion(acc, 0, 1)
+        acc.flush(reset=True)
+        late = [_rec(i, component_id=i % 2) for i in range(40)]
+        live = [_rec(100 + i, component_id=2) for i in range(100)]
+        out = _flatten_ready(acc.push_many(late + live))
+        assert sum(_get_component(r.meta) == 0 for r in out[10::11]) == 9
+
+
 class TestEnsureMixtureAccumulator:
     """Tests for EnsureMixtureAccumulator (adaptive buffering)."""
 

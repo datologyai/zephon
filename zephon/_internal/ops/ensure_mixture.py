@@ -78,6 +78,80 @@ class _BufferedRecord:
 
 
 @dataclass
+class _RetirementGroup:
+    """Components removed together, weighted by their last effective target."""
+
+    weights: dict[int, float]
+    singles: dict[int, deque[_BufferedRecord]] = field(
+        default_factory=lambda: defaultdict(deque)
+    )
+    packs: deque[_BufferedRecord] = field(default_factory=deque)
+    counts: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    swrr: SmoothWeightedRoundRobin[int] | None = None
+
+    def append(self, item: _BufferedRecord) -> None:
+        if len(item.contributions) == 1:
+            self.singles[next(iter(item.contributions))].append(item)
+        else:
+            self.packs.append(item)
+        for cid in item.contributions:
+            self.counts[cid] += 1
+
+    def selector(self) -> SmoothWeightedRoundRobin[int]:
+        # Retired components cannot block drainage. Restart selection when the
+        # available set changes, so absence never builds a catch-up entitlement.
+        available = self.weights.keys() & self.counts.keys()
+        if self.swrr is None or self.swrr.target_ratios.keys() != available:
+            self.swrr = SmoothWeightedRoundRobin(
+                {cid: self.weights[cid] for cid in sorted(available)}, sorted(available)
+            )
+        return self.swrr
+
+    def take(self) -> _BufferedRecord:
+        selector = self.selector()
+        ideal = selector.peek()
+        assert ideal is not None
+        if self.singles.get(ideal):
+            item = self.singles[ideal].popleft()
+        else:
+            deficits = selector.get_deficits()
+            index, item = max(
+                (
+                    (index, item)
+                    for index, item in enumerate(self.packs)
+                    if ideal in item.contributions
+                ),
+                key=lambda pair: sum(
+                    weight * deficits.get(cid, 0.0)
+                    for cid, weight in pair[1].contributions.items()
+                ),
+            )
+            del self.packs[index]
+        selector.record_multi(item.contributions)
+        for cid in item.contributions:
+            self.counts[cid] -= 1
+            if not self.counts[cid]:
+                del self.counts[cid]
+                if cid in self.weights:
+                    # Remember even an absence between two calls to take().
+                    self.swrr = None
+        return item
+
+    def drain(self) -> Iterable[_BufferedRecord]:
+        """Walk buffered records without running selection (discard/reclassify)."""
+        singles, packs = self.singles, self.packs
+        self.singles = defaultdict(deque)
+        self.packs = deque()
+        self.counts.clear()
+        self.swrr = None
+        for buf in singles.values():
+            while buf:
+                yield buf.popleft()
+        while packs:
+            yield packs.popleft()
+
+
+@dataclass
 class _LaneState:
     """Per-lane state for SWRR reordering with buffering.
 
@@ -93,9 +167,12 @@ class _LaneState:
     # Separate buffer for multi-component (packed) samples.
     # These require benefit scoring since they contribute to multiple components.
     multi_component_buffer: deque[_BufferedRecord] = field(default_factory=deque)
-    # Shared FIFO and drain allowance for obsolete records. Reclassification
-    # appends component queues then packs, not global arrival order.
+    # Unknown former weights retain FIFO fallback. Known retirements select by
+    # their previous relative weights; every group shares one drain allowance.
     obsolete_buffer: deque[_BufferedRecord] = field(default_factory=deque)
+    retirement_groups: list[_RetirementGroup] = field(default_factory=list)
+    retirement_by_component: dict[int, _RetirementGroup] = field(default_factory=dict)
+    obsolete_count: int = 0
     # Availability index: avoid scanning packed records on every selection.
     multi_component_counts: dict[int, int] = field(
         default_factory=lambda: defaultdict(int)
@@ -189,6 +266,9 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             take(state.multi_component_buffer.popleft().record)
         while state.obsolete_buffer:
             take(state.obsolete_buffer.popleft().record)
+        for group in state.retirement_groups:
+            for item in group.drain():
+                take(item.record)
 
         if batch:
             ready.append((batch, 0))
@@ -196,6 +276,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         state.buffers.clear()
         state.multi_component_counts.clear()
         state.total_buffered = 0
+        state.obsolete_count = 0
         return ready, dropped
 
     def has_pending_data(self, lane_id: int | None = None) -> bool:
@@ -333,7 +414,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             state = self._lanes[lid]
 
             if self._config.max_buffer_size is None:
-                discarded_obsolete += len(state.obsolete_buffer)
+                discarded_obsolete += state.obsolete_count
                 batches, dropped = self._discard_lane_buffers(state)
                 ready.extend(batches)
                 if dropped:
@@ -403,7 +484,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     def _has_buffered_samples(self, state: _LaneState) -> bool:
         """Check if lane has any buffered samples."""
         return any(buf for buf in state.buffers.values()) or bool(
-            state.multi_component_buffer or state.obsolete_buffer
+            state.multi_component_buffer or state.obsolete_count
         )
 
     def _compute_contributions(self, record: SampleRecord) -> dict[int, float]:
@@ -473,6 +554,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         """Filter out exhausted components and update buffer eligibility."""
         assert state.removed_by_exhaustion is not None
         previous = state.swrr.target_ratios if state.swrr is not None else None
+        unfiltered = target
         if target is None:
             state.swrr = None  # No target configured: unrestricted output.
         else:
@@ -491,6 +573,31 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
         old_components = previous.keys() if previous is not None else None
         new_components = target.keys() if target is not None else None
+        # Flush resets these definitions along with selection history. On the
+        # first target, recover weights for known exhaustion from the unfiltered
+        # target; no historical target is invented for other off-target records.
+        retirement_target = previous
+        if retirement_target is None:
+            retirement_target = unfiltered
+        old_groups = tuple(state.retirement_groups)
+        for cid in list(state.retirement_by_component):
+            if new_components is None or cid in new_components:
+                group = state.retirement_by_component.pop(cid)
+                del group.weights[cid]
+                group.swrr = None
+        state.retirement_groups = [g for g in old_groups if g.weights]
+        if retirement_target is not None and target is not None:
+            weights = {
+                cid: weight
+                for cid, weight in retirement_target.items()
+                if weight > 0
+                and cid not in target
+                and cid not in state.retirement_by_component
+            }
+            if weights:
+                group = _RetirementGroup(weights)
+                state.retirement_groups.append(group)
+                state.retirement_by_component.update(dict.fromkeys(weights, group))
         if not state.total_buffered or old_components == new_components:
             return
 
@@ -502,11 +609,11 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                     state.buffers.get(cid) or state.multi_component_counts.get(cid)
                     for cid in removed
                 )
-                or (added and state.obsolete_buffer)
+                or ((added or removed) and state.obsolete_count)
             ):
                 return
 
-        # Preserve the existing obsolete FIFO ahead of newly obsolete records.
+        # Preserve FIFO within component queues and the unknown-weight fallback.
         # No full-buffer scans on ordinary emissions or weight-only updates.
         single, multi, obsolete = (
             state.buffers,
@@ -516,10 +623,26 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         state.buffers = defaultdict(deque)
         state.multi_component_buffer = deque()
         state.obsolete_buffer = deque()
+        state.obsolete_count = 0
         state.multi_component_counts.clear()
+        # Detach every group's queues before routing cross-group packs again.
+        # Otherwise a pack moved to a later group could be visited twice.
+        retired = [(group.singles, group.packs) for group in old_groups]
+        for group in old_groups:
+            group.singles = defaultdict(deque)
+            group.packs = deque()
+            group.counts.clear()
         while obsolete:
             item = obsolete.popleft()
             self._buffer_record(state, item.record, item.contributions)
+        for singles, packs in retired:
+            for buf in singles.values():
+                while buf:
+                    item = buf.popleft()
+                    self._buffer_record(state, item.record, item.contributions)
+            while packs:
+                item = packs.popleft()
+                self._buffer_record(state, item.record, item.contributions)
         for cid, buf in single.items():
             while buf:
                 record, weight = buf.popleft()
@@ -555,12 +678,51 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             for cid in contributions:
                 state.multi_component_counts[cid] += 1
             return
-        state.obsolete_buffer.append(_BufferedRecord(record, contributions))
+        item = _BufferedRecord(record, contributions)
+        assert target is not None
+        # A pack belongs to the oldest group represented by its retired content.
+        # Zero-count metadata must not give it an unrelated earlier retirement.
+        retired_components = {
+            cid
+            for cid, weight in contributions.items()
+            if cid not in target and weight > 0
+        }
+        if not retired_components:
+            retired_components = contributions.keys() - target.keys()
+        groups = {
+            id(state.retirement_by_component[cid])
+            for cid in retired_components
+            if cid in state.retirement_by_component
+        }
+        for group in state.retirement_groups:
+            if id(group) in groups:
+                group.append(item)
+                break
+        else:
+            state.obsolete_buffer.append(item)
+        state.obsolete_count += 1
+
+    def _take_obsolete(self, state: _LaneState) -> _BufferedRecord:
+        """Use one shared slot; empty earlier groups never hold up later ones."""
+        state.obsolete_count -= 1
+        if state.obsolete_buffer:
+            return state.obsolete_buffer.popleft()
+        for group in state.retirement_groups:
+            if group.counts:
+                item = group.take()
+                # A pack may also serve components retired by another change.
+                # Credit their available selectors without banking absent debt.
+                for cid, weight in item.contributions.items():
+                    other = state.retirement_by_component.get(cid)
+                    if other is not None and other is not group and cid in other.counts:
+                        other.selector().record(cid, weight)
+                return item
+        raise AssertionError("obsolete count has no buffered record")
 
     def _should_drain_obsolete(self, state: _LaneState) -> bool:
         """Whether an obsolete record is waiting and its drain slot is due."""
         # TODO: Explore smooth decay of retired content instead of a fixed interval.
-        return bool(state.obsolete_buffer) and (
+        return bool(state.obsolete_count) and (
             self._obsolete_interval is not None
             and state.emissions_since_obsolete_drain >= self._obsolete_interval
         )
@@ -609,10 +771,10 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         Forced emission can bypass drain spacing to bound memory or finish a
         lossless flush. Strict flushes discard buffered records instead.
         """
-        # Priority 0: One shared FIFO slot for obsolete records, including mixed packs.
+        # Priority 0: One shared drain slot across retirement groups and mixed packs.
         obsolete = self._should_drain_obsolete(state)
         if obsolete:
-            item = state.obsolete_buffer.popleft()
+            item = self._take_obsolete(state)
         else:
             # What does SWRR ideally want (ignoring availability)?
             ideal = state.swrr.peek() if state.swrr is not None else None
@@ -659,10 +821,10 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                         ),
                     )
                     item = self._take_multi(state, best_idx)
-                elif force and state.obsolete_buffer:
+                elif force and state.obsolete_count:
                     # Priority 5: Force-drain obsolete records when no on-target
                     # records remain, even without live data to interleave.
-                    item = state.obsolete_buffer.popleft()
+                    item = self._take_obsolete(state)
                     obsolete = True
                 else:
                     return None
@@ -775,6 +937,9 @@ class EnsureMixture(BaseOp):
             count toward the mixture. At most one slot is saved while the queue
             is empty. Bounded forced drains and flushes may exceed this rate;
             strict flushes discard leftovers.
+            Components removed together share their last relative target weights
+            within drain slots, preferring the oldest group with available records.
+            Groups reset on epoch flush; unknown former weights use FIFO drainage.
         weight_by: How to compute sample weights. Options:
             - "auto" (default): Auto-detect token field from common names
               (input_ids, tokens, token_ids, ids). Raises if not found.
