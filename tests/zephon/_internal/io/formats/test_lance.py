@@ -21,10 +21,12 @@ from zephon._internal.io.formats.lance_support.manifest import (
     read_manifest,
 )
 from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.resolvers.base import ShardResolver
 from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.stores.multi import build_multi_dataset_store
-from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon._internal.io.stores.resilient import ResilientShard
+from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
 from zephon.io import CacheOptions, StoreOptions
 from zephon.io.dataset import Dataset
 
@@ -266,8 +268,56 @@ def test_an_evicted_data_file_is_not_served_from_a_retained_reader(
         shard.close()
         (dataset_path / "data" / store.locators[0].raw.basename).unlink()
 
-        with pytest.raises(ValueError, match="Not found"):
+        with pytest.raises(FileNotFoundError):
             store.open(0)
+
+
+def test_a_resilient_shard_retries_a_file_evicted_before_open(
+    dataset_path: Path,
+) -> None:
+    """The eviction retry only catches OSError, which pylance does not raise."""
+    with _store(dataset_path) as store:
+        locator = store.locators[0]
+        data_file = dataset_path / "data" / locator.raw.basename
+        evicted = data_file.with_suffix(".evicted")
+
+        class Resolver(ShardResolver):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def resolve(
+                self, locator: ShardLocator, *, blocking: bool = True
+            ) -> LocalShardRef:
+                self.calls += 1
+                # The first resolution hands out a path the cache then evicts.
+                if self.calls == 1:
+                    data_file.rename(evicted)
+                else:
+                    evicted.rename(data_file)
+                return LocalShardRef(
+                    raw=LocalShardFile(path=data_file, bytes=locator.raw.bytes),
+                    extra=locator.extra,
+                )
+
+            def touch(self, locator: ShardLocator) -> None:
+                pass
+
+        resolver = Resolver()
+        shard = ResilientShard(
+            locator=locator,
+            resolver=resolver,
+            opener=store._opener,
+            length=store.counts[0],
+            retry_attempts=2,
+            retry_initial_backoff=0,
+            retry_max_backoff=0,
+        )
+
+        rows, stats = shard.getsamples([1, 0])
+
+        assert [row["id"] for row in rows] == [1, 0]
+        assert all(item.retries == 1 for item in stats)
+        assert resolver.calls == 2
 
 
 def test_out_of_range_index_raises(dataset_path: Path) -> None:

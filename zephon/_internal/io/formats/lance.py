@@ -88,6 +88,24 @@ _REWRITE = (
 )
 
 
+@contextmanager
+def _local_io_errors(path: Path) -> Iterator[None]:
+    """Surface a missing or inaccessible shard file as the path's ``OSError``.
+
+    pylance reports a missing file as ``ValueError``, or in older releases as a
+    bare ``OSError``; the eviction retry around shard reads catches only
+    ``OSError``, and should re-resolve only when the path itself failed.
+    """
+    try:
+        yield
+    except (ValueError, RuntimeError, OSError) as exc:
+        try:
+            path.stat()
+        except OSError as io_error:
+            raise io_error from exc
+        raise
+
+
 def _reject(manifest_path: str, reason: str) -> ValueError:
     return ValueError(f"Unsupported Lance dataset at {manifest_path}: {reason}")
 
@@ -383,11 +401,12 @@ class LanceShardOpener:
                 probe, path, fragment, self._read_deletions(root, fragment)
             )
 
-        metadata = self._metadata.get_or_load(cache_key, load_metadata)
-        # Reuse the reader opened on a metadata miss when it needs no projection.
-        if probe is not None and metadata.projection is None:
-            return probe, metadata
-        reader = lance_file.LanceFileReader(str(path), columns=metadata.projection)
+        with _local_io_errors(path):
+            metadata = self._metadata.get_or_load(cache_key, load_metadata)
+            # Reuse the reader opened on a metadata miss when it needs no projection.
+            if probe is not None and metadata.projection is None:
+                return probe, metadata
+            reader = lance_file.LanceFileReader(str(path), columns=metadata.projection)
         return reader, metadata
 
     def open_shard(
