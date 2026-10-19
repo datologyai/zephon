@@ -90,13 +90,43 @@ def test_single_prefix_keeps_metadata_and_nested_payload() -> None:
 
 
 @pytest.mark.parametrize(
-    "messages", [None, "text", {}, [None], [{}], [{"role": None}], [{"role": ""}]]
+    ("messages", "error", "reason"),
+    [
+        (None, TypeError, "must be a sequence of messages"),
+        ("text", TypeError, "must be a sequence of messages"),
+        ({}, TypeError, "must be a sequence of messages"),
+        ([None], ValueError, "message 0"),
+        ([{}], ValueError, "message 0"),
+        ([{"role": None}], ValueError, "message 0"),
+        ([{"role": ""}], ValueError, "message 0"),
+        ([{"role": "user"}, {}], ValueError, "message 1"),
+    ],
 )
-def test_bad_messages_raise(messages: Any) -> None:
+def test_bad_messages_raise(messages: Any, error: type[Exception], reason: str) -> None:
     parent = record()
     parent.payload["messages"] = messages
-    with pytest.raises((TypeError, ValueError), match="expand_chat"):
+    with pytest.raises(error, match=reason) as exc_info:
         ExpandChat().process_one(parent)
+    assert repr(parent.meta.sample_id) in str(exc_info.value)
+    assert "'messages'" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "payload"),
+    [
+        ("messages", {}),
+        ("chat.messages", {}),
+        ("chat.messages", {"chat": {}}),
+        ("chat.messages", {"chat": None}),
+    ],
+)
+def test_missing_field_reports_sample(field: str, payload: Any) -> None:
+    parent = record()
+    parent.payload = payload
+    with pytest.raises(ValueError, match="expand_chat") as exc_info:
+        ExpandChat(field=field).process_one(parent)
+    assert repr(parent.meta.sample_id) in str(exc_info.value)
+    assert repr(field) in str(exc_info.value)
 
 
 def test_builtin_identity_determinism_and_cross_call_harness() -> None:
