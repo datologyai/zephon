@@ -502,3 +502,73 @@ def test_numeric_lists_view_every_width(kind: Any, dtype: Any) -> None:
     np.testing.assert_array_equal(rows[0], [2, 3])
     np.testing.assert_array_equal(rows[1], [4, 5])
     assert not rows[0].flags.writeable
+
+
+@pytest.mark.parametrize(
+    ("kind", "storage", "dtype"),
+    [
+        (pa.int8(), np.int8, np.int8),
+        (pa.uint32(), np.uint32, np.uint32),
+        (pa.int64(), np.int64, np.int64),
+        (pa.float16(), np.float16, np.float16),
+        (pa.float64(), np.float64, np.float64),
+        (pa.timestamp("ns", tz="UTC"), np.int64, "M8[ns]"),
+        (pa.timestamp("s"), np.int64, "M8[s]"),
+        (pa.date32(), np.int32, "M8[D]"),
+        (pa.date64(), np.int64, "M8[ms]"),
+        (pa.duration("us"), np.int64, "m8[us]"),
+    ],
+)
+@pytest.mark.parametrize("offset", [0, 3, 11])
+def test_fixed_width_scalars_survive_unaligned_slices(
+    kind: Any, storage: Any, dtype: Any, offset: int
+) -> None:
+    raw = (np.arange(40) % 7).astype(storage)
+    mask = raw == 2
+    array = pa.array(raw, mask=mask).view(kind).slice(offset, 21)
+    dense = pa.array(raw).view(kind).slice(offset, 21)
+    expected = raw[offset : offset + 21].astype(dtype)
+    present = ~mask[offset : offset + 21]
+
+    rows = _column_values(array, pa)
+    assert [row is None for row in rows] == list(~present)
+    for row, value in zip(np.asarray(rows, dtype=object)[present], expected[present]):
+        assert row == value
+        assert row.dtype == np.dtype(dtype)
+
+    values = _column_values(dense, pa)
+    np.testing.assert_array_equal(values, expected)
+    assert values.dtype == np.dtype(dtype)
+    assert not values.flags.writeable
+
+
+@pytest.mark.parametrize("kind", [pa.int32(), pa.date32(), pa.float64()])
+def test_empty_fixed_width_arrays_have_no_values(kind: Any) -> None:
+    for array in (pa.array([], type=kind), pa.array([1, 0], type=kind)[2:]):
+        assert len(_column_values(array, pa)) == 0
+
+
+@pytest.mark.parametrize("kind", [pa.list_, pa.large_list, pa.list_view])
+@pytest.mark.parametrize("offset", [0, 5, 9])
+def test_list_bitmaps_unpack_from_unaligned_offsets(kind: Any, offset: int) -> None:
+    items = [
+        None if row % 4 == 1 else [bool((row + i) % 3) for i in range(row % 3)]
+        for row in range(30)
+    ]
+    array = pa.array(items, type=kind(pa.bool_())).slice(offset, 17)
+
+    rows = _column_values(array, pa)
+    for row, expected in zip(rows, items[offset : offset + 17]):
+        if expected is None:
+            assert row is None
+        else:
+            assert row.dtype == np.bool_
+            assert row.tolist() == expected
+            assert not row.flags.writeable
+
+    # List views without numeric children compact through Python conversion.
+    strings = pa.array(
+        [None if item is None else [str(v) for v in item] for item in items],
+        type=kind(pa.string()),
+    ).slice(offset, 17)
+    assert _column_values(strings, pa) == strings.to_pylist()
