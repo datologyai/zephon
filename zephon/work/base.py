@@ -66,7 +66,6 @@ class WorkChunk:
     ``components`` stores each mixture component (for example, ``"German"``) and
     the ordered sample identifiers that belong to it.  Mapping insertion order is used
     as a stable tie-breaker whenever behaviour depends on component ordering.
-    Components may represent datasets, languages, or other source-defined categories.
 
     ``target_mixture``, when set, is the per-component target the engine should
     deliver to downstream mixture correctors (``ensure_mixture``) *instead of*
@@ -77,12 +76,11 @@ class WorkChunk:
     Continuing sources may remove exhausted components from this target, but
     must keep their identities in :meth:`WorkSource.component_ids` for late records.
 
-    ``source_exhausted`` records permanent source exhaustion: list every component
-    whose final source sample was produced in this or an earlier chunk. The engine
-    emits an end-of-data (EOD) sentinel in each lane after that component's last
-    sample in its first such chunk, or before the chunk if absent. This also applies
-    on replay. Buffered data may arrive after the EOD sentinel; lanes with no such
-    chunk receive no EOD sentinel.
+    ``source_exhausted`` must list every component whose final source sample was
+    produced in this or an earlier chunk. Each lane emits an end-of-data (EOD) sentinel
+    after that component's last sample in its first such chunk, or before the
+    chunk if absent. This also applies on replay. Buffered data may arrive after
+    the sentinel; lanes with no such chunk receive none.
     """
 
     components: SamplesPerComponent
@@ -449,20 +447,17 @@ class WorkSource(ABC):
         raise NotImplementedError()
 
     def continues_after_exhaustion(self) -> frozenset[str]:
-        """Components the source permits continuing without after their EOD sentinel.
-
-        An end-of-data (EOD) sentinel reports permanent source exhaustion for one
-        mixture component in a lane; buffered records may still arrive afterward.
+        """Components whose exhaustion allows the source to keep producing.
 
         Return a subset of :meth:`component_ids`, fixed across lanes and restores.
-        The engine marks each EOD sentinel with this policy. The runner exposes
-        the observed exhausted component ids that permit continuation as
+        The engine marks each end-of-data (EOD) sentinel with this policy. The runner
+        exposes the observed exhausted component ids that permit continuation as
         ``SourceExhaustion.continuing``, available to accumulators through
         ``ctx["get_source_exhaustion"](lane_id)``. EOD sentinels are emitted
         independently of this policy.
 
         The default is empty. For listed components, ``ensure_mixture`` removes
-        their weight on receipt of the EOD sentinel, even from an explicit mixture
+        their weight when the sentinel arrives, even from an explicit mixture
         override, and handles late records through ``obsolete_drain_rate``. Later
         chunk targets may omit these components.
         """

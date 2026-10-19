@@ -18,12 +18,10 @@ ReadyBatch = tuple[list[T], int]
 
 @dataclass(frozen=True)
 class SourceExhaustion:
-    """Immutable end-of-data (EOD) sentinel state for one operator lane.
+    """Immutable source facts observed by one operator in one lane.
 
-    Each sentinel reports permanent source exhaustion for one mixture component;
-    buffered records may still arrive afterward. ``exhausted`` contains all
-    components whose EOD sentinel reached the operator.
-    ``continuing`` is the subset listed by
+    ``exhausted`` contains all components whose end-of-data (EOD) sentinel reached
+    the operator. ``continuing`` is the subset listed by
     :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
     permits continuing without them. The runner updates this snapshot before
     calling :meth:`Accumulator.on_source_exhausted`.
@@ -114,14 +112,14 @@ class Accumulator(ABC, Generic[T]):
     ) -> list[ReadyBatch[T]]:
         """Handle an end-of-data (EOD) sentinel for a component in this lane.
 
-        The source has permanently run out of samples for this mixture component
-        in this lane, but buffered records may still arrive, even through
-        order-preserving operators. The default leaves buffers untouched.
+        The component's source has permanently run out, but buffered records may
+        still arrive, even through order-preserving operators. The default leaves
+        buffers untouched.
 
         Called at most once per component per lane stream; some lanes close
         without an EOD sentinel. Reactions must be lane-scoped and deterministic
         for a given input order. Restore reconstructs runner state from replayed
-        EOD sentinels.
+        sentinels.
 
         The accumulator-only ``ctx["get_source_exhaustion"](lane_id)`` service
         returns a :class:`SourceExhaustion` snapshot of what this operator has
@@ -131,8 +129,7 @@ class Accumulator(ABC, Generic[T]):
         The runner updates it before calling this hook and retains it across
         epoch resets. It is a cheap local call, available during any accumulator
         call, including after ``flush(reset=True)``. EOD sentinels are emitted
-        independently of continuation policy. See
-        :doc:`/pipelines/user_defined_operators`.
+        regardless of continuation policy. See :doc:`/pipelines/user_defined_operators`.
 
         Return ready batches as in :meth:`push_many`. Keep tombstones in separate
         batches from data.

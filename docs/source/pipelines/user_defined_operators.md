@@ -203,14 +203,12 @@ the closing responsibilities it carries.
 
 (reacting-to-source-exhaustion)=
 
-**When a mixture component runs out.** Components can represent datasets, languages,
-or other source-defined categories. Suppose our operator holds back records from
-component B while waiting for more records from A. These could be English and German
-records from the same dataset. If A runs out, we may want to let B continue.
-Zephon reports this through an end-of-data (EOD) sentinel. `WorkChunk.source_exhausted`
-records the source exhaustion that causes the engine to emit this sentinel. Your
-accumulator handles it through `on_source_exhausted(lane_id, component_id)`; by default,
-this hook does nothing.
+**When a mixture component runs out.** Suppose our operator holds back records from B
+while waiting for more records from A. These could be languages within one dataset.
+If A runs out, we may want to let B continue. The work source reports this in
+`WorkChunk.source_exhausted`; Zephon emits an end-of-data (EOD) sentinel. Your accumulator
+can react by overriding `on_source_exhausted(lane_id, component_id)`; by default, it
+does nothing.
 
 This tells us something different from a change to the target mixture. The target says
 which proportions we want to produce. A curriculum might remove A for a while and bring
@@ -222,12 +220,12 @@ of the remaining components. An EOD sentinel lets it do this before records carr
 updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
-`StaticMixtureWorkSource` leaves this empty, so EOD sentinels do not relax mixture enforcement
-under its stop or repeat policies. In `accumulator()`, save the local callable
+`StaticMixtureWorkSource` leaves this empty, so EOD sentinels do not relax mixture
+enforcement under its stop or repeat policies. In `accumulator()`, save the local callable
 `ctx["get_source_exhaustion"]`. Calling it with a lane id returns an immutable
 `SourceExhaustion` snapshot: `exhausted` contains all observed exhausted component ids,
 and `continuing` is the subset listed by `WorkSource.continues_after_exhaustion()`.
-The engine marks each EOD sentinel with that policy. Components outside that subset
+The engine marks each sentinel with that policy. Components outside that subset
 still send EOD sentinels; they do not cause `ensure_mixture` to relax its target.
 This service is available only to accumulators, not worker `setup` or
 `process_many`, and never makes an IPC roundtrip.
@@ -241,12 +239,12 @@ EOD sentinel means it has already seen every record from that component.
 
 The runner owns these facts per operator and lane, updating them before invoking the
 hook at most once per component. It retains them across epoch flushes and reconstructs
-them from replayed EOD sentinels on checkpoint restore. The snapshot is available during any
+them from replayed sentinels on checkpoint restore. The snapshot is available during any
 accumulator call, including after `flush(reset=True)`. Keep the reaction lane-scoped
 and deterministic for a given input order. The hook returns `ReadyBatch` values just like
 `push_many`; if it drops records, use `tombstones_for_record` and return the tombstones in
-separate batches from data. Keep the usual `flush` handling too: an EOD sentinel describes an
-individual mixture component running out, rather than the whole pipeline finishing.
+separate batches from data. Keep the usual `flush` handling too: an EOD sentinel describes
+one component running out, rather than the whole pipeline finishing.
 
 **Operator validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and

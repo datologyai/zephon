@@ -973,14 +973,12 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
-        An end-of-data (EOD) sentinel reports that the work source has no more samples
-        for one mixture component in this lane; buffered records may still arrive
-        afterward. Components can represent datasets, languages, or other
-        source-defined categories. On receiving the sentinel, this operator removes
-        the component from the target, including explicit overrides, if listed by
-        ``WorkSource.continues_after_exhaustion()``, and renormalizes the
-        remaining weights. ``StaticMixtureWorkSource`` lists none. Late records follow
-        ``obsolete_drain_rate`` in both modes.
+        An end-of-data (EOD) sentinel signals that a component's source has run out
+        in this lane; buffered records may still arrive. For components listed by
+        ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
+        target, including explicit overrides, and renormalizes the remaining weights.
+        ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
+        in both modes.
 
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
