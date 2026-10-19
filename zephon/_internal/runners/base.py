@@ -109,7 +109,7 @@ class BaseOperatorState:
         self._create_accumulator()
 
     def _get_source_exhaustion(self, lane_id: int) -> SourceExhaustion:
-        """Read this operator's stream-positioned facts without IPC or copying."""
+        """Read this operator's EOD sentinel state without IPC or copying."""
         return self._source_exhaustion.get(lane_id, _NO_EXHAUSTION)
 
     def _create_accumulator(self) -> None:
@@ -207,7 +207,7 @@ class BaseOperatorState:
         any cross-invocation state needed for deterministic batching.
 
         Sentinels bypass ``push_many`` and ``process_many`` as individual batches.
-        EOD first calls ``on_source_exhausted``, without flushing or resetting.
+        An EOD sentinel calls ``on_source_exhausted``, without flushing or resetting.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
         to drain that lane's buffered data before the sentinel passes

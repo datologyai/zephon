@@ -973,9 +973,11 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
-        EOD removes components listed by ``WorkSource.continues_after_exhaustion()``
-        from the target, including explicit overrides, and renormalizes the remaining
-        weights. ``StaticMixtureWorkSource`` lists none. Late records follow
+        An end-of-dataset (EOD) sentinel reports that a component has no more source
+        samples; buffered records may still arrive afterward. On receiving it, this
+        operator removes the component from the target, including explicit overrides,
+        if listed by ``WorkSource.continues_after_exhaustion()``, and renormalizes the
+        remaining weights. ``StaticMixtureWorkSource`` lists none. Late records follow
         ``obsolete_drain_rate`` in both modes.
 
         Args:
@@ -1016,7 +1018,7 @@ class Pipeline:
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived
-                from chunk mixture via engine context. EOD handling also applies
+                from chunk mixture via engine context. EOD sentinel handling also applies
                 to this override.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.

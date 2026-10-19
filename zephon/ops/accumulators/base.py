@@ -18,13 +18,15 @@ ReadyBatch = tuple[list[T], int]
 
 @dataclass(frozen=True)
 class SourceExhaustion:
-    """Immutable source facts observed by one operator in one lane.
+    """Immutable end-of-dataset (EOD) sentinel state for one operator lane.
 
-    ``exhausted`` contains all components whose EOD reached the operator.
+    Each sentinel reports permanent source exhaustion; buffered records may still
+    arrive afterward. ``exhausted`` contains all components whose EOD sentinel
+    reached the operator.
     ``continuing`` is the subset listed by
     :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
     permits continuing without them. The runner updates this snapshot before
-    calling the exhaustion hook.
+    calling :meth:`Accumulator.on_source_exhausted`.
     """
 
     exhausted: frozenset[int] = frozenset()
@@ -110,24 +112,26 @@ class Accumulator(ABC, Generic[T]):
     def on_source_exhausted(
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[T]]:
-        """Handle an EOD notification for a component in this lane.
+        """Handle an end-of-dataset (EOD) sentinel for a component in this lane.
 
         The source has permanently run out, but buffered records may still arrive,
         even through order-preserving operators. The default leaves buffers untouched.
 
         Called at most once per component per lane stream; some lanes close
-        without a notification. Reactions must be lane-scoped and deterministic
-        for a given input order. Restore reconstructs runner state from notices.
+        without an EOD sentinel. Reactions must be lane-scoped and deterministic
+        for a given input order. Restore reconstructs runner state from replayed
+        EOD sentinels.
 
         The accumulator-only ``ctx["get_source_exhaustion"](lane_id)`` service
         returns a :class:`SourceExhaustion` snapshot of what this operator has
         seen on that lane: ``exhausted`` contains every component whose EOD
-        reached it, and ``continuing`` is the subset the source permits
+        sentinel reached it, and ``continuing`` is the subset the source permits
         continuing without, per ``WorkSource.continues_after_exhaustion()``.
         The runner updates it before calling this hook and retains it across
         epoch resets. It is a cheap local call, available during any accumulator
-        call, including after ``flush(reset=True)``. Notifications are independent
-        of continuation policy. See :doc:`/pipelines/user_defined_operators`.
+        call, including after ``flush(reset=True)``. EOD sentinels are emitted
+        independently of continuation policy. See
+        :doc:`/pipelines/user_defined_operators`.
 
         Return ready batches as in :meth:`push_many`. Keep tombstones in separate
         batches from data.

@@ -92,7 +92,7 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
     if isinstance(item, SampleRecord):
         if item.meta.is_sentinel and not item.meta.tombstone:
             raise ValueError(
-                "Flush and source-exhaustion controls cannot notify progress"
+                "Flush and end-of-dataset (EOD) sentinels cannot notify progress"
             )
         lane_id = item.meta.lane_id
         # Tombstones close real offsets but are not consumer deliveries.
@@ -172,7 +172,7 @@ def should_notify(item: StreamItem) -> bool:
 
 
 def source_exhausted_component(item: StreamItem) -> int | None:
-    """Return the notified component, including id zero, or None for other items."""
+    """Return an EOD sentinel's component, including zero, or None for other items."""
     if not isinstance(item, SampleRecord):
         return None
     component = item.meta.tags.get("_source_exhausted")
@@ -180,7 +180,7 @@ def source_exhausted_component(item: StreamItem) -> int | None:
 
 
 def source_exhaustion_continues(item: StreamItem) -> bool:
-    """Whether an EOD notice permits continuation without its component."""
+    """Whether an EOD sentinel permits continuation without its component."""
     return isinstance(item, SampleRecord) and bool(
         item.meta.tags.get(SOURCE_EXHAUSTION_CONTINUES_TAG, False)
     )

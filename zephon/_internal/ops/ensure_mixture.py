@@ -724,9 +724,11 @@ class EnsureMixture(BaseOp):
     tracks deficit (target - actual) and always picks the component most
     "owed" samples. This ensures smooth, deterministic convergence.
 
-    EOD removes components listed by ``WorkSource.continues_after_exhaustion()``
-    from the target, including explicit overrides, and renormalizes the remaining
-    weights. ``StaticMixtureWorkSource`` lists none. Late records follow
+    An end-of-dataset (EOD) sentinel reports that a component has no more source
+    samples; buffered records may still arrive afterward. On receiving it, this
+    operator removes the component from the target, including explicit overrides,
+    if listed by ``WorkSource.continues_after_exhaustion()``, and renormalizes the
+    remaining weights. ``StaticMixtureWorkSource`` lists none. Late records follow
     ``obsolete_drain_rate`` in both modes.
 
     Adaptive behavior:
@@ -773,7 +775,7 @@ class EnsureMixture(BaseOp):
             when ratios naturally fluctuate.
         mixture_override: Explicit mixture target {component_name: float}. If None,
             derived from chunk mixture via engine context. Names are converted to
-            component IDs. EOD handling also applies to this override.
+            component IDs. EOD sentinel handling also applies to this override.
         parallelism: Parallelism level for this operator.
     """
 

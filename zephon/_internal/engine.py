@@ -913,7 +913,7 @@ class Engine:
     def _make_source_exhausted_sentinel(
         lane_id: LaneId, component_id: int, *, continues: bool = False
     ) -> SampleRecord:
-        """Create an EOD control record; buffered data may still arrive later."""
+        """Create an end-of-dataset (EOD) sentinel; buffered data may arrive later."""
         return Engine._make_control_record(
             lane_id,
             {
@@ -925,10 +925,10 @@ class Engine:
     def _iter_chunk(
         self, lane_id: LaneId, cid: int, chunk: WorkChunk, announced: set[str]
     ) -> Iterator[EngineSample | SampleRecord]:
-        """Yield samples and each component's EOD once per lane stream.
+        """Yield samples and each component's EOD sentinel once per lane stream.
 
-        EOD follows the component's last sample in this chunk, or precedes the
-        chunk if the component is absent. Live input and replay use this path.
+        The sentinel follows the component's last sample in this chunk, or precedes
+        the chunk if the component is absent. Live input and replay use this path.
         """
         missing = announced.difference(chunk.source_exhausted)
         if missing:
