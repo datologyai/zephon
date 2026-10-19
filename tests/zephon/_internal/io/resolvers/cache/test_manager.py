@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import signal
 import threading
 import time
 import weakref
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import IO, Any, Mapping
 
 import pytest
+from filelock import BaseFileLock
 
 import zephon._internal.io.resolvers.cache.manager as manager_mod
 from tests._catalog_helpers import catalog_set_from_locators
@@ -1569,3 +1571,378 @@ def test_resolve_takes_over_preparing_from_dead_peer(tmp_path: Path) -> None:
         assert ref.raw.path.read_bytes() == data
     finally:
         mgr.close()
+
+
+# ---------------------------------------------------------------------------
+# Finalizer and session-lock coordination
+# ---------------------------------------------------------------------------
+
+
+def _run_bounded(fn: Any, timeout: float = 10.0) -> Any:
+    """Run *fn* on a daemon thread; fail if it exceeds *timeout* seconds."""
+    result: list[Any] = []
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            result.append(fn())
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert not worker.is_alive(), f"{fn.__name__} did not finish within {timeout}s"
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
+def _owner_instances(cache_root: Path, owner_key: str) -> int:
+    session_path = cache_root / ".zephon_cache_state" / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    entry = session["owners"].get(owner_key)
+    return 0 if entry is None else int(entry["instances"])
+
+
+def _wait_for_instances(
+    cache_root: Path, owner_key: str, expected: int, timeout: float = 5.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while _owner_instances(cache_root, owner_key) != expected:
+        assert time.monotonic() < deadline, (
+            f"owner instances stuck at {_owner_instances(cache_root, owner_key)}, "
+            f"expected {expected}"
+        )
+        time.sleep(0.01)
+
+
+def _shm_exists(name: str) -> bool:
+    from multiprocessing.shared_memory import SharedMemory
+
+    try:
+        shm = SharedMemory(name=name, create=False)
+    except FileNotFoundError:
+        return False
+    shm.close()
+    return True
+
+
+def _single_shard_setup(tmp_path: Path) -> tuple[Path, LocalFSBackend, ShardLocator]:
+    remote = tmp_path / "remote"
+    data = b"finalizer-overlap" * 8
+    _make_file(remote / "overlap.bin", data)
+    loc = _locator(
+        "demo", 400, str(remote), raw_name="overlap.bin", raw_bytes=len(data)
+    )
+    return tmp_path / "cache", LocalFSBackend(root=remote), loc
+
+
+def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC finalizing an old manager mid-acquisition of ``.reset.lock`` must not hang.
+
+    The new manager's ``FileLock`` holds the OS lock but is still inside
+    ``_acquire`` when the old manager's ``weakref.finalize`` callback runs.
+    The finalizer must return so acquisition can finish and release the lock.
+    """
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    mgr1 = _make_manager(cache_root, storage, [loc], persist_state=True)
+    mgr1.resolve(loc)
+    assert mgr1._shared is not None
+    old_shm_names = list(mgr1._shared.shm_names.values())
+    owner_key = mgr1._owner_key
+
+    orig_filelock = manager_mod.FileLock
+
+    def hooked_filelock(lock_file: str, *args: Any, **kwargs: Any) -> Any:
+        lock = orig_filelock(lock_file, *args, **kwargs)
+        if Path(lock_file).name == manager_mod._RESET_LOCK_FILENAME:
+            native_acquire = lock._acquire
+
+            def interrupted_acquire() -> None:
+                native_acquire()
+                if mgr1._close_finalizer.alive:
+                    assert lock.is_locked
+                    mgr1._close_finalizer()
+
+            lock._acquire = interrupted_acquire  # type: ignore[method-assign]
+        return lock
+
+    monkeypatch.setattr(manager_mod, "FileLock", hooked_filelock)
+    mgr2 = _run_bounded(
+        lambda: _make_manager(cache_root, storage, [loc], persist_state=True)
+    )
+    monkeypatch.setattr(manager_mod, "FileLock", orig_filelock)
+    try:
+        assert not mgr1._close_finalizer.alive, "finalizer never ran in the window"
+        # mgr1 remains counted while its release is queued, so mgr2 can join
+        # alongside it. Wait for cleanup to leave mgr2 as the only instance.
+        _wait_for_instances(cache_root, owner_key, 1)
+        assert mgr2.resolve(loc).cache_hit is True
+        assert mgr2._shared is not None
+        live_shm_names = list(mgr2._shared.shm_names.values())
+    finally:
+        mgr2.close()
+
+    assert _owner_instances(cache_root, owner_key) == 0
+    for name in old_shm_names + live_shm_names:
+        assert not _shm_exists(name)
+
+
+def test_finalizers_defer_while_this_thread_holds_reset_lock(tmp_path: Path) -> None:
+    """Finalizers run while the thread already holds ``.reset.lock`` must not block.
+
+    Covers GC firing mid-cleanup: several finalizers defer, one background
+    thread applies them all once the lock is free, and the surviving
+    manager keeps its ownership and SHM.
+    """
+    from filelock import FileLock
+
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    doomed = [
+        _make_manager(cache_root, storage, [loc], persist_state=True) for _ in range(4)
+    ]
+    owner_key = survivor._owner_key
+    assert _owner_instances(cache_root, owner_key) == 5
+    try:
+
+        def finalize_under_held_lock() -> None:
+            with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
+                for mgr in doomed:
+                    mgr._close_finalizer()
+                # No owner release can run while this lock is held.
+                assert _owner_instances(cache_root, owner_key) == 5
+
+        _run_bounded(finalize_under_held_lock)
+        assert all(not mgr._close_finalizer.alive for mgr in doomed)
+        _wait_for_instances(cache_root, owner_key, 1)
+        release_threads = [
+            t for t in threading.enumerate() if t.name == "zephon-cache-owner-release"
+        ]
+        assert len(release_threads) == 1
+        assert survivor._shared is not None
+        assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
+    finally:
+        survivor.close()
+    assert _owner_instances(cache_root, owner_key) == 0
+
+
+def test_close_waits_for_reset_lock_under_contention(tmp_path: Path) -> None:
+    """Explicit ``close()`` finishes its owner release before returning."""
+    from filelock import FileLock
+
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    mgr1 = _make_manager(cache_root, storage, [loc], persist_state=True)
+    mgr2 = _make_manager(cache_root, storage, [loc], persist_state=True)
+    owner_key = mgr1._owner_key
+    try:
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_reset_lock() -> None:
+            with FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME)):
+                held.set()
+                release.wait(5.0)
+
+        holder = threading.Thread(target=hold_reset_lock, daemon=True)
+        holder.start()
+        assert held.wait(5.0)
+        threading.Timer(0.2, release.set).start()
+
+        _run_bounded(mgr1.close)
+        assert release.is_set(), "close() returned while .reset.lock was held"
+        assert _owner_instances(cache_root, owner_key) == 1
+        holder.join(5.0)
+    finally:
+        mgr2.close()
+    assert _owner_instances(cache_root, owner_key) == 0
+
+
+def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC firing a second finalizer mid-release must defer, not deadlock.
+
+    The outer finalizer holds ``.reset.lock`` while it rewrites
+    ``session.json``; an allocation there can collect another manager,
+    whose finalizer then finds the lock held by this same thread.
+    """
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    outer = _make_manager(cache_root, storage, [loc], persist_state=True)
+    inner = _make_manager(cache_root, storage, [loc], persist_state=True)
+    owner_key = survivor._owner_key
+    assert _owner_instances(cache_root, owner_key) == 3
+
+    orig_release_locked = manager_mod._release_session_owner_locked
+
+    def release_with_nested_gc(
+        session_path: Path, key: str, session_id: str | None
+    ) -> None:
+        if inner._close_finalizer.alive:
+            inner._close_finalizer()
+            # The inner owner remains counted while its release is queued.
+            assert _owner_instances(cache_root, owner_key) == 3
+        orig_release_locked(session_path, key, session_id)
+
+    monkeypatch.setattr(
+        manager_mod, "_release_session_owner_locked", release_with_nested_gc
+    )
+    try:
+        _run_bounded(outer._close_finalizer)
+        assert not outer._close_finalizer.alive
+        assert not inner._close_finalizer.alive
+        _wait_for_instances(cache_root, owner_key, 1)
+        assert survivor._shared is not None
+        assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
+    finally:
+        survivor.close()
+    assert _owner_instances(cache_root, owner_key) == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_does_not_inherit_deferred_releases(tmp_path: Path) -> None:
+    """A child must not replay a parent's queued release against live owners."""
+    from filelock import FileLock
+
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    doomed = [
+        _make_manager(cache_root, storage, [loc], persist_state=True) for _ in range(2)
+    ]
+    owner_key = survivor._owner_key
+    try:
+        reset_lock = FileLock(str(cache_root / manager_mod._RESET_LOCK_FILENAME))
+        with reset_lock:
+            for mgr in doomed:
+                mgr._close_finalizer()
+            # The release thread takes the first release and blocks on the
+            # lock; the second stays queued across the fork.
+            deadline = time.monotonic() + 5.0
+            while manager_mod._deferred_releases.qsize() != 1:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+
+            read_fd, write_fd = os.pipe()
+            child_pid = os.fork()
+            if child_pid == 0:  # pragma: no cover - parent observes the result
+                os.close(read_fd)
+                pending = manager_mod._deferred_releases.qsize()
+                os.write(write_fd, str(pending).encode())
+                os.close(write_fd)
+                os._exit(0)
+
+            os.close(write_fd)
+
+            def read_child_result() -> tuple[str, int]:
+                pending = os.read(read_fd, 64).decode()
+                _, status = os.waitpid(child_pid, 0)
+                return pending, status
+
+            try:
+                child_pending, status = _run_bounded(read_child_result)
+            except AssertionError:
+                os.kill(child_pid, signal.SIGKILL)
+                raise
+            finally:
+                os.close(read_fd)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert child_pending == "0"
+
+        _wait_for_instances(cache_root, owner_key, 1)
+        assert survivor._shared is not None
+        assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
+    finally:
+        survivor.close()
+    assert _owner_instances(cache_root, owner_key) == 0
+
+
+@pytest.mark.parametrize("manager_kind", ["creator", "joiner"])
+@pytest.mark.parametrize("release_mode", ["close", "finalizer", "deferred"])
+def test_old_manager_release_preserves_replacement_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_kind: str,
+    release_mode: str,
+) -> None:
+    """Cleanup for a replaced session preserves the current owners and SHM."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    old = _make_manager(cache_root, storage, [loc], persist_state=True)
+    if manager_kind == "joiner":
+        creator = old
+        old = _make_manager(cache_root, storage, [loc], persist_state=True)
+        creator.close()
+    old.resolve(loc)
+    old_session = json.loads(old._session_path.read_text(encoding="utf-8"))
+    owner_key = old._owner_key
+    assert _owner_instances(cache_root, owner_key) == 1
+
+    # Missing SHM triggers a new session even though this process is still alive.
+    manager_mod.CacheSharedState.unlink_by_names(old_session["shm_names"])
+    release_done = threading.Event()
+    if release_mode == "deferred":
+        original_init = CacheManager._run_session_state_machine
+        original_release = manager_mod._release_session_owner
+
+        def init_with_pending_release(self: CacheManager) -> None:
+            # Initialization holds a different FileLock on the same path, so
+            # the finalizer queues its release before the session is replaced.
+            old._close_finalizer()
+            original_init(self)
+
+        def release_and_signal(
+            reset_lock: BaseFileLock,
+            session_path: Path,
+            key: str,
+            session_id: str | None,
+        ) -> None:
+            original_release(reset_lock, session_path, key, session_id)
+            if session_id == old_session["session_id"]:
+                release_done.set()
+
+        monkeypatch.setattr(
+            CacheManager, "_run_session_state_machine", init_with_pending_release
+        )
+        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
+
+    new: CacheManager | None = None
+    try:
+        new = _make_manager(cache_root, storage, [loc], persist_state=True)
+        if release_mode == "close":
+            old.close()
+        elif release_mode == "finalizer":
+            old._close_finalizer()
+        else:
+            assert release_done.wait(5.0), "deferred release did not finish"
+
+        assert not old._close_finalizer.alive
+        assert old._shared is not None
+        assert old._shared._closed
+        current = json.loads(new._session_path.read_text(encoding="utf-8"))
+        assert current["session_id"] != old_session["session_id"]
+        assert current["shm_names"] != old_session["shm_names"]
+        assert _owner_instances(cache_root, owner_key) == 1
+        assert all(_shm_exists(name) for name in current["shm_names"].values())
+        assert new.resolve(loc).cache_hit
+
+        # A peer joins the replacement session without rebuilding its state.
+        peer = _make_manager(cache_root, storage, [loc], persist_state=True)
+        try:
+            assert peer._shared is not None
+            assert peer._shared.shm_names == current["shm_names"]
+            assert _owner_instances(cache_root, owner_key) == 2
+        finally:
+            peer.close()
+        assert _owner_instances(cache_root, owner_key) == 1
+    finally:
+        old.close()
+        if new is not None:
+            new.close()
+
+    assert _owner_instances(cache_root, owner_key) == 0
+    assert all(not _shm_exists(name) for name in current["shm_names"].values())

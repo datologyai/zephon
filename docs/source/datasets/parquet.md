@@ -1,18 +1,18 @@
 # Parquet
 
-**What Is It?** Apache Parquet is an open-source and widely-adopted columnar file format
+**What is it?** Apache Parquet is an open-source and widely-adopted columnar file format
 for data storage and retrieval. It is ubiquitous in the data warehouse community as a way
 of efficiently storing and querying datasets, and it can be read and written by most
 databases and analytical data processing tools in every major programming language. It
 strikes a reasonable balance between the easy inspection and editing of JSONL and the
 training efficiency of binary shard formats.
 
-**What Is It Good For?** Parquet is the most common choice for training datasets that have
+**What is it good for?** Parquet is the most common choice for training datasets that have
 a natural tabular structure, or when the training is being done at a company that has
 standardized on Parquet for other data workloads and has lots of tooling to support
 working with it.
 
-**What Is It Bad For?** Parquet's columnar layout is often less efficient when your
+**What is it bad for?** Parquet's columnar layout is often less efficient when your
 training curriculum requires frequent random access to individual records, which is
 typically the case. Zephon needs to read and decode the row groups containing the
 requested samples, which often requires processing more data than the samples themselves.
@@ -21,7 +21,7 @@ more important for you to think about when you are training against Parquet data
 Unless there is an organizational reason to use Parquet, we prefer training-optimized
 binary shard formats over it.
 
-**How Does Zephon Collect Dataset Metadata?** Each `*.parquet` file under the Dataset path
+**How does Zephon collect dataset metadata?** Each `*.parquet` file under the Dataset path
 is a shard. Parquet embeds useful metadata in each file, including its row count, so
 Zephon can discover a Dataset without a separate index file and without having to parse
 each record in the file, as it does for JSONL files. Still, the footer of each file needs
@@ -71,7 +71,7 @@ timezone-bearing timestamps represent the UTC instant without retaining the time
 
 ## Reader configuration
 
-**Caching Reads.** Zephon caches up to 256 Parquet footers in memory per fetch replica.
+**Caching reads.** Zephon caches up to 256 Parquet footers in memory per fetch replica.
 The `metadata_cache_entries` option controls this limit for both Parquet and Vortex;
 zero disables it. Wide files with many row groups have larger footers and may need a
 smaller limit.
@@ -90,7 +90,7 @@ pipeline.options(
 )
 ```
 
-**Worker Threads.** Arrow's CPU and I/O pools are shared within each process, including
+**Worker threads.** Arrow's CPU and I/O pools are shared within each process, including
 by other formats that use Arrow. Zephon defaults both pools to one thread to avoid
 multiplying thread counts across fetch processes and training ranks. Parquet also
 reads columns sequentially by default; separate fetches can still run concurrently.

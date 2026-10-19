@@ -1,4 +1,4 @@
-# Working with Datasets
+# Working with datasets
 
 **What is a `Dataset`?** A `Dataset` is how Zephon refers to a collection of training
 samples that are organized into individual files (which we refer to as *shards*)
@@ -14,7 +14,7 @@ jsonl/parquet/litdata/…).
 
 To be precise, a `Dataset` is an abstraction in the context of Zephon's built-in
 `StaticMixtureWorkSource`, as detailed in
-[WorkSources: The Training Curriculum](../worksources/index.md). We will discuss
+[WorkSources: the training curriculum](../worksources/index.md). We will discuss
 WorkSources later on, but note that if you use another `WorkSource` implementation, it
 might use different concepts.
 

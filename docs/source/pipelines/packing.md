@@ -19,7 +19,7 @@ document boundaries within a single training sequence, or if keeping a single re
 example is important for the workload, then packing can be excluded from your pipeline
 configuration.
 
-**Choosing A Packing Operator.** Zephon ships with two built-in packing operators that
+**Choosing a packing operator.** Zephon ships with two built-in packing operators that
 support a common set of packing algorithms and configuration options: `pack_flat` and
 `pack_sequences`. Both packing operators take a `max_length` argument that defines the
 maximum token capacity of each packed sequence that will be created. This is typically
@@ -57,7 +57,7 @@ below), this list preserves the individual input payloads, but with `wrap` and
 so those algorithms should not be used when you need to retain arbitrary fields from the
 original records.
 
-**Choosing A Packing Algorithm.** While the packing operator determines the shape of the
+**Choosing a packing algorithm.** While the packing operator determines the shape of the
 packed output records, the packing algorithm determines how Zephon chooses to fill those
 packed outputs. Each of the algorithms below can be used with either `pack_flat` or
 `pack_sequences`; the main choice that you need to make is whether you need an algorithm
@@ -110,7 +110,7 @@ using the required `pad_token_id` argument. This also applies to the partial seq
 produced by `best_fit_wrap` at each flush. You don't need to mask this padding yourself:
 `pack_flat` records how much padding it added, and `SampleBatch.to_training` excludes
 those positions from the loss (see
-[Building Training Batches](building_training_batches.md)). The `pack_sequences` operator
+[Building training batches](building_training_batches.md)). The `pack_sequences` operator
 simply returns the constituent payloads without doing any additional padding.
 
 Most users should opt for the `wrap` algorithm when they are trying to maximize token
@@ -118,7 +118,7 @@ utilization and the `first_fit` algorithm when they must keep records intact. Th
 `pack_flat` and `pack_sequences` entries in the [API reference](../api/pipeline.rst)
 cover the `best_fit`, `best_fit_wrap`, and other packing options.
 
-**Packing Homogeneity.** By default, Zephon can pack samples from different upstream
+**Packing homogeneity.** By default, Zephon can pack samples from different upstream
 `Dataset` components together into a single training sequence. For many training
 pipelines this is perfectly fine, but there are cases where you might want to enforce
 some rules about the structure of the samples that the model will encounter in the
