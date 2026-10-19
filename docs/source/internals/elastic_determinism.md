@@ -189,7 +189,7 @@ does which work.
 
 `"contiguous"` is the default and gives each group a contiguous block of lane IDs, so with
 `canonical_replicas=8` and `dp_degree=3` the groups get `[0,1,2]`, `[3,4,5]`, and `[6,7]`.
-Adjacent lanes tend to read adjacent data, which makes this the choice that maximises
+Adjacent lanes tend to read adjacent data, which makes this the choice that maximizes
 shard and block-cache locality.
 
 `"interleaved"` deals lanes round-robin, so lane *i* goes to group *i % num_groups* and

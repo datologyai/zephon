@@ -136,7 +136,7 @@ micro-batch boundaries depend only on counts and never on the clock. A custom op
 that builds a `CountingAccumulator` with a latency bound has to do the same: `accumulator()`
 receives `deterministic`, so check it and drop the latency bound when it is `True`.
 
-The specialised ones ship with the operators that need them, and you never construct one
+The specialized ones ship with the operators that need them, and you never construct one
 yourself. The accumulator behind `pack_sequences` keeps per-lane bins and emits when a
 bin's remaining capacity drops below the minimum useful sequence length or when too many
 bins are open. The one behind `ensure_mixture` keeps per-lane buffers grouped by mixture

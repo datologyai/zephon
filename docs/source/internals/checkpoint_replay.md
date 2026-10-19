@@ -140,7 +140,7 @@ Epoch 0          Epoch 1          Epoch 2
 `flush_every_k_chunks` controls. What that page leaves implicit is what a flush costs at
 the operator level, since each one interrupts an accumulator mid-stride: the packer emits
 partially filled bins and pays for them in padding, the shuffle buffer emits a smaller
-window and randomises less, and the mixture corrector drains mid-rebalance.
+window and randomizes less, and the mixture corrector drains mid-rebalance.
 
 On a non-monotonic `Pipeline`, setting `flush_every_k_chunks=0` is an error, because
 without sentinels the accumulator state depends on unbounded history and we cannot evict
@@ -181,7 +181,7 @@ Epoch 1 (chunks 2–3):  still in progress    → keep
 Epoch 2 (chunks 4–5):  not started          → keep
 ```
 
-Only a lane's own recorded boundaries authorise eviction for that lane. The restriction
+Only a lane's own recorded boundaries authorize eviction for that lane. The restriction
 matters because sentinels are per-lane, so a boundary established when a different lane
 flushed says nothing about this lane's accumulator history. Until a lane has recorded a
 boundary of its own, Zephon retains its entire open epoch even when every offset in it is

@@ -7,7 +7,7 @@ those built-ins plus the `map_transform` operator (see
 examine the case where these options are not enough; e.g. your data has a peculiar schema,
 or where a filtering decision depends on samples you have already seen, or where a
 transformation is expensive or different enough that you need fine-tuned control over how
-it is batched and parallelised.
+it is batched and parallelized.
 
 Whenever you call any operator such as `tokenize` or `pack_flat`, the machinery is exactly
 the same whether it is a Zephon-shipped operator or a custom one. This means that a custom

@@ -1,4 +1,4 @@
-# Overview
+# Internals overview
 
 The rest of this guide describes Zephon from the outside: what you configure, what you
 call, and what comes back out. This section describes it from the inside. You will want it
@@ -12,7 +12,7 @@ knobs exist and what they do, [How pipelines run](../pipelines/how_pipelines_run
 [Inspecting and tuning pipelines](../pipelines/inspecting_and_tuning_pipelines.md) are
 where you want to be.
 
-**A warning about stability.** These pages describe behaviour rather than implementation.
+**A warning about stability.** These pages describe behavior rather than implementation.
 Most of the machinery involved lives in private modules whose layout and signatures we
 change without notice, so we have tried to write down the contract it implements and to
 name things the way you would reach them: the operator you called, the option you set, the
