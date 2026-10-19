@@ -54,11 +54,15 @@ class ExpandChat(BaseOp):
         value = record.payload
         for key in self._field_path:
             if not isinstance(value, Mapping) or key not in value:
-                raise ValueError(f"expand_chat: missing field {self.field!r}")
+                raise ValueError(
+                    f"expand_chat: sample {record.meta.sample_id!r} has "
+                    + f"no {self.field!r} field"
+                )
             value = value[key]
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
             raise TypeError(
-                f"expand_chat: {self.field!r} must be a sequence of messages"
+                f"expand_chat: field {self.field!r} of sample "
+                + f"{record.meta.sample_id!r} must be a sequence of messages"
             )
         for index, message in enumerate(value):
             if (
@@ -67,7 +71,8 @@ class ExpandChat(BaseOp):
                 or not message["role"]
             ):
                 raise ValueError(
-                    f"expand_chat: message {index} must have a non-empty string role"
+                    f"expand_chat: message {index} in field {self.field!r} of "
+                    + f"sample {record.meta.sample_id!r} must have a non-empty string role"
                 )
         return cast(Sequence[Mapping[str, Any]], value)
 

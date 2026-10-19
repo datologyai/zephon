@@ -20,20 +20,27 @@ def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
     assert pipe._options.shm_coalesce
 
 
-def test_pipeline_replay_and_field_validation() -> None:
+@pytest.mark.parametrize("rename_messages", [False, True])
+def test_pipeline_replays_chat_prefixes(rename_messages: bool) -> None:
     from zephon.work.token_estimation import _PreTokenizeReplay
 
     payload = {
         "messages": [
-            {"role": role, "content": "text"} for role in ("user", "assistant") * 2
+            {"role": role, "content": str(index)}
+            for index, role in enumerate(("user", "assistant") * 2)
         ]
     }
     work = FakeIndexableWorkSource(make_inmem_dataset("chat", [payload]), chunk_size=1)
-    pipe = Pipeline(work).expand_chat().tokenize_chat(tokenizer_id="unused")
+    pipe = Pipeline(work).expand_chat()
+    field = "messages"
+    if rename_messages:
+        pipe = pipe.map_transform(lambda p: {"chat": p["messages"]})
+        field = "chat"
+    pipe = pipe.tokenize_chat(tokenizer_id="unused", field=field)
     replay = pipe._build_pre_tokenize_replay(len(pipe._graph.nodes) - 1)
     assert isinstance(replay, _PreTokenizeReplay)
-    assert [len(p["messages"]) for p in replay.apply(payload)] == [2, 4]
+    assert replay.apply(payload) == [
+        {field: payload["messages"][:2]},
+        {field: payload["messages"]},
+    ]
     assert not pipe.is_indexable
-    Pipeline(work).expand_chat().map_transform(
-        lambda p: {"chat": p["messages"]}
-    ).tokenize_chat(tokenizer_id="unused", field="chat")
