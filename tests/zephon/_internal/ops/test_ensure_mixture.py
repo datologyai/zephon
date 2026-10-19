@@ -903,16 +903,70 @@ class TestRetirementGroups:
 
     @pytest.mark.parametrize("weight_by", ["samples", "auto"])
     def test_packs_credit_all_retired_and_live_contributions(self, weight_by) -> None:
-        acc = self.accumulator([{0: 9, 1: 1}, {2: 1}], weight_by=weight_by)
+        acc = self.accumulator([{0: 9, 1: 1}, {2: 1, 3: 1}], weight_by=weight_by)
         packs = [TestRetiredRecords.pack(i, {0: 8, 1: 1, 2: 4}) for i in range(3)]
         b = [_rec(10 + i, component_id=1, tokens=1) for i in range(3)]
-        live = [_rec(20 + i, component_id=2, chunk=1, tokens=1) for i in range(20)]
+        live = [
+            _rec(20 + i, component_id=2 + i % 2, chunk=1, tokens=1) for i in range(40)
+        ]
         out = _flatten_ready(acc.push_many(packs + b + live))
-        assert out[10::11] == packs[:2]
-        selector = acc._lanes[0].swrr
-        assert selector is not None
-        assert selector.total_emitted == 46  # 20 live + 2 * (8 A + 1 B + 4 C)
-        assert selector.get_actual_ratios()[2] == pytest.approx(28 / 46)
+        assert out[10::11][:2] == packs[:2]
+        # The first pack serves four C contributions; the live selector must
+        # then serve four D records to restore its 1:1 mixture.
+        assert [_get_component(r.meta) for r in out[11:15]] == [3] * 4
+        assert _get_component(out[15].meta) == 2
+
+    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
+    @pytest.mark.parametrize("limit", [None, 1000])
+    def test_fallback_stream_does_not_starve_retired_tail(
+        self, weight_by, limit
+    ) -> None:
+        config = _make_config(weight_by=weight_by, max_buffer_size=limit)
+        config.mixture_override_by_id = {0: 1, 1: 1}
+        acc = EnsureMixtureAccumulator(
+            config,
+            get_chunk_mixture=lambda lane, chunk: {0: 1, 1: 1, 2: 1},
+            get_source_exhaustion=_ExhaustionContext(frozenset({0})),
+        )
+        first_b = _rec(0, component_id=1, tokens=3)
+        assert acc.push_many([first_b]) == []
+        out = _flatten_ready(_notify_exhaustion(acc, 0, 0))
+        assert out == [first_b]
+        late_a = [_rec(10 + i, tokens=7) for i in range(3)]
+        assert acc.push_many(late_a) == []
+        fallback = [_rec(100 + i, component_id=2, tokens=5) for i in range(40)]
+        for i, c in enumerate(fallback):
+            # C never belonged to the override, and keeps refilling the fallback.
+            b = _rec(200 + i, component_id=1, tokens=3)
+            out.extend(_flatten_ready(acc.push_many([b, c])))
+        assert out[10::11] == [*late_a, fallback[0]]
+        tail = _flatten_ready(acc.flush())
+        assert [r.meta.sample_id for r in tail] == [
+            r.meta.sample_id for r in fallback[1:]
+        ]
+        assert all(r.meta.tombstone == (limit is None) for r in tail)
+        assert not acc.has_pending_data()
+
+    @pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+    def test_separate_eods_retire_in_notification_order(self, order) -> None:
+        acc = _make_accumulator_with_chunk_mixture(
+            {0: 9, 1: 1, 2: 20},
+            max_buffer_size=None,
+            continues_after_exhaustion=frozenset({0, 1}),
+        )
+        tails = {
+            cid: [_rec(10 * cid + i, component_id=cid) for i in range(3)]
+            for cid in order
+        }
+        assert acc.push_many(tails[0] + tails[1]) == []
+        for cid in order:
+            assert _notify_exhaustion(acc, 0, cid) == []
+        # Both notices concern chunk 0, but each changes the effective target
+        # separately. Each finite tail gets its turn in the shared drain slots.
+        live = [_rec(100 + i, component_id=2) for i in range(60)]
+        out = _flatten_ready(acc.push_many(live))
+        assert out[10::11] == tails[order[0]] + tails[order[1]]
+        assert not acc.has_pending_data()
 
     def test_groups_share_slots_and_skip_empty_older_groups(self) -> None:
         acc = self.accumulator([{0: 9, 1: 1}, {2: 1}, {3: 1}])
