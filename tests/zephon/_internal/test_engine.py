@@ -20,6 +20,7 @@ from zephon._internal.notify import (
     should_notify,
     source_exhausted_component,
     source_exhaustion_continues,
+    source_exhaustion_is_final,
 )
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
@@ -948,18 +949,20 @@ class _StubEngine:
         Engine._make_source_exhausted_sentinel
     )
 
-    def __init__(self) -> None:
-        self._ids: dict[str, int] = {}
+    def __init__(self, component_ids: dict[str, int] | None = None) -> None:
+        self._ids = component_ids if component_ids is not None else {"a": 0, "b": 1}
+        self._component_to_id = self._ids
         self._continues_after_exhaustion: frozenset[int] = frozenset()
 
     def _get_component_id(self, name: str) -> int:
-        return self._ids.setdefault(name, len(self._ids))
+        return self._ids[name]
 
 
 def _weave(
     chunk: WorkChunk, lane_id: int = 0, cid: int = 7
 ) -> tuple[_StubEngine, list[EngineSample | SampleRecord]]:
-    stub = _StubEngine()
+    names = dict.fromkeys([*chunk.components, *chunk.source_exhausted])
+    stub = _StubEngine({name: i for i, name in enumerate(names)})
     items = list(Engine._iter_chunk(stub, lane_id, cid, chunk, set()))
     return stub, items
 
@@ -975,8 +978,7 @@ class TestSourceExhaustion:
     def test_continuation_policy_on_live_and_replayed_notices(
         self, present: bool
     ) -> None:
-        stub = _StubEngine()
-        stub._ids = {"allowed": 7, "stop": 2, "live": 11}
+        stub = _StubEngine({"allowed": 7, "stop": 2, "live": 11})
         stub._continues_after_exhaustion = frozenset({7})
         components = {"live": [(2, 0, 0)]}
         if present:
@@ -987,6 +989,7 @@ class TestSourceExhaustion:
         announced: set[str] = set()
         items = list(Engine._iter_chunk(stub, 3, 7, chunk, announced))
         notices = _sentinels(items)
+        assert not any(source_exhaustion_is_final(n) for n in notices)
         assert {
             source_exhausted_component(n): source_exhaustion_continues(n)
             for n in notices
@@ -1006,6 +1009,47 @@ class TestSourceExhaustion:
         # original EOD preceded the replay window and is announced up front.
         restored = WorkChunk.from_state(chunk.state_dict())
         assert list(Engine._iter_chunk(stub, 3, 7, restored, set())) == items
+
+    @pytest.mark.parametrize("other_component", [False, True])
+    def test_final_eod_reconstructed_when_replay_starts_after_earlier_exhaustion(
+        self, other_component: bool
+    ) -> None:
+        ids = {"a": 7, "b": 2}
+        if other_component:
+            ids["future"] = 11
+        stub = _StubEngine(ids)
+        announced: set[str] = set()
+        first = WorkChunk(components={"a": [(0, 0, 0)]}, source_exhausted=("a",))
+        early = list(Engine._iter_chunk(stub, 0, 0, first, announced))
+        assert not any(source_exhaustion_is_final(n) for n in _sentinels(early))
+        last = WorkChunk(
+            components={"b": [(1, 0, 0)]},
+            target_mixture={"b": 1.0},
+            source_exhausted=("a", "b"),
+        )
+        live = list(Engine._iter_chunk(stub, 0, 1, last, announced))
+        replay = list(
+            Engine._iter_chunk(
+                stub, 0, 1, WorkChunk.from_state(last.state_dict()), set()
+            )
+        )
+        assert source_exhausted_component(replay[0]) == 7  # Absent A is re-announced.
+        assert not source_exhaustion_is_final(replay[0])
+        assert replay[1:] == live
+        assert source_exhausted_component(live[-1]) == 2
+        assert source_exhaustion_is_final(live[-1]) is (not other_component)
+
+    def test_only_last_notice_is_final_when_components_end_in_same_chunk(self) -> None:
+        chunk = WorkChunk(
+            components={"a": [(0, 0, i) for i in range(3)], "b": [(1, 0, 0)]},
+            source_exhausted=("a", "b"),
+        )
+        _, items = _weave(chunk)
+        notices = _sentinels(items)
+        assert [source_exhaustion_is_final(n) for n in notices] == [False, True]
+        samples = [item for item in items if not isinstance(item, SampleRecord)]
+        assert source_exhausted_component(notices[-1]) == samples[-1][4]
+        assert _weave(WorkChunk.from_state(chunk.state_dict()))[1] == items
 
     @pytest.mark.parametrize(
         "revived,match",

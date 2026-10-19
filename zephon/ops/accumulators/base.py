@@ -25,10 +25,14 @@ class SourceExhaustion:
     :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
     permits continuing without them. The runner updates this snapshot before
     calling :meth:`Accumulator.on_source_exhausted`.
+
+    ``final_component`` identifies the EOD that completed exhaustion of all
+    declared source components. It does not mean buffered records have drained.
     """
 
     exhausted: frozenset[int] = frozenset()
     continuing: frozenset[int] = frozenset()
+    final_component: int | None = None
 
 
 class Accumulator(ABC, Generic[T]):

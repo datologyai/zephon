@@ -101,9 +101,13 @@ You can instead control what happens when an individual dataset runs out of samp
   useful when your training loop controls termination through a fixed number of steps or
   tokens.
 - `exhausted_policy="redistribute"` reads each dataset once, then redistributes its weight
-  proportionally over the remaining datasets. This keeps all samples, including a short
-  final chunk, and stops when every dataset has run out. In token mode, redistribution
-  preserves the survivors' relative token weights.
+  proportionally over the remaining datasets. The source keeps every sample; each dataset's
+  last samples may form a short chunk when it runs out. The source stops when every dataset
+  has run out. In token mode, redistribution preserves the survivors' relative token weights.
+
+Downstream, strict `ensure_mixture` can still discard leftovers from earlier retired datasets.
+Use bounded mode when preserving every record matters; see
+[maintaining mixtures](../pipelines/shuffling_and_maintaining_mixtures.md).
 
 With `exhausted_policy="repeat"`, you can also set `max_repeats=N`. This allows each
 dataset its initial pass plus at most `N` additional passes. The entire WorkSource stops

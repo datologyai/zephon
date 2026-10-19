@@ -295,11 +295,11 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         """Remove an exhausted component from the target if source policy allows."""
         if self._get_source_exhaustion is None:
             return []
-        exhausted = self._get_source_exhaustion(lane_id).continuing
-        if component_id not in exhausted:
+        exhaustion = self._get_source_exhaustion(lane_id)
+        if component_id not in exhaustion.continuing:
             return []
         state = self._lanes[lane_id]
-        state.removed_by_exhaustion = exhausted
+        state.removed_by_exhaustion = self._exhaustion_removals(exhaustion)
         if state.swrr is not None:
             self._set_target(state, state.swrr.target_ratios)
         # Release buffered survivors now; there may be no further input.
@@ -445,11 +445,22 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             for cid, count in meta.component_sample_counts.items()
         }
 
+    def _exhaustion_removals(self, exhaustion: SourceExhaustion) -> frozenset[int]:
+        """Keep the final source component eligible under the existing strict target."""
+        if (
+            self._config.max_buffer_size is None
+            and exhaustion.final_component is not None
+        ):
+            # The runner retains this fact across epoch resets and reconstructs it
+            # on replay. Never add a component excluded by the target/override.
+            return exhaustion.continuing - {exhaustion.final_component}
+        return exhaustion.continuing
+
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
         """Adopt the operator override, or the chunk target if no override is set."""
         if state.removed_by_exhaustion is None:
             state.removed_by_exhaustion = (
-                self._get_source_exhaustion(lane_id).continuing
+                self._exhaustion_removals(self._get_source_exhaustion(lane_id))
                 if self._get_source_exhaustion is not None
                 else frozenset()
             )
@@ -730,6 +741,8 @@ class EnsureMixture(BaseOp):
     target, including explicit overrides, and renormalizes the remaining weights.
     ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
     Late records follow ``obsolete_drain_rate`` in both modes.
+    Strict mode keeps the final source component eligible if it is in the target;
+    its EOD does not retire that component's in-flight tail.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission

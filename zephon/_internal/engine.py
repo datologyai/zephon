@@ -58,7 +58,11 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
-from zephon._internal.notify import SOURCE_EXHAUSTION_CONTINUES_TAG, is_sentinel
+from zephon._internal.notify import (
+    SOURCE_EXHAUSTION_CONTINUES_TAG,
+    SOURCE_EXHAUSTION_FINAL_TAG,
+    is_sentinel,
+)
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
 from zephon._internal.replay import ReplayConfigService
@@ -911,7 +915,11 @@ class Engine:
 
     @staticmethod
     def _make_source_exhausted_sentinel(
-        lane_id: LaneId, component_id: int, *, continues: bool = False
+        lane_id: LaneId,
+        component_id: int,
+        *,
+        continues: bool = False,
+        final: bool = False,
     ) -> SampleRecord:
         """Create an end-of-data (EOD) sentinel; buffered data may arrive later."""
         return Engine._make_control_record(
@@ -919,6 +927,7 @@ class Engine:
             {
                 "_source_exhausted": component_id,
                 SOURCE_EXHAUSTION_CONTINUES_TAG: continues,
+                SOURCE_EXHAUSTION_FINAL_TAG: final,
             },
         )
 
@@ -929,6 +938,8 @@ class Engine:
 
         The sentinel follows the component's last sample in this chunk, or precedes
         the chunk if the component is absent. Live input and replay use this path.
+        The notice completing the declared vocabulary is final. Cumulative stamps
+        reconstruct that distinction even when replay starts after earlier EODs.
         """
         missing = announced.difference(chunk.source_exhausted)
         if missing:
@@ -956,6 +967,7 @@ class Engine:
                     lane_id,
                     component_id,
                     continues=component_id in self._continues_after_exhaustion,
+                    final=len(announced) == len(self._component_to_id),
                 )
         get_id = self._get_component_id
         if not remaining:
@@ -975,6 +987,7 @@ class Engine:
                         lane_id,
                         component_id,
                         continues=component_id in self._continues_after_exhaustion,
+                        final=len(announced) == len(self._component_to_id),
                     )
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:

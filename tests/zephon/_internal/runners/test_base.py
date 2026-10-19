@@ -757,10 +757,12 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     assert state._get_source_exhaustion(3) is snapshot
     assert hooks == [(3, 7)]  # No synthetic hook on epoch reset.
     permitted = Engine._make_source_exhausted_sentinel(
-        lane_id=3, component_id=2, continues=True
+        lane_id=3, component_id=2, continues=True, final=True
     )
     state.enqueue([permitted, _rec(6, lane_id=3)])
-    assert observed[-1] == SourceExhaustion(frozenset({2, 7}), frozenset({2}))
+    assert observed[-1] == SourceExhaustion(frozenset({2, 7}), frozenset({2}), 2)
+    state.enqueue([_flush_sentinel(lane_id=3)])
+    assert state._get_source_exhaustion(3).final_component == 2
     assert snapshot == SourceExhaustion(frozenset({7}))  # Immutable old snapshot.
     assert state._get_source_exhaustion(4) == SourceExhaustion()
 
@@ -768,3 +770,5 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     assert state._get_source_exhaustion(3) == SourceExhaustion()
     state.enqueue([notice])  # A fresh run reconstructs facts and dispatches again.
     assert hooks == [(3, 7), (3, 2), (3, 7)]
+    state.enqueue([permitted])
+    assert state._get_source_exhaustion(3) == observed[-1]

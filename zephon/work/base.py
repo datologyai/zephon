@@ -459,12 +459,13 @@ class WorkSource(ABC):
         The default is empty. For listed components, ``ensure_mixture`` removes
         their weight when the sentinel arrives, even from an explicit mixture
         override, and handles late records through ``obsolete_drain_rate``. Later
-        chunk targets may omit these components.
+        chunk targets may omit these components. Strict mode keeps the final source
+        component eligible if it is in the target, so its remaining records can drain.
         """
         return frozenset()
 
     def chunk_size_hint(self) -> int | None:
-        """Return fixed chunk size if constant.
+        """Return the configured chunk size, if known; individual chunks may be shorter.
 
         Used for deterministic resume validation. Default None.
         """
