@@ -283,6 +283,9 @@ def build_multi_dataset_store(
     store_opts = StoreOptions.from_any(options)
     catalog_set = build_catalog_set(datasets)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
+    # The direct resolver defaults to a local backend; openers default to the
+    # router so a format's side-file reads reach remote roots under the cache.
+    opener_storage = RouterStorageBackend() if storage is None else storage
     resources = ExitStack()
     if isinstance(resolver, CacheManager):
         resources.callback(resolver.close)
@@ -309,7 +312,7 @@ def build_multi_dataset_store(
                     ) from exc
                 if kind not in openers:
                     openers[kind] = resources.enter_context(
-                        handler.create_opener(catalog_set, store_opts)
+                        handler.create_opener(catalog_set, store_opts, opener_storage)
                     )
                 opener = openers[kind]
                 catalog: ShardCatalog | None = None

@@ -14,7 +14,7 @@ from zephon._internal.io.formats.base import ShardOpener
 from zephon._internal.io.formats.jsonl import JsonlFormat
 from zephon._internal.io.resolvers.cache.manager import CacheManager
 from zephon._internal.io.resolvers.direct import DirectResolver
-from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
 from zephon._internal.io.stores import multi as multi_store
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import (
@@ -327,7 +327,10 @@ def test_format_opener_shared_and_closed_once(
 
     @contextmanager
     def create_opener(
-        self: JsonlFormat, catalogs: CatalogSet | None, options: StoreOptions
+        self: JsonlFormat,
+        catalogs: CatalogSet | None,
+        options: StoreOptions,
+        storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         assert catalogs is catalog_set
         events.append("open")
@@ -368,7 +371,7 @@ def test_failed_opener_initialization_closes_resources(
     def get_format(kind: str) -> SimpleNamespace:
         @contextmanager
         def create_opener(
-            catalogs: CatalogSet | None, options: StoreOptions
+            catalogs: CatalogSet | None, options: StoreOptions, storage: StorageBackend
         ) -> Iterator[ShardOpener]:
             if kind == failed_kind:
                 raise RuntimeError("opener initialization failed")

@@ -336,10 +336,12 @@ class LanceShard(RandomAccessShard):
 class LanceShardOpener:
     """Share manifests and opened fragments across a store's Lance shards."""
 
-    def __init__(self, options: "StoreOptions") -> None:
+    def __init__(self, options: "StoreOptions", storage: StorageBackend) -> None:
         _require_lance()
         configure_pyarrow(options.arrow)
-        self._storage = RouterStorageBackend()
+        # Manifests and tombstones live beside the data rather than in the
+        # shard cache, so they are read through the store's own backend.
+        self._storage = storage
         # One entry per Lance dataset in the store, and the only thing that must
         # survive ``metadata_cache_entries=0``: without it every read would
         # refetch the manifest.
@@ -414,10 +416,13 @@ class LanceFormat(FormatHandler):
 
     @contextmanager
     def create_opener(
-        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+        self,
+        catalog_set: "CatalogSet | None",
+        options: "StoreOptions",
+        storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         """Provide a store-scoped opener and release its readers on exit."""
-        opener = LanceShardOpener(options)
+        opener = LanceShardOpener(options, storage)
         try:
             yield opener
         finally:
@@ -508,7 +513,8 @@ class LanceFormat(FormatHandler):
         """
         from zephon.io.options import StoreOptions
 
-        return LanceShardOpener(StoreOptions()).open_shard(locator, local_ref)
+        opener = LanceShardOpener(StoreOptions(), RouterStorageBackend())
+        return opener.open_shard(locator, local_ref)
 
 
 register_format(LanceFormat())

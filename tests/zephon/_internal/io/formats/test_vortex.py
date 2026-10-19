@@ -189,7 +189,9 @@ def test_vortex_caps_threads_at_initialization_only(
             assert sum(counts.values()) == 2
             cap.assert_not_called()
             with VortexFormat().create_opener(
-                None, StoreOptions(vortex=VortexOptions(worker_threads=1))
+                None,
+                StoreOptions(vortex=VortexOptions(worker_threads=1)),
+                LocalFSBackend(root),
             ):
                 cap.assert_called_once_with(1)
             for _ in range(2):
