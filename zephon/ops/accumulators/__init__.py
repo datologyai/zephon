@@ -12,13 +12,14 @@ By moving all cross-invocation state into accumulators, worker instances
 become stateless with respect to output-producing state across invocations.
 """
 
-from zephon.ops.accumulators.base import Accumulator, ReadyBatch
+from zephon.ops.accumulators.base import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.accumulators.counting import CountingAccumulator
 from zephon.ops.accumulators.passthrough import PassthroughAccumulator
 
 __all__ = [
     "Accumulator",
     "ReadyBatch",
+    "SourceExhaustion",
     "PassthroughAccumulator",
     "CountingAccumulator",
 ]

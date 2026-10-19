@@ -215,10 +215,12 @@ EXPECTED_ALL = {
         "CountingAccumulator",
         "PassthroughAccumulator",
         "ReadyBatch",
+        "SourceExhaustion",
     ],
     "zephon.ops.accumulators.base": [
         "Accumulator",
         "ReadyBatch",
+        "SourceExhaustion",
     ],
     "zephon.ops.accumulators.counting": [
         "CountingAccumulator",

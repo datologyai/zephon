@@ -872,7 +872,8 @@ def test_component_ids_follow_worksource_vocabulary(
     spec = resolve_runtime_spec(plan, opts)
     eng = Engine(plan, opts, _VocabWorkSource(), spec)
     try:
-        assert eng._ctx["continues_after_exhaustion"] == frozenset({7})
+        assert eng._continues_after_exhaustion == frozenset({7})
+        assert "continues_after_exhaustion" not in eng._ctx
         # Lookup order does not affect declared ids; sparse ids remain valid.
         assert eng._get_component_id("common") == 7
         assert eng._get_component_id("rare") == 0

@@ -365,7 +365,7 @@ class Engine:
                 "WorkSource.continues_after_exhaustion() must return a frozenset "
                 "of names declared by component_ids()"
             )
-        base_ctx["continues_after_exhaustion"] = frozenset(
+        self._continues_after_exhaustion = frozenset(
             self._get_component_id(name) for name in continuing
         )
         # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
@@ -667,13 +667,14 @@ class Engine:
         )
 
         for stage, spec in zip(self._plan.stages, self._runtime_spec.stages):
-            common = dict(
+            common: dict[str, Any] = dict(
                 prefetch_capacity=spec.prefetch_capacity,
                 deterministic=self._opts.deterministic,
                 allow_latency_flush_in_deterministic=spec.allow_latency_flush,
                 stage_index=spec.stage_index,
                 tracking_mode=runner_tracking_mode,
                 stage_output_mode=spec.output_mode,
+                continues_after_exhaustion=self._continues_after_exhaustion,
             )
 
             if spec.runner_type == "threads":

@@ -22,9 +22,11 @@ from zephon._internal.stream import (
 )
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
-from zephon.ops.accumulators import Accumulator
+from zephon.ops.accumulators import Accumulator, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
+
+_NO_EXHAUSTION = SourceExhaustion()
 
 
 @dataclass
@@ -45,6 +47,7 @@ class BaseOperatorState:
     node: Node
     deterministic: bool
     ctx_proto: dict[str, Any]
+    continues_after_exhaustion: frozenset[int] = frozenset()
     allow_latency_flush: bool = False
     stage_index: int = 0
     stage_name: str = ""
@@ -56,6 +59,9 @@ class BaseOperatorState:
     _preserves_cursor_order: bool = field(init=False)
     _stall_on_epoch_boundary: bool = field(init=False)
     _epoch_floor: int | None = field(init=False, default=None)
+    _source_exhaustion: dict[int, SourceExhaustion] = field(
+        init=False, default_factory=dict
+    )
     _stalled_sentinels: list[tuple[SampleRecord, int]] = field(
         init=False, default_factory=list
     )
@@ -97,10 +103,21 @@ class BaseOperatorState:
             instance.setup(OpContext(dict(base_ctx), stage_info))
             self.instances.append(instance)
 
-        # Get accumulator from operator
+        self._create_accumulator()
+
+    def _get_source_exhaustion(self, lane_id: int) -> SourceExhaustion:
+        """Read this operator's stream-positioned facts without IPC or copying."""
+        return self._source_exhaustion.get(lane_id, _NO_EXHAUSTION)
+
+    def _create_accumulator(self) -> None:
+        # This service belongs only to the serial accumulator. Worker contexts
+        # must not observe mutable stream position (or proxy it over IPC).
+        ctx = dict(self.ctx_proto)
+        ctx.setdefault("deterministic", self.deterministic)
+        ctx["get_source_exhaustion"] = self._get_source_exhaustion
         self.accumulator_impl = self.node.op.accumulator(
             deterministic=self.deterministic,
-            ctx=base_ctx,
+            ctx=ctx,
         )
 
     def _update_epoch_floor(self, elems: Sequence[RunnerStreamIn]) -> None:
@@ -174,10 +191,8 @@ class BaseOperatorState:
         This is called during shutdown cleanup to ensure no buffered state
         persists across runs when a runner is reused.
         """
-        self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic,
-            ctx=self.ctx_proto,
-        )
+        self._source_exhaustion.clear()
+        self._create_accumulator()
 
     def enqueue(
         self, elems: Sequence[RunnerStreamIn], *, force: bool = False
@@ -267,10 +282,20 @@ class BaseOperatorState:
 
                 component_id = source_exhausted_component(e)
                 if component_id is not None:
+                    lane = e.meta.lane_id
+                    previous = self._get_source_exhaustion(lane)
+                    if component_id in previous.exhausted:
+                        continue  # Do not repeat either the hook or the notice.
+                    continuing = previous.continuing
+                    if component_id in self.continues_after_exhaustion:
+                        continuing = continuing | {component_id}
+                    # Advance only after preceding data entered this accumulator.
+                    # Epoch flushes retain these facts; restore replays notices.
+                    self._source_exhaustion[lane] = SourceExhaustion(
+                        previous.exhausted | {component_id}, continuing
+                    )
                     ready.extend(
-                        self.accumulator_impl.on_source_exhausted(
-                            e.meta.lane_id, component_id
-                        )
+                        self.accumulator_impl.on_source_exhausted(lane, component_id)
                     )
                     # Hook output may unblock a stalled flush. Release it only
                     # if the accumulator's normal reset condition is satisfied.
@@ -357,6 +382,7 @@ class StageRunnerBase(Generic[StateT], ABC):
         prefetch_capacity: int = 0,
         deterministic: bool = False,
         allow_latency_flush_in_deterministic: bool = True,
+        continues_after_exhaustion: frozenset[int] = frozenset(),
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: str = "microbatches",
@@ -386,6 +412,7 @@ class StageRunnerBase(Generic[StateT], ABC):
                 deterministic=deterministic,
                 ctx_proto=self._ctx_services,
                 allow_latency_flush=allow_latency_flush_in_deterministic,
+                continues_after_exhaustion=continues_after_exhaustion,
                 stage_index=stage_index,
                 stage_name=self._stage_name,
                 collect_op_stats=collect_op_stats,
@@ -404,6 +431,7 @@ class StageRunnerBase(Generic[StateT], ABC):
         deterministic: bool,
         ctx_proto: dict[str, Any],
         allow_latency_flush: bool,
+        continues_after_exhaustion: frozenset[int],
         stage_index: int,
         stage_name: str,
         collect_op_stats: bool,

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import pytest
 
@@ -15,7 +15,7 @@ from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.runners.inline import InlineStageRunner
-from zephon.ops.accumulators.base import Accumulator, ReadyBatch
+from zephon.ops.accumulators.base import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
@@ -691,23 +691,38 @@ def test_stalled_batch_sentinel_arrives_after_cross_epoch_output() -> None:
 
 
 def test_public_source_hook_dispatches_output_through_operator() -> None:
+    hooks: list[tuple[int, int]] = []
+    observed: list[SourceExhaustion] = []
+
     class _HookAccumulator(_FlushTrackingAccumulator):
+        def __init__(self, get_exhaustion: Callable[[int], SourceExhaustion]) -> None:
+            super().__init__()
+            self.get_exhaustion = get_exhaustion
+
+        def push_many(
+            self, elems: Sequence[SampleRecord]
+        ) -> list[ReadyBatch[SampleRecord]]:
+            observed.extend(self.get_exhaustion(r.meta.lane_id) for r in elems)
+            return super().push_many(elems)
+
         def on_source_exhausted(
             self, lane_id: int, component_id: int
         ) -> list[ReadyBatch[SampleRecord]]:
-            assert (lane_id, component_id) == (3, 7)
+            hooks.append((lane_id, component_id))
+            assert component_id in self.get_exhaustion(lane_id).exhausted
             return self.flush(lane_id=lane_id)
 
     class _HookOp(_StallTrackingOp):
         def setup(self, ctx: OpContext) -> None:
             super().setup(ctx)
-            assert ctx.get("continues_after_exhaustion") == frozenset({2})
+            assert ctx.get("continues_after_exhaustion") is None
+            assert ctx.get("get_source_exhaustion") is None
 
         def accumulator(
             self, *, deterministic: bool, ctx: dict[str, Any]
         ) -> Accumulator[SampleRecord]:
-            assert ctx["continues_after_exhaustion"] == frozenset({2})
-            return _HookAccumulator()
+            assert "continues_after_exhaustion" not in ctx
+            return _HookAccumulator(ctx["get_source_exhaustion"])
 
         def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
             for elem in elems:
@@ -718,7 +733,8 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
     runner = InlineStageRunner(
         stage,
-        ctx_services={**_ctx_services(), "continues_after_exhaustion": frozenset({2})},
+        ctx_services=_ctx_services(),
+        continues_after_exhaustion=frozenset({2}),
         max_workers=1,
         deterministic=True,
         stage_output_mode="stream_items",
@@ -731,3 +747,23 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     assert out == [record, notice]
     assert record.payload == {"processed": 5}
     assert notice.payload is None
+    assert observed == [SourceExhaustion()]  # Preceding data saw pre-EOD facts.
+    state = runner.ops[0]
+    snapshot = state._get_source_exhaustion(3)
+    assert snapshot == SourceExhaustion(frozenset({7}))
+    assert state.enqueue([notice]) == []
+    assert hooks == [(3, 7)]  # Duplicates do not reach the accumulator.
+
+    state.enqueue([_flush_sentinel(lane_id=3)])
+    assert state._get_source_exhaustion(3) is snapshot
+    assert hooks == [(3, 7)]  # No synthetic hook on epoch reset.
+    permitted = Engine._make_source_exhausted_sentinel(lane_id=3, component_id=2)
+    state.enqueue([permitted, _rec(6, lane_id=3)])
+    assert observed[-1] == SourceExhaustion(frozenset({2, 7}), frozenset({2}))
+    assert snapshot == SourceExhaustion(frozenset({7}))  # Immutable old snapshot.
+    assert state._get_source_exhaustion(4) == SourceExhaustion()
+
+    state.reset_buffers()
+    assert state._get_source_exhaustion(3) == SourceExhaustion()
+    state.enqueue([notice])  # A fresh run reconstructs facts and dispatches again.
+    assert hooks == [(3, 7), (3, 2), (3, 7)]

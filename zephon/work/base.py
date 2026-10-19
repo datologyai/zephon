@@ -450,9 +450,10 @@ class WorkSource(ABC):
         """Components whose exhaustion allows the source to keep producing.
 
         Return a subset of :meth:`component_ids`, fixed across lanes and restores.
-        Operators receive the corresponding ``frozenset[int]`` in
-        ``ctx.get("continues_after_exhaustion", frozenset())`` during setup and
-        accumulator construction. EOD notifications are independent of this policy.
+        The runner combines this policy with observed EOD notices. Accumulators
+        can read ``ctx["get_source_exhaustion"](lane_id).continuing`` for the
+        exhausted component ids that permit continuation. EOD notifications are
+        independent of this policy.
 
         The default is empty. For listed components, ``ensure_mixture`` removes
         their weight on EOD, even from an explicit mixture override, and handles

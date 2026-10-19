@@ -219,10 +219,13 @@ updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
 `StaticMixtureWorkSource` leaves this empty, so EOD does not relax mixture enforcement
-under its stop or repeat policies. A custom operator can read the corresponding ids from
-`ctx.get("continues_after_exhaustion", frozenset())` during setup or accumulator
-construction. Components outside that set can still send EOD sentinels; they do not
-cause `ensure_mixture` to relax its target.
+under its stop or repeat policies. In `accumulator()`, save the local callable
+`ctx["get_source_exhaustion"]`. Calling it with a lane id returns an immutable
+`SourceExhaustion` snapshot: `exhausted` contains all observed exhausted component ids,
+and `continuing` is the subset whose policy permits continuation. Components outside
+that subset still send EOD sentinels; they do not cause `ensure_mixture` to relax its
+target. This service is available only to accumulators, not worker `setup` or
+`process_many`, and never makes an IPC roundtrip.
 
 There is one catch: A can still have records buffered upstream, for example in a shuffle
 or packer. Those records may reach your operator after the sentinel, so you still need to
@@ -231,10 +234,12 @@ datasets. Its bounded mode preserves leftovers at flush, whereas strict mode dro
 Your operator may need a different policy, but it should not assume that receiving EOD
 means it has already seen every record from that dataset.
 
-As with other stateful behavior, keep this knowledge in the accumulator, separately for
-each lane. Remember exhausted components across `flush(reset=True)`, since the sentinel
-is not repeated after a reset. Make the reaction deterministic and safe to repeat so it
-also works after restoring a checkpoint. The hook returns `ReadyBatch` values just like
+The runner owns these facts per operator and lane, updating them before invoking the
+hook at most once per component. It retains them across epoch flushes and reconstructs
+them from replayed notices on checkpoint restore. Your accumulator can reset to fresh:
+read a snapshot on first use after reset and refresh it in the hook, with no polling
+on ordinary batches. Keep the reaction lane-scoped and deterministic for a given input
+order. The hook returns `ReadyBatch` values just like
 `push_many`; if it drops records, use `tombstones_for_record` and return the tombstones in
 separate batches from data. Keep the usual `flush` handling too: EOD describes an
 individual dataset running out, rather than the whole pipeline finishing.

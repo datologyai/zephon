@@ -15,7 +15,7 @@ from typing import Any, Literal, Sequence
 from zephon._internal.flush_context import in_shutdown_flush
 from zephon._internal.utils.length_extraction import extract_length
 from zephon._internal.utils.swrr import SmoothWeightedRoundRobin
-from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.accumulators import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
@@ -47,7 +47,6 @@ class EnsureMixtureConfig:
 
     # Explicit mixture override converted to int form during setup
     mixture_override_by_id: dict[int, float] | None = None
-    continues_after_exhaustion: frozenset[int] = frozenset()
 
     def get_weight(self, record: SampleRecord) -> float:
         """Get the weight for a sample.
@@ -111,8 +110,9 @@ class _LaneState:
     total_emitted: float = 0.0
     # Counter for obsolete interleaving: counts emissions since last obsolete drain
     emissions_since_obsolete_drain: int = 0
-    # Exhausted components listed in continues_after_exhaustion.
-    source_exhausted: set[int] = field(default_factory=set)
+    # Disposable snapshot of exhaustion that permits continuation. None reloads
+    # from the runner on first use; hooks refresh it without per-batch polling.
+    source_exhausted: frozenset[int] | None = None
 
 
 class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
@@ -134,10 +134,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         get_chunk_mixture: Callable[[LaneId, ChunkId], dict[int, float] | None]
         | None = None,
         get_component_name: Callable[[ComponentId], str | None] | None = None,
+        get_source_exhaustion: Callable[[LaneId], SourceExhaustion] | None = None,
     ) -> None:
         self._config = config
         self._get_chunk_mixture = get_chunk_mixture
         self._get_component_name = get_component_name
+        self._get_source_exhaustion = get_source_exhaustion
         self._lanes: dict[int, _LaneState] = defaultdict(_LaneState)
         self._total_discarded: int = 0
         self._obsolete_interval = (
@@ -292,12 +294,13 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         self, lane_id: int, component_id: int
     ) -> list[ReadyBatch[SampleRecord]]:
         """Remove an exhausted component from the target if source policy allows."""
-        if component_id not in self._config.continues_after_exhaustion:
+        if self._get_source_exhaustion is None:
+            return []
+        exhausted = self._get_source_exhaustion(lane_id).continuing
+        if component_id not in exhausted:
             return []
         state = self._lanes[lane_id]
-        if component_id in state.source_exhausted:
-            return []
-        state.source_exhausted.add(component_id)
+        state.source_exhausted = exhausted
         if state.swrr is not None:
             self._set_target(state, state.swrr.target_ratios)
         # Release buffered survivors now; there may be no further input.
@@ -351,16 +354,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 if emitted_batch:
                     ready.append((emitted_batch, 0))
 
-            # Recreate SWRR even with empty buffers: replay needs fresh emission
-            # history and tie ordering. Clearing counters alone keeps the old
-            # component order. Source exhaustion survives the reset.
+            # Recreate lane state even with empty buffers: replay needs fresh
+            # emission history and tie ordering. Exhaustion is reloaded from the
+            # runner. A stalled upstream flush may split a chunk's output, so
+            # the next record must reload its target even with the same chunk id.
             if reset:
-                state.total_emitted = 0.0
-                state.emissions_since_obsolete_drain = 0
-                # A stalled upstream flush may split a chunk's output. Allow
-                # the next record to reload its target even with the same chunk id.
-                state.target_chunk_id = None
-                state.swrr = None
+                self._lanes[lid] = _LaneState()
 
         if discarded:
             self._total_discarded += discarded
@@ -449,6 +448,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
         """Adopt the operator override, or the chunk target if no override is set."""
+        if state.source_exhausted is None:
+            state.source_exhausted = (
+                self._get_source_exhaustion(lane_id).continuing
+                if self._get_source_exhaustion is not None
+                else frozenset()
+            )
         target = self._config.mixture_override_by_id
         if not target and self._get_chunk_mixture is not None:
             target = self._get_chunk_mixture(lane_id, chunk_id)
@@ -456,6 +461,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
     def _set_target(self, state: _LaneState, target: dict[int, float] | None) -> None:
         """Filter out exhausted components and update buffer eligibility."""
+        assert state.source_exhausted is not None
         previous = state.swrr.target_ratios if state.swrr is not None else None
         if target is None:
             state.swrr = None  # No target configured: unrestricted output.
@@ -845,6 +851,7 @@ class EnsureMixture(BaseOp):
             self._config,
             get_chunk_mixture=ctx.get("get_chunk_mixture"),
             get_component_name=ctx.get("get_component_name"),
+            get_source_exhaustion=ctx.get("get_source_exhaustion"),
         )
 
     def _populate_config_from_ctx(self, ctx: dict[str, Any]) -> None:
@@ -854,9 +861,6 @@ class EnsureMixture(BaseOp):
         the operator is pickled for worker processes (which creates a fresh
         config without mixture_override_by_id populated).
         """
-        self._config.continues_after_exhaustion = ctx.get(
-            "continues_after_exhaustion", frozenset()
-        )
         # Convert explicit mixture override from names to IDs (idempotent)
         if (
             self._config.mixture_override

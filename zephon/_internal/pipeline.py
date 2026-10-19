@@ -1589,8 +1589,8 @@ class Pipeline:
         Walks every user-supplied operator (those built by :meth:`add_op`)
         and runs a smoke test that checks: ``process_many`` is stateless
         across calls, the accumulator conserves samples on push+flush,
-        ``flush(reset=True)`` resets epoch-local state but keeps source exhaustion,
-        and ``has_pending_data()`` mirrors reality. See the
+        ``flush(reset=True)`` leaves the accumulator in a fresh state, and
+        ``has_pending_data()`` mirrors reality.  See the
         ``zephon.validation`` module for the full check list and the
         "Accumulators and Operators" page in the published documentation
         for the contracts being checked.
