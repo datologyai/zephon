@@ -344,7 +344,12 @@ class LanceShard(RandomAccessShard):
             position_of = {row: pos for pos, row in enumerate(wanted)}
             positions = map(position_of.__getitem__, rows)
 
-        table = reader.take_rows(wanted).to_table()
+        # Checked on physical rows: logical rows that are contiguous straddle any
+        # tombstone between them.
+        if wanted[-1] - wanted[0] + 1 == len(wanted):
+            table = reader.read_range(wanted[0], len(wanted)).to_table()
+        else:
+            table = reader.take_rows(wanted).to_table()
         if metadata.rename is not None:
             table = table.rename_columns(list(metadata.rename))
         return arrow_table_to_samples(table, positions)

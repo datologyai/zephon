@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 
 from tests.helpers.storage import _install_obstore_stubs
-from zephon._internal.io.formats.lance import LanceFormat, LanceShardOpener
+from zephon._internal.io.formats.lance import (
+    LanceFormat,
+    LanceShard,
+    LanceShardOpener,
+)
 from zephon._internal.io.formats.lance_support.manifest import (
     dataset_root_of,
     latest_manifest_path,
@@ -405,6 +409,47 @@ def test_store_reads_manifest_and_tombstones_through_its_storage(
     assert [row["id"] for row in rows] == [1, 3]
     assert dataset.path in storage.read
     assert any(f"{os.sep}_deletions{os.sep}" in read for read in storage.read)
+
+
+@pytest.mark.parametrize(
+    ("logical", "ids", "method"),
+    [
+        ([2, 3], [3, 4], "read_range"),
+        # Contiguous logical rows that straddle the deleted row are not a range.
+        ([1, 2], [1, 3], "take_rows"),
+        ([3, 2], [4, 3], "read_range"),
+        ([0, 4], [0, 5], "take_rows"),
+    ],
+)
+def test_contiguous_physical_rows_are_read_as_a_range(
+    tmp_path: Path,
+    pa: Any,
+    logical: list[int],
+    ids: list[int],
+    method: str,
+) -> None:
+    path = tmp_path / "range.lance"
+    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=6)
+    lance.dataset(str(path)).delete("id = 2")
+    calls: list[str] = []
+
+    class Recording:
+        def __init__(self, reader: Any) -> None:
+            self._reader = reader
+
+        def __getattr__(self, name: str) -> Any:
+            calls.append(name)
+            return getattr(self._reader, name)
+
+    with _store(path) as store:
+        shard = store.open(0)
+        assert isinstance(shard, LanceShard)
+        shard._reader = Recording(shard._reader)
+
+        rows = shard.getsamples(logical)
+
+    assert [row["id"] for row in rows] == ids
+    assert calls == [method]
 
 
 def test_emptied_fragments_leave_the_shard_set(
