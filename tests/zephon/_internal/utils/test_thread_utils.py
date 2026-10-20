@@ -179,9 +179,9 @@ def test_lance_none_leaves_the_pools_alone(lance_file) -> None:
     assert lance_file.seen == []
 
 
-@pytest.mark.parametrize("count", [0, -1, True])
+@pytest.mark.parametrize("count", [0, -1, True, 1.5])
 def test_lance_rejects_counts_pylance_cannot_start_with(count) -> None:
-    with pytest.raises(ValueError, match="lance.worker_threads"):
+    with pytest.raises(ValueError, match="lance.worker_threads must be a positive"):
         LanceOptions(worker_threads=count)
 
 

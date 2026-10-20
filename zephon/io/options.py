@@ -75,6 +75,11 @@ def _validate_non_negative_int(name: str, value: object) -> None:
         raise ValueError(f"{name} must be a non-negative integer")
 
 
+def _validate_positive_int(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+
+
 def parse_size_bytes(value: str | int | None) -> int | None:
     """Parse a human-readable size like ``"750gb"`` into a byte count.
 
@@ -361,10 +366,8 @@ class LanceOptions:
     def __post_init__(self) -> None:
         _normalize_options(self)
         if self.worker_threads is not None:
-            _validate_non_negative_int("lance.worker_threads", self.worker_threads)
             # pylance's runtime panics on a zero-sized pool.
-            if self.worker_threads == 0:
-                raise ValueError("lance.worker_threads must be at least 1")
+            _validate_positive_int("lance.worker_threads", self.worker_threads)
 
     @classmethod
     def from_any(cls, obj: Any) -> "LanceOptions":
