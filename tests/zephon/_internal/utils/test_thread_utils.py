@@ -141,7 +141,7 @@ def lance_file(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 def test_lance_pools_are_sized_only_while_pylance_starts(lance_file) -> None:
     thread_utils.configure_lance_threads(lance_file, LanceOptions())
 
-    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "1")]
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
     assert not any(name in os.environ for name in _LANCE_VARS)
 
 
@@ -157,7 +157,7 @@ def test_lance_omitted_count_respects_the_environment(lance_file, monkeypatch) -
 
     thread_utils.configure_lance_threads(lance_file, LanceOptions())
 
-    assert lance_file.seen == [{"TOKIO_WORKER_THREADS": "4", "LANCE_CPU_THREADS": "1"}]
+    assert lance_file.seen == [{"TOKIO_WORKER_THREADS": "4", "LANCE_CPU_THREADS": "2"}]
     assert os.environ["TOKIO_WORKER_THREADS"] == "4"
 
 
@@ -193,4 +193,4 @@ def test_store_options_carry_lance_options() -> None:
 
     assert options.lance.worker_threads == 2
     assert merged.lance.worker_threads == 2
-    assert StoreOptions().lance.worker_threads == 1
+    assert StoreOptions().lance.worker_threads == 2

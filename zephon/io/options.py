@@ -345,9 +345,10 @@ class VortexOptions:
 class LanceOptions:
     """Lance's process-wide worker-pool configuration.
 
-    ``worker_threads`` defaults to one worker in each of pylance's native
+    ``worker_threads`` defaults to two workers in each of pylance's native
     pools, which otherwise start one per core; explicit None leaves them
-    unchanged. pylance sizes them once per process, when it is first used, from
+    unchanged. Unlike Vortex's, these workers do all of pylance's decoding, so a
+    single one halves large contiguous reads. pylance sizes them once per process, when it is first used, from
     TOKIO_WORKER_THREADS and LANCE_CPU_THREADS. Zephon sets those only while
     pylance starts, so other native libraries in the process keep their own
     pools, and a count applied after pylance has started has no effect. An
@@ -356,7 +357,7 @@ class LanceOptions:
     concurrent local reads and retires idle threads after a few seconds.
     """
 
-    worker_threads: int | None = _option(1, preserve_none=True)
+    worker_threads: int | None = _option(2, preserve_none=True)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,

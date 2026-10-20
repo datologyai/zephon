@@ -85,11 +85,14 @@ pipeline.options(io_options={"metadata_cache_entries": 256})
 
 **Worker threads.** pylance starts its native thread pools with one thread per core in
 every process that reads Lance, which multiplies across fetch processes and training
-ranks. Like Vortex, Zephon defaults to one worker per pool. You can change the count
-through the pipeline's `io_options`:
+ranks. Zephon defaults to two workers per pool. That is one more than Vortex's default
+because, unlike Vortex, pylance runs all of its decoding on these workers rather than on
+the calling fetch threads: a single worker halves the throughput of large contiguous
+reads, while two match pylance's uncapped speed. You can change the count through the
+pipeline's `io_options`:
 
 ```python
-pipeline.options(io_options={"lance": {"worker_threads": 1}})
+pipeline.options(io_options={"lance": {"worker_threads": 2}})
 ```
 
 pylance has no setting for its pools and sizes them once per process, from the
