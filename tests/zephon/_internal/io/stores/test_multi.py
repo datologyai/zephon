@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Iterator
 from unittest.mock import Mock
 
 import numpy as np
@@ -15,6 +15,7 @@ from zephon._internal.io.formats.jsonl import JsonlFormat
 from zephon._internal.io.resolvers.cache.manager import CacheManager
 from zephon._internal.io.resolvers.direct import DirectResolver
 from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
+from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.stores import multi as multi_store
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
 from zephon._internal.io.stores.multi import (
@@ -351,6 +352,45 @@ def test_format_opener_shared_and_closed_once(
         store.close()
     assert events == ["open", "close"]
     resolver.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["direct", "cached"])
+def test_default_storage_is_shared_by_resolver_and_openers(
+    monkeypatch: pytest.MonkeyPatch,
+    opener_dependencies: tuple[Mock, Mock, Mock],
+    cache_enabled: bool,
+) -> None:
+    """Each backend builds its remote clients lazily, so a second one doubles them."""
+    _, resolver, _ = opener_dependencies
+    resolver_storage: list[StorageBackend] = []
+    opener_storage: list[StorageBackend] = []
+
+    def build_resolver(*args: Any, storage: StorageBackend, **kwargs: Any) -> Mock:
+        resolver_storage.append(storage)
+        return resolver
+
+    @contextmanager
+    def create_opener(
+        self: JsonlFormat,
+        catalogs: CatalogSet | None,
+        options: StoreOptions,
+        storage: StorageBackend,
+    ) -> Iterator[ShardOpener]:
+        opener_storage.append(storage)
+        yield Mock(spec=ShardOpener)
+
+    monkeypatch.setattr(multi_store, "build_resolver", build_resolver)
+    monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
+    store = build_multi_dataset_store(
+        {0: Dataset(name="ds", backend={"kind": "jsonl"})},
+        options=StoreOptions(cache=CacheOptions(enabled=cache_enabled)),
+    )
+    store.close()
+
+    assert len(resolver_storage) == len(opener_storage) == 1
+    assert resolver_storage[0] is opener_storage[0]
+    expected = RouterStorageBackend if cache_enabled else LocalFSBackend
+    assert isinstance(resolver_storage[0], expected)
 
 
 @pytest.mark.parametrize("failed_kind", ["jsonl", "parquet"])
