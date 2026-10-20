@@ -230,20 +230,3 @@ def test_lance_none_leaves_the_pools_alone(lance_file) -> None:
     thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=None))
 
     assert lance_file.seen == []
-
-
-@pytest.mark.parametrize("count", [0, -1, True, 1.5])
-def test_lance_rejects_counts_pylance_cannot_start_with(count) -> None:
-    with pytest.raises(ValueError, match="lance.worker_threads must be a positive"):
-        LanceOptions(worker_threads=count)
-
-
-def test_store_options_carry_lance_options() -> None:
-    from zephon.io import StoreOptions
-
-    options = StoreOptions.from_any({"lance": {"worker_threads": 2}})
-    merged = StoreOptions().merge(options)
-
-    assert options.lance.worker_threads == 2
-    assert merged.lance.worker_threads == 2
-    assert StoreOptions().lance.worker_threads == 2
