@@ -98,6 +98,7 @@ EXPECTED_ALL = {
         "Dataset",
         "InMemoryShard",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
@@ -183,6 +184,7 @@ EXPECTED_ALL = {
     "zephon.io.options": [
         "CacheOptions",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",

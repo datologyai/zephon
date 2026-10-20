@@ -3,6 +3,10 @@
 
 """Lance pipeline reads through the runners, with and without the shard cache."""
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -129,3 +133,133 @@ def test_cached_shards_land_under_the_data_root(tmp_path: Path, pa: Any) -> None
     ]
     basenames = [name() if callable(name) else name for name in basenames]
     assert cached == [basenames[0]]
+
+
+# Runs in a fresh interpreter: pylance sizes its pools once per process, and
+# this one has already started them.
+_POOL_PROBE = """
+import json, os, subprocess, sys
+from pathlib import Path
+
+from zephon._internal.io.formats.lance import LanceFormat, LanceShardOpener
+from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon.io import Dataset, LanceOptions, StoreOptions
+
+
+def native_threads():
+    if sys.platform == "linux":
+        return len(os.listdir("/proc/self/task"))
+    out = subprocess.run(["ps", "-M", str(os.getpid())], capture_output=True, text=True)
+    return len(out.stdout.strip().splitlines()) - 1
+
+
+path, count = sys.argv[1], json.loads(sys.argv[2])
+storage = RouterStorageBackend()
+handler = LanceFormat()
+manifest = handler.resolve_root(path, storage)
+_counts, meta = handler.discover(manifest, storage)
+dataset = Dataset(name="ds", backend={"kind": "lance", "path": manifest, "shards": meta})
+locator = handler.build_locators(dataset)[0]
+data = Path(path) / "data" / locator.raw.basename
+ref = LocalShardRef(
+    raw=LocalShardFile(path=data, bytes=locator.raw.bytes), extra=locator.extra
+)
+opener = LanceShardOpener(
+    StoreOptions(lance=LanceOptions(worker_threads=count)), storage
+)
+opener.open_shard(locator, ref).getsamples([0, 1])
+print(json.dumps({
+    "threads": native_threads(),
+    "env": {name: os.environ.get(name) for name in ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")},
+}))
+"""
+
+
+def _run_fresh(script: str, *args: str, **env: str) -> str:
+    """Run ``script`` in a new interpreter with only the given pool variables."""
+    clean = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+    }
+    # A timeout turns a fork-related hang into a failure.
+    result = subprocess.run(
+        [sys.executable, "-c", script, *args],
+        capture_output=True,
+        text=True,
+        env={**clean, **env},
+        check=True,
+        timeout=60,
+    )
+    return result.stdout
+
+
+def _pool_probe(path: Path, count: int | None) -> dict[str, Any]:
+    return json.loads(_run_fresh(_POOL_PROBE, str(path), json.dumps(count)))
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="counts native threads"
+)
+def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
+    tmp_path: Path, pa: Any
+) -> None:
+    """The cap relies on a failed open starting pylance's pools; a pylance that
+    stops doing so would leave them silently uncapped."""
+    path = tmp_path / "ds.lance"
+    _write(path, pa)
+
+    one = _pool_probe(path, 1)
+    four = _pool_probe(path, 4)
+
+    assert one["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": "1"}
+    # Two explicit sizes rather than pylance's default, whose size follows the
+    # CPUs available to the process (a container quota), not os.cpu_count().
+    assert four["threads"] - one["threads"] == 3
+
+
+def test_worker_threads_reaches_the_lazily_started_cpu_pool(tmp_path: Path) -> None:
+    # pylance panics on an unparsable count, so the write below succeeds only
+    # if its CPU pool, started long after configuration, reads Zephon's value.
+    _run_fresh(
+        """
+import sys
+import lance, lance.file, pyarrow as pa
+from zephon.io import LanceOptions
+from zephon._internal.utils.thread_utils import configure_lance_threads
+
+configure_lance_threads(lance.file, LanceOptions(worker_threads=1))
+lance.write_dataset(pa.table({"x": [1]}), sys.argv[1])
+""",
+        str(tmp_path / "cpu.lance"),
+        LANCE_CPU_THREADS="invalid",
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_worker_threads_survives_fork(tmp_path: Path, pa: Any) -> None:
+    path = tmp_path / "ds.lance"
+    _write(path, pa)
+    # The parent's environment would make a child's uncapped start panic, so
+    # the child's read succeeds only if it sizes its rebuilt pools itself.
+    _run_fresh(
+        """
+import os, signal, sys
+import lance, lance.file
+from zephon.io import LanceOptions
+from zephon._internal.utils.thread_utils import configure_lance_threads
+
+options = LanceOptions(worker_threads=1)
+configure_lance_threads(lance.file, options)
+pid = os.fork()
+if pid == 0:
+    signal.alarm(20)
+    configure_lance_threads(lance.file, options)
+    rows = lance.dataset(sys.argv[1]).to_table().num_rows
+    os._exit(0 if rows else 1)
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+""",
+        str(path),
+        TOKIO_WORKER_THREADS="0",
+    )

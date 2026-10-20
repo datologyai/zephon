@@ -27,10 +27,12 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterator, Mapping
+
+import numpy as np
 
 from zephon._internal.io.formats.arrow_rows import (
     arrow_table_to_samples,
@@ -58,6 +60,7 @@ from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.thread_utils import configure_lance_threads
 from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
@@ -69,11 +72,6 @@ try:
     import lance.file as _lance_file
 except ImportError:
     _lance_file = None
-
-# Each retained reader holds an open file handle, unlike the footer caches of
-# the other Arrow formats, so the bound stays far below a typical RLIMIT_NOFILE
-# however large ``metadata_cache_entries`` is set.
-_MAX_OPEN_READERS = 64
 
 
 def _require_lance() -> ModuleType:
@@ -91,6 +89,23 @@ _REWRITE = (
     "rewrite the dataset (e.g. lance.write_dataset(lance.dataset(src), dst)) "
     "so each fragment is one file holding exactly the schema's columns"
 )
+
+
+@contextmanager
+def _local_io_errors(path: Path) -> Iterator[None]:
+    """Re-raise a failure to open ``path`` as the path's own ``OSError``.
+
+    pylance reports a missing file as ``ValueError`` (older releases: a bare
+    ``OSError``), and ``ResilientShard`` retries only ``OSError``.
+    """
+    try:
+        yield
+    except (ValueError, RuntimeError, OSError) as exc:
+        try:
+            path.stat()
+        except OSError as io_error:
+            raise io_error from exc
+        raise
 
 
 def _reject(manifest_path: str, reason: str) -> ValueError:
@@ -246,28 +261,26 @@ def _plan_dataset(storage: StorageBackend, manifest_path: str) -> _DatasetPlan:
 
 
 @dataclass(frozen=True)
-class _OpenFragment:
-    """One fragment ready to read: a projected reader and its tombstones.
+class _FragmentMetadata:
+    """A fragment's decoded column mapping and tombstones.
 
-    Shards are opened per read while this entry is retained, so two fetch
-    threads reading one shard share the reader. pylance's reader rejects a
-    reentrant call ("Already borrowed"), hence the lock around each take.
+    Holds no reader: an open one keeps an evicted file's disk space allocated
+    and serializes concurrent takes.
     """
 
-    reader: Any
+    # File column names to project to, or None when the file holds exactly
+    # the dataset's columns in order.
+    projection: list[str] | None
     # Set when the file's own column names differ from the dataset's, which a
     # rename produces: Lance updates the manifest and leaves the file alone.
     rename: tuple[str, ...] | None
     deletion: DeletionVector | None
-    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _open_fragment(
-    path: Path, plan: _FragmentPlan, deletion: DeletionVector | None
-) -> _OpenFragment:
-    """Open ``path`` projected to the dataset's columns, by file column index."""
-    lance_file = _require_lance()
-    probe = lance_file.LanceFileReader(str(path))
+def _fragment_metadata(
+    probe: Any, path: Path, plan: _FragmentPlan, deletion: DeletionVector | None
+) -> _FragmentMetadata:
+    """Map the dataset's columns onto ``probe``'s file columns by position."""
     file_names: list[str] = list(probe.metadata().schema.names)
     if len(file_names) != plan.file_columns:
         raise ValueError(
@@ -278,18 +291,21 @@ def _open_fragment(
     # positions back to names is unambiguous.
     wanted = [file_names[column] for _name, column in plan.columns]
     names = tuple(name for name, _column in plan.columns)
-    rename = None if tuple(wanted) == names else names
-    if wanted == file_names:
-        return _OpenFragment(probe, rename, deletion)
-    reader = lance_file.LanceFileReader(str(path), columns=wanted)
-    return _OpenFragment(reader, rename, deletion)
+    return _FragmentMetadata(
+        projection=None if wanted == file_names else wanted,
+        rename=None if tuple(wanted) == names else names,
+        deletion=deletion,
+    )
 
 
 class LanceShard(RandomAccessShard):
     """Random-access shard backed by one fragment's ``.lance`` data file."""
 
-    def __init__(self, fragment: _OpenFragment, *, length: int) -> None:
-        self._fragment: _OpenFragment | None = fragment
+    def __init__(
+        self, reader: Any, metadata: _FragmentMetadata, *, length: int
+    ) -> None:
+        self._reader: Any | None = reader
+        self._metadata = metadata
         self._length = length
 
     def __getitem__(self, index: int) -> SamplePayload:
@@ -299,9 +315,9 @@ class LanceShard(RandomAccessShard):
         return self._length
 
     def close(self) -> None:
-        # The reader is owned by the store's opener cache and outlives the
-        # shard; dropping the reference here is all this shard owns.
-        self._fragment = None
+        # pylance's reader has no close(); dropping the last reference
+        # releases its file handle.
+        self._reader = None
 
     def getsamples(self, indices: list[int]) -> list[SamplePayload]:
         """Bulk read rows in request order, preserving duplicate indices."""
@@ -310,11 +326,12 @@ class LanceShard(RandomAccessShard):
         for i in indices:
             if i < 0 or i >= self._length:
                 raise IndexError(i)
-        fragment = self._fragment
-        if fragment is None:
+        reader = self._reader
+        if reader is None:
             raise RuntimeError("LanceShard has been closed")
 
-        deletion = fragment.deletion
+        metadata = self._metadata
+        deletion = metadata.deletion
         rows = deletion.to_physical(indices) if deletion else indices
         # The file reader requires strictly increasing indices, so duplicate and
         # out-of-order requests read each row once and are reordered afterwards.
@@ -326,18 +343,22 @@ class LanceShard(RandomAccessShard):
             position_of = {row: pos for pos, row in enumerate(wanted)}
             positions = map(position_of.__getitem__, rows)
 
-        with fragment.lock:
-            table = fragment.reader.take_rows(wanted).to_table()
-        if fragment.rename is not None:
-            table = table.rename_columns(list(fragment.rename))
+        # Checked on physical rows: logical rows that are contiguous straddle any
+        # tombstone between them.
+        if wanted[-1] - wanted[0] + 1 == len(wanted):
+            table = reader.read_range(wanted[0], len(wanted)).to_table()
+        else:
+            table = reader.take_rows(wanted).to_table()
+        if metadata.rename is not None:
+            table = table.rename_columns(list(metadata.rename))
         return arrow_table_to_samples(table, positions)
 
 
 class LanceShardOpener:
-    """Share manifests and opened fragments across a store's Lance shards."""
+    """Share manifests and decoded fragment metadata across a store's shards."""
 
     def __init__(self, options: "StoreOptions", storage: StorageBackend) -> None:
-        _require_lance()
+        configure_lance_threads(_require_lance(), options.lance)
         configure_pyarrow(options.arrow)
         # Manifests and tombstones live beside the data rather than in the
         # shard cache, so they are read through the store's own backend.
@@ -347,8 +368,8 @@ class LanceShardOpener:
         # refetch the manifest.
         self._plans: dict[str, _DatasetPlan] = {}
         self._plans_lock = threading.Lock()
-        self._fragments = MetadataCache[str, _OpenFragment](
-            min(options.metadata_cache_entries, _MAX_OPEN_READERS)
+        self._metadata = MetadataCache[str, _FragmentMetadata](
+            options.metadata_cache_entries
         )
 
     def _plan(self, manifest_path: str) -> _DatasetPlan:
@@ -359,23 +380,40 @@ class LanceShardOpener:
                 self._plans[manifest_path] = plan
             return plan
 
-    def _load_fragment(
-        self, path: Path, root: str, fragment: _FragmentPlan
-    ) -> _OpenFragment:
-        """Open the data file and, when the fragment has one, its tombstones.
+    def _read_deletions(
+        self, root: str, fragment: _FragmentPlan
+    ) -> DeletionVector | None:
+        # The tombstone file is small and lives beside the data under the
+        # dataset root, not in the shard cache, so it is read through storage.
+        if fragment.deletion_basename is None:
+            return None
+        return read_deletion_vector(
+            self._storage,
+            os.path.join(root, DELETIONS_DIR, fragment.deletion_basename),
+            expected_deleted=fragment.num_deleted_rows,
+            physical_rows=fragment.physical_rows,
+        )
 
-        The tombstone file is small and lives beside the data under the dataset
-        root, not in the shard cache, so it is read through storage here.
-        """
-        deletion = None
-        if fragment.deletion_basename is not None:
-            deletion = read_deletion_vector(
-                self._storage,
-                os.path.join(root, DELETIONS_DIR, fragment.deletion_basename),
-                expected_deleted=fragment.num_deleted_rows,
-                physical_rows=fragment.physical_rows,
+    def _open_reader(
+        self, path: Path, root: str, fragment: _FragmentPlan, cache_key: str
+    ) -> tuple[Any, _FragmentMetadata]:
+        lance_file = _require_lance()
+        probe = None
+
+        def load_metadata() -> _FragmentMetadata:
+            nonlocal probe
+            probe = lance_file.LanceFileReader(str(path))
+            return _fragment_metadata(
+                probe, path, fragment, self._read_deletions(root, fragment)
             )
-        return _open_fragment(path, fragment, deletion)
+
+        with _local_io_errors(path):
+            metadata = self._metadata.get_or_load(cache_key, load_metadata)
+            # Reuse the reader opened on a metadata miss when it needs no projection.
+            if probe is not None and metadata.projection is None:
+                return probe, metadata
+            reader = lance_file.LanceFileReader(str(path), columns=metadata.projection)
+        return reader, metadata
 
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
@@ -396,15 +434,14 @@ class LanceShardOpener:
         # one directory share their unchanged data files, and without the cache
         # they share the local path as well, but a delete or a rename between
         # them changes which rows or names that file yields.
-        opened = self._fragments.get_or_load(
-            f"{manifest_path}\0{file_cache_key(path)}",
-            lambda: self._load_fragment(path, plan.root, fragment),
+        reader, metadata = self._open_reader(
+            path, plan.root, fragment, f"{manifest_path}\0{file_cache_key(path)}"
         )
-        return LanceShard(opened, length=fragment.num_rows)
+        return LanceShard(reader, metadata, length=fragment.num_rows)
 
     def close(self) -> None:
-        """Release this store's opened fragments and manifests."""
-        self._fragments.clear()
+        """Release this store's fragment metadata and manifests."""
+        self._metadata.clear()
         with self._plans_lock:
             self._plans.clear()
 
@@ -468,6 +505,14 @@ class LanceFormat(FormatHandler):
                 "extra": {"manifest": manifest_path},
             }
         return shard_index, shard_meta
+
+    def discover_counts(
+        self, path: str, storage: StorageBackend
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return row counts from the manifest, refusing what ``discover`` refuses."""
+        plan = _plan_dataset(storage, self.resolve_root(path, storage))
+        counts = [fragment.num_rows for fragment in plan.fragments]
+        return np.arange(len(counts), dtype=np.int64), np.array(counts, dtype=np.int64)
 
     def build_locators(self, dataset: "Dataset") -> Mapping[int, ShardLocator]:
         """Build locators rooted at the pinned version's ``data/`` directory."""
