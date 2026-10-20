@@ -206,7 +206,7 @@ def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
     one = _pool_probe(path, 1)
     four = _pool_probe(path, 4)
 
-    assert one["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": None}
+    assert one["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": "1"}
     # Two explicit sizes rather than pylance's default, whose size follows the
     # CPUs available to the process (a container quota), not os.cpu_count().
     assert four["threads"] - one["threads"] >= 3

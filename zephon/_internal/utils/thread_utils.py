@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
-import tempfile
 import threading
 import warnings
 from types import ModuleType
@@ -41,8 +39,10 @@ def configure_vortex_threads(vortex: ModuleType, options: VortexOptions) -> None
     vortex.set_worker_threads(count)
 
 
-# pylance reads these when it first starts its tokio and CPU pools.
-_LANCE_POOL_ENV_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+# pylance's runtime reads this when it starts, and so does obstore's.
+_TOKIO_ENV = "TOKIO_WORKER_THREADS"
+# Lance-only: read when pylance's CPU pool first runs, which can be much later.
+_LANCE_CPU_ENV = "LANCE_CPU_THREADS"
 _lance_pools_lock = threading.Lock()
 _lance_pools_started = False
 # Both pools' size after the first configuration; None if they differ.
@@ -52,10 +52,9 @@ _lance_pools_size: str | None = None
 def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> None:
     """Size pylance's pools once per process, before its first read.
 
-    pylance has no setter and reads the sizes from the environment when it
-    starts its pools, so they are set only around a throwaway open and then
-    restored, since obstore reads TOKIO_WORKER_THREADS too. A runtime another
-    thread starts during that open picks them up as well.
+    pylance has no setter. LANCE_CPU_THREADS stays set for the lazily started
+    CPU pool; TOKIO_WORKER_THREADS is set only while an in-memory session
+    starts the runtime, since obstore reads it too.
     """
     global _lance_pools_started, _lance_pools_size
     count = options.worker_threads
@@ -64,7 +63,7 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
     explicit = "worker_threads" in options._provided_fields
     overrides = {
         name: str(count)
-        for name in _LANCE_POOL_ENV_VARS
+        for name in (_TOKIO_ENV, _LANCE_CPU_ENV)
         if explicit or name not in os.environ
     }
     with _lance_pools_lock:
@@ -77,26 +76,18 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
                     stacklevel=2,
                 )
             return
-        _lance_pools_started = True
-        sizes = {
-            overrides.get(name, os.environ.get(name)) for name in _LANCE_POOL_ENV_VARS
-        }
-        _lance_pools_size = sizes.pop() if len(sizes) == 1 else None
-        if not overrides:
-            return
-        saved = {name: os.environ.get(name) for name in overrides}
+        tokio = os.environ.get(_TOKIO_ENV)
         os.environ.update(overrides)
+        sizes = {os.environ.get(_TOKIO_ENV), os.environ.get(_LANCE_CPU_ENV)}
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                # Failing to open a missing file is enough to start the pools.
-                with contextlib.suppress(Exception):
-                    lance_file.LanceFileReader(os.path.join(tmp, "missing.lance"))
+            lance_file.LanceFileSession("memory://zephon-pool-start")
         finally:
-            for name, value in saved.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+            if tokio is None:
+                os.environ.pop(_TOKIO_ENV, None)
+            else:
+                os.environ[_TOKIO_ENV] = tokio
+        _lance_pools_size = sizes.pop() if len(sizes) == 1 else None
+        _lance_pools_started = True
 
 
 def configure_arrow_threads(pa: ModuleType, options: ArrowOptions) -> None:

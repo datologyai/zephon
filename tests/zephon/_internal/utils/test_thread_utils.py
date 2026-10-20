@@ -7,6 +7,7 @@ import os
 import sys
 import warnings
 from types import ModuleType, SimpleNamespace
+from typing import Iterator
 from unittest.mock import Mock
 
 import pytest
@@ -125,26 +126,31 @@ _LANCE_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
 
 
 @pytest.fixture
-def lance_file(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """A pylance stand-in recording the environment each open sees."""
-    for name in _LANCE_VARS:
-        monkeypatch.delenv(name, raising=False)
+def lance_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
+    """A pylance stand-in recording the environment its runtime starts with."""
+    # The CPU variable is left set by design, so restore both by hand.
+    saved = {name: os.environ.pop(name, None) for name in _LANCE_VARS}
     monkeypatch.setattr(thread_utils, "_lance_pools_started", False)
     monkeypatch.setattr(thread_utils, "_lance_pools_size", None)
     seen: list[dict[str, str | None]] = []
 
-    def open_reader(path: str) -> None:
+    def start_session(uri: str) -> None:
         seen.append({name: os.environ.get(name) for name in _LANCE_VARS})
-        raise ValueError(f"Not found: {path}")
 
-    return SimpleNamespace(LanceFileReader=open_reader, seen=seen)
+    yield SimpleNamespace(LanceFileSession=start_session, seen=seen)
+    for name, value in saved.items():
+        os.environ.pop(name, None)
+        if value is not None:
+            os.environ[name] = value
 
 
-def test_lance_pools_are_sized_only_while_pylance_starts(lance_file) -> None:
+def test_lance_tokio_size_is_set_only_while_pylance_starts(lance_file) -> None:
     thread_utils.configure_lance_threads(lance_file, LanceOptions())
 
     assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
-    assert not any(name in os.environ for name in _LANCE_VARS)
+    assert "TOKIO_WORKER_THREADS" not in os.environ
+    # Read only when the CPU pool first runs, which can be long after setup.
+    assert os.environ["LANCE_CPU_THREADS"] == "2"
 
 
 def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
@@ -153,6 +159,17 @@ def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
         thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
 
     assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+
+
+def test_lance_failed_start_is_not_recorded(lance_file) -> None:
+    lance_file.LanceFileSession = Mock(side_effect=[RuntimeError("no runtime"), None])
+
+    with pytest.raises(RuntimeError, match="no runtime"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.LanceFileSession.call_count == 2
+    assert "TOKIO_WORKER_THREADS" not in os.environ
 
 
 def test_lance_resizing_to_the_applied_count_is_silent(lance_file) -> None:
@@ -164,10 +181,10 @@ def test_lance_resizing_to_the_applied_count_is_silent(lance_file) -> None:
 
 
 def test_lance_explicit_count_is_checked_against_environment_sized_pools(
-    lance_file, monkeypatch
+    lance_file,
 ) -> None:
     for name in _LANCE_VARS:
-        monkeypatch.setenv(name, "4")
+        os.environ[name] = "4"
     thread_utils.configure_lance_threads(lance_file, LanceOptions())
 
     with warnings.catch_warnings():
@@ -177,8 +194,8 @@ def test_lance_explicit_count_is_checked_against_environment_sized_pools(
         thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
 
 
-def test_lance_omitted_count_respects_the_environment(lance_file, monkeypatch) -> None:
-    monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
+def test_lance_omitted_count_respects_the_environment(lance_file) -> None:
+    os.environ["TOKIO_WORKER_THREADS"] = "4"
 
     thread_utils.configure_lance_threads(lance_file, LanceOptions())
 
@@ -186,16 +203,14 @@ def test_lance_omitted_count_respects_the_environment(lance_file, monkeypatch) -
     assert os.environ["TOKIO_WORKER_THREADS"] == "4"
 
 
-def test_lance_explicit_count_overrides_the_environment(
-    lance_file, monkeypatch
-) -> None:
-    monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
+def test_lance_explicit_count_overrides_the_environment(lance_file) -> None:
+    os.environ["TOKIO_WORKER_THREADS"] = "4"
 
     thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
 
     assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
     assert os.environ["TOKIO_WORKER_THREADS"] == "4"
-    assert "LANCE_CPU_THREADS" not in os.environ
+    assert os.environ["LANCE_CPU_THREADS"] == "2"
 
 
 def test_lance_none_leaves_the_pools_alone(lance_file) -> None:
