@@ -3,6 +3,10 @@
 
 """Lance pipeline reads through the runners, with and without the shard cache."""
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -129,3 +133,80 @@ def test_cached_shards_land_under_the_data_root(tmp_path: Path, pa: Any) -> None
     ]
     basenames = [name() if callable(name) else name for name in basenames]
     assert cached == [basenames[0]]
+
+
+# Runs in a fresh interpreter: pylance sizes its pools once per process, and
+# this one has already started them.
+_POOL_PROBE = """
+import json, os, subprocess, sys
+from pathlib import Path
+
+from zephon._internal.io.formats.lance import LanceFormat, LanceShardOpener
+from zephon._internal.io.storage import RouterStorageBackend
+from zephon._internal.io.types import LocalShardFile, LocalShardRef
+from zephon.io import Dataset, LanceOptions, StoreOptions
+
+
+def native_threads():
+    if sys.platform == "linux":
+        return len(os.listdir("/proc/self/task"))
+    out = subprocess.run(["ps", "-M", str(os.getpid())], capture_output=True, text=True)
+    return len(out.stdout.strip().splitlines()) - 1
+
+
+path, count = sys.argv[1], json.loads(sys.argv[2])
+storage = RouterStorageBackend()
+handler = LanceFormat()
+manifest = handler.resolve_root(path, storage)
+_counts, meta = handler.discover(manifest, storage)
+dataset = Dataset(name="ds", backend={"kind": "lance", "path": manifest, "shards": meta})
+locator = handler.build_locators(dataset)[0]
+data = Path(path) / "data" / locator.raw.basename
+ref = LocalShardRef(
+    raw=LocalShardFile(path=data, bytes=locator.raw.bytes), extra=locator.extra
+)
+opener = LanceShardOpener(
+    StoreOptions(lance=LanceOptions(worker_threads=count)), storage
+)
+opener.open_shard(locator, ref).getsamples([0, 1])
+print(json.dumps({
+    "threads": native_threads(),
+    "env": {name: os.environ.get(name) for name in ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")},
+}))
+"""
+
+
+def _pool_probe(path: Path, count: int | None) -> dict[str, Any]:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", _POOL_PROBE, str(path), json.dumps(count)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin") or (os.cpu_count() or 1) < 4,
+    reason="counts native threads; needs enough cores for the default pool to differ",
+)
+def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
+    tmp_path: Path, pa: Any
+) -> None:
+    """The cap relies on a failed open starting pylance's pools; a pylance that
+    stops doing so would leave them silently uncapped."""
+    path = tmp_path / "ds.lance"
+    _write(path, pa)
+
+    capped = _pool_probe(path, 1)
+    uncapped = _pool_probe(path, None)
+
+    assert capped["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": None}
+    # pylance's default pool has one worker per core.
+    assert capped["threads"] + (os.cpu_count() or 1) // 2 <= uncapped["threads"]
