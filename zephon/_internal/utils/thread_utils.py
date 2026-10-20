@@ -90,6 +90,25 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
         _lance_pools_started = True
 
 
+def _reset_lance_pools_after_fork() -> None:
+    # pylance rebuilds its runtime in a forked child, which must size it again.
+    # The parent held the lock across the fork, so the child takes a fresh one.
+    global _lance_pools_lock, _lance_pools_started, _lance_pools_size
+    _lance_pools_lock = threading.Lock()
+    _lance_pools_started = False
+    _lance_pools_size = None
+
+
+if hasattr(os, "register_at_fork"):
+    # Holding the lock across the fork keeps a child from inheriting the
+    # temporary TOKIO_WORKER_THREADS while another thread is starting pylance.
+    os.register_at_fork(
+        before=lambda: _lance_pools_lock.acquire(),
+        after_in_parent=lambda: _lance_pools_lock.release(),
+        after_in_child=_reset_lance_pools_after_fork,
+    )
+
+
 def configure_arrow_threads(pa: ModuleType, options: ArrowOptions) -> None:
     """Configure Arrow's process-wide pools, retaining the legacy env fallback."""
     counts = {"cpu_threads": options.cpu_threads, "io_threads": options.io_threads}

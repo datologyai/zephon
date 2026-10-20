@@ -161,6 +161,19 @@ def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
     assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
 
 
+def test_lance_pools_are_sized_again_in_a_forked_child(lance_file, monkeypatch) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    # The reset swaps in a fresh module lock; put the original back afterwards.
+    monkeypatch.setattr(
+        thread_utils, "_lance_pools_lock", thread_utils._lance_pools_lock
+    )
+
+    thread_utils._reset_lance_pools_after_fork()
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert len(lance_file.seen) == 2
+
+
 def test_lance_failed_start_is_not_recorded(lance_file) -> None:
     lance_file.LanceFileSession = Mock(side_effect=[RuntimeError("no runtime"), None])
 
