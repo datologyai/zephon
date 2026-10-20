@@ -46,6 +46,9 @@ def configure_vortex_threads(vortex: ModuleType, options: VortexOptions) -> None
 _LANCE_POOL_ENV_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
 _lance_pools_lock = threading.Lock()
 _lance_pools_started = False
+# The size the first configuration left both pools at, or None if they differ
+# or one is pylance's default.
+_lance_pools_size: str | None = None
 
 
 def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> None:
@@ -56,7 +59,7 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
     it start them, then restored: obstore's tokio runtime reads
     TOKIO_WORKER_THREADS too, and must keep its own size.
     """
-    global _lance_pools_started
+    global _lance_pools_started, _lance_pools_size
     count = options.worker_threads
     if count is None:
         return
@@ -68,8 +71,19 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
     }
     with _lance_pools_lock:
         if _lance_pools_started:
+            if explicit and str(count) != _lance_pools_size:
+                warnings.warn(
+                    f"lance.worker_threads={count} has no effect: pylance's "
+                    + "pools are sized once per process and already were",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             return
         _lance_pools_started = True
+        sizes = {
+            overrides.get(name, os.environ.get(name)) for name in _LANCE_POOL_ENV_VARS
+        }
+        _lance_pools_size = sizes.pop() if len(sizes) == 1 else None
         if not overrides:
             return
         saved = {name: os.environ.get(name) for name in overrides}

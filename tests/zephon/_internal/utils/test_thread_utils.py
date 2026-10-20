@@ -5,6 +5,7 @@
 
 import os
 import sys
+import warnings
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -129,6 +130,7 @@ def lance_file(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     for name in _LANCE_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(thread_utils, "_lance_pools_started", False)
+    monkeypatch.setattr(thread_utils, "_lance_pools_size", None)
     seen: list[dict[str, str | None]] = []
 
     def open_reader(path: str) -> None:
@@ -147,9 +149,32 @@ def test_lance_pools_are_sized_only_while_pylance_starts(lance_file) -> None:
 
 def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
     thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
-    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
+    with pytest.warns(RuntimeWarning, match="worker_threads=3 has no effect"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
 
     assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+
+
+def test_lance_resizing_to_the_applied_count_is_silent(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+        thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+
+def test_lance_explicit_count_is_checked_against_environment_sized_pools(
+    lance_file, monkeypatch
+) -> None:
+    for name in _LANCE_VARS:
+        monkeypatch.setenv(name, "4")
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=4))
+    with pytest.warns(RuntimeWarning, match="worker_threads=3 has no effect"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
 
 
 def test_lance_omitted_count_respects_the_environment(lance_file, monkeypatch) -> None:
