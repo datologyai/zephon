@@ -324,6 +324,7 @@ def test_format_opener_shared_and_closed_once(
         for i, name in enumerate(("first", "second"))
     }
     opener = Mock(spec=ShardOpener)
+    backend = Mock(spec=StorageBackend)
     events: list[str] = []
 
     @contextmanager
@@ -334,6 +335,7 @@ def test_format_opener_shared_and_closed_once(
         storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         assert catalogs is catalog_set
+        assert storage is backend
         events.append("open")
         try:
             yield opener
@@ -341,7 +343,7 @@ def test_format_opener_shared_and_closed_once(
             events.append("close")
 
     monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
-    store = build_multi_dataset_store(datasets)
+    store = build_multi_dataset_store(datasets, storage=backend)
     try:
         assert events == ["open"]
         assert views.call_count == 2
