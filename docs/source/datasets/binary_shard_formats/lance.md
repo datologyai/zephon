@@ -72,40 +72,26 @@ reason and the remedy in the message, so a run never fails halfway through:
 | Fragments stored in an external fragment tree | The fragment list is not in the manifest | — |
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
-**Caching reads.** Zephon retains each fragment's decoded metadata — its column
-projection and its tombstones — per fetch replica, separately from the on-disk shard
-cache, and keeps no file open between reads. The retention limit is
-`metadata_cache_entries`; set it to zero to disable retention. Each shard open still reads
-the data file's footer, because pylance's file reader cannot reuse one it has already
-decoded.
+**Caching reads.** Zephon keeps each fragment's decoded column mapping and tombstones per
+fetch replica, up to `metadata_cache_entries` (zero disables this). No file stays open
+between reads, so each read reopens the data file and rereads its footer.
 
 ```python
 pipeline.options(io_options={"metadata_cache_entries": 256})
 ```
 
-**Worker threads.** pylance starts its native thread pools with one thread per core in
-every process that reads Lance, which multiplies across fetch processes and training
-ranks. Zephon defaults to two workers per pool. That is one more than Vortex's default
-because, unlike Vortex, pylance runs all of its decoding on these workers rather than on
-the calling fetch threads: a single worker halves the throughput of large contiguous
-reads, while two match pylance's uncapped speed. You can change the count through the
-pipeline's `io_options`:
+**Worker threads.** By default pylance starts one thread per core in every process. Zephon
+caps its pools at two workers. pylance decodes on these workers rather than on the fetch
+threads, and in our measurements one worker halved large reads while two kept them at full
+speed:
 
 ```python
 pipeline.options(io_options={"lance": {"worker_threads": 2}})
 ```
 
-pylance has no setting for its pools and sizes them once per process, from the
-`TOKIO_WORKER_THREADS` and `LANCE_CPU_THREADS` environment variables, when it is first
-used. Zephon sets those only while pylance starts and then restores them, so other
-libraries that read `TOKIO_WORKER_THREADS`, such as obstore, keep their own pools. The
-variables are visible to the whole process for that moment, so a library that starts its
-own runtime on another thread at the same instant picks them up as well. The count takes
-effect only if no Lance code has run earlier in the process; a later store asking for a
-different count gets a warning. A count set in your environment is respected unless you
-pass `worker_threads` explicitly, and `worker_threads=None` leaves pylance's defaults
-alone.
-
-Reads of local files also run on pylance's blocking IO pool, which this count does not
-cap. It grows with the number of reads in flight and retires each thread after a few idle
-seconds, so a busy reader shows more threads than a Vortex reader would.
+pylance sizes its pools once per process from `TOKIO_WORKER_THREADS` and
+`LANCE_CPU_THREADS`, so the count applies only if nothing in the process has used pylance
+yet, including writing the dataset. Zephon sets those variables only while pylance starts,
+so libraries like obstore keep their own pools. Values you set yourself win unless you pass
+`worker_threads`; `None` keeps pylance's defaults. pylance's blocking IO pool is not capped
+and grows briefly during reads.
