@@ -22,10 +22,15 @@ Conversion decisions, applied to each column chunk independently::
 Chunks are converted separately to avoid concatenating numeric buffers. Numeric
 arrays use read-only NumPy views where possible, avoiding Python objects for each
 element. Views retain their backing buffers after reader closure; mutation needs
-an explicit copy. Boolean unpacking, nullable scalar conversion and Python
-fallbacks allocate. Parquet's row gather copies selected values before conversion;
-Vortex supplies an indexed selection. Process transport may make a further SHM
-copy. Duplicate rows share read-only arrays but own their mutable Python containers.
+an explicit copy. Boolean and validity unpacking, date32 widening, nullable
+scalar conversion and Python fallbacks allocate. Parquet's row gather copies
+selected values before conversion; Vortex supplies an indexed selection. Process
+transport may make a further SHM copy. Duplicate rows share read-only arrays but
+own their mutable Python containers.
+
+Fixed-width buffers are read with ``np.frombuffer``, not ``Array.to_numpy``.
+``to_numpy`` goes through pyarrow's pandas writer, which releases the GIL. With
+many reading threads, taking the GIL back can cost more than the conversion.
 """
 
 from __future__ import annotations
@@ -44,6 +49,10 @@ ArrowColumns = Mapping[str, list[Any] | np.ndarray]
 _pa: Any | None = None
 _pa_lock = threading.Lock()
 _arrow_options: ArrowOptions | None = None
+
+# Types whose data buffer is viewed with no conversion, keyed by Arrow type id.
+# Reading the id is cheap, but hashing a DataType is not.
+_dtypes: dict[int, np.dtype] = {}
 
 
 def configure_pyarrow(options: ArrowOptions) -> None:
@@ -160,6 +169,82 @@ def _is_numeric_type(kind: Any, pa: Any) -> bool:
     )
 
 
+def _numpy_dtype(kind: Any, pa: Any) -> np.dtype:
+    """Return the NumPy dtype of a fixed-width Arrow type's data buffer.
+
+    Date32 returns its int32 storage dtype, because NumPy has no 32-bit datetime.
+    """
+    dtype = _dtypes.get(kind.id)
+    if dtype is not None:
+        return dtype
+
+    # The type id does not include the unit, so do not cache these types.
+    if pa.types.is_timestamp(kind):
+        return np.dtype(f"M8[{kind.unit}]")
+    if pa.types.is_duration(kind):
+        return np.dtype(f"m8[{kind.unit}]")
+
+    # Date32 needs widening, so it must not reach the cache.
+    if pa.types.is_date32(kind):
+        return np.dtype("i4")
+
+    if pa.types.is_date64(kind):
+        dtype = np.dtype("M8[ms]")
+    elif pa.types.is_floating(kind):
+        dtype = np.dtype(f"f{kind.bit_width // 8}")
+    elif pa.types.is_signed_integer(kind):
+        dtype = np.dtype(f"i{kind.bit_width // 8}")
+    else:
+        dtype = np.dtype(f"u{kind.bit_width // 8}")
+    _dtypes[kind.id] = dtype
+    return dtype
+
+
+def _bits(bitmap: Any, offset: int, length: int) -> np.ndarray:
+    """Unpack ``length`` bits of an Arrow bitmap, starting at bit ``offset``."""
+    if not length:
+        return np.zeros(0, dtype=np.bool_)
+
+    packed = np.frombuffer(bitmap, dtype=np.uint8, offset=offset // 8)
+    skip = offset % 8
+    bits = np.unpackbits(packed, count=skip + length, bitorder="little")
+    return bits[skip:].view(np.bool_)
+
+
+def _validity(array: Any) -> np.ndarray:
+    """Return a mask that is True where the array has a value."""
+    bitmap = array.buffers()[0]
+    if bitmap is None:
+        return np.ones(len(array), dtype=np.bool_)
+    return _bits(bitmap, array.offset, len(array))
+
+
+def _fixed_width_values(array: Any, pa: Any) -> np.ndarray:
+    """Return read-only fixed-width values; null slots are undefined.
+
+    Numeric buffers are viewed directly; booleans unpack and date32 widens.
+    """
+    kind = array.type
+    data = array.buffers()[1]
+
+    # Integers, floats and date64 hit the cache and skip the type checks.
+    dtype = _dtypes.get(kind.id)
+    if dtype is None and pa.types.is_boolean(kind):
+        values = _bits(data, array.offset, len(array))
+    else:
+        values = np.frombuffer(
+            data or b"",
+            dtype=dtype if dtype is not None else _numpy_dtype(kind, pa),
+            count=len(array),
+            offset=array.offset * kind.bit_width // 8,
+        )
+        if dtype is None and pa.types.is_date32(kind):
+            values = values.astype("M8[D]")
+
+    values.setflags(write=False)
+    return values
+
+
 def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
     """Return a read-only numeric array, or None for nulls or unsupported types."""
     if array.null_count:
@@ -170,10 +255,7 @@ def _numeric_values(array: Any, pa: Any) -> np.ndarray | None:
         or pa.types.is_floating(kind)
         or pa.types.is_boolean(kind)
     ):
-        values = array.to_numpy(zero_copy_only=False)
-        # Unpacked boolean buffers must also be read-only.
-        values.setflags(write=False)
-        return values
+        return _fixed_width_values(array, pa)
     if pa.types.is_fixed_size_list(kind):
         size = kind.list_size
         child = array.values.slice(array.offset * size, len(array) * size)
@@ -203,9 +285,9 @@ def _lists_for_python(array: Any, pa: Any) -> Any:
         # Offsets [2, 0, 1], sizes [2, 2, 2] over [a,b,c,d] cast to [[],[a],[]].
         # Flatten follows sizes and offsets, including gaps, overlaps and nulls.
         values = _lists_for_python(array.flatten(), pa)
-        sizes = array.sizes.to_numpy(zero_copy_only=False)
+        sizes = _fixed_width_values(array.sizes, pa)
         if mask is not None:
-            sizes = np.where(mask.to_numpy(zero_copy_only=False), 0, sizes)
+            sizes = np.where(_validity(array), sizes, 0)
         offsets = np.empty(len(array) + 1, dtype=np.int64)
         offsets[0] = 0
         np.cumsum(sizes, dtype=np.int64, out=offsets[1:])
@@ -267,17 +349,17 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
             or pa.types.is_duration(kind)
         ):
             # Python conversion can require pandas or lose nanosecond precision.
-            values = array.to_numpy(zero_copy_only=False)
+            values = _fixed_width_values(array, pa)
             if not array.null_count:
                 return values
-            valid = array.is_valid().to_numpy(zero_copy_only=False)
+            valid = _validity(array)
             return [value if present else None for value, present in zip(values, valid)]
         if pa.types.is_integer(kind) or pa.types.is_floating(kind):
+            # A view keeps the dtype; null slots are replaced per row.
+            numbers = _fixed_width_values(array, pa)
             if not array.null_count:
-                return array.to_numpy(zero_copy_only=False)
-            # Fill before conversion to preserve dtype; restore nulls per row.
-            numbers = array.fill_null(0).to_numpy(zero_copy_only=False)
-            valid = array.is_valid().to_numpy(zero_copy_only=False)
+                return numbers
+            valid = _validity(array)
             return [
                 number if present else None for number, present in zip(numbers, valid)
             ]
@@ -306,20 +388,14 @@ def _column_values(array: Any, pa: Any) -> list[Any] | np.ndarray:
         return numbers[start : start + len(array) * kind.list_size].reshape(
             (len(array), kind.list_size, *numbers.shape[1:])
         )
-    valid = (
-        array.is_valid().to_numpy(zero_copy_only=False) if array.null_count else None
-    )
+    valid = _validity(array) if array.null_count else None
     if is_fixed:
         starts = (np.arange(len(array)) + array.offset) * kind.list_size
         ends = starts + kind.list_size
     else:
-        offsets = array.offsets.to_numpy(zero_copy_only=False)
+        offsets = _fixed_width_values(array.offsets, pa)
         starts = offsets if is_view else offsets[:-1]
-        ends = (
-            starts + array.sizes.to_numpy(zero_copy_only=False)
-            if is_view
-            else offsets[1:]
-        )
+        ends = starts + _fixed_width_values(array.sizes, pa) if is_view else offsets[1:]
     return [
         numbers[start:end] if valid is None or valid[row] else None
         for row, (start, end) in enumerate(zip(starts, ends))

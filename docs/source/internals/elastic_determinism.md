@@ -1,4 +1,4 @@
-# Elastic Determinism
+# Elastic determinism
 
 [Why Zephon?](../why_zephon.md) claims that a run resumed on a different number of GPUs
 sees the same global batches, and [Distributed
@@ -39,8 +39,8 @@ operators cut their buffers, so changing either changes the sample stream of any
 that packs. Fix them at the start of a run, like the seed and `canonical_replicas`.
 
 The two mechanisms that buy you this, sequence-number reordering and the single-threaded
-accumulator, are the ones [How Pipelines Run](../pipelines/how_pipelines_run.md)
-introduces and [Operators and Runners](operators_and_runners.md) takes apart.
+accumulator, are the ones [How pipelines run](../pipelines/how_pipelines_run.md)
+introduces and [Operators and runners](operators_and_runners.md) takes apart.
 
 Not every loader separates the two. [Megatron
 Energon](https://nvidia.github.io/Megatron-Energon/advanced/repro_scaling.html), for
@@ -189,7 +189,7 @@ does which work.
 
 `"contiguous"` is the default and gives each group a contiguous block of lane IDs, so with
 `canonical_replicas=8` and `dp_degree=3` the groups get `[0,1,2]`, `[3,4,5]`, and `[6,7]`.
-Adjacent lanes tend to read adjacent data, which makes this the choice that maximises
+Adjacent lanes tend to read adjacent data, which makes this the choice that maximizes
 shard and block-cache locality.
 
 `"interleaved"` deals lanes round-robin, so lane *i* goes to group *i % num_groups* and

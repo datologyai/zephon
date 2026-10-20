@@ -1,6 +1,6 @@
-# Operators and Runners
+# Operators and runners
 
-[How Pipelines Run](../pipelines/how_pipelines_run.md) claims an operator running across sixteen workers makes exactly the same
+[How pipelines run](../pipelines/how_pipelines_run.md) claims an operator running across sixteen workers makes exactly the same
 decisions it would have made on one. This page explains the two pieces of machinery that
 deliver that, and what they ask of your operator in return.
 
@@ -15,7 +15,7 @@ The three most important methods are:
   micro-batch and returns a list of the same element types, which are `SampleRecord`
   objects, or `SampleBatch` objects downstream of `batch()`. To transform a sample you
   rebuild its `payload` while preserving its `meta`, which carries the identity and
-  ordering that [Records and Sample Lifecycles](records_and_sample_lifecycles.md)
+  ordering that [Records and sample lifecycles](records_and_sample_lifecycles.md)
   describes. Returning a bare dict or a raw payload gets you a
   `TypeError: Unsupported element type`.
 - `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
@@ -43,7 +43,7 @@ yet, and it is a throughput limitation on our side rather than something the des
 requires. What the design does require is that any logic needing to see elements in stream
 order lives in the accumulator.
 
-**Micro-batch sizes.** [How Pipelines Run](../pipelines/how_pipelines_run.md) introduces
+**Micro-batch sizes.** [How pipelines run](../pipelines/how_pipelines_run.md) introduces
 the micro-batch as the small group of elements Zephon hands to a worker for a single
 `process_many` call. Their sizes are
 per-operator, chosen for the work involved: fetching and tokenization use 64, text
@@ -136,7 +136,7 @@ micro-batch boundaries depend only on counts and never on the clock. A custom op
 that builds a `CountingAccumulator` with a latency bound has to do the same: `accumulator()`
 receives `deterministic`, so check it and drop the latency bound when it is `True`.
 
-The specialised ones ship with the operators that need them, and you never construct one
+The specialized ones ship with the operators that need them, and you never construct one
 yourself. The accumulator behind `pack_sequences` keeps per-lane bins and emits when a
 bin's remaining capacity drops below the minimum useful sequence length or when too many
 bins are open. The one behind `ensure_mixture` keeps per-lane buffers grouped by mixture
@@ -147,7 +147,7 @@ accumulator for the default `"streaming"`, and a warmup block accumulator for
 `max_batch` set to the buffer size, and the shuffling happens on the workers.
 
 **How runners keep the order.** Beyond the `inline`, `threads` and `process` runners that
-[How Pipelines Run](../pipelines/how_pipelines_run.md) describes, there is an
+[How pipelines run](../pipelines/how_pipelines_run.md) describes, there is an
 experimental Ray-backed `remote` runner for stages you add with `placement="remote"`.
 From the accumulator's point of view all four behave identically.
 
@@ -180,7 +180,7 @@ the same result regardless of how they were grouped or which restart they turn u
 correction use **flush sentinels** to create the epoch boundaries that make checkpoint
 eviction safe. Every `flush_every_k_chunks` chunks per lane, Zephon injects a sentinel
 that triggers `flush(reset=True, lane_id=lane)` on each accumulator as it passes.
-[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers why we need them;
+[Checkpoint replay and bounded recovery](checkpoint_replay.md) covers why we need them;
 what follows covers what they mean for an accumulator.
 
 **What gets flushed.** Every accumulator, scoped to the sentinel's lane, with one

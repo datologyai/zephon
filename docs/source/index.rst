@@ -25,10 +25,15 @@ guide refers to.
    training_integrations
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Internals
 
    internals/index
+   internals/worksources_and_work_chunks
+   internals/elastic_determinism
+   internals/operators_and_runners
+   internals/records_and_sample_lifecycles
+   internals/checkpoint_replay
 
 .. toctree::
    :maxdepth: 1
