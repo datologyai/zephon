@@ -168,10 +168,9 @@ class LanceManifest:
         columns, which is the only way to locate a column after a rename: the
         manifest changes, the file does not.
 
-        A leaf whose field the schema no longer has belongs to a column that
-        was dropped while the file kept it, and reduces to ``None``. The schema
-        no longer says how many file columns that leaf's column spans, so a
-        ``None`` means the columns after it cannot be placed.
+        A leaf of a dropped column the file still stores reduces to ``None``:
+        the schema no longer says how many file columns it spans, so the
+        columns after it cannot be placed.
         """
         parents = {field.id: field.parent_id for field in self.fields}
         order: list[int | None] = []

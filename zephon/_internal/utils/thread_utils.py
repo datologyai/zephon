@@ -41,25 +41,21 @@ def configure_vortex_threads(vortex: ModuleType, options: VortexOptions) -> None
     vortex.set_worker_threads(count)
 
 
-# pylance sizes its tokio worker pool and its CPU pool from these when it
-# first starts them.
+# pylance reads these when it first starts its tokio and CPU pools.
 _LANCE_POOL_ENV_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
 _lance_pools_lock = threading.Lock()
 _lance_pools_started = False
-# The size the first configuration left both pools at, or None if they differ
-# or one is pylance's default.
+# Both pools' size after the first configuration; None if they differ.
 _lance_pools_size: str | None = None
 
 
 def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> None:
-    """Size pylance's native pools, once per process, before its first read.
+    """Size pylance's pools once per process, before its first read.
 
-    pylance offers no setter and reads the sizes from the environment when it
-    starts its pools, so they are set only around a throwaway open that makes
-    it start them, then restored: obstore's tokio runtime reads
-    TOKIO_WORKER_THREADS too, and must keep its own size. The environment is
-    process-wide, so a runtime another thread starts during that one failed
-    open is sized from it as well.
+    pylance has no setter and reads the sizes from the environment when it
+    starts its pools, so they are set only around a throwaway open and then
+    restored, since obstore reads TOKIO_WORKER_THREADS too. A runtime another
+    thread starts during that open picks them up as well.
     """
     global _lance_pools_started, _lance_pools_size
     count = options.worker_threads

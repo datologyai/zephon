@@ -93,11 +93,10 @@ _REWRITE = (
 
 @contextmanager
 def _local_io_errors(path: Path) -> Iterator[None]:
-    """Surface a missing or inaccessible shard file as the path's ``OSError``.
+    """Re-raise a failure to open ``path`` as the path's own ``OSError``.
 
-    pylance reports a missing file as ``ValueError``, or in older releases as a
-    bare ``OSError``; the eviction retry around shard reads catches only
-    ``OSError``, and should re-resolve only when the path itself failed.
+    pylance reports a missing file as ``ValueError`` (older releases: a bare
+    ``OSError``), and ``ResilientShard`` retries only ``OSError``.
     """
     try:
         yield
@@ -263,11 +262,10 @@ def _plan_dataset(storage: StorageBackend, manifest_path: str) -> _DatasetPlan:
 
 @dataclass(frozen=True)
 class _FragmentMetadata:
-    """What a fragment's reader needs beyond the manifest, decoded once.
+    """A fragment's decoded column mapping and tombstones.
 
-    Holds no file handle: a retained reader would keep an evicted shard's
-    disk space allocated behind the shard cache's back, and pylance's reader
-    serializes concurrent takes.
+    Holds no reader: an open one keeps an evicted file's disk space allocated
+    and serializes concurrent takes.
     """
 
     # File column names to project to, or None when the file holds exactly
@@ -511,12 +509,7 @@ class LanceFormat(FormatHandler):
     def discover_counts(
         self, path: str, storage: StorageBackend
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Count-only discovery: read each fragment's row count from the manifest.
-
-        Skips the per-shard locator metadata and the data-file ``stat`` that
-        ``discover`` falls back to when a writer left a file size unset. Runs
-        the same validation, so it refuses what ``discover`` refuses.
-        """
+        """Return row counts from the manifest, refusing what ``discover`` refuses."""
         plan = _plan_dataset(storage, self.resolve_root(path, storage))
         counts = [fragment.num_rows for fragment in plan.fragments]
         return np.arange(len(counts), dtype=np.int64), np.array(counts, dtype=np.int64)
