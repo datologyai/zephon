@@ -193,8 +193,7 @@ def _pool_probe(path: Path, count: int | None) -> dict[str, Any]:
 
 
 @pytest.mark.skipif(
-    sys.platform not in ("linux", "darwin") or (os.cpu_count() or 1) < 4,
-    reason="counts native threads; needs enough cores for the default pool to differ",
+    sys.platform not in ("linux", "darwin"), reason="counts native threads"
 )
 def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
     tmp_path: Path, pa: Any
@@ -204,9 +203,10 @@ def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
     path = tmp_path / "ds.lance"
     _write(path, pa)
 
-    capped = _pool_probe(path, 1)
-    uncapped = _pool_probe(path, None)
+    one = _pool_probe(path, 1)
+    four = _pool_probe(path, 4)
 
-    assert capped["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": None}
-    # pylance's default pool has one worker per core.
-    assert capped["threads"] + (os.cpu_count() or 1) // 2 <= uncapped["threads"]
+    assert one["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": None}
+    # Two explicit sizes rather than pylance's default, whose size follows the
+    # CPUs available to the process (a container quota), not os.cpu_count().
+    assert four["threads"] - one["threads"] >= 3
