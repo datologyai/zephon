@@ -5,16 +5,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import tempfile
+import threading
 import warnings
 from types import ModuleType
 
-from zephon.io.options import ArrowOptions, VortexOptions
+from zephon.io.options import ArrowOptions, LanceOptions, VortexOptions
 
 # Env vars that suppress internal thread pools in numerical libraries.
 # Shared between suppress_library_threads() (set at runtime) and the
 # Ray runner (baked into runtime_env so they're set before import time).
-# Arrow and Vortex pools are configured separately when their readers are set up.
+# Arrow, Vortex and Lance pools are configured separately when their readers
+# are set up.
 THREAD_SUPPRESSION_ENV_VARS: dict[str, str] = {
     "TOKENIZERS_PARALLELISM": "False",
     "OMP_NUM_THREADS": "1",
@@ -35,6 +39,52 @@ def configure_vortex_threads(vortex: ModuleType, options: VortexOptions) -> None
     ):
         return
     vortex.set_worker_threads(count)
+
+
+# pylance sizes its tokio worker pool and its CPU pool from these when it
+# first starts them.
+_LANCE_POOL_ENV_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+_lance_pools_lock = threading.Lock()
+_lance_pools_started = False
+
+
+def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> None:
+    """Size pylance's native pools, once per process, before its first read.
+
+    pylance offers no setter and reads the sizes from the environment when it
+    starts its pools, so they are set only around a throwaway open that makes
+    it start them, then restored: obstore's tokio runtime reads
+    TOKIO_WORKER_THREADS too, and must keep its own size.
+    """
+    global _lance_pools_started
+    count = options.worker_threads
+    if count is None:
+        return
+    explicit = "worker_threads" in options._provided_fields
+    overrides = {
+        name: str(count)
+        for name in _LANCE_POOL_ENV_VARS
+        if explicit or name not in os.environ
+    }
+    with _lance_pools_lock:
+        if _lance_pools_started:
+            return
+        _lance_pools_started = True
+        if not overrides:
+            return
+        saved = {name: os.environ.get(name) for name in overrides}
+        os.environ.update(overrides)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # Failing to open a missing file is enough to start the pools.
+                with contextlib.suppress(Exception):
+                    lance_file.LanceFileReader(os.path.join(tmp, "missing.lance"))
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def configure_arrow_threads(pa: ModuleType, options: ArrowOptions) -> None:

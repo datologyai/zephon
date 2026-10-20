@@ -3,6 +3,7 @@
 
 """Process-wide reader pool configuration and legacy environment overrides."""
 
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
@@ -10,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from zephon._internal.utils import thread_utils
-from zephon.io import ArrowOptions, VortexOptions
+from zephon.io import ArrowOptions, LanceOptions, VortexOptions
 
 
 @pytest.fixture
@@ -117,3 +118,79 @@ def test_general_suppression_does_not_reset_reader_pools(native, monkeypatch) ->
     native.set_worker_threads.assert_not_called()
     native.set_cpu_count.assert_not_called()
     native.set_io_thread_count.assert_not_called()
+
+
+_LANCE_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+
+
+@pytest.fixture
+def lance_file(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A pylance stand-in recording the environment each open sees."""
+    for name in _LANCE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(thread_utils, "_lance_pools_started", False)
+    seen: list[dict[str, str | None]] = []
+
+    def open_reader(path: str) -> None:
+        seen.append({name: os.environ.get(name) for name in _LANCE_VARS})
+        raise ValueError(f"Not found: {path}")
+
+    return SimpleNamespace(LanceFileReader=open_reader, seen=seen)
+
+
+def test_lance_pools_are_sized_only_while_pylance_starts(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "1")]
+    assert not any(name in os.environ for name in _LANCE_VARS)
+
+
+def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+
+
+def test_lance_omitted_count_respects_the_environment(lance_file, monkeypatch) -> None:
+    monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
+
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.seen == [{"TOKIO_WORKER_THREADS": "4", "LANCE_CPU_THREADS": "1"}]
+    assert os.environ["TOKIO_WORKER_THREADS"] == "4"
+
+
+def test_lance_explicit_count_overrides_the_environment(
+    lance_file, monkeypatch
+) -> None:
+    monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
+
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+    assert os.environ["TOKIO_WORKER_THREADS"] == "4"
+    assert "LANCE_CPU_THREADS" not in os.environ
+
+
+def test_lance_none_leaves_the_pools_alone(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=None))
+
+    assert lance_file.seen == []
+
+
+@pytest.mark.parametrize("count", [0, -1, True])
+def test_lance_rejects_counts_pylance_cannot_start_with(count) -> None:
+    with pytest.raises(ValueError, match="lance.worker_threads"):
+        LanceOptions(worker_threads=count)
+
+
+def test_store_options_carry_lance_options() -> None:
+    from zephon.io import StoreOptions
+
+    options = StoreOptions.from_any({"lance": {"worker_threads": 2}})
+    merged = StoreOptions().merge(options)
+
+    assert options.lance.worker_threads == 2
+    assert merged.lance.worker_threads == 2
+    assert StoreOptions().lance.worker_threads == 1

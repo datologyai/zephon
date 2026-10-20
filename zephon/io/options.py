@@ -337,6 +337,52 @@ class VortexOptions:
 
 
 @dataclass
+class LanceOptions:
+    """Lance's process-wide worker-pool configuration.
+
+    ``worker_threads`` defaults to one worker in each of pylance's native
+    pools, which otherwise start one per core; explicit None leaves them
+    unchanged. pylance sizes them once per process, when it is first used, from
+    TOKIO_WORKER_THREADS and LANCE_CPU_THREADS. Zephon sets those only while
+    pylance starts, so other native libraries in the process keep their own
+    pools, and a count applied after pylance has started has no effect. An
+    explicit count overrides those environment variables; an omitted count
+    respects them. pylance's blocking IO pool is not covered: it grows with
+    concurrent local reads and retires idle threads after a few seconds.
+    """
+
+    worker_threads: int | None = _option(1, preserve_none=True)
+    _provided_fields: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        _normalize_options(self)
+        if self.worker_threads is not None:
+            _validate_non_negative_int("lance.worker_threads", self.worker_threads)
+            # pylance's runtime panics on a zero-sized pool.
+            if self.worker_threads == 0:
+                raise ValueError("lance.worker_threads must be at least 1")
+
+    @classmethod
+    def from_any(cls, obj: Any) -> "LanceOptions":
+        """Normalize Lance options."""
+        if obj is None:
+            return _default_options(cls)
+        if isinstance(obj, LanceOptions):
+            return obj
+        if isinstance(obj, dict):
+            return cls(**obj)
+        raise TypeError(f"Cannot interpret Lance options from {obj!r}")
+
+    def merge(self, other: "LanceOptions") -> "LanceOptions":
+        """Overlay fields supplied by ``other`` onto ``self``."""
+        return LanceOptions(**_merged_options(self, other))
+
+
+@dataclass
 class StoreOptions:
     """Top-level IO store options passed to FetchOp.
 
@@ -349,6 +395,7 @@ class StoreOptions:
     arrow: ArrowOptions = field(default_factory=ArrowOptions)
     parquet: ParquetOptions = field(default_factory=ParquetOptions)
     vortex: VortexOptions = field(default_factory=VortexOptions)
+    lance: LanceOptions = field(default_factory=LanceOptions)
     metadata_cache_entries: int = _option(256)
     _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
 
@@ -412,6 +459,7 @@ class StoreOptions:
                 arrow=ArrowOptions.from_any(None),
                 parquet=ParquetOptions.from_any(None),
                 vortex=VortexOptions.from_any(None),
+                lance=LanceOptions.from_any(None),
                 metadata_cache_entries=256,
             )
         if isinstance(obj, StoreOptions):
@@ -439,11 +487,17 @@ class StoreOptions:
                 if "vortex" in obj
                 else VortexOptions()
             )
+            lance = (
+                LanceOptions.from_any(obj["lance"])
+                if "lance" in obj
+                else LanceOptions()
+            )
             return cls(
                 cache=cache,
                 arrow=arrow,
                 parquet=parquet,
                 vortex=vortex,
+                lance=lance,
                 metadata_cache_entries=obj.get("metadata_cache_entries", _NOT_SUPPLIED),
             )
         raise TypeError(f"Cannot interpret store options from {obj!r}")
@@ -456,12 +510,14 @@ class StoreOptions:
             arrow=self.arrow.merge(other.arrow),
             parquet=self.parquet.merge(other.parquet),
             vortex=self.vortex.merge(other.vortex),
+            lance=self.lance.merge(other.lance),
         )
 
 
 __all__ = [
     "ArrowOptions",
     "CacheOptions",
+    "LanceOptions",
     "ParquetOptions",
     "ParquetRGCacheOptions",
     "StoreOptions",

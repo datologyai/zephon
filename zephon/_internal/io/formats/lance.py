@@ -60,6 +60,7 @@ from zephon._internal.io.formats.metadata_cache import MetadataCache, file_cache
 from zephon._internal.io.protocols import RandomAccessShard
 from zephon._internal.io.storage import RouterStorageBackend, StorageBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
+from zephon._internal.utils.thread_utils import configure_lance_threads
 from zephon.types import SamplePayload
 
 if TYPE_CHECKING:
@@ -359,7 +360,7 @@ class LanceShardOpener:
     """Share manifests and decoded fragment metadata across a store's shards."""
 
     def __init__(self, options: "StoreOptions", storage: StorageBackend) -> None:
-        _require_lance()
+        configure_lance_threads(_require_lance(), options.lance)
         configure_pyarrow(options.arrow)
         # Manifests and tombstones live beside the data rather than in the
         # shard cache, so they are read through the store's own backend.
