@@ -5,17 +5,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import pytest
 
 from tests.zephon._internal.runners._helpers import _ctx_services
+from zephon._internal.engine import Engine
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.runners.inline import InlineStageRunner
-from zephon.ops.accumulators.base import Accumulator, ReadyBatch
-from zephon.ops.base import BaseOp
+from zephon.ops.accumulators.base import Accumulator, ReadyBatch, SourceExhaustion
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -373,6 +374,33 @@ def test_flush_sentinel_dummy_chunk_id_does_not_corrupt_floor() -> None:
     assert state._epoch_floor == 6
 
 
+def test_source_exhaustion_bypasses_buffers_without_corrupting_epoch_floor() -> None:
+    state = _make_pack_runner().ops[0]
+    state.enqueue([_rec(0, chunk_id=5)])
+    assert state.accumulator_impl.has_pending_data()
+    sentinel = Engine._make_source_exhausted_sentinel(lane_id=0, component_id=7)
+    assert state.enqueue([sentinel]) == [([sentinel], 0)]
+    assert state.accumulator_impl.has_pending_data()
+    assert state._epoch_floor == 5
+
+
+def test_source_notification_bypasses_held_flush() -> None:
+    state = _make_batch_runner(batch_size=2).ops[0]
+    older = _rec(0, chunk_id=0)
+    boundary = _flush_sentinel(boundary_cid=1)
+    assert state.enqueue([older, boundary]) == []
+    notification = Engine._make_source_exhausted_sentinel(lane_id=0, component_id=0)
+    assert state.enqueue([notification]) == [([notification], 0)]
+    # An unrelated record releases the earlier stalled flush. Records already
+    # injected into later chunks can still be held in an upstream accumulator.
+    survivor = _rec(1, chunk_id=1)
+    ready = state.enqueue([survivor])
+    assert [batch for batch, _ in ready] == [[older, survivor], [boundary]]
+    later = _rec(2, chunk_id=1)
+    assert state.enqueue([later]) == []
+    assert state.accumulator_impl.has_pending_data()
+
+
 # ---------------------------------------------------------------------------
 # Per-lane flush sentinel scoping
 # ---------------------------------------------------------------------------
@@ -660,3 +688,83 @@ def test_stalled_batch_sentinel_arrives_after_cross_epoch_output() -> None:
         "with stalling Batch upstream, the downstream op sees post-boundary "
         "records before the sentinel (this is expected behavior)"
     )
+
+
+def test_public_source_hook_dispatches_output_through_operator() -> None:
+    hooks: list[tuple[int, int]] = []
+    observed: list[SourceExhaustion] = []
+
+    class _HookAccumulator(_FlushTrackingAccumulator):
+        def __init__(self, get_exhaustion: Callable[[int], SourceExhaustion]) -> None:
+            super().__init__()
+            self.get_exhaustion = get_exhaustion
+
+        def push_many(
+            self, elems: Sequence[SampleRecord]
+        ) -> list[ReadyBatch[SampleRecord]]:
+            observed.extend(self.get_exhaustion(r.meta.lane_id) for r in elems)
+            return super().push_many(elems)
+
+        def on_source_exhausted(
+            self, lane_id: int, component_id: int
+        ) -> list[ReadyBatch[SampleRecord]]:
+            hooks.append((lane_id, component_id))
+            assert component_id in self.get_exhaustion(lane_id).exhausted
+            return self.flush(lane_id=lane_id)
+
+    class _HookOp(_StallTrackingOp):
+        def setup(self, ctx: OpContext) -> None:
+            super().setup(ctx)
+            assert ctx.get("continues_after_exhaustion") is None
+            assert ctx.get("get_source_exhaustion") is None
+
+        def accumulator(
+            self, *, deterministic: bool, ctx: dict[str, Any]
+        ) -> Accumulator[SampleRecord]:
+            assert "continues_after_exhaustion" not in ctx
+            return _HookAccumulator(ctx["get_source_exhaustion"])
+
+        def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+            for elem in elems:
+                elem.payload = {"processed": elem.payload["value"]}
+            return elems
+
+    node = Node(name="hook", op=_HookOp())
+    stage = Stage(name="s", nodes=[node], placement="auto", break_reason="test")
+    runner = InlineStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    notice = Engine._make_source_exhausted_sentinel(lane_id=3, component_id=7)
+    record = _rec(5, lane_id=3)
+    # The public hook fires even outside the continuation set. Its output takes
+    # the normal worker path; the control record bypasses process_many.
+    out = runner._apply_operator_state(runner.ops[0], [record, notice], force=False)
+    assert out == [record, notice]
+    assert record.payload == {"processed": 5}
+    assert notice.payload is None
+    assert observed == [SourceExhaustion()]  # Preceding data saw pre-EOD facts.
+    state = runner.ops[0]
+    snapshot = state._get_source_exhaustion(3)
+    assert snapshot == SourceExhaustion(frozenset({7}))
+    assert state.enqueue([notice]) == []
+    assert hooks == [(3, 7)]  # Duplicates do not reach the accumulator.
+
+    state.enqueue([_flush_sentinel(lane_id=3)])
+    assert state._get_source_exhaustion(3) is snapshot
+    assert hooks == [(3, 7)]  # No synthetic hook on epoch reset.
+    permitted = Engine._make_source_exhausted_sentinel(
+        lane_id=3, component_id=2, continues=True
+    )
+    state.enqueue([permitted, _rec(6, lane_id=3)])
+    assert observed[-1] == SourceExhaustion(frozenset({2, 7}), frozenset({2}))
+    assert snapshot == SourceExhaustion(frozenset({7}))  # Immutable old snapshot.
+    assert state._get_source_exhaustion(4) == SourceExhaustion()
+
+    state.reset_buffers()
+    assert state._get_source_exhaustion(3) == SourceExhaustion()
+    state.enqueue([notice])  # A fresh run reconstructs facts and dispatches again.
+    assert hooks == [(3, 7), (3, 2), (3, 7)]

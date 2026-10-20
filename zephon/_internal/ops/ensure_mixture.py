@@ -15,7 +15,7 @@ from typing import Any, Literal, Sequence
 from zephon._internal.flush_context import in_shutdown_flush
 from zephon._internal.utils.length_extraction import extract_length
 from zephon._internal.utils.swrr import SmoothWeightedRoundRobin
-from zephon.ops.accumulators import Accumulator, ReadyBatch
+from zephon.ops.accumulators import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.traits import OpTraits
@@ -37,14 +37,13 @@ class EnsureMixtureConfig:
     warn_tolerance: float | None
     warn_warmup: float  # Min emitted weight before ratio warnings are enabled
     mixture_override: dict[str, float] | None  # component_name -> target weight
-    # Samples to buffer before force-emitting (enables reordering).  When
-    # ``None`` the buffer is unbounded — the operator only emits while SWRR's
-    # ideal component is available, never compromising the target mixture.
+    # Buffer limit before forced emission. None waits for SWRR's next component
+    # or an obsolete drain slot, with no memory cap.
     max_buffer_size: int | None
     drain_target_ratio: (
         float  # When forced to emit, drain to this fraction of max_buffer_size
     )
-    obsolete_drain_rate: float  # Fraction of emissions reserved for obsolete components
+    obsolete_drain_rate: float  # One obsolete record per int(1 / rate) normal emissions
 
     # Explicit mixture override converted to int form during setup
     mixture_override_by_id: dict[int, float] | None = None
@@ -70,44 +69,132 @@ class EnsureMixtureConfig:
         return float(extract_length(record, field))
 
 
-@dataclass
-class _MultiComponentSample:
-    """A multi-component (packed) sample with precomputed contributions."""
+@dataclass(slots=True)
+class _BufferedRecord:
+    """A buffered record with precomputed component contributions."""
 
     record: SampleRecord
     contributions: dict[int, float]  # component_id -> weight
+
+
+@dataclass(eq=False)
+class _RetirementGroup:
+    """One effective-target removal, weighted by the previous target.
+
+    Separate EODs make separate groups, even within one source chunk. Groups
+    drain oldest available first, before the unknown-weight FIFO fallback.
+    Epoch resets forget the groups; the first target can recover exhausted
+    components' weights together, but not their previous retirement order.
+    """
+
+    weights: dict[int, float]
+    singles: dict[int, deque[_BufferedRecord]] = field(
+        default_factory=lambda: defaultdict(deque)
+    )
+    packs: deque[_BufferedRecord] = field(default_factory=deque)
+    counts: dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    swrr: SmoothWeightedRoundRobin[int] | None = None
+
+    def append(self, item: _BufferedRecord) -> None:
+        if len(item.contributions) == 1:
+            self.singles[next(iter(item.contributions))].append(item)
+        else:
+            self.packs.append(item)
+        for cid in item.contributions:
+            self.counts[cid] += 1
+
+    def selector(self) -> SmoothWeightedRoundRobin[int]:
+        # Retired components cannot block drainage. Restart selection when the
+        # available set changes, so absence never builds a catch-up entitlement.
+        available = self.weights.keys() & self.counts.keys()
+        if self.swrr is None or self.swrr.target_ratios.keys() != available:
+            self.swrr = SmoothWeightedRoundRobin(
+                {cid: self.weights[cid] for cid in sorted(available)}, sorted(available)
+            )
+        return self.swrr
+
+    def take(self) -> _BufferedRecord:
+        selector = self.selector()
+        ideal = selector.peek()
+        assert ideal is not None
+        if self.singles.get(ideal):
+            item = self.singles[ideal].popleft()
+        else:
+            deficits = selector.get_deficits()
+            index, item = max(
+                (
+                    (index, item)
+                    for index, item in enumerate(self.packs)
+                    if ideal in item.contributions
+                ),
+                key=lambda pair: sum(
+                    weight * deficits.get(cid, 0.0)
+                    for cid, weight in pair[1].contributions.items()
+                ),
+            )
+            del self.packs[index]
+        selector.record_multi(item.contributions)
+        for cid in item.contributions:
+            self.counts[cid] -= 1
+            if not self.counts[cid]:
+                del self.counts[cid]
+                if cid in self.weights:
+                    # Remember even an absence between two calls to take().
+                    self.swrr = None
+        return item
+
+    def drain(self) -> Iterable[_BufferedRecord]:
+        """Walk buffered records without running selection (discard/reclassify)."""
+        singles, packs = self.singles, self.packs
+        self.singles = defaultdict(deque)
+        self.packs = deque()
+        self.counts.clear()
+        self.swrr = None
+        for buf in singles.values():
+            while buf:
+                yield buf.popleft()
+        while packs:
+            yield packs.popleft()
 
 
 @dataclass
 class _LaneState:
     """Per-lane state for SWRR reordering with buffering.
 
-    Single-component samples use per-component buffers (original design).
+    Single-component samples use per-component buffers.
     Multi-component (packed) samples go into a separate buffer and use
     benefit scoring for selection.
     """
 
     # Per-component buffers for single-component samples: component_id -> deque[(record, weight)]
-    # This preserves the original SWRR selection logic for the common case.
     buffers: dict[int, deque[tuple[SampleRecord, float]]] = field(
         default_factory=lambda: defaultdict(deque)
     )
     # Separate buffer for multi-component (packed) samples.
     # These require benefit scoring since they contribute to multiple components.
-    multi_component_buffer: deque[_MultiComponentSample] = field(default_factory=deque)
+    multi_component_buffer: deque[_BufferedRecord] = field(default_factory=deque)
+    # Unknown former weights retain FIFO fallback. Known retirements select by
+    # their previous relative weights; every group shares one drain allowance.
+    obsolete_buffer: deque[_BufferedRecord] = field(default_factory=deque)
+    retirement_groups: list[_RetirementGroup] = field(default_factory=list)
+    retirement_by_component: dict[int, _RetirementGroup] = field(default_factory=dict)
+    obsolete_count: int = 0
+    # Availability index: avoid scanning packed records on every selection.
+    multi_component_counts: dict[int, int] = field(
+        default_factory=lambda: defaultdict(int)
+    )
     # SWRR selector for this lane (created lazily with first chunk's mixture)
     swrr: SmoothWeightedRoundRobin[int] | None = None
-    # Current chunk being processed (for mixture lookup)
-    current_chunk_id: int | None = None
+    # Highest chunk id adopted this epoch; late records cannot restore older targets.
+    target_chunk_id: int | None = None
     # Track total samples currently buffered (for max_buffer_size check)
     total_buffered: int = 0
-    # Accumulated weight for ratio deviation checking
-    emitted_by_component: dict[int, float] = field(
-        default_factory=lambda: defaultdict(float)
-    )
+    # Warmup spans target changes, including temporary absence of a target.
     total_emitted: float = 0.0
     # Counter for obsolete interleaving: counts emissions since last obsolete drain
     emissions_since_obsolete_drain: int = 0
+    # Snapshot of SourceExhaustion.continuing; None until first read after construction or reset.
+    removed_by_exhaustion: frozenset[int] | None = None
 
 
 class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
@@ -129,12 +216,19 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         get_chunk_mixture: Callable[[LaneId, ChunkId], dict[int, float] | None]
         | None = None,
         get_component_name: Callable[[ComponentId], str | None] | None = None,
+        get_source_exhaustion: Callable[[LaneId], SourceExhaustion] | None = None,
     ) -> None:
         self._config = config
         self._get_chunk_mixture = get_chunk_mixture
         self._get_component_name = get_component_name
+        self._get_source_exhaustion = get_source_exhaustion
         self._lanes: dict[int, _LaneState] = defaultdict(_LaneState)
         self._total_discarded: int = 0
+        self._obsolete_interval = (
+            int(1.0 / config.obsolete_drain_rate)
+            if config.obsolete_drain_rate
+            else None
+        )
         #: Strict mode discards on roughly every flush in a skewed stream, so
         #: only the first one warns; the rest drop to DEBUG to avoid log spam.
         self._discard_warned: bool = False
@@ -176,13 +270,19 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 take(record)
         while state.multi_component_buffer:
             take(state.multi_component_buffer.popleft().record)
+        while state.obsolete_buffer:
+            take(state.obsolete_buffer.popleft().record)
+        for group in state.retirement_groups:
+            for item in group.drain():
+                take(item.record)
 
         if batch:
             ready.append((batch, 0))
 
         state.buffers.clear()
-        state.multi_component_buffer.clear()
+        state.multi_component_counts.clear()
         state.total_buffered = 0
+        state.obsolete_count = 0
         return ready, dropped
 
     def has_pending_data(self, lane_id: int | None = None) -> bool:
@@ -192,12 +292,9 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         else:
             state = self._lanes.get(lane_id)
             states = (state,) if state is not None else ()
-        return any(
-            any(buf for buf in s.buffers.values()) or s.multi_component_buffer
-            for s in states
-        )
+        return any(self._has_buffered_samples(s) for s in states)
 
-    def _can_emit_optimal(self, state: _LaneState) -> bool:
+    def _can_emit_optimal(self, state: _LaneState, ideal: int | None) -> bool:
         """Check if SWRR's ideal choice is available in the buffer.
 
         Returns True if we can emit without compromising mixture quality.
@@ -210,25 +307,9 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             # No target mixture configured - emit anything available
             return True
 
-        available = {cid for cid, buf in state.buffers.items() if buf}
-        has_multi = bool(state.multi_component_buffer)
-
-        if not available and not has_multi:
-            return False
-
-        # What does SWRR ideally want (ignoring availability)?
-        ideal = state.swrr.peek()
-
-        # Check single-component buffers first (original logic)
-        if ideal in available:
-            return True
-
-        # Check if any multi-component sample contributes to the ideal component
-        for multi in state.multi_component_buffer:
-            if ideal in multi.contributions:
-                return True
-
-        return False
+        return ideal is not None and bool(
+            state.buffers.get(ideal) or state.multi_component_counts.get(ideal)
+        )
 
     @property
     def reads_payload(self) -> bool:
@@ -255,84 +336,75 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
             state = self._lanes[lane_id]
 
-            # Update SWRR if chunk changed (mixture might have changed)
-            if state.current_chunk_id != chunk_id:
+            # Targets are per chunk. Reordering must not restore older targets.
+            if state.target_chunk_id is None or chunk_id > state.target_chunk_id:
                 self._update_lane_swrr(lane_id, chunk_id, state)
-                state.current_chunk_id = chunk_id
+                state.target_chunk_id = chunk_id
 
             # Compute per-component contributions for this sample.
             contributions = self._compute_contributions(elem)
 
-            # Route to appropriate buffer based on number of components.
-            if len(contributions) == 1:
-                # Single-component sample: use per-component buffer (original logic)
-                component_id = next(iter(contributions.keys()))
-                weight = contributions[component_id]
-                state.buffers[component_id].append((elem, weight))
-            else:
-                # Multi-component sample (packed): use separate buffer
-                state.multi_component_buffer.append(
-                    _MultiComponentSample(record=elem, contributions=contributions)
-                )
+            self._buffer_record(state, elem, contributions)
 
             state.total_buffered += 1
             affected_lanes.add(lane_id)
 
-        # Phase 2: Emit batched per-lane (adaptive)
+        # Phase 2: Select from the buffered records, batching output per lane.
         for lane_id in affected_lanes:
-            state = self._lanes[lane_id]
-            emitted_batch: list[SampleRecord] = []
-
-            # Compute drain target: when forced to emit, drain to this level.
-            max_buf = self._config.max_buffer_size
-            if max_buf is None:
-                # Unbounded: never force-drain (drain_target unused here).
-                started_forced_drain = False
-                drain_target = 0
-            else:
-                drain_target = int(self._config.drain_target_ratio * max_buf)
-                started_forced_drain = state.total_buffered >= max_buf
-
-            # Greedy emit: while SWRR is happy OR buffer needs draining
-            while self._has_buffered_samples(state):
-                is_optimal = self._can_emit_optimal(state)
-
-                # If we started forced draining, continue until we reach drain_target
-                is_forced_drain = (
-                    started_forced_drain and state.total_buffered > drain_target
-                )
-
-                if not is_optimal and not is_forced_drain:
-                    break
-
-                # Emit one sample. Obsolete components are drained automatically
-                # at obsolete_drain_rate, interleaved with normal emissions.
-                record = self._emit_one(lane_id, state)
-                if record is not None:
-                    state.total_buffered -= 1
-                    emitted_batch.append(record)
-                else:
-                    break
-
-            if emitted_batch:
-                ready.append((emitted_batch, 0))
-
+            ready.extend(self._emit_ready(lane_id, self._lanes[lane_id]))
         return ready
+
+    def _emit_ready(
+        self, lane_id: int, state: _LaneState
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Emit ready records, allowing forced output under buffer pressure."""
+        emitted: list[SampleRecord] = []
+        max_buf = self._config.max_buffer_size
+        force = max_buf is not None and state.total_buffered >= max_buf
+        drain_target = (
+            int(self._config.drain_target_ratio * max_buf) if max_buf is not None else 0
+        )
+        # Buffer pressure permits suboptimal choices until the lower threshold
+        # is reached. After that, continue only with normal selection/drain slots.
+        while self._has_buffered_samples(state):
+            record = self._emit_one(
+                lane_id, state, force=force and state.total_buffered > drain_target
+            )
+            if record is None:
+                break
+            state.total_buffered -= 1
+            emitted.append(record)
+        return [(emitted, 0)] if emitted else []
+
+    def on_source_exhausted(
+        self, lane_id: int, component_id: int
+    ) -> list[ReadyBatch[SampleRecord]]:
+        """Remove an exhausted component from the target if source policy allows."""
+        if self._get_source_exhaustion is None:
+            return []
+        exhausted = self._get_source_exhaustion(lane_id).continuing
+        if component_id not in exhausted:
+            return []
+        state = self._lanes[lane_id]
+        state.removed_by_exhaustion = exhausted
+        if state.swrr is not None:
+            self._set_target(state, state.swrr.target_ratios)
+        # Release buffered survivors now; there may be no further input.
+        return self._emit_ready(lane_id, state)
 
     def flush(
         self, *, reset: bool = False, lane_id: int | None = None
     ) -> list[ReadyBatch[SampleRecord]]:
         """Emit remaining buffered records for the given lane(s).
 
-        Bounded mode drains the buffer in SWRR order (lossless), accelerating
-        obsolete-component draining so nothing is stranded. Unbounded mode
-        (``max_buffer_size=None``) instead discards the buffer on every flush —
-        mid-stream sentinel (``reset=True``) and terminal close
-        (``reset=False``) alike — since it only holds the surplus SWRR withheld
-        to keep the mixture exact; draining it would skew the output.
+        Bounded mode emits everything, following selection priorities before
+        draining any obsolete tail, which may form a burst. Strict mode
+        (``max_buffer_size=None``) discards everything still buffered, both at
+        epoch boundaries and upstream close; emitting that surplus would skew
+        the target mixture.
 
-        ``lane_id=None`` flushes every lane; otherwise only that lane is
-        flushed and (when ``reset=True``) reset, leaving the others untouched.
+        ``lane_id=None`` flushes all lanes. Otherwise only that lane is affected,
+        including its state reset when ``reset=True``.
         """
         if lane_id is None:
             lane_ids = list(self._lanes)
@@ -342,11 +414,13 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         ready: list[ReadyBatch[SampleRecord]] = []
         discarded = 0
         discarded_lanes = 0
+        discarded_obsolete = 0
 
         for lid in lane_ids:
             state = self._lanes[lid]
 
             if self._config.max_buffer_size is None:
+                discarded_obsolete += state.obsolete_count
                 batches, dropped = self._discard_lane_buffers(state)
                 ready.extend(batches)
                 if dropped:
@@ -356,16 +430,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 emitted_batch: list[SampleRecord] = []
 
                 while self._has_buffered_samples(state):
-                    # During flush, accelerate obsolete draining by resetting the counter
-                    # This ensures obsolete samples are drained promptly
-                    obsolete = self._get_obsolete_components(state)
-                    if obsolete:
-                        # Force obsolete drain by setting counter to threshold
-                        if self._config.obsolete_drain_rate > 0:
-                            drain_interval = int(1.0 / self._config.obsolete_drain_rate)
-                            state.emissions_since_obsolete_drain = drain_interval
-
-                    record = self._emit_one(lid, state)
+                    record = self._emit_one(lid, state, force=True)
                     if record is not None:
                         state.total_buffered -= 1
                         emitted_batch.append(record)
@@ -375,20 +440,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
                 if emitted_batch:
                     ready.append((emitted_batch, 0))
 
-            # Mid-stream flush: reset emission history so the next epoch starts
-            # with clean SWRR state, identical to a freshly constructed
-            # accumulator.  Done even when the buffer was already empty — a stale
-            # SWRR deficit would otherwise perturb the next epoch on replay.  We
-            # null out swrr (not just reset()) so _update_lane_swrr builds a fresh
-            # instance with sorted _order — otherwise update_target() on the old
-            # instance keeps stale _order/_index entries, which can diverge
-            # tie-breaking if mixture components change across epochs.
+            # Recreate lane state even with empty buffers: replay needs fresh
+            # emission history and tie ordering. Exhaustion is reloaded from the
+            # runner. A stalled upstream flush may split a chunk's output, so
+            # the next record must reload its target even with the same chunk id.
             if reset:
-                state.emitted_by_component.clear()
-                state.total_emitted = 0.0
-                state.emissions_since_obsolete_drain = 0
-                state.current_chunk_id = None
-                state.swrr = None
+                self._lanes[lid] = _LaneState()
 
         if discarded:
             self._total_discarded += discarded
@@ -398,22 +455,33 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             # An early-close drain is never consumed, so don't spend the warning on it.
             if not self._discard_warned and not in_shutdown_flush():
                 self._discard_warned = True
+                advice = (
+                    "Raise flush_every_k_chunks to give buffered records more time. "
+                )
+                if discarded_obsolete:
+                    advice += (
+                        "For obsolete tails, consider raising obsolete_drain_rate. "
+                    )
                 logger.warning(
                     "EnsureMixture strict mode discarded %d record(s) across %d "
-                    "lane(s) to keep the mixture exact (%d dropped cumulatively "
-                    "on this rank). Raise flush_every_k_chunks to discard less "
-                    "often; further discards on this rank are logged at DEBUG.",
+                    "lane(s), including %d obsolete record(s), to respect the "
+                    "target and drain allowance (%d dropped cumulatively "
+                    "on this rank). %sFurther discards on this rank are logged at DEBUG.",
                     discarded,
                     discarded_lanes,
+                    discarded_obsolete,
                     self._total_discarded,
+                    advice,
                 )
             else:
                 logger.debug(
                     "EnsureMixture strict mode discarded %d record(s) across %d "
-                    "lane(s) to keep the mixture exact (%d dropped cumulatively "
+                    "lane(s), including %d obsolete record(s), to respect the "
+                    "target and drain allowance (%d dropped cumulatively "
                     "on this rank).",
                     discarded,
                     discarded_lanes,
+                    discarded_obsolete,
                     self._total_discarded,
                 )
 
@@ -422,7 +490,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
     def _has_buffered_samples(self, state: _LaneState) -> bool:
         """Check if lane has any buffered samples."""
         return any(buf for buf in state.buffers.values()) or bool(
-            state.multi_component_buffer
+            state.multi_component_buffer or state.obsolete_count
         )
 
     def _compute_contributions(self, record: SampleRecord) -> dict[int, float]:
@@ -432,7 +500,8 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         For token-based modes: uses component_token_counts if available,
         otherwise distributes the total token count proportionally by sample counts.
 
-        Returns a dict mapping component_id -> weight for this sample.
+        Returns a dict mapping component_id -> weight for this sample. Keep zero
+        weights so zero-weight records retain their component identity for selection.
         """
         meta = record.meta
 
@@ -464,215 +533,308 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         }
 
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
-        """Update or create SWRR selector for a lane based on chunk mixture."""
-        target: dict[int, float] = {}
+        """Adopt the operator override, or the chunk target if no override is set."""
+        if state.removed_by_exhaustion is None:
+            state.removed_by_exhaustion = (
+                self._get_source_exhaustion(lane_id).continuing
+                if self._get_source_exhaustion is not None
+                else frozenset()
+            )
+        target = self._config.mixture_override_by_id
+        if not target and self._get_chunk_mixture is not None:
+            target = self._get_chunk_mixture(lane_id, chunk_id)
+        self._set_target(state, target or None)
 
-        # Explicit mixture override (already in int form) overrides chunk mixture
-        if self._config.mixture_override_by_id:
-            target = dict(self._config.mixture_override_by_id)
-        # Fall back to chunk mixture
-        elif self._get_chunk_mixture is not None:
-            chunk_mixture = self._get_chunk_mixture(lane_id, chunk_id)
-            if chunk_mixture:
-                target = dict(chunk_mixture)
+    def _set_target(self, state: _LaneState, target: dict[int, float] | None) -> None:
+        """Filter out exhausted components and update buffer eligibility."""
+        assert state.removed_by_exhaustion is not None
+        previous = state.swrr.target_ratios if state.swrr is not None else None
+        unfiltered = target
+        if target is None:
+            state.swrr = None  # No target configured: unrestricted output.
+        else:
+            target = {
+                cid: weight
+                for cid, weight in target.items()
+                if weight > 0 and cid not in state.removed_by_exhaustion
+            }
+            # Keep an empty SWRR target distinct from unrestricted output.
+            if state.swrr is None:
+                # Sorted component IDs make initial tie-breaking deterministic.
+                state.swrr = SmoothWeightedRoundRobin(target, sorted(target))
+            else:
+                # Preserve emission history and tie order across target updates.
+                state.swrr.update_target(target)
 
-        if not target:
-            # No mixture info - will use uniform weights over available components
-            state.swrr = None
+        old_components = previous.keys() if previous is not None else None
+        new_components = target.keys() if target is not None else None
+        # Flush resets these definitions along with selection history. On the
+        # first target, recover weights for known exhaustion from the unfiltered
+        # target; no historical target is invented for other off-target records.
+        retirement_target = previous
+        if retirement_target is None:
+            retirement_target = unfiltered
+        old_groups = tuple(state.retirement_groups)
+        for cid in list(state.retirement_by_component):
+            if new_components is None or cid in new_components:
+                group = state.retirement_by_component.pop(cid)
+                del group.weights[cid]
+                group.swrr = None
+        state.retirement_groups = [g for g in old_groups if g.weights]
+        if retirement_target is not None and target is not None:
+            weights = {
+                cid: weight
+                for cid, weight in retirement_target.items()
+                if weight > 0
+                and cid not in target
+                and cid not in state.retirement_by_component
+            }
+            if weights:
+                group = _RetirementGroup(weights)
+                state.retirement_groups.append(group)
+                state.retirement_by_component.update(dict.fromkeys(weights, group))
+        if not state.total_buffered or old_components == new_components:
             return
 
-        # Normalize target weights
-        total = sum(target.values())
-        if total > 0:
-            target = {k: v / total for k, v in target.items()}
+        if old_components is not None and new_components is not None:
+            removed = old_components - new_components
+            added = new_components - old_components
+            # Additions can make obsolete records live again. Removals can move
+            # a fallback pack into a new retirement group.
+            if not (
+                any(
+                    state.buffers.get(cid) or state.multi_component_counts.get(cid)
+                    for cid in removed
+                )
+                or ((added or removed) and state.obsolete_count)
+            ):
+                return
 
-        # Component order for deterministic tie-breaking
-        order = sorted(target.keys())
+        # Preserve FIFO within component queues and the unknown-weight fallback.
+        # No full-buffer scans on ordinary emissions or weight-only updates.
+        single, multi, obsolete = (
+            state.buffers,
+            state.multi_component_buffer,
+            state.obsolete_buffer,
+        )
+        state.buffers = defaultdict(deque)
+        state.multi_component_buffer = deque()
+        state.obsolete_buffer = deque()
+        state.obsolete_count = 0
+        state.multi_component_counts.clear()
+        # Detach every group's queues before routing cross-group packs again.
+        # Otherwise a pack moved to a later group could be visited twice.
+        retired = [(group.singles, group.packs) for group in old_groups]
+        for group in old_groups:
+            group.singles = defaultdict(deque)
+            group.packs = deque()
+            group.counts.clear()
+        while obsolete:
+            item = obsolete.popleft()
+            self._buffer_record(state, item.record, item.contributions)
+        for singles, packs in retired:
+            for buf in singles.values():
+                while buf:
+                    item = buf.popleft()
+                    self._buffer_record(state, item.record, item.contributions)
+            while packs:
+                item = packs.popleft()
+                self._buffer_record(state, item.record, item.contributions)
+        for cid, buf in single.items():
+            while buf:
+                record, weight = buf.popleft()
+                self._buffer_record(state, record, {cid: weight})
+        while multi:
+            item = multi.popleft()
+            self._buffer_record(state, item.record, item.contributions)
 
-        if state.swrr is None:
-            state.swrr = SmoothWeightedRoundRobin(target, order)
-        else:
-            # Update existing SWRR with new targets (preserves emission history)
-            state.swrr.update_target(target)
+    def _buffer_record(
+        self, state: _LaneState, record: SampleRecord, contributions: dict[int, float]
+    ) -> None:
+        """Keep obsolete records out of normal selection.
 
-    def _get_obsolete_components(self, state: _LaneState) -> set[int]:
-        """Get components with buffered samples that are not in the current target.
-
-        These are components from a previous mixture that still have samples
-        waiting to be emitted. They should be drained gradually over time.
+        With a target, any positive off-target contribution or the absence of
+        all target components makes a record obsolete, even at zero weight.
         """
-        if state.swrr is None:
-            return set()
+        target = state.swrr.target_ratios if state.swrr is not None else None
+        if len(contributions) == 1:
+            cid, weight = next(iter(contributions.items()))
+            if target is None or cid in target:
+                state.buffers[cid].append((record, weight))
+                return
+            # Even zero-weight records need a drain slot if their component is
+            # absent from the target: normal selection can never choose them.
+        elif target is None or (
+            any(cid in target for cid in contributions)
+            and not any(
+                weight > 0 and cid not in target
+                for cid, weight in contributions.items()
+            )
+        ):
+            state.multi_component_buffer.append(_BufferedRecord(record, contributions))
+            for cid in contributions:
+                state.multi_component_counts[cid] += 1
+            return
+        item = _BufferedRecord(record, contributions)
+        assert target is not None
+        # A pack belongs to the oldest group represented by its retired content.
+        # Zero-count metadata must not give it an unrelated earlier retirement.
+        retired_components = {
+            cid
+            for cid, weight in contributions.items()
+            if cid not in target and weight > 0
+        }
+        if not retired_components:
+            retired_components = contributions.keys() - target.keys()
+        groups = {
+            state.retirement_by_component[cid]
+            for cid in retired_components
+            if cid in state.retirement_by_component
+        }
+        for group in state.retirement_groups:
+            if group in groups:
+                group.append(item)
+                break
+        else:
+            state.obsolete_buffer.append(item)
+        state.obsolete_count += 1
 
-        target_components = set(state.swrr.target_ratios.keys())
-        buffered_components = {cid for cid, buf in state.buffers.items() if buf}
-        return buffered_components - target_components
+    def _take_obsolete(self, state: _LaneState) -> _BufferedRecord:
+        """Use one shared slot; empty earlier groups never hold up later ones."""
+        state.obsolete_count -= 1
+        # The fallback may refill forever (e.g. a component excluded by an
+        # override). It must not starve known retirement tails.
+        for group in state.retirement_groups:
+            if group.counts:
+                item = group.take()
+                # A pack may also serve components retired by another change.
+                # Credit their available selectors without banking absent debt.
+                for cid, weight in item.contributions.items():
+                    other = state.retirement_by_component.get(cid)
+                    if other is not None and other is not group and cid in other.counts:
+                        other.selector().record(cid, weight)
+                return item
+        if state.obsolete_buffer:
+            return state.obsolete_buffer.popleft()
+        raise AssertionError("obsolete count has no buffered record")
 
     def _should_drain_obsolete(self, state: _LaneState) -> bool:
-        """Check if it's time to drain an obsolete sample based on the drain rate.
+        """Whether an obsolete record is waiting and its drain slot is due."""
+        # TODO: Explore smooth decay of retired content instead of a fixed interval.
+        return bool(state.obsolete_count) and (
+            self._obsolete_interval is not None
+            and state.emissions_since_obsolete_drain >= self._obsolete_interval
+        )
 
-        Returns True if we have obsolete samples AND we've emitted enough
-        normal samples since the last obsolete drain.
-        """
-        if self._config.obsolete_drain_rate <= 0:
-            return False
+    def _take_multi(self, state: _LaneState, index: int) -> _BufferedRecord:
+        """Remove a packed record and update the component-availability index."""
+        multi = state.multi_component_buffer[index]
+        del state.multi_component_buffer[index]
+        for cid in multi.contributions:
+            state.multi_component_counts[cid] -= 1
+            if not state.multi_component_counts[cid]:
+                del state.multi_component_counts[cid]
+        return multi
 
-        obsolete = self._get_obsolete_components(state)
-        if not obsolete:
-            return False
+    def _emit_single(
+        self, lane_id: int, state: _LaneState, component_id: int
+    ) -> SampleRecord:
+        """Account for a single-component emission without allocating a packed wrapper."""
+        record, weight = state.buffers[component_id].popleft()
+        if state.swrr is not None:
+            state.swrr.record(component_id, weight)
+        state.total_emitted += weight
+        self._finish_emission(lane_id, state, obsolete=False)
+        return record
 
-        # Drain interval: emit one obsolete for every N emissions
-        # e.g., rate=0.1 means drain every 10 emissions
-        drain_interval = int(1.0 / self._config.obsolete_drain_rate)
-        return state.emissions_since_obsolete_drain >= drain_interval
-
-    def _emit_one(self, lane_id: int, state: _LaneState) -> SampleRecord | None:
-        """Emit one sample from the lane using SWRR selection.
-
-        Selection priority:
-        0. Periodically drain obsolete components (based on obsolete_drain_rate)
-        1. If ideal component has single-component sample, emit it (original behavior)
-        2. If ideal component can be served by multi-component sample, use benefit
-           scoring to pick the best one
-        3. Fall back to best available single-component sample
-        4. Fall back to best available multi-component sample
-
-        This preserves the original SWRR logic for single-component samples while
-        gradually draining obsolete components and properly integrating
-        multi-component (packed) samples.
-        """
-        if not self._has_buffered_samples(state):
-            return None
-
-        available_single = {cid for cid, buf in state.buffers.items() if buf}
-        has_multi = bool(state.multi_component_buffer)
-
-        if not available_single and not has_multi:
-            return None
-
-        # Priority 0: Periodically drain obsolete components
-        # Obsolete components are those with buffered samples but no longer in the
-        # current mixture target. We interleave them at obsolete_drain_rate to
-        # prevent samples from being stuck indefinitely.
-        if self._should_drain_obsolete(state):
-            obsolete = self._get_obsolete_components(state)
-            if obsolete:
-                # Pick the obsolete component with smallest ID for determinism
-                chosen = min(obsolete)
-                buf = state.buffers[chosen]
-                record, weight = buf.popleft()
-
-                # Don't update SWRR - obsolete components aren't in the target
-                # But do track for ratio monitoring
-                state.emitted_by_component[chosen] += weight
-                state.total_emitted += weight
-                # Reset the counter after draining
-                state.emissions_since_obsolete_drain = 0
-                return record
-
-        # Get the ideal component (what SWRR wants, ignoring availability)
-        ideal = state.swrr.peek() if state.swrr else None
-
-        # Priority 1: Ideal component has single-component sample (original behavior)
-        if ideal is not None and ideal in available_single:
-            buf = state.buffers[ideal]
-            record, weight = buf.popleft()
-
-            if state.swrr is not None:
-                state.swrr.record(ideal, weight)
-
-            state.emitted_by_component[ideal] += weight
-            state.total_emitted += weight
-            state.emissions_since_obsolete_drain += 1
-            self._check_ratios(lane_id, state)
-            return record
-
-        # Priority 2: Multi-component sample that contributes to ideal component
-        if has_multi and ideal is not None:
-            # Find multi-component samples that contribute to the ideal component
-            candidates = [
-                (idx, m)
-                for idx, m in enumerate(state.multi_component_buffer)
-                if ideal in m.contributions
-            ]
-
-            if candidates:
-                # Use benefit scoring among candidates
-                deficits = state.swrr.get_deficits() if state.swrr else {}
-
-                best_idx, best_multi = max(
-                    candidates,
-                    key=lambda pair: sum(
-                        contrib * deficits.get(cid, 0.0)
-                        for cid, contrib in pair[1].contributions.items()
-                    ),
-                )
-
-                # Remove from buffer (need to find actual index in deque)
-                del state.multi_component_buffer[best_idx]
-
-                if state.swrr is not None:
-                    state.swrr.record_multi(best_multi.contributions)
-
-                for cid, weight in best_multi.contributions.items():
-                    state.emitted_by_component[cid] += weight
-                    state.total_emitted += weight
-
-                state.emissions_since_obsolete_drain += 1
-                self._check_ratios(lane_id, state)
-                return best_multi.record
-
-        # Priority 3: Best available single-component sample
-        if available_single:
-            if state.swrr is not None:
-                chosen = state.swrr.select(available_single)
-            else:
-                chosen = min(available_single)
-
-            if chosen is None:
-                chosen = min(available_single)
-
-            buf = state.buffers[chosen]
-            record, weight = buf.popleft()
-
-            if state.swrr is not None:
-                state.swrr.record(chosen, weight)
-
-            state.emitted_by_component[chosen] += weight
-            state.total_emitted += weight
-            state.emissions_since_obsolete_drain += 1
-            self._check_ratios(lane_id, state)
-            return record
-
-        # Priority 4: Best available multi-component sample (benefit scoring)
-        if has_multi:
-            deficits = state.swrr.get_deficits() if state.swrr else {}
-
-            best_idx = max(
-                range(len(state.multi_component_buffer)),
-                key=lambda idx: sum(
-                    contrib * deficits.get(cid, 0.0)
-                    for cid, contrib in state.multi_component_buffer[
-                        idx
-                    ].contributions.items()
-                ),
+    def _finish_emission(
+        self, lane_id: int, state: _LaneState, *, obsolete: bool
+    ) -> None:
+        """Count output records toward the next drain slot, regardless of weight."""
+        if obsolete:
+            state.emissions_since_obsolete_drain = 0
+        elif self._obsolete_interval is not None:
+            # Save at most one slot while obsolete records are absent.
+            state.emissions_since_obsolete_drain = min(
+                state.emissions_since_obsolete_drain + 1, self._obsolete_interval
             )
+        self._check_ratios(lane_id, state)
 
-            multi = state.multi_component_buffer[best_idx]
-            del state.multi_component_buffer[best_idx]
+    def _emit_one(
+        self, lane_id: int, state: _LaneState, *, force: bool = False
+    ) -> SampleRecord | None:
+        """Select a record using the priorities below.
 
-            if state.swrr is not None:
-                state.swrr.record_multi(multi.contributions)
+        Priorities 3 and 4 require forced emission or an unconfigured target;
+        otherwise, wait for the ideal component after checking the drain slot.
+        Forced emission can bypass drain spacing to bound memory or finish a
+        lossless flush. Strict flushes discard buffered records instead.
+        """
+        # Priority 0: One shared drain slot across retirement groups and mixed packs.
+        obsolete = self._should_drain_obsolete(state)
+        if obsolete:
+            item = self._take_obsolete(state)
+        else:
+            # What does SWRR ideally want (ignoring availability)?
+            ideal = state.swrr.peek() if state.swrr is not None else None
+            # A live but unavailable ideal component still blocks normal output.
+            # Exhaustion removes its target share; mere scarcity does not.
+            if not force and not self._can_emit_optimal(state, ideal):
+                return None
 
-            for cid, weight in multi.contributions.items():
-                state.emitted_by_component[cid] += weight
-                state.total_emitted += weight
+            available = {cid for cid, buf in state.buffers.items() if buf}
+            if ideal is not None and ideal in available:
+                # Priority 1: Prefer the ideal component's single-record queue.
+                return self._emit_single(lane_id, state, ideal)
+            else:
+                # Priority 2: Packs serving the ideal component take precedence
+                # over single-component fallbacks.
+                candidates = [
+                    (idx, packed)
+                    for idx, packed in enumerate(state.multi_component_buffer)
+                    if ideal is not None and ideal in packed.contributions
+                ]
+                if not candidates and available:
+                    # Priority 3: Best available single-component fallback.
+                    chosen = (
+                        state.swrr.select(available) if state.swrr is not None else None
+                    )
+                    if chosen is None:
+                        chosen = min(available)
+                    return self._emit_single(lane_id, state, chosen)
+                elif candidates or state.multi_component_buffer:
+                    if not candidates:
+                        # Priority 4: No ideal-serving pack or single record is
+                        # available; score all remaining on-target packs.
+                        candidates = list(enumerate(state.multi_component_buffer))
+                    # Score packs by how much they serve underrepresented components,
+                    # using the same deficits as single-component selection.
+                    deficits = (
+                        state.swrr.get_deficits() if state.swrr is not None else {}
+                    )
+                    best_idx, _ = max(
+                        candidates,
+                        key=lambda pair: sum(
+                            weight * deficits.get(cid, 0.0)
+                            for cid, weight in pair[1].contributions.items()
+                        ),
+                    )
+                    item = self._take_multi(state, best_idx)
+                elif force and state.obsolete_count:
+                    # Priority 5: Force-drain obsolete records when no on-target
+                    # records remain, even without live data to interleave.
+                    item = self._take_obsolete(state)
+                    obsolete = True
+                else:
+                    return None
 
-            state.emissions_since_obsolete_drain += 1
-            self._check_ratios(lane_id, state)
-            return multi.record
-
-        return None
+        # Credit every contribution, including the live part of a retired pack.
+        # SWRR excludes off-target mass when calculating survivor deficits.
+        if state.swrr is not None:
+            state.swrr.record_multi(item.contributions)
+        state.total_emitted += sum(item.contributions.values())
+        self._finish_emission(lane_id, state, obsolete=obsolete)
+        return item.record
 
     def _check_ratios(self, lane_id: int, state: _LaneState) -> None:
         """Check if actual ratios deviate from target and warn if so."""
@@ -685,8 +847,16 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if state.swrr is None:
             return
 
+        # Monitoring retains all contributions. Compare ratios within the current
+        # target so off-target emissions do not dilute them.
         actual_ratios = state.swrr.get_actual_ratios()
         target = state.swrr.target_ratios
+        actual_total = sum(actual_ratios.get(cid, 0.0) for cid in target)
+        if not actual_total:
+            return
+        actual_ratios = {
+            cid: actual_ratios.get(cid, 0.0) / actual_total for cid in target
+        }
 
         for comp_id, target_ratio in target.items():
             actual = actual_ratios.get(comp_id, 0.0)
@@ -726,6 +896,13 @@ class EnsureMixture(BaseOp):
     tracks deficit (target - actual) and always picks the component most
     "owed" samples. This ensures smooth, deterministic convergence.
 
+    An end-of-data (EOD) sentinel signals that a component's source has run out
+    in this lane; buffered records may still arrive. For components listed by
+    ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
+    target, including explicit overrides, and renormalizes the remaining weights.
+    ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
+    in both modes.
+
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission
     - Sequential input (A,A,...,B,B,...): Buffers until desired component arrives
@@ -737,7 +914,7 @@ class EnsureMixture(BaseOp):
             force-emits, so the mixture may drift if a component stays scarce.
             ``None`` removes the cap and instead *discards* the surplus it cannot
             place on-target, on every flush (epoch boundaries and end of stream):
-            the mixture stays exact, at the cost of dropping data. Useful when a
+            the mixture is enforced at the cost of dropping data. Useful when a
             component is rare in the stream (e.g. on-the-fly tokenization of a
             small, non-repeating dataset). Memory is then bounded only by
             ``flush_every_k_chunks``, which also bounds how much is dropped: a
@@ -748,11 +925,19 @@ class EnsureMixture(BaseOp):
             Default is 0.8 (drain to 80% of max). This ensures meaningful progress
             when suboptimal emissions are required, rather than emitting just one
             sample per push_many call.  Ignored when ``max_buffer_size=None``.
-        obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
-            components (those no longer in the current mixture target). Default is
-            0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample
-            if available. Set to 0 to disable. This ensures samples from previous
-            mixtures are gradually drained rather than stuck indefinitely.
+        obsolete_drain_rate: Emit one obsolete record per ``int(1 / rate)`` normal
+            output records, regardless of token count. The effective share is
+            ``1 / (int(1 / rate) + 1)``: default 0.1 means one in eleven;
+            values above 0.5 alternate (50%); 0 disables periodic drainage.
+            A record is obsolete if it has any positive off-target contribution
+            or no component in the target. Its on-target contributions still
+            count toward the mixture. At most one slot is saved while the queue
+            is empty. Bounded forced drains and flushes may exceed this rate;
+            strict flushes discard leftovers.
+            Within an epoch, components removed by one target change drain in
+            proportion to their former weights. Separate EODs drain in notice
+            order when their records are available. Other off-target records
+            follow in arrival order.
         weight_by: How to compute sample weights. Options:
             - "auto" (default): Auto-detect token field from common names
               (input_ids, tokens, token_ids, ids). Raises if not found.
@@ -766,7 +951,7 @@ class EnsureMixture(BaseOp):
             when ratios naturally fluctuate.
         mixture_override: Explicit mixture target {component_name: float}. If None,
             derived from chunk mixture via engine context. Names are converted to
-            component IDs.
+            component IDs. EOD sentinel handling also applies to this override.
         parallelism: Parallelism level for this operator.
     """
 
@@ -843,6 +1028,7 @@ class EnsureMixture(BaseOp):
             self._config,
             get_chunk_mixture=ctx.get("get_chunk_mixture"),
             get_component_name=ctx.get("get_component_name"),
+            get_source_exhaustion=ctx.get("get_source_exhaustion"),
         )
 
     def _populate_config_from_ctx(self, ctx: dict[str, Any]) -> None:
