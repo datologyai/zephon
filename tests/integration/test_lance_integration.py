@@ -176,20 +176,27 @@ print(json.dumps({
 """
 
 
-def _pool_probe(path: Path, count: int | None) -> dict[str, Any]:
-    env = {
+def _run_fresh(script: str, *args: str, **env: str) -> str:
+    """Run ``script`` in a new interpreter with only the given pool variables."""
+    clean = {
         k: v
         for k, v in os.environ.items()
         if k not in ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
     }
+    # A timeout turns a fork-related hang into a failure.
     result = subprocess.run(
-        [sys.executable, "-c", _POOL_PROBE, str(path), json.dumps(count)],
+        [sys.executable, "-c", script, *args],
         capture_output=True,
         text=True,
-        env=env,
+        env={**clean, **env},
         check=True,
+        timeout=60,
     )
-    return json.loads(result.stdout)
+    return result.stdout
+
+
+def _pool_probe(path: Path, count: int | None) -> dict[str, Any]:
+    return json.loads(_run_fresh(_POOL_PROBE, str(path), json.dumps(count)))
 
 
 @pytest.mark.skipif(
@@ -209,4 +216,50 @@ def test_worker_threads_caps_pylance_pools_without_leaking_the_environment(
     assert one["env"] == {"TOKIO_WORKER_THREADS": None, "LANCE_CPU_THREADS": "1"}
     # Two explicit sizes rather than pylance's default, whose size follows the
     # CPUs available to the process (a container quota), not os.cpu_count().
-    assert four["threads"] - one["threads"] >= 3
+    assert four["threads"] - one["threads"] == 3
+
+
+def test_worker_threads_reaches_the_lazily_started_cpu_pool(tmp_path: Path) -> None:
+    # pylance panics on an unparsable count, so the write below succeeds only
+    # if its CPU pool, started long after configuration, reads Zephon's value.
+    _run_fresh(
+        """
+import sys
+import lance, lance.file, pyarrow as pa
+from zephon.io import LanceOptions
+from zephon._internal.utils.thread_utils import configure_lance_threads
+
+configure_lance_threads(lance.file, LanceOptions(worker_threads=1))
+lance.write_dataset(pa.table({"x": [1]}), sys.argv[1])
+""",
+        str(tmp_path / "cpu.lance"),
+        LANCE_CPU_THREADS="invalid",
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_worker_threads_survives_fork(tmp_path: Path, pa: Any) -> None:
+    path = tmp_path / "ds.lance"
+    _write(path, pa)
+    # The parent's environment would make a child's uncapped start panic, so
+    # the child's read succeeds only if it sizes its rebuilt pools itself.
+    _run_fresh(
+        """
+import os, signal, sys
+import lance, lance.file
+from zephon.io import LanceOptions
+from zephon._internal.utils.thread_utils import configure_lance_threads
+
+options = LanceOptions(worker_threads=1)
+configure_lance_threads(lance.file, options)
+pid = os.fork()
+if pid == 0:
+    signal.alarm(20)
+    configure_lance_threads(lance.file, options)
+    rows = lance.dataset(sys.argv[1]).to_table().num_rows
+    os._exit(0 if rows else 1)
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+""",
+        str(path),
+        TOKIO_WORKER_THREADS="0",
+    )
