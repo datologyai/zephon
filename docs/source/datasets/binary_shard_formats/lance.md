@@ -73,27 +73,23 @@ reason and the remedy in the message, so a run never fails halfway through:
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
 **Caching reads.** Zephon keeps each fragment's decoded column mapping and tombstones per
-fetch replica, up to `metadata_cache_entries` (zero disables this). No file stays open
-between reads, so each read reopens the data file and rereads its footer.
+fetch replica, up to `metadata_cache_entries` (zero disables this). Files are not kept
+open between reads.
 
 ```python
 pipeline.options(io_options={"metadata_cache_entries": 256})
 ```
 
-**Worker threads.** By default pylance starts one thread per core in every process. Zephon
-caps its pools at two workers. pylance decodes on these workers rather than on the fetch
-threads, and in our measurements one worker halved large reads while two kept them at full
-speed:
+**Worker threads.** pylance starts one thread per core in every process by default. Zephon
+caps its pools at two workers: pylance decodes on them rather than on the fetch threads,
+so a single worker slows large reads. You can change the count through the pipeline's
+`io_options`:
 
 ```python
 pipeline.options(io_options={"lance": {"worker_threads": 2}})
 ```
 
-pylance sizes its pools once per process: the worker pool from `TOKIO_WORKER_THREADS` when
-it starts, and its CPU pool from `LANCE_CPU_THREADS` when that is first used. Zephon sets
-`TOKIO_WORKER_THREADS` only while it starts pylance, so libraries like obstore keep their
-own pools, and leaves `LANCE_CPU_THREADS` set. The count therefore applies only if nothing
-in the process has used pylance yet, including writing the dataset; forked workers size
-their pools again. Values you set yourself win unless you pass `worker_threads`; `None`
-leaves the existing pool configuration unchanged. pylance's blocking IO pool is not capped
-and grows briefly during reads.
+pylance sizes its pools once per process, so the count applies only if nothing in the
+process has used pylance yet, including writing the dataset. `TOKIO_WORKER_THREADS` and
+`LANCE_CPU_THREADS` from your environment win unless you pass `worker_threads`; `None`
+leaves the existing pool configuration unchanged.
