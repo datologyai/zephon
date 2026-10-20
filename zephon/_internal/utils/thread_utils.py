@@ -57,7 +57,9 @@ def configure_lance_threads(lance_file: ModuleType, options: LanceOptions) -> No
     pylance offers no setter and reads the sizes from the environment when it
     starts its pools, so they are set only around a throwaway open that makes
     it start them, then restored: obstore's tokio runtime reads
-    TOKIO_WORKER_THREADS too, and must keep its own size.
+    TOKIO_WORKER_THREADS too, and must keep its own size. The environment is
+    process-wide, so a runtime another thread starts during that one failed
+    open is sized from it as well.
     """
     global _lance_pools_started, _lance_pools_size
     count = options.worker_threads

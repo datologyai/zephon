@@ -98,10 +98,13 @@ pipeline.options(io_options={"lance": {"worker_threads": 2}})
 pylance has no setting for its pools and sizes them once per process, from the
 `TOKIO_WORKER_THREADS` and `LANCE_CPU_THREADS` environment variables, when it is first
 used. Zephon sets those only while pylance starts and then restores them, so other
-libraries that read `TOKIO_WORKER_THREADS`, such as obstore, keep their own pools. As a
-result the count takes effect only if no Lance code has run earlier in the process, and
-one set in your environment is respected unless you pass `worker_threads` explicitly.
-`worker_threads=None` leaves pylance's defaults alone.
+libraries that read `TOKIO_WORKER_THREADS`, such as obstore, keep their own pools. The
+variables are visible to the whole process for that moment, so a library that starts its
+own runtime on another thread at the same instant picks them up as well. The count takes
+effect only if no Lance code has run earlier in the process; a later store asking for a
+different count gets a warning. A count set in your environment is respected unless you
+pass `worker_threads` explicitly, and `worker_threads=None` leaves pylance's defaults
+alone.
 
 Reads of local files also run on pylance's blocking IO pool, which this count does not
 cap. It grows with the number of reads in flight and retires each thread after a few idle
