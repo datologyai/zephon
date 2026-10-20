@@ -25,10 +25,17 @@ class SourceExhaustion:
     :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
     permits continuing without them. The runner updates this snapshot before
     calling :meth:`Accumulator.on_source_exhausted`.
+
+    ``final_component`` identifies the EOD that completed exhaustion of all
+    components declared by :meth:`~zephon.work.WorkSource.component_ids` on this
+    lane. It stays ``None`` if any declared component is never announced exhausted,
+    even one that emits no records. It does not mean buffered records have drained.
+    A lane may finish without observing a final EOD, so do not wait for it to flush.
     """
 
     exhausted: frozenset[int] = frozenset()
     continuing: frozenset[int] = frozenset()
+    final_component: int | None = None
 
 
 class Accumulator(ABC, Generic[T]):
