@@ -3074,7 +3074,7 @@ def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
     state = source.state_dict()
     state["allocation_mode"] = "legacy_fixed"
     state["accumulators"] = None
-    with pytest.raises(ValueError, match="Legacy fixed-quota.*redistribution"):
+    with pytest.raises(RuntimeError, match="Legacy fixed-quota.*redistribution"):
         source.load_state_dict(state)
 
 
@@ -3235,9 +3235,15 @@ def test_mixed_redistribution_length_is_an_estimate(
 
 
 def test_token_repeat_liveness_never_requires_more_than_a_chunk() -> None:
-    source = _redistribute_source(
-        "tokens", {"a": 4}, exhausted_policy="repeat"
-    ).clone_for_lane(0, 1)
+    source = StaticMixtureWorkSource(
+        [make_dataset("a", 4)],
+        {"a": 1.0},
+        chunk_size=4,
+        exhausted_policy="repeat",
+        token_estimation=TokenEstimation(primer=1.0),
+    )
+    source.prime()
+    source = source.clone_for_lane(0, 1)
     chunks = [source.next_chunk() for _ in range(2)]
     assert all(chunk is not None and len(chunk) == 4 for chunk in chunks)
 

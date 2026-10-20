@@ -100,7 +100,7 @@ def _normalize_per_dataset(
         if unknown:
             raise ValueError(
                 f"{name} contains unknown dataset names: {sorted(unknown)}. "
-                f"Known datasets: {dataset_names}"
+                f"Known datasets: {list(dataset_names)}"
             )
         return {ds: value.get(ds, default) for ds in dataset_names}
     return dict.fromkeys(dataset_names, value)
@@ -1474,7 +1474,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     def __init__(self, config: _AllocationConfig) -> None:
         super().__init__(config)
         if config.redistributing:
-            raise ValueError(
+            raise RuntimeError(
                 "Legacy fixed-quota checkpoints do not support redistribution"
             )
         self._chunk_quota = self._compute_chunk_quota()
