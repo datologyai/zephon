@@ -21,9 +21,11 @@ from zephon._internal.io.formats.lance_support.manifest import (
     read_manifest,
 )
 from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.storage.local import LocalFSBackend
+from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.io.types import LocalShardFile, LocalShardRef
-from zephon.io import StoreOptions
+from zephon.io import CacheOptions, StoreOptions
 from zephon.io.dataset import Dataset
 
 pytest.importorskip("lance", reason="pylance not installed")
@@ -90,7 +92,9 @@ class _Store:
         )
         self._data_root = Path(dataset_root_of(self.manifest)) / "data"
         # A real store shares one opener across every Lance dataset it serves.
-        self._opener = opener or LanceShardOpener(StoreOptions())
+        self._opener = opener or LanceShardOpener(
+            StoreOptions(), RouterStorageBackend()
+        )
 
     def open(self, shard_id: int) -> RandomAccessShard:
         """Open one shard from its cached data file, as the resolver would hand it over."""
@@ -270,6 +274,50 @@ def test_deleted_rows_are_skipped(tmp_path: Path, pa: Any, write: Write) -> None
 
     assert [row["id"] for row in rows] == [1, 3, 4, 6, 7, 8]
     _assert_matches_pylance(path, rows)
+
+
+class _RecordingBackend(LocalFSBackend):
+    """Local storage that remembers which files were read through it."""
+
+    def __init__(self) -> None:
+        super().__init__(root=Path("/"))
+        self.read: list[str] = []
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
+        self.read.append(path)
+        return super().open(path, mode, **kwargs)
+
+    def read_range(self, path: str, start: int, **kwargs: Any) -> Any:
+        self.read.append(path)
+        return super().read_range(path, start, **kwargs)
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["direct", "cached"])
+def test_store_reads_manifest_and_tombstones_through_its_storage(
+    tmp_path: Path, pa: Any, write: Write, cache_enabled: bool
+) -> None:
+    path = tmp_path / "deleted.lance"
+    write(_table(pa, 10), path, max_rows_per_file=4)
+    lance.dataset(str(path)).delete("id in (0, 2, 5, 9)")
+    dataset = Dataset.from_path("ds", str(path))
+    storage = _RecordingBackend()
+
+    store = build_multi_dataset_store(
+        {0: dataset},
+        storage=storage,
+        options=StoreOptions(
+            cache=CacheOptions(enabled=cache_enabled, root=tmp_path / "cache")
+        ),
+    )
+    try:
+        shard, _ = store.for_dataset(0).open(0)
+        rows, _stats = shard.getsamples([0, 1])
+    finally:
+        store.close()
+
+    assert [row["id"] for row in rows] == [1, 3]
+    assert dataset.path in storage.read
+    assert any(f"{os.sep}_deletions{os.sep}" in read for read in storage.read)
 
 
 def test_emptied_fragments_leave_the_shard_set(
