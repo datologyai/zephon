@@ -2852,7 +2852,7 @@ def test_redistribute_preserves_a_single_dataset_tail() -> None:
     assert chunks[-1].source_exhausted == ("alpha",)
 
 
-def _redistribute_source(
+def _mixture_source(
     mode: str,
     sizes: dict[str, int],
     weights: dict[str, float] | None = None,
@@ -2906,7 +2906,7 @@ def test_redistribute_keeps_every_sample_and_publishes_survivor_targets(
     mode: str, chunk_size: int
 ) -> None:
     sizes = {"a": 3, "b": 9}
-    template = _redistribute_source(mode, sizes, chunk_size=chunk_size)
+    template = _mixture_source(mode, sizes, chunk_size=chunk_size)
     source = template.clone_for_lane(0, 1)
     assert len(source) == sum(sizes.values())
     assert source.continues_after_exhaustion() == frozenset(sizes)
@@ -2934,7 +2934,7 @@ def test_redistribute_keeps_every_sample_and_publishes_survivor_targets(
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_redistribute_checkpoint_before_and_after_retirement(mode: str) -> None:
-    template = _redistribute_source(mode, {"a": 3, "b": 9})
+    template = _mixture_source(mode, {"a": 3, "b": 9})
     chunks = _redistribute_chunks(template.clone_for_lane(0, 1))
     boundary = next(i for i, chunk in enumerate(chunks) if chunk.source_exhausted)
     # Before retirement, after retirement, and after the source has finished.
@@ -2960,7 +2960,7 @@ def test_survivor_allocation_preserves_sample_or_token_ratios(mode: str) -> None
     options = (
         {"token_estimation": TokenEstimation(primer=costs)} if mode == "tokens" else {}
     )
-    source = _redistribute_source(
+    source = _mixture_source(
         mode,
         {"a": 2, "b": 32, "c": 32},
         {"a": 0.5, "b": 0.3, "c": 0.2},
@@ -2983,7 +2983,7 @@ def test_survivor_allocation_preserves_sample_or_token_ratios(mode: str) -> None
     "mode,assignment", [("samples", "modulo"), ("tokens", "permute")]
 )
 def test_redistribute_lane_partition_and_resume(mode: str, assignment: str) -> None:
-    template = _redistribute_source(
+    template = _mixture_source(
         mode,
         {"a": 3, "b": 13},
         lane_assignment=assignment,
@@ -3013,7 +3013,7 @@ def test_redistribute_lane_partition_and_resume(mode: str, assignment: str) -> N
 def test_redistribute_retains_other_components_terminal_policy(
     mode: str, policy: str
 ) -> None:
-    source = _redistribute_source(
+    source = _mixture_source(
         mode,
         {"a": 2, "b": 8},
         exhausted_policy={"a": "redistribute", "b": policy},
@@ -3034,7 +3034,7 @@ def test_redistribute_retains_other_components_terminal_policy(
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_repeat_survivor_keeps_source_unbounded(mode: str) -> None:
-    source = _redistribute_source(
+    source = _mixture_source(
         mode, {"a": 2, "b": 8}, exhausted_policy={"a": "redistribute", "b": "repeat"}
     ).clone_for_lane(0, 1)
     assert math.isinf(source.total_samples)
@@ -3052,7 +3052,7 @@ def test_repeat_survivor_keeps_source_unbounded(mode: str) -> None:
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_repeat_liveness_uses_survivor_demand(mode: str) -> None:
     with pytest.raises(ValueError, match="requires at least 4"):
-        _redistribute_source(
+        _mixture_source(
             mode,
             {"a": 2, "b": 3},
             {"a": 0.75, "b": 0.25},
@@ -3062,7 +3062,7 @@ def test_repeat_liveness_uses_survivor_demand(mode: str) -> None:
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_empty_redistributing_component_is_announced(mode: str) -> None:
-    source = _redistribute_source(mode, {"a": 0, "b": 3}).clone_for_lane(0, 1)
+    source = _mixture_source(mode, {"a": 0, "b": 3}).clone_for_lane(0, 1)
     chunks = _redistribute_chunks(source)
     assert sum(map(len, chunks)) == 3
     assert chunks[0].target_mixture == {"b": 1.0}
@@ -3070,7 +3070,7 @@ def test_empty_redistributing_component_is_announced(mode: str) -> None:
 
 
 def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
-    source = _redistribute_source("samples", {"a": 3, "b": 9}).clone_for_lane(0, 1)
+    source = _mixture_source("samples", {"a": 3, "b": 9}).clone_for_lane(0, 1)
     state = source.state_dict()
     state["allocation_mode"] = "legacy_fixed"
     state["accumulators"] = None
@@ -3080,7 +3080,7 @@ def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_mixed_stop_rolls_back_an_unfinished_chunk(mode: str) -> None:
-    source = _redistribute_source(
+    source = _mixture_source(
         mode, {"a": 5, "b": 1}, exhausted_policy={"a": "redistribute", "b": "stop"}
     ).clone_for_lane(0, 1)
     before = source.state_dict()
@@ -3090,7 +3090,7 @@ def test_mixed_stop_rolls_back_an_unfinished_chunk(mode: str) -> None:
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_redistribute_simultaneous_exhaustion(mode: str) -> None:
-    source = _redistribute_source(mode, {"a": 2, "b": 2}).clone_for_lane(0, 1)
+    source = _mixture_source(mode, {"a": 2, "b": 2}).clone_for_lane(0, 1)
     chunks = _redistribute_chunks(source)
     assert len(chunks) == 1
     assert chunks[0].source_exhausted == ("a", "b")
@@ -3100,7 +3100,7 @@ def test_redistribute_simultaneous_exhaustion(mode: str) -> None:
 
 def test_redistribute_discards_retired_fractional_debt() -> None:
     """Removing components must not leave a nonzero total rounding balance."""
-    template = _redistribute_source(
+    template = _mixture_source(
         "samples",
         {"a": 4, "b": 4, "c": 4, "d": 0, "e": 0, "f": 0, "g": 0, "h": 0},
         chunk_size=1,
@@ -3142,7 +3142,7 @@ def test_empty_stop_component_keeps_its_policy(
     mode: str, policy: str | dict[str, str]
 ) -> None:
     with pytest.warns(RuntimeWarning, match="Dataset 'b' has 0 samples.*stop"):
-        source = _redistribute_source(
+        source = _mixture_source(
             mode, {"a": 5, "b": 0}, exhausted_policy=policy
         ).clone_for_lane(0, 1)
     assert len(source) == 0
@@ -3170,16 +3170,16 @@ def test_empty_repeat_component_fails_liveness(
     with pytest.raises(
         ValueError, match="Dataset 'b' has 0 samples but repeat policy requires"
     ):
-        _redistribute_source(mode, {"a": 16, "b": 0}, exhausted_policy=policy)
+        _mixture_source(mode, {"a": 16, "b": 0}, exhausted_policy=policy)
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_mixture_dict_order_does_not_change_redistribution(mode: str) -> None:
     sizes = {"a": 2, "b": 9, "c": 11}
-    original = _redistribute_source(
+    original = _mixture_source(
         mode, sizes, {"a": 0.5, "b": 0.25, "c": 0.25}
     ).clone_for_lane(0, 1)
-    reordered = _redistribute_source(
+    reordered = _mixture_source(
         mode, sizes, {"c": 0.25, "b": 0.25, "a": 0.5}
     ).clone_for_lane(0, 1)
     assert [c.state_dict() for c in _redistribute_chunks(original)] == [
@@ -3189,7 +3189,7 @@ def test_mixture_dict_order_does_not_change_redistribution(mode: str) -> None:
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_all_redistributing_components_initially_empty(mode: str) -> None:
-    source = _redistribute_source(mode, {"a": 0, "b": 0}).clone_for_lane(0, 1)
+    source = _mixture_source(mode, {"a": 0, "b": 0}).clone_for_lane(0, 1)
     assert len(source) == 0
     assert source.next_chunk() is None
     checkpoint = source.state_dict()
@@ -3200,7 +3200,7 @@ def test_all_redistributing_components_initially_empty(mode: str) -> None:
 
 def test_all_empty_stop_components_warn_and_terminate() -> None:
     with pytest.warns(RuntimeWarning, match="has 0 samples.*stop") as caught:
-        source = _redistribute_source(
+        source = _mixture_source(
             "samples", {"a": 0, "b": 0}, exhausted_policy="stop"
         ).clone_for_lane(0, 1)
     assert len(caught) == 2
@@ -3224,7 +3224,7 @@ def test_all_empty_stop_components_warn_and_terminate() -> None:
 def test_mixed_redistribution_length_is_an_estimate(
     sizes: dict[str, int], weights: dict[str, float], estimate: int, actual: int
 ) -> None:
-    source = _redistribute_source(
+    source = _mixture_source(
         "samples",
         sizes,
         weights,

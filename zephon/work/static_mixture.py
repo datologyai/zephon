@@ -1484,17 +1484,15 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     def _compute_chunk_quota(self) -> dict[str, int]:
         """Largest-remainder allocation for legacy fixed-quota mode."""
         cfg = self._config
-        weights = cfg.weights
-        order = cfg.component_order
-        component_count = len(order)
+        component_count = len(cfg.component_order)
         base_slots = component_count
         remaining_slots = cfg.chunk_size - base_slots
-        quota: dict[str, int] = dict.fromkeys(order, 1)
+        quota: dict[str, int] = dict.fromkeys(cfg.component_order, 1)
         warn_components: list[str] = []
         entries: list[tuple[float, int, str]] = []
 
-        for position, name in enumerate(order):
-            weight = weights[name]
+        for position, name in enumerate(cfg.component_order):
+            weight = cfg.weights[name]
             ideal = cfg.chunk_size * weight
             if ideal < 1.0:
                 warn_components.append(name)
@@ -1531,7 +1529,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
 
         if warn_components:
             joined = ", ".join(warn_components)
-            min_weight = min(weights[n] for n in warn_components)
+            min_weight = min(cfg.weights[n] for n in warn_components)
             min_chunk_size = math.ceil(1.0 / min_weight)
             min_proportion = 1.0 / cfg.chunk_size
             raise ValueError(
@@ -1555,11 +1553,10 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
     ) -> dict[str, int] | None:
         """Legacy fixed-quota chunk production (pre-accumulator checkpoints)."""
         cfg = self._config
-        quotas = dict(self._chunk_quota)
 
         # Check exhaustion per component and either stop or reset.
         for name in cfg.component_order:
-            quota = quotas[name]
+            quota = self._chunk_quota[name]
             cursor = cursors[name]
             if cursor.remaining < quota:
                 if cfg.exhausted_policy[name] == "repeat":
@@ -1570,13 +1567,15 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
                 else:
                     return None  # "stop" policy
 
-        return quotas
+        return dict(self._chunk_quota)
 
     # -- length estimation ------------------------------------------------
 
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
         # Legacy mode is reached only from pre-strategy checkpoints, which always
         # migrate to stop_after_passes=None, so the floor never applies here.
+        if not self._chunk_quota:
+            return 0
         cfg = self._config
         chunk_capacity = cfg.chunk_size
         chunks_possible: float = math.inf

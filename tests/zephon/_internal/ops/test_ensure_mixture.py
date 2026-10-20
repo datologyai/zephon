@@ -165,7 +165,7 @@ class TestSourceExhaustion:
     @pytest.mark.parametrize(
         "limit,override",
         [
-            # Integration tests cover bounded/source-target and strict/override.
+            # Cover both modes and both ways of selecting the target.
             pytest.param(None, False, id="strict-source-target"),
             pytest.param(64, True, id="bounded-override"),
         ],
