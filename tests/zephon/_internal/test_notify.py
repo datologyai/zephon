@@ -298,7 +298,8 @@ def test_source_exhaustion_continuation_flag(continues: bool) -> None:
 
 @pytest.mark.parametrize("final", [False, True])
 def test_source_exhaustion_final_flag(final: bool) -> None:
-    notice = Engine._make_source_exhausted_sentinel(0, 0, final=final)
+    notice = _record()
+    notice.meta.tags.update(_source_exhausted=0, _source_exhaustion_final=final)
     assert source_exhaustion_is_final(notice) is final
     assert not should_notify(notice)
     assert not source_exhaustion_is_final(_record())

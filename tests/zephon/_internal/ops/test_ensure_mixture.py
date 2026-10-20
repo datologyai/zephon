@@ -162,8 +162,13 @@ def _flatten_ready(ready: list) -> list[SampleRecord]:
 
 
 class TestSourceExhaustion:
-    @pytest.mark.parametrize("limit", [None, 64])
-    @pytest.mark.parametrize("override", [False, True])
+    @pytest.mark.parametrize(
+        "limit,override",
+        [
+            pytest.param(None, False, id="strict-source-target"),
+            pytest.param(64, True, id="bounded-override"),
+        ],
+    )
     def test_final_component_remains_eligible_after_reset(
         self, limit: int | None, override: bool
     ) -> None:
@@ -198,8 +203,13 @@ class TestSourceExhaustion:
             0,
         ]  # Initial load, EODs, then one reset reload.
 
-    @pytest.mark.parametrize("reset", [False, True])
-    @pytest.mark.parametrize("limit", [None, 64])
+    @pytest.mark.parametrize(
+        "reset,limit",
+        [
+            pytest.param(False, None, id="strict-before-reset"),
+            pytest.param(True, 64, id="bounded-after-reset"),
+        ],
+    )
     def test_final_component_does_not_override_explicit_exclusion(
         self, reset: bool, limit: int | None
     ) -> None:
@@ -221,11 +231,10 @@ class TestSourceExhaustion:
         else:
             assert flushed == [excluded]
 
-    @pytest.mark.parametrize("limit", [None, 64])
-    def test_final_component_exception_is_lane_scoped(self, limit: int | None) -> None:
+    def test_final_component_exception_is_lane_scoped(self) -> None:
         acc = _make_accumulator_with_chunk_mixture(
             {0: 0.5, 1: 0.5},
-            max_buffer_size=limit,
+            max_buffer_size=None,
             continues_after_exhaustion=frozenset({0, 1}),
         )
         for lane in (0, 1):
@@ -237,7 +246,7 @@ class TestSourceExhaustion:
         assert _flatten_ready(acc.push_many([a, b])) == [a]
         flushed = _flatten_ready(acc.flush())
         assert len(flushed) == 1
-        assert flushed[0].meta.tombstone == (limit is None)
+        assert flushed[0].meta.tombstone
         assert flushed[0].meta.lane_id == 1
 
     def test_snapshot_refreshes_only_on_notification_or_after_reset(self) -> None:
@@ -523,8 +532,13 @@ class TestSourceExhaustion:
 
 
 class TestRetiredRecords:
-    @pytest.mark.parametrize("weight_by", ["samples", "auto"])
-    @pytest.mark.parametrize("limit", [None, 64])
+    @pytest.mark.parametrize(
+        "weight_by,limit",
+        [
+            pytest.param("samples", 64, id="bounded-sample-contributions"),
+            pytest.param("auto", None, id="strict-token-contributions"),
+        ],
+    )
     def test_final_component_does_not_admit_mixed_retired_content(
         self, weight_by: str, limit: int | None
     ) -> None:

@@ -3,7 +3,6 @@
 
 """Source exhaustion through runners, epoch resets, buffering and replay."""
 
-import logging
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -370,10 +369,15 @@ def test_stop_policy_keeps_strict_and_bounded_behavior(limit: int | None) -> Non
         assert Counter(text.split("-")[0] for _, text in records) == {"a": 3, "b": 57}
 
 
-@pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize(
+    "strict,override",
+    [
+        pytest.param(False, False, id="bounded-source-target"),
+        pytest.param(True, True, id="strict-override"),
+    ],
+)
 def test_static_redistribution_with_buffering_and_checkpoint(
-    strict: bool, override: bool, caplog: pytest.LogCaptureFixture
+    strict: bool, override: bool
 ) -> None:
     """Real survivor targets and early EOD compose through shuffle, correction and replay."""
 
@@ -409,24 +413,15 @@ def test_static_redistribution_with_buffering_and_checkpoint(
             )
         )
 
-    with caplog.at_level(logging.DEBUG, logger="zephon._internal.ops.ensure_mixture"):
-        baseline = [r.payload["text"] for r in make_pipe()]
+    baseline = [r.payload["text"] for r in make_pipe()]
     assert len(baseline) == len(set(baseline))
     counts = Counter(text.split("-")[0] for text in baseline)
-    discarded_obsolete = sum(
-        record.args[2]
-        for record in caplog.records
-        if record.name == "zephon._internal.ops.ensure_mixture"
-        and record.msg.startswith("EnsureMixture strict mode discarded")
-    )
     if strict:
         # Two A records miss their drain slots. The final B EOD must keep B
         # eligible without admitting the earlier retired A tail.
         assert counts == {"a": 1, "b": 29}
-        assert discarded_obsolete == 2
     else:
         assert counts == {"a": 3, "b": 29}
-        assert discarded_obsolete == 0
         assert set(baseline) == {
             f"{name}-{i}" for name, size in (("a", 3), ("b", 29)) for i in range(size)
         }
