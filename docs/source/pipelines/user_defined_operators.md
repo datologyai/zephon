@@ -219,7 +219,7 @@ of the remaining components. An EOD sentinel lets it do this before records carr
 updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
-`StaticMixtureWorkSource` lists components with `exhausted_policy="redistribute"`;
+`StaticMixtureWorkSource` lists components with `exhausted_policy="redistribute"`.
 EOD sentinels do not relax mixture enforcement under its stop or repeat policies.
 
 There is one catch: A can still have records buffered upstream, for example in a shuffle

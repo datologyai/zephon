@@ -30,6 +30,7 @@ class SourceExhaustion:
     components declared by :meth:`~zephon.work.WorkSource.component_ids` on this
     lane. It stays ``None`` if any declared component is never announced exhausted,
     even one that emits no records. It does not mean buffered records have drained.
+    A lane may finish without observing a final EOD, so do not wait for it to flush.
     """
 
     exhausted: frozenset[int] = frozenset()

@@ -165,6 +165,7 @@ class TestSourceExhaustion:
     @pytest.mark.parametrize(
         "limit,override",
         [
+            # Integration tests cover bounded/source-target and strict/override.
             pytest.param(None, False, id="strict-source-target"),
             pytest.param(64, True, id="bounded-override"),
         ],
@@ -196,12 +197,8 @@ class TestSourceExhaustion:
                 assert flushed == [a]  # B already flowed; bounded mode preserves A.
         context = acc._get_source_exhaustion
         assert isinstance(context, _ExhaustionContext)
-        assert context.reads == [
-            0,
-            0,
-            0,
-            0,
-        ]  # Initial load, EODs, then one reset reload.
+        # Initial load, EODs, then one reset reload.
+        assert context.reads == [0, 0, 0, 0]
 
     @pytest.mark.parametrize(
         "reset,limit",

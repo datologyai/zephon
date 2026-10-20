@@ -296,9 +296,9 @@ class BaseOperatorState:
                     # Advance only after preceding data entered this accumulator.
                     # Epoch flushes retain these facts; restore replays notices.
                     self._source_exhaustion[lane] = SourceExhaustion(
-                        previous.exhausted | {component_id},
-                        continuing,
-                        component_id
+                        exhausted=previous.exhausted | {component_id},
+                        continuing=continuing,
+                        final_component=component_id
                         if source_exhaustion_is_final(e)
                         else previous.final_component,
                     )

@@ -1017,13 +1017,13 @@ def test_load_rejects_conflicting_policy() -> None:
     [
         ("stop", "max_repeats", 3),
         ("redistribute", "reshuffle_on_repeat", False),
-        ("stop", "reshuffle_on_repeat", True),
+        ("stop", "reshuffle_on_repeat", False),
     ],
 )
 def test_repeat_settings_warn_for_explicit_nonrepeat_entries(
     policy: str, knob: str, value: int | bool
 ) -> None:
-    """Explicit repeat-only settings on non-repeat components warn once."""
+    """Non-default repeat settings on non-repeat components warn once."""
     with pytest.warns(RuntimeWarning, match=rf"{knob}\['a'\].*no effect") as caught:
         StaticMixtureWorkSource(
             [make_dataset("a", 4), make_dataset("b", 4)],
@@ -1059,6 +1059,11 @@ def test_repeat_settings_warn_for_explicit_nonrepeat_entries(
             {"max_repeats": {"a": None}, "reshuffle_on_repeat": {}},
             id="unset-nonrepeat-settings",
         ),
+        pytest.param(
+            "stop",
+            {"reshuffle_on_repeat": {"a": True, "b": True}},
+            id="explicit-defaults",
+        ),
     ],
 )
 def test_repeat_settings_do_not_warn_for_scalars_or_repeat_entries(
@@ -1075,6 +1080,23 @@ def test_repeat_settings_do_not_warn_for_scalars_or_repeat_entries(
             **settings,
         )
     assert not caught
+
+
+@pytest.mark.parametrize(
+    "setting,value", [("max_repeats", 3), ("reshuffle_on_repeat", False)]
+)
+def test_scalar_repeat_setting_warns_without_any_repeat_component(
+    setting: str, value: int | bool
+) -> None:
+    with pytest.warns(RuntimeWarning, match=f"{setting}=.*no effect") as caught:
+        StaticMixtureWorkSource(
+            [make_dataset("a", 4)],
+            {"a": 1.0},
+            chunk_size=2,
+            exhausted_policy="stop",
+            **{setting: value},
+        )
+    assert len(caught) == 1
 
 
 def test_repeat_max_repeats() -> None:
@@ -2862,8 +2884,9 @@ def _redistribute_source(
 
 def _redistribute_chunks(source: StaticMixtureWorkSource) -> list[WorkChunk]:
     # A hard cap turns any accidental nontermination into a small, fast failure.
-    chunks = []
-    for _ in range(100):
+    max_chunks = 100
+    chunks: list[WorkChunk] = []
+    for _ in range(max_chunks):
         chunk = source.next_chunk()
         if chunk is None:
             return chunks
@@ -2891,7 +2914,7 @@ def test_redistribute_keeps_every_sample_and_publishes_survivor_targets(
     ids = [sid for c in chunks for samples in c.components.values() for sid in samples]
     assert len(ids) == len(set(ids)) == sum(sizes.values())
     assert Counter(sid[0] for sid in ids) == {0: 3, 1: 9}
-    exhausted = set()
+    exhausted: set[str] = set()
     for chunk in chunks:
         active = {name: 1.0 for name in sizes if name not in exhausted}
         assert chunk.target_mixture == pytest.approx(
@@ -2946,7 +2969,7 @@ def test_survivor_allocation_preserves_sample_or_token_ratios(mode: str) -> None
     ).clone_for_lane(0, 1)
     boundary = source.next_chunk()
     assert boundary is not None and "a" in boundary.source_exhausted
-    total = Counter()
+    total: Counter[str] = Counter()
     for _ in range(3):
         chunk = source.next_chunk()
         assert chunk is not None and len(chunk) == 10
@@ -3046,20 +3069,13 @@ def test_empty_redistributing_component_is_announced(mode: str) -> None:
     assert chunks[0].source_exhausted == ("a", "b")
 
 
-def test_legacy_quota_redistribution_restores_from_cursors() -> None:
-    template = _redistribute_source("samples", {"a": 3, "b": 9})
-    template._strategy = LegacyFixedStrategy(template._alloc_config)
-    source = template.clone_for_lane(0, 1)
-    chunks = _redistribute_chunks(source)
-    assert [len(c) for c in chunks] == [4, 3, 4, 1]
-    source = template.clone_for_lane(0, 1)
-    source.next_chunk()
-    source.next_chunk()
-    restored = template.clone_for_lane(0, 1)
-    restored.load_state_dict(source.state_dict())
-    assert [c.state_dict() for c in _redistribute_chunks(restored)] == [
-        c.state_dict() for c in chunks[2:]
-    ]
+def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
+    source = _redistribute_source("samples", {"a": 3, "b": 9}).clone_for_lane(0, 1)
+    state = source.state_dict()
+    state["allocation_mode"] = "legacy_fixed"
+    state["accumulators"] = None
+    with pytest.raises(ValueError, match="Legacy fixed-quota.*redistribution"):
+        source.load_state_dict(state)
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
@@ -3070,10 +3086,6 @@ def test_mixed_stop_rolls_back_an_unfinished_chunk(mode: str) -> None:
     before = source.state_dict()
     assert source.next_chunk() is None
     assert source.state_dict() == before
-    restored = _redistribute_source(mode, {"a": 5, "b": 1}).clone_for_lane(0, 1)
-    # Omitted policy adopts the checkpoint's policy; an explicit mismatch is rejected.
-    with pytest.raises(RuntimeError, match="contradict"):
-        restored.load_state_dict(before)
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
@@ -3129,9 +3141,10 @@ def test_redistribute_discards_retired_fractional_debt() -> None:
 def test_empty_stop_component_keeps_its_policy(
     mode: str, policy: str | dict[str, str]
 ) -> None:
-    source = _redistribute_source(
-        mode, {"a": 5, "b": 0}, exhausted_policy=policy
-    ).clone_for_lane(0, 1)
+    with pytest.warns(RuntimeWarning, match="Dataset 'b' has 0 samples.*stop"):
+        source = _redistribute_source(
+            mode, {"a": 5, "b": 0}, exhausted_policy=policy
+        ).clone_for_lane(0, 1)
     assert len(source) == 0
     assert source.next_chunk() is None
     checkpoint = source.state_dict()
@@ -3183,6 +3196,50 @@ def test_all_redistributing_components_initially_empty(mode: str) -> None:
     source.load_state_dict(checkpoint)
     assert source.next_chunk() is None
     assert source.state_dict() == checkpoint
+
+
+def test_all_empty_stop_components_warn_and_terminate() -> None:
+    with pytest.warns(RuntimeWarning, match="has 0 samples.*stop") as caught:
+        source = _redistribute_source(
+            "samples", {"a": 0, "b": 0}, exhausted_policy="stop"
+        ).clone_for_lane(0, 1)
+    assert len(caught) == 2
+    assert len(source) == 0
+    before = source.state_dict()
+    assert source.next_chunk() is None
+    assert source.state_dict() == before
+
+
+@pytest.mark.parametrize(
+    "sizes,weights,estimate,actual",
+    [
+        pytest.param(
+            {"a": 2, "b": 8}, {"a": 0.5, "b": 0.5}, 10, 8, id="terminal-rollback"
+        ),
+        pytest.param(
+            {"a": 10, "b": 1}, {"a": 0.7, "b": 0.3}, 3, 4, id="quota-rounding"
+        ),
+    ],
+)
+def test_mixed_redistribution_length_is_an_estimate(
+    sizes: dict[str, int], weights: dict[str, float], estimate: int, actual: int
+) -> None:
+    source = _redistribute_source(
+        "samples",
+        sizes,
+        weights,
+        exhausted_policy={"a": "redistribute", "b": "stop"},
+    ).clone_for_lane(0, 1)
+    assert len(source) == estimate
+    assert sum(map(len, _redistribute_chunks(source))) == actual
+
+
+def test_token_repeat_liveness_never_requires_more_than_a_chunk() -> None:
+    source = _redistribute_source(
+        "tokens", {"a": 4}, exhausted_policy="repeat"
+    ).clone_for_lane(0, 1)
+    chunks = [source.next_chunk() for _ in range(2)]
+    assert all(chunk is not None and len(chunk) == 4 for chunk in chunks)
 
 
 # ---------------------------------------------------------------------------

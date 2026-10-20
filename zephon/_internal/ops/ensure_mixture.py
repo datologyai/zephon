@@ -387,6 +387,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             return []
         state = self._lanes[lane_id]
         state.removed_by_exhaustion = self._exhaustion_removals(exhaustion)
+        # The final EOD leaves the target unchanged; earlier EODs remove a weight.
         if state.swrr is not None:
             self._set_target(state, state.swrr.target_ratios)
         # Release buffered survivors now; there may be no further input.
@@ -532,11 +533,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             for cid, count in meta.component_sample_counts.items()
         }
 
-    def _exhaustion_removals(self, exhaustion: SourceExhaustion) -> frozenset[int]:
+    @staticmethod
+    def _exhaustion_removals(exhaustion: SourceExhaustion) -> frozenset[int]:
         """Keep the final source component eligible under the existing target."""
         if exhaustion.final_component is not None:
-            # The runner retains this fact across epoch resets and reconstructs it
-            # on replay. Never add a component excluded by the target/override.
+            # The runner retains this lane's final component across epoch resets
+            # and reconstructs it on replay, including when its EOD overtook data.
             return exhaustion.continuing - {exhaustion.final_component}
         return exhaustion.continuing
 
@@ -561,6 +563,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if target is None:
             state.swrr = None  # No target configured: unrestricted output.
         else:
+            # Only remove weights: never add a component excluded by an override.
             target = {
                 cid: weight
                 for cid, weight in target.items()
@@ -911,7 +914,8 @@ class EnsureMixture(BaseOp):
     ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
     Late records follow ``obsolete_drain_rate`` in both modes.
     Both modes keep the final source component eligible if it is in the target,
-    so its remaining records can still be emitted.
+    so its remaining records can still be emitted. Earlier retired components
+    remain rate-limited to avoid a burst of their buffered records at final EOD.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission

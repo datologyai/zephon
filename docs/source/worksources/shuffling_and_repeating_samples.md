@@ -103,7 +103,10 @@ You can instead control what happens when an individual dataset runs out of samp
 - `exhausted_policy="redistribute"` reads each dataset once. When a dataset runs out,
   its weight is redistributed proportionally over the remaining datasets. The work source
   stops once every dataset has been consumed. In token mode, the remaining datasets keep
-  their relative token weights.
+  their relative token weights. Chunks can be shorter when a dataset runs out.
+
+With redistribution, `len(source)` is exact when every dataset redistributes. When mixed
+with stop or capped-repeat policies, it is an estimate.
 
 With `exhausted_policy="repeat"`, you can also set `max_repeats=N`. This allows each
 dataset its initial pass plus at most `N` additional passes. The entire WorkSource stops
