@@ -2029,10 +2029,10 @@ class StaticMixtureWorkSource(WorkSource):
     exhausted).
 
     ``exhausted_policy="redistribute"`` consumes a dataset once, then removes it
-    from allocation and renormalizes the surviving weights. Its final samples may
-    form a short chunk, whose target is the mixture at the start of that chunk;
-    subsequent chunks publish the survivor target. The source ends when all
-    components are exhausted, or a mixed-in stop policy or repeat cap ends the run.
+    from the mixture and renormalizes the remaining weights. Its last samples may
+    form a short chunk with the target used to allocate that chunk; later chunks
+    use the updated target. The source stops when all datasets have run out, or
+    earlier if another dataset's stop policy or repeat cap is reached.
 
     ``stop_after_passes`` is the minimum number of full passes per dataset: every
     dataset repeats and the run stops once all have been traversed that many

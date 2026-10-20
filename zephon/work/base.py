@@ -463,8 +463,8 @@ class WorkSource(ABC):
         The default is empty. For listed components, ``ensure_mixture`` removes
         their weight when the sentinel arrives, even from an explicit mixture
         override, and handles late records through ``obsolete_drain_rate``. Later
-        chunk targets may omit these components. Both modes keep the final source
-        component eligible if it is in the target, so its remaining records can drain.
+        chunk targets may omit these components. The final source component stays
+        eligible if it is in the target, so its remaining records can still be emitted.
         """
         return frozenset()
 

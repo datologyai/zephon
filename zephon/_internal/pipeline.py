@@ -979,8 +979,8 @@ class Pipeline:
         target, including explicit overrides, and renormalizes the remaining weights.
         ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
         Late records follow ``obsolete_drain_rate`` in both modes.
-        Both modes keep the final source component eligible if it is in the target;
-        its EOD does not retire that component's in-flight tail.
+        Both modes keep the final source component eligible if it is in the target,
+        so its remaining records can still be emitted.
 
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
