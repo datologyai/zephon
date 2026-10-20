@@ -346,10 +346,10 @@ class LanceOptions:
     """Lance's process-wide worker pools.
 
     ``worker_threads`` (default 2) caps each of pylance's native pools, which
-    otherwise start one worker per core; None leaves them alone. pylance sizes
-    them once per process, so the count applies only before its first use. An
-    explicit count overrides TOKIO_WORKER_THREADS and LANCE_CPU_THREADS; an
-    omitted one respects them.
+    otherwise start one worker per core; None leaves the existing pool
+    configuration unchanged. pylance sizes them once per process, so the count
+    applies only before its first use. An explicit count overrides
+    TOKIO_WORKER_THREADS and LANCE_CPU_THREADS; an omitted one respects them.
     """
 
     worker_threads: int | None = _option(2, preserve_none=True)

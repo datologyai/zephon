@@ -92,6 +92,6 @@ pipeline.options(io_options={"lance": {"worker_threads": 2}})
 pylance sizes its pools once per process from `TOKIO_WORKER_THREADS` and
 `LANCE_CPU_THREADS`, so the count applies only if nothing in the process has used pylance
 yet, including writing the dataset. Zephon sets those variables only while pylance starts,
-so libraries like obstore keep their own pools. Values you set yourself win unless you pass
-`worker_threads`; `None` keeps pylance's defaults. pylance's blocking IO pool is not capped
-and grows briefly during reads.
+so libraries like obstore keep their own pools. Values you set yourself win unless you
+pass `worker_threads`; `None` leaves the existing pool configuration unchanged. pylance's
+blocking IO pool is not capped and grows briefly during reads.
