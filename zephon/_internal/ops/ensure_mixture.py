@@ -535,7 +535,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
 
     @staticmethod
     def _exhaustion_removals(exhaustion: SourceExhaustion) -> frozenset[int]:
-        """Keep the final source component eligible under the existing target."""
+        """Exclude the final source component from EOD-driven target removals."""
         if exhaustion.final_component is not None:
             # The runner retains this lane's final component across epoch resets
             # and reconstructs it on replay, including when its EOD overtook data.
@@ -913,9 +913,9 @@ class EnsureMixture(BaseOp):
     target, including explicit overrides, and renormalizes the remaining weights.
     ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
     in both modes.
-    Both modes keep the final source component eligible if it is in the target,
-    so its remaining records can still be emitted. Earlier retired components
-    remain rate-limited to avoid a burst of their buffered records at final EOD.
+    The final EOD leaves the target unchanged. Previously retired components
+    continue through controlled drainage to avoid a burst of buffered records
+    at final EOD.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission
