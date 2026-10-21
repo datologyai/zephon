@@ -36,6 +36,7 @@ import cloudpickle
 import numpy as np
 from filelock import FileLock
 
+from zephon._internal.calibration import sample_meta as _calibration_sample_meta
 from zephon._internal.io.catalog import (
     resolve_catalog_dir as _resolve_catalog_dir,
 )
@@ -67,7 +68,7 @@ from zephon._internal.utils.atomic import atomic_write_bytes as _atomic_write_by
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 from zephon.ops.base import OpContext, StageInfo
-from zephon.types import SampleId, SampleMeta, SampleRecord
+from zephon.types import SampleId, SampleRecord
 
 _logger = logging.getLogger(__name__)
 
@@ -329,7 +330,7 @@ class _PreTokenizeReplay:
             self._setup_done = True
         records = [
             SampleRecord(
-                meta=SampleMeta(sample_id=sample_id, lane_id=0, chunk_id=0),
+                meta=_calibration_sample_meta(sample_id),
                 payload=payload,
             )
         ]
@@ -921,6 +922,7 @@ def _dataset_content_key(dataset: Dataset) -> str:
 
 def _pickle_fingerprint(obj: Any) -> str:
     """Content hash via cloudpickle; sentinel when the object cannot serialize."""
+    # Dynamic classes carry process-specific IDs and can cause cache misses.
     try:
         return hashlib.sha256(cloudpickle.dumps(obj)).hexdigest()
     except Exception:  # noqa: BLE001 — priming is best-effort by contract

@@ -1661,7 +1661,11 @@ class TestEnsureMixtureOperator:
         ]
 
         replay = _PreTokenizeReplay([make_op()])
-        replayed = [payload for rec in records for payload in replay.apply(rec.payload)]
+        replayed = [
+            payload
+            for rec in records
+            for payload in replay.apply(rec.payload, rec.meta.sample_id)
+        ]
         assert len(replayed) == len(records)
         matches = sorted(emitted, key=lambda row: row["value"]) == replayed
         assert op.traits().calibration_replayable is matches

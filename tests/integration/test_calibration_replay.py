@@ -7,9 +7,9 @@ import pytest
 
 from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
-from zephon.ops import BaseOp, OpContext, OpTraits
+from zephon.ops import BaseOp, OpTraits
 from zephon.ops.children import spawn_child
-from zephon.types import SampleRecord
+from zephon.types import SampleMeta, SampleRecord
 from zephon.work import StaticMixtureWorkSource
 from zephon.work.token_estimation import TokenEstimation
 
@@ -28,17 +28,28 @@ def duplicate_records(records: list[SampleRecord]) -> list[SampleRecord]:
 
 
 class DuplicateRecords(BaseOp):
-    def setup(self, ctx: OpContext) -> None:
-        super().setup(ctx)
-        self._transform = duplicate_records
-
     def traits(self) -> OpTraits:
         return OpTraits(
             indexable=False, preserves_cursor_order=True, calibration_replayable=True
         )
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
-        return self._transform(elems)
+        return duplicate_records(elems)
+
+    def validation_samples(self) -> list[SampleRecord]:
+        return [
+            SampleRecord(
+                meta=SampleMeta(
+                    sample_id=(0, lane, offset),
+                    lane_id=lane,
+                    chunk_id=0,
+                    chunk_offset=offset,
+                ),
+                payload={"text": "one two"},
+            )
+            for lane in range(2)
+            for offset in range(2)
+        ]
 
 
 @pytest.mark.parametrize("form", ["instance", "kwargs"])
@@ -68,16 +79,16 @@ def test_custom_fanout_changes_calibrated_token_ratio(form: str) -> None:
                     preserves_cursor_order=True,
                     calibration_replayable=True,
                 )
-        records = list(
-            pipe.tokenize(
-                tokenizer_id="__fallback__", field="text", special_tokens="none"
-            ).options(
-                runner="threads",
-                deterministic=True,
-                canonical_replicas=1,
-                max_workers=1,
-            )
+        pipe.tokenize(
+            tokenizer_id="__fallback__", field="text", special_tokens="none"
+        ).options(
+            runner="threads",
+            deterministic=True,
+            canonical_replicas=1,
+            max_workers=1,
         )
+        assert not pipe.validate(strict=True).warnings
+        records = list(pipe)
         ratio, source = work.state_dict()["token_ratios"]["text"]
         assert source == "measured"
         return sum(len(record.payload["input_ids"]) for record in records), ratio

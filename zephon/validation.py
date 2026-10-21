@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
 
+from zephon._internal.calibration import sample_meta as _calibration_sample_meta
+from zephon._internal.functional_op import _is_user_op
 from zephon._internal.ops.tokenize_base import TokenizeBase as _TokenizeBase
 from zephon.ops.accumulators import Accumulator
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
@@ -304,12 +306,9 @@ def _calibration_placeholders(samples: list[SampleRecord]) -> list[SampleRecord]
     records = copy.deepcopy(samples)
     for record in records:
         meta = dataclasses.replace(
-            record.meta,
-            lane_id=0,
-            chunk_id=0,
-            chunk_offset=0,
-            component_sample_counts={0: 1},
-            component_token_counts=None,
+            _calibration_sample_meta(record.meta.sample_id),
+            lineage=record.meta.lineage,
+            tags=record.meta.tags,
         )
         if meta.contributors:
             meta = meta.with_contributors(
@@ -317,7 +316,9 @@ def _calibration_placeholders(samples: list[SampleRecord]) -> list[SampleRecord]
                     dataclasses.replace(
                         ref,
                         cursor=dataclasses.replace(
-                            ref.cursor, chunk_id=0, chunk_offset=0
+                            ref.cursor,
+                            chunk_id=meta.chunk_id,
+                            chunk_offset=meta.chunk_offset,
                         ),
                     )
                     for ref in meta.contributors
@@ -1539,23 +1540,6 @@ def _check_acc_flush_is_lane_scoped(
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-
-
-def _is_user_op(op: Any) -> bool:
-    """Identify ops that should be validated.
-
-    Two shapes count as user code: ``_FunctionalOp`` instances (kwargs
-    form of ``Pipeline.add_op`` wraps user callables in one) and any op
-    whose class lives outside the ``zephon.*`` package (user `BaseOp`
-    subclasses attached via the instance form).  Built-in framework ops
-    live in ``zephon._internal.ops`` and are skipped — they have their
-    own dedicated test coverage.
-    """
-    from zephon._internal.functional_op import _FunctionalOp
-
-    if isinstance(op, _FunctionalOp):
-        return True
-    return not type(op).__module__.startswith("zephon.")
 
 
 def _guard(op_name: str, label: str, fn: Callable[[], list[Issue]]) -> list[Issue]:

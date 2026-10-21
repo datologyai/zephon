@@ -260,6 +260,11 @@ for kwargs-form ops. These probes use `validation_samples()` or generic records 
 never call `setup()`. Unsupported comparisons produce a warning; passing is a smoke
 test, not a guarantee.
 
+Calibration caches ratios using serialized operator state. Classes defined in a training
+script or notebook can serialize differently across processes, causing ranks or restarts
+to repeat calibration; this affects startup time, not the measured ratios. Defining the
+class in an importable module avoids the process-specific class identifiers.
+
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
 own operators and is not validated this way.

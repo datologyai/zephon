@@ -24,7 +24,7 @@ from typing import (
 )
 
 from zephon._internal.engine import Engine
-from zephon._internal.functional_op import _FunctionalOp
+from zephon._internal.functional_op import _FunctionalOp, _is_user_op
 from zephon._internal.graph import Graph, Node, Plan
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.decode_text import DecodeText
@@ -68,7 +68,7 @@ from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
 from zephon.options import RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SamplePayload, SampleRecord, StreamItem
-from zephon.validation import ValidationError, _is_user_op, preflight_tokenizers
+from zephon.validation import ValidationError, preflight_tokenizers
 from zephon.work import WorkSource
 from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 
