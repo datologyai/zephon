@@ -53,6 +53,47 @@ def test_pipeline_replays_chat_prefixes(rename_messages: bool) -> None:
     assert not pipe.is_indexable
 
 
+@pytest.fixture
+def chat_scope_tokenizer():
+    from tests.helpers.chat import make_fast_tokenizer
+
+    return make_fast_tokenizer()
+
+
+def test_preflight_reports_failure_without_disabling_runtime_checks(
+    chat_scope_tokenizer,
+) -> None:
+    from tests.helpers.chat import CONVERSATION, TAGGED_TEMPLATE
+    from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+    from zephon import Pipeline
+
+    work = FakeIndexableWorkSource(
+        make_inmem_dataset("chat", [{"messages": CONVERSATION}]), chunk_size=1
+    )
+    pipe = Pipeline(work).tokenize_chat(
+        chat_scope_tokenizer,
+        chat_template=TAGGED_TEMPLATE + "{% generation %}eos{% endgeneration %}",
+        loss_scope="after_last_user",
+    )
+    assert not pipe.preflight_tokenizers(strict=False).ok
+    assert not pipe._tail.op._tokenizer_instantiated
+    with pytest.raises(ValueError, match="no enclosing loop"):
+        pipe._tail.op._ids_and_mask({"messages": CONVERSATION}, "fixture")
+
+
+def test_deprecation_warning_points_to_public_caller(chat_scope_tokenizer) -> None:
+    from tests.helpers.chat import CONVERSATION
+    from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+    from zephon import Pipeline
+
+    work = FakeIndexableWorkSource(
+        make_inmem_dataset("chat", [{"messages": CONVERSATION}]), chunk_size=1
+    )
+    with pytest.warns(FutureWarning) as caught:
+        Pipeline(work).tokenize_chat(chat_scope_tokenizer, loss_on_last_turn_only=True)
+    assert caught[0].filename == __file__
+
+
 @pytest.mark.parametrize("use_monotone", [True, False])
 def test_controls_do_not_notify_delivery_or_escape_the_tail(use_monotone: bool) -> None:
     # Exercise only the tail wrapper: no source, graph compilation or engine.

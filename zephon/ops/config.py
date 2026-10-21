@@ -13,6 +13,14 @@ MissingFieldMode: TypeAlias = Literal["error", "empty"]
 
 SpanSource: TypeAlias = Literal["auto", "generation_tags", "prefix_diff"]
 
+LossScope: TypeAlias = Literal["all_assistant", "last_span", "after_last_user"]
+
 PackingAlgorithm: TypeAlias = Literal["first_fit", "best_fit", "wrap", "best_fit_wrap"]
 
-__all__ = ["MissingFieldMode", "PackingAlgorithm", "SpanSource", "SpecialTokensMode"]
+__all__ = [
+    "LossScope",
+    "MissingFieldMode",
+    "PackingAlgorithm",
+    "SpanSource",
+    "SpecialTokensMode",
+]

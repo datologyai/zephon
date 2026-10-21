@@ -21,6 +21,7 @@ from zephon.ops.children import (
     tombstones_for_record,
 )
 from zephon.ops.config import (
+    LossScope,
     MissingFieldMode,
     PackingAlgorithm,
     SpanSource,
@@ -34,6 +35,7 @@ __all__ = [
     "BaseOp",
     "CountingAccumulator",
     "DomainGroups",
+    "LossScope",
     "MissingFieldMode",
     "OpContext",
     "OpTraits",

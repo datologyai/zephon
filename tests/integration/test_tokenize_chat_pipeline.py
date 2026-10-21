@@ -11,6 +11,10 @@ unsupervised (the packed-shift boundary invariant).
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -24,6 +28,50 @@ pytestmark = pytest.mark.integration
 
 transformers = pytest.importorskip("transformers")
 tokenizers = pytest.importorskip("tokenizers")
+
+
+class _ProbeRecordingTokenizer(transformers.PreTrainedTokenizerFast):
+    """Record HF mask comparisons across parent and worker processes."""
+
+    def apply_chat_template(self, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("return_assistant_tokens_mask"):
+            with open(self.probe_log, "a") as output:
+                output.write(f"{os.getpid()} {bool(kwargs.get('truncation'))}\n")
+        return super().apply_chat_template(*args, **kwargs)
+
+
+def test_process_worker_reuses_preflight_setup_checks(tmp_path: Path) -> None:
+    from tests.helpers.chat import CYCLE, SPLIT, make_fast_tokenizer
+
+    base = make_fast_tokenizer()
+    tokenizer = _ProbeRecordingTokenizer(
+        tokenizer_object=base.backend_tokenizer, **base.special_tokens_map
+    )
+    log = tmp_path / "probes.txt"
+    tokenizer.probe_log = str(log)
+    work = StaticMixtureWorkSource(
+        [Dataset.from_dict("chat", {0: InMemoryShard([{"messages": CYCLE}])})],
+        {"chat": 1.0},
+        chunk_size=1,
+    )
+    pipe = (
+        Pipeline(work)
+        .tokenize_chat(tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
+        .options(runner="process", max_workers=1, canonical_replicas=1)
+    )
+    assert pipe.preflight_tokenizers().ok
+    records = list(pipe)
+    assert len(records) == 1
+    targets = tokenizer.decode(
+        records[0].payload["input_ids"][records[0].payload["loss_mask"].astype(bool)]
+    )
+    assert "how" in targets and "answer" in targets and "12" not in targets
+    probes = [line.split() for line in log.read_text().splitlines()]
+    parent = str(os.getpid())
+    assert sum(pid == parent and truncated == "True" for pid, truncated in probes) == 2
+    workers = [truncated for pid, truncated in probes if pid != parent]
+    assert workers == ["False"]
+
 
 SEQ = 32
 

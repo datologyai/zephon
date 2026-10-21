@@ -37,7 +37,7 @@ from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.ops.prefetch import PrefetchOp
 from zephon._internal.ops.shuffle_buffer import ShuffleBuffer
 from zephon._internal.ops.tokenize_base import TokenizeBase
-from zephon._internal.ops.tokenize_chat import TokenizeChat
+from zephon._internal.ops.tokenize_chat import TokenizeChat, _resolve_loss_scope
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.planner import Planner
 from zephon._internal.runtime_spec import (
@@ -60,6 +60,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    LossScope,
     MissingFieldMode,
     PackingAlgorithm,
     SpanSource,
@@ -907,7 +908,8 @@ class Pipeline:
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
-        loss_on_last_turn_only: bool = False,
+        loss_scope: LossScope | None = None,
+        loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -916,13 +918,47 @@ class Pipeline:
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
-        """Tokenize chat conversations into ids plus a loss mask.
+        """Tokenize each conversation into token IDs and a loss mask.
 
-        Full contract: one-shot
-        render+tokenize with assistant spans from ``{% generation %}`` tags,
-        a guarded prefix-diff fallback for untagged templates, or exact spans
-        in the no-template path (``apply_chat_template=False``).
+        Reads role/content messages from ``field`` (default: ``messages``).
+        Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.
+        ``chat_template`` overrides the tokenizer's template with Jinja text or
+        a file path. ``chat_template_kwargs`` supplies static template arguments;
+        ``tools_field`` and ``enable_thinking_field`` select per-record values.
+
+        Output replaces the payload with aligned, unshifted NumPy arrays:
+        ``input_ids`` (int64) and ``loss_mask`` (uint8; rename via ``mask_field_out``).
+        Ones mark target tokens. ``preserve_upstream_payload=True`` retains other
+        fields; ``max_length`` truncates the output.
+        Samples with fewer than two tokens or no supervised tokens are dropped.
+
+        Targets come from ``{% generation %}`` blocks. Untagged templates infer
+        assistant ranges by rendering successive conversation prefixes.
+        ``apply_chat_template=False`` concatenates message content, appends EOS
+        to assistant messages and selects targets from their roles.
+
+        ``loss_scope`` selects all assistant spans (``all_assistant``, default),
+        the final contiguous supervised run (``last_span``), or all assistant
+        messages after the final user (``after_last_user``). Untagged templates
+        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
+
+        With generation tags, ``after_last_user`` verifies templates automatically.
+        Each selected assistant's generation blocks must cover its reasoning,
+        calls, answer and end-of-turn token within its message loop, excluding
+        user/tool-result content. Verification adds rendering and tokenization at
+        setup and for new message/tool formats or non-object tool argument values;
+        successful checks are reused. ``preflight_tokenizers()`` runs setup checks
+        before iteration. Samples with omitted selected content are dropped and
+        logged; other verification failures raise. Inspect outputs and masks:
+        checks cannot cover every content-dependent template branch.
+
+        ``loss_on_last_turn_only`` is deprecated: True selects ``last_span`` and
+        False selects ``all_assistant``. Cannot accompany ``loss_scope``.
         """
+        # warn -> resolver -> tokenize_chat -> @_mutates_graph -> caller
+        loss_scope = _resolve_loss_scope(
+            loss_scope, loss_on_last_turn_only, stacklevel=4
+        )
         op = TokenizeChat(
             tokenizer,
             tokenizer_id,
@@ -932,7 +968,7 @@ class Pipeline:
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
-            loss_on_last_turn_only=loss_on_last_turn_only,
+            loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
             enable_thinking_field=enable_thinking_field,
@@ -1680,8 +1716,10 @@ class Pipeline:
     def preflight_tokenizers(self, *, strict: bool = True) -> "ValidationReport":
         """Load and validate every tokenizer configured on the pipeline.
 
-        Each tokenizer operator is probed through a deep copy, leaving the
-        pipeline's operator state unchanged. This may download tokenizer files.
+        Each tokenizer operator is initialized through a deep copy. Successful
+        template checks are retained for worker reuse, while the original
+        tokenizer stays lazy. Changed configurations are checked again in the
+        worker. This may download tokenizer files.
 
         Args:
             strict: If True, raise :class:`ValidationError` when any tokenizer

@@ -98,7 +98,8 @@ class ValidationReport:
             lines.append(
                 f"  [{issue.severity}] {issue.code} in {issue.op_name!r}: {issue.message}"
             )
-            lines.append(f"      → {issue.doc_link}")
+            if issue.doc_link:
+                lines.append(f"      → {issue.doc_link}")
         return "\n".join(lines)
 
 
@@ -1771,9 +1772,9 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
 def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
     """Return tokenizer initialization failures for a pipeline.
 
-    Each tokenizer operator is deep-copied before its lazy initialization runs,
-    leaving pipeline-owned operators unchanged. This may download tokenizer
-    files.
+    Each tokenizer operator is initialized through a deep copy. Successful
+    template checks are retained for worker reuse; tokenizer loading and setup
+    failures stay on the copy. This may download tokenizer files.
 
     Args:
         pipeline: Pipeline to inspect.
@@ -1789,6 +1790,7 @@ def preflight_tokenizers(pipeline: "Pipeline") -> ValidationReport:
         try:
             probe = copy.deepcopy(op)
             probe._setup_tokenizer()
+            op._cache_preflight_result(probe)
         except Exception as exc:
             report.issues.append(
                 Issue(

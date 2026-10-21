@@ -19,6 +19,7 @@ from zephon.ops import Accumulator, BaseOp, CountingAccumulator, OpTraits, Ready
 from zephon.ops.children import spawn_child
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.validation import (
+    Issue,
     ValidationError,
     ValidationReport,
     preflight_tokenizers,
@@ -33,6 +34,25 @@ def _empty_pipeline() -> PublicPipeline:
 
 def _codes(report: ValidationReport) -> list[str]:
     return [i.code for i in report.issues]
+
+
+def test_report_formats_issues_with_and_without_doc_links() -> None:
+    report = ValidationReport(
+        [
+            Issue("error", "LOCAL", "chat", "Fix the template", doc_link=""),
+            Issue(
+                "warning",
+                "LINKED",
+                "chat",
+                "See the guide",
+                doc_link="https://example.com",
+            ),
+        ]
+    )
+    formatted = report.format()
+    assert "Fix the template" in formatted
+    assert formatted.count("→") == 1
+    assert "→ https://example.com" in formatted
 
 
 # ---------------------------------------------------------------------------
@@ -1934,7 +1954,7 @@ def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
     assert report.ok, report.format()
     assert loads == ["fake-model"]
 
-    # Preflight must not load or cache state on the pipeline-owned operator.
+    # Preflight must not initialize the pipeline-owned tokenizer.
     (op,) = _tokenize_ops(pipe)
     assert op.tok is None
     assert op._tokenizer_instantiated is False
