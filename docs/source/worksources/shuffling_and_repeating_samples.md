@@ -105,6 +105,11 @@ You can instead control what happens when an individual dataset runs out of samp
   stops once every dataset has been consumed. In token mode, the remaining datasets keep
   their relative token weights. Chunks can be shorter when a dataset runs out.
 
+A short chunk keeps the target from before exhaustion; its contents may differ.
+For example, in sample mode with a 50:50 A:B mixture and chunk size 4, if only one A
+remains, the chunk contains one A and two B, still with a 50:50 target. Later chunks
+use a 100% B target.
+
 With redistribution, `len(source)` is exact when every dataset redistributes. When mixed
 with stop or capped-repeat policies, it is an estimate.
 

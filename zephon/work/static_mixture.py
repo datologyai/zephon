@@ -1348,8 +1348,8 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                 cursor = cursors[name]
                 if cursor.remaining < quota:
                     if cfg.exhausted_policy[name] == "redistribute":
-                        # Keep the tail and finish a short chunk. Renormalize the
-                        # next chunk, whose target no longer includes this source.
+                        # Clamp only this quota; keep the other allocations intact.
+                        # The short chunk keeps the old target; renormalize the next.
                         # Unfulfilled integer draws need no credit: this component
                         # never draws again; fractional carry is handled above.
                         quotas[name] = cursor.remaining
@@ -2025,12 +2025,13 @@ class StaticMixtureWorkSource(WorkSource):
 
     ``exhausted_policy="redistribute"`` consumes a dataset once, then removes it
     from the mixture and renormalizes the remaining weights. Its last samples may
-    form a short chunk with the target used to allocate that chunk; later chunks
-    use the updated target. The source stops when all datasets have run out, or
-    earlier if another dataset's stop policy or repeat cap is reached.
-    Sample mode clamps exhausted quotas; token mode ends the chunk when a draw
-    reaches an exhausted component. ``len(source)`` is exact when all components
-    redistribute, and an estimate when mixed with stop or capped-repeat policies.
+    form a short chunk that keeps the pre-exhaustion target even when its contents
+    differ; later chunks use the updated target. The source stops when all datasets
+    have run out, or earlier if another dataset's stop policy or repeat cap is reached.
+    Sample mode clamps only exhausted quotas, leaving other allocations unchanged.
+    Token mode ends the chunk when a draw reaches an exhausted component.
+    ``len(source)`` is exact when all components redistribute, and an estimate when
+    mixed with stop or capped-repeat policies.
 
     ``stop_after_passes`` is the minimum number of full passes per dataset: every
     dataset repeats and the run stops once all have been traversed that many
