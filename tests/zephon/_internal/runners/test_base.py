@@ -499,7 +499,7 @@ class _StallTrackingOp(BaseOp):
     """Minimal op that uses _FlushTrackingAccumulator."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
+        return OpTraits(preserves_cursor_order=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
@@ -538,7 +538,7 @@ class _BrokenFlushOp(BaseOp):
     """Op whose accumulator leaves data behind after mid-stream flush."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(preserves_cursor_order=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
@@ -629,7 +629,7 @@ class _NonMonotoneFlushOp(BaseOp):
         super().__init__()
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=True, preserves_cursor_order=False)
+        return OpTraits(preserves_cursor_order=False)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

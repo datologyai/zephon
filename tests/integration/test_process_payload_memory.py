@@ -68,13 +68,10 @@ def _run(
 
 class _OrderedOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(preserves_cursor_order=True)
 
 
 class _TensorizeValueOp(_OrderedOp):
-    def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
-
     def accumulator(self, *, deterministic: bool, ctx: dict[str, Any]) -> Accumulator:
         return CountingAccumulator(max_batch=8, max_latency_ms=None)
 
@@ -88,9 +85,6 @@ class _TensorizeValueOp(_OrderedOp):
 
 
 class _EncodeLargeBytesOp(_OrderedOp):
-    def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
-
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         return [
             SampleRecord(

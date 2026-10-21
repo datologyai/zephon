@@ -46,7 +46,7 @@ class _PublishingOp(BaseOp):
             self._hook("replacement")
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         if self.mode == "before":

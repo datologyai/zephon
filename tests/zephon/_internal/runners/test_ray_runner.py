@@ -81,7 +81,6 @@ class _IdentityOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -103,7 +102,6 @@ class _IdentityOp(BaseOp):
 class _ValueMappingOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -159,7 +157,6 @@ class _CrashOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -185,7 +182,6 @@ class _LambdaOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -219,7 +215,6 @@ class _ClosureOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,

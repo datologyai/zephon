@@ -26,9 +26,7 @@ class AssertLineageOrder(BaseOp):
         self._last_per_lane: dict[int, SampleCursor | None] = defaultdict(lambda: None)
 
     def traits(self) -> OpTraits:
-        return OpTraits(
-            calibration_replayable=False, indexable=True, preserves_cursor_order=True
-        )
+        return OpTraits(indexable=True, preserves_cursor_order=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

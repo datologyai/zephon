@@ -506,12 +506,7 @@ def test_checkpoint_resume_nested_tokenized_children() -> None:
         work = StaticMixtureWorkSource([dataset], {"d": 1.0}, chunk_size=1, seed=3)
         return (
             PublicPipeline(work)
-            .add_op(
-                "split_text",
-                calibration_replayable=True,
-                process_many=split_text,
-                preserves_cursor_order=True,
-            )
+            .add_op("split_text", process_many=split_text, preserves_cursor_order=True)
             .tokenize(
                 tokenizer_id="__fallback__",
                 field="text",

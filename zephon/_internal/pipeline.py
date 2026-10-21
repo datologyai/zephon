@@ -724,7 +724,6 @@ class Pipeline:
                 accumulator=lambda: CountingAccumulator(max_batch=64),
                 parallelism=4,
                 preserves_cursor_order=True,
-                calibration_replayable=False,
             )
         """
         if isinstance(name_or_op, BaseOp):

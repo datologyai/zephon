@@ -104,12 +104,7 @@ class _OrderedOp(BaseOp):
         super().__init__()
 
     def traits(self) -> OpTraits:
-        return OpTraits(
-            calibration_replayable=True,
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=1,
-        )
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
 
     def accumulator(self, *, deterministic: bool) -> Accumulator[int]:
         return PassthroughAccumulator[int]()
@@ -123,12 +118,7 @@ class _OrderedOp(BaseOp):
 
 class _ReorderingOp(_OrderedOp):
     def traits(self) -> OpTraits:
-        return OpTraits(
-            calibration_replayable=True,
-            indexable=True,
-            preserves_cursor_order=False,
-            parallelism=1,
-        )
+        return OpTraits(indexable=True, preserves_cursor_order=False, parallelism=1)
 
 
 def test_planner_marks_plan_cursor_order_when_all_ops_preserve() -> None:
@@ -150,7 +140,7 @@ def test_planner_marks_plan_non_cursor_order_when_any_op_reorders() -> None:
 def test_optraits_requires_preserves_cursor_order() -> None:
     """OpTraits enforces the trait declaration at construction time."""
     with pytest.raises(TypeError):
-        OpTraits(calibration_replayable=False)  # type: ignore[call-arg]
+        OpTraits()  # type: ignore[call-arg]
 
 
 def test_planner_rejects_map_transform_after_batch() -> None:

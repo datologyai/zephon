@@ -94,12 +94,7 @@ class PrefetchOp(BaseOp):
     def traits(self) -> OpTraits:
         # Preserves order and can be indexed
         # Higher parallelism allows concurrent downloads across batches
-        return OpTraits(
-            calibration_replayable=False,
-            indexable=True,
-            preserves_cursor_order=True,
-            parallelism=4,
-        )
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

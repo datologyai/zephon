@@ -39,6 +39,9 @@ class _BaseMapTransform(BaseOp):
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
 
+    def traits(self) -> OpTraits:
+        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+
     def _tombstones_for(self, elem: SampleRecord | SampleBatch) -> list[SampleRecord]:
         """Emit tombstone records for every closing contributor in *elem*."""
         records = (elem,) if isinstance(elem, SampleRecord) else elem.records
@@ -208,14 +211,6 @@ class MapBatchTransform(_BaseMapTransform):
         return CountingAccumulator[SampleRecord | SampleBatch](
             max_batch=self._max_batch,
             max_latency_ms=None if deterministic else self._max_latency_ms,
-        )
-
-    def traits(self) -> OpTraits:
-        return OpTraits(
-            indexable=True,
-            preserves_cursor_order=True,
-            calibration_replayable=False,
-            parallelism=4,
         )
 
     def process_one(self, elem: SampleBatch) -> list[SampleBatch | SampleRecord]:

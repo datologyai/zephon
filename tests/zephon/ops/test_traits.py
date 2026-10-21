@@ -15,4 +15,4 @@ def test_optraits_defaults() -> None:
 def test_optraits_requires_preserves_cursor_order() -> None:
     """`preserves_cursor_order` has no default — construction must fail."""
     with pytest.raises(TypeError):
-        OpTraits(calibration_replayable=False)  # type: ignore[call-arg]
+        OpTraits()  # type: ignore[call-arg]

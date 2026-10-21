@@ -1617,7 +1617,6 @@ class PackSequences(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False,
             indexable=False,
             batch_shape_sensitive=False,
             # Serial state lives in the accumulator, so the op needs none.

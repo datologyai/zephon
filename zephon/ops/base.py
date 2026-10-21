@@ -138,7 +138,9 @@ class BaseOp(ABC):
 
     - ``process_many`` — the workhorse transform.
     - ``traits`` — must return an `OpTraits` with ``preserves_cursor_order``
-      explicitly declared.
+      declared; the subclass must declare ``True`` (1:1 maps, payload
+      transforms, non-reordering filters) or ``False`` (reorders, shuffles,
+      packs).
 
     Instantiating a subclass that doesn't override both ``process_many``
     and ``traits`` raises ``TypeError`` at construction time.
