@@ -15,12 +15,9 @@ SpanSource: TypeAlias = Literal["auto", "generation_tags", "prefix_diff"]
 
 LossScope: TypeAlias = Literal["all_assistant", "last_span", "after_last_user"]
 
-ContentLossPolicy: TypeAlias = Literal["raise", "drop"]
-
 PackingAlgorithm: TypeAlias = Literal["first_fit", "best_fit", "wrap", "best_fit_wrap"]
 
 __all__ = [
-    "ContentLossPolicy",
     "LossScope",
     "MissingFieldMode",
     "PackingAlgorithm",

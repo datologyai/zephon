@@ -31,7 +31,6 @@ from zephon.observability import (
 )
 from zephon.ops import (
     BaseOp,
-    ContentLossPolicy,
     DomainGroups,
     LossScope,
     OpContext,
@@ -164,7 +163,4 @@ class IdentityOp(BaseOp):
 
 def scoped_chat(pipe: Pipeline) -> Pipeline:
     scope: LossScope = "after_last_user"
-    policy: ContentLossPolicy = "drop"
-    return pipe.expand_chat().tokenize_chat(
-        tokenizer_id="model", loss_scope=scope, on_content_loss=policy
-    )
+    return pipe.expand_chat().tokenize_chat(tokenizer_id="model", loss_scope=scope)

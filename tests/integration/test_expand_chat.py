@@ -156,7 +156,6 @@ def test_content_loss_drops_preserve_expansion_and_calibration(runner: str) -> N
             make_fast_tokenizer(),
             chat_template=THINK_SPLIT_TEMPLATE,
             loss_scope="after_last_user",
-            on_content_loss="drop",
         )
         .options(runner=runner, max_workers=1, canonical_replicas=1)
     )

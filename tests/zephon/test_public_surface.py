@@ -67,7 +67,6 @@ EXPECTED_ALL = {
     "zephon.ops": [
         "Accumulator",
         "BaseOp",
-        "ContentLossPolicy",
         "CountingAccumulator",
         "DomainGroups",
         "LossScope",
@@ -242,7 +241,6 @@ EXPECTED_ALL = {
         "tombstones_for_record",
     ],
     "zephon.ops.config": [
-        "ContentLossPolicy",
         "LossScope",
         "MissingFieldMode",
         "PackingAlgorithm",

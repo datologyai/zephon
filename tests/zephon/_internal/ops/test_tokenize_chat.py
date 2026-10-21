@@ -826,19 +826,21 @@ def test_invalid_structure_fails_without_preflight(
         )
 
 
-def test_structure_detects_omitted_calls_before_emission(fast_tokenizer: Any) -> None:
+def test_structure_drops_omitted_calls_before_emission(
+    fast_tokenizer: Any, caplog: pytest.LogCaptureFixture
+) -> None:
     op = TokenizeChat(
         fast_tokenizer,
         chat_template=TAGGED_TEMPLATE,
         loss_scope="after_last_user",
-        on_content_loss="raise",
     )
     assert not run(op, CONVERSATION).meta.tombstone
-    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
-        run(op, CYCLE)
+    with caplog.at_level(logging.ERROR):
+        assert run(op, CYCLE).meta.tombstone
+    assert "CHAT_REQUIRED_CONTENT" in caplog.text
 
 
-def test_content_loss_defaults_to_drop_and_logs_sample_context(
+def test_content_loss_drops_and_logs_sample_context(
     fast_tokenizer: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     op = TokenizeChat(
@@ -858,38 +860,23 @@ def test_content_loss_defaults_to_drop_and_logs_sample_context(
     # Another matching input must not be treated as a verified structure.
     assert run(op, messages).meta.tombstone
 
-    strict = TokenizeChat(
-        fast_tokenizer,
-        chat_template=THINK_SPLIT_TEMPLATE,
-        loss_scope="after_last_user",
-        on_content_loss="raise",
-    )
-    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
-        run(strict, messages)
 
-
-def test_content_loss_policy_reaches_serialized_token_counter(
+def test_content_loss_counts_zero_with_serialized_token_counter(
     fast_tokenizer: Any,
 ) -> None:
     messages = copy.deepcopy(CONVERSATION)
     messages[-1]["content"] = "<think>how</think>yes</think>the answer"
     bad = {"messages": messages}
     good = {"messages": CONVERSATION}
-    for policy in ("drop", "raise"):
-        op = TokenizeChat(
-            fast_tokenizer,
-            chat_template=THINK_SPLIT_TEMPLATE,
-            loss_scope="after_last_user",
-            on_content_loss=policy,
-        )
-        spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
-        plan = spec.build_counter().plan([bad, good])
-        if policy == "drop":
-            assert plan.count(bad) == 0
-        else:
-            with pytest.raises(FatalCountError, match="CHAT_REQUIRED_CONTENT"):
-                plan.count(bad)
-        assert plan.count(good) == len(run(op, CONVERSATION).payload["input_ids"])
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=THINK_SPLIT_TEMPLATE,
+        loss_scope="after_last_user",
+    )
+    spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    plan = spec.build_counter().plan([bad, good])
+    assert plan.count(bad) == 0
+    assert plan.count(good) == len(run(op, CONVERSATION).payload["input_ids"])
 
 
 def test_drop_policy_never_suppresses_setup_errors(fast_tokenizer: Any) -> None:
@@ -954,11 +941,6 @@ def test_content_loss_logging_is_bounded(
     ]
     assert len(logs) == 6
     assert "content-loss drops=100/100" in logs[-1]
-
-
-def test_content_loss_policy_rejects_unknown_value(fast_tokenizer: Any) -> None:
-    with pytest.raises(ValueError, match="invalid on_content_loss"):
-        TokenizeChat(fast_tokenizer, on_content_loss=cast(Any, "ignore"))
 
 
 def test_tool_content_contamination_detected(fast_tokenizer: Any) -> None:
@@ -1113,16 +1095,14 @@ def test_input_shapes_checked_automatically(fast_tokenizer: Any) -> None:
         "{{ message['content'] }}",
         "{{ message['content'] if message['content'] is string else '' }}",
     )
-    with pytest.raises(ValidationError, match="CHAT_REQUIRED_CONTENT"):
-        run(
-            TokenizeChat(
-                fast_tokenizer,
-                chat_template=drops_lists,
-                loss_scope="after_last_user",
-                on_content_loss="raise",
-            ),
-            lists,
-        )
+    assert run(
+        TokenizeChat(
+            fast_tokenizer,
+            chat_template=drops_lists,
+            loss_scope="after_last_user",
+        ),
+        lists,
+    ).meta.tombstone
     messages = [CONVERSATION[0], CONVERSATION[1], CONVERSATION[0]]
     text, spans = OwnedTemplate(TAGGED_TEMPLATE).render(messages, {})
     assert text.count("hi there") == 2
