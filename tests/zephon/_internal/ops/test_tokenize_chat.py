@@ -761,6 +761,32 @@ def run(op: TokenizeChat, messages: list[dict[str, Any]]) -> SampleRecord:
     )[0]
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("json_arguments", [False, True])
+def test_tool_call_formats_preserve_tokens_and_loss(
+    fast_tokenizer: Any, wrapped: bool, json_arguments: bool
+) -> None:
+    messages = copy.deepcopy(CYCLE[2:])
+    function = messages[1]["tool_calls"][0]["function"]
+    if json_arguments:
+        function["arguments"] = json.dumps(function["arguments"])
+    if not wrapped:
+        messages[1]["tool_calls"] = [function]
+    baseline = _payload(
+        run(TokenizeChat(fast_tokenizer, chat_template=SPLIT), messages)
+    )
+    actual = _payload(
+        run(
+            TokenizeChat(
+                fast_tokenizer, chat_template=SPLIT, loss_scope="after_last_user"
+            ),
+            messages,
+        )
+    )
+    for key in ("input_ids", "loss_mask"):
+        np.testing.assert_array_equal(actual[key], baseline[key])
+
+
 @pytest.mark.parametrize("mode", ["generation_tags", "prefix_diff", "literal"])
 @pytest.mark.parametrize("scope", ["all_assistant", "last_span", "after_last_user"])
 def test_scope_targets_by_source(fast_tokenizer: Any, mode: str, scope: str) -> None:

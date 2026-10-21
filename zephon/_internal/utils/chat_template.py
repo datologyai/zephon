@@ -362,13 +362,25 @@ def _call_arguments(value: Any) -> dict[str, Any]:
     return arguments
 
 
+def _call_function(value: Any) -> dict[str, Any]:
+    """Return a wrapped or flat tool-call function without changing its format."""
+    if not isinstance(value, dict):
+        raise ValueError("tool calls must be dictionaries")
+    function = value.get("function", value)
+    if not isinstance(function, dict) or (
+        "function" not in value and "name" not in value
+    ):
+        raise ValueError("tool calls must contain a function dictionary or a name")
+    return function
+
+
 def _tool_structure(value: Any, *, call: bool) -> tuple[Any, ...]:
     """Describe tool formats without names, argument contents or parameter schemas."""
     if not isinstance(value, dict):
         raise ValueError("tools and tool calls must be dictionaries")
-    function = value.get("function", value)
-    if not isinstance(function, dict) or (call and "function" not in value):
-        raise ValueError("tool calls must contain a function dictionary")
+    function = _call_function(value) if call else value.get("function", value)
+    if not isinstance(function, dict):
+        raise ValueError("tools must contain a function dictionary")
     common = (
         "wrapped" if "function" in value else "flat",
         tuple(sorted(value)),
@@ -498,9 +510,7 @@ def _marked_probe(
             if message.get(field_name):
                 message[field_name] = mark_text(message[field_name], i)
         for call in message.get("tool_calls") or []:
-            if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
-                raise ValueError("tool calls must contain a function dictionary")
-            function = call["function"]
+            function = _call_function(call)
             args = function.get("arguments", {})
             is_json = isinstance(args, str)
             args = _call_arguments(args)

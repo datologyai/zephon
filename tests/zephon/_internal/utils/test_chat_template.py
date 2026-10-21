@@ -233,6 +233,34 @@ def test_cache_reuses_tool_formats_across_payload_changes(
     assert len(calls) == 1
 
 
+def test_cache_distinguishes_flat_and_wrapped_calls(counted_verifier: Any) -> None:
+    verifier, calls = counted_verifier
+    messages = copy.deepcopy(CYCLE)
+    verifier.verify_input_structure(messages, {})
+    messages[3]["tool_calls"] = [messages[3]["tool_calls"][0]["function"]]
+    verifier.verify_input_structure(messages, {})
+    verifier.verify_input_structure(CYCLE, {})
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+def test_flat_calls_require_content_and_supervision(
+    fast_tokenizer: Any, omitted: bool
+) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"] = [messages[3]["tool_calls"][0]["function"]]
+    template = SPLIT.replace(
+        "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}",
+        "" if omitted else "{{m.tool_calls|tojson}}",
+    )
+    verifier = TemplateVerifier(fast_tokenizer, template, {})
+    code = "CHAT_REQUIRED_CONTENT" if omitted else "CHAT_REQUIRED_SUPERVISION"
+    with pytest.raises(ValidationError, match=code):
+        verifier.verify_input_structure(messages, {})
+
+
 @pytest.mark.parametrize("field", ["tool_calls", "tools"])
 def test_cache_buckets_tool_counts(counted_verifier: Any, field: str) -> None:
     verifier, calls = counted_verifier
@@ -272,17 +300,22 @@ def test_cache_distinguishes_first_middle_and_last_call_formats(
     assert len(calls) == 4
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("arguments", [None, [], 1, False, "[]", "null", "{broken"])
 def test_cached_formats_still_validate_every_call(
-    counted_verifier: Any, arguments: Any
+    counted_verifier: Any, arguments: Any, wrapped: bool
 ) -> None:
     verifier, calls = counted_verifier
     messages = copy.deepcopy(CYCLE)
     call = messages[3]["tool_calls"][0]
+    if not wrapped:
+        call = call["function"]
     messages[3]["tool_calls"] = [copy.deepcopy(call) for _ in range(3)]
     verifier.verify_input_structure(messages, {})
     messages[3]["tool_calls"] = [copy.deepcopy(call) for _ in range(8)]
-    messages[3]["tool_calls"][5]["function"]["arguments"] = arguments
+    changed = messages[3]["tool_calls"][5]
+    function = changed["function"] if wrapped else changed
+    function["arguments"] = arguments
     with pytest.raises(ValidationError, match="CHAT_TEMPLATE_INVALID"):
         verifier.verify_input_structure(messages, {})
     assert len(calls) == 1
