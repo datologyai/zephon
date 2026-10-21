@@ -31,10 +31,16 @@ import copy
 import dataclasses
 import inspect
 import pickle
+import sys
 import textwrap
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+import numpy as np
+
+from zephon._internal.calibration import sample_meta as _calibration_sample_meta
+from zephon._internal.functional_op import _is_user_op
 from zephon._internal.ops.tokenize_base import TokenizeBase as _TokenizeBase
 from zephon.ops.accumulators import Accumulator
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
@@ -255,6 +261,72 @@ def _outputs_equivalent(out_a: list[Any], out_b: list[Any]) -> bool:
         return pickle.dumps(out_a) == pickle.dumps(out_b)
     except Exception:
         return True
+
+
+def _calibration_payload_key(value: Any) -> Any:
+    """Snapshot supported payload values independently of storage and dict order."""
+    if type(value) in (str, bytes, int, float, complex, bool, type(None)):
+        return pickle.dumps(value)
+    if type(value) in (list, tuple):
+        return type(value), tuple(_calibration_payload_key(v) for v in value)
+    if type(value) is dict:
+        return dict, frozenset(
+            (_calibration_payload_key(k), _calibration_payload_key(v))
+            for k, v in value.items()
+        )
+    if isinstance(value, (np.ndarray, np.generic)):
+        return (
+            type(value),
+            str(value.dtype),
+            value.shape,
+            _calibration_payload_key(value.tolist())
+            if value.dtype.hasobject
+            else value.tobytes(),
+        )
+    torch = sys.modules.get("torch")
+    if torch is not None and isinstance(value, torch.Tensor):
+        return (
+            type(value),
+            str(value.dtype),
+            tuple(value.shape),
+            value.detach()
+            .cpu()
+            .contiguous()
+            .reshape(-1)
+            .view(torch.uint8)
+            .numpy()
+            .tobytes(),
+        )
+    raise TypeError(
+        f"unsupported calibration comparison payload: {type(value).__name__}"
+    )
+
+
+def _calibration_placeholders(samples: list[SampleRecord]) -> list[SampleRecord]:
+    """Replace scheduling and component metadata while retaining source identity."""
+    records = copy.deepcopy(samples)
+    for record in records:
+        meta = dataclasses.replace(
+            _calibration_sample_meta(record.meta.sample_id),
+            lineage=record.meta.lineage,
+            tags=record.meta.tags,
+        )
+        if meta.contributors:
+            meta = meta.with_contributors(
+                tuple(
+                    dataclasses.replace(
+                        ref,
+                        cursor=dataclasses.replace(
+                            ref.cursor,
+                            chunk_id=meta.chunk_id,
+                            chunk_offset=meta.chunk_offset,
+                        ),
+                    )
+                    for ref in meta.contributors
+                )
+            )
+        record.meta = meta
+    return records
 
 
 def _lineage_extends_or_equals(
@@ -526,6 +598,102 @@ def _check_op_no_cross_call_state(
                 ),
             )
         ]
+    return []
+
+
+def _check_op_calibration_replayable(
+    op: Any,
+    op_name: str,
+    samples: list[SampleRecord],
+    *,
+    check_accumulator: bool,
+) -> list[Issue]:
+    """Compare batched, per-record, placeholder, and accumulator-backed outputs."""
+    if not op.traits().calibration_replayable:
+        return []
+
+    def unavailable(reason: str) -> list[Issue]:
+        return [
+            Issue(
+                severity="warning",
+                code="OP_CALIBRATION_REPLAY_NOT_VALIDATED",
+                op_name=op_name,
+                message=(
+                    f"Calibration replay could not be fully checked: {reason}. "
+                    "Supply validation_samples() that work without setup and use "
+                    "supported payloads (scalars, lists, tuples, dicts, arrays, or "
+                    "tensors). Passing other checks does not validate replay."
+                ),
+            )
+        ]
+
+    def mismatch(reason: str) -> list[Issue]:
+        return [
+            Issue(
+                severity="error",
+                code="OP_CALIBRATION_REPLAY_MISMATCH",
+                op_name=op_name,
+                message=(
+                    f"calibration_replayable=True but {reason}. Replay must "
+                    "produce the same payloads and record counts per source, "
+                    "including drops, regardless of batching or placeholder "
+                    "metadata. Leave calibration_replayable=False if this "
+                    "dependency is intentional."
+                ),
+            )
+        ]
+
+    baseline: Counter[Any] | None = None
+    modes = ["batch", "per-record", "placeholder metadata"]
+    if check_accumulator:
+        modes.append("accumulator")
+    for mode in modes:
+        try:
+            probe = copy.deepcopy(op)
+            records = (
+                _calibration_placeholders(samples)
+                if mode == "placeholder metadata"
+                else copy.deepcopy(samples)
+            )
+        except Exception as exc:
+            return unavailable(f"probe inputs could not be copied ({exc})")
+        try:
+            if mode == "accumulator":
+                acc = _make_accumulator_factory(probe)()
+                outputs = [
+                    record
+                    for batch, _ in acc.push_many(records)
+                    for record in probe.process_many(batch)
+                ]
+                outputs.extend(
+                    record
+                    for batch, _ in acc.flush()
+                    for record in probe.process_many(batch)
+                )
+            else:
+                groups = [records] if mode == "batch" else [[r] for r in records]
+                outputs = [
+                    record for group in groups for record in probe.process_many(group)
+                ]
+        except Exception as exc:
+            reason = f"{mode} processing raised {type(exc).__name__}: {exc}"
+            return unavailable(reason) if baseline is None else mismatch(reason)
+        if any(not isinstance(record, SampleRecord) for record in outputs):
+            return mismatch(
+                f"{mode} processing emitted something other than SampleRecord"
+            )
+        try:
+            signature = Counter(
+                (record.meta.sample_id, _calibration_payload_key(record.payload))
+                for record in outputs
+                if not record.meta.tombstone
+            )
+        except Exception as exc:
+            return unavailable(str(exc))
+        if baseline is None:
+            baseline = signature
+        elif signature != baseline:
+            return mismatch(f"{mode} processing changed payloads or record counts")
     return []
 
 
@@ -1375,23 +1543,6 @@ def _check_acc_flush_is_lane_scoped(
 # ---------------------------------------------------------------------------
 
 
-def _is_user_op(op: Any) -> bool:
-    """Identify ops that should be validated.
-
-    Two shapes count as user code: ``_FunctionalOp`` instances (kwargs
-    form of ``Pipeline.add_op`` wraps user callables in one) and any op
-    whose class lives outside the ``zephon.*`` package (user `BaseOp`
-    subclasses attached via the instance form).  Built-in framework ops
-    live in ``zephon._internal.ops`` and are skipped — they have their
-    own dedicated test coverage.
-    """
-    from zephon._internal.functional_op import _FunctionalOp
-
-    if isinstance(op, _FunctionalOp):
-        return True
-    return not type(op).__module__.startswith("zephon.")
-
-
 def _guard(op_name: str, label: str, fn: Callable[[], list[Issue]]) -> list[Issue]:
     """Run one validator check, converting an unexpected crash into an Issue.
 
@@ -1535,6 +1686,15 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
                         lambda: _check_op_sample_identity(op, name, samples),
                     )
                 )
+                report.issues.extend(
+                    _guard(
+                        name,
+                        "calibration-replay",
+                        lambda: _check_op_calibration_replayable(
+                            op, name, samples, check_accumulator=is_functional
+                        ),
+                    )
+                )
         else:
             report.issues.append(
                 Issue(
@@ -1544,7 +1704,7 @@ def validate_pipeline(pipeline: "Pipeline") -> ValidationReport:
                     message=(
                         "!! THIS OP WAS NOT VALIDATED !! Runtime checks "
                         "(determinism, cross-call state, self-mutation, "
-                        "state-diff, sample identity) were skipped for this "
+                        "state-diff, sample identity, calibration replay) were skipped for this "
                         "`BaseOp` instance-form op. The validator does not "
                         "invoke `setup()`, so calling `process_many` against "
                         "an op whose body needs setup-built resources would "

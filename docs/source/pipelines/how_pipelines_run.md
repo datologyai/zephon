@@ -59,7 +59,7 @@ that state in a single-threaded component (the *accumulator*) that sees every re
 order, while only the stateless part of their work is handed out to the parallel workers.
 This means that the decisions that the operators make, like which records get packed
 together, never depend on how the work was divided up among the workers.
-[Operators and Runners](../internals/operators_and_runners.md) describes both
+[Operators and runners](../internals/operators_and_runners.md) describes both
 mechanisms, and the contract they impose on an operator, in detail.
 
 Together, these two properties mean that the execution settings of a `Pipeline` are purely
@@ -102,7 +102,7 @@ operators' state exactly.
 
 The bookkeeping that decides when a chunk is finished, and the reasons a flush sentinel is
 the only safe place to start a replay from, are covered in
-[Checkpoint Replay and Bounded Recovery](../internals/checkpoint_replay.md).
+[Checkpoint replay and bounded recovery](../internals/checkpoint_replay.md).
 
 Zephon only sends flush sentinels when a `Pipeline` includes an operator that reorders or
 regroups records, like `shuffle`, `ensure_mixture`, or one of the packing operators. In

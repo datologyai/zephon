@@ -19,6 +19,16 @@ class OpTraits:
     transforms, non-reordering filters) or ``False`` (reorders, shuffles,
     packs) call.
 
+    ``calibration_replayable`` — set True if processing each fetched record
+    independently produces the same output payloads and record counts as normal
+    execution, including which records are dropped. Otherwise leave False
+    (default). Output order may differ. The op must also run without accumulators
+    or runner services. Sample IDs are real; lane/chunk positions, component counts,
+    and stage metadata are placeholders and must not affect payloads or drops.
+    Text cleanup, content-based filters, and per-record splits qualify; packing
+    and padding to the longest item in a batch do not. Buffers that only delay or
+    reorder records are safe.
+
     ``parallelism`` — suggested parallelism for the operator when not
     overridden.
 
@@ -39,6 +49,7 @@ class OpTraits:
 
     indexable: bool = True
     preserves_cursor_order: bool
+    calibration_replayable: bool = False
     parallelism: int = 1
     batch_shape_sensitive: bool = False
     requires_serial_state: bool = False

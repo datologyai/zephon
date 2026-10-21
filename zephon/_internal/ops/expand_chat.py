@@ -44,7 +44,12 @@ class ExpandChat(BaseOp):
         self._warned_no_user = False
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=False, preserves_cursor_order=True, parallelism=4)
+        return OpTraits(
+            indexable=False,
+            preserves_cursor_order=True,
+            calibration_replayable=True,
+            parallelism=4,
+        )
 
     def _messages(self, record: SampleRecord) -> Sequence[Mapping[str, Any]]:
         """Resolve the field path and validate each message's role.

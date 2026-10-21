@@ -413,7 +413,12 @@ def test_add_op_with_baseop_instance_uses_class_name_when_name_omitted() -> None
     assert "MyCustomOp" in node_names
 
 
-def test_add_op_with_baseop_instance_rejects_kwargs_form_fields() -> None:
+@pytest.mark.parametrize(
+    "kwargs", [{"process_many": lambda elems: elems}, {"calibration_replayable": True}]
+)
+def test_add_op_with_baseop_instance_rejects_kwargs_form_fields(
+    kwargs: dict[str, Any],
+) -> None:
     """Mixing the two forms is a programming error and must raise."""
 
     class TrivialOp(BaseOp):
@@ -425,7 +430,7 @@ def test_add_op_with_baseop_instance_rejects_kwargs_form_fields() -> None:
 
     pipe = _empty_pipeline()
     with pytest.raises(ValueError, match="does not accept"):
-        pipe.add_op(TrivialOp(), process_many=lambda elems: elems)  # type: ignore[call-overload]
+        pipe.add_op(TrivialOp(), **kwargs)
 
 
 def test_add_op_kwargs_form_requires_process_many_and_preserves_cursor_order() -> None:
@@ -572,6 +577,7 @@ def test_add_op_passes_advanced_traits_through() -> None:
     """The advanced OpTraits kwargs must flow into the op's traits()."""
     pipe = _empty_pipeline().add_op(
         "advanced",
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
         batch_shape_sensitive=True,
@@ -581,6 +587,7 @@ def test_add_op_passes_advanced_traits_through() -> None:
     # The op we just appended is the new tail; pull it back out and inspect.
     node = pipe._tail
     traits = node.op.traits()
+    assert traits.calibration_replayable is True
     assert traits.batch_shape_sensitive is True
     assert traits.requires_serial_state is True
 
@@ -593,6 +600,7 @@ def test_add_op_advanced_traits_default_false() -> None:
         preserves_cursor_order=True,
     )
     traits = pipe._tail.op.traits()
+    assert traits.calibration_replayable is False
     assert traits.batch_shape_sensitive is False
     assert traits.requires_serial_state is False
 

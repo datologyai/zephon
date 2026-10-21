@@ -34,6 +34,7 @@ def test_materialize_traits_and_accumulator() -> None:
     op = Materialize()
     t = op.traits()
     assert t.indexable is False
+    assert t.calibration_replayable is True
 
     # PassthroughAccumulator has no configuration - keep isinstance as regression guard
     acc = op.accumulator(deterministic=False, ctx={})

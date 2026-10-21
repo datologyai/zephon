@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 
 from tests.helpers.storage import _install_obstore_stubs
-from zephon._internal.io.formats.lance import LanceFormat, LanceShardOpener
+from zephon._internal.io.formats.lance import (
+    LanceFormat,
+    LanceShard,
+    LanceShardOpener,
+)
 from zephon._internal.io.formats.lance_support.manifest import (
     dataset_root_of,
     latest_manifest_path,
@@ -21,9 +25,13 @@ from zephon._internal.io.formats.lance_support.manifest import (
     read_manifest,
 )
 from zephon._internal.io.protocols import RandomAccessShard
+from zephon._internal.io.resolvers.base import ShardResolver
+from zephon._internal.io.storage import RouterStorageBackend
 from zephon._internal.io.storage.local import LocalFSBackend
-from zephon._internal.io.types import LocalShardFile, LocalShardRef
-from zephon.io import StoreOptions
+from zephon._internal.io.stores.multi import build_multi_dataset_store
+from zephon._internal.io.stores.resilient import ResilientShard
+from zephon._internal.io.types import LocalShardFile, LocalShardRef, ShardLocator
+from zephon.io import CacheOptions, StoreOptions
 from zephon.io.dataset import Dataset
 
 pytest.importorskip("lance", reason="pylance not installed")
@@ -90,7 +98,9 @@ class _Store:
         )
         self._data_root = Path(dataset_root_of(self.manifest)) / "data"
         # A real store shares one opener across every Lance dataset it serves.
-        self._opener = opener or LanceShardOpener(StoreOptions())
+        self._opener = opener or LanceShardOpener(
+            StoreOptions(), RouterStorageBackend()
+        )
 
     def open(self, shard_id: int) -> RandomAccessShard:
         """Open one shard from its cached data file, as the resolver would hand it over."""
@@ -99,7 +109,7 @@ class _Store:
         return self._opener.open_shard(
             locator,
             LocalShardRef(
-                raw=LocalShardFile(path=raw, bytes=raw.stat().st_size),
+                raw=LocalShardFile(path=raw, bytes=locator.raw.bytes),
                 extra=locator.extra,
             ),
         )
@@ -184,6 +194,30 @@ def test_reads_match_pylance(dataset_path: Path) -> None:
     _assert_matches_pylance(dataset_path, _rows(dataset_path))
 
 
+def test_count_only_discovery_agrees_with_discovery(
+    dataset_path: Path, storage: LocalFSBackend
+) -> None:
+    lance.dataset(str(dataset_path)).delete("id in (1, 6)")
+    handler = LanceFormat()
+
+    ids, counts = handler.discover_counts(str(dataset_path), storage)
+    shard_index, _meta = handler.discover(str(dataset_path), storage)
+
+    assert ids.tolist() == sorted(shard_index)
+    assert counts.tolist() == [shard_index[i] for i in sorted(shard_index)]
+
+
+def test_count_only_discovery_refuses_what_discovery_refuses(
+    tmp_path: Path, pa: Any, write: Write, storage: LocalFSBackend
+) -> None:
+    path = tmp_path / "multi.lance"
+    write(_table(pa, 4), path)
+    lance.dataset(str(path)).add_columns({"extra": "id * 2"})
+
+    with pytest.raises(ValueError, match="spans 2 data files"):
+        LanceFormat().discover_counts(str(path), storage)
+
+
 def test_auto_detection_and_version_pinning(dataset_path: Path, pa: Any) -> None:
     first = Dataset.from_path("ds", str(dataset_path))
     assert first.backend["kind"] == "lance"
@@ -229,7 +263,6 @@ def test_row_order_and_duplicates_are_preserved(dataset_path: Path) -> None:
 def test_one_shard_reads_from_several_threads(
     tmp_path: Path, pa: Any, write: Write
 ) -> None:
-    """A retained reader is shared across fetch threads; pylance rejects reentry."""
     import random
     from concurrent.futures import ThreadPoolExecutor
 
@@ -253,6 +286,68 @@ def test_one_shard_reads_from_several_threads(
             assert all(pool.map(read, range(16)))
 
 
+def test_an_evicted_data_file_is_not_served_from_a_retained_reader(
+    dataset_path: Path,
+) -> None:
+    """An open reader keeps an unlinked file readable, hiding the eviction."""
+    with _store(dataset_path) as store:
+        shard = store.open(0)
+        shard.getsamples([0])
+        shard.close()
+        (dataset_path / "data" / store.locators[0].raw.basename).unlink()
+
+        with pytest.raises(FileNotFoundError):
+            store.open(0)
+
+
+def test_a_resilient_shard_retries_a_file_evicted_before_open(
+    dataset_path: Path,
+) -> None:
+    """The eviction retry only catches OSError, which pylance does not raise."""
+    with _store(dataset_path) as store:
+        locator = store.locators[0]
+        data_file = dataset_path / "data" / locator.raw.basename
+        evicted = data_file.with_suffix(".evicted")
+
+        class Resolver(ShardResolver):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def resolve(
+                self, locator: ShardLocator, *, blocking: bool = True
+            ) -> LocalShardRef:
+                self.calls += 1
+                # The first resolution hands out a path the cache then evicts.
+                if self.calls == 1:
+                    data_file.rename(evicted)
+                else:
+                    evicted.rename(data_file)
+                return LocalShardRef(
+                    raw=LocalShardFile(path=data_file, bytes=locator.raw.bytes),
+                    extra=locator.extra,
+                )
+
+            def touch(self, locator: ShardLocator) -> None:
+                pass
+
+        resolver = Resolver()
+        shard = ResilientShard(
+            locator=locator,
+            resolver=resolver,
+            opener=store._opener,
+            length=store.counts[0],
+            retry_attempts=2,
+            retry_initial_backoff=0,
+            retry_max_backoff=0,
+        )
+
+        rows, stats = shard.getsamples([1, 0])
+
+        assert [row["id"] for row in rows] == [1, 0]
+        assert all(item.retries == 1 for item in stats)
+        assert resolver.calls == 2
+
+
 def test_out_of_range_index_raises(dataset_path: Path) -> None:
     with _store(dataset_path) as store:
         shard = store.open(0)
@@ -270,6 +365,91 @@ def test_deleted_rows_are_skipped(tmp_path: Path, pa: Any, write: Write) -> None
 
     assert [row["id"] for row in rows] == [1, 3, 4, 6, 7, 8]
     _assert_matches_pylance(path, rows)
+
+
+class _RecordingBackend(LocalFSBackend):
+    """Local storage that remembers which files were read through it."""
+
+    def __init__(self) -> None:
+        super().__init__(root=Path("/"))
+        self.read: list[str] = []
+
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
+        self.read.append(path)
+        return super().open(path, mode, **kwargs)
+
+    def read_range(self, path: str, start: int, **kwargs: Any) -> Any:
+        self.read.append(path)
+        return super().read_range(path, start, **kwargs)
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["direct", "cached"])
+def test_store_reads_manifest_and_tombstones_through_its_storage(
+    tmp_path: Path, pa: Any, write: Write, cache_enabled: bool
+) -> None:
+    path = tmp_path / "deleted.lance"
+    write(_table(pa, 10), path, max_rows_per_file=4)
+    lance.dataset(str(path)).delete("id in (0, 2, 5, 9)")
+    dataset = Dataset.from_path("ds", str(path))
+    storage = _RecordingBackend()
+
+    store = build_multi_dataset_store(
+        {0: dataset},
+        storage=storage,
+        options=StoreOptions(
+            cache=CacheOptions(enabled=cache_enabled, root=tmp_path / "cache")
+        ),
+    )
+    try:
+        shard, _ = store.for_dataset(0).open(0)
+        rows, _stats = shard.getsamples([0, 1])
+    finally:
+        store.close()
+
+    assert [row["id"] for row in rows] == [1, 3]
+    assert dataset.path in storage.read
+    assert any(f"{os.sep}_deletions{os.sep}" in read for read in storage.read)
+
+
+@pytest.mark.parametrize(
+    ("logical", "ids", "method"),
+    [
+        ([2, 3], [3, 4], "read_range"),
+        # Contiguous logical rows that straddle the deleted row are not a range.
+        ([1, 2], [1, 3], "take_rows"),
+        ([3, 2], [4, 3], "read_range"),
+        ([0, 4], [0, 5], "take_rows"),
+    ],
+)
+def test_contiguous_physical_rows_are_read_as_a_range(
+    tmp_path: Path,
+    pa: Any,
+    logical: list[int],
+    ids: list[int],
+    method: str,
+) -> None:
+    path = tmp_path / "range.lance"
+    lance.write_dataset(_table(pa, 6), str(path), max_rows_per_file=6)
+    lance.dataset(str(path)).delete("id = 2")
+    calls: list[str] = []
+
+    class Recording:
+        def __init__(self, reader: Any) -> None:
+            self._reader = reader
+
+        def __getattr__(self, name: str) -> Any:
+            calls.append(name)
+            return getattr(self._reader, name)
+
+    with _store(path) as store:
+        shard = store.open(0)
+        assert isinstance(shard, LanceShard)
+        shard._reader = Recording(shard._reader)
+
+        rows = shard.getsamples(logical)
+
+    assert [row["id"] for row in rows] == ids
+    assert calls == [method]
 
 
 def test_emptied_fragments_leave_the_shard_set(

@@ -34,6 +34,147 @@ def make_dataset(name: str, sample_count: int) -> Dataset:
     return Dataset.from_dict(name, {0: InMemoryShard(rows)})
 
 
+@pytest.mark.parametrize("policy,cap,passes", [("stop", None, 1), ("repeat", 1, 2)])
+def test_source_exhaustion_only_on_final_committed_pass(
+    policy: str, cap: int | None, passes: int
+) -> None:
+    ws = StaticMixtureWorkSource(
+        [make_dataset("a", 20), make_dataset("b", 400)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy={"a": policy, "b": "repeat"},
+        max_repeats={"a": cap},
+    )
+    ws = ws.clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(ws.next_chunk, None))
+    assert len(chunks) == 4 * passes
+    assert all(not chunk.source_exhausted for chunk in chunks[:-1])
+    assert chunks[-1].source_exhausted == ("a",)
+
+
+def test_default_pass_floor_does_not_announce_source_exhaustion() -> None:
+    ws = StaticMixtureWorkSource(
+        [make_dataset("a", 20), make_dataset("b", 40)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+    )
+    ws = ws.clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(ws.next_chunk, None))
+    assert chunks
+    assert all(not chunk.source_exhausted for chunk in chunks)
+
+
+@pytest.mark.parametrize("assignment", ["modulo", "permute"])
+def test_exhaustion_restamped_across_lanes_and_restore(assignment: str) -> None:
+    ws = StaticMixtureWorkSource(
+        [make_dataset("a", 3), make_dataset("b", 1000)],
+        {"a": 0.05, "b": 0.95},
+        chunk_size=10,
+        exhausted_policy="stop",
+        lane_assignment=assignment,
+        seed=0,
+    )
+    first_announcements = []
+    emitted_a = 0
+    for lane in range(2):
+        source = ws.clone_for_lane(lane, canonical_replicas=2)
+        chunks = list(iter(source.next_chunk, None))
+        assert chunks[-1].source_exhausted == ("a",)
+        first = next(i for i, chunk in enumerate(chunks) if chunk.source_exhausted)
+        assert all(chunk.source_exhausted == ("a",) for chunk in chunks[first:])
+        first_announcements.append(bool(chunks[first].components.get("a")))
+        emitted_a += sum(len(chunk.components.get("a", ())) for chunk in chunks)
+        for cut in range(len(chunks)):
+            source = ws.clone_for_lane(lane, canonical_replicas=2)
+            for _ in range(cut):
+                assert source.next_chunk() is not None
+            restored = ws.clone_for_lane(lane, canonical_replicas=2)
+            restored.load_state_dict(source.state_dict())
+            assert [c.state_dict() for c in iter(restored.next_chunk, None)] == [
+                c.state_dict() for c in chunks[cut:]
+            ]
+    assert sorted(first_announcements) == [False, True]
+    assert emitted_a == 3
+
+
+def test_exhaustion_on_skipped_terminal_chunk_survives_restore() -> None:
+    template = StaticMixtureWorkSource(
+        [make_dataset("a", 10), make_dataset("b", 1000)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy="stop",
+        lane_assignment="modulo",
+    )
+    source = template.clone_for_lane(0, canonical_replicas=2)
+    first = source.next_chunk()
+    assert first is not None and not first.source_exhausted
+    # Lane 0 discovers the final A on lane 1's chunk and then reaches EOS.
+    assert source.next_chunk() is None
+    restored = template.clone_for_lane(0, canonical_replicas=2)
+    restored.load_state_dict(source.state_dict())
+    assert restored._source_exhausted_components() == ("a",)
+    assert restored.next_chunk() is None
+
+
+def test_simultaneous_capped_repeat_exhaustion_is_sorted() -> None:
+    source = StaticMixtureWorkSource(
+        [make_dataset("z", 4), make_dataset("a", 4)],
+        {"z": 0.5, "a": 0.5},
+        chunk_size=4,
+        exhausted_policy="repeat",
+        max_repeats=2,
+    ).clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(source.next_chunk, None))
+    assert len(chunks) == 6
+    assert all(not chunk.source_exhausted for chunk in chunks[:-1])
+    assert chunks[-1].source_exhausted == ("a", "z")
+
+
+def test_uncapped_repeat_does_not_announce_exhaustion() -> None:
+    source = StaticMixtureWorkSource(
+        [make_dataset("a", 4), make_dataset("b", 1000)],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=4,
+        exhausted_policy="repeat",
+    ).clone_for_lane(0, canonical_replicas=1)
+    for _ in range(30):
+        chunk = source.next_chunk()
+        assert chunk is not None and not chunk.source_exhausted
+
+
+@pytest.mark.parametrize("size", [20, 21])
+def test_token_exhaustion_only_stamps_successful_chunks(size: int) -> None:
+    ws = make_token_ws(
+        [
+            make_token_dataset("a", 5, docs_per_shard=size, n_shards=1),
+            make_token_dataset("b", 5, docs_per_shard=100, n_shards=1),
+        ],
+        {"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy="stop",
+    )
+    ws = ws.clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(ws.next_chunk, None))
+    assert len(chunks) == 4
+    assert sum(len(c.components.get("a", ())) for c in chunks) == 20
+    assert all(not c.source_exhausted for c in chunks[:-1])
+    # The fifth chunk for size=21 touches the final record but rolls back.
+    assert chunks[-1].source_exhausted == (("a",) if size == 20 else ())
+    assert all(c.target_mixture == {"a": 0.5, "b": 0.5} for c in chunks)
+    if size == 20:
+        state = ws.state_dict()
+        restored = make_token_ws(
+            list(ws.datasets_by_id.values()),
+            {"a": 0.5, "b": 0.5},
+            chunk_size=10,
+            exhausted_policy="stop",
+            primed=False,
+        ).clone_for_lane(0, canonical_replicas=1)
+        restored.load_state_dict(state)
+        assert not restored.requires_token_priming
+        assert restored._source_exhausted_components() == ("a",)
+
+
 def make_sharded_dataset(name: str, shard_lengths: list[int]) -> Dataset:
     """Create a dataset with multiple shards of given lengths."""
     shards: dict[int, InMemoryShard] = {}

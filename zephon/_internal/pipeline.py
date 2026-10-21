@@ -24,7 +24,7 @@ from typing import (
 )
 
 from zephon._internal.engine import Engine
-from zephon._internal.functional_op import _FunctionalOp
+from zephon._internal.functional_op import _FunctionalOp, _is_user_op
 from zephon._internal.graph import Graph, Node, Plan
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.decode_text import DecodeText
@@ -78,10 +78,6 @@ from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 _S = TypeVar("_S")
 
 _OpT = TypeVar("_OpT")
-
-# Ops calibration can replay standalone: pure per-record, no accumulator
-# state, no OpContext services.
-_PRE_TOKENIZE_REPLAYABLE_OPS: tuple[type, ...] = (DecodeText, ExpandChat, MapTransform)
 
 # TypeVar for Pipeline methods that mutate the graph or cached plan state
 _PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
@@ -563,6 +559,7 @@ class Pipeline:
         *,
         process_many: Callable[[list[Any]], list[Any]],
         preserves_cursor_order: bool,
+        calibration_replayable: bool = False,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -582,6 +579,7 @@ class Pipeline:
         name: Optional[str] = None,
         process_many: Optional[Callable[[list[Any]], list[Any]]] = None,
         preserves_cursor_order: Optional[bool] = None,
+        calibration_replayable: Optional[bool] = None,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -605,7 +603,8 @@ class Pipeline:
         the lifecycle built-in operators use.  Traits come from
         ``op.traits()`` rather than kwargs.
 
-        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., preserves_cursor_order=..., ...)``.
+        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., ...)``.
+        ``preserves_cursor_order`` is required.
         Convenience for stateless transforms.  The framework builds an
         internal `BaseOp` subclass from the supplied callables +
         accumulator factory + traits.  ``process_many`` must not carry
@@ -678,6 +677,8 @@ class Pipeline:
             indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
+            calibration_replayable: Kwargs form. Whether token calibration may replay
+                the op before tokenization. Default False; see :class:`OpTraits`.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
@@ -702,12 +703,18 @@ class Pipeline:
                     self._name = name
                     self._tokenizer = None
                 def traits(self):
-                    return OpTraits(preserves_cursor_order=True, parallelism=4)
+                    return OpTraits(
+                        preserves_cursor_order=True,
+                        calibration_replayable=True,
+                        parallelism=4,
+                    )
                 def setup(self, ctx):
                     super().setup(ctx)
                     self._tokenizer = load_tokenizer(self._name)
                 def process_many(self, elems):
-                    return [self._tokenizer.encode(e) for e in elems]
+                    for e in elems:
+                        e.payload = {"ids": self._tokenizer.encode(e.payload["text"])}
+                    return elems
 
             pipeline.add_op(Tokenize("gpt2"))
 
@@ -727,6 +734,7 @@ class Pipeline:
                 for kw, val in (
                     ("process_many", process_many),
                     ("preserves_cursor_order", preserves_cursor_order),
+                    ("calibration_replayable", calibration_replayable),
                     ("accumulator", accumulator),
                     ("process_one", process_one),
                     ("validation_samples", validation_samples),
@@ -783,6 +791,9 @@ class Pipeline:
             validation_samples_factory=validation_samples,
             op_traits=OpTraits(
                 preserves_cursor_order=preserves_cursor_order,
+                calibration_replayable=(
+                    False if calibration_replayable is None else calibration_replayable
+                ),
                 parallelism=1 if parallelism is None else parallelism,
                 indexable=False if indexable is None else indexable,
                 batch_shape_sensitive=(
@@ -1047,27 +1058,45 @@ class Pipeline:
         The SWRR algorithm tracks deficit (target - actual) and always picks the
         component most "owed" samples, ensuring smooth, deterministic convergence.
 
+        An end-of-data (EOD) sentinel signals that a component's source has run out
+        in this lane; buffered records may still arrive. For components listed by
+        ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
+        target, including explicit overrides, and renormalizes the remaining weights.
+        ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
+        in both modes.
+
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
                 target mixture needs next. Default 1000; when the buffer fills, the
                 operator emits what it has, so the output mixture may drift if a
                 component stays scarce. Pass ``None`` to instead **drop** the surplus
                 it cannot place on-target — at every epoch boundary and at end of
-                stream. This makes the mixture exact but discards data, so use it only
-                when an exact mixture matters more than keeping every sample. How much
-                is dropped depends on the stream's skew and on ``flush_every_k_chunks``
-                (smaller → more dropped). ensure_mixture is always non-monotonic, so
-                that cadence defaults to 8; in strict mode the buffer is then discarded
-                on roughly every flush. If drops are too frequent, raise
+                stream. This enforces the mixture at the cost of dropping data.
+                Use strict mode when an exact mixture matters more than keeping
+                every sample. How much is dropped depends on the stream's skew
+                and on ``flush_every_k_chunks`` (smaller → more dropped).
+                ensure_mixture is always non-monotonic, so that cadence defaults
+                to 8; in strict mode the buffer is then discarded on roughly
+                every flush. If drops are too frequent, raise
                 ``flush_every_k_chunks`` above the default to give scarce components
                 more time to absorb the buffer (at the cost of holding more in memory
                 between flushes).
             drain_target_ratio: When forced to emit (buffer hits max_buffer_size), drain
                 the buffer down to this fraction of max_buffer_size before stopping.
                 Default is 0.8 (drain to 80% of max).  Ignored when ``max_buffer_size=None``.
-            obsolete_drain_rate: Fraction of emissions reserved for draining obsolete
-                components (those no longer in the current mixture target). Default is
-                0.1 (10%), meaning 1 in every 10 emissions drains an obsolete sample.
+            obsolete_drain_rate: Emit one obsolete record per ``int(1 / rate)`` normal
+                output records, regardless of token count. The effective share is
+                ``1 / (int(1 / rate) + 1)``: default 0.1 means one in eleven;
+                values above 0.5 alternate (50%); 0 disables periodic drainage.
+                A record is obsolete if it has any positive off-target contribution
+                or no component in the target. Its on-target contributions still
+                count toward the mixture. At most one slot is saved while the queue
+                is empty. Bounded forced drains and flushes may exceed this rate;
+                strict flushes discard leftovers.
+                Within an epoch, components removed by one target change drain in
+                proportion to their former weights. Separate EODs drain in notice
+                order when their records are available. Other off-target records
+                follow in arrival order.
             weight_by: How to compute sample weights. Options:
 
                 - ``auto`` (default): Auto-detect token field from common names
@@ -1075,10 +1104,12 @@ class Pipeline:
                 - ``samples``: Each sample has weight 1.
                 - Explicit field name (e.g., ``input_ids``): Use that field's length.
                 - Callable: Custom function taking SampleRecord, returning float.
+                  Must not modify the record.
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived
-                from chunk mixture via engine context.
+                from chunk mixture via engine context. EOD sentinel handling also applies
+                to this override.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.
 
@@ -1565,14 +1596,18 @@ class Pipeline:
         """Collect the fetch -> tokenize ops calibration must replay.
 
         Calibration fetches raw store rows; ops ahead of the tokenize op
-        can change what it counts. An op outside the replayable allowlist
+        can change what it counts. An op without calibration replay support
         yields a marker that priming rejects if it actually measures.
         """
         fetch_index = self._graph.nodes.index(self._fetch_node)
         ops: list[Any] = []
         for node in self._graph.nodes[fetch_index + 1 : tokenize_index]:
-            if not isinstance(node.op, _PRE_TOKENIZE_REPLAYABLE_OPS):
-                return _UnreplayableOp(type(node.op).__name__)
+            if not node.op.traits().calibration_replayable:
+                is_custom = _is_user_op(node.op)
+                return _UnreplayableOp(
+                    node.name if is_custom else type(node.op).__name__,
+                    is_custom=is_custom,
+                )
             ops.append(node.op)
         return _PreTokenizeReplay(ops) if ops else None
 
@@ -1868,18 +1903,18 @@ class Pipeline:
         Uses the shared ``_notify_item`` helper (also called by the subprocess
         ACK path) so the bookkeeping logic is never duplicated.
         """
-        from zephon._internal.notify import _notify_item, is_sentinel
+        from zephon._internal.notify import _notify_item, is_sentinel, is_tombstone
 
         engine = self._engine
         assert engine is not None
         assert self._plan is not None
         use_monotone = self._plan.preserves_cursor_order
         for item in source:
-            # Flush sentinels carry dummy cursor data — skip notification to
-            # avoid corrupting offset_done bitmaps and cursor pinning.
-            if not (isinstance(item, SampleRecord) and item.meta.is_flush_sentinel):
+            sentinel = is_sentinel(item)
+            # Only data and tombstones have real offsets; flush and EOD have dummy cursors.
+            if not sentinel or is_tombstone(item):
                 _notify_item(engine, item, use_monotone)
-            if not is_sentinel(item):
+            if not sentinel:
                 yield item
 
         # After drain, flush cursor-pinned chunks.  During iteration,

@@ -576,6 +576,74 @@ def test_tokenizer_initializes_on_first_process() -> None:
     assert "input_ids" in payload
 
 
+@pytest.mark.parametrize(
+    ("padding", "split", "special_tokens", "replayable"),
+    [
+        (False, False, "none", True),
+        ("longest", False, "none", False),
+        (True, False, "tokenizer_default", False),
+        ("max_length", False, "tokenizer_default", True),
+        ("longest", True, "none", True),
+        (True, True, "tokenizer_default", True),
+    ],
+)
+def test_calibration_replay_matches_batch_independent_tokenization(
+    padding: bool | str,
+    split: bool,
+    special_tokens: SpecialTokensMode,
+    replayable: bool,
+) -> None:
+    op = TokenizeText(
+        tokenizer_id="__fallback__",
+        field="text",
+        special_tokens=special_tokens,
+        padding=padding,
+        max_length=4,
+        split_long_samples=split,
+    )
+    op.setup(OpContext({}))
+    texts = ["one", "one two three four five six"]
+    batched = [r.payload for r in op.process_many([_rec(t) for t in texts])]
+    individual = [r.payload for text in texts for r in op.process_many([_rec(text)])]
+    assert op.traits().calibration_replayable is replayable
+    assert (batched == individual) is replayable
+
+
+@pytest.mark.parametrize(
+    ("padding", "truncation", "replayable"),
+    [(False, False, False), ("max_length", False, False), ("max_length", True, True)],
+)
+def test_calibration_replay_requires_fixed_length_hf_batch_tensors(
+    padding: bool | str, truncation: bool, replayable: bool
+) -> None:
+    pytest.importorskip("torch")
+    # Older NumPy versions accept ragged batches as object arrays.
+    op = TokenizeText(
+        tokenizer_id="__fallback__",
+        field="text",
+        special_tokens="tokenizer_default",
+        return_tensors="pt",
+        padding=padding,
+        truncation=truncation,
+        max_length=4,
+    )
+    op.setup(OpContext({}))
+    texts = ["one", "one two three four five six"]
+    individual = [r for text in texts for r in op.process_many([_rec(text)])]
+    assert op.traits().calibration_replayable is replayable
+    if replayable:
+        batched = op.process_many([_rec(t) for t in texts])
+        for together, alone in zip(batched, individual, strict=True):
+            for field in ("input_ids", "attention_mask"):
+                assert (
+                    _payload_dict(together)[field].tolist()
+                    == _payload_dict(alone)[field].tolist()
+                )
+    else:
+        with pytest.raises(ValueError):
+            op.process_many([_rec(t) for t in texts])
+
+
 def test_tokenizer_traits_and_default_accumulator() -> None:
     op = _setup(
         TokenizeText(
@@ -586,6 +654,7 @@ def test_tokenizer_traits_and_default_accumulator() -> None:
         )
     )
     t = op.traits()
+    assert t.calibration_replayable is True
 
     assert t.indexable is True and t.parallelism == 4
 

@@ -164,17 +164,13 @@ class LanceManifest:
         """Reduce a data file's leaf ids to the columns they belong to, in order.
 
         A file stores one entry per leaf, so several consecutive leaves make up
-        one nested column; a leaf whose field the schema no longer has belongs
-        to a dropped column and reduces to ``None``. The result lines up with
-        the file's own top-level columns, which is the only way to locate a
-        column after a rename (the manifest changes, the file does not) or a
-        drop (neither changes, but the schema has one column fewer).
+        one nested column. The result lines up with the file's own top-level
+        columns, which is the only way to locate a column after a rename: the
+        manifest changes, the file does not.
 
-        A dropped leaf gets a slot of its own, because the schema no longer
-        says how many leaves its field had: that is exact for a dropped
-        scalar, list or fixed-size list, which contribute one leaf each, and
-        over-counts a dropped struct. Callers compare the result against the
-        file's own column count, which catches the one ambiguous case.
+        A leaf of a dropped column the file still stores reduces to ``None``:
+        the schema no longer says how many file columns it spans, so the
+        columns after it cannot be placed.
         """
         parents = {field.id: field.parent_id for field in self.fields}
         order: list[int | None] = []
@@ -183,8 +179,6 @@ class LanceManifest:
             while root in parents and parents[root] >= 0:
                 root = parents[root]
             if root not in parents:
-                # Two dropped columns running together must not merge into one
-                # slot, or every column after them shifts.
                 order.append(None)
             elif not order or order[-1] != root:
                 order.append(root)

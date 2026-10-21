@@ -53,3 +53,6 @@ Accumulator types
 
    What an accumulator emits for one worker invocation: the grouped elements,
    and the nanoseconds they waited, which is carried for metrics.
+
+.. autoclass:: zephon.ops.accumulators.SourceExhaustion
+   :members:

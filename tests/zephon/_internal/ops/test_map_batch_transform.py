@@ -173,6 +173,7 @@ def test_map_batch_transform_traits_and_accumulator() -> None:
     traits = op.traits()
 
     assert traits.indexable is True
+    assert traits.calibration_replayable is False
     assert traits.parallelism == 4
 
     acc_det = op.accumulator(deterministic=True, ctx={})
