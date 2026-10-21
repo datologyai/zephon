@@ -87,6 +87,7 @@ def test_delaybyid_non_record_items_use_hash(monkeypatch: pytest.MonkeyPatch) ->
 def test_delaybyid_traits_and_accumulator() -> None:
     op = DelayById(max_delay_ms=1.0, max_batch=16, max_latency_ms=50)
     t = op.traits()
+    assert t.calibration_replayable is True
 
     assert t.indexable is True and t.parallelism == 8
 

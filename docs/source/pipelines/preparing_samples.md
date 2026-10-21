@@ -62,6 +62,12 @@ training it to predict the user's messages:
 :caption: examples/guide/pipelines/tokenize_chat.py
 ```
 
+With `loss_scope="after_last_user"`, generation-tagged templates are verified
+automatically. Tool-call arguments can be objects, other JSON values, or raw text.
+Non-object arguments use additional verification renders, cached by exact value.
+Templates that cannot render the verification probe or attribute the affected output
+fail verification. These are supervision checks; they do not validate JSON syntax.
+
 By default, both tokenization operators replace the original record payload with their
 tokenized output. If later operations in your pipeline need access to the original fields,
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized

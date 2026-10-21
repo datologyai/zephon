@@ -274,7 +274,10 @@ class ParquetFormat(FormatHandler):
 
     @contextmanager
     def create_opener(
-        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+        self,
+        catalog_set: "CatalogSet | None",
+        options: "StoreOptions",
+        storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         """Own the footer and decoded row-group caches for one store."""
         from zephon._internal.io.formats.parquet_cache.runtime import (

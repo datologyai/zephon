@@ -4,6 +4,7 @@
 """Map-style transformation operators for applying user-defined functions to samples or batches."""
 
 import logging
+from dataclasses import replace
 from typing import Any, Callable, Optional
 
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
@@ -102,6 +103,9 @@ class MapTransform(_BaseMapTransform):
             max_batch=max_batch,
             max_latency_ms=max_latency_ms,
         )
+
+    def traits(self) -> OpTraits:
+        return replace(super().traits(), calibration_replayable=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

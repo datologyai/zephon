@@ -24,11 +24,12 @@ from typing import (
 )
 
 from zephon._internal.engine import Engine
-from zephon._internal.functional_op import _FunctionalOp
+from zephon._internal.functional_op import _FunctionalOp, _is_user_op
 from zephon._internal.graph import Graph, Node, Plan
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.ops.ensure_mixture import EnsureMixture
+from zephon._internal.ops.expand_chat import ExpandChat
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.ops.map_transform import MapBatchTransform, MapTransform
 from zephon._internal.ops.materialize import Materialize
@@ -36,7 +37,7 @@ from zephon._internal.ops.pack_sequences import PackSequences
 from zephon._internal.ops.prefetch import PrefetchOp
 from zephon._internal.ops.shuffle_buffer import ShuffleBuffer
 from zephon._internal.ops.tokenize_base import TokenizeBase
-from zephon._internal.ops.tokenize_chat import TokenizeChat
+from zephon._internal.ops.tokenize_chat import TokenizeChat, _resolve_loss_scope
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.planner import Planner
 from zephon._internal.runtime_spec import (
@@ -59,6 +60,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    LossScope,
     MissingFieldMode,
     PackingAlgorithm,
     SpanSource,
@@ -76,10 +78,6 @@ from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 _S = TypeVar("_S")
 
 _OpT = TypeVar("_OpT")
-
-# Ops calibration can replay standalone: pure per-record, no accumulator
-# state, no OpContext services.
-_PRE_TOKENIZE_REPLAYABLE_OPS: tuple[type, ...] = (DecodeText, MapTransform)
 
 # TypeVar for Pipeline methods that mutate the graph or cached plan state
 _PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
@@ -561,6 +559,7 @@ class Pipeline:
         *,
         process_many: Callable[[list[Any]], list[Any]],
         preserves_cursor_order: bool,
+        calibration_replayable: bool = False,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -580,6 +579,7 @@ class Pipeline:
         name: Optional[str] = None,
         process_many: Optional[Callable[[list[Any]], list[Any]]] = None,
         preserves_cursor_order: Optional[bool] = None,
+        calibration_replayable: Optional[bool] = None,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -603,7 +603,8 @@ class Pipeline:
         the lifecycle built-in operators use.  Traits come from
         ``op.traits()`` rather than kwargs.
 
-        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., preserves_cursor_order=..., ...)``.
+        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., ...)``.
+        ``preserves_cursor_order`` is required.
         Convenience for stateless transforms.  The framework builds an
         internal `BaseOp` subclass from the supplied callables +
         accumulator factory + traits.  ``process_many`` must not carry
@@ -676,6 +677,8 @@ class Pipeline:
             indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
+            calibration_replayable: Kwargs form. Whether token calibration may replay
+                the op before tokenization. Default False; see :class:`OpTraits`.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
@@ -700,12 +703,18 @@ class Pipeline:
                     self._name = name
                     self._tokenizer = None
                 def traits(self):
-                    return OpTraits(preserves_cursor_order=True, parallelism=4)
+                    return OpTraits(
+                        preserves_cursor_order=True,
+                        calibration_replayable=True,
+                        parallelism=4,
+                    )
                 def setup(self, ctx):
                     super().setup(ctx)
                     self._tokenizer = load_tokenizer(self._name)
                 def process_many(self, elems):
-                    return [self._tokenizer.encode(e) for e in elems]
+                    for e in elems:
+                        e.payload = {"ids": self._tokenizer.encode(e.payload["text"])}
+                    return elems
 
             pipeline.add_op(Tokenize("gpt2"))
 
@@ -725,6 +734,7 @@ class Pipeline:
                 for kw, val in (
                     ("process_many", process_many),
                     ("preserves_cursor_order", preserves_cursor_order),
+                    ("calibration_replayable", calibration_replayable),
                     ("accumulator", accumulator),
                     ("process_one", process_one),
                     ("validation_samples", validation_samples),
@@ -781,6 +791,9 @@ class Pipeline:
             validation_samples_factory=validation_samples,
             op_traits=OpTraits(
                 preserves_cursor_order=preserves_cursor_order,
+                calibration_replayable=(
+                    False if calibration_replayable is None else calibration_replayable
+                ),
                 parallelism=1 if parallelism is None else parallelism,
                 indexable=False if indexable is None else indexable,
                 batch_shape_sensitive=(
@@ -847,6 +860,43 @@ class Pipeline:
         return self
 
     @_mutates_graph
+    def expand_chat(
+        self,
+        *,
+        field: str = "messages",
+        placement: str = "auto",
+        parallelism: int | None = None,
+    ) -> "Pipeline":
+        """Emit one conversation prefix per user query containing an assistant.
+
+        Each prefix ends before the next user, or at the end of the input.
+        Earlier history and other payload fields are retained. Empty assistant
+        content is allowed. Queries without an assistant emit nothing.
+        Prefixes own independent nested payloads; the sole or final prefix may
+        reuse input objects.
+
+        Expansion repeats context and does not select loss targets. Normalize
+        roles before expansion; do not expand data already stored as prefixes.
+        Packed prefixes require document-isolated attention in the model.
+        Keep expansion and tokenization in one stage to avoid serializing repeated
+        history between processes. Changing expansion settings before checkpoint
+        resume is unsupported and is not detected.
+
+        Args:
+            field: Dot-separated payload path of the messages list.
+            placement: Execution placement, usually shared with tokenization.
+            parallelism: Worker count override.
+        """
+        self._tail = self._graph.add(
+            "expand_chat",
+            ExpandChat(field=field),
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
+        return self
+
+    @_mutates_graph
     def tokenize_chat(
         self,
         tokenizer: Any | None = None,
@@ -858,7 +908,8 @@ class Pipeline:
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
-        loss_on_last_turn_only: bool = False,
+        loss_scope: LossScope | None = None,
+        loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         tools_field: str = "tools",
         enable_thinking_field: str = "enable_thinking",
@@ -867,13 +918,47 @@ class Pipeline:
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
-        """Tokenize chat conversations into ids plus a loss mask.
+        """Tokenize each conversation into token IDs and a loss mask.
 
-        Full contract: one-shot
-        render+tokenize with assistant spans from ``{% generation %}`` tags,
-        a guarded prefix-diff fallback for untagged templates, or exact spans
-        in the no-template path (``apply_chat_template=False``).
+        Reads role/content messages from ``field`` (default: ``messages``).
+        Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.
+        ``chat_template`` overrides the tokenizer's template with Jinja text or
+        a file path. ``chat_template_kwargs`` supplies static template arguments;
+        ``tools_field`` and ``enable_thinking_field`` select per-record values.
+
+        Output replaces the payload with aligned, unshifted NumPy arrays:
+        ``input_ids`` (int64) and ``loss_mask`` (uint8; rename via ``mask_field_out``).
+        Ones mark target tokens. ``preserve_upstream_payload=True`` retains other
+        fields; ``max_length`` truncates the output.
+        Samples with fewer than two tokens or no supervised tokens are dropped.
+
+        Targets come from ``{% generation %}`` blocks. Untagged templates infer
+        assistant ranges by rendering successive conversation prefixes.
+        ``apply_chat_template=False`` concatenates message content, appends EOS
+        to assistant messages and selects targets from their roles.
+
+        ``loss_scope`` selects all assistant spans (``all_assistant``, default),
+        the final contiguous supervised run (``last_span``), or all assistant
+        messages after the final user (``after_last_user``). Untagged templates
+        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
+
+        With generation tags, ``after_last_user`` verifies templates automatically.
+        Each selected assistant's generation blocks must cover its reasoning,
+        calls, answer and end-of-turn token within its message loop, excluding
+        user/tool-result content. Verification adds rendering and tokenization at
+        setup and for new message/tool formats or non-object tool argument values;
+        successful checks are reused. ``preflight_tokenizers()`` runs setup checks
+        before iteration. Samples with omitted selected content are dropped and
+        logged; other verification failures raise. Inspect outputs and masks:
+        checks cannot cover every content-dependent template branch.
+
+        ``loss_on_last_turn_only`` is deprecated: True selects ``last_span`` and
+        False selects ``all_assistant``. Cannot accompany ``loss_scope``.
         """
+        # warn -> resolver -> tokenize_chat -> @_mutates_graph -> caller
+        loss_scope = _resolve_loss_scope(
+            loss_scope, loss_on_last_turn_only, stacklevel=4
+        )
         op = TokenizeChat(
             tokenizer,
             tokenizer_id,
@@ -883,7 +968,7 @@ class Pipeline:
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
-            loss_on_last_turn_only=loss_on_last_turn_only,
+            loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
             enable_thinking_field=enable_thinking_field,
@@ -1022,6 +1107,7 @@ class Pipeline:
                 - ``samples``: Each sample has weight 1.
                 - Explicit field name (e.g., ``input_ids``): Use that field's length.
                 - Callable: Custom function taking SampleRecord, returning float.
+                  Must not modify the record.
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived
@@ -1513,14 +1599,18 @@ class Pipeline:
         """Collect the fetch -> tokenize ops calibration must replay.
 
         Calibration fetches raw store rows; ops ahead of the tokenize op
-        can change what it counts. An op outside the replayable allowlist
+        can change what it counts. An op without calibration replay support
         yields a marker that priming rejects if it actually measures.
         """
         fetch_index = self._graph.nodes.index(self._fetch_node)
         ops: list[Any] = []
         for node in self._graph.nodes[fetch_index + 1 : tokenize_index]:
-            if not isinstance(node.op, _PRE_TOKENIZE_REPLAYABLE_OPS):
-                return _UnreplayableOp(type(node.op).__name__)
+            if not node.op.traits().calibration_replayable:
+                is_custom = _is_user_op(node.op)
+                return _UnreplayableOp(
+                    node.name if is_custom else type(node.op).__name__,
+                    is_custom=is_custom,
+                )
             ops.append(node.op)
         return _PreTokenizeReplay(ops) if ops else None
 
@@ -1629,8 +1719,10 @@ class Pipeline:
     def preflight_tokenizers(self, *, strict: bool = True) -> "ValidationReport":
         """Load and validate every tokenizer configured on the pipeline.
 
-        Each tokenizer operator is probed through a deep copy, leaving the
-        pipeline's operator state unchanged. This may download tokenizer files.
+        Each tokenizer operator is initialized through a deep copy. Successful
+        template checks are retained for worker reuse, while the original
+        tokenizer stays lazy. Changed configurations are checked again in the
+        worker. This may download tokenizer files.
 
         Args:
             strict: If True, raise :class:`ValidationError` when any tokenizer

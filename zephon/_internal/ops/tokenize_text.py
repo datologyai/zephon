@@ -374,7 +374,24 @@ class TokenizeText(TokenizeBase):
         return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+        # HF batch tensors require equal lengths; Zephon converts each row separately.
+        batch_tensors = (
+            not self._zephon_owns_brackets and self.return_tensors is not None
+        )
+        fixed_length = self.padding == "max_length" and self.truncation
+        return OpTraits(
+            # Batch padding changes payloads; split mode pads each chunk separately.
+            calibration_replayable=(
+                self.split_long_samples
+                or (
+                    self.padding in (False, "max_length")
+                    and (not batch_tensors or fixed_length)
+                )
+            ),
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=4,
+        )
 
     def token_counting_spec(self) -> TextTokenCountingSpec:
         return TextTokenCountingSpec.from_op(self)

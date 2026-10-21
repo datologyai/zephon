@@ -11,6 +11,7 @@ from zephon.io.memory import InMemoryShard
 from zephon.io.options import (
     ArrowOptions,
     CacheOptions,
+    LanceOptions,
     ParquetOptions,
     ParquetRGCacheOptions,
     StoreOptions,
@@ -22,6 +23,7 @@ __all__ = [
     "CacheOptions",
     "Dataset",
     "InMemoryShard",
+    "LanceOptions",
     "ParquetOptions",
     "ParquetRGCacheOptions",
     "StoreOptions",

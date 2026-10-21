@@ -202,6 +202,21 @@ def validate_store_cache_disk_space(
         )
 
 
+def _uses_shard_cache(catalog_set: CatalogSet | None, store_opts: StoreOptions) -> bool:
+    return bool(
+        store_opts.cache.enabled and catalog_set is not None and catalog_set.num_shards
+    )
+
+
+def _default_storage(
+    catalog_set: CatalogSet | None, store_opts: StoreOptions
+) -> StorageBackend:
+    # The direct resolver admits only local roots.
+    if _uses_shard_cache(catalog_set, store_opts):
+        return RouterStorageBackend()
+    return LocalFSBackend(root=Path("/"))
+
+
 def build_resolver(
     catalog_set: CatalogSet | None,
     options: StoreOptions | None = None,
@@ -213,11 +228,13 @@ def build_resolver(
     enabled and there are shards, else a stateless ``DirectResolver``.
     """
     store_opts = StoreOptions.from_any(options)
-    if store_opts.cache.enabled and catalog_set is not None and catalog_set.num_shards:
+    if storage is None:
+        storage = _default_storage(catalog_set, store_opts)
+    if _uses_shard_cache(catalog_set, store_opts):
+        assert catalog_set is not None
         validate_raw_cache_dataset_names(
             Path(store_opts.cache.root), catalog_set.cacheable_names
         )
-        storage = RouterStorageBackend() if storage is None else storage
         cache_root = Path(store_opts.cache.root).expanduser()
         return CacheManager(
             cache_root,
@@ -241,7 +258,6 @@ def build_resolver(
                     "cache; set cache.enabled=True."
                 )
 
-    storage = LocalFSBackend(root=Path("/")) if storage is None else storage
     if not isinstance(storage, LocalFSBackend):
         raise ValueError(
             "Reading without the shard cache requires LocalFSBackend; "
@@ -282,6 +298,10 @@ def build_multi_dataset_store(
     """
     store_opts = StoreOptions.from_any(options)
     catalog_set = build_catalog_set(datasets)
+    # One backend for the resolver and every opener, so a store builds its
+    # remote clients once.
+    if storage is None:
+        storage = _default_storage(catalog_set, store_opts)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
     resources = ExitStack()
     if isinstance(resolver, CacheManager):
@@ -309,7 +329,7 @@ def build_multi_dataset_store(
                     ) from exc
                 if kind not in openers:
                     openers[kind] = resources.enter_context(
-                        handler.create_opener(catalog_set, store_opts)
+                        handler.create_opener(catalog_set, store_opts, storage)
                     )
                 opener = openers[kind]
                 catalog: ShardCatalog | None = None

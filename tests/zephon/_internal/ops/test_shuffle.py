@@ -364,6 +364,7 @@ def test_shuffle_buffer_accumulator_dispatch() -> None:
 def test_shuffle_buffer_traits_and_process_one() -> None:
     op = ShuffleBuffer(buffer_size=4, seed=0, algorithm="block")
     traits = op.traits()
+    assert traits.calibration_replayable is True
     assert traits.parallelism == 1
     assert traits.preserves_cursor_order is False
 
