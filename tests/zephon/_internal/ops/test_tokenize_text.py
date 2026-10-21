@@ -616,11 +616,13 @@ def test_calibration_replay_matches_batch_independent_tokenization(
 def test_calibration_replay_requires_fixed_length_hf_batch_tensors(
     padding: bool | str, truncation: bool, replayable: bool
 ) -> None:
+    pytest.importorskip("torch")
+    # Older NumPy versions accept ragged batches as object arrays.
     op = TokenizeText(
         tokenizer_id="__fallback__",
         field="text",
         special_tokens="tokenizer_default",
-        return_tensors="np",
+        return_tensors="pt",
         padding=padding,
         truncation=truncation,
         max_length=4,
