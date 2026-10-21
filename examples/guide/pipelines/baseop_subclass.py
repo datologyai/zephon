@@ -26,7 +26,10 @@ class QualityScoreOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False, preserves_cursor_order=True, parallelism=4
+            # Assumes scores are independent of batch grouping.
+            calibration_replayable=True,
+            preserves_cursor_order=True,
+            parallelism=4,
         )
 
     def accumulator(
