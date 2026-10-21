@@ -68,7 +68,7 @@ def _run(
 
 class _OrderedOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
 
 class _TensorizeValueOp(_OrderedOp):

@@ -15,7 +15,9 @@ class Materialize(BaseOp):
     """Force evaluation of upstream iterables without altering records."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=False, preserves_cursor_order=True)
+        return OpTraits(
+            calibration_replayable=False, indexable=False, preserves_cursor_order=True
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

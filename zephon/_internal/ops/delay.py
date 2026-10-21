@@ -33,7 +33,12 @@ class DelayById(BaseOp):
         self._max_latency_ms = max_latency_ms
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=8)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=8,
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

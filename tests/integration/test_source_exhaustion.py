@@ -127,7 +127,7 @@ class _ObserveExhaustion(BaseOp):
         self.events = events
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

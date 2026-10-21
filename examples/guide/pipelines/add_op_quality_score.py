@@ -20,6 +20,7 @@ pipeline = (
     Pipeline(work_source)
     .add_op(
         "quality_score",
+        calibration_replayable=False,
         process_many=score_documents,
         accumulator=lambda: CountingAccumulator(max_batch=64),
         preserves_cursor_order=True,

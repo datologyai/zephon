@@ -612,7 +612,12 @@ class TokenizeChat(TokenizeBase):
     # Op plumbing
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=4,
+        )
 
     def token_counting_spec(self) -> "ChatTokenCountingSpec":
         return ChatTokenCountingSpec.from_op(self)

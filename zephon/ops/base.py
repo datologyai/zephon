@@ -106,7 +106,9 @@ class BaseOp(ABC):
                 self._tokenizer = None  # built per-worker in setup()
 
             def traits(self) -> OpTraits:
-                return OpTraits(preserves_cursor_order=True)
+                return OpTraits(
+                    preserves_cursor_order=True, calibration_replayable=False
+                )
 
             def setup(self, ctx):
                 super().setup(ctx)
@@ -136,9 +138,9 @@ class BaseOp(ABC):
 
     - ``process_many`` — the workhorse transform.
     - ``traits`` — must return an `OpTraits` with ``preserves_cursor_order``
-      declared; the subclass must declare ``True`` (1:1 maps, payload
-      transforms, non-reordering filters) or ``False`` (reorders, shuffles,
-      packs).
+      and ``calibration_replayable`` explicitly declared. The latter opts into
+      per-record token calibration without accumulator logic, runner services,
+      or real source metadata; see :class:`OpTraits` for the contract.
 
     Instantiating a subclass that doesn't override both ``process_many``
     and ``traits`` raises ``TypeError`` at construction time.

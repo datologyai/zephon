@@ -25,7 +25,9 @@ class QualityScoreOp(BaseOp):
         self._model = load_classifier(self._model_name)
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True, parallelism=4)
+        return OpTraits(
+            calibration_replayable=False, preserves_cursor_order=True, parallelism=4
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

@@ -374,7 +374,12 @@ class TokenizeText(TokenizeBase):
         return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=4,
+        )
 
     def token_counting_spec(self) -> TextTokenCountingSpec:
         return TextTokenCountingSpec.from_op(self)

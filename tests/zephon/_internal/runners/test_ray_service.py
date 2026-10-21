@@ -111,7 +111,9 @@ class TestRaySingleOpActor:
 
         class StageInfoProbe(BaseOp):
             def traits(self) -> OpTraits:
-                return OpTraits(preserves_cursor_order=True)
+                return OpTraits(
+                    calibration_replayable=False, preserves_cursor_order=True
+                )
 
             def process_many(self, elems):
                 info = self.stage_info
@@ -146,7 +148,11 @@ class TestRaySingleOpActor:
 
         class FailOp(BaseOp):
             def traits(self) -> OpTraits:
-                return OpTraits(indexable=True, preserves_cursor_order=True)
+                return OpTraits(
+                    calibration_replayable=False,
+                    indexable=True,
+                    preserves_cursor_order=True,
+                )
 
             def process_one(self, elem):
                 raise ValueError("intentional failure")
@@ -173,7 +179,11 @@ class TestRaySingleOpActor:
 
         class BrokenProcessManyOp(BaseOp):
             def traits(self) -> OpTraits:
-                return OpTraits(indexable=True, preserves_cursor_order=True)
+                return OpTraits(
+                    calibration_replayable=False,
+                    indexable=True,
+                    preserves_cursor_order=True,
+                )
 
             def process_many(self, elems):
                 return [self.missing_attr for _ in elems]

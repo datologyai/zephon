@@ -28,7 +28,7 @@ class _CountingBase(TokenizeBase):
             raise ValueError("finalize boom")
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         return elems

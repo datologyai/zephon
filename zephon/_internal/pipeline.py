@@ -77,10 +77,6 @@ _S = TypeVar("_S")
 
 _OpT = TypeVar("_OpT")
 
-# Ops calibration can replay standalone: pure per-record, no accumulator
-# state, no OpContext services.
-_PRE_TOKENIZE_REPLAYABLE_OPS: tuple[type, ...] = (DecodeText, MapTransform)
-
 # TypeVar for Pipeline methods that mutate the graph or cached plan state
 _PipelineMethod = TypeVar("_PipelineMethod", bound=Callable[..., Any])
 
@@ -561,6 +557,7 @@ class Pipeline:
         *,
         process_many: Callable[[list[Any]], list[Any]],
         preserves_cursor_order: bool,
+        calibration_replayable: bool,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -580,6 +577,7 @@ class Pipeline:
         name: Optional[str] = None,
         process_many: Optional[Callable[[list[Any]], list[Any]]] = None,
         preserves_cursor_order: Optional[bool] = None,
+        calibration_replayable: Optional[bool] = None,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -603,7 +601,8 @@ class Pipeline:
         the lifecycle built-in operators use.  Traits come from
         ``op.traits()`` rather than kwargs.
 
-        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., preserves_cursor_order=..., ...)``.
+        **Kwargs form**: ``pipe.add_op(name, *, process_many=..., ...)``.
+        Both ``preserves_cursor_order`` and ``calibration_replayable`` are required.
         Convenience for stateless transforms.  The framework builds an
         internal `BaseOp` subclass from the supplied callables +
         accumulator factory + traits.  ``process_many`` must not carry
@@ -676,6 +675,12 @@ class Pipeline:
             indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
+            calibration_replayable: Kwargs form, required. True only when the op
+                can replay each fetched record independently during token
+                calibration, without accumulator logic, runner services, or
+                real source metadata. See :class:`OpTraits` for the contract.
+                False rejects automatic calibration through this op; pinned
+                token ratios and a custom measurement function remain available.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
@@ -700,7 +705,11 @@ class Pipeline:
                     self._name = name
                     self._tokenizer = None
                 def traits(self):
-                    return OpTraits(preserves_cursor_order=True, parallelism=4)
+                    return OpTraits(
+                        preserves_cursor_order=True,
+                        calibration_replayable=False,
+                        parallelism=4,
+                    )
                 def setup(self, ctx):
                     super().setup(ctx)
                     self._tokenizer = load_tokenizer(self._name)
@@ -717,6 +726,7 @@ class Pipeline:
                 accumulator=lambda: CountingAccumulator(max_batch=64),
                 parallelism=4,
                 preserves_cursor_order=True,
+                calibration_replayable=False,
             )
         """
         if isinstance(name_or_op, BaseOp):
@@ -725,6 +735,7 @@ class Pipeline:
                 for kw, val in (
                     ("process_many", process_many),
                     ("preserves_cursor_order", preserves_cursor_order),
+                    ("calibration_replayable", calibration_replayable),
                     ("accumulator", accumulator),
                     ("process_one", process_one),
                     ("validation_samples", validation_samples),
@@ -772,6 +783,14 @@ class Pipeline:
                 "reorder/shuffle/pack ops)"
             )
 
+        if calibration_replayable is None:
+            raise ValueError(
+                "add_op(name, ...) requires `calibration_replayable` "
+                + "(True for independent per-record transforms that need no "
+                + "accumulator logic, runner services, or real source metadata; "
+                + "False otherwise)"
+            )
+
         functional_op = _FunctionalOp(
             process_many_fn=process_many,
             accumulator_factory=(
@@ -781,6 +800,7 @@ class Pipeline:
             validation_samples_factory=validation_samples,
             op_traits=OpTraits(
                 preserves_cursor_order=preserves_cursor_order,
+                calibration_replayable=calibration_replayable,
                 parallelism=1 if parallelism is None else parallelism,
                 indexable=False if indexable is None else indexable,
                 batch_shape_sensitive=(
@@ -1510,13 +1530,13 @@ class Pipeline:
         """Collect the fetch -> tokenize ops calibration must replay.
 
         Calibration fetches raw store rows; ops ahead of the tokenize op
-        can change what it counts. An op outside the replayable allowlist
+        can change what it counts. An op without calibration replay support
         yields a marker that priming rejects if it actually measures.
         """
         fetch_index = self._graph.nodes.index(self._fetch_node)
         ops: list[Any] = []
         for node in self._graph.nodes[fetch_index + 1 : tokenize_index]:
-            if not isinstance(node.op, _PRE_TOKENIZE_REPLAYABLE_OPS):
+            if not node.op.traits().calibration_replayable:
                 return _UnreplayableOp(type(node.op).__name__)
             ops.append(node.op)
         return _PreTokenizeReplay(ops) if ops else None

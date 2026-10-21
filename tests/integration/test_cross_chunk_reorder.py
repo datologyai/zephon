@@ -58,6 +58,7 @@ class _DeferFirstOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=False,
             parallelism=1,

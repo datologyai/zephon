@@ -566,7 +566,12 @@ class ShuffleBuffer(BaseOp):
     def traits(self) -> OpTraits:
         # Stateless; deterministic even when multiple worker instances are present.
         # Keep suggested parallelism at 1 to avoid oversubscribing by default.
-        return OpTraits(indexable=False, preserves_cursor_order=False, parallelism=1)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=False,
+            preserves_cursor_order=False,
+            parallelism=1,
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

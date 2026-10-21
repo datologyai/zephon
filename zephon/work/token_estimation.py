@@ -300,8 +300,9 @@ class _PreTokenizeReplay:
     """Replay safe per-record ops before tokenization during calibration.
 
     Calibration fetches raw rows, so it replays these ops to count what the
-    tokenizer sees; dropped rows contribute zero tokens. The pipeline allowlist
-    excludes ops that need accumulator state or ``OpContext`` services.
+    tokenizer sees; dropped rows contribute zero tokens. Operators opt in through
+    ``OpTraits.calibration_replayable`` and must work with placeholder metadata,
+    an empty ``OpContext`` service map, and no accumulator logic.
     """
 
     def __init__(self, ops: Sequence[Any]) -> None:

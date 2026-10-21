@@ -147,6 +147,7 @@ class _IdentityOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -168,6 +169,7 @@ class _IdentityOp(BaseOp):
 class _ValueMappingOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -224,6 +226,7 @@ class _ServiceOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -436,6 +439,7 @@ class _CrashOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -487,6 +491,7 @@ class _LambdaOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -547,6 +552,7 @@ class _ClosureOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -1328,7 +1334,12 @@ class _CrashOnValue(BaseOp):
         self._mode = mode
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]
@@ -1376,7 +1387,12 @@ class _CrashNTimes(BaseOp):
         self._marker_dir = marker_dir
 
     def traits(self) -> OpTraits:
-        return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=1)
+        return OpTraits(
+            calibration_replayable=False,
+            indexable=True,
+            preserves_cursor_order=True,
+            parallelism=1,
+        )
 
     def accumulator(
         self, *, deterministic: bool, ctx: dict[str, Any]

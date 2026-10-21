@@ -1012,6 +1012,7 @@ class EnsureMixture(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=False,
             preserves_cursor_order=False,
             batch_shape_sensitive=False,

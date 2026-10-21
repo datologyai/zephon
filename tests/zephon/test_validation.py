@@ -50,6 +50,7 @@ def test_validate_passes_for_stateless_passthrough_op() -> None:
     """A textbook stateless op + default accumulator validates cleanly."""
     pipe = _empty_pipeline().add_op(
         "stateless",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -62,6 +63,7 @@ def test_validate_passes_for_counting_accumulator() -> None:
     """A real-world pattern: per-lane windowing via CountingAccumulator."""
     pipe = _empty_pipeline().add_op(
         "windowed",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=lambda: CountingAccumulator(max_batch=4),
         preserves_cursor_order=False,
@@ -95,7 +97,10 @@ def test_validate_catches_cross_call_state_leakage() -> None:
         return out
 
     pipe = _empty_pipeline().add_op(
-        "leaker", process_many=cross_call_leaker, preserves_cursor_order=True
+        "leaker",
+        calibration_replayable=False,
+        process_many=cross_call_leaker,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_CROSS_CALL_STATE" in _codes(report)
@@ -111,7 +116,10 @@ def test_validate_catches_nondeterministic_process_many() -> None:
         return list(elems) if counter["n"] % 2 == 0 else list(reversed(elems))
 
     pipe = _empty_pipeline().add_op(
-        "oops", process_many=stateful, preserves_cursor_order=True
+        "oops",
+        calibration_replayable=False,
+        process_many=stateful,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert not report.ok
@@ -137,6 +145,7 @@ def test_validate_catches_payload_level_nondeterminism() -> None:
 
     pipe = _empty_pipeline().add_op(
         "payload_drifter",
+        calibration_replayable=False,
         process_many=payload_drifter,
         preserves_cursor_order=True,
     )
@@ -155,7 +164,10 @@ def test_validate_catches_divergent_exception_behavior() -> None:
         return list(elems)
 
     pipe = _empty_pipeline().add_op(
-        "flaky", process_many=flaky, preserves_cursor_order=True
+        "flaky",
+        calibration_replayable=False,
+        process_many=flaky,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_NONDETERMINISTIC" in _codes(report)
@@ -178,6 +190,7 @@ def test_consistent_raise_degrades_to_warning_regardless_of_exception_type() -> 
 
     pipe = _empty_pipeline().add_op(
         "raises_value_error",
+        calibration_replayable=False,
         process_many=always_value_error,
         preserves_cursor_order=True,
     )
@@ -201,6 +214,7 @@ def test_validate_reports_loud_warning_on_shape_sensitive_op() -> None:
 
     pipe = _empty_pipeline().add_op(
         "needs_field",
+        calibration_replayable=False,
         process_many=needs_special_field,
         preserves_cursor_order=True,
     )
@@ -253,6 +267,7 @@ class _DroppingAccumulator(Accumulator[Any]):
 def test_validate_catches_flush_dropping_samples() -> None:
     pipe = _empty_pipeline().add_op(
         "dropper",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_DroppingAccumulator,
         preserves_cursor_order=True,
@@ -292,6 +307,7 @@ class _ResetIgnoringAccumulator(Accumulator[Any]):
 def test_validate_catches_reset_that_does_not_clear_state() -> None:
     pipe = _empty_pipeline().add_op(
         "leaky_reset",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_ResetIgnoringAccumulator,
         preserves_cursor_order=True,
@@ -343,6 +359,7 @@ def test_validate_catches_reset_that_leaks_state_into_payloads() -> None:
     """
     pipe = _empty_pipeline().add_op(
         "round_counter",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_RoundCounterAccumulator,
         preserves_cursor_order=True,
@@ -380,6 +397,7 @@ class _LyingPendingAccumulator(Accumulator[Any]):
 def test_validate_catches_has_pending_data_liar() -> None:
     pipe = _empty_pipeline().add_op(
         "liar",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_LyingPendingAccumulator,
         preserves_cursor_order=True,
@@ -417,6 +435,7 @@ def test_validate_catches_always_false_has_pending_data() -> None:
     """Accumulator buffers samples but reports no pending data → ACC_HAS_PENDING_LIES."""
     pipe = _empty_pipeline().add_op(
         "always_false",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_AlwaysFalseAccumulator,
         preserves_cursor_order=True,
@@ -446,7 +465,10 @@ def test_validate_catches_fabricated_sample_ids() -> None:
         return out
 
     pipe = _empty_pipeline().add_op(
-        "fab", process_many=fabricator, preserves_cursor_order=True
+        "fab",
+        calibration_replayable=False,
+        process_many=fabricator,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_FABRICATES_SAMPLE_ID" in _codes(report)
@@ -466,7 +488,10 @@ def test_validate_catches_fanout_without_child() -> None:
         return out
 
     pipe = _empty_pipeline().add_op(
-        "bad_fanout", process_many=bad_fanout, preserves_cursor_order=True
+        "bad_fanout",
+        calibration_replayable=False,
+        process_many=bad_fanout,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_FANOUT_DUPLICATE_LINEAGE" in _codes(report)
@@ -484,7 +509,10 @@ def test_validate_passes_for_correct_fanout_via_child() -> None:
         return out
 
     pipe = _empty_pipeline().add_op(
-        "good_fanout", process_many=good_fanout, preserves_cursor_order=True
+        "good_fanout",
+        calibration_replayable=False,
+        process_many=good_fanout,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     codes = _codes(report)
@@ -513,6 +541,7 @@ def test_validate_handles_op_emitting_sample_batch_outputs() -> None:
 
     pipe = _empty_pipeline().add_op(
         "wrap_into_batch",
+        calibration_replayable=False,
         process_many=emit_one_batch,
         preserves_cursor_order=True,
     )
@@ -565,6 +594,7 @@ class _LaneScramblingAccumulator(Accumulator[Any]):
 def test_validate_catches_accumulator_mutating_lane_id() -> None:
     pipe = _empty_pipeline().add_op(
         "scrambler",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_LaneScramblingAccumulator,
         preserves_cursor_order=True,
@@ -610,6 +640,7 @@ def test_validate_catches_lane_mixing_bucketing_accumulator() -> None:
     """A bucketing accumulator emitting cross-lane batches → ACC_BATCH_NOT_LANE_PURE."""
     pipe = _empty_pipeline().add_op(
         "cross_pollinator",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_CrossPollinatingAccumulator,
         preserves_cursor_order=True,
@@ -622,6 +653,7 @@ def test_validate_skips_lane_purity_for_passthrough_shape() -> None:
     """Passthrough-shape accumulators are exempt from lane-purity (upstream's job)."""
     pipe = _empty_pipeline().add_op(
         "passthrough_op",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -633,6 +665,7 @@ def test_validate_passes_lane_purity_for_lane_keyed_counting_accumulator() -> No
     """CountingAccumulator keyed by lane must not trip the check."""
     pipe = _empty_pipeline().add_op(
         "lane_keyed",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=lambda: CountingAccumulator(max_batch=2),
         preserves_cursor_order=False,
@@ -681,6 +714,7 @@ class _NoLaneIdAccumulator(Accumulator[Any]):
 def test_validate_catches_accumulator_without_lane_id() -> None:
     pipe = _empty_pipeline().add_op(
         "no_lane_id",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_NoLaneIdAccumulator,
         preserves_cursor_order=True,
@@ -720,6 +754,7 @@ class _LaneFlushNoOpAccumulator(Accumulator[Any]):
 def test_validate_catches_per_lane_flush_that_does_not_drain() -> None:
     pipe = _empty_pipeline().add_op(
         "lane_flush_noop",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_LaneFlushNoOpAccumulator,
         preserves_cursor_order=True,
@@ -757,6 +792,7 @@ class _AllLaneFlushAccumulator(Accumulator[Any]):
 def test_validate_catches_per_lane_flush_that_leaks_other_lanes() -> None:
     pipe = _empty_pipeline().add_op(
         "all_lane_flush",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_AllLaneFlushAccumulator,
         preserves_cursor_order=True,
@@ -780,7 +816,12 @@ def test_iter_raises_validation_error_for_broken_op() -> None:
 
     pipe = (
         _empty_pipeline()
-        .add_op("bad", process_many=stateful, preserves_cursor_order=True)
+        .add_op(
+            "bad",
+            calibration_replayable=False,
+            process_many=stateful,
+            preserves_cursor_order=True,
+        )
         .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
     )
 
@@ -799,7 +840,12 @@ def _broken_op_pipeline() -> PublicPipeline:
 
     return (
         _empty_pipeline()
-        .add_op("bad", process_many=stateful, preserves_cursor_order=True)
+        .add_op(
+            "bad",
+            calibration_replayable=False,
+            process_many=stateful,
+            preserves_cursor_order=True,
+        )
         .options(deterministic=True, prefetch_batches=0, default_stage_prefetch=0)
     )
 
@@ -865,7 +911,10 @@ def test_auto_validation_strict_surfaces_warning_only_issues() -> None:
         return [e.payload["nonexistent_field"] for e in elems]
 
     pipe = _empty_pipeline().add_op(
-        "needs_field", process_many=needs_special_field, preserves_cursor_order=True
+        "needs_field",
+        calibration_replayable=False,
+        process_many=needs_special_field,
+        preserves_cursor_order=True,
     )
     assert pipe._options.auto_validation == "strict"
 
@@ -887,7 +936,10 @@ def test_auto_validation_strict_surfaces_warning_only_issues() -> None:
 def test_validation_caches_per_graph_generation() -> None:
     """Validation must not re-run on every iter() call for the same graph."""
     pipe = _empty_pipeline().add_op(
-        "ok", process_many=lambda elems: list(elems), preserves_cursor_order=True
+        "ok",
+        calibration_replayable=False,
+        process_many=lambda elems: list(elems),
+        preserves_cursor_order=True,
     )
 
     pipe._run_auto_validation()
@@ -895,7 +947,10 @@ def test_validation_caches_per_graph_generation() -> None:
 
     # Mutating the graph (adding another op) must invalidate the validation flag.
     pipe.add_op(
-        "ok2", process_many=lambda elems: list(elems), preserves_cursor_order=True
+        "ok2",
+        calibration_replayable=False,
+        process_many=lambda elems: list(elems),
+        preserves_cursor_order=True,
     )
     assert pipe._validated is False
 
@@ -932,6 +987,7 @@ def test_report_format_includes_doc_link_and_op_name() -> None:
     """Error messages must point users at the contract docs."""
     pipe = _empty_pipeline().add_op(
         "dropper",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_DroppingAccumulator,
         preserves_cursor_order=True,
@@ -977,7 +1033,10 @@ def test_writes_to_self_static_scan_flags_attribute_assignment() -> None:
     bound = _self_writer.__get__(wrapper, _Wrapper)
 
     pipe = _empty_pipeline().add_op(
-        "self_assigner", process_many=bound, preserves_cursor_order=True
+        "self_assigner",
+        calibration_replayable=False,
+        process_many=bound,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_WRITES_TO_SELF" in _codes(report)
@@ -999,7 +1058,10 @@ def test_writes_to_self_static_scan_flags_mutator_call() -> None:
     bound = _list_appender.__get__(holder, _Holder)
 
     pipe = _empty_pipeline().add_op(
-        "self_appender", process_many=bound, preserves_cursor_order=True
+        "self_appender",
+        calibration_replayable=False,
+        process_many=bound,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_WRITES_TO_SELF" in _codes(report)
@@ -1024,7 +1086,10 @@ def test_writes_to_self_runs_even_when_op_rejects_generic_payload() -> None:
     bound = _self_writer_that_rejects_payload.__get__(_Holder(), _Holder)
 
     pipe = _empty_pipeline().add_op(
-        "self_writer_picky", process_many=bound, preserves_cursor_order=True
+        "self_writer_picky",
+        calibration_replayable=False,
+        process_many=bound,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     codes = _codes(report)
@@ -1043,7 +1108,10 @@ def _uses_random_random(elems: list[Any]) -> list[Any]:
 
 def test_nondeterministic_stdlib_static_scan_flags_random() -> None:
     pipe = _empty_pipeline().add_op(
-        "randy", process_many=_uses_random_random, preserves_cursor_order=True
+        "randy",
+        calibration_replayable=False,
+        process_many=_uses_random_random,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_NONDETERMINISTIC_STDLIB_CALL" in _codes(report)
@@ -1058,7 +1126,10 @@ def _uses_time_time(elems: list[Any]) -> list[Any]:
 
 def test_nondeterministic_stdlib_static_scan_flags_time_time() -> None:
     pipe = _empty_pipeline().add_op(
-        "clocky", process_many=_uses_time_time, preserves_cursor_order=True
+        "clocky",
+        calibration_replayable=False,
+        process_many=_uses_time_time,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     assert "OP_NONDETERMINISTIC_STDLIB_CALL" in _codes(report)
@@ -1074,6 +1145,7 @@ def _uses_random_but_rejects_payload(elems: list[Any]) -> list[Any]:
 def test_nondeterministic_stdlib_runs_even_when_op_rejects_generic_payload() -> None:
     pipe = _empty_pipeline().add_op(
         "randy_picky",
+        calibration_replayable=False,
         process_many=_uses_random_but_rejects_payload,
         preserves_cursor_order=True,
     )
@@ -1093,6 +1165,7 @@ def test_state_diff_catches_closure_mutation_via_cloudpickle() -> None:
 
     pipe = _empty_pipeline().add_op(
         "closure_leaker",
+        calibration_replayable=False,
         process_many=closure_mutator,
         preserves_cursor_order=True,
     )
@@ -1116,7 +1189,10 @@ def test_static_checks_are_warnings_not_errors() -> None:
     bound = heuristic_triggerer.__get__(_Holder(), _Holder)
 
     pipe = _empty_pipeline().add_op(
-        "warn_only", process_many=bound, preserves_cursor_order=True
+        "warn_only",
+        calibration_replayable=False,
+        process_many=bound,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     codes = _codes(report)
@@ -1140,7 +1216,7 @@ def test_static_checks_are_warnings_not_errors() -> None:
 
 class _SelfWritingOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         self._counter = getattr(self, "_counter", 0) + 1
@@ -1157,7 +1233,7 @@ def test_static_scan_flags_self_writes_in_baseop_subclass() -> None:
 
 class _PassThroughOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         return list(elems)
@@ -1203,7 +1279,7 @@ class _SubclassWithDefensiveSetupGuard(BaseOp):
         self._tokenizer: Any = None  # populated by setup
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def setup(self, ctx: Any) -> None:
         super().setup(ctx)
@@ -1237,7 +1313,10 @@ def test_op_rejects_generic_payload_message_points_at_validation_samples_hook() 
         return [e.payload["nonexistent_field"] for e in elems]
 
     pipe = _empty_pipeline().add_op(
-        "needs_field", process_many=needs_special_field, preserves_cursor_order=True
+        "needs_field",
+        calibration_replayable=False,
+        process_many=needs_special_field,
+        preserves_cursor_order=True,
     )
     report = pipe.validate()
     msg = next(
@@ -1281,6 +1360,7 @@ def test_validation_samples_kwarg_unlocks_op_level_checks_for_kwargs_form() -> N
 
     pipe = _empty_pipeline().add_op(
         "tokenized",
+        calibration_replayable=False,
         process_many=needs_tokens,
         preserves_cursor_order=True,
         validation_samples=lambda: _custom_records("tokens"),
@@ -1297,7 +1377,7 @@ class _SubclassWithValidationSamples(BaseOp):
     still probe `process_many`."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def validation_samples(self) -> list[SampleRecord]:
         return _custom_records("ids")
@@ -1334,6 +1414,7 @@ def test_validation_samples_factory_that_raises_surfaces_warning_and_falls_back(
 
     pipe = _empty_pipeline().add_op(
         "kvargs_factory_blows_up",
+        calibration_replayable=False,
         process_many=fine,
         preserves_cursor_order=True,
         validation_samples=explode,
@@ -1351,6 +1432,7 @@ def test_validation_samples_factory_returning_wrong_type_surfaces_warning() -> N
 
     pipe = _empty_pipeline().add_op(
         "wrong_type",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
         validation_samples=lambda: "not a list of records",  # type: ignore[arg-type,return-value]
@@ -1367,7 +1449,7 @@ def test_validation_samples_kwarg_rejected_with_baseop_instance_form() -> None:
 
     class Trivial(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -1389,7 +1471,7 @@ def test_trait_kwargs_rejected_with_baseop_instance_form() -> None:
 
     class _Trivial(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -1408,7 +1490,9 @@ def test_instance_form_accepts_name_and_placement_only() -> None:
 
     class _TraitsCarrying(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(preserves_cursor_order=True, parallelism=4)
+            return OpTraits(
+                calibration_replayable=False, preserves_cursor_order=True, parallelism=4
+            )
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -1427,6 +1511,7 @@ def test_name_kwarg_rejected_with_kwargs_form() -> None:
     with pytest.raises(ValueError, match="name="):
         pipe.add_op(  # type: ignore[call-overload]
             "real_name",
+            calibration_replayable=False,
             name="other",
             process_many=lambda elems: list(elems),
             preserves_cursor_order=True,
@@ -1449,6 +1534,7 @@ def test_validate_reports_non_stream_item_output_cleanly() -> None:
     spurious OP_VALIDATOR_CRASHED noise)."""
     pipe = _empty_pipeline().add_op(
         "p",
+        calibration_replayable=False,
         process_many=lambda es: [e.payload for e in es],
         preserves_cursor_order=True,
     )
@@ -1474,6 +1560,7 @@ def test_non_stream_item_output_warn_mode_does_not_crash_iter() -> None:
         _empty_pipeline()
         .add_op(
             "p",
+            calibration_replayable=False,
             process_many=lambda es: [e.payload for e in es],
             preserves_cursor_order=True,
         )
@@ -1503,6 +1590,7 @@ def test_unexpected_check_crash_becomes_issue(
 
     pipe = _empty_pipeline().add_op(
         "stateless",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -1550,6 +1638,7 @@ def test_payload_reading_accumulator_does_not_crash_validator() -> None:
     pending-data check must bail quietly, not surface OP_VALIDATOR_CRASHED."""
     pipe = _empty_pipeline().add_op(
         "tok",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_PayloadReadingAccumulator,
         preserves_cursor_order=False,
@@ -1593,6 +1682,7 @@ def test_accumulator_probes_use_user_supplied_validation_samples() -> None:
     must let the full accumulator suite run cleanly."""
     pipe = _empty_pipeline().add_op(
         "tok",
+        calibration_replayable=False,
         process_many=lambda elems: list(elems),
         accumulator=_PassthroughPayloadReadingAccumulator,
         preserves_cursor_order=True,

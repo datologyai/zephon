@@ -4,9 +4,10 @@ from zephon.ops.traits import OpTraits
 
 
 def test_optraits_defaults() -> None:
-    t = OpTraits(preserves_cursor_order=True)
+    t = OpTraits(calibration_replayable=False, preserves_cursor_order=True)
     assert t.indexable is True
     assert t.preserves_cursor_order is True
+    assert t.calibration_replayable is False
     assert t.parallelism == 1
     assert t.batch_shape_sensitive is False
 
@@ -14,4 +15,9 @@ def test_optraits_defaults() -> None:
 def test_optraits_requires_preserves_cursor_order() -> None:
     """`preserves_cursor_order` has no default — construction must fail."""
     with pytest.raises(TypeError):
-        OpTraits()  # type: ignore[call-arg]
+        OpTraits(calibration_replayable=False)  # type: ignore[call-arg]
+
+
+def test_optraits_requires_calibration_replayable() -> None:
+    with pytest.raises(TypeError, match="calibration_replayable"):
+        OpTraits(preserves_cursor_order=True)  # type: ignore[call-arg]

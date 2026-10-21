@@ -220,6 +220,7 @@ class StatefulTransformOp(BaseOp, Generic[S]):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=self._indexable,
             preserves_cursor_order=self._preserves_cursor_order,
             parallelism=self._parallelism,

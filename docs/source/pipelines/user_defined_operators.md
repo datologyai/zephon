@@ -165,6 +165,14 @@ Configuring `traits` is essential to get the operator to work the way you want i
   if your operator emits records in the same order it received them in, or `False`
   otherwise. Be careful; if you do set this to `True` while not preserving order, it will
   silently break checkpointing.
+- `calibration_replayable` is mandatory. Set it to `True` only when each fetched
+  record produces the same output payloads independently of batch boundaries,
+  accumulator logic, runner services, and real sample/lane/chunk metadata.
+  Calibration runs `setup` with no services and supplies placeholder metadata;
+  filters and per-record fan-out are supported. Set `False` otherwise: automatic
+  token calibration through the op is rejected, but pinned ratios and
+  `TokenEstimation(measure=...)` remain available. Both forms of `add_op` require
+  an explicit choice.
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
   map-style dataset).
 - `parallelism` notes the preference for how many workers should be given to the operator.

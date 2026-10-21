@@ -19,7 +19,7 @@ def test_op_context_default_stage_info_is_sentinel() -> None:
 
 class _NoopOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def process_many(self, elems: list) -> list:
         return elems

@@ -45,6 +45,7 @@ class ReplayFilter(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            calibration_replayable=False,
             indexable=True,
             preserves_cursor_order=True,
             batch_shape_sensitive=False,

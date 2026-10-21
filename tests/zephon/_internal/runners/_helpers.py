@@ -100,7 +100,7 @@ class _StageInfoProbe(BaseOp):
         self._key = key
 
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         info = self.stage_info

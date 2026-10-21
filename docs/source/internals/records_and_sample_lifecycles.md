@@ -249,12 +249,13 @@ If that sounds like a trap, the way out is to keep filtering in a preceding
 `map_transform` with `drop_none=True` and let your stateful operator do nothing but buffer
 and reorder.
 
-**Traits that change how the planner wires you in.** `OpTraits` carries what the planner
-needs to know:
+**Operator traits.** `OpTraits` declares capabilities for planning, execution, and
+token calibration:
 
 | Trait | Default | Meaning |
 |---|---|---|
 | `preserves_cursor_order` | Required, no default | Records leave in the same chunk/offset order they arrived. `False` for anything that shuffles, packs, or buffers across chunks. |
+| `calibration_replayable` | Required, no default | Token calibration may replay the operator on individual fetched records with placeholder metadata and no runner services or accumulator logic. See the [authoring contract](../pipelines/user_defined_operators.md). |
 | `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1. |
 | `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect ([#49](https://github.com/datologyai/zephon/issues/49)). |
 | `indexable` | `True` | The operator preserves indexability through the plan. |

@@ -12,6 +12,8 @@ from zephon import Pipeline as PublicPipeline
 from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops import BaseOp, OpTraits
+from zephon.types import SampleRecord
 from zephon.work import StaticMixtureWorkSource
 from zephon.work.token_estimation import (
     TokenEstimation,
@@ -282,3 +284,34 @@ def test_priming_without_tokenize_op_passes_no_replay(
     pipe = PublicPipeline(_make_token_work_source()).map_transform(_lift_text)
     pipe._prime_worksource()
     assert captured["pre_tokenize_replay"] is None
+
+
+class _NonReplayableOp(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True, calibration_replayable=False)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        raise AssertionError("calibration must not execute this op")
+
+
+@pytest.mark.parametrize("form", ["instance", "kwargs"])
+def test_custom_op_opt_out_rejects_automatic_calibration(form: str) -> None:
+    work = StaticMixtureWorkSource(
+        [_make_token_dataset("text", 3, n_docs=2)],
+        {"text": 1.0},
+        token_estimation=TokenEstimation(),
+    )
+    pipe = PublicPipeline(work)
+    op = _NonReplayableOp()
+    if form == "instance":
+        pipe.add_op(op)
+    else:
+        pipe.add_op(
+            "custom",
+            process_many=op.process_many,
+            preserves_cursor_order=True,
+            calibration_replayable=False,
+        )
+    pipe.tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+    with pytest.raises(ValueError, match="cannot be replayed outside the engine"):
+        pipe._prime_worksource()
