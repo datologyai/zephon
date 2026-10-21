@@ -852,7 +852,6 @@ class Pipeline:
         self,
         *,
         field: str = "messages",
-        copy_mode: Literal["deep", "shallow"] = "deep",
         placement: str = "auto",
         parallelism: int | None = None,
     ) -> "Pipeline":
@@ -861,6 +860,8 @@ class Pipeline:
         Each prefix ends before the next user, or at the end of the input.
         Earlier history and other payload fields are retained. Empty assistant
         content is allowed. Queries without an assistant emit nothing.
+        Prefixes own independent nested payloads; the sole or final prefix may
+        reuse input objects.
 
         Expansion repeats context and does not select loss targets. Normalize
         roles before expansion; do not expand data already stored as prefixes.
@@ -871,19 +872,12 @@ class Pipeline:
 
         Args:
             field: Dot-separated payload path of the messages list.
-            copy_mode: ``"deep"`` (default) isolates nested data between prefixes,
-                copying repeated history and other mutable payload fields.
-                ``"shallow"`` copies containers along ``field`` and slices the
-                message sequence, sharing messages and other nested values to
-                reduce copying and memory use. Downstream ops must not mutate
-                shared values in shallow mode. Both modes may reuse input objects
-                for the sole or final prefix.
             placement: Execution placement, usually shared with tokenization.
             parallelism: Worker count override.
         """
         self._tail = self._graph.add(
             "expand_chat",
-            ExpandChat(field=field, copy_mode=copy_mode),
+            ExpandChat(field=field),
             self._tail,
             placement=placement,
             parallelism=parallelism,

@@ -1,7 +1,5 @@
 """Tests for pipeline option validation."""
 
-from typing import Any, Literal
-
 import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
@@ -23,10 +21,7 @@ def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
 
 
 @pytest.mark.parametrize("rename_messages", [False, True])
-@pytest.mark.parametrize("copy_mode", ["deep", "shallow"])
-def test_pipeline_replays_chat_prefixes(
-    rename_messages: bool, copy_mode: Literal["deep", "shallow"]
-) -> None:
+def test_pipeline_replays_chat_prefixes(rename_messages: bool) -> None:
     from zephon.work.token_estimation import _PreTokenizeReplay
 
     payload = {
@@ -36,7 +31,7 @@ def test_pipeline_replays_chat_prefixes(
         ]
     }
     work = FakeIndexableWorkSource(make_inmem_dataset("chat", [payload]), chunk_size=1)
-    pipe = Pipeline(work).expand_chat(copy_mode=copy_mode)
+    pipe = Pipeline(work).expand_chat()
     field = "messages"
     if rename_messages:
         pipe = pipe.map_transform(lambda p: {"chat": p["messages"]})
@@ -49,14 +44,5 @@ def test_pipeline_replays_chat_prefixes(
         {field: payload["messages"][:2]},
         {field: payload["messages"]},
     ]
-    assert (replayed[0][field][0] is replayed[1][field][0]) == (copy_mode == "shallow")
+    assert replayed[0][field][0] is not replayed[1][field][0]
     assert not pipe.is_indexable
-
-
-@pytest.mark.parametrize("copy_mode", ["invalid", "", None])
-def test_expand_chat_rejects_invalid_copy_mode(copy_mode: Any) -> None:
-    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("chat", [])))
-    tail = pipe._tail
-    with pytest.raises(ValueError, match="copy_mode must be 'deep' or 'shallow'"):
-        pipe.expand_chat(copy_mode=copy_mode)
-    assert pipe._tail is tail
