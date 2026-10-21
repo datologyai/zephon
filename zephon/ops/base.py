@@ -196,8 +196,8 @@ class BaseOp(ABC):
         Override to opt this op into the validator's runtime check
         suite.  Returning a small batch (~12 records across a couple of
         lanes) lets the harness run determinism, cross-call-state,
-        self-mutation, state-diff, and sample-identity probes against
-        ``process_many``.
+        self-mutation, state-diff, sample-identity, and calibration-replay
+        probes against ``process_many``.
 
         Why instance-form ops are gated this way: the validator never
         invokes ``setup``, so probing a `BaseOp` subclass whose

@@ -168,8 +168,8 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `calibration_replayable`: set `True` if processing each fetched record independently
   produces the same payloads and record counts as normal execution, including drops;
   otherwise leave `False` (default). Order may differ. See {class}`~zephon.ops.OpTraits`
-  for replay constraints and examples. Only operators before the first
-  tokenizer are checked; `False` there requires pinned token ratios or a custom
+  for replay constraints and examples. Automatic token calibration requires this trait
+  only before the first tokenizer; `False` there requires pinned token ratios or a custom
   `TokenEstimation(measure=...)`.
   Calibration supplies real `sample_id` values, but placeholder lane/chunk positions,
   mixture-component counts, and stage metadata. Leave `False` if replacing runtime
@@ -253,6 +253,12 @@ operator twice with the same input gives the same output. It also checks whether
 are any wrongful dependencies by checking whether the output depends on earlier input.
 Finally, the validator runs checks on writing to attributes and unseeded randomness.
 These last two are reported as warnings; the rest will error and stop the pipeline.
+
+For custom ops declaring `calibration_replayable=True`, validation compares batched and
+per-record outputs, substitutes placeholder metadata, and checks accumulator effects
+for kwargs-form ops. These probes use `validation_samples()` or generic records and
+never call `setup()`. Unsupported comparisons produce a warning; passing is a smoke
+test, not a guarantee.
 
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's

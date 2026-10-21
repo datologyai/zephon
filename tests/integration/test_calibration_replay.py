@@ -76,7 +76,6 @@ def test_custom_fanout_changes_calibrated_token_ratio(form: str) -> None:
                 deterministic=True,
                 canonical_replicas=1,
                 max_workers=1,
-                auto_validation="off",
             )
         )
         ratio, source = work.state_dict()["token_ratios"]["text"]
