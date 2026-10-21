@@ -301,7 +301,7 @@ def test_cache_distinguishes_first_middle_and_last_call_formats(
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("arguments", [None, [], 1, False, "[]", "null", "{broken"])
+@pytest.mark.parametrize("arguments", [object(), {1}, b"text"])
 def test_cached_formats_still_validate_every_call(
     counted_verifier: Any, arguments: Any, wrapped: bool
 ) -> None:
@@ -319,6 +319,120 @@ def test_cached_formats_still_validate_every_call(
     with pytest.raises(ValidationError, match="CHAT_TEMPLATE_INVALID"):
         verifier.verify_input_structure(messages, {})
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "arguments", [None, [], [1], 0, False, "", "[]", "null", "{broken"]
+)
+def test_literal_arguments_require_content_and_supervision(
+    fast_tokenizer: Any, arguments: Any
+) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"][0]["function"]["arguments"] = arguments
+    for replacement in ("", "{{m.tool_calls|tojson}}"):
+        template = SPLIT.replace(
+            "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}", replacement
+        )
+        with pytest.raises(ValidationError):
+            TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
+                messages, {}
+            )
+
+
+@pytest.mark.parametrize("arguments", [None, [], 0, False, "[]", "null", "{broken"])
+def test_literal_argument_only_omissions_fail(
+    fast_tokenizer: Any, arguments: Any
+) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"][0]["function"]["arguments"] = arguments
+    template = SPLIT.replace(
+        "{{m.tool_calls|tojson}}", "{{m.tool_calls[0].function.name}}"
+    )
+    with pytest.raises(ValidationError, match="Argument probe was not rendered"):
+        TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
+            messages, {}
+        )
+
+
+def test_literal_argument_checks_keep_input_values_and_cache_exact_values(
+    counted_verifier: Any,
+) -> None:
+    verifier, calls = counted_verifier
+    messages = copy.deepcopy(CYCLE)
+    function = messages[3]["tool_calls"][0]["function"]
+    for arguments in (
+        None,
+        [],
+        0,
+        False,
+        "",
+        "null",
+        "{broken",
+        "{different",
+        "{broken",
+    ):
+        function["arguments"] = arguments
+        original = copy.deepcopy(messages)
+        verifier.verify_input_structure(messages, {})
+        assert messages == original
+    assert len(calls) == 8
+
+
+@pytest.mark.parametrize("arguments", [None, [], False, ""])
+def test_literal_argument_branch_output_is_checked(
+    fast_tokenizer: Any, arguments: Any
+) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"][0]["function"]["arguments"] = arguments
+    template = SPLIT.replace(
+        "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}",
+        "{% if m.tool_calls[0].function.arguments %}"
+        "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}"
+        "{% else %}{{m.tool_calls|tojson}}{% endif %}",
+    )
+    with pytest.raises(ValidationError, match="CHAT_REQUIRED_SUPERVISION"):
+        TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
+            messages, {}
+        )
+
+
+def test_literal_argument_unrenderable_probe_fails_closed(fast_tokenizer: Any) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"][0]["function"]["arguments"] = None
+    template = SPLIT.replace(
+        "{{m.tool_calls|tojson}}",
+        "{% if m.tool_calls[0].function.arguments is not none %}"
+        "{{raise_exception('only null arguments supported')}}{% endif %}{{m.tool_calls|tojson}}",
+    )
+    with pytest.raises(ValidationError, match="only null arguments supported"):
+        TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
+            messages, {}
+        )
+
+
+def test_literal_arguments_cannot_receive_another_assistants_loss(
+    fast_tokenizer: Any,
+) -> None:
+    from zephon._internal.utils.chat_template import TemplateVerifier
+
+    messages = copy.deepcopy(CYCLE)
+    messages[3]["tool_calls"][0]["function"]["arguments"] = None
+    template = SPLIT.replace(
+        "{{m.content}}<|end|>",
+        "{{m.content}}{% if loop.last %}{{messages[3].tool_calls|tojson}}{% endif %}<|end|>",
+    )
+    with pytest.raises(ValidationError, match="CHAT_CONTENT_OWNERSHIP"):
+        TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
+            messages, {}
+        )
 
 
 @pytest.mark.parametrize("call", [None, "call", {}, {"function": None}])

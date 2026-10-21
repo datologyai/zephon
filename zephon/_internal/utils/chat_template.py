@@ -354,12 +354,16 @@ def _issue(code: str, message: str, *, warning: bool = False) -> Issue:
     )
 
 
-def _call_arguments(value: Any) -> dict[str, Any]:
-    """Validate argument objects, including JSON strings, without changing inputs."""
-    arguments = json.loads(value) if isinstance(value, str) else value
-    if not isinstance(arguments, dict):
-        raise ValueError("tool-call arguments must be a dictionary or JSON object")
-    return arguments
+def _call_arguments(value: Any) -> Any:
+    """Decode JSON arguments for probes; retain non-JSON strings as text."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    if value is not None and not isinstance(value, (dict, list, int, float)):
+        raise ValueError("tool-call arguments must be JSON values or text")
+    return value
 
 
 def _call_function(value: Any) -> dict[str, Any]:
@@ -390,10 +394,13 @@ def _tool_structure(value: Any, *, call: bool) -> tuple[Any, ...]:
     )
     if call:
         arguments = function.get("arguments", {})
+        decoded = _call_arguments(arguments)
         return (
             *common,
-            "json" if isinstance(arguments, str) else "object",
-            bool(_call_arguments(arguments)),
+            type(arguments).__name__,
+            ("object", bool(decoded))
+            if isinstance(decoded, dict)
+            else ("literal", repr(arguments), repr(function.get("name"))),
         )
     parameters = function.get("parameters", function.get("arguments"))
     return (
@@ -514,6 +521,8 @@ def _marked_probe(
             args = function.get("arguments", {})
             is_json = isinstance(args, str)
             args = _call_arguments(args)
+            if not isinstance(args, dict):
+                continue
             # A string argument detects templates that omit the whole call.
             args = {**args, "zephon_probe": marker(i, required_output=i in selected)}
             function["arguments"] = json.dumps(args) if is_json else args
@@ -594,6 +603,18 @@ class TemplateSetupResult:
     executed_sites: frozenset[int]
 
 
+def _changed_range(before: str, after: str) -> tuple[int, int]:
+    """Locate the original text between the common prefix and suffix."""
+    start = 0
+    while start < min(len(before), len(after)) and before[start] == after[start]:
+        start += 1
+    end, other_end = len(before), len(after)
+    while end > start and other_end > start and before[end - 1] == after[other_end - 1]:
+        end -= 1
+        other_end -= 1
+    return start, end
+
+
 class TemplateVerifier:
     """Verify a compiled template and gate new input structures before rendering."""
 
@@ -632,6 +653,67 @@ class TemplateVerifier:
         self.executed_sites: set[int] = set()
         self.setup_result: TemplateSetupResult | None = None
 
+    def _verify_literal_arguments(
+        self,
+        messages: list[Mapping[str, Any]],
+        context: Mapping[str, Any],
+        text: str,
+        spans: Sequence[tuple[int, int, int, int]],
+    ) -> list[Issue]:
+        """Check original non-object output against a counterfactual render.
+
+        Empty strings have no argument text; substituting the name checks the call.
+        Branches that cannot render the probe fail verification.
+        """
+        issues: list[Issue] = []
+        selected = selected_assistant_indices(messages, self.scope)
+        for owner, message in enumerate(messages):
+            for index, call in enumerate(message.get("tool_calls") or []):
+                args = _call_function(call).get("arguments", {})
+                if isinstance(_call_arguments(args), dict):
+                    continue
+                probe = copy.deepcopy(messages)
+                calls = probe[owner]["tool_calls"]
+                marker = f"zephon_argument_{owner}_{index}_text"
+                if args == "":
+                    _call_function(calls[index])["name"] = marker
+                else:
+                    replacement = {"zephon_probe": marker}
+                    _call_function(calls[index])["arguments"] = (
+                        json.dumps(replacement)
+                        if isinstance(args, str)
+                        else replacement
+                    )
+                changed, _ = self.template.render(probe, context)
+                if owner in selected and marker not in changed:
+                    issues.append(
+                        _issue(
+                            "CHAT_TEMPLATE_INVALID", "Argument probe was not rendered."
+                        )
+                    )
+                    continue
+                start, end = _changed_range(text, changed)
+                if start == end:
+                    if owner in selected:
+                        issues.append(
+                            _issue(
+                                "CHAT_REQUIRED_CONTENT",
+                                f"Tool-call output for message {owner} was omitted.",
+                            )
+                        )
+                    continue
+                fragment = text[start:end]
+                issues.extend(
+                    _check_markers(
+                        fragment,
+                        [(i, a - start, b - start, site) for i, a, b, site in spans],
+                        messages,
+                        {fragment: owner},
+                        {fragment} if owner in selected else set(),
+                    )
+                )
+        return issues
+
     def verify(
         self,
         messages: list[Mapping[str, Any]],
@@ -653,6 +735,9 @@ class TemplateVerifier:
                 probe, required = copy.deepcopy(messages), set(required_markers)
             context = {**self.tokenizer.special_tokens_map, **kwargs}
             text, spans = self.template.render(probe, context)
+            report.issues.extend(
+                self._verify_literal_arguments(probe, context, text, spans)
+            )
             # HF's cached mask recorder is mutable; use the tokenizer's thread salt.
             hf_template = thread_salted_template(self.template.source)
             hf_text = self.tokenizer.apply_chat_template(
@@ -751,8 +836,9 @@ class TemplateVerifier:
         """Reuse successful checks across rows, preflight and operator copies.
 
         Keep message order, field formats, text flags and exact render options.
-        Tool names, argument contents and schemas are omitted; tool/call counts
-        use 0/1/2/3+ buckets with first/last and distinct middle formats. These
+        Object-argument contents and schemas are omitted. Non-object arguments
+        and their tool names remain exact; other names are omitted. Tool/call
+        counts use 0/1/2/3+ buckets with first/last and distinct middle formats. These
         probes do not certify branches on omitted values or exact larger counts.
         """
         # Preserve branch controls even when ordinary text shares a cache entry.

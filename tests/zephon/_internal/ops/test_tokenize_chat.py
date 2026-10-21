@@ -762,14 +762,34 @@ def run(op: TokenizeChat, messages: list[dict[str, Any]]) -> SampleRecord:
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("json_arguments", [False, True])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"question": "what"},
+        '{"question": "what"}',
+        None,
+        [],
+        [1, "hi"],
+        0,
+        1,
+        1.5,
+        False,
+        True,
+        "",
+        " ",
+        "[]",
+        "null",
+        "1",
+        '"hi"',
+        "{broken",
+    ],
+)
 def test_tool_call_formats_preserve_tokens_and_loss(
-    fast_tokenizer: Any, wrapped: bool, json_arguments: bool
+    fast_tokenizer: Any, wrapped: bool, arguments: Any
 ) -> None:
     messages = copy.deepcopy(CYCLE[2:])
     function = messages[1]["tool_calls"][0]["function"]
-    if json_arguments:
-        function["arguments"] = json.dumps(function["arguments"])
+    function["arguments"] = arguments
     if not wrapped:
         messages[1]["tool_calls"] = [function]
     baseline = _payload(
