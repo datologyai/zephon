@@ -25,6 +25,34 @@ def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
     assert pipe._options.shm_coalesce
 
 
+@pytest.mark.parametrize("rename_messages", [False, True])
+def test_pipeline_replays_chat_prefixes(rename_messages: bool) -> None:
+    from zephon.work.token_estimation import _PreTokenizeReplay
+
+    payload = {
+        "messages": [
+            {"role": role, "content": str(index)}
+            for index, role in enumerate(("user", "assistant") * 2)
+        ]
+    }
+    work = FakeIndexableWorkSource(make_inmem_dataset("chat", [payload]), chunk_size=1)
+    pipe = Pipeline(work).expand_chat()
+    field = "messages"
+    if rename_messages:
+        pipe = pipe.map_transform(lambda p: {"chat": p["messages"]})
+        field = "chat"
+    pipe = pipe.tokenize_chat(tokenizer_id="unused", field=field)
+    replay = pipe._build_pre_tokenize_replay(len(pipe._graph.nodes) - 1)
+    assert isinstance(replay, _PreTokenizeReplay)
+    replayed = replay.apply(payload, (0, 0, 0))
+    assert replayed == [
+        {field: payload["messages"][:2]},
+        {field: payload["messages"]},
+    ]
+    assert replayed[0][field][0] is not replayed[1][field][0]
+    assert not pipe.is_indexable
+
+
 @pytest.mark.parametrize("use_monotone", [True, False])
 def test_controls_do_not_notify_delivery_or_escape_the_tail(use_monotone: bool) -> None:
     # Exercise only the tail wrapper: no source, graph compilation or engine.

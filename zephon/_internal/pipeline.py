@@ -29,6 +29,7 @@ from zephon._internal.graph import Graph, Node, Plan
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.decode_text import DecodeText
 from zephon._internal.ops.ensure_mixture import EnsureMixture
+from zephon._internal.ops.expand_chat import ExpandChat
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.ops.map_transform import MapBatchTransform, MapTransform
 from zephon._internal.ops.materialize import Materialize
@@ -855,6 +856,43 @@ class Pipeline:
             "tokenize", op, self._tail, placement=placement, parallelism=parallelism
         )
         self._tail = node
+        return self
+
+    @_mutates_graph
+    def expand_chat(
+        self,
+        *,
+        field: str = "messages",
+        placement: str = "auto",
+        parallelism: int | None = None,
+    ) -> "Pipeline":
+        """Emit one conversation prefix per user query containing an assistant.
+
+        Each prefix ends before the next user, or at the end of the input.
+        Earlier history and other payload fields are retained. Empty assistant
+        content is allowed. Queries without an assistant emit nothing.
+        Prefixes own independent nested payloads; the sole or final prefix may
+        reuse input objects.
+
+        Expansion repeats context and does not select loss targets. Normalize
+        roles before expansion; do not expand data already stored as prefixes.
+        Packed prefixes require document-isolated attention in the model.
+        Keep expansion and tokenization in one stage to avoid serializing repeated
+        history between processes. Changing expansion settings before checkpoint
+        resume is unsupported and is not detected.
+
+        Args:
+            field: Dot-separated payload path of the messages list.
+            placement: Execution placement, usually shared with tokenization.
+            parallelism: Worker count override.
+        """
+        self._tail = self._graph.add(
+            "expand_chat",
+            ExpandChat(field=field),
+            self._tail,
+            placement=placement,
+            parallelism=parallelism,
+        )
         return self
 
     @_mutates_graph
