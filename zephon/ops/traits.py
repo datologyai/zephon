@@ -19,13 +19,10 @@ class OpTraits:
     transforms, non-reordering filters) or ``False`` (reorders, shuffles,
     packs) call.
 
-    ``calibration_replayable`` — required opt-in to token calibration outside
-    the engine. ``setup`` must work with an empty ``OpContext`` service map.
-    ``process_many`` must produce the same payloads and drops per input record
-    regardless of batch boundaries, without accumulator logic, cross-call state,
-    or real sample/lane/chunk identities. Calibration supplies placeholder
-    metadata and discards output metadata. Set False when these conditions
-    are not guaranteed.
+    ``calibration_replayable`` — required. Whether token calibration can replay
+    the op per record without changing its output payloads or drops. Replay
+    bypasses accumulators and uses an empty service map and placeholder
+    source/stage metadata. Outputs must not depend on batching or previous calls.
 
     ``parallelism`` — suggested parallelism for the operator when not
     overridden.

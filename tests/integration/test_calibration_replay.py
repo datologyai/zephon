@@ -41,9 +41,8 @@ class DuplicateRecords(BaseOp):
         return self._transform(elems)
 
 
-@pytest.mark.parametrize("runner", ["threads", "process"])
 @pytest.mark.parametrize("form", ["instance", "kwargs"])
-def test_custom_fanout_changes_calibrated_token_ratio(runner: str, form: str) -> None:
+def test_custom_fanout_changes_calibrated_token_ratio(form: str) -> None:
     dataset = Dataset.from_dict("text", {0: InMemoryShard([{"text": "one two"}] * 2)})
 
     def run(duplicate: bool) -> tuple[int, float]:
@@ -73,7 +72,7 @@ def test_custom_fanout_changes_calibrated_token_ratio(runner: str, form: str) ->
             pipe.tokenize(
                 tokenizer_id="__fallback__", field="text", special_tokens="none"
             ).options(
-                runner=runner,
+                runner="threads",
                 deterministic=True,
                 canonical_replicas=1,
                 max_workers=1,

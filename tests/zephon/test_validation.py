@@ -50,7 +50,7 @@ def test_validate_passes_for_stateless_passthrough_op() -> None:
     """A textbook stateless op + default accumulator validates cleanly."""
     pipe = _empty_pipeline().add_op(
         "stateless",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -63,7 +63,7 @@ def test_validate_passes_for_counting_accumulator() -> None:
     """A real-world pattern: per-lane windowing via CountingAccumulator."""
     pipe = _empty_pipeline().add_op(
         "windowed",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         accumulator=lambda: CountingAccumulator(max_batch=4),
         preserves_cursor_order=False,
@@ -510,7 +510,7 @@ def test_validate_passes_for_correct_fanout_via_child() -> None:
 
     pipe = _empty_pipeline().add_op(
         "good_fanout",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=good_fanout,
         preserves_cursor_order=True,
     )
@@ -653,7 +653,7 @@ def test_validate_skips_lane_purity_for_passthrough_shape() -> None:
     """Passthrough-shape accumulators are exempt from lane-purity (upstream's job)."""
     pipe = _empty_pipeline().add_op(
         "passthrough_op",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -665,7 +665,7 @@ def test_validate_passes_lane_purity_for_lane_keyed_counting_accumulator() -> No
     """CountingAccumulator keyed by lane must not trip the check."""
     pipe = _empty_pipeline().add_op(
         "lane_keyed",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         accumulator=lambda: CountingAccumulator(max_batch=2),
         preserves_cursor_order=False,
@@ -937,7 +937,7 @@ def test_validation_caches_per_graph_generation() -> None:
     """Validation must not re-run on every iter() call for the same graph."""
     pipe = _empty_pipeline().add_op(
         "ok",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -948,7 +948,7 @@ def test_validation_caches_per_graph_generation() -> None:
     # Mutating the graph (adding another op) must invalidate the validation flag.
     pipe.add_op(
         "ok2",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -1233,7 +1233,7 @@ def test_static_scan_flags_self_writes_in_baseop_subclass() -> None:
 
 class _PassThroughOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         return list(elems)
@@ -1279,7 +1279,7 @@ class _SubclassWithDefensiveSetupGuard(BaseOp):
         self._tokenizer: Any = None  # populated by setup
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
     def setup(self, ctx: Any) -> None:
         super().setup(ctx)
@@ -1360,7 +1360,7 @@ def test_validation_samples_kwarg_unlocks_op_level_checks_for_kwargs_form() -> N
 
     pipe = _empty_pipeline().add_op(
         "tokenized",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=needs_tokens,
         preserves_cursor_order=True,
         validation_samples=lambda: _custom_records("tokens"),
@@ -1377,7 +1377,7 @@ class _SubclassWithValidationSamples(BaseOp):
     still probe `process_many`."""
 
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
     def validation_samples(self) -> list[SampleRecord]:
         return _custom_records("ids")
@@ -1414,7 +1414,7 @@ def test_validation_samples_factory_that_raises_surfaces_warning_and_falls_back(
 
     pipe = _empty_pipeline().add_op(
         "kvargs_factory_blows_up",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=fine,
         preserves_cursor_order=True,
         validation_samples=explode,
@@ -1432,7 +1432,7 @@ def test_validation_samples_factory_returning_wrong_type_surfaces_warning() -> N
 
     pipe = _empty_pipeline().add_op(
         "wrong_type",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
         validation_samples=lambda: "not a list of records",  # type: ignore[arg-type,return-value]
@@ -1449,7 +1449,7 @@ def test_validation_samples_kwarg_rejected_with_baseop_instance_form() -> None:
 
     class Trivial(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -1471,7 +1471,7 @@ def test_trait_kwargs_rejected_with_baseop_instance_form() -> None:
 
     class _Trivial(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -1491,7 +1491,7 @@ def test_instance_form_accepts_name_and_placement_only() -> None:
     class _TraitsCarrying(BaseOp):
         def traits(self) -> OpTraits:
             return OpTraits(
-                calibration_replayable=False, preserves_cursor_order=True, parallelism=4
+                calibration_replayable=True, preserves_cursor_order=True, parallelism=4
             )
 
         def process_many(self, elems: list[Any]) -> list[Any]:
@@ -1511,7 +1511,7 @@ def test_name_kwarg_rejected_with_kwargs_form() -> None:
     with pytest.raises(ValueError, match="name="):
         pipe.add_op(  # type: ignore[call-overload]
             "real_name",
-            calibration_replayable=False,
+            calibration_replayable=True,
             name="other",
             process_many=lambda elems: list(elems),
             preserves_cursor_order=True,
@@ -1590,7 +1590,7 @@ def test_unexpected_check_crash_becomes_issue(
 
     pipe = _empty_pipeline().add_op(
         "stateless",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -1638,7 +1638,7 @@ def test_payload_reading_accumulator_does_not_crash_validator() -> None:
     pending-data check must bail quietly, not surface OP_VALIDATOR_CRASHED."""
     pipe = _empty_pipeline().add_op(
         "tok",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         accumulator=_PayloadReadingAccumulator,
         preserves_cursor_order=False,
@@ -1682,7 +1682,7 @@ def test_accumulator_probes_use_user_supplied_validation_samples() -> None:
     must let the full accumulator suite run cleanly."""
     pipe = _empty_pipeline().add_op(
         "tok",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         accumulator=_PassthroughPayloadReadingAccumulator,
         preserves_cursor_order=True,

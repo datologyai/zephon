@@ -159,7 +159,7 @@ def test_baseop_defaults_passthrough_traits_and_accumulator() -> None:
 
     class TrivialOp(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -181,7 +181,7 @@ def test_baseop_process_one_routes_through_process_many() -> None:
 
     class CapturingOp(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             seen_batches.append(list(elems))
@@ -249,7 +249,7 @@ def test_add_op_rejects_empty_name() -> None:
     with pytest.raises(ValueError, match="non-empty name"):
         pipe.add_op(
             "",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: list(elems),
             preserves_cursor_order=True,
         )
@@ -271,7 +271,7 @@ def test_add_op_invalidates_cached_plan() -> None:
 
     pipe.add_op(
         "tag",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: _tag_payload(elems, "after-cache"),
         preserves_cursor_order=True,
     )
@@ -289,7 +289,7 @@ def test_add_op_passthrough_default_accumulator_runs_end_to_end() -> None:
         .decode_text()
         .add_op(
             "tagger",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: _tag_payload(elems, "hi"),
             preserves_cursor_order=True,
         )
@@ -377,7 +377,7 @@ def test_add_op_with_baseop_instance_invokes_setup_per_worker() -> None:
             self._tokenizer: Any = None  # populated per worker
 
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def setup(self, ctx: Any) -> None:
             super().setup(ctx)
@@ -409,7 +409,7 @@ def test_add_op_with_baseop_instance_uses_class_name_when_name_omitted() -> None
 
     class MyCustomOp(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -429,7 +429,7 @@ def test_add_op_with_baseop_instance_rejects_kwargs_form_fields(
 
     class TrivialOp(BaseOp):
         def traits(self) -> OpTraits:
-            return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+            return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
         def process_many(self, elems: list[Any]) -> list[Any]:
             return list(elems)
@@ -449,7 +449,7 @@ def test_add_op_kwargs_form_requires_process_many_and_traits() -> None:
     with pytest.raises(ValueError, match="preserves_cursor_order"):
         pipe.add_op(
             "missing_pco",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: list(elems),
         )  # type: ignore[call-overload]
     with pytest.raises(ValueError, match="calibration_replayable"):
@@ -474,7 +474,7 @@ def test_add_op_accumulator_factory_called_per_setup() -> None:
         .decode_text()
         .add_op(
             "noop",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: list(elems),
             accumulator=factory,
             preserves_cursor_order=True,
@@ -509,7 +509,7 @@ def test_add_op_accumulator_factory_receives_deterministic_and_ctx() -> None:
         .decode_text()
         .add_op(
             "noop",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: list(elems),
             accumulator=factory,
             preserves_cursor_order=True,
@@ -534,7 +534,7 @@ def test_add_op_appears_in_explain() -> None:
         .decode_text()
         .add_op(
             "custom_stage",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=lambda elems: list(elems),
             preserves_cursor_order=True,
         )
@@ -565,7 +565,7 @@ def test_add_op_process_one_override_used() -> None:
         .decode_text()
         .add_op(
             "split",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=my_process_many,
             process_one=my_process_one,
             preserves_cursor_order=True,
@@ -599,7 +599,7 @@ def test_add_op_passes_advanced_traits_through() -> None:
     """The advanced OpTraits kwargs must flow into the op's traits()."""
     pipe = _empty_pipeline().add_op(
         "advanced",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
         batch_shape_sensitive=True,
@@ -617,7 +617,7 @@ def test_add_op_advanced_traits_default_false() -> None:
     """Omitting the advanced trait kwargs leaves them at the OpTraits defaults."""
     pipe = _empty_pipeline().add_op(
         "defaults",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
@@ -658,7 +658,7 @@ def test_legacy_shuffle_pack_v2_pattern_via_kwargs_add_op() -> None:
         .decode_text()
         .add_op(
             "shuffle_pack_v2",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=shuffle_pack,
             accumulator=lambda: CountingAccumulator(max_batch=window_size),
             parallelism=1,

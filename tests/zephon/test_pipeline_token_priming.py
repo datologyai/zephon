@@ -294,6 +294,33 @@ class _NonReplayableOp(BaseOp):
         raise AssertionError("calibration must not execute this op")
 
 
+def test_calibration_replays_materialize_and_stops_before_packing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_token_prime(monkeypatch)
+    work = StaticMixtureWorkSource(
+        [_make_token_dataset("text", 3, n_docs=2)],
+        {"text": 1.0},
+        chunk_size=1,
+        exhausted_policy="stop",
+        token_estimation=TokenEstimation(),
+    )
+    pipe = (
+        PublicPipeline(work)
+        .materialize()
+        .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+        .pack_flat(max_length=8, num_bins=2, pad_token_id=0)
+        .batch(2)
+    )
+    pipe._prime_worksource()
+    replay = captured["pre_tokenize_replay"]
+    assert isinstance(replay, _PreTokenizeReplay)
+    assert [type(op).__name__ for op in replay.ops] == ["Materialize"]
+    ratio, source = work.state_dict()["token_ratios"]["text"]
+    assert source == "measured"
+    assert ratio > 0
+
+
 @pytest.mark.parametrize("form", ["instance", "kwargs"])
 def test_custom_op_opt_out_rejects_automatic_calibration(form: str) -> None:
     work = StaticMixtureWorkSource(

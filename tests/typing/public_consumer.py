@@ -140,7 +140,7 @@ def pack_training(pipe: Pipeline) -> Pipeline:
 
 class IdentityOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
     def setup(self, ctx: OpContext) -> None:
         super().setup(ctx)

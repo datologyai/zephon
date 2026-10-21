@@ -72,8 +72,6 @@ class MapTransform(_BaseMapTransform):
     for the same inputs. This is automatically satisfied if the transform function
     is deterministic.
 
-    Token calibration also calls the transform on individual fetched payloads.
-
     Example:
         >>> def preprocess(payload):
         ...     if payload.get("text") == "":

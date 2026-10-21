@@ -107,7 +107,7 @@ class BaseOp(ABC):
 
             def traits(self) -> OpTraits:
                 return OpTraits(
-                    preserves_cursor_order=True, calibration_replayable=False
+                    preserves_cursor_order=True, calibration_replayable=True
                 )
 
             def setup(self, ctx):
@@ -138,9 +138,7 @@ class BaseOp(ABC):
 
     - ``process_many`` — the workhorse transform.
     - ``traits`` — must return an `OpTraits` with ``preserves_cursor_order``
-      and ``calibration_replayable`` explicitly declared. The latter opts into
-      per-record token calibration without accumulator logic, runner services,
-      or real source metadata; see :class:`OpTraits` for the contract.
+      and ``calibration_replayable`` explicitly declared.
 
     Instantiating a subclass that doesn't override both ``process_many``
     and ``traits`` raises ``TypeError`` at construction time.

@@ -508,7 +508,7 @@ def test_checkpoint_resume_nested_tokenized_children() -> None:
             PublicPipeline(work)
             .add_op(
                 "split_text",
-                calibration_replayable=False,
+                calibration_replayable=True,
                 process_many=split_text,
                 preserves_cursor_order=True,
             )

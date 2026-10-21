@@ -297,12 +297,9 @@ class PerShardTokenCost:
 
 
 class _PreTokenizeReplay:
-    """Replay safe per-record ops before tokenization during calibration.
+    """Replay ops with ``OpTraits.calibration_replayable`` before tokenization.
 
-    Calibration fetches raw rows, so it replays these ops to count what the
-    tokenizer sees; dropped rows contribute zero tokens. Operators opt in through
-    ``OpTraits.calibration_replayable`` and must work with placeholder metadata,
-    an empty ``OpContext`` service map, and no accumulator logic.
+    Dropped records contribute zero tokens.
     """
 
     def __init__(self, ops: Sequence[Any]) -> None:

@@ -105,7 +105,7 @@ class _OrderedOp(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False,
+            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=1,
@@ -124,7 +124,7 @@ class _OrderedOp(BaseOp):
 class _ReorderingOp(_OrderedOp):
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False,
+            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=False,
             parallelism=1,

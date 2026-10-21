@@ -675,12 +675,8 @@ class Pipeline:
             indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
-            calibration_replayable: Kwargs form, required. True only when the op
-                can replay each fetched record independently during token
-                calibration, without accumulator logic, runner services, or
-                real source metadata. See :class:`OpTraits` for the contract.
-                False rejects automatic calibration through this op; pinned
-                token ratios and a custom measurement function remain available.
+            calibration_replayable: Kwargs form, required. Whether token calibration
+                may replay the op before tokenization. See :class:`OpTraits`.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
@@ -707,14 +703,16 @@ class Pipeline:
                 def traits(self):
                     return OpTraits(
                         preserves_cursor_order=True,
-                        calibration_replayable=False,
+                        calibration_replayable=True,
                         parallelism=4,
                     )
                 def setup(self, ctx):
                     super().setup(ctx)
                     self._tokenizer = load_tokenizer(self._name)
                 def process_many(self, elems):
-                    return [self._tokenizer.encode(e) for e in elems]
+                    for e in elems:
+                        e.payload = {"ids": self._tokenizer.encode(e.payload["text"])}
+                    return elems
 
             pipeline.add_op(Tokenize("gpt2"))
 
@@ -786,9 +784,7 @@ class Pipeline:
         if calibration_replayable is None:
             raise ValueError(
                 "add_op(name, ...) requires `calibration_replayable` "
-                + "(True for independent per-record transforms that need no "
-                + "accumulator logic, runner services, or real source metadata; "
-                + "False otherwise)"
+                + "(see OpTraits for the replay contract)"
             )
 
         functional_op = _FunctionalOp(

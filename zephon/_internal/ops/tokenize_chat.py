@@ -613,7 +613,7 @@ class TokenizeChat(TokenizeBase):
 
     def traits(self) -> OpTraits:
         return OpTraits(
-            calibration_replayable=False,
+            calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
             parallelism=4,
