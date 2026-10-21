@@ -14,9 +14,11 @@ from tests.helpers.chat import (
     CYCLE,
     SPLIT,
     TAGGED_TEMPLATE,
+    UNTAGGED_TEMPLATE,
     make_fast_tokenizer,
 )
-from zephon.validation import Issue, ValidationError, verify_chat_template
+from zephon._internal.utils.chat_template import _verify_chat_template
+from zephon.validation import Issue, ValidationError
 
 
 @pytest.fixture
@@ -28,7 +30,7 @@ def test_generation_sites_on_same_line_are_distinct(fast_tokenizer: Any) -> None
     from zephon._internal.utils.chat_template import OwnedTemplate
 
     assert len(OwnedTemplate(SPLIT).sites) == 3
-    report = verify_chat_template(fast_tokenizer, SPLIT)
+    report = _verify_chat_template(fast_tokenizer, SPLIT)
     warnings = [
         issue for issue in report.warnings if issue.code == "CHAT_UNCOVERED_GENERATION"
     ]
@@ -426,7 +428,7 @@ def test_tool_schema_loop_can_rebind_its_target(
         if in_message_loop
         else schema + TAGGED_TEMPLATE
     )
-    report = verify_chat_template(
+    report = _verify_chat_template(
         fast_tokenizer,
         template,
         chat_template_kwargs={"tools": [{"function": {"name": "lookup"}}]},
@@ -440,14 +442,14 @@ def test_selected_reasoning_field_must_receive_loss(
 ) -> None:
     messages = copy.deepcopy(CONVERSATION)
     messages[-1][field] = "private reasoning"
-    report = verify_chat_template(
+    report = _verify_chat_template(
         fast_tokenizer, TAGGED_TEMPLATE, probes=[{"messages": messages}]
     )
     assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)
     tagged = TAGGED_TEMPLATE.replace(
         "{% generation %}", "{% generation %}{{ message." + field + " | default('') }}"
     )
-    report = verify_chat_template(
+    report = _verify_chat_template(
         fast_tokenizer, tagged, probes=[{"messages": messages}]
     )
     assert report.ok, report.format()
@@ -504,7 +506,7 @@ def test_unpreservable_text_conditions_fail_setup(
         + condition
         + " %}{{ messages[0].content }}{% endif %}{% endgeneration %}",
     )
-    report = verify_chat_template(fast_tokenizer, template)
+    report = _verify_chat_template(fast_tokenizer, template)
     assert not report.ok
     op = TokenizeChat(
         fast_tokenizer, chat_template=template, loss_scope="after_last_user"
@@ -521,6 +523,59 @@ def test_content_alias_comparison_in_assignment_fails_setup(
         "{% set value = message.content %}{% set copy_prompt = value == 'COPY_PROMPT' %}"
         "{% generation %}{% if copy_prompt %}{{ messages[0].content }}{% endif %}",
     )
-    report = verify_chat_template(fast_tokenizer, template)
+    report = _verify_chat_template(fast_tokenizer, template)
     assert not report.ok
     assert "content-dependent comparison" in report.format()
+
+
+def test_verifier_requires_stock_identity_and_marker_coverage(
+    fast_tokenizer: Any,
+) -> None:
+    report = _verify_chat_template(
+        fast_tokenizer, TAGGED_TEMPLATE, stock_template=UNTAGGED_TEMPLATE
+    )
+    assert report.ok, report.format()
+    report = _verify_chat_template(
+        fast_tokenizer,
+        TAGGED_TEMPLATE,
+        stock_template=UNTAGGED_TEMPLATE + "extra",
+    )
+    assert not report.ok
+    assert any(i.code == "CHAT_STOCK_IDENTITY" for i in report.errors)
+    report = _verify_chat_template(
+        fast_tokenizer, TAGGED_TEMPLATE, probes=[{"messages": CYCLE}]
+    )
+    assert any(i.code == "CHAT_REQUIRED_CONTENT" for i in report.errors)
+
+
+def test_probe_coverage_uses_requested_scope(fast_tokenizer: Any) -> None:
+    messages = copy.deepcopy(CYCLE)
+    messages.extend(
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "yes"},
+        ]
+    )
+    report = _verify_chat_template(
+        fast_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        probes=[{"messages": messages}],
+    )
+    assert report.ok, report.format()
+    messages[-1]["reasoning_content"] = "yes"
+    report = _verify_chat_template(
+        fast_tokenizer,
+        TAGGED_TEMPLATE,
+        loss_scope="after_last_user",
+        probes=[{"messages": messages}],
+    )
+    assert any(issue.code == "CHAT_REQUIRED_CONTENT" for issue in report.errors)
+
+
+def test_chat_verifier_rejects_invalid_scope(fast_tokenizer: Any) -> None:
+    report = _verify_chat_template(
+        fast_tokenizer, TAGGED_TEMPLATE, loss_scope="last_assistant"
+    )
+    assert not report.ok
+    assert any("invalid loss_scope" in issue.message for issue in report.errors)

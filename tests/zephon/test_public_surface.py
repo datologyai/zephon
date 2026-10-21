@@ -153,12 +153,10 @@ EXPECTED_ALL = {
         "build_index",
     ],
     "zephon.validation": [
-        "ChatTemplateProbe",
         "Issue",
         "ValidationError",
         "ValidationReport",
         "preflight_tokenizers",
-        "verify_chat_template",
     ],
     "zephon.debug": [
         "DatasetInspector",

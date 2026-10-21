@@ -37,10 +37,11 @@ from zephon._internal.ops.tokenize_chat import (
     _mask_from_spans,
 )
 from zephon._internal.token_counting import FatalCountError
+from zephon._internal.utils.chat_template import _verify_chat_template
 from zephon.io import Dataset, InMemoryShard
 from zephon.ops.config import SpanSource
 from zephon.types import SampleMeta, SampleRecord
-from zephon.validation import ValidationError, verify_chat_template
+from zephon.validation import ValidationError
 from zephon.work.token_estimation import (
     TokenEstimation,
     _measure_dataset,
@@ -1195,7 +1196,7 @@ def test_untagged_history_is_allowed(fast_tokenizer: Any) -> None:
             "message['role'] == 'assistant' and loop.index0 > ns.user",
         )
     )
-    report = verify_chat_template(fast_tokenizer, template)
+    report = _verify_chat_template(fast_tokenizer, template)
     assert report.ok, report.format()
     result = run(
         TokenizeChat(

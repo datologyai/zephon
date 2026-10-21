@@ -29,7 +29,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, TypeGuard, cast
+from typing import Any, TypedDict, TypeGuard, cast, get_args
 
 import numpy as np
 from jinja2 import TemplateError, nodes, pass_context
@@ -824,3 +824,108 @@ class TemplateVerifier:
             if context:
                 issues.append(_issue("CHAT_INPUT_CONTEXT", context))
             raise ValidationError(ValidationReport(issues))
+
+
+class _RequiredChatTemplateProbe(TypedDict):
+    messages: list[Mapping[str, Any]]
+
+
+class _ChatTemplateProbe(_RequiredChatTemplateProbe, total=False):
+    """Template fixture with optional render context and marker expectations."""
+
+    kwargs: Mapping[str, Any]
+    markers: Mapping[str, int]
+    required_markers: Sequence[str]
+
+
+def _verify_chat_template(
+    tokenizer: Any,
+    chat_template: str | None = None,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    probes: Sequence[_ChatTemplateProbe] | None = None,
+    loss_scope: LossScope = "after_last_user",
+    stock_template: str | None = None,
+) -> ValidationReport:
+    """Check generation ownership, content coverage and HF token-mask parity.
+
+    ``after_last_user`` runs these checks automatically. This entry point is
+    useful for template CI, extra fixtures and tagged/stock comparisons.
+
+    Check your template: every selected assistant's reasoning, tool calls,
+    answer and any end-of-turn token must appear inside its own ``{% generation %}``
+    blocks, within its message loop. Keep user/tool-result text and content read
+    from other messages outside those blocks. Inspect rendered text and loss
+    masks on representative inputs, because automatic probes can miss
+    content-dependent errors.
+
+    Probes retain literal substring, prefix and suffix controls in message text.
+    Exact text comparisons and length thresholds beyond emptiness are rejected
+    when detected on content fields or their assignment aliases. Coverage checks
+    include ``content``, ``reasoning_content``, ``reasoning`` and ``thinking``.
+
+    Args:
+        tokenizer: HF-compatible fast tokenizer.
+        chat_template: Tagged Jinja source; None uses the tokenizer's template.
+        chat_template_kwargs: Static render context.
+        loss_scope: Message selection to verify, usually ``after_last_user``.
+        probes: Extra fixtures with ``messages`` and optional ``kwargs``.
+            By default text is replaced with ownership markers. To supply
+            exact fixture text, provide ``markers`` (marker to message index)
+            and ``required_markers`` (markers that must appear).
+        stock_template: Optional inference template for render-identity checks.
+
+    Returns:
+        Findings for mandatory probes and extra fixtures. Unexecuted generation
+        sites are warnings; structural, ownership and parity failures are errors.
+    """
+    try:
+        if loss_scope not in get_args(LossScope):
+            raise ValueError(f"invalid loss_scope: {loss_scope!r}")
+        template = (
+            chat_template if chat_template is not None else tokenizer.chat_template
+        )
+        if not isinstance(template, str) or not template:
+            raise ValueError("a generation-tagged chat template is required")
+        if not getattr(tokenizer, "is_fast", False):
+            raise ValueError("a fast tokenizer is required")
+        verifier = TemplateVerifier(
+            tokenizer, template, chat_template_kwargs or {}, loss_scope
+        )
+        report = verifier.setup_report()
+        fixtures = list(probes or ())
+        if stock_template is not None:
+            fixtures.insert(
+                0,
+                {
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "answer"},
+                    ]
+                },
+            )
+        for probe in fixtures:
+            kwargs = {**(chat_template_kwargs or {}), **probe.get("kwargs", {})}
+            report.issues.extend(
+                verifier.verify(
+                    probe["messages"],
+                    kwargs,
+                    markers=probe.get("markers"),
+                    required_markers=probe.get("required_markers", ()),
+                    stock_template=stock_template,
+                ).issues
+            )
+        uncovered = verifier.template.sites.keys() - verifier.executed_sites
+        if uncovered:
+            report.issues.append(
+                _issue(
+                    "CHAT_UNCOVERED_GENERATION",
+                    f"Generation sites not exercised (site, line): {[(site, verifier.template.sites[site]) for site in sorted(uncovered)]}",
+                    warning=True,
+                )
+            )
+        return report
+    except Exception as error:
+        return ValidationReport(
+            [_issue("CHAT_TEMPLATE_INVALID", f"{type(error).__name__}: {error}")]
+        )
