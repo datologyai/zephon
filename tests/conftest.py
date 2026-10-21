@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytest_plugins = ('tests.cache_lock_diagnostics',)
+
 
 def _ensure_torch_shm_manager_is_executable() -> None:
     """Repair macOS torch SHM helper permissions for local test runs.
