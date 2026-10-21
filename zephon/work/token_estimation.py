@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import inspect
+import io
 import json
 import logging
 import math
@@ -920,11 +922,31 @@ def _dataset_content_key(dataset: Dataset) -> str:
     ).hexdigest()
 
 
+class _FingerprintPickler(cloudpickle.CloudPickler):
+    """Serialize calibration inputs without process-specific class tracker IDs."""
+
+    def reducer_override(self, obj: Any) -> Any:
+        if isinstance(obj, (_PreTokenizeReplay, _TokenCountingSpec, TokenEstimation)):
+            # Hash objects directly instead of the nested transport pickle bytes.
+            return object.__new__, (type(obj),), vars(obj)
+        reduced = super().reducer_override(obj)
+        if isinstance(obj, type) and isinstance(reduced, tuple):
+            factory, args, *rest = reduced
+            if factory.__module__.startswith("cloudpickle."):
+                parameters = tuple(inspect.signature(factory).parameters)
+                if "class_tracker_id" in parameters:
+                    index = parameters.index("class_tracker_id")
+                    args = (*args[:index], None, *args[index + 1 :])
+                    return factory, args, *rest
+        return reduced
+
+
 def _pickle_fingerprint(obj: Any) -> str:
     """Content hash via cloudpickle; sentinel when the object cannot serialize."""
-    # Dynamic classes carry process-specific IDs and can cause cache misses.
     try:
-        return hashlib.sha256(cloudpickle.dumps(obj)).hexdigest()
+        buffer = io.BytesIO()
+        _FingerprintPickler(buffer).dump(obj)
+        return hashlib.sha256(buffer.getvalue()).hexdigest()
     except Exception:  # noqa: BLE001 — priming is best-effort by contract
         return "__unpicklable__"
 

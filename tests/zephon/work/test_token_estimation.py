@@ -5,6 +5,9 @@
 
 import json
 import pickle
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -440,6 +443,85 @@ def test_prime_cache_key_tracks_chat_config():
     assert a != b
     assert a == c
     assert a != d
+
+
+def test_prime_cache_key_stable_for_script_classes(tmp_path: Path) -> None:
+    script = tmp_path / "fingerprint.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import json
+            from enum import Enum
+
+            from zephon.io import Dataset, InMemoryShard
+            from zephon.ops import BaseOp, OpTraits
+            from zephon.work.token_estimation import (
+                TokenEstimation, _PreTokenizeReplay, _TextTokenCountingSpec,
+                _prime_cache_key,
+            )
+
+            class Mode(Enum):
+                WORDS = "words"
+
+            class ScriptOp(BaseOp):
+                mode = Mode.WORDS
+
+                def __init__(self, extra=0):
+                    super().__init__()
+                    self.extra = extra
+
+                def traits(self):
+                    return OpTraits(preserves_cursor_order=True, calibration_replayable=True)
+
+                def process_many(self, records):
+                    return records
+
+                def measure(self, payload):
+                    return len(payload["text"].split()) + self.extra
+
+                def __call__(self, text, **kwargs):
+                    return {"input_ids": [1] * (len(text.split()) + self.extra)}
+
+            dataset = Dataset.from_dict("d", {0: InMemoryShard([{"text": "one two"}])})
+
+            def keys(op):
+                return [
+                    _prime_cache_key(
+                        {"d": 0}, {"d": dataset}, estimation, spec, seed=0,
+                        pre_tokenize_replay=replay,
+                    )
+                    for estimation, spec, replay in (
+                        (TokenEstimation(), None, _PreTokenizeReplay([op])),
+                        (TokenEstimation(), _TextTokenCountingSpec(tokenizer=op), None),
+                        (TokenEstimation(measure=op.measure), None, None),
+                    )
+                ]
+
+            baseline = keys(ScriptOp())
+            configured = keys(ScriptOp(extra=1))
+
+            def first_only(self, records):
+                return records[:1]
+
+            ScriptOp.process_many = first_only
+            changed_code = keys(ScriptOp())
+            print(json.dumps([baseline, configured, changed_code]))
+            """
+        )
+    )
+    results = [
+        json.loads(
+            subprocess.check_output(
+                [sys.executable, str(script)], text=True, timeout=30
+            )
+        )
+        for _ in range(2)
+    ]
+    assert results[0] == results[1]
+    baseline, configured, changed_code = results[0]
+    for original, state, code in zip(baseline, configured, changed_code, strict=True):
+        assert original != state
+        assert original != code
 
 
 def test_prime_cache_round_trip(tmp_path):

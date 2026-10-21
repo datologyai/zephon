@@ -168,8 +168,8 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `calibration_replayable`: set `True` if processing each fetched record independently
   produces the same payloads and record counts as normal execution, including drops;
   otherwise leave `False` (default). Order may differ. See {class}`~zephon.ops.OpTraits`
-  for replay constraints and examples. Automatic token calibration requires this trait
-  only before the first tokenizer; `False` there requires pinned token ratios or a custom
+  for replay constraints and examples. If you leave this `False` on an operator before
+  the first tokenizer, you need to supply token ratios or a custom
   `TokenEstimation(measure=...)`.
   Calibration supplies real `sample_id` values, but placeholder lane/chunk positions,
   mixture-component counts, and stage metadata. Leave `False` if replacing runtime
@@ -254,16 +254,12 @@ are any wrongful dependencies by checking whether the output depends on earlier 
 Finally, the validator runs checks on writing to attributes and unseeded randomness.
 These last two are reported as warnings; the rest will error and stop the pipeline.
 
-For custom ops declaring `calibration_replayable=True`, validation compares batched and
-per-record outputs, substitutes placeholder metadata, and checks accumulator effects
-for kwargs-form ops. These probes use `validation_samples()` or generic records and
-never call `setup()`. Unsupported comparisons produce a warning; passing is a smoke
-test, not a guarantee.
-
-Calibration caches ratios using serialized operator state. Classes defined in a training
-script or notebook can serialize differently across processes, causing ranks or restarts
-to repeat calibration; this affects startup time, not the measured ratios. Defining the
-class in an importable module avoids the process-specific class identifiers.
+If you set `calibration_replayable=True`, Zephon also checks that processing records one
+at a time or replacing their metadata with placeholders does not change the output.
+For operators added through keyword arguments, it also checks whether the accumulator
+changes the result. These checks use your `validation_samples()` or generated records,
+without calling `setup()`. Zephon warns when it cannot complete a check. You should still
+test your operator on representative data, since these checks only cover a few records.
 
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
