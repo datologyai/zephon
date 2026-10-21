@@ -877,16 +877,20 @@ class CacheManager(ShardResolver):
         shard_lock = self._shard_lock(dataset_root, locator.shard_id)
 
         while True:
-            with self._cache_lock:
-                state_value = _ShardState(self._shared.shard_states[index])
-                if state_value == _ShardState.LOCAL:
-                    if raw_path.is_file():
-                        self._shared.set_access_time(index, time.time_ns())
-                        return self._build_ref(
-                            raw_path, zip_path, locator, cache_hit=True
-                        )
-                    self._mark_remote_locked(index)
-                    continue
+            # A hit reads the shared state without the cache lock: an eviction can
+            # unlink the file after this returns whether or not the lock was held,
+            # and taking it would serialize every fetch worker on the node.
+            if _ShardState(self._shared.shard_states[index]) == _ShardState.LOCAL:
+                if raw_path.is_file():
+                    self._shared.set_access_time(index, time.time_ns())
+                    return self._build_ref(raw_path, zip_path, locator, cache_hit=True)
+                with self._cache_lock:
+                    if (
+                        _ShardState(self._shared.shard_states[index])
+                        == _ShardState.LOCAL
+                    ):
+                        self._mark_remote_locked(index)
+                continue
 
             # Not LOCAL. Try to become the active preparer via non-
             # blocking flock. ``timeout=0`` → ``fcntl.flock(LOCK_NB)``:
