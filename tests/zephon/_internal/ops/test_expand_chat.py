@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
@@ -148,28 +148,20 @@ def test_prefix_payloads_do_not_alias() -> None:
     assert last.payload == parent.payload
 
 
-@pytest.mark.parametrize("copy_mode", ["deep", "shallow"])
-def test_nested_prefix_copy_mode(copy_mode: Literal["deep", "shallow"]) -> None:
+def test_nested_prefix_payloads_do_not_alias() -> None:
     parent = record("user", "assistant", "user", "assistant")
     parent.payload["chat"] = {
         "messages": parent.payload.pop("messages"),
         "settings": {"language": "en"},
     }
-    first, last = ExpandChat(field="chat.messages", copy_mode=copy_mode).process_one(
-        parent
-    )
+    first, last = ExpandChat(field="chat.messages").process_one(parent)
     assert first.payload is not last.payload
     assert first.payload["chat"] is not last.payload["chat"]
     assert first.payload["chat"]["messages"] is not last.payload["chat"]["messages"]
-    shared = copy_mode == "shallow"
-    assert (first.payload["tools"] is last.payload["tools"]) == shared
-    assert (
-        first.payload["chat"]["settings"] is last.payload["chat"]["settings"]
-    ) == shared
+    assert first.payload["tools"] is not last.payload["tools"]
+    assert first.payload["chat"]["settings"] is not last.payload["chat"]["settings"]
     first.payload["chat"]["messages"][0]["content"] = "changed"
-    assert last.payload["chat"]["messages"][0]["content"] == (
-        "changed" if shared else "0"
-    )
+    assert last.payload["chat"]["messages"][0]["content"] == "0"
     first.payload["chat"]["messages"].pop()
     assert len(last.payload["chat"]["messages"]) == 4
 

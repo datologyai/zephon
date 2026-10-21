@@ -1,7 +1,7 @@
 # Copyright 2026 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
@@ -16,9 +16,8 @@ pytestmark = pytest.mark.integration
 @pytest.mark.parametrize(
     ("runner", "drop_final"), [("threads", False), ("process", True)]
 )
-@pytest.mark.parametrize("copy_mode", ["deep", "shallow"])
 def test_query_prefixes_with_unanswered_rows_and_downstream_drops(
-    runner: str, drop_final: bool, copy_mode: Literal["deep", "shallow"]
+    runner: str, drop_final: bool
 ) -> None:
     shapes = [
         ["user", "assistant"] * 3,
@@ -45,7 +44,7 @@ def test_query_prefixes_with_unanswered_rows_and_downstream_drops(
             chunk_size=2,
             seed=3,
         )
-        pipe = Pipeline(work).expand_chat(copy_mode=copy_mode)
+        pipe = Pipeline(work).expand_chat()
         pipe.map_transform(lambda p: p)
         if drop_final:
             pipe.map_transform(lambda p: p if len(p["messages"]) < 6 else None)
