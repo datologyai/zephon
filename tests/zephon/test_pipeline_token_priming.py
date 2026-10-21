@@ -340,7 +340,7 @@ def test_calibration_replays_shuffle(
     payloads = [
         payload
         for text in ("one", "two three")
-        for payload in replay.apply({"text": text})
+        for payload in replay.apply({"text": text}, (0, 0, 0))
     ]
     plan = captured["counting_spec"].build_counter().plan(payloads)
     assert [plan.count(payload) for payload in payloads] == [2, 3]

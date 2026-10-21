@@ -23,10 +23,11 @@ class OpTraits:
     independently produces the same output payloads and record counts as normal
     execution, including which records are dropped. Otherwise leave False
     (default). Output order may differ. The op must also run without accumulators
-    or runner services, using placeholder source/stage metadata. Text cleanup,
-    content-based filters, and per-record splits qualify; packing and padding to
-    the longest item in a batch do not. Buffers that only delay or reorder records
-    are safe.
+    or runner services. Sample IDs are real; lane/chunk positions, component counts,
+    and stage metadata are placeholders and must not affect payloads or drops.
+    Text cleanup, content-based filters, and per-record splits qualify; packing
+    and padding to the longest item in a batch do not. Buffers that only delay or
+    reorder records are safe.
 
     ``parallelism`` — suggested parallelism for the operator when not
     overridden.

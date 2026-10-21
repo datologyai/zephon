@@ -26,6 +26,7 @@ from zephon._internal.token_counting import (
 )
 from zephon._internal.utils.tokenizer import fallback_tokenizer
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleId, SampleRecord
 from zephon.work import token_estimation
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
@@ -405,17 +406,18 @@ def test_dataset_content_key_stable_and_data_sensitive():
 def test_prime_cache_key_stable_and_input_sensitive():
     by_name = {"a": Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 3)})}
     est = TokenEstimation()
-    key = _prime_cache_key(["a"], by_name, est, None, seed=0)
-    assert key == _prime_cache_key(["a"], by_name, est, None, seed=0)
-    assert key != _prime_cache_key(["a"], by_name, est, None, seed=1)
+    key = _prime_cache_key({"a": 0}, by_name, est, None, seed=0)
+    assert key == _prime_cache_key({"a": 0}, by_name, est, None, seed=0)
+    assert key != _prime_cache_key({"a": 0}, by_name, est, None, seed=1)
+    assert key != _prime_cache_key({"a": 1}, by_name, est, None, seed=0)
     assert key != _prime_cache_key(
-        ["a"], by_name, TokenEstimation(calibration_samples=999), None, seed=0
+        {"a": 0}, by_name, TokenEstimation(calibration_samples=999), None, seed=0
     )
     assert key != _prime_cache_key(
-        ["a"], by_name, est, TextTokenCountingSpec(max_length=128), seed=0
+        {"a": 0}, by_name, est, TextTokenCountingSpec(max_length=128), seed=0
     )
     assert key != _prime_cache_key(
-        ["a"],
+        {"a": 0},
         by_name,
         est,
         None,
@@ -429,7 +431,7 @@ def test_prime_cache_key_tracks_chat_config():
     estimation = TokenEstimation()
 
     def key(spec):
-        return _prime_cache_key(["d"], {"d": dataset}, estimation, spec, seed=0)
+        return _prime_cache_key({"d": 0}, {"d": dataset}, estimation, spec, seed=0)
 
     a = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
     b = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=16))
@@ -887,7 +889,7 @@ def test_prime_cache_key_distinguishes_live_tokenizer_state():
     est = TokenEstimation()
 
     def key(spec):
-        return _prime_cache_key(["b"], {"b": ds}, est, spec, seed=0)
+        return _prime_cache_key({"b": 0}, {"b": ds}, est, spec, seed=0)
 
     k1 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(1)))
     k3 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(3)))
@@ -983,21 +985,21 @@ def _lift_2n_words(payload: dict[str, int]) -> dict[str, str]:
 
 def test_pre_tokenize_replay_applies_map_ops() -> None:
     replay = _PreTokenizeReplay([MapTransform(_lift_n_words)])
-    assert replay.apply({"n": 3}) == [{"text": "w0 w1 w2"}]
+    assert replay.apply({"n": 3}, (0, 0, 0)) == [{"text": "w0 w1 w2"}]
 
 
 def test_pre_tokenize_replay_preserves_drop_semantics() -> None:
     dropped = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=True)])
-    assert dropped.apply({"n": 1}) == []
+    assert dropped.apply({"n": 1}, (0, 0, 0)) == []
     kept = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=False)])
-    assert kept.apply({"n": 1}) == [{"n": 1}]
+    assert kept.apply({"n": 1}, (0, 0, 0)) == [{"n": 1}]
 
 
 def test_pre_tokenize_replay_survives_cloudpickle() -> None:
     replay = cloudpickle.loads(
         cloudpickle.dumps(_PreTokenizeReplay([MapTransform(_lift_n_words)]))
     )
-    assert replay.apply({"n": 2}) == [{"text": "w0 w1"}]
+    assert replay.apply({"n": 2}, (0, 0, 0)) == [{"text": "w0 w1"}]
 
 
 def test_pre_tokenize_replay_pickles_local_lambda() -> None:
@@ -1006,7 +1008,7 @@ def test_pre_tokenize_replay_pickles_local_lambda() -> None:
         [MapTransform(lambda payload: {"text": payload["text"] + " " + suffix})]
     )
     restored = pickle.loads(pickle.dumps(replay))
-    assert restored.apply({"text": "one two"}) == [{"text": "one two extra"}]
+    assert restored.apply({"text": "one two"}, (0, 0, 0)) == [{"text": "one two extra"}]
 
 
 def _int_rows_dataset(n_rows: int = 40) -> Dataset:
@@ -1050,6 +1052,40 @@ def test_measure_dataset_counts_through_pre_tokenize_replay() -> None:
 def _pop_n_words(payload: dict[str, int]) -> dict[str, str]:
     n_words = payload.pop("n")
     return {"text": " ".join(f"w{i}" for i in range(n_words))}
+
+
+def test_measure_dataset_replays_real_sample_ids() -> None:
+    ds = Dataset.from_dict(
+        "d",
+        {
+            shard: InMemoryShard(
+                [{"sample_id": (7, shard, i), "text": "a b c"} for i in range(20)]
+            )
+            for shard in (2, 5)
+        },
+    )
+    seen: set[SampleId] = set()
+
+    def check_ids(records: list[SampleRecord]) -> list[SampleRecord]:
+        for record in records:
+            assert record.meta.sample_id == record.payload["sample_id"]
+            seen.add(record.meta.sample_id)
+        return records
+
+    measured = _measure_dataset(
+        ds,
+        7,
+        build_multi_dataset_store({7: ds}),
+        TokenEstimation(calibration_samples=64),
+        _fallback_text_counter(),
+        seed=3,
+        pre_tokenize_replay=_PreTokenizeReplay(
+            [SimpleNamespace(setup=lambda ctx: None, process_many=check_ids)]
+        ),
+    )
+    assert measured.ratio.source == "measured"
+    # Exercise replay during both count planning and the remaining measurements.
+    assert len(seen) > token_estimation._PLAN_SAMPLE_COUNT
 
 
 def test_measure_dataset_replays_planning_payloads_once() -> None:

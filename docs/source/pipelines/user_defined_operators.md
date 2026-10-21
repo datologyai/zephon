@@ -171,6 +171,10 @@ Configuring `traits` is essential to get the operator to work the way you want i
   for replay constraints and examples. Only operators before the first
   tokenizer are checked; `False` there requires pinned token ratios or a custom
   `TokenEstimation(measure=...)`.
+  Calibration supplies real `sample_id` values, but placeholder lane/chunk positions,
+  mixture-component counts, and stage metadata. Leave `False` if those placeholders
+  affect payload contents, output counts, or drop decisions; copying metadata through
+  with helpers such as `spawn_child` is fine.
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
   map-style dataset).
 - `parallelism` notes the preference for how many workers should be given to the operator.

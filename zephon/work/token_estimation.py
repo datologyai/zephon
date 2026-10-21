@@ -317,7 +317,7 @@ class _PreTokenizeReplay:
             state = {**state, "ops": cloudpickle.loads(state["ops"])}
         self.__dict__.update(state)
 
-    def apply(self, payload: Any) -> list[Any]:
+    def apply(self, payload: Any, sample_id: SampleId) -> list[Any]:
         """Map one raw payload to the payloads the tokenize op would see."""
         if not self._setup_done:
             # Ops arrive as pre-setup cloudpickle copies, like runner workers.
@@ -329,7 +329,7 @@ class _PreTokenizeReplay:
             self._setup_done = True
         records = [
             SampleRecord(
-                meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+                meta=SampleMeta(sample_id=sample_id, lane_id=0, chunk_id=0),
                 payload=payload,
             )
         ]
@@ -368,12 +368,15 @@ def _count_replayed(plan: _CountPlan, payloads: Sequence[Any]) -> int | None:
 
 
 def _count_delivered(
-    plan: _CountPlan, replay: _PreTokenizeReplay | None, payload: Any
+    plan: _CountPlan,
+    replay: _PreTokenizeReplay | None,
+    payload: Any,
+    sample_id: SampleId,
 ) -> int | None:
     """Delivered tokens for one raw pointer, or ``None`` when unmeasurable."""
     if replay is None:
         return plan.count(payload)
-    return _count_replayed(plan, replay.apply(payload))
+    return _count_replayed(plan, replay.apply(payload, sample_id))
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +677,7 @@ def _measure_dataset(
             prefix = []
             for sid in prefix_ids:
                 try:
-                    replayed = pre_tokenize_replay.apply(payloads[sid])
+                    replayed = pre_tokenize_replay.apply(payloads[sid], sid)
                 except Exception as exc:  # noqa: BLE001 — handled during measurement
                     replay_errors[sid] = exc
                 else:
@@ -693,7 +696,9 @@ def _measure_dataset(
             if sid in replayed_prefix:
                 delivered = _count_replayed(plan, replayed_prefix.pop(sid))
             else:
-                delivered = _count_delivered(plan, pre_tokenize_replay, payloads[sid])
+                delivered = _count_delivered(
+                    plan, pre_tokenize_replay, payloads[sid], sid
+                )
         except _FatalCountError:
             # Structural: execution rejects this row too. Surface it instead of
             # sampling around it, even when coverage would otherwise pass.
@@ -923,7 +928,7 @@ def _pickle_fingerprint(obj: Any) -> str:
 
 
 def _prime_cache_key(
-    names: list[str],
+    dataset_ids: Mapping[str, int],
     by_name: Mapping[str, Dataset],
     estimation: TokenEstimation,
     counting_spec: _TokenCountingSpec | None,
@@ -939,7 +944,10 @@ def _prime_cache_key(
         _pickle_fingerprint(estimation),
         _pickle_fingerprint(counting_spec or _TextTokenCountingSpec()),
         _pickle_fingerprint(pre_tokenize_replay),
-        *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
+        *(
+            f"{name}:{dataset_ids[name]}={_dataset_content_key(by_name[name])}"
+            for name in sorted(dataset_ids)
+        ),
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
@@ -1043,8 +1051,9 @@ def prime_token_ratios(
                         "Review the OpTraits.calibration_replayable contract before "
                         "setting calibration_replayable=True: setup must work without "
                         "runner services, and per-record payloads and drops must not "
-                        "depend on batching, accumulator logic, previous calls, or "
-                        "source/stage metadata. "
+                        "depend on batching, accumulator logic, previous calls, "
+                        "or placeholder lane/chunk positions, component counts, "
+                        "or stage metadata. "
                     )
                 raise ValueError(
                     f"token-aware mixture priming cannot calibrate through {kind} "
@@ -1058,7 +1067,12 @@ def prime_token_ratios(
             _build_multi_dataset_store(measured_datasets, options=store_options)
 
             key = _prime_cache_key(
-                names, by_name, estimation, counting_spec, seed, pre_tokenize_replay
+                {name: dataset_ids[name] for name in names},
+                by_name,
+                estimation,
+                counting_spec,
+                seed,
+                pre_tokenize_replay,
             )
             cache_path = (
                 _resolve_catalog_dir(store_options)
