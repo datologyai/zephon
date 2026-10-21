@@ -16,6 +16,7 @@ import pytest
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon.ops import Accumulator, BaseOp, CountingAccumulator, OpTraits, ReadyBatch
+from zephon.ops.children import spawn_child
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 from zephon.validation import (
     ValidationError,
@@ -68,6 +69,240 @@ def test_validate_passes_for_counting_accumulator() -> None:
     )
     report = pipe.validate()
     assert report.ok, report.format()
+
+
+# ---------------------------------------------------------------------------
+# Calibration replay
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_replay_allows_reordering_filtering_and_fanout() -> None:
+    def samples() -> list[SampleRecord]:
+        return [
+            SampleRecord(
+                meta=spawn_child(record.meta, 0, is_last_child=True),
+                payload={"value": i, "text": record.payload["text"]},
+            )
+            for i, record in enumerate(_custom_records("text"))
+        ]
+
+    def expand(elems: list[SampleRecord]) -> list[SampleRecord]:
+        out = []
+        for record in reversed(elems):
+            assert all(
+                ref.cursor.chunk_id == record.meta.chunk_id
+                and ref.cursor.chunk_offset == record.meta.chunk_offset
+                for ref in record.meta.contributors
+            )
+            if record.payload["value"] % 2:
+                # Tombstones and empty output both represent a dropped source.
+                if len(elems) > 1:
+                    out.append(
+                        SampleRecord(meta=record.meta.with_tombstone(), payload=None)
+                    )
+                continue
+            out.extend(
+                SampleRecord(
+                    meta=spawn_child(record.meta, i, is_last_child=i == 1),
+                    payload={
+                        "text": record.payload["text"],
+                        "source": record.meta.sample_id,
+                        "lineage": record.meta.lineage,
+                    },
+                )
+                for i in range(2)
+            )
+        return out
+
+    pipe = _empty_pipeline().add_op(
+        "expand",
+        process_many=expand,
+        accumulator=lambda: CountingAccumulator(max_batch=3),
+        preserves_cursor_order=False,
+        calibration_replayable=True,
+        validation_samples=samples,
+    )
+    report = pipe.validate()
+    assert report.ok, report.format()
+    assert not report.warnings, report.format()
+
+
+@pytest.mark.parametrize("behavior", ["payload", "count", "drop", "raise"])
+def test_calibration_replay_rejects_batch_dependence(behavior: str) -> None:
+    def dependent(elems: list[SampleRecord]) -> list[SampleRecord]:
+        if len(elems) == 1:
+            if behavior == "raise":
+                raise ValueError("a batch is required")
+            if behavior == "drop":
+                return []
+        count = 2 if behavior == "count" and len(elems) > 1 else 1
+        return [
+            SampleRecord(
+                meta=spawn_child(record.meta, i, is_last_child=i == count - 1),
+                payload={"value": len(elems) if behavior == "payload" else 0},
+            )
+            for record in elems
+            for i in range(count)
+        ]
+
+    pipe = _empty_pipeline().add_op(
+        "dependent",
+        process_many=dependent,
+        preserves_cursor_order=True,
+        calibration_replayable=True,
+    )
+    with pytest.warns(UserWarning, match="OP_CALIBRATION_REPLAY_MISMATCH"):
+        with pytest.raises(ValidationError, match="OP_CALIBRATION_REPLAY_MISMATCH"):
+            iter(pipe)
+
+
+@pytest.mark.parametrize("field", ["chunk_id", "component_sample_counts"])
+def test_calibration_replay_rejects_placeholder_dependence(field: str) -> None:
+    def dependent(elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [
+            SampleRecord(meta=r.meta, payload={"value": getattr(r.meta, field)})
+            for r in elems
+        ]
+
+    pipe = _empty_pipeline().add_op(
+        "dependent",
+        process_many=dependent,
+        preserves_cursor_order=True,
+        calibration_replayable=True,
+        validation_samples=lambda: [
+            SampleRecord(
+                meta=SampleMeta(
+                    sample_id=(2, 3, i),
+                    lane_id=1,
+                    chunk_id=4,
+                    component_sample_counts={2: 1},
+                ),
+                payload={"text": "hello"},
+            )
+            for i in range(2)
+        ],
+    )
+    report = pipe.validate()
+    issue = next(i for i in report.errors if i.code == "OP_CALIBRATION_REPLAY_MISMATCH")
+    assert "placeholder metadata" in issue.message
+
+
+class _RewriteOnFlush(CountingAccumulator[SampleRecord]):
+    def flush(
+        self, *, reset: bool = False, lane_id: int | None = None
+    ) -> list[ReadyBatch[SampleRecord]]:
+        batches = super().flush(reset=reset, lane_id=lane_id)
+        for batch, _ in batches:
+            for record in batch:
+                record.payload = {"text": "changed in accumulator"}
+        return batches
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_calibration_replay_rejects_accumulator_changes(drop: bool) -> None:
+    pipe = _empty_pipeline().add_op(
+        "accumulator",
+        process_many=lambda elems: list(elems),
+        accumulator=(
+            (lambda: CountingAccumulator(max_batch=3, drop_last=True))
+            if drop
+            else (lambda: _RewriteOnFlush(max_batch=3))
+        ),
+        preserves_cursor_order=True,
+        calibration_replayable=True,
+    )
+    report = pipe.validate()
+    issue = next(i for i in report.errors if i.code == "OP_CALIBRATION_REPLAY_MISMATCH")
+    assert "accumulator" in issue.message
+
+
+def test_calibration_replay_false_skips_probe() -> None:
+    pipe = _empty_pipeline().add_op(
+        "batch_dependent",
+        process_many=lambda elems: [
+            SampleRecord(meta=r.meta, payload={"value": len(elems)}) for r in elems
+        ],
+        preserves_cursor_order=True,
+    )
+    report = pipe.validate()
+    assert report.ok, report.format()
+    assert not report.warnings, report.format()
+
+
+def test_calibration_replay_warns_for_unsupported_payload_comparison() -> None:
+    pipe = _empty_pipeline().add_op(
+        "opaque",
+        process_many=lambda elems: [
+            SampleRecord(meta=r.meta, payload=object()) for r in elems
+        ],
+        preserves_cursor_order=True,
+        calibration_replayable=True,
+    )
+    report = pipe.validate()
+    assert report.ok, report.format()
+    assert "OP_CALIBRATION_REPLAY_NOT_VALIDATED" in _codes(report)
+
+
+@pytest.mark.parametrize("framework", ["numpy", "torch"])
+def test_calibration_replay_compares_array_values(framework: str) -> None:
+    module = pytest.importorskip(framework)
+    make_array = module.array if framework == "numpy" else module.tensor
+
+    def array_payloads(elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [
+            SampleRecord(
+                meta=r.meta,
+                payload={"nested": [make_array([1.0, float("nan")])]},
+            )
+            for r in elems
+        ]
+
+    report = (
+        _empty_pipeline()
+        .add_op(
+            "arrays",
+            process_many=array_payloads,
+            preserves_cursor_order=True,
+            calibration_replayable=True,
+        )
+        .validate()
+    )
+    assert not [i for i in report.issues if i.code.startswith("OP_CALIBRATION")]
+
+
+class _ReplayValidationOp(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True, calibration_replayable=True)
+
+    def validation_samples(self) -> list[SampleRecord] | None:
+        return _custom_records("ids")
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        return [SampleRecord(meta=r.meta, payload={"size": len(elems)}) for r in elems]
+
+    def setup(self, ctx: Any) -> None:
+        raise AssertionError("validation must not call setup")
+
+    def accumulator(self, *, deterministic: bool, ctx: Any) -> Accumulator[Any]:
+        raise AssertionError("instance accumulator depends on setup")
+
+
+def test_calibration_replay_checks_instances_with_validation_samples() -> None:
+    report = _empty_pipeline().add_op(_ReplayValidationOp()).validate()
+    assert "OP_CALIBRATION_REPLAY_MISMATCH" in _codes(report)
+    assert "OP_VALIDATOR_CRASHED" not in _codes(report)
+
+
+def test_calibration_replay_reports_skipped_instance_probe() -> None:
+    class NoSamples(_ReplayValidationOp):
+        def validation_samples(self) -> None:
+            return None
+
+    report = _empty_pipeline().add_op(NoSamples()).validate()
+    issue = next(
+        i for i in report.warnings if i.code == "OP_INSTANCE_RUNTIME_CHECKS_SKIPPED"
+    )
+    assert "calibration replay" in issue.message
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ def test_optraits_defaults() -> None:
     t = OpTraits(preserves_cursor_order=True)
     assert t.indexable is True
     assert t.preserves_cursor_order is True
+    assert t.calibration_replayable is False
     assert t.parallelism == 1
     assert t.batch_shape_sensitive is False
 

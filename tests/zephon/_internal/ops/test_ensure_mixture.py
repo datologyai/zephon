@@ -19,6 +19,7 @@ from zephon.ops.accumulators import ReadyBatch, SourceExhaustion
 from zephon.ops.base import OpContext
 from zephon.types import ContributorRef, SampleCursor, SampleMeta, SampleRecord
 from zephon.work import WorkChunk
+from zephon.work.token_estimation import _PreTokenizeReplay
 
 
 def _assert_tombstones_only(ready, expected_count=None):
@@ -1631,9 +1632,43 @@ class TestEnsureMixtureOperator:
         traits = op.traits()
 
         assert traits.indexable is False
+        assert traits.calibration_replayable is True
         assert traits.preserves_cursor_order is False
         assert traits.batch_shape_sensitive is False
         assert traits.parallelism == 4
+
+    @pytest.mark.parametrize("limit", [8, None])
+    def test_calibration_replay_matches_flush_policy(self, limit: int | None) -> None:
+        def make_op() -> EnsureMixture:
+            return EnsureMixture(
+                max_buffer_size=limit,
+                weight_by="samples",
+                mixture_override={"a": 0.5, "b": 0.5},
+            )
+
+        op = make_op()
+        ctx = {"get_component_id": lambda name: {"a": 0, "b": 1}[name]}
+        op.setup(OpContext(ctx))
+        acc = op.accumulator(deterministic=True, ctx=ctx)
+        records = [_rec(i, component_id=0 if i < 4 else 1) for i in range(5)]
+        ready = acc.push_many(records)
+        ready.extend(acc.flush())
+        emitted = [
+            rec.payload
+            for batch, _ in ready
+            for rec in op.process_many(batch)
+            if not rec.meta.tombstone
+        ]
+
+        replay = _PreTokenizeReplay([make_op()])
+        replayed = [
+            payload
+            for rec in records
+            for payload in replay.apply(rec.payload, rec.meta.sample_id)
+        ]
+        assert len(replayed) == len(records)
+        matches = sorted(emitted, key=lambda row: row["value"]) == replayed
+        assert op.traits().calibration_replayable is matches
 
     def test_accumulator_with_context(self) -> None:
         """Test that accumulator receives context services.

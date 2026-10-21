@@ -944,6 +944,7 @@ class EnsureMixture(BaseOp):
             - "samples": Each sample has weight 1.
             - Explicit field name (e.g., "input_ids"): Use that field's length.
             - Callable: Custom function taking SampleRecord, returning float.
+              Must not modify the record.
         warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
             If None (default), no warnings are emitted.
         warn_warmup: Minimum total emitted weight before ratio warnings are enabled.
@@ -1012,6 +1013,8 @@ class EnsureMixture(BaseOp):
 
     def traits(self) -> OpTraits:
         return OpTraits(
+            # Bounded flushes emit every record; strict flushes discard surplus.
+            calibration_replayable=self._config.max_buffer_size is not None,
             indexable=False,
             preserves_cursor_order=False,
             batch_shape_sensitive=False,
