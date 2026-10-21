@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import inspect
+import io
 import json
 import logging
 import math
@@ -36,6 +38,7 @@ import cloudpickle
 import numpy as np
 from filelock import FileLock
 
+from zephon._internal.calibration import sample_meta as _calibration_sample_meta
 from zephon._internal.io.catalog import (
     resolve_catalog_dir as _resolve_catalog_dir,
 )
@@ -67,7 +70,7 @@ from zephon._internal.utils.atomic import atomic_write_bytes as _atomic_write_by
 from zephon.io.dataset import Dataset
 from zephon.io.options import StoreOptions
 from zephon.ops.base import OpContext, StageInfo
-from zephon.types import SampleId, SampleMeta, SampleRecord
+from zephon.types import SampleId, SampleRecord
 
 _logger = logging.getLogger(__name__)
 
@@ -297,18 +300,27 @@ class PerShardTokenCost:
 
 
 class _PreTokenizeReplay:
-    """Replay safe per-record ops before tokenization during calibration.
+    """Replay ops with ``OpTraits.calibration_replayable`` before tokenization.
 
-    Calibration fetches raw rows, so it replays these ops to count what the
-    tokenizer sees; dropped rows contribute zero tokens. The pipeline allowlist
-    excludes ops that need accumulator state or ``OpContext`` services.
+    Dropped records contribute zero tokens.
     """
 
     def __init__(self, ops: Sequence[Any]) -> None:
         self.ops: tuple[Any, ...] = tuple(ops)
         self._setup_done = False
 
-    def apply(self, payload: Any) -> list[Any]:
+    def __getstate__(self) -> dict[str, Any]:
+        # Census workers use std pickle, which cannot carry local callables.
+        state = dict(self.__dict__)
+        state["ops"] = cloudpickle.dumps(state["ops"])
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        if isinstance(state.get("ops"), bytes):
+            state = {**state, "ops": cloudpickle.loads(state["ops"])}
+        self.__dict__.update(state)
+
+    def apply(self, payload: Any, sample_id: SampleId) -> list[Any]:
         """Map one raw payload to the payloads the tokenize op would see."""
         if not self._setup_done:
             # Ops arrive as pre-setup cloudpickle copies, like runner workers.
@@ -320,7 +332,7 @@ class _PreTokenizeReplay:
             self._setup_done = True
         records = [
             SampleRecord(
-                meta=SampleMeta(sample_id=(0, 0, 0), lane_id=0, chunk_id=0),
+                meta=_calibration_sample_meta(sample_id),
                 payload=payload,
             )
         ]
@@ -344,6 +356,7 @@ class _UnreplayableOp:
     """
 
     op_name: str
+    is_custom: bool = False
 
 
 def _count_replayed(plan: _CountPlan, payloads: Sequence[Any]) -> int | None:
@@ -358,12 +371,15 @@ def _count_replayed(plan: _CountPlan, payloads: Sequence[Any]) -> int | None:
 
 
 def _count_delivered(
-    plan: _CountPlan, replay: _PreTokenizeReplay | None, payload: Any
+    plan: _CountPlan,
+    replay: _PreTokenizeReplay | None,
+    payload: Any,
+    sample_id: SampleId,
 ) -> int | None:
     """Delivered tokens for one raw pointer, or ``None`` when unmeasurable."""
     if replay is None:
         return plan.count(payload)
-    return _count_replayed(plan, replay.apply(payload))
+    return _count_replayed(plan, replay.apply(payload, sample_id))
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +680,7 @@ def _measure_dataset(
             prefix = []
             for sid in prefix_ids:
                 try:
-                    replayed = pre_tokenize_replay.apply(payloads[sid])
+                    replayed = pre_tokenize_replay.apply(payloads[sid], sid)
                 except Exception as exc:  # noqa: BLE001 — handled during measurement
                     replay_errors[sid] = exc
                 else:
@@ -683,7 +699,9 @@ def _measure_dataset(
             if sid in replayed_prefix:
                 delivered = _count_replayed(plan, replayed_prefix.pop(sid))
             else:
-                delivered = _count_delivered(plan, pre_tokenize_replay, payloads[sid])
+                delivered = _count_delivered(
+                    plan, pre_tokenize_replay, payloads[sid], sid
+                )
         except _FatalCountError:
             # Structural: execution rejects this row too. Surface it instead of
             # sampling around it, even when coverage would otherwise pass.
@@ -904,16 +922,37 @@ def _dataset_content_key(dataset: Dataset) -> str:
     ).hexdigest()
 
 
+class _FingerprintPickler(cloudpickle.CloudPickler):
+    """Serialize calibration inputs without process-specific class tracker IDs."""
+
+    def reducer_override(self, obj: Any) -> Any:
+        if isinstance(obj, (_PreTokenizeReplay, _TokenCountingSpec, TokenEstimation)):
+            # Hash objects directly instead of the nested transport pickle bytes.
+            return object.__new__, (type(obj),), vars(obj)
+        reduced = super().reducer_override(obj)
+        if isinstance(obj, type) and isinstance(reduced, tuple):
+            factory, args, *rest = reduced
+            if factory.__module__.startswith("cloudpickle."):
+                parameters = tuple(inspect.signature(factory).parameters)
+                if "class_tracker_id" in parameters:
+                    index = parameters.index("class_tracker_id")
+                    args = (*args[:index], None, *args[index + 1 :])
+                    return factory, args, *rest
+        return reduced
+
+
 def _pickle_fingerprint(obj: Any) -> str:
     """Content hash via cloudpickle; sentinel when the object cannot serialize."""
     try:
-        return hashlib.sha256(cloudpickle.dumps(obj)).hexdigest()
+        buffer = io.BytesIO()
+        _FingerprintPickler(buffer).dump(obj)
+        return hashlib.sha256(buffer.getvalue()).hexdigest()
     except Exception:  # noqa: BLE001 — priming is best-effort by contract
         return "__unpicklable__"
 
 
 def _prime_cache_key(
-    names: list[str],
+    dataset_ids: Mapping[str, int],
     by_name: Mapping[str, Dataset],
     estimation: TokenEstimation,
     counting_spec: _TokenCountingSpec | None,
@@ -929,7 +968,10 @@ def _prime_cache_key(
         _pickle_fingerprint(estimation),
         _pickle_fingerprint(counting_spec or _TextTokenCountingSpec()),
         _pickle_fingerprint(pre_tokenize_replay),
-        *(f"{name}={_dataset_content_key(by_name[name])}" for name in sorted(names)),
+        *(
+            f"{name}:{dataset_ids[name]}={_dataset_content_key(by_name[name])}"
+            for name in sorted(dataset_ids)
+        ),
     ]
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
@@ -1026,21 +1068,35 @@ def prime_token_ratios(
                 # callable is not fed already-normalized payloads.
                 pre_tokenize_replay = None
             elif isinstance(pre_tokenize_replay, _UnreplayableOp):
+                kind = "custom" if pre_tokenize_replay.is_custom else "built-in"
+                advice = ""
+                if pre_tokenize_replay.is_custom:
+                    advice = (
+                        "Review the OpTraits.calibration_replayable contract before "
+                        "setting calibration_replayable=True: setup must work without "
+                        "runner services, and per-record payloads and drops must not "
+                        "depend on batching, accumulator logic, previous calls, "
+                        "or placeholder lane/chunk positions, component counts, "
+                        "or stage metadata. "
+                    )
                 raise ValueError(
-                    f"token-aware mixture priming cannot calibrate through "
-                    f"this pipeline: op {pre_tokenize_replay.op_name!r} "
-                    f"between fetch and the tokenize op cannot be replayed "
-                    f"outside the engine, so calibration would count raw rows "
-                    f"the tokenize op never sees. Provide "
-                    f"TokenEstimation(measure=...) or pin ratios via "
-                    f"TokenEstimation(primer={{...}})."
+                    f"token-aware mixture priming cannot calibrate through {kind} "
+                    f"op {pre_tokenize_replay.op_name!r} between fetch and tokenize: "
+                    f"calibration_replayable=False. {advice}"
+                    "Provide TokenEstimation(measure=...) or pin ratios via "
+                    "TokenEstimation(primer={...})."
                 )
             measured_datasets = {dataset_ids[name]: by_name[name] for name in names}
             # Build catalogs once so workers mmap-attach instead of repeating discovery.
             _build_multi_dataset_store(measured_datasets, options=store_options)
 
             key = _prime_cache_key(
-                names, by_name, estimation, counting_spec, seed, pre_tokenize_replay
+                {name: dataset_ids[name] for name in names},
+                by_name,
+                estimation,
+                counting_spec,
+                seed,
+                pre_tokenize_replay,
             )
             cache_path = (
                 _resolve_catalog_dir(store_options)

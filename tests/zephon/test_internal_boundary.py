@@ -25,6 +25,10 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/helpers/storage.py": frozenset(
         {"zephon._internal.io.storage:StorageBackend"}
     ),
+    # Calibration compares expanded token counts with the source-byte estimator.
+    "tests/integration/test_expand_chat.py": frozenset(
+        {"zephon._internal.observability.size_estimator:content_bytes"}
+    ),
     # Shared-storage and lazy-payload checks exercise real process transport.
     "tests/integration/test_process_payload_memory.py": frozenset(
         {

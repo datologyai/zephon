@@ -34,6 +34,17 @@ The string literals that operator-configuration arguments accept.
 
    How ``tokenize_chat`` works out which tokens belong to the assistant.
 
+.. py:data:: LossScope
+   :type: Literal['all_assistant', 'last_span', 'after_last_user']
+
+   Which assistant spans ``tokenize_chat`` supervises. ``after_last_user``
+   automatically verifies generation ownership before producing output.
+
+   With generation tags, samples whose selected source content disappears during
+   rendering are dropped and logged at ERROR, counting zero delivered tokens
+   during calibration. Setup failures, wrong ownership and incorrect supervision
+   always raise.
+
 Accumulator types
 -----------------
 

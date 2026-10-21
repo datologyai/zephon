@@ -165,6 +165,17 @@ Configuring `traits` is essential to get the operator to work the way you want i
   if your operator emits records in the same order it received them in, or `False`
   otherwise. Be careful; if you do set this to `True` while not preserving order, it will
   silently break checkpointing.
+- `calibration_replayable`: set `True` if processing each fetched record independently
+  produces the same payloads and record counts as normal execution, including drops;
+  otherwise leave `False` (default). Order may differ. See {class}`~zephon.ops.OpTraits`
+  for replay constraints and examples. If you leave this `False` on an operator before
+  the first tokenizer, you need to supply token ratios or a custom
+  `TokenEstimation(measure=...)`.
+  Calibration supplies real `sample_id` values, but placeholder lane/chunk positions,
+  mixture-component counts, and stage metadata. Leave `False` if replacing runtime
+  values in those fields with placeholders would change the emitted payloads, number
+  of records, or which records are dropped; copying metadata through with helpers
+  such as `spawn_child` is fine.
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
   map-style dataset).
 - `parallelism` notes the preference for how many workers should be given to the operator.
@@ -242,6 +253,13 @@ operator twice with the same input gives the same output. It also checks whether
 are any wrongful dependencies by checking whether the output depends on earlier input.
 Finally, the validator runs checks on writing to attributes and unseeded randomness.
 These last two are reported as warnings; the rest will error and stop the pipeline.
+
+If you set `calibration_replayable=True`, Zephon also checks that processing records one
+at a time or replacing their metadata with placeholders does not change the output.
+For operators added through keyword arguments, it also checks whether the accumulator
+changes the result. These checks use your `validation_samples()` or generated records,
+without calling `setup()`. Zephon warns when it cannot complete a check. You should still
+test your operator on representative data, since these checks only cover a few records.
 
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's

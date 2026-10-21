@@ -166,6 +166,7 @@ def test_map_transform_traits_and_accumulator() -> None:
     traits = op.traits()
 
     assert traits.indexable is True
+    assert traits.calibration_replayable is True
     assert traits.parallelism == 4
 
     # Test deterministic mode disables time-based flushing

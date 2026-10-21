@@ -70,6 +70,13 @@ class _FunctionalOp(BaseOp):
         return self._validation_samples_factory()
 
 
+def _is_user_op(op: Any) -> bool:
+    """Identify user callables and operator classes defined outside Zephon."""
+    return isinstance(op, _FunctionalOp) or not type(op).__module__.startswith(
+        "zephon."
+    )
+
+
 def _accumulator_factory_takes_kwargs(factory: Callable[..., Any]) -> bool:
     """Decide whether ``factory`` accepts the ``deterministic``/``ctx`` kwargs.
 

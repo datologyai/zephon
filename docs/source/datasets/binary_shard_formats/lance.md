@@ -72,12 +72,24 @@ reason and the remedy in the message, so a run never fails halfway through:
 | Fragments stored in an external fragment tree | The fragment list is not in the manifest | — |
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
-**Caching reads.** Zephon retains opened fragments — a projected Lance reader plus that
-fragment's decoded tombstones — per fetch replica, separately from the on-disk shard
-cache. The retention limit is `metadata_cache_entries`, additionally capped well below a
-typical open-file limit because each entry holds an open file handle. Set it to zero to
-disable retention.
+**Caching reads.** Zephon keeps each fragment's decoded column mapping and tombstones per
+fetch replica, up to `metadata_cache_entries` (zero disables this). Files are not kept
+open between reads.
 
 ```python
 pipeline.options(io_options={"metadata_cache_entries": 256})
 ```
+
+**Worker threads.** pylance starts one thread per core in every process by default. Zephon
+caps its pools at two workers: pylance decodes on them rather than on the fetch threads,
+so a single worker slows large reads. You can change the count through the pipeline's
+`io_options`:
+
+```python
+pipeline.options(io_options={"lance": {"worker_threads": 2}})
+```
+
+pylance sizes its pools once per process, so the count applies only if nothing in the
+process has used pylance yet, including writing the dataset. `TOKIO_WORKER_THREADS` and
+`LANCE_CPU_THREADS` from your environment win unless you pass `worker_threads`; `None`
+leaves the existing pool configuration unchanged.

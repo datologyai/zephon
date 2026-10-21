@@ -5,32 +5,36 @@ import pytest
 from zephon.io.options import (
     ArrowOptions,
     CacheOptions,
+    LanceOptions,
     ParquetOptions,
     ParquetRGCacheOptions,
     StoreOptions,
     VortexOptions,
 )
 
+_THREAD_OPTIONS = [
+    ("vortex", "worker_threads"),
+    ("lance", "worker_threads"),
+    ("arrow", "cpu_threads"),
+    ("arrow", "io_threads"),
+]
 
-@pytest.mark.parametrize(
-    "kind,field",
-    [("vortex", "worker_threads"), ("arrow", "cpu_threads"), ("arrow", "io_threads")],
-)
+
+@pytest.mark.parametrize("kind,field", _THREAD_OPTIONS)
 def test_thread_options_preserve_explicit_none_and_omitted_fields(kind, field) -> None:
+    default = getattr(getattr(StoreOptions(), kind), field)
     base = StoreOptions.from_any({kind: {field: 3}})
     assert getattr(getattr(base.merge(StoreOptions()), kind), field) == 3
     unchanged = base.merge(StoreOptions.from_any({kind: {field: None}}))
     assert getattr(getattr(unchanged, kind), field) is None
     assert getattr(getattr(unchanged.merge(StoreOptions()), kind), field) is None
     reset = base.merge(StoreOptions.from_any({kind: None}))
-    assert getattr(getattr(reset, kind), field) == 1
-    assert getattr(getattr(base.merge(StoreOptions.from_any(None)), kind), field) == 1
+    assert getattr(getattr(reset, kind), field) == default
+    merged = base.merge(StoreOptions.from_any(None))
+    assert getattr(getattr(merged, kind), field) == default
 
 
-@pytest.mark.parametrize(
-    "kind,field",
-    [("vortex", "worker_threads"), ("arrow", "cpu_threads"), ("arrow", "io_threads")],
-)
+@pytest.mark.parametrize("kind,field", _THREAD_OPTIONS)
 @pytest.mark.parametrize("value", [-1, True, 1.5, "2"])
 def test_invalid_thread_counts(kind, field, value) -> None:
     with pytest.raises(ValueError, match=f"{kind}.{field}"):
@@ -39,6 +43,9 @@ def test_invalid_thread_counts(kind, field, value) -> None:
 
 def test_zero_workers_and_arrow_validation() -> None:
     assert VortexOptions(worker_threads=0).worker_threads == 0
+    # pylance's runtime panics on a zero-sized pool.
+    with pytest.raises(ValueError, match="lance.worker_threads"):
+        LanceOptions(worker_threads=0)
     with pytest.raises(ValueError, match="arrow.cpu_threads"):
         ArrowOptions(cpu_threads=0)
     with pytest.raises(ValueError, match="arrow.io_threads"):

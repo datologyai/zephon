@@ -65,6 +65,7 @@ def test_decode_traits_and_default_accumulator() -> None:
     t = op.traits()
 
     assert t.indexable is True and t.parallelism == 2
+    assert t.calibration_replayable is True
 
     # Test deterministic mode disables time-based flushing
     acc_det = op.accumulator(deterministic=True, ctx={})

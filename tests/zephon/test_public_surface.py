@@ -69,6 +69,7 @@ EXPECTED_ALL = {
         "BaseOp",
         "CountingAccumulator",
         "DomainGroups",
+        "LossScope",
         "MissingFieldMode",
         "OpContext",
         "OpTraits",
@@ -98,6 +99,7 @@ EXPECTED_ALL = {
         "Dataset",
         "InMemoryShard",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
@@ -183,6 +185,7 @@ EXPECTED_ALL = {
     "zephon.io.options": [
         "CacheOptions",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
@@ -240,6 +243,7 @@ EXPECTED_ALL = {
         "tombstones_for_record",
     ],
     "zephon.ops.config": [
+        "LossScope",
         "MissingFieldMode",
         "PackingAlgorithm",
         "SpanSource",

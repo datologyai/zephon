@@ -309,7 +309,10 @@ class LitDataFormat(FormatHandler):
 
     @contextmanager
     def create_opener(
-        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+        self,
+        catalog_set: "CatalogSet | None",
+        options: "StoreOptions",
+        storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         """Configure Arrow layouts without importing Arrow for binary chunks."""
         configure_pyarrow(options.arrow)
