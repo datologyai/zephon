@@ -19,11 +19,14 @@ class OpTraits:
     transforms, non-reordering filters) or ``False`` (reorders, shuffles,
     packs) call.
 
-    ``calibration_replayable`` — defaults to False. Whether token calibration can
-    replay the op per record with the same output SampleRecord payloads and
-    multiplicities, ignoring order. Replay bypasses accumulators and uses an empty
-    service map and placeholder source/stage metadata. Payloads and drops must not
-    depend on batching or previous calls; buffering and reordering alone are safe.
+    ``calibration_replayable`` — set True if processing each fetched record
+    independently produces the same output payloads and record counts as normal
+    execution, including which records are dropped. Otherwise leave False
+    (default). Output order may differ. The op must also run without accumulators
+    or runner services, using placeholder source/stage metadata. Text cleanup,
+    content-based filters, and per-record splits qualify; packing and padding to
+    the longest item in a batch do not. Buffers that only delay or reorder records
+    are safe.
 
     ``parallelism`` — suggested parallelism for the operator when not
     overridden.

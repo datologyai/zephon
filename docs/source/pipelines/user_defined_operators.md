@@ -165,9 +165,10 @@ Configuring `traits` is essential to get the operator to work the way you want i
   if your operator emits records in the same order it received them in, or `False`
   otherwise. Be careful; if you do set this to `True` while not preserving order, it will
   silently break checkpointing.
-- `calibration_replayable` defaults to `False`. Set it to `True` when the operator can
-  replay each fetched record independently for token calibration; see
-  {class}`~zephon.ops.OpTraits` for the contract. Only operators before the first
+- `calibration_replayable`: set `True` if processing each fetched record independently
+  produces the same payloads and record counts as normal execution, including drops;
+  otherwise leave `False` (default). Order may differ. See {class}`~zephon.ops.OpTraits`
+  for replay constraints and examples. Only operators before the first
   tokenizer are checked; `False` there requires pinned token ratios or a custom
   `TokenEstimation(measure=...)`.
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
