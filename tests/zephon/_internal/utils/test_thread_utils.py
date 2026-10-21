@@ -3,14 +3,17 @@
 
 """Process-wide reader pool configuration and legacy environment overrides."""
 
+import os
 import sys
+import warnings
 from types import ModuleType, SimpleNamespace
+from typing import Iterator
 from unittest.mock import Mock
 
 import pytest
 
 from zephon._internal.utils import thread_utils
-from zephon.io import ArrowOptions, VortexOptions
+from zephon.io import ArrowOptions, LanceOptions, VortexOptions
 
 
 @pytest.fixture
@@ -117,3 +120,113 @@ def test_general_suppression_does_not_reset_reader_pools(native, monkeypatch) ->
     native.set_worker_threads.assert_not_called()
     native.set_cpu_count.assert_not_called()
     native.set_io_thread_count.assert_not_called()
+
+
+_LANCE_VARS = ("TOKIO_WORKER_THREADS", "LANCE_CPU_THREADS")
+
+
+@pytest.fixture
+def lance_file(monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace]:
+    """A pylance stand-in recording the environment its runtime starts with."""
+    # The CPU variable is left set by design, so restore both by hand.
+    saved = {name: os.environ.pop(name, None) for name in _LANCE_VARS}
+    monkeypatch.setattr(thread_utils, "_lance_pools_started", False)
+    monkeypatch.setattr(thread_utils, "_lance_pools_size", None)
+    seen: list[dict[str, str | None]] = []
+
+    def start_session(uri: str) -> None:
+        seen.append({name: os.environ.get(name) for name in _LANCE_VARS})
+
+    yield SimpleNamespace(LanceFileSession=start_session, seen=seen)
+    for name, value in saved.items():
+        os.environ.pop(name, None)
+        if value is not None:
+            os.environ[name] = value
+
+
+def test_lance_tokio_size_is_set_only_while_pylance_starts(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+    assert "TOKIO_WORKER_THREADS" not in os.environ
+    # Read only when the CPU pool first runs, which can be long after setup.
+    assert os.environ["LANCE_CPU_THREADS"] == "2"
+
+
+def test_lance_pools_are_sized_once_per_process(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+    with pytest.warns(RuntimeWarning, match="worker_threads=3 has no effect"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+
+
+def test_lance_pools_are_sized_again_in_a_forked_child(lance_file, monkeypatch) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    # The reset swaps in a fresh module lock; put the original back afterwards.
+    monkeypatch.setattr(
+        thread_utils, "_lance_pools_lock", thread_utils._lance_pools_lock
+    )
+
+    thread_utils._reset_lance_pools_after_fork()
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert len(lance_file.seen) == 2
+
+
+def test_lance_failed_start_is_not_recorded(lance_file) -> None:
+    lance_file.LanceFileSession = Mock(side_effect=[RuntimeError("no runtime"), None])
+
+    with pytest.raises(RuntimeError, match="no runtime"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.LanceFileSession.call_count == 2
+    assert "TOKIO_WORKER_THREADS" not in os.environ
+
+
+def test_lance_resizing_to_the_applied_count_is_silent(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+        thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+
+def test_lance_explicit_count_is_checked_against_environment_sized_pools(
+    lance_file,
+) -> None:
+    for name in _LANCE_VARS:
+        os.environ[name] = "4"
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=4))
+    with pytest.warns(RuntimeWarning, match="worker_threads=3 has no effect"):
+        thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=3))
+
+
+def test_lance_omitted_count_respects_the_environment(lance_file) -> None:
+    os.environ["TOKIO_WORKER_THREADS"] = "4"
+
+    thread_utils.configure_lance_threads(lance_file, LanceOptions())
+
+    assert lance_file.seen == [{"TOKIO_WORKER_THREADS": "4", "LANCE_CPU_THREADS": "2"}]
+    assert os.environ["TOKIO_WORKER_THREADS"] == "4"
+
+
+def test_lance_explicit_count_overrides_the_environment(lance_file) -> None:
+    os.environ["TOKIO_WORKER_THREADS"] = "4"
+
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=2))
+
+    assert lance_file.seen == [dict.fromkeys(_LANCE_VARS, "2")]
+    assert os.environ["TOKIO_WORKER_THREADS"] == "4"
+    assert os.environ["LANCE_CPU_THREADS"] == "2"
+
+
+def test_lance_none_leaves_the_pools_alone(lance_file) -> None:
+    thread_utils.configure_lance_threads(lance_file, LanceOptions(worker_threads=None))
+
+    assert lance_file.seen == []

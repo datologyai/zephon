@@ -19,6 +19,8 @@ from zephon.types import (
     StreamItem,
 )
 
+SOURCE_EXHAUSTION_CONTINUES_TAG = "_source_exhaustion_continues"
+
 
 class _MonotoneNotify(NamedTuple):
     """Lightweight args for ``engine.notify_monotone()``.
@@ -88,10 +90,14 @@ def _extract_notify_args(item: StreamItem, use_monotone: bool) -> NotifyArgs:
         return _ContributorNotify(lane_id, contributors, record_cursor)
 
     if isinstance(item, SampleRecord):
+        if item.meta.is_sentinel and not item.meta.tombstone:
+            raise ValueError(
+                "Flush and end-of-data (EOD) sentinels cannot notify progress"
+            )
         lane_id = item.meta.lane_id
-        # Sentinels never reach the consumer; replayed-and-dropped records arrive
-        # as tombstones, so excluding them prevents double-counting on resume.
-        delivered = not item.meta.is_sentinel
+        # Tombstones close real offsets but are not consumer deliveries.
+        # Counting replayed-and-dropped records would count them twice.
+        delivered = not item.meta.tombstone
         if use_monotone:
             return _MonotoneNotify(
                 lane_id, item.meta.chunk_id, 1, item.meta.cursor, delivered
@@ -119,9 +125,8 @@ def _apply_notify_args(engine: Any, notify: NotifyArgs) -> None:
     on the consumer's ACK, so producing ahead does not advance delivery state.
     """
     if not notify.delivered:
-        # Tombstone: callers filter out flush sentinels before notification.
-        # Controls can overtake buffered payloads. They are neither monotone
-        # watermarks nor replay cursors, and cannot trigger epoch eviction.
+        # Only tombstones reach this branch. They may overtake buffered data,
+        # so completion must not advance the delivery cursor or evict an epoch.
         if isinstance(notify, _ContributorNotify):
             # Non-monotone tombstone: update completion bits only.
             engine.notify_completion(notify.lane_id, notify.entries)
@@ -153,5 +158,29 @@ def is_tombstone(item: StreamItem) -> bool:
 
 
 def is_sentinel(item: StreamItem) -> bool:
-    """Check if a stream item is a sentinel (should be notified but not yielded)."""
+    """Whether a stream item is a control record, hidden from the consumer."""
     return isinstance(item, SampleRecord) and item.meta.is_sentinel
+
+
+def should_notify(item: StreamItem) -> bool:
+    """Whether an item reports real offset progress: data or a tombstone.
+
+    Flush and EOD have dummy cursors; reporting them would falsely complete
+    chunk 0 and overwrite the lane's replay cursor.
+    """
+    return not is_sentinel(item) or is_tombstone(item)
+
+
+def source_exhausted_component(item: StreamItem) -> int | None:
+    """Return an EOD sentinel's component, including zero, or None for other items."""
+    if not isinstance(item, SampleRecord):
+        return None
+    component = item.meta.tags.get("_source_exhausted")
+    return int(component) if component is not None else None
+
+
+def source_exhaustion_continues(item: StreamItem) -> bool:
+    """Whether an EOD sentinel permits continuation without its component."""
+    return isinstance(item, SampleRecord) and bool(
+        item.meta.tags.get(SOURCE_EXHAUSTION_CONTINUES_TAG, False)
+    )

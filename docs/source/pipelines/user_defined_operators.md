@@ -7,7 +7,7 @@ those built-ins plus the `map_transform` operator (see
 examine the case where these options are not enough; e.g. your data has a peculiar schema,
 or where a filtering decision depends on samples you have already seen, or where a
 transformation is expensive or different enough that you need fine-tuned control over how
-it is batched and parallelised.
+it is batched and parallelized.
 
 Whenever you call any operator such as `tokenize` or `pack_flat`, the machinery is exactly
 the same whether it is a Zephon-shipped operator or a custom one. This means that a custom
@@ -165,6 +165,17 @@ Configuring `traits` is essential to get the operator to work the way you want i
   if your operator emits records in the same order it received them in, or `False`
   otherwise. Be careful; if you do set this to `True` while not preserving order, it will
   silently break checkpointing.
+- `calibration_replayable`: set `True` if processing each fetched record independently
+  produces the same payloads and record counts as normal execution, including drops;
+  otherwise leave `False` (default). Order may differ. See {class}`~zephon.ops.OpTraits`
+  for replay constraints and examples. If you leave this `False` on an operator before
+  the first tokenizer, you need to supply token ratios or a custom
+  `TokenEstimation(measure=...)`.
+  Calibration supplies real `sample_id` values, but placeholder lane/chunk positions,
+  mixture-component counts, and stage metadata. Leave `False` if replacing runtime
+  values in those fields with placeholders would change the emitted payloads, number
+  of records, or which records are dropped; copying metadata through with helpers
+  such as `spawn_child` is fine.
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
   map-style dataset).
 - `parallelism` notes the preference for how many workers should be given to the operator.
@@ -201,6 +212,39 @@ keep the contributor cursors but clear all closing flags. If you drop a record i
 of splitting it, use `tombstones_for_record` from the same module to emit tombstones for
 the closing responsibilities it carries.
 
+(reacting-to-source-exhaustion)=
+
+**When a mixture component runs out.** Suppose our operator holds back records from B
+while waiting for more records from A. These could be languages within one dataset.
+If A runs out, we may want to let B continue. Zephon reports this through an end-of-data
+(EOD) sentinel. Your accumulator can react by overriding
+`on_source_exhausted(lane_id, component_id)`; by default, it does nothing.
+
+This tells us something different from a change to the target mixture. The target says
+which proportions we want to produce. A curriculum might remove A for a while and bring
+it back later. An EOD sentinel says that A will supply no more source samples in this
+lane. That fact is permanent for the run, regardless of what the target mixture says.
+
+For example, `ensure_mixture` can stop waiting for A and continue correcting the mixture
+of the remaining components. An EOD sentinel lets it do this before records carrying an
+updated target arrive. It also works when the operator has an explicit `mixture`
+override instead of following the source's target. It only relaxes the target for
+components listed in `WorkSource.continues_after_exhaustion()`. The built-in
+`StaticMixtureWorkSource` leaves this empty, so EOD sentinels do not relax mixture
+enforcement under its stop or repeat policies.
+
+There is one catch: A can still have records buffered upstream, for example in a shuffle
+or packer. Those records may reach your operator after the sentinel, so you still need to
+decide how to handle them. `ensure_mixture` interleaves them with records from the remaining
+components. Its bounded mode preserves leftovers at flush, whereas strict mode drops them.
+Your operator may need a different policy, but it should not assume that receiving an
+EOD sentinel means it has already seen every record from that component.
+
+Zephon remembers which components have run out, including when your accumulator's own
+state is reset. The [accumulator API](../api/operators.rst) explains how to read that
+information and implement the hook. Keep the usual `flush` handling too: an EOD sentinel
+describes one component running out, rather than the whole pipeline finishing.
+
 **Operator validation.** The first time you let Zephon iterate on your `Pipeline`, it
 will check whether your operators are valid. The validation suite checks the results and
 the source of a test suite of a few small synthetic records. Besides checking for
@@ -210,11 +254,18 @@ are any wrongful dependencies by checking whether the output depends on earlier 
 Finally, the validator runs checks on writing to attributes and unseeded randomness.
 These last two are reported as warnings; the rest will error and stop the pipeline.
 
+If you set `calibration_replayable=True`, Zephon also checks that processing records one
+at a time or replacing their metadata with placeholders does not change the output.
+For operators added through keyword arguments, it also checks whether the accumulator
+changes the result. These checks use your `validation_samples()` or generated records,
+without calling `setup()`. Zephon warns when it cannot complete a check. You should still
+test your operator on representative data, since these checks only cover a few records.
+
 The validation framework is exclusive to custom operators (those you add with `add_op`).
 Anything that you run with `map_transform` and `stateful_transform` runs inside Zephon's
 own operators and is not validated this way.
 
 If your operator splits records, merges them, or drops them, it owes the engine some
 bookkeeping so that progress tracking and checkpointing keep working.
-[Records and Sample Lifecycles](../internals/records_and_sample_lifecycles.md) covers the
+[Records and sample lifecycles](../internals/records_and_sample_lifecycles.md) covers the
 helpers that handle it and the contract behind them.

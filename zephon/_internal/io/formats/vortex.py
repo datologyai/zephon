@@ -310,7 +310,10 @@ class VortexFormat(FormatHandler):
 
     @contextmanager
     def create_opener(
-        self, catalog_set: "CatalogSet | None", options: "StoreOptions"
+        self,
+        catalog_set: "CatalogSet | None",
+        options: "StoreOptions",
+        storage: StorageBackend,
     ) -> Iterator[ShardOpener]:
         """Provide a store-scoped opener and clear its caches on exit."""
         opener = VortexShardOpener(options)

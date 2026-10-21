@@ -25,6 +25,7 @@ from zephon._internal.checkpoint._schemas import (
     StaticMixtureStateV5,
     WorkChunkStateV1,
     WorkChunkStateV2,
+    WorkChunkStateV3,
 )
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "CursorStateV1",
     "WorkChunkStateV1",
     "WorkChunkStateV2",
+    "WorkChunkStateV3",
     "StaticMixtureStateV1",
     "StaticMixtureStateV2",
     "StaticMixtureStateV3",

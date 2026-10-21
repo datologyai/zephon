@@ -98,6 +98,7 @@ EXPECTED_ALL = {
         "Dataset",
         "InMemoryShard",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
@@ -183,6 +184,7 @@ EXPECTED_ALL = {
     "zephon.io.options": [
         "CacheOptions",
         "ArrowOptions",
+        "LanceOptions",
         "ParquetOptions",
         "ParquetRGCacheOptions",
         "StoreOptions",
@@ -215,10 +217,12 @@ EXPECTED_ALL = {
         "CountingAccumulator",
         "PassthroughAccumulator",
         "ReadyBatch",
+        "SourceExhaustion",
     ],
     "zephon.ops.accumulators.base": [
         "Accumulator",
         "ReadyBatch",
+        "SourceExhaustion",
     ],
     "zephon.ops.accumulators.counting": [
         "CountingAccumulator",

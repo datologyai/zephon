@@ -1,4 +1,4 @@
-# WorkSources and Work Chunks
+# WorkSources and work chunks
 
 [WorkSources: The Training Curriculum](../worksources/index.md) describes a `WorkSource`
 from the outside. You hand it datasets and mixture weights, and it decides what your model
@@ -6,7 +6,7 @@ sees and in what order. This page describes the interface underneath that: what 
 actually calls, what it is allowed to assume, and how the one implementation that ships
 with it satisfies that interface.
 
-This is the base case of the induction that [Elastic Determinism](elastic_determinism.md)
+This is the base case of the induction that [Elastic determinism](elastic_determinism.md)
 rests on. Every claim we make about reproducible data order reduces, eventually, to the
 claim that a `WorkSource` bound to a given lane produces the same pointers in the same
 order for a given seed, and everything downstream is a deterministic function of that.
@@ -55,9 +55,9 @@ The required ones fall into five groups:
   topology changes, and resumes. The alternative, assigning ids in encounter order, would
   produce a different numbering on a rank that happens to see a rare component later.
   Emitting a component that was never declared raises.
-- **Dataset catalogue.** `datasets_by_id` maps each dataset id appearing in your pointers
+- **Dataset catalog.** `datasets_by_id` maps each dataset id appearing in your pointers
   to the `Dataset` that can read it. The engine reads it once at startup, builds the
-  node-local shard catalogue from it, and passes it to the operators through their
+  node-local shard catalog from it, and passes it to the operators through their
   context, so this is the bridge between a pointer and the bytes it names. Fetching and
   prefetching raise without it.
 - **Lane binding.** Before pulling any chunks, the engine clones the source once per lane
@@ -70,8 +70,8 @@ The required ones fall into five groups:
   requirement is that restoring from a saved state and then calling `next_chunk()`
   produces the same sequence as if the source had never been interrupted. The base class
   stores the lane identity and refuses a restore whose `lane_id` or `canonical_replicas`
-  does not match, which is the first line of defence against the silent curriculum change
-  that [Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) describes.
+  does not match, which is the first line of defense against the silent curriculum change
+  that [Checkpoint replay and bounded recovery](checkpoint_replay.md) describes.
 
 Three further hooks are optional, and the built-in source implements all of them:
 
@@ -103,7 +103,7 @@ WorkChunk(
 )
 ```
 
-Wherever behaviour depends on component order, Zephon falls back on the mapping's
+Wherever behavior depends on component order, Zephon falls back on the mapping's
 insertion order as a stable tie-breaker, which is why your source should build that dict
 in a fixed order rather than whatever order the datasets happened to be discovered in.
 
@@ -176,7 +176,7 @@ property of chunk traversal rather than something baked into a shared permutatio
 The cursor streams shard by shard and generates within-shard permutations lazily, so
 memory is proportional to the largest shard rather than to the dataset, with a block-sized
 buffer on top when block shuffle is active. Nothing anywhere scales with the total sample
-count, which is what lets you start a run against a multi-billion-sample catalogue without
+count, which is what lets you start a run against a multi-billion-sample catalog without
 a materialization step.
 
 (chunk-to-lane-routing)=
@@ -238,7 +238,7 @@ and it makes "skip to 73% of the epoch" a one-line operation.
 
 A `WorkSource` is a streaming generator instead, producing chunks on demand and never
 holding the whole sequence, and three things follow from that. The first is that a source
-does not have to be finite: the built-in one can repeat its catalogue for a fixed number
+does not have to be finite: the built-in one can repeat its catalog for a fixed number
 of passes or indefinitely, and you could write a source that grows while training runs
 without changing anything else. The second is that changing the rank count does not
 require recomputing a global permutation, because the lane abstraction absorbs it and the

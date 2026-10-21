@@ -165,6 +165,7 @@ def test_tagged_golden(fast_tokenizer: Any) -> None:
         chat_template=TAGGED_TEMPLATE,
         span_source="generation_tags",
     )
+    assert op.traits().calibration_replayable is True
     record = _run_one(op, {"messages": CONVERSATION})
     assert _tokens(fast_tokenizer, record) == GOLDEN_TOKENS
     assert _mask(record) == GOLDEN_MASK

@@ -58,7 +58,7 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
-from zephon._internal.notify import is_sentinel
+from zephon._internal.notify import SOURCE_EXHAUSTION_CONTINUES_TAG, is_sentinel
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
 from zephon._internal.replay import ReplayConfigService
@@ -357,6 +357,17 @@ class Engine:
             id_to_component[component_id] = name
         self._component_to_id: dict[str, int] = declared
         self._id_to_component = id_to_component
+        continuing = work.continues_after_exhaustion()
+        if not isinstance(continuing, frozenset) or any(
+            not isinstance(name, str) or name not in declared for name in continuing
+        ):
+            raise ValueError(
+                "WorkSource.continues_after_exhaustion() must return a frozenset "
+                "of names declared by component_ids()"
+            )
+        self._continues_after_exhaustion = frozenset(
+            self._get_component_id(name) for name in continuing
+        )
         # Per-chunk mixture storage: (lane_id, chunk_id) -> {component_id: weight}
         self._chunk_mixtures: dict[tuple[LaneId, ChunkId], dict[int, float]] = {}
         self._mixture_lock = threading.Lock()
@@ -656,7 +667,7 @@ class Engine:
         )
 
         for stage, spec in zip(self._plan.stages, self._runtime_spec.stages):
-            common = dict(
+            common: dict[str, Any] = dict(
                 prefetch_capacity=spec.prefetch_capacity,
                 deterministic=self._opts.deterministic,
                 allow_latency_flush_in_deterministic=spec.allow_latency_flush,
@@ -871,6 +882,20 @@ class Engine:
             self._chunk_mixtures[(lane_id, chunk_id)] = id_mixture
 
     @staticmethod
+    def _make_control_record(lane_id: LaneId, tags: dict[str, Any]) -> SampleRecord:
+        """Make an internal control record with a dummy cursor and no payload."""
+        return SampleRecord(
+            meta=SampleMeta(
+                sample_id=(0, 0, 0),
+                lane_id=lane_id,
+                chunk_id=0,
+                chunk_offset=0,
+                tags=tags,
+            ),
+            payload=None,
+        )
+
+    @staticmethod
     def _make_flush_sentinel(lane_id: LaneId, *, boundary_cid: int = 0) -> SampleRecord:
         """Create a flush sentinel record for the given lane.
 
@@ -880,14 +905,77 @@ class Engine:
                 this value belong to the completed epoch and are eligible for
                 eviction (subject to the all_done check).
         """
-        meta = SampleMeta(
-            sample_id=(0, 0, 0),
-            lane_id=lane_id,
-            chunk_id=0,
-            chunk_offset=0,
-            tags={"_flush_sentinel": True, "_boundary_cid": boundary_cid},
+        return Engine._make_control_record(
+            lane_id, {"_flush_sentinel": True, "_boundary_cid": boundary_cid}
         )
-        return SampleRecord(meta=meta, payload={})
+
+    @staticmethod
+    def _make_source_exhausted_sentinel(
+        lane_id: LaneId, component_id: int, *, continues: bool = False
+    ) -> SampleRecord:
+        """Create an end-of-data (EOD) sentinel; buffered data may arrive later."""
+        return Engine._make_control_record(
+            lane_id,
+            {
+                "_source_exhausted": component_id,
+                SOURCE_EXHAUSTION_CONTINUES_TAG: continues,
+            },
+        )
+
+    def _iter_chunk(
+        self, lane_id: LaneId, cid: int, chunk: WorkChunk, announced: set[str]
+    ) -> Iterator[EngineSample | SampleRecord]:
+        """Yield samples and each component's EOD sentinel once per lane stream.
+
+        The sentinel follows the component's last sample in this chunk, or precedes
+        the chunk if the component is absent. Live input and replay use this path.
+        """
+        missing = announced.difference(chunk.source_exhausted)
+        if missing:
+            raise ValueError(
+                f"source_exhausted must be cumulative: lane {lane_id}, chunk {cid} "
+                f"drops {sorted(missing)}"
+            )
+        revived = [name for name in announced if chunk.components.get(name)]
+        if revived:
+            raise ValueError(
+                f"lane {lane_id}, chunk {cid} contains samples from previously "
+                f"source-exhausted components {sorted(revived)}"
+            )
+        remaining: dict[str, int] = {}
+        for name in chunk.source_exhausted:
+            if name in announced:
+                continue
+            count = len(chunk.components.get(name, ()))
+            if count:
+                remaining[name] = count
+            else:
+                announced.add(name)
+                component_id = self._get_component_id(name)
+                yield self._make_source_exhausted_sentinel(
+                    lane_id,
+                    component_id,
+                    continues=component_id in self._continues_after_exhaustion,
+                )
+        get_id = self._get_component_id
+        if not remaining:
+            for offset, (sample_id, name) in enumerate(chunk):
+                yield (sample_id, lane_id, cid, offset, get_id(name))
+            return
+        for offset, (sample_id, name) in enumerate(chunk):
+            component_id = get_id(name)
+            yield (sample_id, lane_id, cid, offset, component_id)
+            left = remaining.get(name)
+            if left is not None:
+                remaining[name] = left - 1
+                if left == 1:
+                    del remaining[name]
+                    announced.add(name)
+                    yield self._make_source_exhausted_sentinel(
+                        lane_id,
+                        component_id,
+                        continues=component_id in self._continues_after_exhaustion,
+                    )
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
@@ -905,6 +993,9 @@ class Engine:
         re-injected at stored epoch boundary positions.
         """
         inflight_lane = self.inflight_chunks_per_lane[lane_id]
+        # Later chunks retain earlier source_exhausted entries. Start empty on
+        # restore so new accumulators hear again which datasets have run out.
+        announced: set[str] = set()
 
         # Phase 1: replay restored inflight chunks first (ascending chunk_id).
         # Re-inject flush sentinels at stored epoch boundary positions so that
@@ -925,10 +1016,9 @@ class Engine:
             chunk = inflight_lane[cid]
             # Store mixture for restored chunks (may already exist, but idempotent)
             self._store_chunk_mixture(lane_id, cid, chunk)
-            for offset, (sample_id, component_name) in enumerate(chunk):
-                component_id = self._get_component_id(component_name)
-                # Note that we yield the _entire_ chunk here. This can break with elastic continuation in case a batch is cross-chunk boundaries.
-                yield (sample_id, lane_id, int(cid), offset, component_id)
+            # Replay full chunks to rebuild operator state. ReplayFilter removes
+            # already-delivered records before batching (or at the pipeline tail).
+            yield from self._iter_chunk(lane_id, cid, chunk, announced)
 
         # Trailing boundary: if a boundary exceeds all inflight cids, the
         # sentinel between the last Phase 1 chunk and the first Phase 2 chunk
@@ -960,7 +1050,7 @@ class Engine:
                 # We need to ensure that we are not prefetching while updating the lane state.
                 chunk = ws.next_chunk()
                 if chunk is None:
-                    break  # lane exhausted → emit final sentinel below
+                    break  # Runners force-flush accumulators on upstream close.
 
                 cid = int(self._lane_next_cid[lane_id])
                 self._lane_next_cid[lane_id] = cid + 1
@@ -986,9 +1076,7 @@ class Engine:
                     self._epoch_boundaries[lane_id].append(emit_boundary)
                     chunks_in_epoch = 0
 
-            for offset, (sample_id, component_name) in enumerate(chunk):
-                component_id = self._get_component_id(component_name)
-                yield (sample_id, lane_id, cid, offset, component_id)
+            yield from self._iter_chunk(lane_id, cid, chunk, announced)
 
             if emit_boundary is not None:
                 yield self._make_flush_sentinel(lane_id, boundary_cid=emit_boundary)

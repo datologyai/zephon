@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Generic, Sequence, TypeVar
 
 T = TypeVar("T")
@@ -15,6 +16,21 @@ T = TypeVar("T")
 ReadyBatch = tuple[list[T], int]
 
 
+@dataclass(frozen=True)
+class SourceExhaustion:
+    """Immutable source facts observed by one operator in one lane.
+
+    ``exhausted`` contains all components whose end-of-data (EOD) sentinel reached
+    the operator. ``continuing`` is the subset listed by
+    :meth:`~zephon.work.WorkSource.continues_after_exhaustion`, whose policy
+    permits continuing without them. The runner updates this snapshot before
+    calling :meth:`Accumulator.on_source_exhausted`.
+    """
+
+    exhausted: frozenset[int] = frozenset()
+    continuing: frozenset[int] = frozenset()
+
+
 class Accumulator(ABC, Generic[T]):
     """Base class for accumulators that run on the pump thread.
 
@@ -22,7 +38,7 @@ class Accumulator(ABC, Generic[T]):
     cross-invocation state (buffers/bins), and emit ready invocation batches.
 
     Contract for deterministic parallelism:
-    - All cross-invocation, output-producing state must live in the accumulator
+    - Operator-owned cross-invocation state must live in the accumulator
     - Worker `process_many` must be deterministic given its input batch
     - Accumulators are invoked only on the pump thread (no concurrent calls)
     """
@@ -91,6 +107,38 @@ class Accumulator(ABC, Generic[T]):
         """
         return False
 
+    def on_source_exhausted(
+        self, lane_id: int, component_id: int
+    ) -> list[ReadyBatch[T]]:
+        """Handle an end-of-data (EOD) sentinel for a component in this lane.
+
+        The component's source has permanently run out, but buffered records may
+        still arrive, even through order-preserving operators. The default leaves
+        buffers untouched.
+
+        Called at most once per component per lane stream; some lanes close
+        without an EOD sentinel. Reactions must be lane-scoped and deterministic
+        for a given input order. Restore reconstructs runner state from replayed
+        sentinels.
+
+        Obtain the accumulator-only callback with ``ctx.get("get_source_exhaustion")``.
+        It may be ``None`` during validation, which uses an empty context; use
+        ``SourceExhaustion()`` (no observed exhaustion) in that case. Otherwise,
+        calling it with ``lane_id`` returns a :class:`SourceExhaustion` snapshot
+        of what this operator has seen: ``exhausted`` contains every component whose EOD
+        sentinel reached it, and ``continuing`` is the subset the source permits
+        continuing without, per ``WorkSource.continues_after_exhaustion()``.
+        At runtime, the runner updates it before this hook and retains it across
+        epoch resets. It is a cheap local call, available during any accumulator
+        call, including after ``flush(reset=True)``. EOD sentinels are emitted
+        regardless of continuation policy. See :doc:`/pipelines/user_defined_operators`.
+
+        Return ready batches as in :meth:`push_many`. If dropping records, emit
+        their tombstones with :func:`~zephon.ops.tombstones_for_record` in separate
+        batches from data.
+        """
+        return []
+
     def try_epoch_reset(
         self, boundary_chunk_id: int, lane_id: int | None = None
     ) -> bool:
@@ -126,4 +174,4 @@ class Accumulator(ABC, Generic[T]):
         return not self.has_pending_data(lane_id)
 
 
-__all__ = ["Accumulator", "ReadyBatch"]
+__all__ = ["Accumulator", "ReadyBatch", "SourceExhaustion"]

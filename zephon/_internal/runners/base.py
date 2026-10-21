@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Sequence, TypeVar
 
 from zephon._internal.graph import Node, Stage
-from zephon._internal.notify import is_sentinel
+from zephon._internal.notify import (
+    is_sentinel,
+    source_exhausted_component,
+    source_exhaustion_continues,
+)
 from zephon._internal.observability.stopwatch import Stopwatch
 from zephon._internal.ops.batch import Batch
 from zephon._internal.stream import (
@@ -22,9 +26,11 @@ from zephon._internal.stream import (
 )
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
-from zephon.ops.accumulators import Accumulator
+from zephon.ops.accumulators import Accumulator, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
+
+_NO_EXHAUSTION = SourceExhaustion()
 
 
 @dataclass
@@ -56,6 +62,9 @@ class BaseOperatorState:
     _preserves_cursor_order: bool = field(init=False)
     _stall_on_epoch_boundary: bool = field(init=False)
     _epoch_floor: int | None = field(init=False, default=None)
+    _source_exhaustion: dict[int, SourceExhaustion] = field(
+        init=False, default_factory=dict
+    )
     _stalled_sentinels: list[tuple[SampleRecord, int]] = field(
         init=False, default_factory=list
     )
@@ -97,10 +106,21 @@ class BaseOperatorState:
             instance.setup(OpContext(dict(base_ctx), stage_info))
             self.instances.append(instance)
 
-        # Get accumulator from operator
+        self._create_accumulator()
+
+    def _get_source_exhaustion(self, lane_id: int) -> SourceExhaustion:
+        """Read this operator's EOD sentinel state without IPC or copying."""
+        return self._source_exhaustion.get(lane_id, _NO_EXHAUSTION)
+
+    def _create_accumulator(self) -> None:
+        # This service belongs only to the serial accumulator. Worker contexts
+        # must not observe mutable stream position (or proxy it over IPC).
+        ctx = dict(self.ctx_proto)
+        ctx.setdefault("deterministic", self.deterministic)
+        ctx["get_source_exhaustion"] = self._get_source_exhaustion
         self.accumulator_impl = self.node.op.accumulator(
             deterministic=self.deterministic,
-            ctx=base_ctx,
+            ctx=ctx,
         )
 
     def _update_epoch_floor(self, elems: Sequence[RunnerStreamIn]) -> None:
@@ -174,10 +194,8 @@ class BaseOperatorState:
         This is called during shutdown cleanup to ensure no buffered state
         persists across runs when a runner is reused.
         """
-        self.accumulator_impl = self.node.op.accumulator(
-            deterministic=self.deterministic,
-            ctx=self.ctx_proto,
-        )
+        self._source_exhaustion.clear()
+        self._create_accumulator()
 
     def enqueue(
         self, elems: Sequence[RunnerStreamIn], *, force: bool = False
@@ -188,9 +206,8 @@ class BaseOperatorState:
         The accumulator runs on the pump thread (serial) and maintains
         any cross-invocation state needed for deterministic batching.
 
-        Sentinel records (tombstones, flush signals, etc.) bypass the
-        accumulator entirely and are emitted as individual ready batches.
-        This ensures operators never see sentinels unless they create them.
+        Sentinels bypass ``push_many`` and ``process_many`` as individual batches.
+        An EOD sentinel calls ``on_source_exhausted``, without flushing or resetting.
 
         Flush sentinels trigger ``accumulator.flush(reset=True, lane_id=lane)``
         to drain that lane's buffered data before the sentinel passes
@@ -261,13 +278,33 @@ class BaseOperatorState:
                     self._try_release_stalled_sentinels(ready)
                     pre_sentinel = []
 
-                # Tombstones contribute to epoch floor tracking — their chunk_id
-                # must constrain eviction even though they bypass the accumulator.
-                # Flush sentinels have dummy chunk_id=0 and must NOT affect the floor.
-                if not e.meta.is_flush_sentinel:
+                # Tombstone chunk ids constrain epoch eviction even though they
+                # bypass the accumulator. Flush and EOD have dummy cursors.
+                if e.meta.tombstone:
                     self._update_epoch_floor([e])
 
-                if e.meta.is_flush_sentinel:
+                component_id = source_exhausted_component(e)
+                if component_id is not None:
+                    lane = e.meta.lane_id
+                    previous = self._get_source_exhaustion(lane)
+                    if component_id in previous.exhausted:
+                        continue  # Do not repeat either the hook or the notice.
+                    continuing = previous.continuing
+                    if source_exhaustion_continues(e):
+                        continuing = continuing | {component_id}
+                    # Advance only after preceding data entered this accumulator.
+                    # Epoch flushes retain these facts; restore replays notices.
+                    self._source_exhaustion[lane] = SourceExhaustion(
+                        previous.exhausted | {component_id}, continuing
+                    )
+                    ready.extend(
+                        self.accumulator_impl.on_source_exhausted(lane, component_id)
+                    )
+                    # Hook output may unblock a stalled flush. Release it only
+                    # if the accumulator's normal reset condition is satisfied.
+                    self._try_release_stalled_sentinels(ready)
+                    ready.append(([e], 0))
+                elif e.meta.is_flush_sentinel:
                     boundary_cid_tag = e.meta.tags.get("_boundary_cid")
                     bcid = int(boundary_cid_tag) if boundary_cid_tag is not None else 0
                     lane = e.meta.lane_id

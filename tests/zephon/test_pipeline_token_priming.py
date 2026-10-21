@@ -3,7 +3,7 @@
 
 """Pipeline wiring for token-aware mixture priming."""
 
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -12,6 +12,8 @@ from zephon import Pipeline as PublicPipeline
 from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops import BaseOp, OpTraits
+from zephon.types import SampleRecord
 from zephon.work import StaticMixtureWorkSource
 from zephon.work.token_estimation import (
     TokenEstimation,
@@ -255,13 +257,14 @@ def test_priming_flags_unreplayable_pre_tokenize_op(
     captured = _capture_token_prime(monkeypatch)
     pipe = (
         PublicPipeline(_make_token_work_source())
-        .shuffle(buffer_size=4)
+        .batch(2)
         .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
     )
     pipe._prime_worksource()
     marker = captured["pre_tokenize_replay"]
     assert isinstance(marker, _UnreplayableOp)
-    assert marker.op_name == "ShuffleBuffer"
+    assert marker.op_name == "Batch"
+    assert marker.is_custom is False
 
 
 def test_priming_without_pre_tokenize_ops_passes_no_replay(
@@ -282,3 +285,90 @@ def test_priming_without_tokenize_op_passes_no_replay(
     pipe = PublicPipeline(_make_token_work_source()).map_transform(_lift_text)
     pipe._prime_worksource()
     assert captured["pre_tokenize_replay"] is None
+
+
+class _NonReplayableOp(BaseOp):
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
+        raise AssertionError("calibration must not execute this op")
+
+
+def test_calibration_replays_materialize_and_stops_before_packing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_token_prime(monkeypatch)
+    work = StaticMixtureWorkSource(
+        [_make_token_dataset("text", 3, n_docs=2)],
+        {"text": 1.0},
+        chunk_size=1,
+        exhausted_policy="stop",
+        token_estimation=TokenEstimation(),
+    )
+    pipe = (
+        PublicPipeline(work)
+        .materialize()
+        .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+        .pack_flat(max_length=8, num_bins=2, pad_token_id=0)
+        .batch(2)
+    )
+    pipe._prime_worksource()
+    replay = captured["pre_tokenize_replay"]
+    assert isinstance(replay, _PreTokenizeReplay)
+    assert [type(op).__name__ for op in replay.ops] == ["Materialize"]
+    ratio, source = work.state_dict()["token_ratios"]["text"]
+    assert source == "measured"
+    assert ratio > 0
+
+
+@pytest.mark.parametrize("algorithm", ["streaming", "block", "block_warmup"])
+def test_calibration_replays_shuffle(
+    algorithm: Literal["streaming", "block", "block_warmup"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_token_prime(monkeypatch)
+    pipe = (
+        PublicPipeline(_make_token_work_source())
+        .shuffle(buffer_size=4, algorithm=algorithm)
+        .map_transform(lambda row: {"text": row["text"] + " extra"})
+        .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+    )
+    pipe._prime_worksource()
+    replay = captured["pre_tokenize_replay"]
+    assert isinstance(replay, _PreTokenizeReplay)
+    payloads = [
+        payload
+        for text in ("one", "two three")
+        for payload in replay.apply({"text": text}, (0, 0, 0))
+    ]
+    plan = captured["counting_spec"].build_counter().plan(payloads)
+    assert [plan.count(payload) for payload in payloads] == [2, 3]
+
+
+@pytest.mark.parametrize("form", ["instance", "kwargs"])
+def test_custom_op_default_rejects_automatic_calibration(form: str) -> None:
+    work = StaticMixtureWorkSource(
+        [_make_token_dataset("text", 3, n_docs=2)],
+        {"text": 1.0},
+        token_estimation=TokenEstimation(),
+    )
+    pipe = PublicPipeline(work)
+    op = _NonReplayableOp()
+    if form == "instance":
+        pipe.add_op(op)
+        name = "_NonReplayableOp"
+    else:
+        pipe.add_op(
+            "custom",
+            process_many=op.process_many,
+            preserves_cursor_order=True,
+        )
+        name = "custom"
+    pipe.tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+    with pytest.raises(ValueError, match=f"custom op {name!r}") as exc_info:
+        pipe._prime_worksource()
+    message = str(exc_info.value)
+    assert "calibration_replayable=False" in message
+    assert "Review the OpTraits.calibration_replayable contract" in message
+    assert "calibration_replayable=True" in message

@@ -30,11 +30,13 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
     Intuition:
         Each component 'k' has a normalized target weight T[k] (summing to 1.0).
-        We track how much each component has emitted (E[k]) and the total emitted.
+        We track each component's emissions (E[k]). Selection counts only
+        components in the current target; monitoring counts all emissions.
         On each selection step:
 
         1) Compute deficit for each available component:
-           deficit[k] = T[k] * total_emitted - E[k]
+           target_total = sum(E[j] for j in T)
+           deficit[k] = T[k] * max(1, target_total) - E[k]
 
            This represents how much component k is "owed" relative to its target.
            Positive deficit means underrepresented; negative means overrepresented.
@@ -43,9 +45,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
 
         3) Emit one item from the chosen component
 
-        4) Record the emission: E[k] += weight, total += weight
-           This increases total_emitted, raising everyone's "fair share", while
-           only the emitting component's E[k] increases, reducing its deficit.
+        4) Record the emission: E[k] += weight
+           On-target emissions increase target_total and adjust all deficits.
+           Off-target emissions do not affect selection.
 
     Properties:
         - Over time, emits in proportion to target weights.
@@ -56,9 +58,9 @@ class SmoothWeightedRoundRobin(Generic[K]):
     Edge cases:
         - When total_emitted=0 (initial state), we use effective_total=1.0 so that
           deficits equal target weights, selecting the highest-weighted component first.
-        - If a component runs out of items, it's removed from the available set.
-          The algorithm naturally adapts since deficit is only computed for available
-          components.
+        - select() considers available components; peek() considers all targets.
+          Unavailable components still count toward target_total until removed
+          by update_target().
         - Components with zero or negative weight are filtered out during initialization.
 
     Args:
@@ -94,17 +96,12 @@ class SmoothWeightedRoundRobin(Generic[K]):
         if not self._target or not self._order:
             return None
 
-        effective_total = max(1.0, self._total)
-        deficits = {
-            k: self._target[k] * effective_total - self._emitted[k]
-            for k in self._target
-        }
-
         # Return highest deficit component, tie-break by original order
         # Only consider components in current target (filter out obsolete)
         active = [k for k in self._order if k in self._target]
         if not active:
             return None
+        deficits = self.get_deficits()
         return max(active, key=lambda k: (deficits[k], -self._index[k]))
 
     def select(self, available: set[K]) -> K | None:
@@ -123,12 +120,7 @@ class SmoothWeightedRoundRobin(Generic[K]):
         if len(active) == 1:
             return active[0]
 
-        # Calculate deficit: target * total - emitted
-        # Use max(1.0, total) to handle the initial case when total=0
-        effective_total = max(1.0, self._total)
-        deficits = {
-            k: self._target[k] * effective_total - self._emitted[k] for k in active
-        }
+        deficits = self.get_deficits()
 
         # Select highest deficit, tie-break by original order (smaller index wins)
         return max(active, key=lambda k: (deficits[k], -self._index[k]))
@@ -159,27 +151,26 @@ class SmoothWeightedRoundRobin(Generic[K]):
             self._total += weight
 
     def get_deficits(self) -> dict[K, float]:
-        """Get current deficit per component for benefit scoring.
+        """Return each target component's deficit; positive means underserved.
 
-        Deficit = target * total_emitted - emitted. Positive deficit means the
-        component is "owed" more emissions. Used by ensure_mixture to score
-        multi-component samples by how well they reduce overall deficit.
-
-        Returns:
-            Dict mapping component -> deficit (positive = underserved).
+        Deficit = target * max(1, target_total) - emitted. Only contributions from
+        components in the current target count toward target_total, including
+        those currently unavailable. Off-target contributions from mixed packs
+        do not affect these deficits.
         """
-        effective_total = max(1.0, self._total)
+        total = sum(self._emitted.get(k, 0.0) for k in self._target)
+        # With no on-target history, deficits equal target weights.
+        effective_total = max(1.0, total)
         return {
-            k: self._target[k] * effective_total - self._emitted[k]
+            k: self._target[k] * effective_total - self._emitted.get(k, 0.0)
             for k in self._target
         }
 
     def update_target(self, new_target: dict[K, float]) -> None:
         """Update target weights while preserving emission history.
 
-        This enables smooth transitions when mixture weights change.
-        The emission counts are preserved, so the deficit calculation
-        naturally adapts to the new targets.
+        Removed components no longer affect deficits. Weights change immediately;
+        past emissions are neither rescaled nor reset.
 
         Args:
             new_target: New target weights (will be normalized).

@@ -1,4 +1,4 @@
-# Records and Sample Lifecycles
+# Records and sample lifecycles
 
 A sample starts as three integers and ends as a row in a tensor. On the way it may be
 split into four sequences, three of which get packed with fragments of other documents
@@ -161,7 +161,7 @@ emitting them unconditionally is the only choice that is correct in both cases.
 
 (chunks-are-the-unit-of-state)=
 
-**Chunks are the unit of state.** [How Pipelines Run](../pipelines/how_pipelines_run.md)
+**Chunks are the unit of state.** [How pipelines run](../pipelines/how_pipelines_run.md)
 explains that Zephon tracks progress by chunk and that a chunk is complete once every
 record derived from it has been delivered. The bookkeeping above is how it knows:
 contributors and tombstones close offsets, and a chunk whose offsets are all closed leaves
@@ -186,7 +186,7 @@ WorkSource           Engine                       Operators            Training 
     │                   │                             │ (tombstones stripped)│
 ```
 
-[Checkpoint Replay and Bounded Recovery](checkpoint_replay.md) covers how Zephon decides
+[Checkpoint replay and bounded recovery](checkpoint_replay.md) covers how Zephon decides
 that a chunk is safe to drop, which turns out to be considerably more subtle than "all its
 offsets are closed" once packing and shuffling are in the `Pipeline`.
 
@@ -249,12 +249,13 @@ If that sounds like a trap, the way out is to keep filtering in a preceding
 `map_transform` with `drop_none=True` and let your stateful operator do nothing but buffer
 and reorder.
 
-**Traits that change how the planner wires you in.** `OpTraits` carries what the planner
-needs to know:
+**Operator traits.** `OpTraits` declares capabilities for planning, execution, and
+token calibration:
 
 | Trait | Default | Meaning |
 |---|---|---|
 | `preserves_cursor_order` | Required, no default | Records leave in the same chunk/offset order they arrived. `False` for anything that shuffles, packs, or buffers across chunks. |
+| `calibration_replayable` | `False` | Whether token calibration may replay the operator before tokenization. See {class}`~zephon.ops.OpTraits`. |
 | `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1. |
 | `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect ([#49](https://github.com/datologyai/zephon/issues/49)). |
 | `indexable` | `True` | The operator preserves indexability through the plan. |

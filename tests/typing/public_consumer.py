@@ -138,6 +138,12 @@ def pack_training(pipe: Pipeline) -> Pipeline:
     ).batch(4)
 
 
+def add_custom_op(pipe: Pipeline) -> Pipeline:
+    return pipe.add_op(
+        "identity", process_many=lambda records: records, preserves_cursor_order=True
+    )
+
+
 class IdentityOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True)
