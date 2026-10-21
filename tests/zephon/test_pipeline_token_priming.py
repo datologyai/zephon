@@ -3,13 +3,12 @@
 
 """Pipeline wiring for token-aware mixture priming."""
 
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 import zephon.work.static_mixture as sm
 from zephon import Pipeline as PublicPipeline
-from zephon._internal.ops.shuffle_buffer import ShuffleAlgorithm
 from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
@@ -325,7 +324,8 @@ def test_calibration_replays_materialize_and_stops_before_packing(
 
 @pytest.mark.parametrize("algorithm", ["streaming", "block", "block_warmup"])
 def test_calibration_replays_shuffle(
-    algorithm: ShuffleAlgorithm, monkeypatch: pytest.MonkeyPatch
+    algorithm: Literal["streaming", "block", "block_warmup"],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = _capture_token_prime(monkeypatch)
     pipe = (
