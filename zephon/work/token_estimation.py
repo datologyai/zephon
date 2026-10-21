@@ -306,6 +306,17 @@ class _PreTokenizeReplay:
         self.ops: tuple[Any, ...] = tuple(ops)
         self._setup_done = False
 
+    def __getstate__(self) -> dict[str, Any]:
+        # Census workers use std pickle, which cannot carry local callables.
+        state = dict(self.__dict__)
+        state["ops"] = cloudpickle.dumps(state["ops"])
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        if isinstance(state.get("ops"), bytes):
+            state = {**state, "ops": cloudpickle.loads(state["ops"])}
+        self.__dict__.update(state)
+
     def apply(self, payload: Any) -> list[Any]:
         """Map one raw payload to the payloads the tokenize op would see."""
         if not self._setup_done:

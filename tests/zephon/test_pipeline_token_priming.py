@@ -9,6 +9,7 @@ import pytest
 
 import zephon.work.static_mixture as sm
 from zephon import Pipeline as PublicPipeline
+from zephon._internal.ops.shuffle_buffer import ShuffleAlgorithm
 from zephon._internal.ops.tokenize_chat import ChatTokenCountingSpec
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon.io import Dataset, InMemoryShard
@@ -257,13 +258,13 @@ def test_priming_flags_unreplayable_pre_tokenize_op(
     captured = _capture_token_prime(monkeypatch)
     pipe = (
         PublicPipeline(_make_token_work_source())
-        .shuffle(buffer_size=4)
+        .batch(2)
         .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
     )
     pipe._prime_worksource()
     marker = captured["pre_tokenize_replay"]
     assert isinstance(marker, _UnreplayableOp)
-    assert marker.op_name == "ShuffleBuffer"
+    assert marker.op_name == "Batch"
     assert marker.is_custom is False
 
 
@@ -320,6 +321,29 @@ def test_calibration_replays_materialize_and_stops_before_packing(
     ratio, source = work.state_dict()["token_ratios"]["text"]
     assert source == "measured"
     assert ratio > 0
+
+
+@pytest.mark.parametrize("algorithm", ["streaming", "block", "block_warmup"])
+def test_calibration_replays_shuffle(
+    algorithm: ShuffleAlgorithm, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _capture_token_prime(monkeypatch)
+    pipe = (
+        PublicPipeline(_make_token_work_source())
+        .shuffle(buffer_size=4, algorithm=algorithm)
+        .map_transform(lambda row: {"text": row["text"] + " extra"})
+        .tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
+    )
+    pipe._prime_worksource()
+    replay = captured["pre_tokenize_replay"]
+    assert isinstance(replay, _PreTokenizeReplay)
+    payloads = [
+        payload
+        for text in ("one", "two three")
+        for payload in replay.apply({"text": text})
+    ]
+    plan = captured["counting_spec"].build_counter().plan(payloads)
+    assert [plan.count(payload) for payload in payloads] == [2, 3]
 
 
 @pytest.mark.parametrize("form", ["instance", "kwargs"])

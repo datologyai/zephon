@@ -20,9 +20,10 @@ class OpTraits:
     packs) call.
 
     ``calibration_replayable`` — defaults to False. Whether token calibration can
-    replay the op per record without changing its output payloads or drops. Replay
-    bypasses accumulators and uses an empty service map and placeholder
-    source/stage metadata. Outputs must not depend on batching or previous calls.
+    replay the op per record with the same output SampleRecord payloads and
+    multiplicities, ignoring order. Replay bypasses accumulators and uses an empty
+    service map and placeholder source/stage metadata. Payloads and drops must not
+    depend on batching or previous calls; buffering and reordering alone are safe.
 
     ``parallelism`` — suggested parallelism for the operator when not
     overridden.

@@ -567,7 +567,7 @@ class ShuffleBuffer(BaseOp):
         # Stateless; deterministic even when multiple worker instances are present.
         # Keep suggested parallelism at 1 to avoid oversubscribing by default.
         return OpTraits(
-            calibration_replayable=False,
+            calibration_replayable=True,
             indexable=False,
             preserves_cursor_order=False,
             parallelism=1,

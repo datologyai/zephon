@@ -1031,6 +1031,7 @@ class Pipeline:
                 - ``samples``: Each sample has weight 1.
                 - Explicit field name (e.g., ``input_ids``): Use that field's length.
                 - Callable: Custom function taking SampleRecord, returning float.
+                  Must not modify the record.
             warn_tolerance: If set, warn when mixture drift exceeds this value (0.05 = ±5%).
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived

@@ -1000,6 +1000,15 @@ def test_pre_tokenize_replay_survives_cloudpickle() -> None:
     assert replay.apply({"n": 2}) == [{"text": "w0 w1"}]
 
 
+def test_pre_tokenize_replay_pickles_local_lambda() -> None:
+    suffix = "extra"
+    replay = _PreTokenizeReplay(
+        [MapTransform(lambda payload: {"text": payload["text"] + " " + suffix})]
+    )
+    restored = pickle.loads(pickle.dumps(replay))
+    assert restored.apply({"text": "one two"}) == [{"text": "one two extra"}]
+
+
 def _int_rows_dataset(n_rows: int = 40) -> Dataset:
     rows = [{"n": 5} for _ in range(n_rows)]
     return Dataset.from_dict(
@@ -1120,13 +1129,13 @@ def test_measure_dataset_replay_errors_fall_back() -> None:
 
 def test_prime_token_ratios_unreplayable_op_raises_when_measuring() -> None:
     ds = make_inmem_dataset("d", 4, 3)
-    with pytest.raises(ValueError, match="built-in op 'ShuffleBuffer'") as exc_info:
+    with pytest.raises(ValueError, match="built-in op 'Batch'") as exc_info:
         prime_token_ratios(
             datasets=[ds],
             dataset_ids={"d": 0},
             estimation=TokenEstimation(),
             counting_spec=None,
-            pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+            pre_tokenize_replay=_UnreplayableOp("Batch"),
         )
     message = str(exc_info.value)
     assert "calibration_replayable=True" not in message
@@ -1141,7 +1150,7 @@ def test_prime_token_ratios_unreplayable_op_ignored_when_pinned() -> None:
         dataset_ids={"d": 0},
         estimation=TokenEstimation(primer={"d": 0.5}),
         counting_spec=None,
-        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+        pre_tokenize_replay=_UnreplayableOp("Batch"),
     )
     assert ratios["d"].source == "pinned"
 
@@ -1171,7 +1180,7 @@ def test_prime_token_ratios_measure_callable_skips_replay(
         dataset_ids={"b": 0},
         estimation=TokenEstimation(measure=len),
         counting_spec=None,
-        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+        pre_tokenize_replay=_UnreplayableOp("Batch"),
     )
     assert ratios["b"].source == "measured"
     assert seen["pre_tokenize_replay"] is None

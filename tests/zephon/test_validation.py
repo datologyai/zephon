@@ -98,7 +98,7 @@ def test_validate_catches_cross_call_state_leakage() -> None:
 
     pipe = _empty_pipeline().add_op(
         "leaker",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=cross_call_leaker,
         preserves_cursor_order=True,
     )
@@ -117,7 +117,7 @@ def test_validate_catches_nondeterministic_process_many() -> None:
 
     pipe = _empty_pipeline().add_op(
         "oops",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=stateful,
         preserves_cursor_order=True,
     )
@@ -818,7 +818,7 @@ def test_iter_raises_validation_error_for_broken_op() -> None:
         _empty_pipeline()
         .add_op(
             "bad",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=stateful,
             preserves_cursor_order=True,
         )
@@ -842,7 +842,7 @@ def _broken_op_pipeline() -> PublicPipeline:
         _empty_pipeline()
         .add_op(
             "bad",
-            calibration_replayable=False,
+            calibration_replayable=True,
             process_many=stateful,
             preserves_cursor_order=True,
         )
@@ -1034,7 +1034,7 @@ def test_writes_to_self_static_scan_flags_attribute_assignment() -> None:
 
     pipe = _empty_pipeline().add_op(
         "self_assigner",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=bound,
         preserves_cursor_order=True,
     )
@@ -1059,7 +1059,7 @@ def test_writes_to_self_static_scan_flags_mutator_call() -> None:
 
     pipe = _empty_pipeline().add_op(
         "self_appender",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=bound,
         preserves_cursor_order=True,
     )
@@ -1109,7 +1109,7 @@ def _uses_random_random(elems: list[Any]) -> list[Any]:
 def test_nondeterministic_stdlib_static_scan_flags_random() -> None:
     pipe = _empty_pipeline().add_op(
         "randy",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=_uses_random_random,
         preserves_cursor_order=True,
     )
@@ -1127,7 +1127,7 @@ def _uses_time_time(elems: list[Any]) -> list[Any]:
 def test_nondeterministic_stdlib_static_scan_flags_time_time() -> None:
     pipe = _empty_pipeline().add_op(
         "clocky",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=_uses_time_time,
         preserves_cursor_order=True,
     )
@@ -1165,7 +1165,7 @@ def test_state_diff_catches_closure_mutation_via_cloudpickle() -> None:
 
     pipe = _empty_pipeline().add_op(
         "closure_leaker",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=closure_mutator,
         preserves_cursor_order=True,
     )
@@ -1190,7 +1190,7 @@ def test_static_checks_are_warnings_not_errors() -> None:
 
     pipe = _empty_pipeline().add_op(
         "warn_only",
-        calibration_replayable=False,
+        calibration_replayable=True,
         process_many=bound,
         preserves_cursor_order=True,
     )
@@ -1216,7 +1216,7 @@ def test_static_checks_are_warnings_not_errors() -> None:
 
 class _SelfWritingOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(calibration_replayable=False, preserves_cursor_order=True)
+        return OpTraits(calibration_replayable=True, preserves_cursor_order=True)
 
     def process_many(self, elems: list[Any]) -> list[Any]:
         self._counter = getattr(self, "_counter", 0) + 1

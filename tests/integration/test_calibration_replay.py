@@ -64,7 +64,7 @@ def test_custom_fanout_changes_calibrated_token_ratio(form: str) -> None:
             else:
                 pipe.add_op(
                     "duplicate",
-                    process_many=duplicate_records,
+                    process_many=lambda records: duplicate_records(records),
                     preserves_cursor_order=True,
                     calibration_replayable=True,
                 )
