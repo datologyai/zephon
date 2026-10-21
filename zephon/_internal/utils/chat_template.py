@@ -945,21 +945,6 @@ def _verify_chat_template(
 ) -> ValidationReport:
     """Check generation ownership, content coverage and HF token-mask parity.
 
-    ``after_last_user`` runs these checks automatically. This entry point is
-    useful for template CI, extra fixtures and tagged/stock comparisons.
-
-    Check your template: every selected assistant's reasoning, tool calls,
-    answer and any end-of-turn token must appear inside its own ``{% generation %}``
-    blocks, within its message loop. Keep user/tool-result text and content read
-    from other messages outside those blocks. Inspect rendered text and loss
-    masks on representative inputs, because automatic probes can miss
-    content-dependent errors.
-
-    Probes retain literal substring, prefix and suffix controls in message text.
-    Exact text comparisons and length thresholds beyond emptiness are rejected
-    when detected on content fields or their assignment aliases. Coverage checks
-    include ``content``, ``reasoning_content``, ``reasoning`` and ``thinking``.
-
     Args:
         tokenizer: HF-compatible fast tokenizer.
         chat_template: Tagged Jinja source; None uses the tokenizer's template.

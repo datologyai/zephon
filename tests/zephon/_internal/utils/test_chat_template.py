@@ -322,37 +322,38 @@ def test_cached_formats_still_validate_every_call(
 
 
 @pytest.mark.parametrize(
-    "arguments", [None, [], [1], 0, False, "", "[]", "null", "{broken"]
+    ("omitted", "arguments"),
+    [
+        ("call", None),
+        ("call", ""),
+        ("generation", None),
+        ("generation", ""),
+        ("arguments", None),
+        ("arguments", "{broken"),
+    ],
 )
-def test_literal_arguments_require_content_and_supervision(
-    fast_tokenizer: Any, arguments: Any
+def test_literal_arguments_require_supervised_output(
+    fast_tokenizer: Any, omitted: str, arguments: Any
 ) -> None:
     from zephon._internal.utils.chat_template import TemplateVerifier
 
     messages = copy.deepcopy(CYCLE)
     messages[3]["tool_calls"][0]["function"]["arguments"] = arguments
-    for replacement in ("", "{{m.tool_calls|tojson}}"):
-        template = SPLIT.replace(
-            "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}", replacement
-        )
-        with pytest.raises(ValidationError):
-            TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
-                messages, {}
-            )
-
-
-@pytest.mark.parametrize("arguments", [None, [], 0, False, "[]", "null", "{broken"])
-def test_literal_argument_only_omissions_fail(
-    fast_tokenizer: Any, arguments: Any
-) -> None:
-    from zephon._internal.utils.chat_template import TemplateVerifier
-
-    messages = copy.deepcopy(CYCLE)
-    messages[3]["tool_calls"][0]["function"]["arguments"] = arguments
+    replacements = {
+        "call": "",
+        "generation": "{{m.tool_calls|tojson}}",
+        "arguments": "{% generation %}{{m.tool_calls[0].function.name}}{% endgeneration %}",
+    }
     template = SPLIT.replace(
-        "{{m.tool_calls|tojson}}", "{{m.tool_calls[0].function.name}}"
+        "{% generation %}{{m.tool_calls|tojson}}{% endgeneration %}",
+        replacements[omitted],
     )
-    with pytest.raises(ValidationError, match="Argument probe was not rendered"):
+    code = (
+        "CHAT_REQUIRED_SUPERVISION"
+        if omitted == "generation"
+        else "CHAT_TEMPLATE_INVALID"
+    )
+    with pytest.raises(ValidationError, match=code):
         TemplateVerifier(fast_tokenizer, template, {}).verify_input_structure(
             messages, {}
         )

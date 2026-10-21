@@ -907,45 +907,42 @@ class Pipeline:
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
-        """Tokenize chat conversations into ids plus a loss mask.
+        """Tokenize each conversation into token IDs and a loss mask.
 
-        Assistant targets come from ``{% generation %}`` blocks in the chat
-        template. Untagged templates use guarded prefix comparisons; with
-        ``apply_chat_template=False``, targets come directly from message roles.
+        Reads role/content messages from ``field`` (default: ``messages``).
+        Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.
+        ``chat_template`` overrides the tokenizer's template with Jinja text or
+        a file path. ``chat_template_kwargs`` supplies static template arguments;
+        ``tools_field`` and ``enable_thinking_field`` select per-record values.
 
-        ``loss_scope`` selects all assistant spans (``all_assistant``), the
-        final contiguous mask run (``last_span``), or every assistant after the
-        final raw user (``after_last_user``). The default is ``all_assistant``.
+        Output replaces the payload with aligned, unshifted NumPy arrays:
+        ``input_ids`` (int64) and ``loss_mask`` (uint8; rename via ``mask_field_out``).
+        Ones mark target tokens. ``preserve_upstream_payload=True`` retains other
+        fields; ``max_length`` truncates the output.
+        Samples with fewer than two tokens or no supervised tokens are dropped.
 
-        ``after_last_user`` needs to associate generated text with its input
-        assistant message. Zephon checks tagged templates using synthetic
-        conversations at tokenizer initialization and on each new message/tool
-        structure.
-        ``preflight_tokenizers()`` runs initialization checks before iteration;
-        the checks also run automatically without it.
+        Targets come from ``{% generation %}`` blocks. Untagged templates infer
+        assistant ranges by rendering successive conversation prefixes.
+        ``apply_chat_template=False`` concatenates message content, appends EOS
+        to assistant messages and selects targets from their roles.
 
-        Samples whose selected source content disappears during rendering are
-        dropped and logged at ERROR. This applies to ``after_last_user`` with
-        generation tags; other paths do not verify source-content retention.
-        Drops count zero tokens during calibration. Setup, ownership and mask
-        errors always raise.
-        Drop logs include running counts and sample context, limited to the first
-        five drops and every hundredth per operator instance.
+        ``loss_scope`` selects all assistant spans (``all_assistant``, default),
+        the final contiguous supervised run (``last_span``), or all assistant
+        messages after the final user (``after_last_user``). Untagged templates
+        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
 
-        Check your template: every selected assistant's reasoning, tool calls,
-        answer and any end-of-turn token must appear inside its own
-        ``{% generation %}`` blocks, within its message loop. Keep user/tool-result
-        text and content read from other messages outside those blocks. Inspect
-        rendered text and loss masks on representative inputs, because automatic
-        probes can miss content-dependent errors.
+        With generation tags, ``after_last_user`` verifies templates automatically.
+        Each selected assistant's generation blocks must cover its reasoning,
+        calls, answer and end-of-turn token within its message loop, excluding
+        user/tool-result content. Verification adds rendering and tokenization at
+        setup and for new message/tool formats or non-object tool argument values;
+        successful checks are reused. ``preflight_tokenizers()`` runs setup checks
+        before iteration. Samples with omitted selected content are dropped and
+        logged; other verification failures raise. Inspect outputs and masks:
+        checks cannot cover every content-dependent template branch.
 
-        Pair ``expand_chat()`` with ``after_last_user`` for templates such as
-        Qwen that omit reasoning from earlier user cycles. Each prefix makes
-        its target cycle the final one, so its reasoning appears in the tokens.
-
-        ``loss_on_last_turn_only`` is deprecated: replace True with
-        ``loss_scope="last_span"`` and False with ``loss_scope="all_assistant"``.
-        Supplying both arguments raises.
+        ``loss_on_last_turn_only`` is deprecated: True selects ``last_span`` and
+        False selects ``all_assistant``. Cannot accompany ``loss_scope``.
         """
         # warn -> resolver -> tokenize_chat -> @_mutates_graph -> caller
         loss_scope = _resolve_loss_scope(

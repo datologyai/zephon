@@ -215,29 +215,12 @@ class TokenizeChat(TokenizeBase):
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
                 ``after_last_user`` selects every assistant after the final user.
-                The default is ``all_assistant``. With generation tags,
-                ``after_last_user`` identifies the input owner of each block.
-                Synthetic checks run at tokenizer initialization and once per
-                new message/tool structure. Every render checks owners and ranges.
-                ``preflight_tokenizers()`` runs initialization checks early; omitting
-                it does not disable checks. Samples whose selected source content
-                disappears during rendering are dropped and count zero tokens
-                during calibration. Drops log at ERROR for the first five and
-                every hundredth per operator instance, with counts and sample
-                context. Setup, ownership and supervision errors always raise.
-                Cache misses run extra rendering and tokenization probes.
-                Empty or fully truncated targets are dropped.
-                Pair ``expand_chat()`` with ``after_last_user`` when a template
-                such as Qwen removes reasoning from earlier user cycles: each
-                prefix then renders its target cycle with reasoning included.
-
-                With ``after_last_user`` and generation tags, check that every
-                selected assistant's reasoning, tool calls, answer and any
-                end-of-turn token appear in its own ``{% generation %}`` blocks,
-                within its message loop. Keep user/tool-result text and content
-                read from other messages outside those blocks. Inspect rendered
-                text and loss masks on representative inputs, because automatic
-                probes can miss content-dependent errors.
+                Defaults to ``all_assistant``. With generation tags,
+                ``after_last_user`` verifies ownership and supervision automatically.
+                Verification adds rendering and tokenization at setup and for new
+                message/tool formats or non-object tool argument values; successful
+                checks are reused. Samples with omitted selected content are
+                dropped and logged; other verification failures raise.
             loss_on_last_turn_only: Deprecated alias: True selects ``last_span``;
                 False selects ``all_assistant``. Cannot accompany ``loss_scope``.
             chat_template_kwargs: Static extra kwargs forwarded to
