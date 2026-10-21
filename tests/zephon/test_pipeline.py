@@ -439,7 +439,7 @@ def test_add_op_with_baseop_instance_rejects_kwargs_form_fields(
         pipe.add_op(TrivialOp(), **kwargs)
 
 
-def test_add_op_kwargs_form_requires_process_many_and_traits() -> None:
+def test_add_op_kwargs_form_requires_process_many_and_preserves_cursor_order() -> None:
     """The kwargs form must spell out the required callables/traits."""
     pipe = _empty_pipeline()
     with pytest.raises(ValueError, match="process_many"):
@@ -452,12 +452,6 @@ def test_add_op_kwargs_form_requires_process_many_and_traits() -> None:
             calibration_replayable=True,
             process_many=lambda elems: list(elems),
         )  # type: ignore[call-overload]
-    with pytest.raises(ValueError, match="calibration_replayable"):
-        pipe.add_op(  # type: ignore[call-overload]
-            "missing_replay",
-            process_many=lambda elems: list(elems),
-            preserves_cursor_order=True,
-        )
 
 
 def test_add_op_accumulator_factory_called_per_setup() -> None:
@@ -617,11 +611,11 @@ def test_add_op_advanced_traits_default_false() -> None:
     """Omitting the advanced trait kwargs leaves them at the OpTraits defaults."""
     pipe = _empty_pipeline().add_op(
         "defaults",
-        calibration_replayable=True,
         process_many=lambda elems: list(elems),
         preserves_cursor_order=True,
     )
     traits = pipe._tail.op.traits()
+    assert traits.calibration_replayable is False
     assert traits.batch_shape_sensitive is False
     assert traits.requires_serial_state is False
 

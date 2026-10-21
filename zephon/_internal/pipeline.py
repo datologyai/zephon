@@ -68,7 +68,7 @@ from zephon.ops.grouping import DomainGroups
 from zephon.ops.traits import OpTraits
 from zephon.options import RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SamplePayload, SampleRecord, StreamItem
-from zephon.validation import ValidationError, preflight_tokenizers
+from zephon.validation import ValidationError, _is_user_op, preflight_tokenizers
 from zephon.work import WorkSource
 from zephon.work.token_estimation import _PreTokenizeReplay, _UnreplayableOp
 
@@ -557,7 +557,7 @@ class Pipeline:
         *,
         process_many: Callable[[list[Any]], list[Any]],
         preserves_cursor_order: bool,
-        calibration_replayable: bool,
+        calibration_replayable: bool = False,
         accumulator: Optional[Callable[..., "Accumulator[Any]"]] = None,
         process_one: Optional[Callable[[Any], list[Any]]] = None,
         validation_samples: Optional[Callable[[], list[SampleRecord]]] = None,
@@ -602,7 +602,7 @@ class Pipeline:
         ``op.traits()`` rather than kwargs.
 
         **Kwargs form**: ``pipe.add_op(name, *, process_many=..., ...)``.
-        Both ``preserves_cursor_order`` and ``calibration_replayable`` are required.
+        ``preserves_cursor_order`` is required.
         Convenience for stateless transforms.  The framework builds an
         internal `BaseOp` subclass from the supplied callables +
         accumulator factory + traits.  ``process_many`` must not carry
@@ -675,8 +675,8 @@ class Pipeline:
             indexable: Kwargs form. Whether the op preserves indexability through the
                 plan.  Default False; set True only if the transform is
                 1:1 and deterministic.
-            calibration_replayable: Kwargs form, required. Whether token calibration
-                may replay the op before tokenization. See :class:`OpTraits`.
+            calibration_replayable: Kwargs form. Whether token calibration may replay
+                the op before tokenization. Default False; see :class:`OpTraits`.
             batch_shape_sensitive: Kwargs form. Set True when ``process_many``'s output
                 can depend on how inputs are grouped into micro-batches
                 (per-batch RNG, statistics, etc.). In deterministic mode
@@ -781,12 +781,6 @@ class Pipeline:
                 "reorder/shuffle/pack ops)"
             )
 
-        if calibration_replayable is None:
-            raise ValueError(
-                "add_op(name, ...) requires `calibration_replayable` "
-                + "(see OpTraits for the replay contract)"
-            )
-
         functional_op = _FunctionalOp(
             process_many_fn=process_many,
             accumulator_factory=(
@@ -796,7 +790,9 @@ class Pipeline:
             validation_samples_factory=validation_samples,
             op_traits=OpTraits(
                 preserves_cursor_order=preserves_cursor_order,
-                calibration_replayable=calibration_replayable,
+                calibration_replayable=(
+                    False if calibration_replayable is None else calibration_replayable
+                ),
                 parallelism=1 if parallelism is None else parallelism,
                 indexable=False if indexable is None else indexable,
                 batch_shape_sensitive=(
@@ -1533,7 +1529,11 @@ class Pipeline:
         ops: list[Any] = []
         for node in self._graph.nodes[fetch_index + 1 : tokenize_index]:
             if not node.op.traits().calibration_replayable:
-                return _UnreplayableOp(type(node.op).__name__)
+                is_custom = _is_user_op(node.op)
+                return _UnreplayableOp(
+                    node.name if is_custom else type(node.op).__name__,
+                    is_custom=is_custom,
+                )
             ops.append(node.op)
         return _PreTokenizeReplay(ops) if ops else None
 

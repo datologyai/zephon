@@ -1120,7 +1120,7 @@ def test_measure_dataset_replay_errors_fall_back() -> None:
 
 def test_prime_token_ratios_unreplayable_op_raises_when_measuring() -> None:
     ds = make_inmem_dataset("d", 4, 3)
-    with pytest.raises(ValueError, match="ShuffleBuffer"):
+    with pytest.raises(ValueError, match="built-in op 'ShuffleBuffer'") as exc_info:
         prime_token_ratios(
             datasets=[ds],
             dataset_ids={"d": 0},
@@ -1128,6 +1128,10 @@ def test_prime_token_ratios_unreplayable_op_raises_when_measuring() -> None:
             counting_spec=None,
             pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
         )
+    message = str(exc_info.value)
+    assert "calibration_replayable=True" not in message
+    assert "TokenEstimation(measure=...)" in message
+    assert "TokenEstimation(primer={...})" in message
 
 
 def test_prime_token_ratios_unreplayable_op_ignored_when_pinned() -> None:

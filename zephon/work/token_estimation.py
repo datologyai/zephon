@@ -342,6 +342,7 @@ class _UnreplayableOp:
     """
 
     op_name: str
+    is_custom: bool = False
 
 
 def _count_replayed(plan: _CountPlan, payloads: Sequence[Any]) -> int | None:
@@ -1024,14 +1025,22 @@ def prime_token_ratios(
                 # callable is not fed already-normalized payloads.
                 pre_tokenize_replay = None
             elif isinstance(pre_tokenize_replay, _UnreplayableOp):
+                kind = "custom" if pre_tokenize_replay.is_custom else "built-in"
+                advice = ""
+                if pre_tokenize_replay.is_custom:
+                    advice = (
+                        "Review the OpTraits.calibration_replayable contract before "
+                        "setting calibration_replayable=True: setup must work without "
+                        "runner services, and per-record payloads and drops must not "
+                        "depend on batching, accumulator logic, previous calls, or "
+                        "source/stage metadata. "
+                    )
                 raise ValueError(
-                    f"token-aware mixture priming cannot calibrate through "
-                    f"this pipeline: op {pre_tokenize_replay.op_name!r} "
-                    f"between fetch and the tokenize op cannot be replayed "
-                    f"outside the engine, so calibration would count raw rows "
-                    f"the tokenize op never sees. Provide "
-                    f"TokenEstimation(measure=...) or pin ratios via "
-                    f"TokenEstimation(primer={{...}})."
+                    f"token-aware mixture priming cannot calibrate through {kind} "
+                    f"op {pre_tokenize_replay.op_name!r} between fetch and tokenize: "
+                    f"calibration_replayable=False. {advice}"
+                    "Provide TokenEstimation(measure=...) or pin ratios via "
+                    "TokenEstimation(primer={...})."
                 )
             measured_datasets = {dataset_ids[name]: by_name[name] for name in names}
             # Build catalogs once so workers mmap-attach instead of repeating discovery.

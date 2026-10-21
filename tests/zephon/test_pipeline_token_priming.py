@@ -264,6 +264,7 @@ def test_priming_flags_unreplayable_pre_tokenize_op(
     marker = captured["pre_tokenize_replay"]
     assert isinstance(marker, _UnreplayableOp)
     assert marker.op_name == "ShuffleBuffer"
+    assert marker.is_custom is False
 
 
 def test_priming_without_pre_tokenize_ops_passes_no_replay(
@@ -288,7 +289,7 @@ def test_priming_without_tokenize_op_passes_no_replay(
 
 class _NonReplayableOp(BaseOp):
     def traits(self) -> OpTraits:
-        return OpTraits(preserves_cursor_order=True, calibration_replayable=False)
+        return OpTraits(preserves_cursor_order=True)
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         raise AssertionError("calibration must not execute this op")
@@ -322,7 +323,7 @@ def test_calibration_replays_materialize_and_stops_before_packing(
 
 
 @pytest.mark.parametrize("form", ["instance", "kwargs"])
-def test_custom_op_opt_out_rejects_automatic_calibration(form: str) -> None:
+def test_custom_op_default_rejects_automatic_calibration(form: str) -> None:
     work = StaticMixtureWorkSource(
         [_make_token_dataset("text", 3, n_docs=2)],
         {"text": 1.0},
@@ -332,13 +333,18 @@ def test_custom_op_opt_out_rejects_automatic_calibration(form: str) -> None:
     op = _NonReplayableOp()
     if form == "instance":
         pipe.add_op(op)
+        name = "_NonReplayableOp"
     else:
         pipe.add_op(
             "custom",
             process_many=op.process_many,
             preserves_cursor_order=True,
-            calibration_replayable=False,
         )
+        name = "custom"
     pipe.tokenize(tokenizer_id="__fallback__", field="text", special_tokens="none")
-    with pytest.raises(ValueError, match="cannot be replayed outside the engine"):
+    with pytest.raises(ValueError, match=f"custom op {name!r}") as exc_info:
         pipe._prime_worksource()
+    message = str(exc_info.value)
+    assert "calibration_replayable=False" in message
+    assert "Review the OpTraits.calibration_replayable contract" in message
+    assert "calibration_replayable=True" in message

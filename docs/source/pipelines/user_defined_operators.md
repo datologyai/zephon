@@ -165,7 +165,7 @@ Configuring `traits` is essential to get the operator to work the way you want i
   if your operator emits records in the same order it received them in, or `False`
   otherwise. Be careful; if you do set this to `True` while not preserving order, it will
   silently break checkpointing.
-- `calibration_replayable` is mandatory. Set it to `True` when the operator can
+- `calibration_replayable` defaults to `False`. Set it to `True` when the operator can
   replay each fetched record independently for token calibration; see
   {class}`~zephon.ops.OpTraits` for the contract. Only operators before the first
   tokenizer are checked; `False` there requires pinned token ratios or a custom

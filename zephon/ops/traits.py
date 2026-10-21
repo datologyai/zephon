@@ -19,8 +19,8 @@ class OpTraits:
     transforms, non-reordering filters) or ``False`` (reorders, shuffles,
     packs) call.
 
-    ``calibration_replayable`` — required. Whether token calibration can replay
-    the op per record without changing its output payloads or drops. Replay
+    ``calibration_replayable`` — defaults to False. Whether token calibration can
+    replay the op per record without changing its output payloads or drops. Replay
     bypasses accumulators and uses an empty service map and placeholder
     source/stage metadata. Outputs must not depend on batching or previous calls.
 
@@ -44,7 +44,7 @@ class OpTraits:
 
     indexable: bool = True
     preserves_cursor_order: bool
-    calibration_replayable: bool
+    calibration_replayable: bool = False
     parallelism: int = 1
     batch_shape_sensitive: bool = False
     requires_serial_state: bool = False
