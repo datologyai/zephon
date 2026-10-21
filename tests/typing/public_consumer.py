@@ -29,7 +29,14 @@ from zephon.observability import (
     MTPQueueStats,
     PrefetchTimingSummary,
 )
-from zephon.ops import BaseOp, DomainGroups, OpContext, OpTraits, StageInfo
+from zephon.ops import (
+    BaseOp,
+    DomainGroups,
+    LossScope,
+    OpContext,
+    OpTraits,
+    StageInfo,
+)
 from zephon.options import IpcTransport, RuntimeOptions
 from zephon.types import SampleBatch, SampleId, SampleNumeric, SamplePayload
 from zephon.validation import ValidationReport
@@ -138,6 +145,12 @@ def pack_training(pipe: Pipeline) -> Pipeline:
     ).batch(4)
 
 
+def add_custom_op(pipe: Pipeline) -> Pipeline:
+    return pipe.add_op(
+        "identity", process_many=lambda records: records, preserves_cursor_order=True
+    )
+
+
 class IdentityOp(BaseOp):
     def traits(self) -> OpTraits:
         return OpTraits(preserves_cursor_order=True)
@@ -152,3 +165,8 @@ class IdentityOp(BaseOp):
             sid: SampleId = e.meta.sample_id
             _ = sid
         return elems
+
+
+def scoped_chat(pipe: Pipeline) -> Pipeline:
+    scope: LossScope = "after_last_user"
+    return pipe.expand_chat().tokenize_chat(tokenizer_id="model", loss_scope=scope)

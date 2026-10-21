@@ -5,6 +5,9 @@
 
 import json
 import pickle
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +29,7 @@ from zephon._internal.token_counting import (
 )
 from zephon._internal.utils.tokenizer import fallback_tokenizer
 from zephon.io import Dataset, InMemoryShard
+from zephon.types import SampleId, SampleRecord
 from zephon.work import token_estimation
 from zephon.work.token_estimation import (
     DEFAULT_FALLBACK_TOKENS_PER_BYTE,
@@ -405,17 +409,18 @@ def test_dataset_content_key_stable_and_data_sensitive():
 def test_prime_cache_key_stable_and_input_sensitive():
     by_name = {"a": Dataset.from_dict("a", {0: InMemoryShard([{"text": "x"}] * 3)})}
     est = TokenEstimation()
-    key = _prime_cache_key(["a"], by_name, est, None, seed=0)
-    assert key == _prime_cache_key(["a"], by_name, est, None, seed=0)
-    assert key != _prime_cache_key(["a"], by_name, est, None, seed=1)
+    key = _prime_cache_key({"a": 0}, by_name, est, None, seed=0)
+    assert key == _prime_cache_key({"a": 0}, by_name, est, None, seed=0)
+    assert key != _prime_cache_key({"a": 0}, by_name, est, None, seed=1)
+    assert key != _prime_cache_key({"a": 1}, by_name, est, None, seed=0)
     assert key != _prime_cache_key(
-        ["a"], by_name, TokenEstimation(calibration_samples=999), None, seed=0
+        {"a": 0}, by_name, TokenEstimation(calibration_samples=999), None, seed=0
     )
     assert key != _prime_cache_key(
-        ["a"], by_name, est, TextTokenCountingSpec(max_length=128), seed=0
+        {"a": 0}, by_name, est, TextTokenCountingSpec(max_length=128), seed=0
     )
     assert key != _prime_cache_key(
-        ["a"],
+        {"a": 0},
         by_name,
         est,
         None,
@@ -429,7 +434,7 @@ def test_prime_cache_key_tracks_chat_config():
     estimation = TokenEstimation()
 
     def key(spec):
-        return _prime_cache_key(["d"], {"d": dataset}, estimation, spec, seed=0)
+        return _prime_cache_key({"d": 0}, {"d": dataset}, estimation, spec, seed=0)
 
     a = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=8))
     b = key(ChatTokenCountingSpec(tokenizer_id="t", max_length=16))
@@ -438,6 +443,85 @@ def test_prime_cache_key_tracks_chat_config():
     assert a != b
     assert a == c
     assert a != d
+
+
+def test_prime_cache_key_stable_for_script_classes(tmp_path: Path) -> None:
+    script = tmp_path / "fingerprint.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import json
+            from enum import Enum
+
+            from zephon.io import Dataset, InMemoryShard
+            from zephon.ops import BaseOp, OpTraits
+            from zephon.work.token_estimation import (
+                TokenEstimation, _PreTokenizeReplay, _TextTokenCountingSpec,
+                _prime_cache_key,
+            )
+
+            class Mode(Enum):
+                WORDS = "words"
+
+            class ScriptOp(BaseOp):
+                mode = Mode.WORDS
+
+                def __init__(self, extra=0):
+                    super().__init__()
+                    self.extra = extra
+
+                def traits(self):
+                    return OpTraits(preserves_cursor_order=True, calibration_replayable=True)
+
+                def process_many(self, records):
+                    return records
+
+                def measure(self, payload):
+                    return len(payload["text"].split()) + self.extra
+
+                def __call__(self, text, **kwargs):
+                    return {"input_ids": [1] * (len(text.split()) + self.extra)}
+
+            dataset = Dataset.from_dict("d", {0: InMemoryShard([{"text": "one two"}])})
+
+            def keys(op):
+                return [
+                    _prime_cache_key(
+                        {"d": 0}, {"d": dataset}, estimation, spec, seed=0,
+                        pre_tokenize_replay=replay,
+                    )
+                    for estimation, spec, replay in (
+                        (TokenEstimation(), None, _PreTokenizeReplay([op])),
+                        (TokenEstimation(), _TextTokenCountingSpec(tokenizer=op), None),
+                        (TokenEstimation(measure=op.measure), None, None),
+                    )
+                ]
+
+            baseline = keys(ScriptOp())
+            configured = keys(ScriptOp(extra=1))
+
+            def first_only(self, records):
+                return records[:1]
+
+            ScriptOp.process_many = first_only
+            changed_code = keys(ScriptOp())
+            print(json.dumps([baseline, configured, changed_code]))
+            """
+        )
+    )
+    results = [
+        json.loads(
+            subprocess.check_output(
+                [sys.executable, str(script)], text=True, timeout=30
+            )
+        )
+        for _ in range(2)
+    ]
+    assert results[0] == results[1]
+    baseline, configured, changed_code = results[0]
+    for original, state, code in zip(baseline, configured, changed_code, strict=True):
+        assert original != state
+        assert original != code
 
 
 def test_prime_cache_round_trip(tmp_path):
@@ -887,7 +971,7 @@ def test_prime_cache_key_distinguishes_live_tokenizer_state():
     est = TokenEstimation()
 
     def key(spec):
-        return _prime_cache_key(["b"], {"b": ds}, est, spec, seed=0)
+        return _prime_cache_key({"b": 0}, {"b": ds}, est, spec, seed=0)
 
     k1 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(1)))
     k3 = key(TextTokenCountingSpec(tokenizer=_CountingTokenizer(3)))
@@ -983,21 +1067,30 @@ def _lift_2n_words(payload: dict[str, int]) -> dict[str, str]:
 
 def test_pre_tokenize_replay_applies_map_ops() -> None:
     replay = _PreTokenizeReplay([MapTransform(_lift_n_words)])
-    assert replay.apply({"n": 3}) == [{"text": "w0 w1 w2"}]
+    assert replay.apply({"n": 3}, (0, 0, 0)) == [{"text": "w0 w1 w2"}]
 
 
 def test_pre_tokenize_replay_preserves_drop_semantics() -> None:
     dropped = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=True)])
-    assert dropped.apply({"n": 1}) == []
+    assert dropped.apply({"n": 1}, (0, 0, 0)) == []
     kept = _PreTokenizeReplay([MapTransform(lambda p: None, drop_none=False)])
-    assert kept.apply({"n": 1}) == [{"n": 1}]
+    assert kept.apply({"n": 1}, (0, 0, 0)) == [{"n": 1}]
 
 
 def test_pre_tokenize_replay_survives_cloudpickle() -> None:
     replay = cloudpickle.loads(
         cloudpickle.dumps(_PreTokenizeReplay([MapTransform(_lift_n_words)]))
     )
-    assert replay.apply({"n": 2}) == [{"text": "w0 w1"}]
+    assert replay.apply({"n": 2}, (0, 0, 0)) == [{"text": "w0 w1"}]
+
+
+def test_pre_tokenize_replay_pickles_local_lambda() -> None:
+    suffix = "extra"
+    replay = _PreTokenizeReplay(
+        [MapTransform(lambda payload: {"text": payload["text"] + " " + suffix})]
+    )
+    restored = pickle.loads(pickle.dumps(replay))
+    assert restored.apply({"text": "one two"}, (0, 0, 0)) == [{"text": "one two extra"}]
 
 
 def _int_rows_dataset(n_rows: int = 40) -> Dataset:
@@ -1041,6 +1134,40 @@ def test_measure_dataset_counts_through_pre_tokenize_replay() -> None:
 def _pop_n_words(payload: dict[str, int]) -> dict[str, str]:
     n_words = payload.pop("n")
     return {"text": " ".join(f"w{i}" for i in range(n_words))}
+
+
+def test_measure_dataset_replays_real_sample_ids() -> None:
+    ds = Dataset.from_dict(
+        "d",
+        {
+            shard: InMemoryShard(
+                [{"sample_id": (7, shard, i), "text": "a b c"} for i in range(20)]
+            )
+            for shard in (2, 5)
+        },
+    )
+    seen: set[SampleId] = set()
+
+    def check_ids(records: list[SampleRecord]) -> list[SampleRecord]:
+        for record in records:
+            assert record.meta.sample_id == record.payload["sample_id"]
+            seen.add(record.meta.sample_id)
+        return records
+
+    measured = _measure_dataset(
+        ds,
+        7,
+        build_multi_dataset_store({7: ds}),
+        TokenEstimation(calibration_samples=64),
+        _fallback_text_counter(),
+        seed=3,
+        pre_tokenize_replay=_PreTokenizeReplay(
+            [SimpleNamespace(setup=lambda ctx: None, process_many=check_ids)]
+        ),
+    )
+    assert measured.ratio.source == "measured"
+    # Exercise replay during both count planning and the remaining measurements.
+    assert len(seen) > token_estimation._PLAN_SAMPLE_COUNT
 
 
 def test_measure_dataset_replays_planning_payloads_once() -> None:
@@ -1120,14 +1247,18 @@ def test_measure_dataset_replay_errors_fall_back() -> None:
 
 def test_prime_token_ratios_unreplayable_op_raises_when_measuring() -> None:
     ds = make_inmem_dataset("d", 4, 3)
-    with pytest.raises(ValueError, match="ShuffleBuffer"):
+    with pytest.raises(ValueError, match="built-in op 'Batch'") as exc_info:
         prime_token_ratios(
             datasets=[ds],
             dataset_ids={"d": 0},
             estimation=TokenEstimation(),
             counting_spec=None,
-            pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+            pre_tokenize_replay=_UnreplayableOp("Batch"),
         )
+    message = str(exc_info.value)
+    assert "calibration_replayable=True" not in message
+    assert "TokenEstimation(measure=...)" in message
+    assert "TokenEstimation(primer={...})" in message
 
 
 def test_prime_token_ratios_unreplayable_op_ignored_when_pinned() -> None:
@@ -1137,7 +1268,7 @@ def test_prime_token_ratios_unreplayable_op_ignored_when_pinned() -> None:
         dataset_ids={"d": 0},
         estimation=TokenEstimation(primer={"d": 0.5}),
         counting_spec=None,
-        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+        pre_tokenize_replay=_UnreplayableOp("Batch"),
     )
     assert ratios["d"].source == "pinned"
 
@@ -1167,7 +1298,7 @@ def test_prime_token_ratios_measure_callable_skips_replay(
         dataset_ids={"b": 0},
         estimation=TokenEstimation(measure=len),
         counting_spec=None,
-        pre_tokenize_replay=_UnreplayableOp("ShuffleBuffer"),
+        pre_tokenize_replay=_UnreplayableOp("Batch"),
     )
     assert ratios["b"].source == "measured"
     assert seen["pre_tokenize_replay"] is None
