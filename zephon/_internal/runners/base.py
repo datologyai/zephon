@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Sequence, TypeVar
@@ -31,6 +32,15 @@ from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
 
 _NO_EXHAUSTION = SourceExhaustion()
+logger = logging.getLogger(__name__)
+
+
+def teardown_operator(instance: BaseOp) -> None:
+    """Attempt cleanup without preventing other operators from being released."""
+    try:
+        instance.teardown()
+    except Exception:
+        logger.exception("Failed to tear down operator %s", type(instance).__name__)
 
 
 @dataclass
@@ -101,12 +111,22 @@ class BaseOperatorState:
             collect_stats=self.collect_stats,
         )
 
-        for _ in range(self.parallelism):
-            instance = copy.deepcopy(self.node.op)
-            instance.setup(OpContext(dict(base_ctx), stage_info))
-            self.instances.append(instance)
+        try:
+            for _ in range(self.parallelism):
+                instance = copy.deepcopy(self.node.op)
+                self.instances.append(instance)
+                instance.setup(OpContext(dict(base_ctx), stage_info))
 
-        self._create_accumulator()
+            self._create_accumulator()
+        except BaseException:
+            self.teardown()
+            raise
+
+    def teardown(self) -> None:
+        """Release local operator instances once their execution has stopped."""
+        instances, self.instances = self.instances, []
+        for instance in reversed(instances):
+            teardown_operator(instance)
 
     def _get_source_exhaustion(self, lane_id: int) -> SourceExhaustion:
         """Read this operator's EOD sentinel state without IPC or copying."""
@@ -407,21 +427,25 @@ class StageRunnerBase(Generic[StateT], ABC):
 
         self.ops: list[StateT] = []
         collect_op_stats = self._tracking_mode.collects_nodes
-        for op_index, node in enumerate(stage.nodes):
-            state = self._make_operator_state(
-                node=node,
-                op_index=op_index,
-                deterministic=deterministic,
-                ctx_proto=self._ctx_services,
-                allow_latency_flush=allow_latency_flush_in_deterministic,
-                stage_index=stage_index,
-                stage_name=self._stage_name,
-                collect_op_stats=collect_op_stats,
-            )
-            self.ops.append(state)
-            self._metrics_meta.append(
-                (self._stage_index, self._stage_name, op_index, node.name)
-            )
+        try:
+            for op_index, node in enumerate(stage.nodes):
+                state = self._make_operator_state(
+                    node=node,
+                    op_index=op_index,
+                    deterministic=deterministic,
+                    ctx_proto=self._ctx_services,
+                    allow_latency_flush=allow_latency_flush_in_deterministic,
+                    stage_index=stage_index,
+                    stage_name=self._stage_name,
+                    collect_op_stats=collect_op_stats,
+                )
+                self.ops.append(state)
+                self._metrics_meta.append(
+                    (self._stage_index, self._stage_name, op_index, node.name)
+                )
+        except BaseException:
+            self._teardown_operators()
+            raise
 
     @abstractmethod
     def _make_operator_state(
@@ -483,6 +507,10 @@ class StageRunnerBase(Generic[StateT], ABC):
         Args:
             hard: When True, use minimal join timeouts for fast exit.
         """
+
+    def _teardown_operators(self) -> None:
+        for state in reversed(self.ops):
+            state.teardown()
 
     def run_one(self, elem: RunnerStreamIn) -> StreamItem:
         if not self.ops:

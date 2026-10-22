@@ -546,5 +546,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
 
         for state in self.ops:
             if state.actor_group is not None:
-                state.actor_group.shutdown()
+                state.actor_group.shutdown(hard=hard)
                 state.actor_group = None
+        if not hard:
+            self._teardown_operators()

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytestmark = [pytest.mark.requires_ray, pytest.mark.usefixtures("ray_init")]
@@ -200,6 +202,27 @@ class TestRaySingleOpActor:
 
 class TestRayActorGroup:
     """Tests for the _RayActorGroup."""
+
+    def test_shutdown_releases_operator_resources(self, tmp_path: Path) -> None:
+        from tests.zephon._internal.runners.test_teardown import _ResourceOp
+
+        group = _RayActorGroup(
+            node=Node(name="resource", op=_ResourceOp(tmp_path)),
+            op_index=0,
+            num_actors=1,
+            stage_index=0,
+            stage_name="test",
+            collect_stats=False,
+            ctx_services={},
+        )
+        group.init(num_cpus_per_actor=0.1)
+        try:
+            ray.get(group.actors[0].process.remote(_mk_records([1]), 0))
+            assert len(list(tmp_path.glob("*.live"))) == 1
+        finally:
+            group.shutdown()
+        assert not list(tmp_path.glob("*.live"))
+        assert len(list(tmp_path.glob("*.closed"))) == 1
 
     def test_init_creates_actors(self, group) -> None:
         """After init, the requested number of actor handles exist."""

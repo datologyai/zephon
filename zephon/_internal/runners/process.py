@@ -70,6 +70,7 @@ from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
     RunnerResult,
@@ -99,7 +100,7 @@ from zephon._internal.utils.shm_coalesce import (
     prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
-from zephon.ops.base import OpContext, StageInfo
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 
 Q = TypeVar("Q")
 
@@ -407,6 +408,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     startup_t0 = time.perf_counter_ns()
     rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
+    op_instance: BaseOp | None = None
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
@@ -529,6 +531,9 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 error=info,
             )
         )
+    finally:
+        if op_instance is not None:
+            teardown_operator(op_instance)
 
 
 @dataclass
@@ -2353,3 +2358,5 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                 _shutdown_debug("close(): calling _join_threads")
                 self._join_threads(ctx, hard=hard)
             _shutdown_debug("close(): done")
+        if not hard:
+            self._teardown_operators()

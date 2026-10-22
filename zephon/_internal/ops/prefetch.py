@@ -91,6 +91,14 @@ class PrefetchOp(BaseOp):
         # Get metrics callback from context
         self._emit_prefetch_metrics = ctx.get("emit_prefetch_metrics")
 
+    def teardown(self) -> None:
+        """Release cache ownership after the worker stops prefetching."""
+        resolver, self._resolver = self._resolver, None
+        self._locators = {}
+        close = getattr(resolver, "close", None)
+        if callable(close):
+            close()
+
     def traits(self) -> OpTraits:
         # Preserves order and can be indexed
         # Higher parallelism allows concurrent downloads across batches

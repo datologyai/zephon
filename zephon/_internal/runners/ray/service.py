@@ -20,6 +20,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from zephon._internal.graph import Node
 from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import RunnerResult, WorkerErrorInfo
 from zephon._internal.utils.thread_utils import suppress_library_threads
 from zephon.ops.base import BaseOp, OpContext, StageInfo
@@ -68,7 +69,15 @@ class RaySingleOpActor:
             op_index=op_index,
             collect_stats=collect_stats,
         )
-        self._op.setup(OpContext(dict(ctx_services), stage_info))
+        try:
+            self._op.setup(OpContext(dict(ctx_services), stage_info))
+        except BaseException:
+            teardown_operator(self._op)
+            raise
+
+    def teardown(self) -> None:
+        """Release operator resources before the actor is terminated."""
+        teardown_operator(self._op)
 
     def get_node_id(self) -> str:
         """Return the Ray node id this actor is running on.
@@ -250,9 +259,17 @@ class _RayActorGroup:
                 f"the requested placement: {exc}. Requested node ids: {planned}."
             ) from exc
 
-    def shutdown(self) -> None:
-        """Kill all actors."""
+    def shutdown(self, *, hard: bool = False) -> None:
+        """Allow graceful operator teardown, then terminate all actors."""
         _shutdown_debug(f"_RayActorGroup.shutdown: killing {len(self.actors)} actors")
+
+        if not hard and self.actors:
+            try:
+                ray.get([actor.teardown.remote() for actor in self.actors], timeout=5.0)
+            except Exception:
+                logger.warning(
+                    "Actor teardown did not finish before shutdown", exc_info=True
+                )
 
         for actor in self.actors:
             try:

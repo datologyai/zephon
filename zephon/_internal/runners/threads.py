@@ -12,6 +12,7 @@ from typing import Any, Literal, Sequence
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
     RunnerResult,
@@ -105,7 +106,11 @@ class _ThreadOperatorState(QueueDrainOperatorState):
                     op_index=self.op_index,
                     collect_stats=self.collect_stats,
                 )
-                instance.setup(OpContext(dict(self.ctx_proto), stage_info))
+                try:
+                    instance.setup(OpContext(dict(self.ctx_proto), stage_info))
+                except BaseException:
+                    teardown_operator(instance)
+                    raise
                 self.instances.append(instance)
                 self._instance_queue.put(instance)
             self.parallelism = desired
@@ -125,6 +130,7 @@ class _ThreadOperatorState(QueueDrainOperatorState):
             ) from exc
         for inst in removed:
             self.instances.remove(inst)
+            teardown_operator(inst)
         self.parallelism = desired
 
 
@@ -452,3 +458,5 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             self._join_threads(ctx, hard=hard)
 
         self._executor.shutdown(wait=not hard, cancel_futures=hard)
+        if not hard:
+            self._teardown_operators()

@@ -126,6 +126,8 @@ class BaseOp(ABC):
 
     - ``setup`` records ``ctx.stage_info`` as ``self.stage_info``. Overrides
       should call ``super().setup(ctx)`` before initializing worker resources.
+    - ``teardown`` releases worker resources after processing stops. The default
+      does nothing; resource-owning operators should override it.
     - ``accumulator`` — returns `PassthroughAccumulator` so each upstream
       micro-batch is forwarded as one ready batch. Override to enable
       size-based per-lane batching via `CountingAccumulator` or any custom
@@ -163,6 +165,14 @@ class BaseOp(ABC):
         operator. Overrides should call ``super().setup(ctx)``.
         """
         self.stage_info = ctx.stage_info
+
+    def teardown(self) -> None:
+        """Release resources created by ``setup`` after processing stops.
+
+        Runners call this on graceful shutdown and if setup fails. Overrides
+        must tolerate partial setup and repeated calls. Forced worker
+        termination may bypass teardown.
+        """
 
     @abstractmethod
     def traits(self) -> OpTraits: ...

@@ -22,6 +22,7 @@ from zephon._internal.utils import buffered_iterable
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.base import BaseOp
+from zephon.types import StreamItem
 
 
 @dataclass
@@ -53,7 +54,10 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
         self._context_lock = threading.Lock()
+        self._execution_lock = threading.Lock()
         self._active = False
+        self._closed = False
+        self._stop_event: threading.Event | None = None
         super().__init__(
             stage,
             ctx_services,
@@ -202,9 +206,12 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         upstream_holder: dict[str, Iterator[RunnerStageIn] | None] = {"iter": None}
 
         with self._context_lock:
+            if self._closed:
+                raise RuntimeError("Stage runner is closed")
             if self._active:
                 raise RuntimeError("Stage runner already in use")
             self._active = True
+            self._stop_event = stop_event
 
         def iterator() -> Iterator[RunnerStageOut]:
             upstream_iter = iter(upstream)
@@ -223,12 +230,16 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                     batch = self._coerce_to_batch(elem)
                     if not batch:
                         continue
-                    outputs = self._process_pipeline(batch, force=False)
+                    with self._execution_lock:
+                        if self._closed:
+                            break
+                        outputs = self._process_pipeline(batch, force=False)
                     if outputs:
                         yield from self._emit_stage_output(outputs)
 
-                with shutdown_flush(enabled=stop_event.is_set()):
-                    tail = self._finalize_pipeline()
+                with self._execution_lock:
+                    with shutdown_flush(enabled=stop_event.is_set()):
+                        tail = [] if self._closed else self._finalize_pipeline()
                 if tail:
                     yield from self._emit_stage_output(tail)
             finally:
@@ -237,6 +248,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                 upstream_holder["iter"] = None
                 with self._context_lock:
                     self._active = False
+                    self._stop_event = None
 
         stream = iterator()
         if self._prefetch_capacity > 0:
@@ -254,4 +266,17 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
 
     def close(self, *, hard: bool = False) -> None:
         with self._context_lock:
-            self._active = False
+            self._closed = True
+            if self._stop_event is not None:
+                self._stop_event.set()
+        if not hard:
+            # Prefetch may execute this inline runner on a background thread.
+            # Wait for its current operator call before releasing resources.
+            with self._execution_lock:
+                self._teardown_operators()
+
+    def run_one(self, elem: RunnerStreamIn) -> StreamItem:
+        with self._execution_lock:
+            if self._closed:
+                raise RuntimeError("Stage runner is closed")
+            return super().run_one(elem)
