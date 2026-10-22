@@ -138,7 +138,7 @@ def _component_domain(record: SampleRecord) -> ComponentId:
 
 
 def _positions_from_segment_lengths(segment_lengths: Sequence[int]) -> _np.ndarray:
-    """Build a 1D ``int32`` positions array that resets to 0 at each segment.
+    """Build a 1D ``int64`` positions array that resets to 0 at each segment.
 
     Given segment lengths ``[L0, L1, ..., Lk]`` returns a flat array of length
     ``sum(Li)`` whose contents are
@@ -147,10 +147,14 @@ def _positions_from_segment_lengths(segment_lengths: Sequence[int]) -> _np.ndarr
     Downstream consumers (e.g. torchtitan's positions-based document mask)
     derive document IDs as ``cumsum(positions == 0) - 1``, so each ``0`` marks a
     fresh document boundary inside the packed bin.
+
+    int64, the dtype ``to_training`` stacks to: emitting it ready makes that a no-op,
+    where an int32 array costs a CPU cast per batch, which wakes torch's intra-op
+    thread pool and stalls a GPU-bound trainer loop for milliseconds.
     """
-    parts = [_np.arange(int(n), dtype=_np.int32) for n in segment_lengths if n > 0]
+    parts = [_np.arange(int(n), dtype=_np.int64) for n in segment_lengths if n > 0]
     if not parts:
-        return _np.empty(0, dtype=_np.int32)
+        return _np.empty(0, dtype=_np.int64)
     return _np.concatenate(parts)
 
 
