@@ -143,8 +143,11 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
 # the worker.
 # One daemon thread applies queued releases under the lock. While their session
 # remains current, queued managers still count as owners and keep its SHM names alive.
-# Pending releases are not guaranteed to finish at interpreter exit. A later
-# manager initialization prunes ownership for processes that are no longer alive.
+# All GC-triggered releases are asynchronous, including finalizers run at
+# interpreter exit. The daemon worker is not joined during shutdown, so releases
+# may remain unapplied even when the file lock is free. Explicit ``close()``
+# performs owner release synchronously. A later manager initialization prunes
+# ownership left by processes that are no longer alive.
 _deferred_releases: "queue.SimpleQueue[tuple[BaseFileLock, Path, str, str | None]]" = (
     queue.SimpleQueue()
 )
@@ -211,6 +214,8 @@ def _close_cache_manager_resources(
     busy lock, but could reenter lock bookkeeping interrupted by GC. If that call
     raised after taking the OS lock, queuing a retry could leave the lock held.
     The worker performs acquisition and release outside the finalizer.
+    GC cleanup does not wait for completion, including at interpreter exit;
+    the daemon worker is not joined during shutdown.
     Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
     the release synchronously. Local SHM handles close in either case.
     """
