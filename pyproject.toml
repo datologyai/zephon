@@ -53,9 +53,9 @@ cloud = [
     "obstore>=0.11.0",
 ]
 litdata = [
-    # 0.2.45 made torchvision (and therefore Pillow) mandatory.
-    "litdata>=0.2.44,<0.2.45; python_version < '3.11'",
-    "litdata; python_version >= '3.11'",
+    # 0.2.40 added the bool serializer; 0.2.45 made torchvision/Pillow mandatory.
+    "litdata>=0.2.40,<0.2.45; python_version < '3.11'",
+    "litdata>=0.2.40; python_version >= '3.11'",
     "pillow>=13.0.0; python_version >= '3.11'",
     "optree",
     "zstd",
@@ -104,8 +104,8 @@ test = [
     "pytest>=8.0.0",
     "mosaicml-streaming>=0.13.0; python_version >= '3.11'",
     "zstd>=1.5.0",
-    "litdata>=0.2.44,<0.2.45; python_version < '3.11'",
-    "litdata>=0.2.0; python_version >= '3.11'",
+    "litdata>=0.2.40,<0.2.45; python_version < '3.11'",
+    "litdata>=0.2.40; python_version >= '3.11'",
     "optree>=0.12.0",
     "pillow>=13.0.0; python_version >= '3.11'",
     "torchdata>=0.11.0",
