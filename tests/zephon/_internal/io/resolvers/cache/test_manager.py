@@ -1642,10 +1642,11 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An interrupted acquire can raise after taking the OS lock.
+    """GC cleanup must leave lock acquisition entirely to the release worker.
 
-    Retrying that lock on another thread then waits for a hold the finalizer
-    never released. GC cleanup must leave acquisition to the release thread.
+    The patched acquire takes the OS lock and then raises on the finalizer
+    thread. Cleanup must enqueue the release without invoking that path, and
+    the worker must complete the release with the lock available afterward.
     """
     from filelock import FileLock
 
@@ -1678,7 +1679,7 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
         with FileLock(lock.lock_file).acquire(timeout=1):
             pass
     finally:
-        # Also unblock the release worker when testing the old implementation.
+        # Prevent a failed assertion from leaving the shared release worker blocked.
         lock.release(force=True)
         _wait_for_instances(tmp_path, "owner", 0)
 
@@ -1815,7 +1816,7 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
 
     The release worker holds ``.reset.lock`` while it rewrites
     ``session.json``; an allocation there can collect another manager,
-    whose finalizer then finds the lock held by this same thread.
+    whose finalizer must enqueue another release without acquiring the lock.
     """
     cache_root, storage, loc = _single_shard_setup(tmp_path)
     survivor = _make_manager(cache_root, storage, [loc], persist_state=True)

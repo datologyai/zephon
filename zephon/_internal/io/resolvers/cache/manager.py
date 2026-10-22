@@ -134,10 +134,12 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
-# GC finalizers enqueue owner releases with reentrant ``SimpleQueue.put``.
-# Even a nonblocking FileLock acquisition can reenter interrupted bookkeeping
-# and raise after taking the OS lock, leaving it held when cleanup is deferred.
-# Keep all lock acquisition out of finalizers.
+# GC can invoke a finalizer while filelock is updating its internal state.
+# ``FileLock.acquire(timeout=0)`` avoids waiting for a busy file lock, but still
+# runs Python bookkeeping that can reenter those updates. It can raise after
+# taking the OS lock; queuing a retry after such a failure can leave the worker
+# waiting on an unreleased lock. Finalizers therefore enqueue owner releases
+# with reentrant ``SimpleQueue.put`` and leave lock acquisition to the worker.
 # One daemon thread applies queued releases under the lock. While their session
 # remains current, queued managers still count as owners and keep its SHM names alive.
 # Pending releases are not guaranteed to finish at interpreter exit. A later
@@ -203,8 +205,10 @@ def _close_cache_manager_resources(
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
 
-    GC cleanup (``blocking=False``) queues the release without touching the lock:
-    even nonblocking acquisition can reenter interrupted lock bookkeeping.
+    GC cleanup (``blocking=False``) queues owner release without acquiring
+    ``reset_lock``. Even ``acquire(timeout=0)`` runs Python lock bookkeeping:
+    reentering it from GC can raise after taking the OS lock and leave it held.
+    The worker performs acquisition and release outside the finalizer.
     Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
     the release synchronously. Local SHM handles close in either case.
     """
