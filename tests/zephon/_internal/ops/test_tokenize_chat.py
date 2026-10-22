@@ -1085,10 +1085,10 @@ def test_preflight_transfers_setup_checks_without_loading_original_tokenizer(
     from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
     from zephon import Pipeline
     from zephon._internal.utils import chat_template as module
+    from zephon._internal.utils.tokenizer import TOKENIZER_LOADERS
 
-    monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer",
-        lambda *args, **kwargs: copy.deepcopy(fast_tokenizer),
+    monkeypatch.setitem(
+        TOKENIZER_LOADERS, "hf", lambda *args, **kwargs: copy.deepcopy(fast_tokenizer)
     )
     work = FakeIndexableWorkSource(
         make_inmem_dataset("chat", [{"messages": CONVERSATION}])

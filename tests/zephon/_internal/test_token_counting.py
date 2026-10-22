@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 import pytest
 
+from tests._helpers import requires_rust_tokenize
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.token_counting import (
     FatalCountError,
@@ -19,7 +20,11 @@ from zephon._internal.token_counting import (
     choose_text_field,
     extract_text,
 )
-from zephon._internal.utils.tokenizer import fallback_tokenizer
+from zephon._internal.utils.tokenizer import (
+    TOKENIZER_LOADERS,
+    RustTokenizer,
+    fallback_tokenizer,
+)
 
 # ---------------------------------------------------------------------------
 # Delivered-token arithmetic
@@ -241,7 +246,7 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
         calls.append((tokenizer_id, use_fast))
         return fallback_tokenizer()
 
-    monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", fake_load)
     TextTokenCountingSpec(tokenizer_id="hf-model", use_fast=False).build_counter()
     assert calls == [("hf-model", False)]
 
@@ -400,3 +405,22 @@ def test_counting_spec_std_pickles_with_closure_tokenizer():
     restored = pickle.loads(pickle.dumps(spec))
     assert restored.tokenizer is not None
     assert restored.tokenizer("a b c")["input_ids"] == ["a", "b", "c"]
+
+
+@requires_rust_tokenize
+def test_rust_counts_equal_hf_through_the_op(deepseek_like_tokenizer_dir):
+    texts = ["The quick brown fox", "数据 😀 " * 20, "q <｜fim▁hole｜> z", "x"]
+    payloads = [{"text": t} for t in texts]
+
+    def counter(backend):
+        op = TokenizeText(
+            tokenizer_id=str(deepseek_like_tokenizer_dir), field="text", backend=backend
+        )
+        return op.token_counting_spec().build_counter()
+
+    rust, hf = counter("rust"), counter("hf")
+    assert isinstance(rust.tokenizer, RustTokenizer)
+    rust_plan, hf_plan = rust.plan(payloads), hf.plan(payloads)
+    assert [rust_plan.count(p) for p in payloads] == [
+        hf_plan.count(p) for p in payloads
+    ]
