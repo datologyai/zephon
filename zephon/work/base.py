@@ -71,8 +71,9 @@ class WorkChunk:
     deliver to downstream mixture correctors (``ensure_mixture``) *instead of*
     the counted composition. Token-aware work sources stamp the user's token
     mixture here because their chunks deliberately carry a different sample
-    composition (long-doc components contribute fewer pointers); the counted
-    :attr:`mixture` stays composition-derived for within-chunk interleaving.
+    composition (long-doc components contribute fewer pointers). Redistributing
+    sample sources also stamp their intended target for sparse or partial chunks.
+    The counted :attr:`mixture` stays composition-derived for within-chunk interleaving.
     Continuing sources may remove exhausted components from this target, but
     must keep their identities in :meth:`WorkSource.component_ids` for late records.
 
@@ -467,7 +468,7 @@ class WorkSource(ABC):
         return frozenset()
 
     def chunk_size_hint(self) -> int | None:
-        """Return fixed chunk size if constant.
+        """Return the configured chunk size, if known; individual chunks may be shorter.
 
         Used for deterministic resume validation. Default None.
         """

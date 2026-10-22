@@ -367,3 +367,127 @@ def test_stop_policy_keeps_strict_and_bounded_behavior(limit: int | None) -> Non
         assert Counter(text.split("-")[0] for _, text in records) == {"a": 3, "b": 3}
     else:
         assert Counter(text.split("-")[0] for _, text in records) == {"a": 3, "b": 57}
+
+
+@pytest.mark.parametrize(
+    "strict,override",
+    [
+        # Unit tests cover strict/source-target and bounded/override separately.
+        pytest.param(False, False, id="bounded-source-target"),
+        pytest.param(True, True, id="strict-override"),
+    ],
+)
+def test_static_redistribution_with_buffering_and_checkpoint(
+    strict: bool, override: bool
+) -> None:
+    """Real survivor targets and early EOD compose through shuffle, correction and replay."""
+
+    def make_pipe() -> Pipeline:
+        datasets = [
+            Dataset.from_dict(
+                name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(size)])}
+            )
+            for name, size in (("a", 3), ("b", 29))
+        ]
+        source = StaticMixtureWorkSource(
+            datasets,
+            {"a": 0.5, "b": 0.5},
+            chunk_size=4,
+            exhausted_policy="redistribute",
+            shuffle_shards=False,
+        )
+        return (
+            Pipeline(source)
+            .fetch(max_batch=4)
+            .shuffle(buffer_size=7, seed=4)
+            .ensure_mixture(
+                weight_by="samples",
+                max_buffer_size=None if strict else 16,
+                mixture={"a": 0.5, "b": 0.5} if override else None,
+            )
+            .options(
+                runner="inline",
+                canonical_replicas=1,
+                max_workers=1,
+                default_stage_prefetch=0,
+                flush_every_k_chunks=2,
+            )
+        )
+
+    baseline = [r.payload["text"] for r in make_pipe()]
+    assert len(baseline) == len(set(baseline))
+    counts = Counter(text.split("-")[0] for text in baseline)
+    if strict:
+        # Some A records miss their drain slots. Final EOD must keep all of B
+        # eligible without reopening the earlier retired A tail.
+        assert counts["b"] == 29
+        assert 0 < counts["a"] < 3
+    else:
+        assert counts == {"a": 3, "b": 29}
+        assert set(baseline) == {
+            f"{name}-{i}" for name, size in (("a", 3), ("b", 29)) for i in range(size)
+        }
+    pipe = make_pipe()
+    iterator = iter(pipe)
+    try:
+        prefix = [next(iterator).payload["text"] for _ in range(3)]
+        checkpoint = pipe.checkpoint()
+    finally:
+        iterator.close()
+    restored = make_pipe()
+    restored.restore(checkpoint)
+    assert prefix + [r.payload["text"] for r in restored] == baseline
+    finished = make_pipe()
+    finished.restore(restored.checkpoint())
+    assert list(finished) == []
+
+
+def test_short_redistribution_chunks_batch_and_resume() -> None:
+    """Monotone batching and replay use actual chunk lengths, not the size hint."""
+
+    def make_pipe() -> Pipeline:
+        datasets = [
+            Dataset.from_dict(
+                name, {0: InMemoryShard([{"text": f"{name}-{i}"} for i in range(size)])}
+            )
+            for name, size in (("a", 3), ("b", 10))
+        ]
+        return (
+            Pipeline(
+                StaticMixtureWorkSource(
+                    datasets,
+                    {"a": 0.5, "b": 0.5},
+                    chunk_size=4,
+                    exhausted_policy="redistribute",
+                    shuffle_shards=False,
+                )
+            )
+            .fetch(max_batch=4)
+            .batch(microbatch_size=3, drop_last=False)
+            .options(
+                runner="inline",
+                canonical_replicas=1,
+                max_workers=1,
+                default_stage_prefetch=0,
+            )
+        )
+
+    baseline = [[r.payload["text"] for r in batch.records] for batch in make_pipe()]
+    assert [len(batch) for batch in baseline] == [3, 3, 3, 3, 1]
+    texts = [text for batch in baseline for text in batch]
+    assert len(texts) == len(set(texts)) == 13
+    assert set(texts) == {
+        f"{n}-{i}" for n, count in (("a", 3), ("b", 10)) for i in range(count)
+    }
+
+    pipe = make_pipe()
+    iterator = iter(pipe)
+    try:
+        prefix = [[r.payload["text"] for r in next(iterator).records] for _ in range(2)]
+        checkpoint = pipe.checkpoint()
+    finally:
+        iterator.close()
+    restored = make_pipe()
+    restored.restore(checkpoint)
+    suffix = [[r.payload["text"] for r in batch.records] for batch in restored]
+    assert prefix + suffix == baseline

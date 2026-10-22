@@ -102,6 +102,19 @@ You can instead control what happens when an individual dataset runs out of samp
   Without an additional stopping limit, the work source continues indefinitely. This is
   useful when your training loop controls termination through a fixed number of steps or
   tokens.
+- `exhausted_policy="redistribute"` reads each dataset once. When a dataset runs out,
+  its weight is redistributed proportionally over the remaining datasets. The work source
+  stops once every dataset has been consumed. In token mode, the remaining datasets keep
+  their relative token weights. Chunks can be shorter when a dataset runs out.
+  Empty datasets are allowed as long as at least one dataset has samples.
+
+A short chunk keeps the target from before exhaustion; its contents may differ.
+For example, in sample mode with a 50:50 A:B mixture and chunk size 4, if only one A
+remains, the chunk contains one A and two B, still with a 50:50 target. Later chunks
+use a 100% B target.
+
+With redistribution, `len(source)` is exact when every dataset redistributes. When mixed
+with stop or capped-repeat policies, it is an estimate.
 
 With `exhausted_policy="repeat"`, you can also set `max_repeats=N`. This allows each
 dataset its initial pass plus at most `N` additional passes. The entire WorkSource stops
@@ -123,6 +136,7 @@ replaces this default stopping behavior. Assuming you don't set `max_repeats`:
 | Nothing | `"repeat"` | `1` | Once every dataset has completed at least one pass |
 | Only `exhausted_policy="repeat"` | `"repeat"` | `None` | Never automatically; datasets repeat indefinitely |
 | Only `exhausted_policy="stop"` | `"stop"` | `None` | When any dataset cannot supply its next allocation, no repeats |
+| Only `exhausted_policy="redistribute"` | `"redistribute"` | `None` | Once every dataset has been consumed, no repeats |
 | Only `stop_after_passes=N` | `"repeat"` | `N` | Once every dataset has completed at least `N` passes |
 
 The `exhausted_policy`, `max_repeats`, and `reshuffle_on_repeat` settings can each be
@@ -132,3 +146,7 @@ configured per-`Dataset` to allow for more complex training plans:
 :language: python
 :caption: examples/guide/worksources/per_dataset_repeat_settings.py
 ```
+
+A redistributing dataset leaves the mix when it runs out. Other datasets retain their
+own policies: a `"stop"` dataset or a reached repeat cap still stops the entire source,
+while uncapped repeats can keep it running indefinitely.

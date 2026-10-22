@@ -1062,8 +1062,8 @@ class Pipeline:
         in this lane; buffered records may still arrive. For components listed by
         ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
         target, including explicit overrides, and renormalizes the remaining weights.
-        ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
-        in both modes.
+        ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
+        Late records follow ``obsolete_drain_rate`` in both modes.
         The final EOD leaves the target unchanged. Previously retired components
         continue through controlled drainage to avoid a burst of buffered records
         at final EOD.
