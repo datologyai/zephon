@@ -945,7 +945,7 @@ def test_bfw_flat_flush_pads_tail_instead_of_dropping() -> None:
     assert not rec.meta.tombstone
     assert rec.payload["input_ids"] == [1, 2, 3, 11, 12, 99, 99, 99]
     np.testing.assert_array_equal(
-        rec.payload["positions"], np.array([0, 1, 2, 0, 1, 0, 1, 2], dtype=np.int32)
+        rec.payload["positions"], np.array([0, 1, 2, 0, 1, 0, 1, 2], dtype=np.int64)
     )
     assert rec.meta.padding_length == 3
     assert not acc.has_pending_data()
@@ -1214,7 +1214,7 @@ def test_flat_first_best_pads_and_resets_positions(algorithm: str) -> None:
     # 3 + 2 real, padded to 8; positions reset per doc, pad tail is its own doc.
     assert record.payload["input_ids"] == [10, 11, 12, 20, 21, 999, 999, 999]
     np.testing.assert_array_equal(
-        record.payload["positions"], np.array([0, 1, 2, 0, 1, 0, 1, 2], dtype=np.int32)
+        record.payload["positions"], np.array([0, 1, 2, 0, 1, 0, 1, 2], dtype=np.int64)
     )
     # Efficiency uses real (non-pad) tokens.
     meta = record.meta.tags["_packing_metadata"]
@@ -1233,7 +1233,7 @@ def test_flat_wrap_no_padding() -> None:
     assert "packed_samples" not in record.payload
     assert record.payload["input_ids"] == [1, 2, 3, 4, 5, 6, 7]
     np.testing.assert_array_equal(
-        record.payload["positions"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int32)
+        record.payload["positions"], np.array([0, 1, 2, 3, 0, 1, 2], dtype=np.int64)
     )
     assert record.meta.padding_length == 0  # wrap fills exactly
 
@@ -1247,8 +1247,21 @@ def test_flat_wrap_split_record_positions_reset_per_bin() -> None:
     assert len(ready) == 2
     for rec in _records(ready):
         np.testing.assert_array_equal(
-            rec.payload["positions"], np.array([0, 1, 2, 3], dtype=np.int32)
+            rec.payload["positions"], np.array([0, 1, 2, 3], dtype=np.int64)
         )
+
+
+def test_flat_positions_are_int64() -> None:
+    """Positions come out in the dtype to_training stacks to, so building training
+    tensors casts nothing (an int32 cast wakes torch's CPU thread pool every batch)."""
+    import numpy as np
+
+    acc = _flat(4, algorithm="wrap")
+    ready = acc.push_many([_rec_tokens(0, list(range(6))), _rec_tokens(1, [7, 8])])
+    assert [r.payload["positions"].dtype for r in _records(ready)] == [
+        np.int64,
+        np.int64,
+    ]
 
 
 @pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
