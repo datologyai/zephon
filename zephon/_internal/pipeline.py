@@ -1082,7 +1082,7 @@ class Pipeline:
                 every sample. How much is dropped depends on the stream's skew
                 and on ``flush_every_k_chunks`` (smaller → more dropped).
                 ensure_mixture is always non-monotonic, so that cadence defaults
-                to 8; in strict mode the buffer is then discarded on roughly
+                to 32; in strict mode the buffer is then discarded on roughly
                 every flush. If drops are too frequent, raise
                 ``flush_every_k_chunks`` above the default to give scarce components
                 more time to absorb the buffer (at the cost of holding more in memory

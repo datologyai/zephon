@@ -102,7 +102,7 @@ class RuntimeOptions:
     # Flush sentinel cadence: inject a flush sentinel every K chunks per lane.
     # Forces history-dependent accumulators (preserves_cursor_order=False) to flush,
     # creating clean epoch boundaries for deterministic replay after eviction.
-    # None = auto (8 for non-monotonic pipelines, 0 for monotone).
+    # None = auto (32 for non-monotonic pipelines, 0 for monotone).
     # Explicitly setting 0 for non-monotonic pipelines is an error.
     flush_every_k_chunks: int | None = None
 

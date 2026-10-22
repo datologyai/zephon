@@ -493,6 +493,13 @@ def _make_non_monotone_engine(flush_k: int | None) -> Engine:
     return Engine(plan, opts, work, spec)
 
 
+def test_flush_every_k_chunks_defaults_to_32_non_monotone() -> None:
+    """A non-monotone pipeline flushes every 32 chunks per lane unless told otherwise."""
+    eng = _make_non_monotone_engine(flush_k=None)
+    assert eng._flush_every_k_chunks == 32
+    eng.close()
+
+
 def test_flush_every_k_chunks_rejects_negative() -> None:
     """Negative flush_every_k_chunks must raise ValueError."""
     with pytest.raises(ValueError, match="non-negative integer"):

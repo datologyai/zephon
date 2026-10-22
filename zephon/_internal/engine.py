@@ -307,7 +307,7 @@ class Engine:
         # Resolve flush_every_k_chunks: auto-detect for non-monotonic pipelines.
         _flush_k = opts.flush_every_k_chunks
         if _flush_k is None:
-            self._flush_every_k_chunks: int = 0 if self._preserves_cursor_order else 8
+            self._flush_every_k_chunks: int = 0 if self._preserves_cursor_order else 32
         elif not isinstance(_flush_k, int) or _flush_k < 0:
             raise ValueError(
                 f"flush_every_k_chunks must be a non-negative integer, got {_flush_k!r}"

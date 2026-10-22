@@ -106,7 +106,7 @@ the only safe place to start a replay from, are covered in
 
 Zephon only sends flush sentinels when a `Pipeline` includes an operator that reorders or
 regroups records, like `shuffle`, `ensure_mixture`, or one of the packing operators. In
-that case, a flush will happen every eight work chunks by default, which can be modified
+that case, a flush will happen every 32 work chunks by default, which can be modified
 via `Pipeline.options(flush_every_k_chunks=...)`. Flushing less often gives the stateful
 operators more records to work with between resets and reduces the partial outputs that
 each flush produces (which are detailed on the individual operator pages in the rest of
