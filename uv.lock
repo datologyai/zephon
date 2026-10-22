@@ -15,7 +15,6 @@ resolution-markers = [
 [manifest]
 overrides = [
     { name = "paramiko", specifier = ">=5.1.0,<6" },
-    { name = "torchvision", marker = "python_full_version >= '3.11'" },
     { name = "transformers", specifier = ">=4.52.0" },
 ]
 
@@ -2649,21 +2648,50 @@ wheels = [
 
 [[package]]
 name = "litdata"
+version = "0.2.44"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "boto3", marker = "python_full_version < '3.11'" },
+    { name = "filelock", marker = "python_full_version < '3.11'" },
+    { name = "lightning-utilities", marker = "python_full_version < '3.11'" },
+    { name = "numpy", marker = "python_full_version < '3.11'" },
+    { name = "requests", marker = "python_full_version < '3.11'" },
+    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "torch", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/37/79f941be1fe0a094a89235f40847ad0374514291281e4849cd5de45e1c95/litdata-0.2.44.tar.gz", hash = "sha256:0c2ad485d4692702d97a396bfe6017f9ac2af2832bb39fae99fd49c26e207a0e", size = 160604, upload-time = "2025-03-26T16:41:03.981Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/04/942993c4ed8e353ec0b30160df61e031e3389fd66707f4d66b0588ec4c6f/litdata-0.2.44-py3-none-any.whl", hash = "sha256:1dce319af368be312c4b11250e9bdfd63cd32b993d372119915ce8dc0ac41471", size = 154768, upload-time = "2025-03-26T16:41:02.707Z" },
+]
+
+[[package]]
+name = "litdata"
 version = "0.2.76"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15' and sys_platform == 'win32'",
+    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*'",
+    "python_full_version == '3.13.*'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
+]
 dependencies = [
-    { name = "boto3" },
-    { name = "filelock" },
-    { name = "lightning-utilities" },
-    { name = "numpy" },
-    { name = "obstore" },
-    { name = "requests" },
-    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "boto3", marker = "python_full_version >= '3.11'" },
+    { name = "filelock", marker = "python_full_version >= '3.11'" },
+    { name = "lightning-utilities", marker = "python_full_version >= '3.11'" },
+    { name = "numpy", marker = "python_full_version >= '3.11'" },
+    { name = "obstore", marker = "python_full_version >= '3.11'" },
+    { name = "requests", marker = "python_full_version >= '3.11'" },
     { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "tifffile", version = "2026.9.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch" },
+    { name = "torch", marker = "python_full_version >= '3.11'" },
     { name = "torchvision", marker = "python_full_version >= '3.11'" },
-    { name = "urllib3" },
+    { name = "urllib3", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/11/1804808bc602244b7df78339fabb58e4be18f75bd803bb6f1732839e31e7/litdata-0.2.76.tar.gz", hash = "sha256:10b38e23421528ea69064836dacfe8e7ec93992d0aff392fdba716847e3a5012", size = 452469, upload-time = "2026-09-30T09:10:54.247Z" }
 wheels = [
@@ -6487,7 +6515,8 @@ lance = [
     { name = "pylance" },
 ]
 litdata = [
-    { name = "litdata" },
+    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "optree" },
     { name = "pillow", marker = "python_full_version >= '3.11'" },
     { name = "zstd" },
@@ -6528,7 +6557,8 @@ dev = [
 test = [
     { name = "attrs" },
     { name = "hypothesis" },
-    { name = "litdata" },
+    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "mosaicml-streaming", marker = "python_full_version >= '3.11'" },
     { name = "obstore" },
     { name = "optree" },
@@ -6551,7 +6581,8 @@ requires-dist = [
     { name = "filelock", specifier = ">=3.0.0" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2023.0.0" },
     { name = "huggingface-hub", marker = "extra == 'hf'", specifier = ">=0.25.0" },
-    { name = "litdata", marker = "extra == 'litdata'" },
+    { name = "litdata", marker = "python_full_version >= '3.11' and extra == 'litdata'" },
+    { name = "litdata", marker = "python_full_version < '3.11' and extra == 'litdata'", specifier = ">=0.2.44,<0.2.45" },
     { name = "mosaicml-streaming", marker = "python_full_version >= '3.11' and extra == 'streaming'" },
     { name = "msgpack", specifier = ">=1.0.0" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
@@ -6591,7 +6622,8 @@ dev = [
 test = [
     { name = "attrs", specifier = ">=21.0.0" },
     { name = "hypothesis", specifier = ">=6.100.0" },
-    { name = "litdata", specifier = ">=0.2.0" },
+    { name = "litdata", marker = "python_full_version < '3.11'", specifier = ">=0.2.44,<0.2.45" },
+    { name = "litdata", marker = "python_full_version >= '3.11'", specifier = ">=0.2.0" },
     { name = "mosaicml-streaming", marker = "python_full_version >= '3.11'", specifier = ">=0.13.0" },
     { name = "obstore", specifier = ">=0.11.0" },
     { name = "optree", specifier = ">=0.12.0" },
