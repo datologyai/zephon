@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO, Any, Mapping
 
 import pytest
-from filelock import BaseFileLock
+from filelock import BaseFileLock, FileLock
 
 import zephon._internal.io.resolvers.cache.manager as manager_mod
 from tests._catalog_helpers import catalog_set_from_locators
@@ -438,6 +438,68 @@ def test_re_resolve_recovers_if_local_file_missing(tmp_path: Path) -> None:
         stats2 = mgr.stats()
         assert stats2.shards == 1
         assert stats2.bytes_used == stats1.bytes_used
+    finally:
+        mgr.close()
+
+
+def test_cache_hit_does_not_wait_for_the_cache_lock(tmp_path: Path) -> None:
+    # Every fetch worker on a node resolves through one cache lock; a hit that
+    # took it would wait whenever any peer held it.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"h" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    peer = FileLock(str(cache_root / manager_mod._CACHE_LOCK_FILENAME))
+    try:
+        mgr.resolve(loc)
+        refs: list[LocalShardRef] = []
+        with peer:
+            hit = threading.Thread(target=lambda: refs.append(mgr.resolve(loc)))
+            hit.start()
+            hit.join(timeout=2.0)
+            assert not hit.is_alive(), "a cache hit waited for the cache lock"
+        hit.join()
+        assert (
+            refs[0].cache_hit and refs[0].raw.path == cache_root / "demo" / "shard0.bin"
+        )
+    finally:
+        mgr.close()
+
+
+def test_missing_file_stays_local_if_a_peer_restores_it(tmp_path: Path) -> None:
+    # The file is gone at the lock-free check, but a peer re-downloads it before
+    # this resolve takes the cache lock: the shard must stay LOCAL, a hit.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"r" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    cached = cache_root / "demo" / "shard0.bin"
+
+    class _PeerRestoresFirst:
+        def __init__(self, lock: Any) -> None:
+            self._lock = lock
+
+        def __enter__(self) -> Any:
+            cached.write_bytes(data)
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc: Any) -> Any:
+            return self._lock.__exit__(*exc)
+
+    try:
+        mgr.resolve(loc)
+        cached.unlink()
+        lock = mgr._cache_lock
+        mgr._cache_lock = _PeerRestoresFirst(lock)  # type: ignore[assignment]
+        try:
+            ref = mgr.resolve(loc)
+        finally:
+            mgr._cache_lock = lock
+        assert ref.cache_hit and ref.raw.path == cached
     finally:
         mgr.close()
 
