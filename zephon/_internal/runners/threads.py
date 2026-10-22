@@ -244,7 +244,8 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
-        self._submission_lock = threading.RLock()
+        self._teardown_pending = False
+        self._hard_close = False
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._queue_capacity = max(1, queue_capacity)
         super().__init__(
@@ -388,17 +389,16 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
                 outputs = instance.process_many(items)
                 return outputs, self._node_sw.elapsed(start_ns)
 
-            with self._submission_lock:
-                if self._closed:
-                    state.release_instance(instance)
-                    return
-                state.inflight.increment()
-                try:
-                    future = self._executor.submit(work, batch)
-                except BaseException:
-                    state.inflight.decrement()
-                    state.release_instance(instance)
-                    raise
+            state.inflight.increment()
+            try:
+                future = self._executor.submit(work, batch)
+            except BaseException as exc:
+                state.release_instance(instance)
+                state.inflight.decrement()
+                self._teardown_if_idle()
+                if self._closed and isinstance(exc, RuntimeError):
+                    return  # Executor shutdown rejected this submission.
+                raise
             state.pump_timer.note("batches_submitted")
 
         def done_callback(
@@ -419,7 +419,8 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             if should_put:
                 state.pending_puts.increment()
             state.inflight.decrement()
-            self._on_execution_stopped()
+            if self._teardown_pending:
+                self._teardown_if_idle()
 
             # Enqueue result (tracked by pending_puts for termination safety)
             if result is not None:
@@ -453,27 +454,30 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         future.add_done_callback(done_callback)
 
     def set_parallelism(self, op_index: int, new_parallelism: int) -> None:
-        with self._submission_lock:
-            self._check_open()
-            if op_index < 0 or op_index >= len(self.ops):
-                raise IndexError("op_index out of range")
-            target = max(1, min(new_parallelism, self._max_workers))
-            self.ops[op_index].adjust_parallelism(target)
+        self._check_open()
+        if op_index < 0 or op_index >= len(self.ops):
+            raise IndexError("op_index out of range")
+        target = max(1, min(new_parallelism, self._max_workers))
+        self.ops[op_index].adjust_parallelism(target)
 
-    def _on_execution_stopped(self) -> None:
-        if not self._closed:
-            return
-        # Serialize shutdown with submission so no new task can borrow an
-        # operator after the last in-flight call has returned its instance.
-        with self._submission_lock:
-            if all(state.inflight.is_zero() for state in self.ops):
-                self._close_local_operators()
+    def _teardown_if_idle(self) -> None:
+        # Only executor shutdown enables teardown. Close and the last completion
+        # callback use the context lock to claim it once, then release it before
+        # calling user teardown code.
+        with self._context_lock:
+            if not self._teardown_pending or any(
+                not state.inflight.is_zero() for state in self.ops
+            ):
+                return
+            self._teardown_pending = False
+        self._teardown_operators(hard=self._hard_close)
 
     def close(self, *, hard: bool = False) -> None:
-        with self._submission_lock:
+        with self._context_lock:
+            if self._closed:
+                return
             self._closed = True
             self._hard_close = hard
-        with self._context_lock:
             ctx = self._active_context
 
         if ctx is not None:
@@ -483,4 +487,5 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             self._join_threads(ctx, hard=hard)
 
         self._executor.shutdown(wait=not hard, cancel_futures=hard)
-        self._on_execution_stopped()
+        self._teardown_pending = True
+        self._teardown_if_idle()

@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import copy
 import logging
-import threading
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Iterator, Sequence, TypeVar
+from typing import Any, Callable, Generic, Sequence, TypeVar
 
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import (
@@ -420,9 +418,6 @@ class StageRunnerBase(Generic[StateT], ABC):
         if stage_output_mode not in {"microbatches", "stream_items"}:
             raise ValueError(f"Unsupported stage_output_mode '{stage_output_mode}'.")
         self._closed = False
-        self._hard_close = False
-        self._execution_lock = threading.Lock()
-        self._execution_thread_id: int | None = None
         self._stage = stage
         self._ctx_services = dict(ctx_services)
         self._max_workers = max(1, max_workers)
@@ -520,50 +515,18 @@ class StageRunnerBase(Generic[StateT], ABC):
             hard: Use short waits and defer cleanup of operators still executing.
         """
 
-    def _teardown_operators(self) -> None:
-        for state in reversed(self.ops):
-            state.teardown()
+    def _teardown_operators(self, *, hard: bool = False) -> None:
+        with cleanup_budget(hard=hard):
+            for state in reversed(self.ops):
+                state.teardown()
 
     def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError("Stage runner is closed")
 
-    @contextmanager
-    def _executing_operators(self) -> Iterator[None]:
-        try:
-            with self._execution_lock:
-                self._execution_thread_id = threading.get_ident()
-                try:
-                    yield
-                finally:
-                    self._execution_thread_id = None
-        finally:
-            self._on_execution_stopped()
-
-    def _on_execution_stopped(self) -> None:
-        if self._closed:
-            self._close_local_operators()
-
-    def _close_local_operators(self) -> None:
-        # A close requested by the active operator must wait until it returns.
-        if self._execution_thread_id == threading.get_ident():
-            return
-        if self._execution_lock.acquire(blocking=not self._hard_close):
-            self._execution_thread_id = threading.get_ident()
-            try:
-                with cleanup_budget(hard=self._hard_close):
-                    self._teardown_operators()
-            finally:
-                self._execution_thread_id = None
-                self._execution_lock.release()
-
     def run_one(self, elem: RunnerStreamIn) -> StreamItem:
+        """Evaluate synchronously; callers must not overlap this with run or close."""
         self._check_open()
-        with self._executing_operators():
-            self._check_open()
-            return self._run_one(elem)
-
-    def _run_one(self, elem: RunnerStreamIn) -> StreamItem:
         if not self.ops:
             if not isinstance(elem, (SampleRecord, SampleBatch)):
                 raise TypeError(

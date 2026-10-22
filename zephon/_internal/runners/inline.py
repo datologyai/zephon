@@ -4,6 +4,7 @@
 """Inline stage runner that executes operators synchronously."""
 
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 
@@ -22,6 +23,7 @@ from zephon._internal.utils import buffered_iterable
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.base import BaseOp
+from zephon.types import StreamItem
 
 
 @dataclass
@@ -53,6 +55,9 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
         self._context_lock = threading.Lock()
+        self._execution_lock = threading.Lock()
+        self._execution_thread_id: int | None = None
+        self._hard_close = False
         self._active = False
         self._stop_event: threading.Event | None = None
         super().__init__(
@@ -260,6 +265,23 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
             )
         return stream
 
+    @contextmanager
+    def _executing_operators(self) -> Iterator[None]:
+        with self._execution_lock:
+            self._execution_thread_id = threading.get_ident()
+            try:
+                yield
+            finally:
+                try:
+                    if self._closed:
+                        self._teardown_operators(hard=self._hard_close)
+                finally:
+                    self._execution_thread_id = None
+
+    def run_one(self, elem: RunnerStreamIn) -> StreamItem:
+        with self._executing_operators():
+            return super().run_one(elem)
+
     def close(self, *, hard: bool = False) -> None:
         with self._context_lock:
             self._closed = True
@@ -268,4 +290,12 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                 self._stop_event.set()
         # Prefetch can execute inline operators on a background thread. Hard
         # close cleans up immediately when idle; an active call cleans up on return.
-        self._close_local_operators()
+        if self._execution_thread_id == threading.get_ident():
+            return  # The active call performs teardown after processing returns.
+        if self._execution_lock.acquire(blocking=not hard):
+            self._execution_thread_id = threading.get_ident()
+            try:
+                self._teardown_operators(hard=hard)
+            finally:
+                self._execution_thread_id = None
+                self._execution_lock.release()
