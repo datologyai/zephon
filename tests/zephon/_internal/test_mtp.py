@@ -901,3 +901,33 @@ class TestRestoreValidation:
         pipe.restore(_fake_ckpt())
 
         assert called == [1]
+
+
+def _hub_freeze_count(record: dict) -> dict:
+    import gc
+
+    return {**record, "frozen": gc.get_freeze_count()}
+
+
+def test_hub_freezes_its_objects_after_the_first_item() -> None:
+    """Full GC passes in the hub skip what the built pipeline holds: items computed
+    after the first delivery see far more frozen objects than the first item did (the
+    interpreter may start with a few frozen already)."""
+    rows = [{"text": f"row-{i}"} for i in range(1024)]
+    ws = FakeIndexableWorkSource(make_inmem_dataset("test", rows), chunk_size=8)
+    pipe = (
+        PublicPipeline(ws)
+        .decode_text()
+        .map_transform(_hub_freeze_count)
+        .options(
+            deterministic=True,
+            runner="threads",
+            max_workers=1,
+            default_stage_prefetch=0,
+            prefetch_batches=0,
+            mtp_mode=True,
+            mtp_buffer=2,
+        )
+    )
+    frozen = [item.payload["frozen"] for item in pipe]
+    assert frozen[-1] > frozen[0] + 1000
