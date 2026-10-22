@@ -3081,10 +3081,22 @@ def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
 def test_mixed_stop_rolls_back_an_unfinished_chunk(mode: str) -> None:
     source = _mixture_source(
+        mode, {"a": 5, "b": 3}, exhausted_policy={"a": "redistribute", "b": "stop"}
+    ).clone_for_lane(0, 1)
+    assert source.next_chunk() is not None
+    before = source.state_dict()
+    assert source.next_chunk() is None
+    assert source.state_dict() == before
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_mixed_stop_cannot_produce_first_chunk(mode: str) -> None:
+    source = _mixture_source(
         mode, {"a": 5, "b": 1}, exhausted_policy={"a": "redistribute", "b": "stop"}
     ).clone_for_lane(0, 1)
     before = source.state_dict()
-    assert source.next_chunk() is None
+    with pytest.raises(ValueError, match="Cannot produce the first chunk"):
+        source.next_chunk()
     assert source.state_dict() == before
 
 
@@ -3138,19 +3150,21 @@ def test_redistribute_discards_retired_fractional_debt() -> None:
         pytest.param("tokens", {"a": "redistribute", "b": "stop"}, id="mixed-stop"),
     ],
 )
-def test_empty_stop_component_keeps_its_policy(
+def test_empty_stop_component_raises_at_construction(
     mode: str, policy: str | dict[str, str]
 ) -> None:
-    with pytest.warns(RuntimeWarning, match="Dataset 'b' has 0 samples.*stop"):
-        source = _mixture_source(
-            mode, {"a": 5, "b": 0}, exhausted_policy=policy
-        ).clone_for_lane(0, 1)
-    assert len(source) == 0
-    assert source.next_chunk() is None
-    checkpoint = source.state_dict()
-    source.load_state_dict(checkpoint)
-    assert source.next_chunk() is None
-    assert source.state_dict() == checkpoint
+    with pytest.raises(ValueError, match="Dataset 'b' has 0 samples.*stop"):
+        _mixture_source(mode, {"a": 5, "b": 0}, exhausted_policy=policy)
+
+
+def test_empty_stop_component_with_tiny_weight_raises_at_construction() -> None:
+    with pytest.raises(ValueError, match="Dataset 'b' has 0 samples.*stop"):
+        _mixture_source(
+            "samples",
+            {"a": 5, "b": 0},
+            {"a": 0.999999, "b": 0.000001},
+            exhausted_policy="stop",
+        )
 
 
 @pytest.mark.parametrize(
@@ -3188,26 +3202,73 @@ def test_mixture_dict_order_does_not_change_redistribution(mode: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["samples", "tokens"])
-def test_all_redistributing_components_initially_empty(mode: str) -> None:
-    source = _mixture_source(mode, {"a": 0, "b": 0}).clone_for_lane(0, 1)
-    assert len(source) == 0
-    assert source.next_chunk() is None
-    checkpoint = source.state_dict()
-    source.load_state_dict(checkpoint)
-    assert source.next_chunk() is None
-    assert source.state_dict() == checkpoint
+def test_all_redistributing_components_initially_empty_raise(mode: str) -> None:
+    with pytest.raises(ValueError, match="At least one dataset must contain samples"):
+        _mixture_source(mode, {"a": 0, "b": 0})
 
 
-def test_all_empty_stop_components_warn_and_terminate() -> None:
-    with pytest.warns(RuntimeWarning, match="has 0 samples.*stop") as caught:
-        source = _mixture_source(
-            "samples", {"a": 0, "b": 0}, exhausted_policy="stop"
-        ).clone_for_lane(0, 1)
-    assert len(caught) == 2
-    assert len(source) == 0
+def test_all_empty_token_components_raise_before_priming() -> None:
+    with pytest.raises(ValueError, match="At least one dataset must contain samples"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 0), make_dataset("b", 0)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=4,
+            exhausted_policy="repeat",
+            token_estimation=TokenEstimation(primer=1.0),
+        )
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_stop_cannot_produce_first_chunk(mode: str) -> None:
+    template = _mixture_source(mode, {"a": 5, "b": 1}, exhausted_policy="stop")
+    source = template.clone_for_lane(0, 1)
     before = source.state_dict()
-    assert source.next_chunk() is None
+    with pytest.raises(ValueError, match="Cannot produce the first chunk"):
+        source.next_chunk()
     assert source.state_dict() == before
+
+    restored = template.clone_for_lane(0, 1)
+    restored.load_state_dict(before)
+    with pytest.raises(ValueError, match="Cannot produce the first chunk"):
+        restored.next_chunk()
+    assert restored.state_dict() == before
+
+
+def test_stop_zero_length_estimate_can_still_produce_a_chunk() -> None:
+    source = _mixture_source(
+        "samples",
+        {"a": 10, "b": 1},
+        {"a": 0.7, "b": 0.3},
+        exhausted_policy="stop",
+    ).clone_for_lane(0, 1)
+    assert len(source) == 0
+    chunk = source.next_chunk()
+    assert chunk is not None
+    assert {name: len(samples) for name, samples in chunk.components.items()} == {
+        "a": 3,
+        "b": 1,
+    }
+    assert source.next_chunk() is None
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_terminal_stop_and_empty_lane_survive_restore(mode: str) -> None:
+    template = _mixture_source(
+        mode, {"a": 2, "b": 2}, exhausted_policy="stop", lane_assignment="modulo"
+    )
+    # The sole global chunk belongs to lane 0; lane 1 has no local output.
+    for lane in (0, 1):
+        source = template.clone_for_lane(lane, 2)
+        first = source.next_chunk()
+        assert (first is not None) == (lane == 0)
+        before = source.state_dict()
+        assert source.next_chunk() is None
+        assert source.state_dict() == before
+
+        restored = template.clone_for_lane(lane, 2)
+        restored.load_state_dict(before)
+        assert restored.next_chunk() is None
+        assert restored.state_dict() == before
 
 
 @pytest.mark.parametrize(
