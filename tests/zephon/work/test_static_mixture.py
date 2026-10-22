@@ -2921,32 +2921,39 @@ def test_all_empty_token_components_raise_before_priming() -> None:
         )
 
 
-@pytest.mark.parametrize("mode", ["samples", "tokens"])
+@pytest.mark.parametrize("mode", ["samples", "tokens", "legacy"])
 def test_stop_cannot_produce_first_chunk(mode: str) -> None:
     template = _mixture_source(mode, {"a": 5, "b": 1}, exhausted_policy="stop")
     source = template.clone_for_lane(0, 1)
+    if mode == "legacy":
+        checkpoint = source.state_dict()
+        checkpoint["allocation_mode"] = "legacy_fixed"
+        checkpoint["accumulators"] = None
+        source.load_state_dict(checkpoint)
     before = source.state_dict()
-    with pytest.raises(ValueError, match="Cannot produce the first chunk"):
+    with pytest.raises(ValueError, match="Cannot produce the first chunk.*dataset 'b'"):
         source.next_chunk()
     assert source.state_dict() == before
 
     restored = template.clone_for_lane(0, 1)
     restored.load_state_dict(before)
-    with pytest.raises(ValueError, match="Cannot produce the first chunk"):
+    with pytest.raises(ValueError, match="Cannot produce the first chunk.*dataset 'b'"):
         restored.next_chunk()
     assert restored.state_dict() == before
 
 
-def test_stop_zero_length_estimate_can_still_produce_a_chunk() -> None:
+def test_stop_can_produce_a_chunk_despite_small_length_estimate() -> None:
     source = _mixture_source(
         "samples",
         {"a": 10, "b": 1},
         {"a": 0.7, "b": 0.3},
         exhausted_policy="stop",
     ).clone_for_lane(0, 1)
-    assert len(source) == 0
+    estimate = len(source)
     chunk = source.next_chunk()
     assert chunk is not None
+    # Allow an exact estimate if the current underestimation is fixed.
+    assert 0 <= estimate <= len(chunk)
     assert {name: len(samples) for name, samples in chunk.components.items()} == {
         "a": 3,
         "b": 1,

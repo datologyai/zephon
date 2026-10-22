@@ -955,6 +955,8 @@ class AllocationStrategy(ABC):
 
     def __init__(self, config: _AllocationConfig) -> None:
         self._config = config
+        # Diagnostic only, read if the first global chunk fails; not checkpointed.
+        self.last_failed_component: str | None = None
 
     @abstractmethod
     def produce(
@@ -1245,6 +1247,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                 quota = quotas[name]
                 cursor = cursors[name]
                 if cursor.remaining < quota:
+                    self.last_failed_component = name
                     if cfg.exhausted_policy[name] == "repeat":
                         ds_max = cfg.max_repeats[name]
                         # Roll back this chunk's accumulator advance before any
@@ -1448,6 +1451,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
             quota = self._chunk_quota[name]
             cursor = cursors[name]
             if cursor.remaining < quota:
+                self.last_failed_component = name
                 if cfg.exhausted_policy[name] == "repeat":
                     ds_max = cfg.max_repeats[name]
                     if ds_max is not None and cursor._epoch >= ds_max:
@@ -1672,6 +1676,7 @@ class TokenAwareStrategy(AllocationStrategy):
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
+                    self.last_failed_component = name
                     # Roll back the partial attempt before deciding whether this
                     # is a repeat retry or a fixed-point terminal state.
                     self._restore(cursors, snapshot)
@@ -2327,10 +2332,12 @@ class StaticMixtureWorkSource(WorkSource):
                 # Count global chunks, not this lane's output: a valid source
                 # can finish before assigning any chunks to this lane.
                 if self._global_chunk_index == 0:
+                    name = self._strategy.last_failed_component
+                    dataset = f"dataset {name!r}" if name is not None else "a dataset"
                     raise ValueError(
                         "Cannot produce the first chunk "
                         f"(chunk_size={self._alloc_config.chunk_size}): "
-                        "a dataset cannot supply its requested allocation. "
+                        f"{dataset} cannot supply its requested allocation. "
                         "Reduce chunk_size or adjust the mixture or exhaustion policies."
                     )
                 return None
