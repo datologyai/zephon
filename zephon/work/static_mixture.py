@@ -1003,6 +1003,8 @@ class AllocationStrategy(ABC):
 
     def __init__(self, config: _AllocationConfig) -> None:
         self._config = config
+        # Diagnostic only, read if the first global chunk fails; not checkpointed.
+        self.last_failed_component: str | None = None
         self._redistributing = config.redistributing
 
     def _active_weights(
@@ -1347,6 +1349,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                 quota = quotas.get(name, 0)
                 cursor = cursors[name]
                 if cursor.remaining < quota:
+                    self.last_failed_component = name
                     if cfg.exhausted_policy[name] == "redistribute":
                         # Clamp only this quota; keep the other allocations intact.
                         # The short chunk keeps the old target; renormalize the next.
@@ -1559,6 +1562,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
             quota = self._chunk_quota[name]
             cursor = cursors[name]
             if cursor.remaining < quota:
+                self.last_failed_component = name
                 if cfg.exhausted_policy[name] == "repeat":
                     ds_max = cfg.max_repeats[name]
                     if ds_max is not None and cursor._epoch >= ds_max:
@@ -1785,6 +1789,7 @@ class TokenAwareStrategy(AllocationStrategy):
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
+                    self.last_failed_component = name
                     if cfg.exhausted_policy[name] == "redistribute":
                         # Commit this tail before removing the component from the
                         # next target. Stop/repeat still roll back whole attempts.
@@ -2471,10 +2476,12 @@ class StaticMixtureWorkSource(WorkSource):
                 # Count global chunks, not this lane's output: a valid source
                 # can finish before assigning any chunks to this lane.
                 if self._global_chunk_index == 0:
+                    name = self._strategy.last_failed_component
+                    dataset = f"dataset {name!r}" if name is not None else "a dataset"
                     raise ValueError(
                         "Cannot produce the first chunk "
                         f"(chunk_size={self._alloc_config.chunk_size}): "
-                        "a dataset cannot supply its requested allocation. "
+                        f"{dataset} cannot supply its requested allocation. "
                         "Reduce chunk_size or adjust the mixture or exhaustion policies."
                     )
                 return None
