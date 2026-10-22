@@ -2112,7 +2112,8 @@ def test_process_runner_worker_exit_is_visible_despite_helper_subprocess(
         runner.close()
 
 
-def test_close_releases_operator_resources(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_releases_operator_resources(tmp_path: Path, hard: bool) -> None:
     runner = ProcessStageRunner(
         _resource_stage(_ResourceOp(tmp_path)),
         _ctx_services(),
@@ -2124,9 +2125,14 @@ def test_close_releases_operator_resources(tmp_path: Path) -> None:
     try:
         assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
     finally:
-        runner.close()
-    runner.close()
+        runner.close(hard=hard)
+    runner.close(hard=hard)
 
     assert instances and all(op.resource is None for op in instances)
     assert not list(tmp_path.glob("*.live"))
     assert len(list(tmp_path.glob("*.closed"))) == 2
+
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        runner.run_one(_mk_record(1))
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        list(runner.run(_mk_records([1])))

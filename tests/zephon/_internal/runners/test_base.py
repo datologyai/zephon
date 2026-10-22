@@ -19,6 +19,7 @@ from zephon._internal.engine import Engine
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.pack_sequences import PackSequences
+from zephon._internal.runners.base import BaseOperatorState
 from zephon._internal.runners.inline import InlineStageRunner
 from zephon.ops.accumulators.base import Accumulator, ReadyBatch, SourceExhaustion
 from zephon.ops.base import BaseOp, OpContext
@@ -807,3 +808,35 @@ def test_teardown_failure_does_not_skip_remaining_operators(
     assert len(list(tmp_path.glob("*.closed"))) == 2
     assert "Failed to tear down operator FailingTeardownOp" in caplog.text
     assert "teardown failed" in caplog.text
+
+
+def test_final_component_survives_flush_and_is_reconstructed_after_reset() -> None:
+    state = BaseOperatorState(
+        node=Node(name="hook", op=_StallTrackingOp()),
+        deterministic=True,
+        ctx_proto={},
+    )
+    notice = SampleRecord(
+        meta=SampleMeta(
+            sample_id=(0, 0, 0),
+            lane_id=3,
+            chunk_id=0,
+            tags={
+                "_source_exhausted": 2,
+                "_source_exhaustion_continues": True,
+                "_source_exhaustion_final": True,
+            },
+        ),
+        payload=None,
+    )
+    state.enqueue([notice])
+    expected = SourceExhaustion(frozenset({2}), frozenset({2}), 2)
+    assert state._get_source_exhaustion(3) == expected
+    state.enqueue([_flush_sentinel(lane_id=3)])
+    assert state._get_source_exhaustion(3) == expected
+    assert state._get_source_exhaustion(4) == SourceExhaustion()
+
+    state.reset_buffers()
+    assert state._get_source_exhaustion(3) == SourceExhaustion()
+    state.enqueue([notice])
+    assert state._get_source_exhaustion(3) == expected

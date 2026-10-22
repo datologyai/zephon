@@ -40,6 +40,7 @@ from zephon._internal.io.types import (
     ShardLocator,
 )
 from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon._internal.utils.cleanup import remaining_cleanup_timeout
 from zephon._internal.utils.compression import decompress_file
 from zephon._internal.utils.disk import check_cache_disk_space
 
@@ -134,20 +135,16 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
-# GC finalizers enqueue owner releases with reentrant ``SimpleQueue.put``.
-# It might seem reasonable to try ``FileLock.acquire(timeout=0)`` in a finalizer
-# to release ownership immediately when the lock is free. However, GC can interrupt
-# filelock's internal bookkeeping, so that call could reenter unfinished updates
-# and raise after taking the OS lock. Queuing a retry then could leave the worker
-# waiting on a lock the finalizer never releases. File locking therefore runs on
-# the worker.
-# One daemon thread applies queued releases under the lock. While their session
-# remains current, queued managers still count as owners and keep its SHM names alive.
-# All GC-triggered releases are asynchronous, including finalizers run at
-# interpreter exit. The daemon worker is not joined during shutdown, so releases
-# may remain unapplied even when the file lock is free. Explicit ``close()``
-# performs owner release synchronously. A later manager initialization prunes
-# ownership left by processes that are no longer alive.
+# GC finalizers only enqueue owner releases with reentrant SimpleQueue.put.
+# It might seem reasonable to acquire with timeout=0, but acquire() can raise
+# after taking the native lock. Enqueueing another acquisition would
+# then make the worker wait on that unreleased hold. Keep file locking out of
+# GC callbacks; the worker acquires and releases the lock in normal execution.
+# Queued managers remain owners of their session until the release is applied.
+# The daemon worker is not joined at interpreter exit, so queued releases may
+# remain unapplied even when the lock is free. Explicit close attempts release
+# synchronously within its cleanup budget. Later initialization prunes owners
+# whose processes have exited.
 _deferred_releases: "queue.SimpleQueue[tuple[BaseFileLock, Path, str, str | None]]" = (
     queue.SimpleQueue()
 )
@@ -209,23 +206,33 @@ def _close_cache_manager_resources(
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
 
-    GC cleanup (``blocking=False``) queues owner release without acquiring
-    ``reset_lock``. Trying ``acquire(timeout=0)`` here would avoid waiting for a
-    busy lock, but could reenter lock bookkeeping interrupted by GC. If that call
-    raised after taking the OS lock, queuing a retry could leave the lock held.
-    The worker performs acquisition and release outside the finalizer.
-    GC cleanup does not wait for completion, including at interpreter exit;
-    the daemon worker is not joined during shutdown.
-    Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
-    the release synchronously. Local SHM handles close in either case.
+    GC cleanup only enqueues ownership release; see the note on
+    ``_deferred_releases``. Explicit close attempts the release synchronously,
+    deferring only if lock acquisition times out. Local SHM handles close in
+    either case. The last owner release unlinks the session's SHM names.
     """
-    with contextlib.suppress(Exception):
-        if blocking:
-            _release_session_owner(reset_lock, session_path, owner_key, session_id)
-        else:
+    try:
+        if not blocking:
             _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
-    if shared is not None:
-        shared.close()
+        elif not _release_session_owner(
+            reset_lock,
+            session_path,
+            owner_key,
+            session_id,
+            timeout=remaining_cleanup_timeout(),
+        ):
+            _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
+            logger.warning(
+                "Cache owner release deferred after lock timeout: %s", session_path
+            )
+    except Exception:
+        # A release may already have changed ownership. Do not retry arbitrary
+        # failures: decrementing the instance count twice can remove a live owner.
+        if blocking:
+            logger.exception("Failed to release cache ownership: %s", session_path)
+    finally:
+        if shared is not None:
+            shared.close()
 
 
 def _release_session_owner(
@@ -233,9 +240,22 @@ def _release_session_owner(
     session_path: Path,
     owner_key: str,
     session_id: str | None,
-) -> None:
-    with reset_lock:
+    *,
+    timeout: float = -1,
+) -> bool:
+    """Release ownership, returning False only for a timeout before acquisition."""
+    try:
+        acquired = reset_lock.acquire(timeout=timeout)
+    except BaseException as exc:
+        held = reset_lock.is_locked
+        if held:
+            reset_lock.release(force=True)
+        if isinstance(exc, FileLockTimeout) and not held:
+            return False
+        raise
+    with acquired:
         _release_session_owner_locked(session_path, owner_key, session_id)
+    return True
 
 
 def _release_session_owner_locked(
@@ -822,8 +842,8 @@ class CacheManager(ShardResolver):
 
     def close(self) -> None:
         # Detach the finalizer so repeated close() calls and later GC cannot
-        # release this manager twice. Explicit close waits for the session lock
-        # and attempts the owner release before returning.
+        # release this manager twice. Attempt release synchronously, deferring
+        # only if the session lock is unavailable within the cleanup budget.
         detached = self._close_finalizer.detach()
         if detached is not None:
             _, _, args, _ = detached

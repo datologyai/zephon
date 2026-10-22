@@ -152,6 +152,14 @@ These last two can be the cause of some confusion, as they may feel quite simila
 used for configuration. `setup` runs once per worker, which is e.g. where we can load our
 model.
 
+Override `teardown()` to release resources acquired in `setup()`. Runners call it
+when closing and when setup fails, so it must tolerate partial setup and
+repeated calls. The default does nothing. Hard shutdown cleans up idle operators;
+active local calls defer cleanup until they return, and forcibly terminated workers
+may never run the hook. Cache ownership release waits only within its cleanup
+budget and falls back to queued cleanup on lock contention. Automatic GC cleanup
+is asynchronous and is not guaranteed to finish at interpreter exit.
+
 Once we have defined our subclass, we can pass it on by passing an instance:
 
 ```{literalinclude} ../../../examples/guide/pipelines/add_op_instance.py
@@ -230,8 +238,8 @@ of the remaining components. An EOD sentinel lets it do this before records carr
 updated target arrive. It also works when the operator has an explicit `mixture`
 override instead of following the source's target. It only relaxes the target for
 components listed in `WorkSource.continues_after_exhaustion()`. The built-in
-`StaticMixtureWorkSource` leaves this empty, so EOD sentinels do not relax mixture
-enforcement under its stop or repeat policies.
+`StaticMixtureWorkSource` lists components with `exhausted_policy="redistribute"`.
+EOD sentinels do not relax mixture enforcement under its stop or repeat policies.
 
 There is one catch: A can still have records buffered upstream, for example in a shuffle
 or packer. Those records may reach your operator after the sentinel, so you still need to

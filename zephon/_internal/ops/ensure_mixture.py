@@ -382,11 +382,12 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         """Remove an exhausted component from the target if source policy allows."""
         if self._get_source_exhaustion is None:
             return []
-        exhausted = self._get_source_exhaustion(lane_id).continuing
-        if component_id not in exhausted:
+        exhaustion = self._get_source_exhaustion(lane_id)
+        if component_id not in exhaustion.continuing:
             return []
         state = self._lanes[lane_id]
-        state.removed_by_exhaustion = exhausted
+        state.removed_by_exhaustion = self._exhaustion_removals(exhaustion)
+        # The final EOD leaves the target unchanged; earlier EODs remove a weight.
         if state.swrr is not None:
             self._set_target(state, state.swrr.target_ratios)
         # Release buffered survivors now; there may be no further input.
@@ -532,11 +533,20 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
             for cid, count in meta.component_sample_counts.items()
         }
 
+    @staticmethod
+    def _exhaustion_removals(exhaustion: SourceExhaustion) -> frozenset[int]:
+        """Exclude the final source component from EOD-driven target removals."""
+        if exhaustion.final_component is not None:
+            # The runner retains this lane's final component across epoch resets
+            # and reconstructs it on replay, including when its EOD overtook data.
+            return exhaustion.continuing - {exhaustion.final_component}
+        return exhaustion.continuing
+
     def _update_lane_swrr(self, lane_id: int, chunk_id: int, state: _LaneState) -> None:
         """Adopt the operator override, or the chunk target if no override is set."""
         if state.removed_by_exhaustion is None:
             state.removed_by_exhaustion = (
-                self._get_source_exhaustion(lane_id).continuing
+                self._exhaustion_removals(self._get_source_exhaustion(lane_id))
                 if self._get_source_exhaustion is not None
                 else frozenset()
             )
@@ -553,6 +563,7 @@ class EnsureMixtureAccumulator(Accumulator[SampleRecord]):
         if target is None:
             state.swrr = None  # No target configured: unrestricted output.
         else:
+            # Only remove weights: never add a component excluded by an override.
             target = {
                 cid: weight
                 for cid, weight in target.items()
@@ -900,8 +911,11 @@ class EnsureMixture(BaseOp):
     in this lane; buffered records may still arrive. For components listed by
     ``WorkSource.continues_after_exhaustion()``, this removes their weight from the
     target, including explicit overrides, and renormalizes the remaining weights.
-    ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
-    in both modes.
+    ``StaticMixtureWorkSource`` lists components with ``exhausted_policy="redistribute"``.
+    Late records follow ``obsolete_drain_rate`` in both modes.
+    The final EOD leaves the target unchanged. Previously retired components
+    continue through controlled drainage to avoid a burst of buffered records
+    at final EOD.
 
     Adaptive behavior:
     - Interleaved input (A,B,A,B,...): Low latency, immediate emission

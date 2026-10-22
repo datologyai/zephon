@@ -169,9 +169,10 @@ class BaseOp(ABC):
     def teardown(self) -> None:
         """Release resources created by ``setup`` after processing stops.
 
-        Runners call this on graceful shutdown and if setup fails. Overrides
-        must tolerate partial setup and repeated calls. Forced worker
-        termination may bypass teardown.
+        Runners call this when closing and if setup fails. Hard shutdown
+        may defer local cleanup until an active call returns; forced worker
+        termination may bypass it. Overrides must tolerate partial setup and
+        repeated calls.
         """
 
     @abstractmethod

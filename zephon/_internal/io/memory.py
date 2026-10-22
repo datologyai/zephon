@@ -32,4 +32,4 @@ class InMemoryMultiDatasetStore(MultiDatasetShardStore):
         return self._datasets[dataset_id]
 
     def close(self) -> None:
-        """Leave borrowed in-memory shard views available to their owners."""
+        """No-op: in-memory shards are owned by the caller."""

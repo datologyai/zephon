@@ -1,5 +1,8 @@
+import threading
 from pathlib import Path
 from typing import Iterable
+
+import pytest
 
 from tests.zephon._internal.runners._helpers import (
     _assert_close_waits_for_operator_execution,
@@ -172,7 +175,8 @@ def test_inline_runner_collect_stats_flag_reaches_ops() -> None:
     assert out.payload["probe"] == (0, "probe_stage", 0, True)
 
 
-def test_close_releases_operator_resources(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_releases_operator_resources(tmp_path: Path, hard: bool) -> None:
     runner = InlineStageRunner(
         _resource_stage(_ResourceOp(tmp_path)),
         _ctx_services(),
@@ -184,13 +188,51 @@ def test_close_releases_operator_resources(tmp_path: Path) -> None:
     try:
         assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
     finally:
-        runner.close()
-    runner.close()
+        runner.close(hard=hard)
+    runner.close(hard=hard)
 
     assert instances and all(op.resource is None for op in instances)
     assert not list(tmp_path.glob("*.live"))
     assert len(list(tmp_path.glob("*.closed"))) == 1
 
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        runner.run_one(_mk_record(1))
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        list(runner.run(_mk_records([1])))
 
-def test_close_waits_for_operator_execution() -> None:
-    _assert_close_waits_for_operator_execution(InlineStageRunner)
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_waits_for_operator_execution(hard: bool) -> None:
+    _assert_close_waits_for_operator_execution(InlineStageRunner, hard=hard)
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_from_active_operator_defers_teardown(tmp_path: Path, hard: bool) -> None:
+    class ClosingOp(_ResourceOp):
+        def process_many(self, elems):
+            runner.close(hard=hard)
+            assert self.resource is not None
+            return super().process_many(elems)
+
+    runner = InlineStageRunner(
+        _resource_stage(ClosingOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            assert list(runner.run(_mk_records([1]))) == _mk_records([1])
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=consume, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "close must not wait on its own active operator"
+    assert not errors
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1

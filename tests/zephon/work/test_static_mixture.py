@@ -1,5 +1,8 @@
+import math
 import pickle
 import random
+import warnings
+from collections import Counter
 from typing import Any
 
 import numpy as np
@@ -11,6 +14,7 @@ from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     MixtureSpec,
     StaticMixtureWorkSource,
+    WorkChunk,
 )
 from zephon.work.static_mixture import (
     _AUTO_BLOCK_SIZE_FACTOR,
@@ -480,11 +484,9 @@ def test_shuffle_block_size_auto_with_all_empty_datasets_raises_clearly() -> Non
 
 
 def test_shuffle_block_size_none_with_all_empty_datasets_raises_clear_error() -> None:
-    """No sentinel involved: the empty-shard-list case must still fail loudly,
-    via the standard 'No datasets with positive weight' guard rather than a
-    confusing 'max() iterable argument is empty'."""
+    """The default repeat policy rejects empty inputs through its liveness guard."""
     empty = Dataset.from_dict("empty", {})
-    with pytest.raises(ValueError, match="No datasets with positive weight"):
+    with pytest.raises(ValueError, match="has 0 samples but repeat policy requires"):
         StaticMixtureWorkSource(
             [empty],
             {empty.name: 1.0},
@@ -1010,17 +1012,91 @@ def test_load_rejects_conflicting_policy() -> None:
         ws_load.load_state_dict(state)
 
 
-def test_max_repeats_warns_with_stop_policy() -> None:
-    """max_repeats with stop policy emits a warning."""
-    ds = make_dataset("alpha", 10)
-    with pytest.warns(RuntimeWarning, match="max_repeats.*no effect"):
+@pytest.mark.parametrize(
+    "policy,knob,value",
+    [
+        ("stop", "max_repeats", 3),
+        ("redistribute", "reshuffle_on_repeat", False),
+        ("stop", "reshuffle_on_repeat", False),
+    ],
+)
+def test_repeat_settings_warn_for_explicit_nonrepeat_entries(
+    policy: str, knob: str, value: int | bool
+) -> None:
+    """Non-default repeat settings on non-repeat components warn once."""
+    with pytest.warns(RuntimeWarning, match=rf"{knob}\['a'\].*no effect") as caught:
         StaticMixtureWorkSource(
-            [ds],
-            {ds.name: 1.0},
-            chunk_size=5,
-            exhausted_policy="stop",
-            max_repeats=3,
+            [make_dataset("a", 4), make_dataset("b", 4)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=2,
+            exhausted_policy={"a": policy, "b": "repeat"},
+            **{knob: {"a": value, "b": value}},
         )
+    assert len(caught) == 1
+
+
+@pytest.mark.parametrize(
+    "policy,settings",
+    [
+        pytest.param("stop", {}, id="defaults"),
+        pytest.param(
+            "redistribute",
+            {"max_repeats": 3, "reshuffle_on_repeat": True},
+            id="shared-repeat-settings",
+        ),
+        pytest.param(
+            "stop",
+            {"max_repeats": 3, "reshuffle_on_repeat": False},
+            id="shared-no-reshuffle",
+        ),
+        pytest.param(
+            "redistribute",
+            {"max_repeats": {"b": 3}, "reshuffle_on_repeat": {"b": False}},
+            id="repeat-component-only",
+        ),
+        pytest.param(
+            "stop",
+            {"max_repeats": {"a": None}, "reshuffle_on_repeat": {}},
+            id="unset-nonrepeat-settings",
+        ),
+        pytest.param(
+            "stop",
+            {"reshuffle_on_repeat": {"a": True, "b": True}},
+            id="explicit-defaults",
+        ),
+    ],
+)
+def test_repeat_settings_do_not_warn_for_scalars_or_repeat_entries(
+    policy: str, settings: dict[str, Any]
+) -> None:
+    """Defaults and shared repeat settings are valid for mixed-policy sources."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        StaticMixtureWorkSource(
+            [make_dataset("a", 4), make_dataset("b", 4)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=2,
+            exhausted_policy={"a": policy, "b": "repeat"},
+            **settings,
+        )
+    assert not caught
+
+
+@pytest.mark.parametrize(
+    "setting,value", [("max_repeats", 3), ("reshuffle_on_repeat", False)]
+)
+def test_scalar_repeat_setting_warns_without_any_repeat_component(
+    setting: str, value: int | bool
+) -> None:
+    with pytest.warns(RuntimeWarning, match=f"{setting}=.*no effect") as caught:
+        StaticMixtureWorkSource(
+            [make_dataset("a", 4)],
+            {"a": 1.0},
+            chunk_size=2,
+            exhausted_policy="stop",
+            **{setting: value},
+        )
+    assert len(caught) == 1
 
 
 def test_repeat_max_repeats() -> None:
@@ -2763,16 +2839,481 @@ def test_multilane_no_duplicate_chunks() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_redistribute_raises_not_implemented() -> None:
-    """Redistribute policy is accepted but raises at construction (via len)."""
-    ds = make_dataset("alpha", 50)
-    with pytest.raises(NotImplementedError, match="redistribute"):
-        StaticMixtureWorkSource(
-            datasets=[ds],
-            mixture={"alpha": 1.0},
-            chunk_size=5,
-            exhausted_policy="redistribute",
+def test_redistribute_preserves_a_single_dataset_tail() -> None:
+    ds = make_dataset("alpha", 5)
+    source = StaticMixtureWorkSource(
+        datasets=[ds],
+        mixture={"alpha": 1.0},
+        chunk_size=2,
+        exhausted_policy="redistribute",
+    ).clone_for_lane(0, canonical_replicas=1)
+    chunks = list(iter(source.next_chunk, None))
+    assert [len(chunk) for chunk in chunks] == [2, 2, 1]
+    assert chunks[-1].source_exhausted == ("alpha",)
+
+
+def _mixture_source(
+    mode: str,
+    sizes: dict[str, int],
+    weights: dict[str, float] | None = None,
+    **kwargs: Any,
+) -> StaticMixtureWorkSource:
+    # Fixed-width rows keep token costs constant within each dataset.
+    datasets = [
+        Dataset.from_dict(
+            name, {0: InMemoryShard([{"text": f"{name}-{i:03}"} for i in range(count)])}
         )
+        for name, count in sizes.items()
+    ]
+    options: dict[str, Any] = {
+        "chunk_size": 4,
+        "exhausted_policy": "redistribute",
+        "shuffle_shards": False,
+        **kwargs,
+    }
+    # Pinned ratios avoid tokenizer calibration and worker processes.
+    if mode == "tokens":
+        options.setdefault("token_estimation", TokenEstimation(primer=1.0))
+    source = StaticMixtureWorkSource(
+        datasets, weights or dict.fromkeys(sizes, 1.0), **options
+    )
+    if mode == "tokens":
+        source.prime()
+    return source
+
+
+def _redistribute_chunks(source: StaticMixtureWorkSource) -> list[WorkChunk]:
+    # A hard cap turns any accidental nontermination into a small, fast failure.
+    max_chunks = 100
+    chunks: list[WorkChunk] = []
+    for _ in range(max_chunks):
+        chunk = source.next_chunk()
+        if chunk is None:
+            return chunks
+        chunks.append(chunk)
+    pytest.fail("finite redistribution did not terminate")
+
+
+@pytest.mark.parametrize(
+    "mode,chunk_size",
+    [
+        pytest.param("samples", 4, id="sample-tail"),
+        pytest.param("samples", 1, id="sparse-sample-chunks"),
+        pytest.param("tokens", 4, id="token-tail"),
+    ],
+)
+def test_redistribute_keeps_every_sample_and_publishes_survivor_targets(
+    mode: str, chunk_size: int
+) -> None:
+    sizes = {"a": 3, "b": 9}
+    template = _mixture_source(mode, sizes, chunk_size=chunk_size)
+    source = template.clone_for_lane(0, 1)
+    assert len(source) == sum(sizes.values())
+    assert source.continues_after_exhaustion() == frozenset(sizes)
+    chunks = _redistribute_chunks(source)
+    ids = [sid for c in chunks for samples in c.components.values() for sid in samples]
+    assert len(ids) == len(set(ids)) == sum(sizes.values())
+    assert Counter(sid[0] for sid in ids) == {0: 3, 1: 9}
+    exhausted: set[str] = set()
+    for chunk in chunks:
+        active = {name: 1.0 for name in sizes if name not in exhausted}
+        assert chunk.target_mixture == pytest.approx(
+            {n: w / len(active) for n, w in active.items()}
+        )
+        assert 0 < len(chunk) <= chunk_size
+        assert exhausted <= set(chunk.source_exhausted)
+        assert not exhausted.intersection(chunk.components)
+        exhausted.update(chunk.source_exhausted)
+    assert exhausted == set(sizes)
+    assert source.component_ids() == {"a": 0, "b": 1}
+    assert len(source) == 0
+    done = source.state_dict()
+    assert source.next_chunk() is None
+    assert source.state_dict() == done
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_redistribute_checkpoint_before_and_after_retirement(mode: str) -> None:
+    template = _mixture_source(mode, {"a": 3, "b": 9})
+    chunks = _redistribute_chunks(template.clone_for_lane(0, 1))
+    boundary = next(i for i, chunk in enumerate(chunks) if chunk.source_exhausted)
+    # Before retirement, after retirement, and after the source has finished.
+    for cut in (boundary, boundary + 1, len(chunks)):
+        original = template.clone_for_lane(0, 1)
+        for _ in range(cut):
+            original.next_chunk()
+        restored = template.clone_for_lane(0, 1)
+        restored.load_state_dict(original.state_dict())
+        assert [c.state_dict() for c in _redistribute_chunks(restored)] == [
+            c.state_dict() for c in chunks[cut:]
+        ]
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_survivor_allocation_preserves_sample_or_token_ratios(mode: str) -> None:
+    # Rows have equal byte sizes; pinned ratios set their relative token costs.
+    costs = (
+        {"a": 1.0, "b": 2.0, "c": 4.0}
+        if mode == "tokens"
+        else dict.fromkeys("abc", 1.0)
+    )
+    options = (
+        {"token_estimation": TokenEstimation(primer=costs)} if mode == "tokens" else {}
+    )
+    source = _mixture_source(
+        mode,
+        {"a": 2, "b": 32, "c": 32},
+        {"a": 0.5, "b": 0.3, "c": 0.2},
+        chunk_size=10,
+        **options,
+    ).clone_for_lane(0, 1)
+    boundary = source.next_chunk()
+    assert boundary is not None and "a" in boundary.source_exhausted
+    total: Counter[str] = Counter()
+    for _ in range(3):
+        chunk = source.next_chunk()
+        assert chunk is not None and len(chunk) == 10
+        assert chunk.target_mixture == pytest.approx({"b": 0.6, "c": 0.4})
+        for name, samples in chunk.components.items():
+            total[name] += len(samples) * costs[name]
+    assert abs(total["b"] - 0.6 * total.total()) <= 2 * max(costs.values())
+
+
+@pytest.mark.parametrize(
+    "mode,assignment", [("samples", "modulo"), ("tokens", "permute")]
+)
+def test_redistribute_lane_partition_and_resume(mode: str, assignment: str) -> None:
+    template = _mixture_source(
+        mode,
+        {"a": 3, "b": 13},
+        lane_assignment=assignment,
+        shuffle_block_size=3,
+        shuffle_within_shard=True,
+    )
+    all_ids = []
+    for lane in range(2):
+        source = template.clone_for_lane(lane, 2)
+        chunks = _redistribute_chunks(source)
+        all_ids.extend(
+            sid for c in chunks for samples in c.components.values() for sid in samples
+        )
+        prefix = template.clone_for_lane(lane, 2)
+        assert prefix.next_chunk() is not None
+        restored = template.clone_for_lane(lane, 2)
+        restored.load_state_dict(prefix.state_dict())
+        assert [c.state_dict() for c in _redistribute_chunks(restored)] == [
+            c.state_dict() for c in chunks[1:]
+        ]
+    assert len(all_ids) == len(set(all_ids)) == 16
+
+
+@pytest.mark.parametrize(
+    "mode,policy", [("samples", "stop"), ("samples", "repeat"), ("tokens", "repeat")]
+)
+def test_redistribute_retains_other_components_terminal_policy(
+    mode: str, policy: str
+) -> None:
+    source = _mixture_source(
+        mode,
+        {"a": 2, "b": 8},
+        exhausted_policy={"a": "redistribute", "b": policy},
+        **({"max_repeats": {"b": 0}} if policy == "repeat" else {}),
+    ).clone_for_lane(0, 1)
+    assert source.continues_after_exhaustion() == frozenset({"a"})
+    assert math.isfinite(source.total_samples)
+    chunks = _redistribute_chunks(source)
+    counts = Counter(
+        {n: sum(len(c.components.get(n, [])) for c in chunks) for n in ("a", "b")}
+    )
+    assert counts == {"a": 2, "b": 6}
+    assert chunks[-1].target_mixture == {"b": 1.0}
+    done = source.state_dict()
+    assert source.next_chunk() is None
+    assert source.state_dict() == done
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_repeat_survivor_keeps_source_unbounded(mode: str) -> None:
+    source = _mixture_source(
+        mode, {"a": 2, "b": 8}, exhausted_policy={"a": "redistribute", "b": "repeat"}
+    ).clone_for_lane(0, 1)
+    assert math.isinf(source.total_samples)
+    with pytest.raises(TypeError, match="infinite"):
+        len(source)
+    chunks = [source.next_chunk() for _ in range(5)]
+    assert all(c is not None for c in chunks)
+    assert all(
+        c.target_mixture == {"b": 1.0} and c.source_exhausted == ("a",)
+        for c in chunks[1:]
+    )
+    assert sum(len(c.components.get("a", [])) for c in chunks) == 2
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_repeat_liveness_uses_survivor_demand(mode: str) -> None:
+    with pytest.raises(ValueError, match="requires at least 4"):
+        _mixture_source(
+            mode,
+            {"a": 2, "b": 3},
+            {"a": 0.75, "b": 0.25},
+            exhausted_policy={"a": "redistribute", "b": "repeat"},
+        )
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_empty_redistributing_component_is_announced(mode: str) -> None:
+    source = _mixture_source(mode, {"a": 0, "b": 3}).clone_for_lane(0, 1)
+    chunks = _redistribute_chunks(source)
+    assert sum(map(len, chunks)) == 3
+    assert chunks[0].target_mixture == {"b": 1.0}
+    assert chunks[0].source_exhausted == ("a", "b")
+
+
+def test_legacy_checkpoint_rejects_unsupported_redistribution() -> None:
+    source = _mixture_source("samples", {"a": 3, "b": 9}).clone_for_lane(0, 1)
+    state = source.state_dict()
+    state["allocation_mode"] = "legacy_fixed"
+    state["accumulators"] = None
+    with pytest.raises(RuntimeError, match="Legacy fixed-quota.*redistribution"):
+        source.load_state_dict(state)
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_mixed_stop_rolls_back_an_unfinished_chunk(mode: str) -> None:
+    source = _mixture_source(
+        mode, {"a": 5, "b": 3}, exhausted_policy={"a": "redistribute", "b": "stop"}
+    ).clone_for_lane(0, 1)
+    assert source.next_chunk() is not None
+    before = source.state_dict()
+    assert source.next_chunk() is None
+    assert source.state_dict() == before
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_mixed_stop_cannot_produce_first_chunk(mode: str) -> None:
+    source = _mixture_source(
+        mode, {"a": 5, "b": 1}, exhausted_policy={"a": "redistribute", "b": "stop"}
+    ).clone_for_lane(0, 1)
+    before = source.state_dict()
+    with pytest.raises(ValueError, match="Cannot produce the first chunk.*dataset 'b'"):
+        source.next_chunk()
+    assert source.state_dict() == before
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_redistribute_simultaneous_exhaustion(mode: str) -> None:
+    source = _mixture_source(mode, {"a": 2, "b": 2}).clone_for_lane(0, 1)
+    chunks = _redistribute_chunks(source)
+    assert len(chunks) == 1
+    assert chunks[0].source_exhausted == ("a", "b")
+    assert chunks[0].target_mixture == {"a": 0.5, "b": 0.5}
+    assert len(source) == 0
+
+
+def test_redistribute_discards_retired_fractional_debt() -> None:
+    """Removing components must not leave a nonzero total rounding balance."""
+    template = _mixture_source(
+        "samples",
+        {"a": 4, "b": 4, "c": 4, "d": 0, "e": 0, "f": 0, "g": 0, "h": 0},
+        chunk_size=1,
+    )
+    source = template.clone_for_lane(0, 1)
+    state = source.state_dict()
+    # The allocator permits balances above one after a correction. This valid
+    # zero-sum carry becomes unbalanced when the five depleted sources leave.
+    state["accumulators"] = {
+        "a": 1.5,
+        "b": 1.5,
+        "c": 1.5,
+        "d": -0.9,
+        "e": -0.9,
+        "f": -0.9,
+        "g": -0.9,
+        "h": -0.9,
+    }
+    source.load_state_dict(state)
+    chunks = _redistribute_chunks(source)
+    assert len(chunks) == 12
+    assert all(len(chunk) == 1 for chunk in chunks)
+    assert Counter(name for chunk in chunks for name in chunk.components) == {
+        "a": 4,
+        "b": 4,
+        "c": 4,
+    }
+
+
+@pytest.mark.parametrize(
+    "mode,policy",
+    [
+        pytest.param("samples", "stop", id="scalar-stop"),
+        pytest.param("samples", {"a": "stop", "b": "stop"}, id="per-dataset-stop"),
+        pytest.param("tokens", {"a": "redistribute", "b": "stop"}, id="mixed-stop"),
+    ],
+)
+def test_empty_stop_component_raises_at_construction(
+    mode: str, policy: str | dict[str, str]
+) -> None:
+    with pytest.raises(ValueError, match="Dataset 'b' has 0 samples.*stop"):
+        _mixture_source(mode, {"a": 5, "b": 0}, exhausted_policy=policy)
+
+
+def test_empty_stop_component_with_tiny_weight_raises_at_construction() -> None:
+    with pytest.raises(ValueError, match="Dataset 'b' has 0 samples.*stop"):
+        _mixture_source(
+            "samples",
+            {"a": 5, "b": 0},
+            {"a": 0.999999, "b": 0.000001},
+            exhausted_policy="stop",
+        )
+
+
+@pytest.mark.parametrize(
+    "mode,policy",
+    [
+        pytest.param("samples", None, id="default-repeat"),
+        pytest.param("tokens", "repeat", id="scalar-repeat"),
+        pytest.param("samples", {"a": "stop", "b": "repeat"}, id="stop-and-repeat"),
+        pytest.param(
+            "tokens", {"a": "redistribute", "b": "repeat"}, id="redistribute-and-repeat"
+        ),
+    ],
+)
+def test_empty_repeat_component_fails_liveness(
+    mode: str, policy: str | dict[str, str] | None
+) -> None:
+    with pytest.raises(
+        ValueError, match="Dataset 'b' has 0 samples but repeat policy requires"
+    ):
+        _mixture_source(mode, {"a": 16, "b": 0}, exhausted_policy=policy)
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_mixture_dict_order_does_not_change_redistribution(mode: str) -> None:
+    sizes = {"a": 2, "b": 9, "c": 11}
+    original = _mixture_source(
+        mode, sizes, {"a": 0.5, "b": 0.25, "c": 0.25}
+    ).clone_for_lane(0, 1)
+    reordered = _mixture_source(
+        mode, sizes, {"c": 0.25, "b": 0.25, "a": 0.5}
+    ).clone_for_lane(0, 1)
+    assert [c.state_dict() for c in _redistribute_chunks(original)] == [
+        c.state_dict() for c in _redistribute_chunks(reordered)
+    ]
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_all_redistributing_components_initially_empty_raise(mode: str) -> None:
+    with pytest.raises(ValueError, match="At least one dataset must contain samples"):
+        _mixture_source(mode, {"a": 0, "b": 0})
+
+
+def test_all_empty_token_components_raise_before_priming() -> None:
+    with pytest.raises(ValueError, match="At least one dataset must contain samples"):
+        StaticMixtureWorkSource(
+            [make_dataset("a", 0), make_dataset("b", 0)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=4,
+            exhausted_policy="repeat",
+            token_estimation=TokenEstimation(primer=1.0),
+        )
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens", "legacy"])
+def test_stop_cannot_produce_first_chunk(mode: str) -> None:
+    template = _mixture_source(mode, {"a": 5, "b": 1}, exhausted_policy="stop")
+    source = template.clone_for_lane(0, 1)
+    if mode == "legacy":
+        checkpoint = source.state_dict()
+        checkpoint["allocation_mode"] = "legacy_fixed"
+        checkpoint["accumulators"] = None
+        source.load_state_dict(checkpoint)
+    before = source.state_dict()
+    with pytest.raises(ValueError, match="Cannot produce the first chunk.*dataset 'b'"):
+        source.next_chunk()
+    assert source.state_dict() == before
+
+    restored = template.clone_for_lane(0, 1)
+    restored.load_state_dict(before)
+    with pytest.raises(ValueError, match="Cannot produce the first chunk.*dataset 'b'"):
+        restored.next_chunk()
+    assert restored.state_dict() == before
+
+
+def test_stop_can_produce_a_chunk_despite_small_length_estimate() -> None:
+    source = _mixture_source(
+        "samples",
+        {"a": 10, "b": 1},
+        {"a": 0.7, "b": 0.3},
+        exhausted_policy="stop",
+    ).clone_for_lane(0, 1)
+    estimate = len(source)
+    chunk = source.next_chunk()
+    assert chunk is not None
+    # Allow an exact estimate if the current underestimation is fixed.
+    assert 0 <= estimate <= len(chunk)
+    assert {name: len(samples) for name, samples in chunk.components.items()} == {
+        "a": 3,
+        "b": 1,
+    }
+    assert source.next_chunk() is None
+
+
+@pytest.mark.parametrize("mode", ["samples", "tokens"])
+def test_terminal_stop_and_empty_lane_survive_restore(mode: str) -> None:
+    template = _mixture_source(
+        mode, {"a": 2, "b": 2}, exhausted_policy="stop", lane_assignment="modulo"
+    )
+    # The sole global chunk belongs to lane 0; lane 1 has no local output.
+    for lane in (0, 1):
+        source = template.clone_for_lane(lane, 2)
+        first = source.next_chunk()
+        assert (first is not None) == (lane == 0)
+        before = source.state_dict()
+        assert source.next_chunk() is None
+        assert source.state_dict() == before
+
+        restored = template.clone_for_lane(lane, 2)
+        restored.load_state_dict(before)
+        assert restored.next_chunk() is None
+        assert restored.state_dict() == before
+
+
+@pytest.mark.parametrize(
+    "sizes,weights,estimate,actual",
+    [
+        pytest.param(
+            {"a": 2, "b": 8}, {"a": 0.5, "b": 0.5}, 10, 8, id="terminal-rollback"
+        ),
+        pytest.param(
+            {"a": 10, "b": 1}, {"a": 0.7, "b": 0.3}, 3, 4, id="quota-rounding"
+        ),
+    ],
+)
+def test_mixed_redistribution_length_is_an_estimate(
+    sizes: dict[str, int], weights: dict[str, float], estimate: int, actual: int
+) -> None:
+    source = _mixture_source(
+        "samples",
+        sizes,
+        weights,
+        exhausted_policy={"a": "redistribute", "b": "stop"},
+    ).clone_for_lane(0, 1)
+    assert len(source) == estimate
+    assert sum(map(len, _redistribute_chunks(source))) == actual
+
+
+def test_token_repeat_liveness_never_requires_more_than_a_chunk() -> None:
+    source = StaticMixtureWorkSource(
+        [make_dataset("a", 4)],
+        {"a": 1.0},
+        chunk_size=4,
+        exhausted_policy="repeat",
+        token_estimation=TokenEstimation(primer=1.0),
+    )
+    source.prime()
+    source = source.clone_for_lane(0, 1)
+    chunks = [source.next_chunk() for _ in range(2)]
+    assert all(chunk is not None and len(chunk) == 4 for chunk in chunks)
 
 
 # ---------------------------------------------------------------------------

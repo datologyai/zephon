@@ -71,8 +71,9 @@ class WorkChunk:
     deliver to downstream mixture correctors (``ensure_mixture``) *instead of*
     the counted composition. Token-aware work sources stamp the user's token
     mixture here because their chunks deliberately carry a different sample
-    composition (long-doc components contribute fewer pointers); the counted
-    :attr:`mixture` stays composition-derived for within-chunk interleaving.
+    composition (long-doc components contribute fewer pointers). Redistributing
+    sample sources also stamp their intended target for sparse or partial chunks.
+    The counted :attr:`mixture` stays composition-derived for within-chunk interleaving.
     Continuing sources may remove exhausted components from this target, but
     must keep their identities in :meth:`WorkSource.component_ids` for late records.
 
@@ -443,6 +444,10 @@ class WorkSource(ABC):
         ever emit (curriculum stages included), so ids are a pure function of
         config across ranks, topology changes, and resumes. Ids are unique
         non-negative ints, not necessarily dense.
+
+        The final EOD is recognized only after every declared component has been
+        announced exhausted on that lane, including components that emit no records.
+        See :attr:`~zephon.ops.accumulators.SourceExhaustion.final_component`.
         """
         raise NotImplementedError()
 
@@ -457,15 +462,13 @@ class WorkSource(ABC):
         (see :meth:`~zephon.ops.accumulators.Accumulator.on_source_exhausted`).
         EOD sentinels are emitted independently of this policy.
 
-        The default is empty. For listed components, ``ensure_mixture`` removes
-        their weight when the sentinel arrives, even from an explicit mixture
-        override, and handles late records through ``obsolete_drain_rate``. Later
-        chunk targets may omit these components.
+        The default is empty. Later chunk targets may omit listed components,
+        but their ids must remain in :meth:`component_ids` for buffered records.
         """
         return frozenset()
 
     def chunk_size_hint(self) -> int | None:
-        """Return fixed chunk size if constant.
+        """Return the configured chunk size, if known; individual chunks may be shorter.
 
         Used for deterministic resume validation. Default None.
         """

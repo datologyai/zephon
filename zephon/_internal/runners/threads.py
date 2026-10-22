@@ -244,6 +244,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
+        self._submission_lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._queue_capacity = max(1, queue_capacity)
         super().__init__(
@@ -387,8 +388,17 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
                 outputs = instance.process_many(items)
                 return outputs, self._node_sw.elapsed(start_ns)
 
-            state.inflight.increment()
-            future = self._executor.submit(work, batch)
+            with self._submission_lock:
+                if self._closed:
+                    state.release_instance(instance)
+                    return
+                state.inflight.increment()
+                try:
+                    future = self._executor.submit(work, batch)
+                except BaseException:
+                    state.inflight.decrement()
+                    state.release_instance(instance)
+                    raise
             state.pump_timer.note("batches_submitted")
 
         def done_callback(
@@ -409,6 +419,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             if should_put:
                 state.pending_puts.increment()
             state.inflight.decrement()
+            self._on_execution_stopped()
 
             # Enqueue result (tracked by pending_puts for termination safety)
             if result is not None:
@@ -442,12 +453,26 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         future.add_done_callback(done_callback)
 
     def set_parallelism(self, op_index: int, new_parallelism: int) -> None:
-        if op_index < 0 or op_index >= len(self.ops):
-            raise IndexError("op_index out of range")
-        target = max(1, min(new_parallelism, self._max_workers))
-        self.ops[op_index].adjust_parallelism(target)
+        with self._submission_lock:
+            self._check_open()
+            if op_index < 0 or op_index >= len(self.ops):
+                raise IndexError("op_index out of range")
+            target = max(1, min(new_parallelism, self._max_workers))
+            self.ops[op_index].adjust_parallelism(target)
+
+    def _on_execution_stopped(self) -> None:
+        if not self._closed:
+            return
+        # Serialize shutdown with submission so no new task can borrow an
+        # operator after the last in-flight call has returned its instance.
+        with self._submission_lock:
+            if all(state.inflight.is_zero() for state in self.ops):
+                self._close_local_operators()
 
     def close(self, *, hard: bool = False) -> None:
+        with self._submission_lock:
+            self._closed = True
+            self._hard_close = hard
         with self._context_lock:
             ctx = self._active_context
 
@@ -458,5 +483,4 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             self._join_threads(ctx, hard=hard)
 
         self._executor.shutdown(wait=not hard, cancel_futures=hard)
-        if not hard:
-            self._teardown_operators()
+        self._on_execution_stopped()

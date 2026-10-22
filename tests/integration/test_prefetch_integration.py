@@ -678,9 +678,16 @@ def test_backpressure_callback_simple(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("runner", ["inline", "threads", "process"])
-@pytest.mark.parametrize("early_close", [False, True])
+@pytest.mark.parametrize(
+    ("shutdown_mode", "early_close"),
+    [("graceful", False), ("graceful", True), ("hard", False)],
+)
 def test_pipeline_releases_fetch_and_prefetch_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: str, early_close: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: str,
+    early_close: bool,
+    shutdown_mode: str,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -706,11 +713,12 @@ def test_pipeline_releases_fetch_and_prefetch_cache(
     monkeypatch.setattr(CacheManager, "__init__", retain_manager)
     pipe = (
         Pipeline(work)
-        .prefetch(buffer_size=4)
+        .prefetch(buffer_size=4, parallelism=1)
         .fetch(parallelism=1)
         .batch(microbatch_size=4, drop_last=False)
         .options(
             runner=runner,
+            shutdown_mode=shutdown_mode,
             max_workers=2,
             mtp_mode=False,
             io_options={"cache": {"enabled": True, "root": str(cache)}},
@@ -727,7 +735,7 @@ def test_pipeline_releases_fetch_and_prefetch_cache(
         iterator.close()
 
         # Retaining the managers prevents GC from satisfying these assertions.
-        assert len(managers) >= 2
+        assert len(managers) == 2
         assert all(not manager._close_finalizer.alive for manager in managers)
         assert json.loads(path.read_text())["owners"] == {}
         for name in names.values():

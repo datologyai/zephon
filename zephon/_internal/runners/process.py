@@ -2336,6 +2336,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         raise NotImplementedError("ProcessStageRunner does not support live scaling")
 
     def close(self, *, hard: bool = False) -> None:
+        self._closed = True
+        self._hard_close = hard
         self._service_cancelled.value = 1
         _shutdown_debug("close() called")
         with ShutdownWatchdog(_SHUTDOWN_WATCHDOG_TIMEOUT, "close()"):
@@ -2357,6 +2359,5 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             if ctx is not None:
                 _shutdown_debug("close(): calling _join_threads")
                 self._join_threads(ctx, hard=hard)
+            self._close_local_operators()
             _shutdown_debug("close(): done")
-        if not hard:
-            self._teardown_operators()

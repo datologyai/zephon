@@ -1,6 +1,8 @@
+import contextlib
 import gc
 import json
 import os
+import queue
 import signal
 import threading
 import time
@@ -1644,9 +1646,9 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
 ) -> None:
     """GC cleanup must leave lock acquisition entirely to the release worker.
 
-    The patched acquire takes the OS lock and then raises on the finalizer
-    thread. Cleanup must enqueue the release without invoking that path, and
-    the worker must complete the release with the lock available afterward.
+    If called on the finalizer thread, the patched acquire would take the OS
+    lock and then raise. Cleanup must enqueue the release without invoking that
+    path, and the worker must complete it with the lock available afterward.
     """
     from filelock import FileLock
 
@@ -1680,8 +1682,11 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
             pass
     finally:
         # Prevent a failed assertion from leaving the shared release worker blocked.
-        lock.release(force=True)
-        _wait_for_instances(tmp_path, "owner", 0)
+        if lock.is_locked:
+            lock.release(force=True)
+            # Recovery must not replace the assertion that exposed the regression.
+            with contextlib.suppress(AssertionError):
+                _wait_for_instances(tmp_path, "owner", 0)
 
 
 def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
@@ -1939,10 +1944,15 @@ def test_old_manager_release_preserves_replacement_session(
             session_path: Path,
             key: str,
             session_id: str | None,
-        ) -> None:
-            original_release(reset_lock, session_path, key, session_id)
+            *,
+            timeout: float = -1,
+        ) -> bool:
+            released = original_release(
+                reset_lock, session_path, key, session_id, timeout=timeout
+            )
             if session_id == old_session["session_id"]:
                 release_done.set()
+            return released
 
         monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
 
@@ -1995,3 +2005,93 @@ def test_old_manager_release_preserves_replacement_session(
 
     assert _owner_instances(cache_root, owner_key) == 0
     assert all(not _shm_exists(name) for name in current["shm_names"].values())
+
+
+def test_close_defers_only_after_lock_wait_budget_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from filelock import FileLock
+
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    first = _make_manager(cache_root, storage, [loc], persist_state=True)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    held, release = threading.Event(), threading.Event()
+
+    def hold_lock() -> None:
+        with FileLock(first._reset_lock.lock_file):
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    try:
+        assert held.wait(5)
+        monkeypatch.setattr(manager_mod, "remaining_cleanup_timeout", lambda: 0.05)
+        started = time.monotonic()
+        _run_bounded(first.close)
+        assert time.monotonic() - started < 1
+        assert "deferred after lock timeout" in caplog.text
+        assert _owner_instances(cache_root, first._owner_key) == 2
+        assert not first._close_finalizer.alive
+        first.close()
+        release.set()
+        holder.join(5)
+        _wait_for_instances(cache_root, first._owner_key, 1)
+        assert survivor._shared is not None
+        assert all(_shm_exists(name) for name in survivor._shared.shm_names.values())
+    finally:
+        release.set()
+        holder.join(5)
+        survivor.close()
+    assert _owner_instances(cache_root, first._owner_key) == 0
+
+
+@pytest.mark.parametrize("timeout_error", [False, True])
+def test_explicit_close_releases_partial_acquisition_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_error: bool
+) -> None:
+    from filelock import FileLock, Timeout
+
+    pending = queue.SimpleQueue()
+    monkeypatch.setattr(manager_mod, "_deferred_releases", pending)
+    lock = FileLock(str(tmp_path / ".reset.lock"))
+    original_acquire = lock.acquire
+
+    def acquire_then_fail(*args: Any, **kwargs: Any) -> Any:
+        original_acquire(*args, **kwargs)
+        if timeout_error:
+            raise Timeout(lock.lock_file)
+        raise RuntimeError("failure after native acquisition")
+
+    monkeypatch.setattr(lock, "acquire", acquire_then_fail)
+    manager_mod._close_cache_manager_resources(
+        None, lock, tmp_path / "session.json", "owner", "session", blocking=True
+    )
+    assert not lock.is_locked
+    assert pending.empty()
+    with FileLock(lock.lock_file).acquire(timeout=0):
+        pass
+
+
+def test_explicit_close_does_not_retry_a_partially_applied_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from filelock import FileLock, Timeout
+
+    pending = queue.SimpleQueue()
+    monkeypatch.setattr(manager_mod, "_deferred_releases", pending)
+    lock = FileLock(str(tmp_path / ".reset.lock"))
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps({"instances": 2}))
+
+    def release_then_fail(*args: Any) -> None:
+        path.write_text(json.dumps({"instances": 1}))
+        raise Timeout(lock.lock_file)
+
+    monkeypatch.setattr(manager_mod, "_release_session_owner_locked", release_then_fail)
+    manager_mod._close_cache_manager_resources(
+        None, lock, path, "owner", "session", blocking=True
+    )
+    assert json.loads(path.read_text())["instances"] == 1
+    assert pending.empty()
+    assert not lock.is_locked

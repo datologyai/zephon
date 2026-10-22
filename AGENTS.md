@@ -43,7 +43,7 @@ and signatures change without notice. The boundary is CI-enforced by
 - `pipeline.py`: user API and operator chaining
 - `_internal/planner.py`: graph-to-stage compilation
 - `_internal/engine.py`: runtime execution, queues, shutdown
-- `ops/base.py`: `BaseOp` authoring contract (`setup`, `traits`, `accumulator`, `process_many`)
+- `ops/base.py`: `BaseOp` authoring contract (`setup`, `teardown`, `traits`, `accumulator`, `process_many`)
 
 Critical invariant: `process_many()` must stay stateless across calls; cross-call state belongs in the accumulator.
 

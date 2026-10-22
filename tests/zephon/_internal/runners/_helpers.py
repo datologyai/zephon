@@ -181,6 +181,8 @@ class _BlockingOp(BaseOp):
 
 def _assert_close_waits_for_operator_execution(
     runner_type: type[StageRunnerBase[Any]],
+    *,
+    hard: bool = False,
 ) -> None:
     started, proceed, closed, finished = (threading.Event() for _ in range(4))
     runner = runner_type(
@@ -199,7 +201,7 @@ def _assert_close_waits_for_operator_execution(
 
     def close() -> None:
         try:
-            runner.close()
+            runner.close(hard=hard)
         except BaseException as exc:
             errors.append(exc)
         finally:
@@ -211,7 +213,10 @@ def _assert_close_waits_for_operator_execution(
     try:
         assert started.wait(5)
         closer.start()
-        assert not finished.wait(0.1)
+        if hard:
+            assert finished.wait(2), "hard close waited for the running operator"
+        else:
+            assert not finished.wait(0.1)
         assert not closed.is_set()
     finally:
         proceed.set()
@@ -219,5 +224,5 @@ def _assert_close_waits_for_operator_execution(
         if closer.ident is not None:
             closer.join(5)
     assert not consumer.is_alive() and not closer.is_alive()
-    assert finished.is_set() and closed.is_set()
+    assert finished.is_set() and closed.wait(5)
     assert not errors

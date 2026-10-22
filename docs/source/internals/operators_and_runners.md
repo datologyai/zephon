@@ -21,10 +21,16 @@ The three most important methods are:
 - `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
   all-important `preserves_cursor_order`.
 
-Two additional methods complete the contract. `setup(ctx)` runs once before any data arrives and receives an
+Three additional methods complete the contract. `setup(ctx)` runs once before any data arrives and receives an
 `OpContext` with runtime services and plan metadata, while `process_one(elem)` handles a
 single element and by default just calls `process_many` with a one-element list. You only
-want to override that last one if you have a genuinely faster scalar path.
+want to override `process_one` if you have a faster scalar path. `teardown()`
+releases resources after execution stops, including after partial setup failure;
+its default is a no-op and overrides must tolerate repeated calls. A closed runner
+cannot execute again. Hard shutdown releases idle operators and defers local
+cleanup while an operator is still executing. Forced worker termination can bypass
+teardown. Explicit cache cleanup uses a shared lock-wait budget; GC cleanup only
+queues releases and has no interpreter-exit completion guarantee.
 
 **The invariant is that `process_many` must be stateless across calls.** It must not
 depend on anything left over from a previous invocation, so every piece of

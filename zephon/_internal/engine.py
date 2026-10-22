@@ -30,6 +30,7 @@ The engine also inserts a lane-merging distributor at the tail only when a rank 
 and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane dataflow.
 """
 
+import contextlib
 import ctypes
 import dataclasses
 import multiprocessing as mp
@@ -58,7 +59,12 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
-from zephon._internal.notify import SOURCE_EXHAUSTION_CONTINUES_TAG, is_sentinel
+from zephon._internal.notify import (
+    SOURCE_EXHAUSTED_TAG,
+    SOURCE_EXHAUSTION_CONTINUES_TAG,
+    SOURCE_EXHAUSTION_FINAL_TAG,
+    is_sentinel,
+)
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
 from zephon._internal.replay import ReplayConfigService
@@ -67,6 +73,7 @@ from zephon._internal.runners.process import ProcessStageRunner
 from zephon._internal.runners.threads import ThreadStageRunner
 from zephon._internal.runtime_spec import RuntimeSpec
 from zephon._internal.stream import EngineSample, LanePtr, RunnerStageOut
+from zephon._internal.utils.cleanup import cleanup_budget
 from zephon._internal.utils.rank import rank_ctx
 from zephon._internal.world import World
 from zephon.observability import ExecutionTrackingMode
@@ -426,33 +433,43 @@ class Engine:
         self._runners: list[
             ThreadStageRunner | InlineStageRunner | ProcessStageRunner
         ] = []
-        self._build_runners()
-
-        self._coordinator: CheckpointCoordinator = make_coordinator(
-            self._opts,
-            global_rank=self._world.global_rank,
-            world_size=self._world.world_size,
-            plan_id=self._plan.plan_id,
-            worker_info=get_torch_worker_info,
-        )
-        if self._takes_part_in_rounds():
-            self._coordinator.check_ready()
-
-        # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        # This calls close() to clean up runners/queues/semaphores, then
-        # _clean_merged() to release retained checkpoint coordinator resources.
         self._closed = False
+        try:
+            self._build_runners()
 
-        self._cleanup_finalizer = weakref.finalize(
-            self, _call_engine_cleanup, weakref.ref(self)
-        )
-
-        bs = self._plan.batch_size_hint
-        if bs is not None:
-            cs = self._work.chunk_size_hint()
-            assert cs is not None, (
-                "No chunk size hint for current work source, determinism breaks potentially"
+            self._coordinator: CheckpointCoordinator = make_coordinator(
+                self._opts,
+                global_rank=self._world.global_rank,
+                world_size=self._world.world_size,
+                plan_id=self._plan.plan_id,
+                worker_info=get_torch_worker_info,
             )
+            if self._takes_part_in_rounds():
+                self._coordinator.check_ready()
+
+            # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
+            # This calls close() to clean up runners/queues/semaphores, then
+            # _clean_merged() to release retained checkpoint coordinator resources.
+
+            self._cleanup_finalizer = weakref.finalize(
+                self, _call_engine_cleanup, weakref.ref(self)
+            )
+
+            bs = self._plan.batch_size_hint
+            if bs is not None:
+                cs = self._work.chunk_size_hint()
+                assert cs is not None, (
+                    "WorkSource must provide a chunk_size_hint when the pipeline batches"
+                )
+        except BaseException:
+            # Constructor failures must release runners created by earlier stages,
+            # including when coordinator setup or validation fails afterward.
+            try:
+                self.close()
+            finally:
+                with contextlib.suppress(Exception):
+                    self._clean_merged()
+            raise
 
     @property
     def _last_round_id(self) -> str | None:
@@ -911,14 +928,19 @@ class Engine:
 
     @staticmethod
     def _make_source_exhausted_sentinel(
-        lane_id: LaneId, component_id: int, *, continues: bool = False
+        lane_id: LaneId,
+        component_id: int,
+        *,
+        continues: bool = False,
+        final: bool = False,
     ) -> SampleRecord:
         """Create an end-of-data (EOD) sentinel; buffered data may arrive later."""
         return Engine._make_control_record(
             lane_id,
             {
-                "_source_exhausted": component_id,
+                SOURCE_EXHAUSTED_TAG: component_id,
                 SOURCE_EXHAUSTION_CONTINUES_TAG: continues,
+                SOURCE_EXHAUSTION_FINAL_TAG: final,
             },
         )
 
@@ -929,6 +951,8 @@ class Engine:
 
         The sentinel follows the component's last sample in this chunk, or precedes
         the chunk if the component is absent. Live input and replay use this path.
+        The notice completing the declared vocabulary is final. Cumulative stamps
+        reconstruct that distinction even when replay starts after earlier EODs.
         """
         missing = announced.difference(chunk.source_exhausted)
         if missing:
@@ -942,6 +966,17 @@ class Engine:
                 f"lane {lane_id}, chunk {cid} contains samples from previously "
                 f"source-exhausted components {sorted(revived)}"
             )
+
+        def announce(name: str, component_id: int) -> SampleRecord:
+            # Include this notice before checking whether the vocabulary is complete.
+            announced.add(name)
+            return self._make_source_exhausted_sentinel(
+                lane_id,
+                component_id,
+                continues=component_id in self._continues_after_exhaustion,
+                final=len(announced) == len(self._component_to_id),
+            )
+
         remaining: dict[str, int] = {}
         for name in chunk.source_exhausted:
             if name in announced:
@@ -950,13 +985,7 @@ class Engine:
             if count:
                 remaining[name] = count
             else:
-                announced.add(name)
-                component_id = self._get_component_id(name)
-                yield self._make_source_exhausted_sentinel(
-                    lane_id,
-                    component_id,
-                    continues=component_id in self._continues_after_exhaustion,
-                )
+                yield announce(name, self._get_component_id(name))
         get_id = self._get_component_id
         if not remaining:
             for offset, (sample_id, name) in enumerate(chunk):
@@ -970,12 +999,7 @@ class Engine:
                 remaining[name] = left - 1
                 if left == 1:
                     del remaining[name]
-                    announced.add(name)
-                    yield self._make_source_exhausted_sentinel(
-                        lane_id,
-                        component_id,
-                        continues=component_id in self._continues_after_exhaustion,
-                    )
+                    yield announce(name, component_id)
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
@@ -1705,15 +1729,16 @@ class Engine:
             return
         self._closed = True
         hard = self._opts.shutdown_mode == "hard"
-        for runner in self._runners:
-            try:
-                runner.close(hard=hard)
-            except Exception:
-                print(
-                    f"Error closing runner {runner!r}.",
-                    file=sys.stderr,
-                )
-                traceback.print_exc(file=sys.stderr)
+        with cleanup_budget(hard=hard):
+            for runner in self._runners:
+                try:
+                    runner.close(hard=hard)
+                except Exception:
+                    print(
+                        f"Error closing runner {runner!r}.",
+                        file=sys.stderr,
+                    )
+                    traceback.print_exc(file=sys.stderr)
         if self._metrics_reporter is not None and self._metrics_started:
             try:
                 self._metrics_reporter.stop()
@@ -2109,7 +2134,7 @@ class Engine:
         if bs is not None:
             cs = self._work.chunk_size_hint()
             assert cs is not None, (
-                "No chunk size hint for current work source, determinism breaks potentially"
+                "WorkSource must provide a chunk_size_hint when the pipeline batches"
             )
 
         # This is FOR ALL WORKERS on that node. So we restore a bit more than we have to because we cannot be certain whether load_state_dict is called before workers are instantiated or not.
