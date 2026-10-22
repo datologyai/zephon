@@ -135,11 +135,12 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
 
 
 # GC finalizers enqueue owner releases with reentrant ``SimpleQueue.put``.
-# We could try ``FileLock.acquire(timeout=0)`` in a finalizer to release ownership
-# immediately when the lock is free. However, GC can interrupt filelock's internal
-# bookkeeping, so that call could reenter unfinished updates and raise after
-# taking the OS lock. Queuing a retry then could leave the worker waiting on a
-# lock the finalizer never releases. We therefore leave file locking to the worker.
+# It might seem reasonable to try ``FileLock.acquire(timeout=0)`` in a finalizer
+# to release ownership immediately when the lock is free. However, GC can interrupt
+# filelock's internal bookkeeping, so that call could reenter unfinished updates
+# and raise after taking the OS lock. Queuing a retry then could leave the worker
+# waiting on a lock the finalizer never releases. File locking therefore runs on
+# the worker.
 # One daemon thread applies queued releases under the lock. While their session
 # remains current, queued managers still count as owners and keep its SHM names alive.
 # Pending releases are not guaranteed to finish at interpreter exit. A later
