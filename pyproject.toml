@@ -54,11 +54,13 @@ cloud = [
 ]
 litdata = [
     "litdata",
+    "pillow>=13.0.0; python_version >= '3.11'",
     "optree",
     "zstd",
 ]
 streaming = [
-    "mosaicml-streaming",
+    "mosaicml-streaming; python_version >= '3.11'",
+    "pillow>=13.0.0; python_version >= '3.11'",
     "zstd",
 ]
 mosaic = [
@@ -98,11 +100,11 @@ dev = [
 test = [
     "hypothesis>=6.100.0",
     "pytest>=8.0.0",
-    "mosaicml-streaming>=0.13.0",
+    "mosaicml-streaming>=0.13.0; python_version >= '3.11'",
     "zstd>=1.5.0",
     "litdata>=0.2.0",
     "optree>=0.12.0",
-    "pillow>=10.0.0",
+    "pillow>=13.0.0; python_version >= '3.11'",
     "torchdata>=0.11.0",
     "pytest-timeout>=2.4.0",
     "pytest-rerunfailures>=14.0",
@@ -260,7 +262,13 @@ log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
-# Ignore mosaicml-streaming 0.13.0's stale transformers<5 cap when resolving our
-# internal lock; use same version as in test group.
+# These overrides apply to this repository's uv environment, not wheel metadata.
 [tool.uv]
-override-dependencies = ["transformers>=4.52.0"]
+override-dependencies = [
+    # Ignore Streaming 0.13.0's stale transformers<5 cap; match the test group.
+    "transformers>=4.52.0",
+    # Streaming 0.13.0's cap predates upstream's Paramiko 5 support (PR #982).
+    "paramiko>=5.1.0,<6",
+    # LitData's text/tensor serializers do not need its image dependency.
+    "torchvision; python_version >= '3.11'",
+]

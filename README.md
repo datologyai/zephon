@@ -59,8 +59,8 @@ Most of what Zephon can read is behind optional extras, so you only install what
 | `zephon[cloud]` | Reading from S3, GCS, and Azure (`s3://`, `gs://`, `az://` paths) |
 | `zephon[hf]` | Hugging Face datasets (`hf://` paths), plus Parquet |
 | `zephon[parquet]` | Parquet shards |
-| `zephon[streaming]` | MosaicML Streaming / MDS shards |
-| `zephon[litdata]` | LitData shards |
+| `zephon[streaming]` | MosaicML Streaming / MDS shards (Python 3.11+) |
+| `zephon[litdata]` | LitData shards (Python 3.10 requires a uv override; no image decoding) |
 | `zephon[vortex]` | Vortex shards (Python 3.11+) |
 | `zephon[lance]` | Lance datasets, one shard per fragment |
 | `zephon[ray]` | The experimental Ray runner |

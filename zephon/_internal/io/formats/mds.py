@@ -4,6 +4,7 @@
 """MDS shard format integration via mosaicml-streaming."""
 
 import os
+import sys
 from copy import deepcopy
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol, TypedDict, cast
 
@@ -178,6 +179,11 @@ class MDSFormat(FormatHandler):
     def open_shard(
         self, locator: ShardLocator, local_ref: LocalShardRef
     ) -> RandomAccessShard:
+        if sys.version_info < (3, 11):
+            raise RuntimeError(
+                "MDS decoding requires Python 3.11 or newer because its image "
+                "dependencies have no security-fixed release for Python 3.10."
+            )
         extras = dict(local_ref.extra) if local_ref.extra else {}
 
         if _StreamingMDSReader is None:
