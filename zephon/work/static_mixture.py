@@ -2128,11 +2128,9 @@ class StaticMixtureWorkSource(WorkSource):
 
         for ds_name, policy in exhausted_policy_map.items():
             if policy == "stop" and self._cursors[ds_name]._total_samples == 0:
-                warnings.warn(
+                raise ValueError(
                     f"Dataset '{ds_name}' has 0 samples and exhausted_policy='stop'; "
-                    "the source stops when this component is selected.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    "provide a non-empty dataset or change its exhaustion policy."
                 )
 
         self._alloc_config = _AllocationConfig(
@@ -2150,6 +2148,9 @@ class StaticMixtureWorkSource(WorkSource):
         # checks immediately; an unprimed token strategy no-ops until prime()
         # supplies the ratios and re-runs it.
         self._strategy.validate_liveness(self._cursors)
+
+        if not any(cur._total_samples for cur in self._cursors.values()):
+            raise ValueError("At least one dataset must contain samples")
 
         self._recompute_total_samples()
 
@@ -2323,6 +2324,15 @@ class StaticMixtureWorkSource(WorkSource):
         while True:
             components = self._strategy.produce(self._cursors)
             if not components:
+                # Count global chunks, not this lane's output: a valid source
+                # can finish before assigning any chunks to this lane.
+                if self._global_chunk_index == 0:
+                    raise ValueError(
+                        "Cannot produce the first chunk "
+                        f"(chunk_size={self._alloc_config.chunk_size}): "
+                        "a dataset cannot supply its requested allocation. "
+                        "Reduce chunk_size or adjust the mixture or exhaustion policies."
+                    )
                 return None
             self._recompute_total_samples()
             g = self._global_chunk_index
