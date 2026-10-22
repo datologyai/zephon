@@ -58,7 +58,12 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
-from zephon._internal.notify import SOURCE_EXHAUSTION_CONTINUES_TAG, is_sentinel
+from zephon._internal.notify import (
+    SOURCE_EXHAUSTED_TAG,
+    SOURCE_EXHAUSTION_CONTINUES_TAG,
+    SOURCE_EXHAUSTION_FINAL_TAG,
+    is_sentinel,
+)
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
 from zephon._internal.replay import ReplayConfigService
@@ -451,7 +456,7 @@ class Engine:
         if bs is not None:
             cs = self._work.chunk_size_hint()
             assert cs is not None, (
-                "No chunk size hint for current work source, determinism breaks potentially"
+                "WorkSource must provide a chunk_size_hint when the pipeline batches"
             )
 
     @property
@@ -911,14 +916,19 @@ class Engine:
 
     @staticmethod
     def _make_source_exhausted_sentinel(
-        lane_id: LaneId, component_id: int, *, continues: bool = False
+        lane_id: LaneId,
+        component_id: int,
+        *,
+        continues: bool = False,
+        final: bool = False,
     ) -> SampleRecord:
         """Create an end-of-data (EOD) sentinel; buffered data may arrive later."""
         return Engine._make_control_record(
             lane_id,
             {
-                "_source_exhausted": component_id,
+                SOURCE_EXHAUSTED_TAG: component_id,
                 SOURCE_EXHAUSTION_CONTINUES_TAG: continues,
+                SOURCE_EXHAUSTION_FINAL_TAG: final,
             },
         )
 
@@ -929,6 +939,8 @@ class Engine:
 
         The sentinel follows the component's last sample in this chunk, or precedes
         the chunk if the component is absent. Live input and replay use this path.
+        The notice completing the declared vocabulary is final. Cumulative stamps
+        reconstruct that distinction even when replay starts after earlier EODs.
         """
         missing = announced.difference(chunk.source_exhausted)
         if missing:
@@ -942,6 +954,17 @@ class Engine:
                 f"lane {lane_id}, chunk {cid} contains samples from previously "
                 f"source-exhausted components {sorted(revived)}"
             )
+
+        def announce(name: str, component_id: int) -> SampleRecord:
+            # Include this notice before checking whether the vocabulary is complete.
+            announced.add(name)
+            return self._make_source_exhausted_sentinel(
+                lane_id,
+                component_id,
+                continues=component_id in self._continues_after_exhaustion,
+                final=len(announced) == len(self._component_to_id),
+            )
+
         remaining: dict[str, int] = {}
         for name in chunk.source_exhausted:
             if name in announced:
@@ -950,13 +973,7 @@ class Engine:
             if count:
                 remaining[name] = count
             else:
-                announced.add(name)
-                component_id = self._get_component_id(name)
-                yield self._make_source_exhausted_sentinel(
-                    lane_id,
-                    component_id,
-                    continues=component_id in self._continues_after_exhaustion,
-                )
+                yield announce(name, self._get_component_id(name))
         get_id = self._get_component_id
         if not remaining:
             for offset, (sample_id, name) in enumerate(chunk):
@@ -970,12 +987,7 @@ class Engine:
                 remaining[name] = left - 1
                 if left == 1:
                     del remaining[name]
-                    announced.add(name)
-                    yield self._make_source_exhausted_sentinel(
-                        lane_id,
-                        component_id,
-                        continues=component_id in self._continues_after_exhaustion,
-                    )
+                    yield announce(name, component_id)
 
     def _lane_stream(self, lane_id: LaneId) -> Iterator[EngineSample | SampleRecord]:
         """Yield EngineSamples for a single lane, fetching chunks lazily.
@@ -2109,7 +2121,7 @@ class Engine:
         if bs is not None:
             cs = self._work.chunk_size_hint()
             assert cs is not None, (
-                "No chunk size hint for current work source, determinism breaks potentially"
+                "WorkSource must provide a chunk_size_hint when the pipeline batches"
             )
 
         # This is FOR ALL WORKERS on that node. So we restore a bit more than we have to because we cannot be certain whether load_state_dict is called before workers are instantiated or not.

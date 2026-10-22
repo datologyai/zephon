@@ -19,7 +19,9 @@ from zephon.types import (
     StreamItem,
 )
 
+SOURCE_EXHAUSTED_TAG = "_source_exhausted"
 SOURCE_EXHAUSTION_CONTINUES_TAG = "_source_exhaustion_continues"
+SOURCE_EXHAUSTION_FINAL_TAG = "_source_exhaustion_final"
 
 
 class _MonotoneNotify(NamedTuple):
@@ -175,7 +177,7 @@ def source_exhausted_component(item: StreamItem) -> int | None:
     """Return an EOD sentinel's component, including zero, or None for other items."""
     if not isinstance(item, SampleRecord):
         return None
-    component = item.meta.tags.get("_source_exhausted")
+    component = item.meta.tags.get(SOURCE_EXHAUSTED_TAG)
     return int(component) if component is not None else None
 
 
@@ -183,4 +185,11 @@ def source_exhaustion_continues(item: StreamItem) -> bool:
     """Whether an EOD sentinel permits continuation without its component."""
     return isinstance(item, SampleRecord) and bool(
         item.meta.tags.get(SOURCE_EXHAUSTION_CONTINUES_TAG, False)
+    )
+
+
+def source_exhaustion_is_final(item: StreamItem) -> bool:
+    """Whether this EOD completes exhaustion of the source's component vocabulary."""
+    return isinstance(item, SampleRecord) and bool(
+        item.meta.tags.get(SOURCE_EXHAUSTION_FINAL_TAG, False)
     )

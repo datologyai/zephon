@@ -15,6 +15,7 @@ from zephon._internal.notify import (
     is_sentinel,
     source_exhausted_component,
     source_exhaustion_continues,
+    source_exhaustion_is_final,
 )
 from zephon._internal.observability.stopwatch import Stopwatch
 from zephon._internal.ops.batch import Batch
@@ -295,7 +296,11 @@ class BaseOperatorState:
                     # Advance only after preceding data entered this accumulator.
                     # Epoch flushes retain these facts; restore replays notices.
                     self._source_exhaustion[lane] = SourceExhaustion(
-                        previous.exhausted | {component_id}, continuing
+                        exhausted=previous.exhausted | {component_id},
+                        continuing=continuing,
+                        final_component=component_id
+                        if source_exhaustion_is_final(e)
+                        else previous.final_component,
                     )
                     ready.extend(
                         self.accumulator_impl.on_source_exhausted(lane, component_id)

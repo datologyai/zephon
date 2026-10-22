@@ -1064,6 +1064,9 @@ class Pipeline:
         target, including explicit overrides, and renormalizes the remaining weights.
         ``StaticMixtureWorkSource`` lists none. Late records follow ``obsolete_drain_rate``
         in both modes.
+        The final EOD leaves the target unchanged. Previously retired components
+        continue through controlled drainage to avoid a burst of buffered records
+        at final EOD.
 
         Args:
             max_buffer_size: Samples to hold while waiting for the component the
