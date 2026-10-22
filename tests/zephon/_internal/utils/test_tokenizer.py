@@ -5,17 +5,34 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import pickle
+import shutil
 import sys
 import threading
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from tenacity.wait import wait_none
 
-from zephon._internal.utils.tokenizer import fallback_tokenizer, load_hf_tokenizer
+from tests._helpers import (
+    DEEPSEEK_LIKE_NORMALIZED,
+    DEEPSEEK_LIKE_SPECIALS,
+    LLAMA3_LIKE_SPECIALS,
+    requires_rust_tokenize,
+)
+from zephon._internal.utils.tokenizer import (
+    Refused,
+    fallback_tokenizer,
+    load_hf_tokenizer,
+    load_rust_tokenizer,
+)
 from zephon._internal.utils.tokenizer_cloud import (
     TransientCloudTokenizerError,
     resolve_tokenizer_id_with_retry,
@@ -363,3 +380,179 @@ def test_thread_salt_render_is_byte_identical(tail: str) -> None:
         CONVERSATION, chat_template=thread_salted_template(template), tokenize=False
     )
     assert rendered == base
+
+
+# ---------------------------------------------------------------------------
+# RustTokenizer / load_rust_tokenizer
+# ---------------------------------------------------------------------------
+
+
+_FAMILY_TOKENS = {
+    "deepseek": (DEEPSEEK_LIKE_SPECIALS, DEEPSEEK_LIKE_NORMALIZED),
+    "llama3": (LLAMA3_LIKE_SPECIALS, ()),
+}
+
+
+def _adversarial_texts(family: str) -> dict[str, str]:
+    """Strings where HF and the rust engine are likeliest to disagree.
+
+    Special-token text must stay content (``add_special_tokens=False``), and
+    ``normalized: true`` added tokens match after normalization.
+    """
+    specials, normalized = _FAMILY_TOKENS[family]
+    bos, eos, pad = specials[:3]
+    return {
+        "prose": "The quick brown fox jumps over the lazy dog.",
+        "contractions": "It's what they'll say: we've done it, I'D agree.",
+        "empty": "",
+        "space": " ",
+        "whitespace": "\n\n\t x\r\n",
+        "leading_spaces": "  leading",
+        "multibyte": "emoji 😀👍🏽 中文 日本語 ﬁ Ａ café",
+        "digits": "1234567",
+        "run_5000_chars": "lorem ipsum dolor " * 278,
+        "eos_text": f"hello {eos} world",
+        "bos_text": f"{bos}x",
+        "pad_text": f"a{pad}b",
+        **{f"special_{i}": f"x{t}y" for i, t in enumerate(specials[3:])},
+        "unknown_special_text": "x<｜place▁holder▁no▁3｜>y<|reserved_special_token_9|>",
+        **{f"normalized_{i}": f"q {t} z" for i, t in enumerate(normalized)},
+    }
+
+
+_PARITY_CASES = [
+    pytest.param(family, text, id=f"{family}-{name}")
+    for family in _FAMILY_TOKENS
+    for name, text in _adversarial_texts(family).items()
+]
+
+
+@pytest.fixture(scope="module")
+def tokenizers_by_family(
+    deepseek_like_tokenizer_dir: Path, llama3_like_tokenizer_dir: Path
+) -> dict[str, tuple[Any, Any]]:
+    dirs = {
+        "deepseek": deepseek_like_tokenizer_dir,
+        "llama3": llama3_like_tokenizer_dir,
+    }
+    return {
+        family: (load_hf_tokenizer(str(d)), load_rust_tokenizer(str(d)))
+        for family, d in dirs.items()
+    }
+
+
+@pytest.fixture(scope="module")
+def hf_tok(tokenizers_by_family: dict[str, tuple[Any, Any]]) -> Any:
+    return tokenizers_by_family["deepseek"][0]
+
+
+@pytest.fixture(scope="module")
+def rust_tok(tokenizers_by_family: dict[str, tuple[Any, Any]]) -> Any:
+    return tokenizers_by_family["deepseek"][1]
+
+
+def test_fixture_marks_normalized_added_tokens(
+    deepseek_like_tokenizer_dir: Path,
+) -> None:
+    spec = json.loads((deepseek_like_tokenizer_dir / "tokenizer.json").read_text())
+    normalized = {t["content"] for t in spec["added_tokens"] if t["normalized"]}
+    assert normalized == set(DEEPSEEK_LIKE_NORMALIZED)
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize("family,text", _PARITY_CASES)
+def test_rust_ids_equal_hf(
+    family: str, text: str, tokenizers_by_family: dict[str, tuple[Any, Any]]
+) -> None:
+    hf, rust = tokenizers_by_family[family]
+    got = rust([text], add_special_tokens=False)["input_ids"][0]
+    assert got.dtype == np.int64
+    assert got.tolist() == hf([text], add_special_tokens=False)["input_ids"][0]
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize("family", list(_FAMILY_TOKENS))
+def test_rust_special_token_ids_equal_hf(
+    family: str, tokenizers_by_family: dict[str, tuple[Any, Any]]
+) -> None:
+    hf, rust = tokenizers_by_family[family]
+    ids = ("bos_token_id", "eos_token_id", "pad_token_id")
+    assert [getattr(rust, k) for k in ids] == [getattr(hf, k) for k in ids]
+
+
+@requires_rust_tokenize
+def test_rust_single_str_returns_one_array(hf_tok: Any, rust_tok: Any) -> None:
+    text = "The quick brown fox"
+    ids = rust_tok(text, add_special_tokens=False)["input_ids"]
+    assert ids.tolist() == hf_tok(text, add_special_tokens=False)["input_ids"]
+
+
+@requires_rust_tokenize
+def test_rust_truncation_keeps_the_head(hf_tok: Any, rust_tok: Any) -> None:
+    texts = ["The quick brown fox jumps over the lazy dog.", "dog"]
+    kwargs = {"add_special_tokens": False, "truncation": True, "max_length": 4}
+    got = [ids.tolist() for ids in rust_tok(texts, **kwargs)["input_ids"]]
+    assert got == hf_tok(texts, **kwargs)["input_ids"]
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize(
+    "roundtrip",
+    [lambda t: pickle.loads(pickle.dumps(t)), copy.deepcopy],
+    ids=["pickle", "deepcopy"],
+)
+def test_rust_tokenizer_survives_copy(rust_tok: Any, roundtrip: Any) -> None:
+    texts = list(_adversarial_texts("deepseek").values())
+    clone = roundtrip(rust_tok)
+    assert [a.tolist() for a in clone(texts)["input_ids"]] == [
+        a.tolist() for a in rust_tok(texts)["input_ids"]
+    ]
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"add_special_tokens": True},
+        {"padding": True},
+        {"truncation": True, "max_length": 4, "truncation_side": "left"},
+    ],
+    ids=["add_special_tokens", "padding", "truncation_side_left"],
+)
+def test_rust_refuses_call_options(rust_tok: Any, kwargs: dict[str, Any]) -> None:
+    refused = next(k for k in kwargs if k not in ("truncation", "max_length"))
+    with pytest.raises(Refused, match=refused):
+        rust_tok(["hello"], **kwargs)
+
+
+@requires_rust_tokenize
+def test_rust_refuses_disagreeing_special_token_files(
+    llama3_like_tokenizer_dir: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "tok"
+    shutil.copytree(llama3_like_tokenizer_dir, folder)
+    special_map = json.loads((folder / "special_tokens_map.json").read_text())
+    special_map["pad_token"]["content"] = "<|eot_id|>"
+    (folder / "special_tokens_map.json").write_text(json.dumps(special_map))
+    with pytest.raises(Refused, match=r"pad_token.*finetune_right_pad_id.*eot_id"):
+        load_rust_tokenizer(str(folder))
+
+
+@requires_rust_tokenize
+def test_rust_refuses_arrow_tokenize_1x(
+    monkeypatch: pytest.MonkeyPatch, deepseek_like_tokenizer_dir: Path
+) -> None:
+    monkeypatch.setitem(
+        sys.modules, "arrow_tokenize", types.SimpleNamespace(__version__="1.0.2")
+    )
+    with pytest.raises(Refused, match="arrow-tokenize 1.0.2"):
+        load_rust_tokenizer(str(deepseek_like_tokenizer_dir))
+
+
+@requires_rust_tokenize
+def test_rust_without_arrow_tokenize_names_the_package(
+    monkeypatch: pytest.MonkeyPatch, deepseek_like_tokenizer_dir: Path
+) -> None:
+    monkeypatch.setitem(sys.modules, "arrow_tokenize", None)
+    with pytest.raises(ImportError, match="arrow-tokenize>=2"):
+        load_rust_tokenizer(str(deepseek_like_tokenizer_dir))

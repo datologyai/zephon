@@ -23,7 +23,9 @@ from typing import (
 from zephon._internal.ops.tokenize_base import _MISSING, TokenizeBase
 from zephon._internal.token_counting import TextTokenCountingSpec
 from zephon._internal.utils.tokenizer import (
+    Refused,
     TokenBatch,
+    TokenizerBackend,
     TokenizerLike,
     TokenizerOutput,
 )
@@ -84,6 +86,7 @@ class TokenizeText(TokenizeBase):
         special_tokens: SpecialTokensMode = "bos_eos",
         bos_token_id: int | None = None,
         eos_token_id: int | None = None,
+        backend: TokenizerBackend = "hf",
     ) -> None:
         """Tokenize text fields using a provided or auto-resolved tokenizer.
 
@@ -171,12 +174,36 @@ class TokenizeText(TokenizeBase):
                 Required when the chosen mode needs an EOS and the tokenizer
                 has none. Tokenizer not mutated; raises at ``__init__``
                 under ``tokenizer_default`` / ``none`` — see ``bos_token_id``.
+            backend: ``"hf"`` (default) loads ``tokenizer_id`` with
+                ``AutoTokenizer``. ``"rust"`` loads the same folder's
+                ``tokenizer.json`` with arrow-tokenize 2.x (the tokenizers 1.0
+                engine, Python 3.11-3.13) and emits identical ids as int64
+                numpy arrays. It needs a local or cloud ``tokenizer_id``, the
+                default ``use_fast``, and a bracket or ``"none"``
+                ``special_tokens`` mode; anything else raises at
+                construction rather than falling back to HF.
         """
         if special_tokens not in _VALID_SPECIAL_TOKENS_MODES:
             raise ValueError(
                 f"special_tokens must be one of {_VALID_SPECIAL_TOKENS_MODES}, "
                 + f"got {special_tokens!r}"
             )
+
+        if backend == "rust":
+            unsupported = {
+                "tokenizer": tokenizer is not None,
+                "tokenizer_id=None": tokenizer_id is None,
+                f"use_fast={use_fast!r}": use_fast is not True,
+                "special_tokens='tokenizer_default'": (
+                    special_tokens == "tokenizer_default"
+                ),
+            }
+            named = [name for name, bad in unsupported.items() if bad]
+            if named:
+                raise Refused(
+                    f"backend='rust' does not support {', '.join(named)}: it "
+                    + "loads tokenizer_id itself and emits content ids only"
+                )
 
         if missing_field not in _VALID_MISSING_FIELD_MODES:
             raise ValueError(
@@ -240,6 +267,7 @@ class TokenizeText(TokenizeBase):
             tokenizer,
             tokenizer_id,
             use_fast=use_fast,
+            backend=backend,
             max_batch=max_batch,
             max_latency_ms=max_latency_ms,
         )

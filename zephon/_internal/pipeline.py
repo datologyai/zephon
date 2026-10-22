@@ -48,6 +48,7 @@ from zephon._internal.runtime_spec import (
 )
 from zephon._internal.stream import EngineSample
 from zephon._internal.utils import buffered_iterable
+from zephon._internal.utils.tokenizer import TokenizerBackend
 from zephon._internal.utils.torch_compat import detect_loader_kind
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
@@ -833,6 +834,7 @@ class Pipeline:
         special_tokens: SpecialTokensMode = "bos_eos",
         bos_token_id: int | None = None,
         eos_token_id: int | None = None,
+        backend: TokenizerBackend = "hf",
         placement: str = "auto",
         parallelism: Optional[int] = None,
     ) -> "Pipeline":
@@ -852,6 +854,7 @@ class Pipeline:
             special_tokens=special_tokens,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
+            backend=backend,
         )
         node = self._graph.add(
             "tokenize", op, self._tail, placement=placement, parallelism=parallelism

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from tests._helpers import requires_rust_tokenize
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon.types import SampleBatch, SampleRecord
@@ -122,6 +126,18 @@ def test_pipeline_tokenize_forwards_missing_field_policy() -> None:
     assert op.missing_field == "empty"
 
 
+def test_pipeline_tokenize_forwards_backend() -> None:
+    from zephon._internal.ops.tokenize_text import TokenizeText
+
+    ds = make_inmem_dataset("tiny", [{"text": "hello"}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds)).tokenize(
+        tokenizer_id="some/dir", field="text", backend="rust"
+    )
+    op = pipe._tail.op
+    assert isinstance(op, TokenizeText)
+    assert op.backend == "rust"
+
+
 def test_pipeline_tokenize_signature_uses_missing_field_mode_literal() -> None:
     import inspect
 
@@ -145,3 +161,40 @@ def test_pipeline_tokenize_signature_uses_special_tokens_mode_literal() -> None:
     sig = inspect.signature(Pipeline.tokenize)
     annotation = sig.parameters["special_tokens"].annotation
     assert annotation is SpecialTokensMode
+
+
+def _training_windows(tokenizer_dir: Path, backend: str) -> list[dict[str, Any]]:
+    rows = [
+        {"text": f"Document {i}: the quick brown fox 数据 😀 " * (1 + i % 5)}
+        for i in range(40)
+    ]
+    ws = FakeIndexableWorkSource(make_inmem_dataset("docs", rows), chunk_size=8)
+    pipe = (
+        PublicPipeline(ws)
+        .decode_text()
+        .tokenize(
+            tokenizer_id=str(tokenizer_dir),
+            field="text",
+            backend=backend,
+            add_attention_mask=False,
+        )
+        .shuffle(buffer_size=16, seed=0)
+        .pack_flat(max_length=32, algorithm="wrap")
+        .batch(microbatch_size=4, drop_last=False)
+        .options(deterministic=True, max_workers=1, default_stage_prefetch=0)
+    )
+    windows = []
+    for batch in pipe:
+        assert isinstance(batch, SampleBatch)
+        out = batch.to_training(return_labels=True)
+        windows.append(
+            {k: np.asarray(out[k]).tolist() for k in ("input_ids", "labels")}
+        )
+    return windows
+
+
+@requires_rust_tokenize
+def test_rust_backend_windows_equal_hf(deepseek_like_tokenizer_dir: Path) -> None:
+    hf = _training_windows(deepseek_like_tokenizer_dir, "hf")
+    assert len(hf) > 1
+    assert _training_windows(deepseek_like_tokenizer_dir, "rust") == hf

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from zephon._internal.ops.tokenize_base import _MISSING, TokenizeBase
+from zephon._internal.utils.tokenizer import TOKENIZER_LOADERS
 from zephon.ops.traits import OpTraits
 
 
@@ -55,9 +56,7 @@ def test_lazy_setup_loads_and_finalizes_once(monkeypatch: pytest.MonkeyPatch) ->
         loads.append((tokenizer_id, use_fast, eos_token))
         return SimpleNamespace(name_or_path="loaded")
 
-    monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer", fake_load
-    )
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", fake_load)
     op = _base(tokenizer_id="some-model", use_fast=False)
     op._setup_tokenizer()
     op._setup_tokenizer()
@@ -84,9 +83,7 @@ def test_provided_tokenizer_skips_loader(monkeypatch: pytest.MonkeyPatch) -> Non
     def fail_load(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("loader must not run when a tokenizer is provided")
 
-    monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer", fail_load
-    )
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", fail_load)
     provided = SimpleNamespace(name_or_path="user-supplied")
     op = _base(tokenizer=provided)
     op._setup_tokenizer()

@@ -2,11 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
+from tests._helpers import requires_rust_tokenize
 from zephon._internal.ops.tokenize_text import TokenizeText
+from zephon._internal.utils.tokenizer import (
+    Refused,
+    RustTokenizer,
+    fallback_tokenizer,
+)
 from zephon._internal.utils.torch_compat import _should_use_tensor_lock
 from zephon.ops.base import OpContext, StageInfo
 from zephon.ops.config import SpecialTokensMode
@@ -2111,3 +2119,88 @@ def test_special_tokens_mode_values() -> None:
         "none",
         "tokenizer_default",
     }
+
+
+# ---------------------------------------------------------------------------
+# backend="rust"
+# ---------------------------------------------------------------------------
+
+_LONG = "The quick brown fox jumps over the lazy dog, again and again. " * 4
+
+
+def _tokenize_records(
+    tokenizer_dir: Path, texts: list[Any], backend: str, **kwargs: Any
+) -> list[tuple[Any, Any, dict[str, list[int]]]]:
+    op = _setup(
+        TokenizeText(
+            tokenizer_id=str(tokenizer_dir), field="text", backend=backend, **kwargs
+        )
+    )
+    records = [
+        SampleRecord(
+            meta=SampleMeta(sample_id=(0, 0, i), lane_id=0, chunk_id=0),
+            payload={"text": text},
+        )
+        for i, text in enumerate(texts)
+    ]
+    return [
+        (
+            rec.meta.sample_id,
+            rec.meta.lineage,
+            {k: np.asarray(v).tolist() for k, v in _payload_dict(rec).items()},
+        )
+        for rec in op.process_many(records)
+    ]
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"split_long_samples": True, "max_length": 8},
+        {"truncation": True, "max_length": 8},
+        {"padding": "max_length", "max_length": 64},
+    ],
+    ids=["bos_eos_split", "truncation", "padding"],
+)
+def test_rust_backend_records_equal_hf(
+    deepseek_like_tokenizer_dir: Path, kwargs: dict[str, Any]
+) -> None:
+    texts = [_LONG, "", "short 数据 😀", "q <｜fim▁hole｜> z"]
+    hf = _tokenize_records(deepseek_like_tokenizer_dir, texts, "hf", **kwargs)
+    rust = _tokenize_records(deepseek_like_tokenizer_dir, texts, "rust", **kwargs)
+    assert rust == hf
+
+
+@requires_rust_tokenize
+def test_rust_backend_loads_rust_tokenizer(deepseek_like_tokenizer_dir: Path) -> None:
+    op = TokenizeText(
+        tokenizer_id=str(deepseek_like_tokenizer_dir), field="text", backend="rust"
+    )
+    op._setup_tokenizer()
+    assert isinstance(op.tok, RustTokenizer)
+
+
+@requires_rust_tokenize
+@pytest.mark.parametrize("backend", ["hf", "rust"])
+def test_none_text_raises(deepseek_like_tokenizer_dir: Path, backend: str) -> None:
+    with pytest.raises(TypeError):
+        _tokenize_records(deepseek_like_tokenizer_dir, ["fine", None], backend)
+
+
+@pytest.mark.parametrize(
+    "kwargs,refused",
+    [
+        ({"special_tokens": "tokenizer_default"}, "special_tokens"),
+        ({"tokenizer": fallback_tokenizer()}, "tokenizer"),
+        ({"use_fast": False}, "use_fast=False"),
+        ({"tokenizer_id": None}, "tokenizer_id=None"),
+    ],
+    ids=["tokenizer_default", "prebuilt_tokenizer", "use_fast", "no_tokenizer_id"],
+)
+def test_rust_backend_refuses_at_construction(
+    kwargs: dict[str, Any], refused: str
+) -> None:
+    kwargs = {"tokenizer_id": "some/dir", **kwargs}
+    with pytest.raises(Refused, match=refused):
+        TokenizeText(field="text", backend="rust", **kwargs)

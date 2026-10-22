@@ -15,6 +15,7 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
+from zephon._internal.utils.tokenizer import TOKENIZER_LOADERS
 from zephon.ops import Accumulator, BaseOp, CountingAccumulator, OpTraits, ReadyBatch
 from zephon.ops.children import spawn_child
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
@@ -1897,7 +1898,7 @@ def test_preflight_bad_tokenizer_reports_error_issue(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("no repo named 'definitely-not-a-model'")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="definitely-not-a-model",
         field="text",
@@ -1941,9 +1942,7 @@ def test_preflight_probes_a_copy_and_leaves_pipeline_ops_lazy(
         loads.append(tokenizer_id)
         return _FastTok()
 
-    monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer", _fake_load
-    )
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", _fake_load)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="fake-model",
         field="text",
@@ -1965,8 +1964,9 @@ def test_preflight_finalize_failure_is_not_cached_on_pipeline_op(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Finalization failures are cached, unlike loader failures.
-    monkeypatch.setattr(
-        "zephon._internal.ops.tokenize_base.load_hf_tokenizer",
+    monkeypatch.setitem(
+        TOKENIZER_LOADERS,
+        "hf",
         lambda *a, **k: _NoBosTok(),
     )
     pipe = _empty_pipeline().tokenize(tokenizer_id="fake-model", field="text")
@@ -1987,7 +1987,7 @@ def test_preflight_aggregates_issues_in_graph_order(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("down")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", _boom)
     pipe = (
         _empty_pipeline()
         .tokenize(
