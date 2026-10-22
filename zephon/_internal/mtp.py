@@ -58,6 +58,7 @@ join non-daemon children — preventing the process from blocking exit.
 from __future__ import annotations
 
 import ctypes
+import gc
 import multiprocessing as mp
 import os
 import queue as _queue_mod
@@ -349,6 +350,13 @@ def _mtp_worker(
                 break
 
             seq += 1
+            if seq == 1:
+                # The pipeline is built and running, so what is alive now lives as long as
+                # the hub. Freezing it keeps every full collection from rescanning those
+                # objects (~600K in a training hub, ~400 ms a pass), a pause that stalls
+                # this rank and, at a data-parallel trainer's all-reduce, every rank.
+                gc.collect()
+                gc.freeze()
 
             # Opportunistically drain control messages without blocking
             if _drain_ctrl(ctrl_conn, pending, engine):
