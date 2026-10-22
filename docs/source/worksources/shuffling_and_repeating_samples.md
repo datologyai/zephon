@@ -95,7 +95,9 @@ You can instead control what happens when an individual dataset runs out of samp
 - `exhausted_policy="stop"` stops the entire work source as soon as any dataset can no
   longer supply its requested allocation. No dataset repeats, but other datasets may still
   have unread samples. This means that setting both `exhausted_policy="stop"` and
-  `stop_after_passes` is an invalid configuration.
+  `stop_after_passes` is an invalid configuration. An empty dataset gives you an error
+  when you create the work source. If it can't produce its first chunk, you'll get an
+  error when you start reading.
 - `exhausted_policy="repeat"` restarts each dataset independently whenever it runs out.
   Without an additional stopping limit, the work source continues indefinitely. This is
   useful when your training loop controls termination through a fixed number of steps or

@@ -7,7 +7,7 @@ import math
 import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, ClassVar, Literal
@@ -85,7 +85,7 @@ def _resolve_block_size(
 
 def _normalize_per_dataset(
     value: Any,
-    dataset_names: list[str],
+    dataset_names: Sequence[str],
     *,
     default: Any,
     name: str,
@@ -100,7 +100,7 @@ def _normalize_per_dataset(
         if unknown:
             raise ValueError(
                 f"{name} contains unknown dataset names: {sorted(unknown)}. "
-                f"Known datasets: {dataset_names}"
+                f"Known datasets: {list(dataset_names)}"
             )
         return {ds: value.get(ds, default) for ds in dataset_names}
     return dict.fromkeys(dataset_names, value)
@@ -955,6 +955,8 @@ class AllocationStrategy(ABC):
 
     def __init__(self, config: _AllocationConfig) -> None:
         self._config = config
+        # Diagnostic only, read if the first global chunk fails; not checkpointed.
+        self._last_failed_component: str | None = None
 
     @abstractmethod
     def produce(
@@ -1245,6 +1247,7 @@ class AccumulatorStrategy(QuotaAllocationStrategy):
                 quota = quotas[name]
                 cursor = cursors[name]
                 if cursor.remaining < quota:
+                    self._last_failed_component = name
                     if cfg.exhausted_policy[name] == "repeat":
                         ds_max = cfg.max_repeats[name]
                         # Roll back this chunk's accumulator advance before any
@@ -1448,6 +1451,7 @@ class LegacyFixedStrategy(QuotaAllocationStrategy):
             quota = self._chunk_quota[name]
             cursor = cursors[name]
             if cursor.remaining < quota:
+                self._last_failed_component = name
                 if cfg.exhausted_policy[name] == "repeat":
                     ds_max = cfg.max_repeats[name]
                     if ds_max is not None and cursor._epoch >= ds_max:
@@ -1672,6 +1676,7 @@ class TokenAwareStrategy(AllocationStrategy):
                 sample_id = cursor_list[best].next_one()
                 if sample_id is None:
                     name = order[best]
+                    self._last_failed_component = name
                     # Roll back the partial attempt before deciding whether this
                     # is a repeat retry or a fixed-point terminal state.
                     self._restore(cursors, snapshot)
@@ -1744,17 +1749,26 @@ class TokenAwareStrategy(AllocationStrategy):
         if not any(policy == "repeat" for policy in cfg.exhausted_policy.values()):
             return
         shares = self.effective_shares()
+
+        def required(name: str) -> int:
+            bound = math.ceil(
+                shares[name] * cfg.chunk_size * self._TOKEN_LIVENESS_SAFETY
+            )
+            # No component can supply more than the entire chunk.
+            return min(cfg.chunk_size, bound)
+
+        def formula(name: str) -> str:
+            bound = (
+                f"ceil(effective_share={shares[name]:.4g} * "
+                f"chunk_size={cfg.chunk_size} * safety={self._TOKEN_LIVENESS_SAFETY})"
+            )
+            return f"min(chunk_size, {bound})"
+
         _validate_repeat_liveness(
             cfg,
             cursors,
-            lambda n: math.ceil(
-                shares[n] * cfg.chunk_size * self._TOKEN_LIVENESS_SAFETY
-            ),
-            lambda n: (
-                f"ceil(effective_share={shares[n]:.4g} * "
-                f"chunk_size={cfg.chunk_size} * "
-                f"safety={self._TOKEN_LIVENESS_SAFETY})"
-            ),
+            required,
+            formula,
         )
 
     def estimate_remaining_samples(self, cursors: dict[str, _DatasetCursor]) -> int:
@@ -1959,10 +1973,10 @@ class StaticMixtureWorkSource(WorkSource):
         # (see AllocationStrategy.mixture_unit).
         self._token_estimation: TokenEstimation | None = token_estimation
         self._datasets: list[Dataset] = list(datasets)
-        dataset_names = [ds.name for ds in self._datasets]
+        component_order = tuple(ds.name for ds in self._datasets)
 
         mixture_spec = MixtureSpec(mixture) if isinstance(mixture, Mapping) else mixture
-        mixture_spec.validate_for(dataset_names)
+        mixture_spec.validate_for(component_order)
 
         self._dataset_ids: dict[str, int] = {}
         self._datasets_by_id: dict[int, Dataset] = {}
@@ -2007,25 +2021,11 @@ class StaticMixtureWorkSource(WorkSource):
             self._knobs_by_name[ds.name] = knobs
             cursor = _DatasetCursor(dataset_id, ds.ids(), ds.counts(), knobs)
 
-            if cursor.remaining <= 0:
-                # Should not happen due to validate_for call
-                print(f"Unexpected: cursor for ds {dataset_id} has 0 remaining items.")
-                self._weights.pop(ds.name)
-                self._knobs_by_name.pop(ds.name)
-                continue
+            # Keep empty cursors: their own policy governs exhaustion, and repeat
+            # liveness validation below rejects datasets that cannot supply a chunk.
             self._cursors[ds.name] = cursor
 
-        if not self._weights:
-            raise ValueError("No datasets with positive weight and non-empty cursors")
-
-        component_order = tuple(
-            ds.name for ds in self._datasets if ds.name in self._weights
-        )
-        if not component_order:
-            raise ValueError("No active mixture components available")
-
         self._seed = seed
-        active_names = list(component_order)
 
         # Resolve the stop_after_passes default: unset (caller passed nothing) becomes
         # stop_after_passes=1 — epoch the slowest dataset once, repeat the rest —
@@ -2057,7 +2057,7 @@ class StaticMixtureWorkSource(WorkSource):
             exhausted_policy = policy_default
         exhausted_policy_map = _normalize_per_dataset(
             exhausted_policy,
-            active_names,
+            component_order,
             default=policy_default,
             name="exhausted_policy",
         )
@@ -2095,26 +2095,47 @@ class StaticMixtureWorkSource(WorkSource):
             reshuffle_on_repeat = True
         reshuffle_on_repeat_map = _normalize_per_dataset(
             reshuffle_on_repeat,
-            active_names,
+            component_order,
             default=True,
             name="reshuffle_on_repeat",
         )
 
         max_repeats_map = _normalize_per_dataset(
             max_repeats,
-            active_names,
+            component_order,
             default=None,
             name="max_repeats",
         )
 
-        for ds_name, mr in max_repeats_map.items():
-            if mr is not None and exhausted_policy_map[ds_name] != "repeat":
+        # Defaults are harmless. Scalar settings can serve the repeating part of
+        # a mixed source; otherwise report non-default settings that have no effect.
+        has_repeat = "repeat" in exhausted_policy_map.values()
+        for setting, spec, default in (
+            ("max_repeats", max_repeats, None),
+            ("reshuffle_on_repeat", reshuffle_on_repeat, True),
+        ):
+            if isinstance(spec, Mapping):
+                for ds_name, value in spec.items():
+                    if value != default and exhausted_policy_map[ds_name] != "repeat":
+                        warnings.warn(
+                            f"{setting}['{ds_name}']={value} has no effect with "
+                            f"exhausted_policy['{ds_name}']="
+                            f"'{exhausted_policy_map[ds_name]}'",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+            elif spec != default and not has_repeat:
                 warnings.warn(
-                    f"max_repeats['{ds_name}']={mr} has no effect with "
-                    f"exhausted_policy['{ds_name}']="
-                    f"'{exhausted_policy_map[ds_name]}'",
+                    f"{setting}={spec} has no effect without a repeat component",
                     RuntimeWarning,
                     stacklevel=2,
+                )
+
+        for ds_name, policy in exhausted_policy_map.items():
+            if policy == "stop" and self._cursors[ds_name]._total_samples == 0:
+                raise ValueError(
+                    f"Dataset '{ds_name}' has 0 samples and exhausted_policy='stop'; "
+                    "provide a non-empty dataset or change its exhaustion policy."
                 )
 
         self._alloc_config = _AllocationConfig(
@@ -2132,6 +2153,9 @@ class StaticMixtureWorkSource(WorkSource):
         # checks immediately; an unprimed token strategy no-ops until prime()
         # supplies the ratios and re-runs it.
         self._strategy.validate_liveness(self._cursors)
+
+        if not any(cur._total_samples for cur in self._cursors.values()):
+            raise ValueError("At least one dataset must contain samples")
 
         self._recompute_total_samples()
 
@@ -2160,23 +2184,6 @@ class StaticMixtureWorkSource(WorkSource):
             )
         return self._total_samples
 
-    def _active_dataset_context(self) -> tuple[dict[str, Dataset], dict[str, int]]:
-        """Datasets and ids restricted to the active mixture components.
-
-        Threaded identically into the fresh-build and checkpoint-load strategy
-        factories.
-        """
-        active_ids = {
-            name: dataset_id
-            for name, dataset_id in self._dataset_ids.items()
-            if name in self._weights
-        }
-        datasets_by_name = {
-            name: self._datasets_by_id[dataset_id]
-            for name, dataset_id in active_ids.items()
-        }
-        return datasets_by_name, active_ids
-
     def _build_fresh_strategy(self) -> AllocationStrategy:
         """Construct the mode-appropriate strategy with empty carry state.
 
@@ -2185,11 +2192,10 @@ class StaticMixtureWorkSource(WorkSource):
         registry lookup, one uniform factory call.
         """
         mode = "token_aware" if self._token_estimation is not None else "accumulator"
-        datasets_by_name, active_ids = self._active_dataset_context()
         return _STRATEGY_BY_MODE[mode].from_scratch(
             self._alloc_config,
-            datasets_by_name=datasets_by_name,
-            dataset_ids=active_ids,
+            datasets_by_name={ds.name: ds for ds in self._datasets},
+            dataset_ids=dict(self._dataset_ids),
             estimation=self._token_estimation,
         )
 
@@ -2323,6 +2329,17 @@ class StaticMixtureWorkSource(WorkSource):
         while True:
             components = self._strategy.produce(self._cursors)
             if not components:
+                # Count global chunks, not this lane's output: a valid source
+                # can finish before assigning any chunks to this lane.
+                if self._global_chunk_index == 0:
+                    name = self._strategy._last_failed_component
+                    dataset = f"dataset {name!r}" if name is not None else "a dataset"
+                    raise ValueError(
+                        "Cannot produce the first chunk "
+                        f"(chunk_size={self._alloc_config.chunk_size}): "
+                        f"{dataset} cannot supply its requested allocation. "
+                        "Reduce chunk_size or adjust the mixture or exhaustion policies."
+                    )
                 return None
             self._recompute_total_samples()
             g = self._global_chunk_index
@@ -2616,12 +2633,11 @@ class StaticMixtureWorkSource(WorkSource):
         # Rebuild the strategy from its persisted tag (strategy_cls resolved by
         # the parity check above). from_checkpoint owns the per-mode field
         # parsing; sample strategies ignore the token-only context.
-        datasets_by_name, active_ids = self._active_dataset_context()
         self._strategy = strategy_cls.from_checkpoint(
             self._alloc_config,
             ckpt,
-            datasets_by_name=datasets_by_name,
-            dataset_ids=active_ids,
+            datasets_by_name={ds.name: ds for ds in self._datasets},
+            dataset_ids=dict(self._dataset_ids),
             estimation=self._token_estimation,
         )
         # Re-run the repeat-policy liveness guard now the strategy is rebuilt: a
