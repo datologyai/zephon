@@ -60,7 +60,7 @@ Most of what Zephon can read is behind optional extras, so you only install what
 | `zephon[hf]` | Hugging Face datasets (`hf://` paths), plus Parquet |
 | `zephon[parquet]` | Parquet shards |
 | `zephon[streaming]` | MosaicML Streaming / MDS shards (Python 3.11+) |
-| `zephon[litdata]` | LitData shards (Python 3.10 uses LitData 0.2.44 without Pillow) |
+| `zephon[litdata]` | LitData shards |
 | `zephon[vortex]` | Vortex shards (Python 3.11+) |
 | `zephon[lance]` | Lance datasets, one shard per fragment |
 | `zephon[ray]` | The experimental Ray runner |
