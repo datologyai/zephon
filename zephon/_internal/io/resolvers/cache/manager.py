@@ -134,10 +134,10 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
-# Owner releases that GC finalizers cannot apply immediately. GC can interrupt
-# an allocation while the same thread holds or is acquiring ``.reset.lock``
-# through another ``FileLock`` instance. Waiting for that lock would deadlock
-# the interrupted thread, so finalizers enqueue with reentrant ``SimpleQueue.put``.
+# GC finalizers enqueue owner releases with reentrant ``SimpleQueue.put``.
+# Even a nonblocking FileLock acquisition can reenter interrupted bookkeeping
+# and raise after taking the OS lock, leaving it held when cleanup is deferred.
+# Keep all lock acquisition out of finalizers.
 # One daemon thread applies queued releases under the lock. While their session
 # remains current, queued managers still count as owners and keep its SHM names alive.
 # Pending releases are not guaranteed to finish at interpreter exit. A later
@@ -203,8 +203,8 @@ def _close_cache_manager_resources(
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
 
-    GC cleanup (``blocking=False``) tries ``reset_lock`` once and queues the
-    release on contention: waiting could block the interrupted lock holder.
+    GC cleanup (``blocking=False``) queues the release without touching the lock:
+    even nonblocking acquisition can reenter interrupted lock bookkeeping.
     Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
     the release synchronously. Local SHM handles close in either case.
     """
@@ -212,33 +212,9 @@ def _close_cache_manager_resources(
         if blocking:
             _release_session_owner(reset_lock, session_path, owner_key, session_id)
         else:
-            _release_session_owner_or_defer(
-                reset_lock, session_path, owner_key, session_id
-            )
+            _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
     if shared is not None:
         shared.close()
-
-
-def _release_session_owner_or_defer(
-    reset_lock: "BaseFileLock",
-    session_path: Path,
-    owner_key: str,
-    session_id: str | None,
-) -> None:
-    """Release session ownership from a finalizer without waiting for the lock.
-
-    If acquisition fails, enqueue with reentrant ``SimpleQueue.put``. This path
-    must not acquire ``_release_thread_lock`` or start the background worker.
-    """
-    try:
-        reset_lock.acquire(timeout=0)
-    except Exception:
-        _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
-        return
-    try:
-        _release_session_owner_locked(session_path, owner_key, session_id)
-    finally:
-        reset_lock.release()
 
 
 def _release_session_owner(

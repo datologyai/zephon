@@ -1638,6 +1638,51 @@ def _single_shard_setup(tmp_path: Path) -> tuple[Path, LocalFSBackend, ShardLoca
     return tmp_path / "cache", LocalFSBackend(root=remote), loc
 
 
+def test_finalizer_does_not_leak_partial_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted acquire can raise after taking the OS lock.
+
+    Retrying that lock on another thread then waits for a hold the finalizer
+    never released. GC cleanup must leave acquisition to the release thread.
+    """
+    from filelock import FileLock
+
+    session_path = tmp_path / manager_mod._STATE_DIR_NAME / "session.json"
+    session_path.parent.mkdir()
+    session_path.write_text(
+        json.dumps({"session_id": "session", "owners": {"owner": {"instances": 1}}}),
+        encoding="utf-8",
+    )
+    lock = FileLock(str(tmp_path / manager_mod._RESET_LOCK_FILENAME))
+    acquire = lock.acquire
+    finalizer_thread = threading.get_ident()
+
+    def interrupted_acquire(*args: Any, **kwargs: Any) -> Any:
+        result = acquire(*args, **kwargs)
+        if threading.get_ident() == finalizer_thread:
+            raise RuntimeError("acquisition bookkeeping interrupted after OS lock")
+        return result
+
+    monkeypatch.setattr(lock, "acquire", interrupted_acquire)
+    manager_mod._ensure_deferred_release_thread()
+    try:
+        manager_mod._close_cache_manager_resources(
+            None, lock, session_path, "owner", "session"
+        )
+        assert not lock.is_locked, (
+            "finalizer left the OS lock held after acquire raised"
+        )
+        _wait_for_instances(tmp_path, "owner", 0)
+        with FileLock(lock.lock_file).acquire(timeout=1):
+            pass
+    finally:
+        # Also unblock the release worker when testing the old implementation.
+        lock.release(force=True)
+        _wait_for_instances(tmp_path, "owner", 0)
+
+
 def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1768,7 +1813,7 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
 ) -> None:
     """GC firing a second finalizer mid-release must defer, not deadlock.
 
-    The outer finalizer holds ``.reset.lock`` while it rewrites
+    The release worker holds ``.reset.lock`` while it rewrites
     ``session.json``; an allocation there can collect another manager,
     whose finalizer then finds the lock held by this same thread.
     """
@@ -1795,9 +1840,9 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
     )
     try:
         _run_bounded(outer._close_finalizer)
+        _wait_for_instances(cache_root, owner_key, 1)
         assert not outer._close_finalizer.alive
         assert not inner._close_finalizer.alive
-        _wait_for_instances(cache_root, owner_key, 1)
         assert survivor._shared is not None
         assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
     finally:
@@ -1885,15 +1930,8 @@ def test_old_manager_release_preserves_replacement_session(
     # Missing SHM triggers a new session even though this process is still alive.
     manager_mod.CacheSharedState.unlink_by_names(old_session["shm_names"])
     release_done = threading.Event()
-    if release_mode == "deferred":
-        original_init = CacheManager._run_session_state_machine
+    if release_mode != "close":
         original_release = manager_mod._release_session_owner
-
-        def init_with_pending_release(self: CacheManager) -> None:
-            # Initialization holds a different FileLock on the same path, so
-            # the finalizer queues its release before the session is replaced.
-            old._close_finalizer()
-            original_init(self)
 
         def release_and_signal(
             reset_lock: BaseFileLock,
@@ -1905,10 +1943,20 @@ def test_old_manager_release_preserves_replacement_session(
             if session_id == old_session["session_id"]:
                 release_done.set()
 
+        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
+
+    if release_mode == "deferred":
+        original_init = CacheManager._run_session_state_machine
+
+        def init_with_pending_release(self: CacheManager) -> None:
+            # Initialization holds a different FileLock on the same path, so
+            # the queued release waits until the session has been replaced.
+            old._close_finalizer()
+            original_init(self)
+
         monkeypatch.setattr(
             CacheManager, "_run_session_state_machine", init_with_pending_release
         )
-        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
 
     new: CacheManager | None = None
     try:
@@ -1917,7 +1965,7 @@ def test_old_manager_release_preserves_replacement_session(
             old.close()
         elif release_mode == "finalizer":
             old._close_finalizer()
-        else:
+        if release_mode != "close":
             assert release_done.wait(5.0), "deferred release did not finish"
 
         assert not old._close_finalizer.alive
