@@ -126,9 +126,12 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.ofd_lock:probe_ofd_support",
         }
     ),
-    # Internal patches make cache interleavings deterministic; metrics stay public.
+    # Internal patches control cache interleavings and keep managers alive to
+    # distinguish explicit pipeline teardown from GC cleanup; metrics stay public.
     "tests/integration/test_prefetch_integration.py": frozenset(
         {
+            "zephon._internal.io.resolvers.cache.manager:CacheManager",
+            "zephon._internal.io.resolvers.cache.shared_state:CacheSharedState",
             "zephon._internal.observability.collector:PipelineCollector",
             "zephon._internal.ops.fetch:FetchOp",
             "zephon._internal.ops.prefetch:PrefetchOp",

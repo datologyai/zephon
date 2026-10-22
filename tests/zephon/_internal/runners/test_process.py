@@ -25,6 +25,8 @@ from tests.zephon._internal.runners._helpers import (
     _mk_record,
     _mk_records,
     _probe_stage,
+    _resource_stage,
+    _ResourceOp,
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
@@ -2108,3 +2110,23 @@ def test_process_runner_worker_exit_is_visible_despite_helper_subprocess(
     finally:
         _kill_helper(pid_path)
         runner.close()
+
+
+def test_close_releases_operator_resources(tmp_path: Path) -> None:
+    runner = ProcessStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    instances = list(runner.ops[0].instances)
+    try:
+        assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
+    finally:
+        runner.close()
+    runner.close()
+
+    assert instances and all(op.resource is None for op in instances)
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 2

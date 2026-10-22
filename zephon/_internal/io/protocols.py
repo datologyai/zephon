@@ -61,6 +61,10 @@ class MultiDatasetShardStore(Protocol):
 
     def for_dataset(self, dataset_id: int) -> DatasetShardView: ...
 
+    def close(self) -> None:
+        """Release owned resources; repeated calls must be safe."""
+        ...
+
 
 __all__ = [
     "RandomAccessShard",

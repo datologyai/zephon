@@ -30,3 +30,6 @@ class InMemoryMultiDatasetStore(MultiDatasetShardStore):
 
     def for_dataset(self, dataset_id: int) -> DatasetShardView:
         return self._datasets[dataset_id]
+
+    def close(self) -> None:
+        """Leave borrowed in-memory shard views available to their owners."""

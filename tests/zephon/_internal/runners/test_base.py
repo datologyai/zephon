@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import pytest
 
-from tests.zephon._internal.runners._helpers import _ctx_services
+from tests.zephon._internal.runners._helpers import (
+    _ctx_services,
+    _resource_stage,
+    _ResourceOp,
+)
 from zephon._internal.engine import Engine
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
@@ -768,3 +773,37 @@ def test_public_source_hook_dispatches_output_through_operator() -> None:
     assert state._get_source_exhaustion(3) == SourceExhaustion()
     state.enqueue([notice])  # A fresh run reconstructs facts and dispatches again.
     assert hooks == [(3, 7), (3, 2), (3, 7)]
+
+
+def test_setup_failure_releases_partial_and_previous_operators(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="setup failed"):
+        InlineStageRunner(
+            _resource_stage(
+                _ResourceOp(tmp_path), _ResourceOp(tmp_path, fail_setup=True)
+            ),
+            _ctx_services(),
+            max_workers=1,
+        )
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 2
+
+
+def test_teardown_failure_does_not_skip_remaining_operators(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FailingTeardownOp(_ResourceOp):
+        def teardown(self) -> None:
+            super().teardown()
+            raise RuntimeError("teardown failed")
+
+    runner = InlineStageRunner(
+        _resource_stage(_ResourceOp(tmp_path), FailingTeardownOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+    )
+    runner.close()
+
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 2
+    assert "Failed to tear down operator FailingTeardownOp" in caplog.text
+    assert "teardown failed" in caplog.text

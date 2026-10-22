@@ -2,16 +2,20 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.zephon._internal.runners._helpers import (
+    _assert_close_waits_for_operator_execution,
     _ctx_services,
     _extract_values,
     _mk_record,
     _mk_records,
     _probe_stage,
+    _resource_stage,
+    _ResourceOp,
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
@@ -629,3 +633,27 @@ def test_thread_runner_initial_and_grown_instances_share_stage_info() -> None:
         assert [inst.stage_info for inst in state.instances] == [expected, expected]
     finally:
         runner.close()
+
+
+def test_close_releases_operator_resources(tmp_path: Path) -> None:
+    runner = ThreadStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    instances = list(runner.ops[0].instances)
+    try:
+        assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
+    finally:
+        runner.close()
+    runner.close()
+
+    assert instances and all(op.resource is None for op in instances)
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1
+
+
+def test_close_waits_for_operator_execution() -> None:
+    _assert_close_waits_for_operator_execution(ThreadStageRunner)

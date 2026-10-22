@@ -55,9 +55,8 @@ class FetchOp(BaseOp):
     def teardown(self) -> None:
         """Close the shard store and its cache manager before the worker exits."""
         store, self._store = self._store, None
-        close = getattr(store, "close", None)
-        if callable(close):
-            close()
+        if store is not None:
+            store.close()
 
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
