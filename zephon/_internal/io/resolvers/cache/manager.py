@@ -134,12 +134,12 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
-# GC can invoke a finalizer while filelock is updating its internal state.
-# ``FileLock.acquire(timeout=0)`` avoids waiting for a busy file lock, but still
-# runs Python bookkeeping that can reenter those updates. It can raise after
-# taking the OS lock; queuing a retry after such a failure can leave the worker
-# waiting on an unreleased lock. Finalizers therefore enqueue owner releases
-# with reentrant ``SimpleQueue.put`` and leave lock acquisition to the worker.
+# GC finalizers enqueue owner releases with reentrant ``SimpleQueue.put``.
+# We could try ``FileLock.acquire(timeout=0)`` in a finalizer to release ownership
+# immediately when the lock is free. However, GC can interrupt filelock's internal
+# bookkeeping, so that call could reenter unfinished updates and raise after
+# taking the OS lock. Queuing a retry then could leave the worker waiting on a
+# lock the finalizer never releases. We therefore leave file locking to the worker.
 # One daemon thread applies queued releases under the lock. While their session
 # remains current, queued managers still count as owners and keep its SHM names alive.
 # Pending releases are not guaranteed to finish at interpreter exit. A later
@@ -206,8 +206,9 @@ def _close_cache_manager_resources(
     ``CacheManager`` is already being garbage-collected.
 
     GC cleanup (``blocking=False``) queues owner release without acquiring
-    ``reset_lock``. Even ``acquire(timeout=0)`` runs Python lock bookkeeping:
-    reentering it from GC can raise after taking the OS lock and leave it held.
+    ``reset_lock``. Trying ``acquire(timeout=0)`` here would avoid waiting for a
+    busy lock, but could reenter lock bookkeeping interrupted by GC. If that call
+    raised after taking the OS lock, queuing a retry could leave the lock held.
     The worker performs acquisition and release outside the finalizer.
     Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
     the release synchronously. Local SHM handles close in either case.
