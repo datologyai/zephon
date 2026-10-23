@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 import pytest
 
+from tests.helpers.tokenizer_reference import BACKENDS, counts, reference
 from zephon._internal.ops.tokenize_text import TokenizeText
 from zephon._internal.token_counting import (
     FatalCountError,
@@ -19,7 +20,7 @@ from zephon._internal.token_counting import (
     choose_text_field,
     extract_text,
 )
-from zephon._internal.utils.tokenizer import fallback_tokenizer
+from zephon._internal.utils.tokenizer import TOKENIZER_LOADERS, fallback_tokenizer
 
 # ---------------------------------------------------------------------------
 # Delivered-token arithmetic
@@ -241,7 +242,7 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
         calls.append((tokenizer_id, use_fast))
         return fallback_tokenizer()
 
-    monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", fake_load)
     TextTokenCountingSpec(tokenizer_id="hf-model", use_fast=False).build_counter()
     assert calls == [("hf-model", False)]
 
@@ -400,3 +401,8 @@ def test_counting_spec_std_pickles_with_closure_tokenizer():
     restored = pickle.loads(pickle.dumps(spec))
     assert restored.tokenizer is not None
     assert restored.tokenizer("a b c")["input_ids"] == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_counts_through_the_op_match_reference(backend):
+    assert counts(backend) == reference()["counts"]

@@ -63,9 +63,25 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+# tryfirst: the guard must see rust tests before ``-m`` deselects them.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
+    from tests.helpers.tokenizer_reference import RUST_TEST_FILES
+
+    stray = sorted(
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("rust")
+        and item.path.relative_to(config.rootpath).as_posix() not in RUST_TEST_FILES
+    )
+    if stray:
+        raise pytest.UsageError(
+            "rust-marked tests outside RUST_TEST_FILES never run in CI; "
+            "add their module to tests/helpers/tokenizer_reference.py:\n"
+            + "\n".join(stray)
+        )
     skip_integration = (
         None
         if config.getoption("--run-integration")

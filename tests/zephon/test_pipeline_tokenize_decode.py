@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from tests.helpers.tokenizer_reference import (
+    BACKENDS,
+    as_json,
+    reference,
+    training_windows,
+)
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon.types import SampleBatch, SampleRecord
@@ -122,6 +130,18 @@ def test_pipeline_tokenize_forwards_missing_field_policy() -> None:
     assert op.missing_field == "empty"
 
 
+def test_pipeline_tokenize_forwards_backend() -> None:
+    from zephon._internal.ops.tokenize_text import TokenizeText
+
+    ds = make_inmem_dataset("tiny", [{"text": "hello"}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds)).tokenize(
+        tokenizer_id="some/dir", field="text", backend="rust"
+    )
+    op = pipe._tail.op
+    assert isinstance(op, TokenizeText)
+    assert op.backend == "rust"
+
+
 def test_pipeline_tokenize_signature_uses_missing_field_mode_literal() -> None:
     import inspect
 
@@ -145,3 +165,10 @@ def test_pipeline_tokenize_signature_uses_special_tokens_mode_literal() -> None:
     sig = inspect.signature(Pipeline.tokenize)
     annotation = sig.parameters["special_tokens"].annotation
     assert annotation is SpecialTokensMode
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_training_windows_match_reference(backend: str) -> None:
+    windows = as_json(training_windows(backend))
+    assert len(windows) > 1
+    assert windows == reference()["training_windows"]

@@ -28,6 +28,7 @@ import pytest
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
 from zephon._internal.ops.ensure_mixture import EnsureMixture
+from zephon._internal.utils.tokenizer import TOKENIZER_LOADERS
 from zephon.io import Dataset
 from zephon.ops import (
     Accumulator,
@@ -673,7 +674,7 @@ def test_preflight_tokenizers_strict_default_raises(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("unreachable hub")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="unreachable",
         field="text",
@@ -690,7 +691,7 @@ def test_preflight_tokenizers_lenient_returns_report(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise OSError("unreachable hub")
 
-    monkeypatch.setattr("zephon._internal.ops.tokenize_base.load_hf_tokenizer", _boom)
+    monkeypatch.setitem(TOKENIZER_LOADERS, "hf", _boom)
     pipe = _empty_pipeline().tokenize(
         tokenizer_id="unreachable",
         field="text",

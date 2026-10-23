@@ -5,17 +5,40 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import pickle
+import shutil
 import sys
 import threading
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from tenacity.wait import wait_none
 
-from zephon._internal.utils.tokenizer import fallback_tokenizer, load_hf_tokenizer
+from tests.helpers.tokenizer_reference import (
+    BACKENDS,
+    DEEPSEEK_LIKE_NORMALIZED,
+    DIRS,
+    adversarial_texts,
+    as_json,
+    ids,
+    load,
+    reference,
+    special_ids,
+    truncated,
+)
+from zephon._internal.utils.tokenizer import (
+    Refused,
+    fallback_tokenizer,
+    load_hf_tokenizer,
+    load_rust_tokenizer,
+)
 from zephon._internal.utils.tokenizer_cloud import (
     TransientCloudTokenizerError,
     resolve_tokenizer_id_with_retry,
@@ -363,3 +386,103 @@ def test_thread_salt_render_is_byte_identical(tail: str) -> None:
         CONVERSATION, chat_template=thread_salted_template(template), tokenize=False
     )
     assert rendered == base
+
+
+# ---------------------------------------------------------------------------
+# RustTokenizer / load_rust_tokenizer
+# ---------------------------------------------------------------------------
+
+
+def test_committed_folder_marks_normalized_added_tokens() -> None:
+    spec = json.loads((DIRS["deepseek"] / "tokenizer.json").read_text())
+    normalized = {t["content"] for t in spec["added_tokens"] if t["normalized"]}
+    assert normalized == set(DEEPSEEK_LIKE_NORMALIZED)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "family,name",
+    [(family, name) for family in DIRS for name in adversarial_texts(family)],
+)
+def test_ids_match_reference(backend: str, family: str, name: str) -> None:
+    got = ids(backend, family, adversarial_texts(family)[name])
+    assert as_json(got) == reference()["ids"][family][name]
+
+
+@pytest.mark.rust
+def test_rust_ids_are_int64() -> None:
+    assert ids("rust", "deepseek", "The quick brown fox").dtype == np.int64
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("family", list(DIRS))
+def test_special_token_ids_match_reference(backend: str, family: str) -> None:
+    assert special_ids(backend, family) == reference()["special_ids"][family]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_single_str_returns_one_sequence(backend: str) -> None:
+    text = adversarial_texts("deepseek")["prose"]
+    got = load(backend, "deepseek")(text, add_special_tokens=False)["input_ids"]
+    assert as_json(got) == reference()["ids"]["deepseek"]["prose"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_truncation_keeps_the_head(backend: str) -> None:
+    assert as_json(truncated(backend)) == reference()["truncated"]
+
+
+@pytest.mark.rust
+@pytest.mark.parametrize(
+    "roundtrip",
+    [lambda t: pickle.loads(pickle.dumps(t)), copy.deepcopy],
+    ids=["pickle", "deepcopy"],
+)
+def test_rust_tokenizer_survives_copy(roundtrip: Any) -> None:
+    texts = adversarial_texts("deepseek")
+    clone = roundtrip(load("rust", "deepseek"))
+    got = as_json(clone(list(texts.values()))["input_ids"])
+    assert dict(zip(texts, got)) == reference()["ids"]["deepseek"]
+
+
+@pytest.mark.rust
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"add_special_tokens": True},
+        {"padding": True},
+        {"truncation": True, "max_length": 4, "truncation_side": "left"},
+    ],
+    ids=["add_special_tokens", "padding", "truncation_side_left"],
+)
+def test_rust_refuses_call_options(kwargs: dict[str, Any]) -> None:
+    refused = next(k for k in kwargs if k not in ("truncation", "max_length"))
+    with pytest.raises(Refused, match=refused):
+        load("rust", "deepseek")(["hello"], **kwargs)
+
+
+@pytest.mark.rust
+def test_rust_refuses_disagreeing_special_token_files(tmp_path: Path) -> None:
+    folder = tmp_path / "tok"
+    shutil.copytree(DIRS["llama3"], folder)
+    special_map = json.loads((folder / "special_tokens_map.json").read_text())
+    special_map["pad_token"]["content"] = "<|eot_id|>"
+    (folder / "special_tokens_map.json").write_text(json.dumps(special_map))
+    with pytest.raises(Refused, match=r"pad_token.*finetune_right_pad_id.*eot_id"):
+        load_rust_tokenizer(str(folder))
+
+
+def test_rust_refuses_tokenizers_0x(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        sys.modules, "tokenizers", types.SimpleNamespace(__version__="0.22.2")
+    )
+    with pytest.raises(Refused, match="tokenizers 0.22.2"):
+        load_rust_tokenizer(str(DIRS["deepseek"]))
+
+
+def test_rust_without_tokenizers_names_the_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "tokenizers", None)
+    with pytest.raises(ImportError, match="tokenizers>=1"):
+        load_rust_tokenizer(str(DIRS["deepseek"]))
