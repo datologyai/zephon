@@ -820,7 +820,6 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
 
     # -- Public API -----------------------------------------------------
     def run(self, upstream: Iterable[RunnerStageIn]) -> Iterator[RunnerStageOut]:
-        self._check_open()
         context = self._create_context()
         with self._context_lock:
             self._check_open()
