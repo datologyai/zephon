@@ -595,6 +595,7 @@ class Pipeline:
         indexable: bool = False,
         batch_shape_sensitive: bool = False,
         requires_serial_state: bool = False,
+        one_to_one_records: bool | None = None,
     ) -> "Pipeline": ...
 
     @_mutates_graph
@@ -615,6 +616,7 @@ class Pipeline:
         indexable: Optional[bool] = None,
         batch_shape_sensitive: Optional[bool] = None,
         requires_serial_state: Optional[bool] = None,
+        one_to_one_records: Optional[bool] = None,
     ) -> "Pipeline":
         """Append a custom operator — two forms.
 
@@ -719,6 +721,11 @@ class Pipeline:
                 across parallel worker instances. In deterministic mode
                 the planner pins ``parallelism=1`` for ops with this
                 trait.
+            one_to_one_records: Kwargs form. Set True when every input record
+                leaves the op as exactly one record with the same identity
+                (no filtering, duplication, splitting, or merging). An
+                optimizer-step curriculum (``StepMixturePlan``) runs only
+                pipelines whose ops all declare it. Default None (unknown).
 
         Returns:
             Self for method chaining.
@@ -771,6 +778,7 @@ class Pipeline:
                     ("indexable", indexable),
                     ("batch_shape_sensitive", batch_shape_sensitive),
                     ("requires_serial_state", requires_serial_state),
+                    ("one_to_one_records", one_to_one_records),
                 )
                 if val is not None
             ]
@@ -831,6 +839,7 @@ class Pipeline:
                 requires_serial_state=(
                     False if requires_serial_state is None else requires_serial_state
                 ),
+                one_to_one_records=one_to_one_records,
             ),
         )
         node = self._graph.add(

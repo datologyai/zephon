@@ -47,6 +47,7 @@ class ExpandChat(BaseOp):
         return OpTraits(
             indexable=False,
             preserves_cursor_order=True,
+            one_to_one_records=False,
             calibration_replayable=True,
             parallelism=4,
         )

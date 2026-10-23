@@ -103,11 +103,17 @@ Zephon checks these when the pipeline starts:
   pipeline that sets `global_batch_size`, with or without a curriculum.
 - **Records stay in order.** `shuffle`, `ensure_mixture`, `pack_sequences`, and
   `pack_flat` are rejected. To shuffle, set `shuffle_within_shard=True` on the work source.
+- **One record per training example.** Operators that may split, merge, or drop records
+  are rejected: `tokenize(split_long_samples=True)`, `expand_chat`, `stateful_transform`,
+  and custom operators that do not declare `one_to_one_records=True`.
 - **No `TokenEstimation`.**
 
-Dropped records are not detected yet: a `map_transform` that returns `None`, or a
-`map_batch` that changes the batch size, shifts every later breakpoint without an error.
-Packed pipelines cannot use step plans; attach a chunk-round `MixtureSchedule` instead.
+Some operators drop records only for certain inputs: a `map_transform` that returns
+`None`, a `map_batch` that drops or changes its batch, or a `tokenize_chat` sample it
+cannot tokenize faithfully. Under a step plan these raise an error naming the lane, chunk, and
+offset, rather than silently shifting every later breakpoint.
+`map_transform(..., drop_none=False)` keeps such records and is allowed. To filter, do it
+before loading the dataset, or use a chunk-round `MixtureSchedule`.
 
 ## Schedules in chunk rounds
 

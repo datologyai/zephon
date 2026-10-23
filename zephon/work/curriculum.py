@@ -437,6 +437,9 @@ class StepMixturePlan:
     starting, and the error names the nearest exact steps. ``"warn"`` averages
     such a breakpoint over its round and logs a warning instead.
     :meth:`describe` shows where every breakpoint lands.
+
+    Every pipeline operator must keep one record per source record
+    (``OpTraits(one_to_one_records=True)``) and preserve cursor order.
     """
 
     phases: tuple[MixturePhase, ...]

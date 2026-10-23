@@ -47,6 +47,7 @@ class ReplayFilter(BaseOp):
         return OpTraits(
             indexable=True,
             preserves_cursor_order=True,
+            one_to_one_records=True,
             batch_shape_sensitive=False,
         )
 

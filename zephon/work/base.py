@@ -481,13 +481,18 @@ class WorkSource(ABC):
         output_batch_size: int | None,
         preserves_cursor_order: bool,
         global_batch_size: int | None = None,
+        record_count_blockers: tuple[str, ...] = (),
     ) -> None:
         """Bind configuration that depends on the resolved execution topology.
 
         The engine calls this before it creates lane clones.
         """
         del canonical_replicas, output_batch_size, preserves_cursor_order
-        del global_batch_size
+        del global_batch_size, record_count_blockers
+
+    def _requires_one_to_one_records(self) -> bool:
+        """Whether operators must keep exactly one record per source record."""
+        return False
 
     def _has_schedule(self) -> bool:
         """Whether a curriculum schedule drives this source's per-chunk mixture."""
