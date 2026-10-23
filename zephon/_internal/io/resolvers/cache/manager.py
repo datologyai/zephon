@@ -143,7 +143,7 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
 # Queued managers remain owners of their session until the release is applied.
 # Orderly interpreter exit gives the worker one bounded opportunity to drain
 # releases. A blocked lock or failed release can still leave ownership behind;
-# later initialization prunes owners whose processes have exited. Explicit close
+# later release or initialization prunes dead owners. Explicit close
 # attempts release synchronously within its cleanup budget.
 _DEFERRED_RELEASE_EXIT_TIMEOUT = 1.0
 
@@ -375,6 +375,9 @@ def _release_session_owner_locked(
             _atomic_write_json(session_path, session)
             return
     owners.pop(owner_key, None)
+    # A crashed peer cannot release its entry. Let the last surviving owner
+    # clean up without waiting for another cache initialization.
+    owners = CacheManager._prune_dead_owners(owners)
     session["owners"] = owners
     if owners:
         _atomic_write_json(session_path, session)
@@ -542,7 +545,14 @@ class CacheManager(ShardResolver):
         _ensure_deferred_release_thread()
         with self._reset_lock:
             self._state_dir.mkdir(parents=True, exist_ok=True)
-            self._run_session_state_machine()
+            try:
+                self._run_session_state_machine()
+            except BaseException:
+                if self._shared is not None:
+                    if self._shared.created_regions:
+                        CacheSharedState.unlink_by_names(self._shared.shm_names)
+                    self._shared.close()
+                raise
 
         assert self._shared is not None
         logger.debug(
@@ -718,7 +728,8 @@ class CacheManager(ShardResolver):
         except Exception:
             return None
 
-    def _prune_dead_owners(self, owners: object) -> dict:
+    @classmethod
+    def _prune_dead_owners(cls, owners: object) -> dict:
         """Drop owners whose process is gone or whose pid has been recycled.
 
         Defense-in-depth: each owner key is ``f"{pid}-{start_time_ns}"``
@@ -738,7 +749,7 @@ class CacheManager(ShardResolver):
             if pid <= 0:
                 logger.info("Dropping malformed cache-session owner %r", key)
                 continue
-            if not self._pid_alive(pid):
+            if not cls._pid_alive(pid):
                 logger.info("Dropping dead cache-session owner pid=%d key=%r", pid, key)
                 continue
             actual_start = _process_start_time_ns(pid)

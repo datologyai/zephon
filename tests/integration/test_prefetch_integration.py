@@ -15,7 +15,6 @@ import sys
 import textwrap
 import threading
 import time
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -24,7 +23,10 @@ import pytest
 
 from zephon import Pipeline
 from zephon._internal.io.resolvers.cache.manager import CacheManager
-from zephon._internal.io.resolvers.cache.shared_state import CacheSharedState
+from zephon._internal.io.resolvers.cache.shared_state import (
+    CacheSharedState,
+    _open_shared_memory,
+)
 from zephon._internal.observability.collector import PipelineCollector
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.ops.prefetch import PrefetchOp
@@ -745,7 +747,7 @@ def test_pipeline_releases_fetch_and_prefetch_cache(
         assert json.loads(path.read_text())["owners"] == {}
         for name in names.values():
             with pytest.raises(FileNotFoundError):
-                segment = shared_memory.SharedMemory(name=name, create=False)
+                segment = _open_shared_memory(name=name)
                 segment.close()
     finally:
         iterator.close()
@@ -776,10 +778,10 @@ def test_retained_pipeline_releases_cache_at_process_exit(
         import json
         import sys
         import weakref
-        from multiprocessing import shared_memory
         from pathlib import Path
 
         from zephon import Pipeline
+        from zephon._internal.io.resolvers.cache.shared_state import _open_shared_memory
         from zephon.io.dataset import Dataset
         from zephon.work import MixtureSpec, StaticMixtureWorkSource
 
@@ -795,7 +797,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
             remaining = []
             for name in session["shm_names"].values():
                 try:
-                    segment = shared_memory.SharedMemory(name=name, create=False)
+                    segment = _open_shared_memory(name=name)
                 except FileNotFoundError:
                     continue
                 segment.close()
@@ -805,7 +807,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
                 "remaining_shm": remaining,
             }))
 
-        # Observe after Zephon's finalizers, before the resource tracker exits.
+        # Observe after Zephon's finalizers to check completed exit cleanup.
         weakref.finalize(observer, observe)
         dataset = Dataset.from_path("data", str(root / "source"))
         work = StaticMixtureWorkSource(
@@ -827,7 +829,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
         assert next(iterator)
         session = json.loads(session_path.read_text())
         for name in session["shm_names"].values():
-            segment = shared_memory.SharedMemory(name=name, create=False)
+            segment = _open_shared_memory(name=name)
             segment.close()
         ready = root / "ready.tmp"
         ready.write_text(json.dumps(session))
@@ -880,8 +882,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
                 assert process.returncode == 0, log_path.read_text()
 
             session_path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
-            # The resource tracker can unlink SHM without updating ownership.
-            # Check both so it cannot hide a missed Zephon owner release.
+            # Check both the owner record and SHM names to verify complete cleanup.
             observation = json.loads((tmp_path / "exit.json").read_text())
             assert observation == {"owners": {}, "remaining_shm": []}, (
                 log_path.read_text()
@@ -891,7 +892,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
             )
             for name in names.values():
                 with pytest.raises(FileNotFoundError):
-                    segment = shared_memory.SharedMemory(name=name, create=False)
+                    segment = _open_shared_memory(name=name)
                     segment.close()
         finally:
             if process.poll() is None:

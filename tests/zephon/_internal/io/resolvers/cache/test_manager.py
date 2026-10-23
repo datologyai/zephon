@@ -25,7 +25,11 @@ from zephon._internal.io.resolvers.cache import (
     PermanentSourceMissing,
     ShardNotReady,
 )
-from zephon._internal.io.resolvers.cache.shared_state import _ShardState
+from zephon._internal.io.resolvers.cache.shared_state import (
+    CacheSharedState,
+    _open_shared_memory,
+    _ShardState,
+)
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 from zephon._internal.utils.compression import zstd
@@ -1623,10 +1627,18 @@ def _wait_for_instances(
 
 
 def _shm_exists(name: str) -> bool:
-    from multiprocessing.shared_memory import SharedMemory
+    if os.name == "posix":
+        from _posixshmem import shm_open
 
+        # Observe without registering with the tracker or changing its state.
+        try:
+            fd = shm_open("/" + name.lstrip("/"), os.O_RDONLY, mode=0o600)
+        except FileNotFoundError:
+            return False
+        os.close(fd)
+        return True
     try:
-        shm = SharedMemory(name=name, create=False)
+        shm = _open_shared_memory(name=name)
     except FileNotFoundError:
         return False
     shm.close()
@@ -2107,7 +2119,7 @@ def test_explicit_close_does_not_retry_a_partially_applied_release(
 
 
 def _run_cache_exit(tmp_path: Path, script: str) -> tuple[dict[str, Any], str]:
-    """Observe real interpreter-exit cleanup before the resource tracker runs."""
+    """Observe owner entries and SHM names after real interpreter-exit cleanup."""
     setup = textwrap.dedent("""
         import gc
         import json
@@ -2137,7 +2149,7 @@ def _run_cache_exit(tmp_path: Path, script: str) -> tuple[dict[str, Any], str]:
                     "shm_exists": [_shm_exists(name) for name in names],
                 }))
 
-        # Older finalizers run last, before the separate resource tracker exits.
+        # Older finalizers run last, so the observer sees completed exit cleanup.
         weakref.finalize(observer, observe)
         cache_root, storage, loc = _single_shard_setup(root)
         manager = _make_manager(cache_root, storage, [loc], persist_state=True)
@@ -2148,23 +2160,30 @@ def _run_cache_exit(tmp_path: Path, script: str) -> tuple[dict[str, Any], str]:
     script = setup + textwrap.dedent(script) + "\nsys.setswitchinterval(10.0)\n"
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(sys.path)
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path)],
-        cwd=Path(__file__).resolve().parents[6],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    observation = json.loads((tmp_path / "exit.json").read_text())
-    return observation, result.stderr
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            cwd=Path(__file__).resolve().parents[6],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "resource_tracker" not in result.stderr, result.stderr
+        observation = json.loads((tmp_path / "exit.json").read_text())
+        return observation, result.stderr
+    finally:
+        # Failure scenarios deliberately leave SHM for a later owner to recover.
+        path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
+        if path.exists():
+            CacheSharedState.unlink_by_names(json.loads(path.read_text())["shm_names"])
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
 def test_interpreter_exit_finishes_cache_owner_releases(tmp_path: Path) -> None:
-    """Exit cleanup completes before the resource tracker can hide a missed release."""
+    """Orderly exit finishes queued releases and unlinks the session's SHM."""
     observation, stderr = _run_cache_exit(
         tmp_path,
         """
@@ -2292,3 +2311,183 @@ def test_forked_exit_preserves_parent_owner_and_releases_child_owner(
     assert "Timed out waiting for deferred cache owner releases" not in stderr
     assert observation["owners"] == {}
     assert not any(observation["shm_exists"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+@pytest.mark.parametrize("child_creates", [True, False], ids=["creator", "joiner"])
+@pytest.mark.parametrize("exit_mode", ["close", "finalizer", "crash"])
+def test_independent_process_exit_preserves_live_cache(
+    tmp_path: Path, child_creates: bool, exit_mode: str
+) -> None:
+    """Either rank can exit first; the surviving rank owns the same SHM session."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = (
+        None
+        if child_creates
+        else _make_manager(cache_root, storage, [loc], persist_state=True)
+    )
+    script = textwrap.dedent("""
+        import json
+        import os
+        import sys
+        from pathlib import Path
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _single_shard_setup,
+        )
+
+        root, storage, loc = _single_shard_setup(Path(sys.argv[1]))
+        manager = _make_manager(root, storage, [loc], persist_state=True)
+        manager._shared.set_cache_usage(123)
+        print(manager._session_path.read_text(), flush=True)
+        sys.stdin.readline()
+        if sys.argv[2] == "crash":
+            os._exit(0)
+        if sys.argv[2] == "close":
+            manager.close()
+    """)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    names: dict[str, str] = {}
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path), exit_mode],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        original = json.loads(_run_bounded(process.stdout.readline))
+        names = original["shm_names"]
+        if manager is None:
+            manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert manager._shared is not None
+        assert manager._shared.shm_names == names
+        assert manager._shared.get_cache_usage() == 123
+
+        # communicate also waits for the child's tracker to close stderr.
+        stdout, stderr = process.communicate("exit\n", timeout=10)
+        assert process.returncode == 0, stdout + stderr
+        current = json.loads(manager._session_path.read_text())
+        assert current["session_id"] == original["session_id"]
+        assert all(_shm_exists(name) for name in names.values())
+        assert "resource_tracker" not in stderr, stderr
+        assert manager._shared.get_cache_usage() == 123
+        if exit_mode == "crash":
+            assert len(current["owners"]) == 2
+        else:
+            assert set(current["owners"]) == {manager._owner_key}
+            peer = _make_manager(cache_root, storage, [loc], persist_state=True)
+            try:
+                assert peer._shared is not None
+                assert peer._shared.shm_names == names
+                assert peer._session_id == original["session_id"]
+            finally:
+                peer.close()
+
+        # No intervening initialization prunes the crashed child's entry.
+        manager.close()
+        assert json.loads(manager._session_path.read_text())["owners"] == {}
+        assert not any(_shm_exists(name) for name in names.values())
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+        if manager is not None:
+            manager.close()
+        CacheSharedState.unlink_by_names(names)
+
+
+def test_failed_session_publication_unlinks_new_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    names: dict[str, str] = {}
+
+    def fail_publication(self: CacheManager) -> None:
+        assert self._shared is not None
+        names.update(self._shared.shm_names)
+        raise OSError("injected session write failure")
+
+    monkeypatch.setattr(
+        CacheManager, "_write_new_session_record_locked", fail_publication
+    )
+    try:
+        with pytest.raises(OSError, match="injected session write failure"):
+            _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert len(names) == 4
+        assert not any(_shm_exists(name) for name in names.values())
+    finally:
+        CacheSharedState.unlink_by_names(names)
+
+
+def test_failed_join_preserves_existing_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+    assert manager._shared is not None
+    names = manager._shared.shm_names
+
+    def fail_write(*args: Any) -> None:
+        raise OSError("injected session write failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_mod, "_atomic_write_json", fail_write)
+            with pytest.raises(OSError, match="injected session write failure"):
+                _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert _owner_instances(cache_root, manager._owner_key) == 1
+        assert all(_shm_exists(name) for name in names.values())
+    finally:
+        manager.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_next_init_recovers_crashed_session(tmp_path: Path) -> None:
+    """An abandoned session's SHM is reclaimed while cached files can be reused."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    script = textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _single_shard_setup,
+        )
+
+        root, storage, loc = _single_shard_setup(Path(sys.argv[1]))
+        manager = _make_manager(root, storage, [loc], persist_state=True)
+        manager.resolve(loc)
+        os._exit(0)
+    """)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    path = cache_root / ".zephon_cache_state" / "session.json"
+    names: dict[str, str] = {}
+    manager = None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "resource_tracker" not in result.stderr, result.stderr
+        original = json.loads(path.read_text())
+        names = original["shm_names"]
+        assert original["owners"]
+        assert all(_shm_exists(name) for name in names.values())
+
+        manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        current = json.loads(path.read_text())
+        assert current["session_id"] != original["session_id"]
+        assert set(current["owners"]) == {manager._owner_key}
+        assert not any(_shm_exists(name) for name in names.values())
+        assert manager.resolve(loc).cache_hit
+    finally:
+        if manager is not None:
+            manager.close()
+        if path.exists():
+            CacheSharedState.unlink_by_names(json.loads(path.read_text())["shm_names"])
+        CacheSharedState.unlink_by_names(names)

@@ -1,12 +1,15 @@
 import gc
+import os
 import time
 import weakref
 from multiprocessing import Process, Queue
+from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import zephon._internal.io.resolvers.cache.shared_state as shared_state_mod
 from zephon._internal.io.resolvers.cache.shared_state import (
     CacheSharedState,
     _ShardState,
@@ -30,6 +33,7 @@ def test_create_allocates_arrays_and_returns_names() -> None:
         assert set(names.keys()) == {"states", "access", "sizes", "usage"}
         # All four names must be distinct
         assert len(set(names.values())) == 4
+        assert all(not name.startswith("/") for name in names.values())
 
         assert ss.shard_states.shape == (8,)
         assert ss.shard_access_ns.shape == (8,)
@@ -39,14 +43,18 @@ def test_create_allocates_arrays_and_returns_names() -> None:
         assert int(ss.shard_states[0]) == int(_ShardState.INVALID)
     finally:
         ss.close()
+        CacheSharedState.unlink_by_names(ss.shm_names)
 
 
-def test_attach_second_process_in_same_process_sees_writes() -> None:
+@pytest.mark.parametrize("prefix", ["", "/"])
+def test_attach_second_process_in_same_process_sees_writes(prefix: str) -> None:
     """Attaching twice in the same process reflects writes through both views."""
+    if prefix and os.name != "posix":
+        pytest.skip("slash-prefixed session names are POSIX-only")
     creator = CacheSharedState(capacity=4)
     attacher = None
     try:
-        names = creator.shm_names
+        names = {key: prefix + name for key, name in creator.shm_names.items()}
         attacher = CacheSharedState(capacity=4, shm_names=names)
         assert not attacher.created_regions
         assert attacher.capacity == 4
@@ -65,6 +73,7 @@ def test_attach_second_process_in_same_process_sees_writes() -> None:
         if attacher is not None:
             attacher.close()
         creator.close()
+        CacheSharedState.unlink_by_names(creator.shm_names)
 
 
 def test_attach_missing_raises() -> None:
@@ -141,6 +150,7 @@ def test_numeric_accessors_roundtrip() -> None:
         assert ss.count_local() == 2
     finally:
         ss.close()
+        CacheSharedState.unlink_by_names(ss.shm_names)
 
 
 def _child_attach_and_write(names: dict, q: Queue) -> None:  # type: ignore[no-redef]
@@ -170,30 +180,38 @@ def test_attach_across_processes() -> None:
         assert int(ss.shard_access_ns[0]) == 99
     finally:
         ss.close()
+        CacheSharedState.unlink_by_names(ss.shm_names)
 
 
 def test_finalizer_releases_segments_on_gc() -> None:
     ss = CacheSharedState(capacity=2)
+    names = ss.shm_names
     fin = ss._close_finalizer
     ss_ref = weakref.ref(ss)
     ss = None  # drop strong ref
 
-    for _ in range(200):
-        if fin is None or not fin.alive:
-            break
-        gc.collect()
-        time.sleep(0.01)
+    try:
+        for _ in range(200):
+            if fin is None or not fin.alive:
+                break
+            gc.collect()
+            time.sleep(0.01)
 
-    assert ss_ref() is None
+        assert ss_ref() is None
+    finally:
+        CacheSharedState.unlink_by_names(names)
 
 
 def test_accessor_raises_after_close() -> None:
     ss = CacheSharedState(capacity=2)
     ss.close()
-    with pytest.raises(RuntimeError):
-        _ = ss.shard_states
-    with pytest.raises(RuntimeError):
-        _ = ss.get_cache_usage()
+    try:
+        with pytest.raises(RuntimeError):
+            _ = ss.shard_states
+        with pytest.raises(RuntimeError):
+            _ = ss.get_cache_usage()
+    finally:
+        CacheSharedState.unlink_by_names(ss.shm_names)
 
 
 def test_views_reflect_numpy_semantics() -> None:
@@ -207,3 +225,69 @@ def test_views_reflect_numpy_semantics() -> None:
         assert list(ss.shard_sizes.tolist()) == [0, 1, 2, 3, 4]
     finally:
         ss.close()
+        CacheSharedState.unlink_by_names(ss.shm_names)
+
+
+@pytest.mark.parametrize("create", [True, False], ids=["create", "attach"])
+def test_partial_open_failure_cleans_up_only_its_own_allocations(
+    monkeypatch: pytest.MonkeyPatch, create: bool
+) -> None:
+    creator = None if create else CacheSharedState(capacity=4)
+    names = (
+        CacheSharedState._generate_shm_names() if creator is None else creator.shm_names
+    )
+    monkeypatch.setattr(
+        CacheSharedState, "_generate_shm_names", staticmethod(lambda: names)
+    )
+    opened: list[SharedMemory] = []
+    open_memory = shared_state_mod._open_shared_memory
+
+    def fail_third_open(
+        *, name: str, create: bool = False, size: int = 0
+    ) -> SharedMemory:
+        if name == names["sizes"]:
+            raise OSError("injected shared-memory open failure")
+        segment = open_memory(name=name, create=create, size=size)
+        opened.append(segment)
+        return segment
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(shared_state_mod, "_open_shared_memory", fail_third_open)
+            with pytest.raises(OSError, match="injected"):
+                CacheSharedState(capacity=4, shm_names=None if create else names)
+        assert len(opened) == 2
+        assert all(segment.buf is None for segment in opened)
+        if create:
+            for name in names.values():
+                with pytest.raises(FileNotFoundError):
+                    open_memory(name=name)
+        else:
+            peer = CacheSharedState(capacity=4, shm_names=names)
+            peer.close()
+    finally:
+        if creator is not None:
+            creator.close()
+        CacheSharedState.unlink_by_names(names)
+
+
+def test_name_collision_preserves_existing_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = CacheSharedState._generate_shm_names()
+    existing = shared_state_mod._open_shared_memory(
+        name=names["access"], create=True, size=32
+    )
+    monkeypatch.setattr(
+        CacheSharedState, "_generate_shm_names", staticmethod(lambda: names)
+    )
+    try:
+        with pytest.raises(FileExistsError):
+            CacheSharedState(capacity=4)
+        with pytest.raises(FileNotFoundError):
+            shared_state_mod._open_shared_memory(name=names["states"])
+        peer = shared_state_mod._open_shared_memory(name=names["access"])
+        peer.close()
+    finally:
+        existing.close()
+        CacheSharedState.unlink_by_names(names)
