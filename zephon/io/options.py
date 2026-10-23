@@ -388,6 +388,10 @@ class StoreOptions:
     ``metadata_cache_entries`` bounds retained footers per format and fetch
     replica, independently of the on-disk shard cache; zero disables retention.
     Parquet footer sizes grow with the number of columns and row groups.
+    ``max_open_shards`` bounds the shard readers of each format that each fetch
+    replica keeps open between batches. Zero, the default, opens a reader for
+    each read. An open reader of a shard that the shard cache evicted keeps its
+    disk space until the replica opens its next new reader.
     """
 
     cache: CacheOptions = field(default_factory=CacheOptions)
@@ -396,6 +400,7 @@ class StoreOptions:
     vortex: VortexOptions = field(default_factory=VortexOptions)
     lance: LanceOptions = field(default_factory=LanceOptions)
     metadata_cache_entries: int = _option(256)
+    max_open_shards: int = _option(0)
     _provided_fields: frozenset[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -403,6 +408,7 @@ class StoreOptions:
         _validate_non_negative_int(
             "metadata_cache_entries", self.metadata_cache_entries
         )
+        _validate_non_negative_int("max_open_shards", self.max_open_shards)
         legacy_limit = self.cache.rg_cache_bytes
         if legacy_limit is not None:
             warnings.warn(
@@ -460,6 +466,7 @@ class StoreOptions:
                 vortex=VortexOptions.from_any(None),
                 lance=LanceOptions.from_any(None),
                 metadata_cache_entries=256,
+                max_open_shards=0,
             )
         if isinstance(obj, StoreOptions):
             return obj
@@ -498,6 +505,7 @@ class StoreOptions:
                 vortex=vortex,
                 lance=lance,
                 metadata_cache_entries=obj.get("metadata_cache_entries", _NOT_SUPPLIED),
+                max_open_shards=obj.get("max_open_shards", _NOT_SUPPLIED),
             )
         raise TypeError(f"Cannot interpret store options from {obj!r}")
 

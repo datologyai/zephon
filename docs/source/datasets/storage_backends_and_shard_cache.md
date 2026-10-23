@@ -74,6 +74,22 @@ Each rank releases its cache ownership when it closes; the last owner also frees
 shared bookkeeping memory. Zephon checks for dead owners on close and startup, so if
 every rank is killed, recorded SHM can stick around until the next run uses that cache.
 
+(open-shard-readers)=
+**Open shard readers.** By default, Zephon opens a shard reader for each read. Opening a
+shard again can cost more than a small read, so you can keep readers open between reads.
+With `max_open_shards` set, each fetch replica keeps the readers of that many of its most
+recently used shards open, for each shard format:
+
+```python
+pipeline.options(io_options={"max_open_shards": 16})
+```
+
+Before it uses an open reader, Zephon makes sure that the file did not change. A shard
+that the cache downloaded again gets a new reader. An open reader of a shard that the
+cache evicted keeps the shard's disk space, which the cache limit does not count. Zephon
+closes these readers when the replica opens its next new reader. Thus, keep the limit
+low enough that the disk can hold this many evicted shards for each fetch replica.
+
 ```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
 :language: python
 :caption: examples/guide/datasets/storage_configuration.py
