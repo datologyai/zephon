@@ -1,5 +1,6 @@
 import multiprocessing
 import multiprocessing.context
+import multiprocessing.spawn
 import os
 import pickle
 import signal
@@ -1461,6 +1462,76 @@ def _run_flat(runner: ProcessStageRunner, values: list[int]) -> list[int]:
         elif isinstance(item, SampleRecord):
             flat.append(item)
     return _extract_values(flat)
+
+
+class _ExitInSetupOp(_CrashOp):
+    """Exits the worker with a positive code before any error can be reported."""
+
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        # The parent also sets up local instances; only kill the worker.
+        if multiprocessing.parent_process() is not None:
+            os._exit(3)
+
+
+def _two_op_stage(second: BaseOp) -> Stage:
+    """Identity -> ``second``: exercises the pump path, not direct IPC."""
+    nodes = [Node(name="identity", op=_IdentityOp()), Node(name="dies", op=second)]
+    return Stage(name="s", nodes=nodes, placement="auto", break_reason="test")
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("parallelism", [1, 4])
+@pytest.mark.parametrize("multi_op", [False, True], ids=["direct_ipc", "pump"])
+def test_process_runner_fails_when_worker_exits_without_reporting(
+    multi_op: bool, parallelism: int
+) -> None:
+    op = _ExitInSetupOp()
+    stage = _two_op_stage(op) if multi_op else _mk_resilience_stage(op)
+    stage.nodes[-1].parallelism = parallelism
+    runner = ProcessStageRunner(
+        stage,
+        ctx_services=_ctx_services(),
+        max_workers=parallelism + 1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+        # Resilient mode (the Pipeline default) keeps the parent's
+        # result-queue writer open for respawns, so no EOF ever arrives and
+        # the watchdog is the only thing that can notice the death.
+        max_worker_retries=3,
+        mp_context=_fast_spawn_ctx(),
+    )
+    with pytest.raises(WorkerCrashed) as excinfo:
+        list(runner.run(iter(_mk_records(range(3)))))
+    assert excinfo.value.info.exc_type == "WorkerExited"
+    assert "exited with code 3" in excinfo.value.info.message
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("multi_op", [False, True], ids=["direct_ipc", "pump"])
+def test_process_runner_fails_when_worker_interpreter_cannot_start(
+    multi_op: bool,
+) -> None:
+    """A spawn child that dies before running any Python fails fast."""
+    original = multiprocessing.spawn.get_executable()
+    multiprocessing.spawn.set_executable("/usr/bin/false")
+    try:
+        op = _IdentityOp()
+        runner = ProcessStageRunner(
+            _two_op_stage(op) if multi_op else _mk_resilience_stage(op),
+            ctx_services=_ctx_services(),
+            max_workers=2 if multi_op else 1,
+            deterministic=True,
+            stage_output_mode="stream_items",
+            max_worker_retries=3,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        with pytest.raises(WorkerCrashed) as excinfo:
+            list(runner.run(iter(_mk_records(range(3)))))
+    finally:
+        multiprocessing.spawn.set_executable(original)
+    assert excinfo.value.info.exc_type == "WorkerExited"
+    assert "exited with code 1" in excinfo.value.info.message
 
 
 class TestResilientWorkers:
