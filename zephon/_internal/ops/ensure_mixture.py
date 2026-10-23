@@ -1033,6 +1033,7 @@ class EnsureMixture(BaseOp):
             calibration_replayable=self._config.max_buffer_size is not None,
             indexable=False,
             preserves_cursor_order=False,
+            one_to_one_records=False,
             batch_shape_sensitive=False,
             requires_serial_state=False,
             parallelism=self._parallelism,

@@ -570,6 +570,7 @@ class ShuffleBuffer(BaseOp):
             calibration_replayable=True,
             indexable=False,
             preserves_cursor_order=False,
+            one_to_one_records=False,
             parallelism=1,
         )
 
