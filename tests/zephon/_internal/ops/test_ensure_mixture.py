@@ -1717,6 +1717,45 @@ class TestEnsureMixtureOperator:
         # Explicit mixture override should be stored by name
         assert op._config.mixture_override == {"code": 0.3, "text": 0.7}
 
+    def test_mixture_override_with_curriculum_raises_in_setup(self) -> None:
+        op = EnsureMixture(mixture_override={"a": 1.0})
+        ctx = OpContext({"curriculum_active": True})
+
+        with pytest.raises(ValueError, match="curriculum"):
+            op.setup(ctx)
+
+    def test_mixture_override_with_curriculum_raises_in_accumulator(self) -> None:
+        # Workers build accumulators from a pickled op that never ran setup().
+        op = EnsureMixture(mixture_override={"a": 1.0})
+
+        with pytest.raises(ValueError, match="curriculum"):
+            op.accumulator(deterministic=True, ctx={"curriculum_active": True})
+
+    def test_mixture_override_without_curriculum_ok(self) -> None:
+        op = EnsureMixture(mixture_override={"a": 1.0})
+        ctx = OpContext(
+            {"curriculum_active": False, "get_component_id": lambda name: 0}
+        )
+
+        op.setup(ctx)
+
+        assert op._config.mixture_override_by_id == {0: 1.0}
+
+    def test_curriculum_without_override_ok(self) -> None:
+        op = EnsureMixture()
+        ctx = OpContext({"curriculum_active": True})
+        op.setup(ctx)
+
+        acc = op.accumulator(
+            deterministic=True,
+            ctx={
+                "curriculum_active": True,
+                "get_chunk_mixture": lambda lane, chunk: {0: 0.5, 1: 0.5},
+            },
+        )
+
+        assert isinstance(acc, EnsureMixtureAccumulator)
+
     def test_setup_with_context_services(self) -> None:
         """Test setup with context services from engine.
 
