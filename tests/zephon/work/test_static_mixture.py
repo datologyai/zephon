@@ -4475,7 +4475,7 @@ def test_state_dict_writes_current_version_with_lane_assignment() -> None:
         ).clone_for_lane(0, canonical_replicas=2)
         _drain_chunks(ws, limit=3)
         state = ws.state_dict()
-        assert state["version"] == 6
+        assert state["version"] == 7
         assert state["lane_assignment"] == mode
 
 
@@ -4627,7 +4627,7 @@ def test_permute_checkpoint_restore_matches_baseline(canonical_replicas: int) ->
         prefix = _drain_chunks(ws_save, limit=2)
         state = ws_save.state_dict()
         assert state["lane_assignment"] == "permute"
-        assert state["version"] == 6
+        assert state["version"] == 7
 
         ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
             lane, canonical_replicas=canonical_replicas
@@ -5154,7 +5154,7 @@ def test_token_mode_checkpoint_round_trip_is_bit_identical() -> None:
     for _ in range(7):
         lane.next_chunk()
     state = lane.state_dict()
-    assert state["version"] == 6
+    assert state["version"] == 7
     assert state["allocation_mode"] == "token_aware"
     assert set(state["token_deficits"]) == {"short", "long"}
     assert set(state["token_ratios"]) == {"short", "long"}
@@ -5211,7 +5211,7 @@ def test_sample_checkpoint_into_token_mode_errors() -> None:
     ds = make_token_dataset("a", 10)
     sample_ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
     state = sample_ws.clone_for_lane(0, canonical_replicas=1).state_dict()
-    assert state["version"] == 6
+    assert state["version"] == 7
 
     token_lane = make_token_ws([ds], {"a": 1.0}, chunk_size=16).clone_for_lane(
         0, canonical_replicas=1
@@ -5224,7 +5224,7 @@ def test_sample_mode_state_carries_inert_token_fields() -> None:
     ds = make_token_dataset("a", 10)
     ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
     state = ws.clone_for_lane(0, canonical_replicas=1).state_dict()
-    assert state["version"] == 6
+    assert state["version"] == 7
     assert state["allocation_mode"] == "accumulator"
     assert state["token_deficits"] is None
     assert state["token_ratios"] is None

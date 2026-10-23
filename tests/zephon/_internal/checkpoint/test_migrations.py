@@ -351,7 +351,7 @@ def test_v1_to_v2_migrate_lands_on_valid_v2(monkeypatch):
 
 def test_v1_end_to_end_via_migrate_validates_current():
     """The migrate() entry point produces a dict the current schema accepts."""
-    from zephon._internal.checkpoint._schemas import StaticMixtureStateV6
+    from zephon._internal.checkpoint._schemas import StaticMixtureStateV7
 
     raw = _v1_static_mixture_raw(
         knobs={
@@ -366,8 +366,8 @@ def test_v1_end_to_end_via_migrate_validates_current():
         cursor_epochs={"a": 0, "b": 0},
     )
     migrated = migrate("static_mixture", raw)
-    sm = StaticMixtureStateV6.from_dict(migrated)
-    assert sm.version == 6
+    sm = StaticMixtureStateV7.from_dict(migrated)
+    assert sm.version == 7
     assert sm.cursor_block_sizes == {"a": 8, "b": 8}
     assert sm.shuffle_block_size_spec == 8
     assert sm.allocation_mode == "legacy_fixed"
@@ -458,11 +458,11 @@ def test_v2_to_v3_migrate_lands_on_valid_v3(monkeypatch):
 
 def test_v2_end_to_end_via_migrate_validates_current():
     """migrate() chains a v2 payload all the way to the current schema."""
-    from zephon._internal.checkpoint._schemas import StaticMixtureStateV6
+    from zephon._internal.checkpoint._schemas import StaticMixtureStateV7
 
     migrated = migrate("static_mixture", _v2_static_mixture_raw())
-    sm = StaticMixtureStateV6.from_dict(migrated)
-    assert sm.version == 6
+    sm = StaticMixtureStateV7.from_dict(migrated)
+    assert sm.version == 7
     assert sm.exhausted_policy == {"a": "stop"}  # v2 -> v3 scalar broadcast
     assert sm.stop_after_passes is None  # additive v3 field, absent in v2 checkpoints
     assert sm.lane_assignment == "modulo"  # v3 -> v4 fill
@@ -567,11 +567,11 @@ def test_v3_to_v4_migrate_lands_on_valid_v4(monkeypatch):
 
 def test_v3_end_to_end_validates_current():
     """migrate() upgrades a v3 dict all the way to the current schema."""
-    from zephon._internal.checkpoint._schemas import StaticMixtureStateV6
+    from zephon._internal.checkpoint._schemas import StaticMixtureStateV7
 
     migrated = migrate("static_mixture", _v3_static_mixture_raw())
-    sm = StaticMixtureStateV6.from_dict(migrated)
-    assert sm.version == 6
+    sm = StaticMixtureStateV7.from_dict(migrated)
+    assert sm.version == 7
     assert sm.lane_assignment == "modulo"  # v3 -> v4 fill
     assert sm.token_deficits is None
     assert sm.token_ratios is None
@@ -630,14 +630,15 @@ def _v5_static_mixture_raw(**overrides):
     return base
 
 
-def test_v5_to_v6_keeps_skipping_pass_tails():
-    from zephon._internal.checkpoint._schemas import StaticMixtureStateV6
+def test_v5_migrates_to_unscheduled_tail_skipping_v7():
+    from zephon._internal.checkpoint._schemas import StaticMixtureStateV7
 
-    sm = StaticMixtureStateV6.from_dict(
+    sm = StaticMixtureStateV7.from_dict(
         migrate("static_mixture", _v5_static_mixture_raw())
     )
-    assert sm.version == 6
+    assert sm.version == 7
     assert sm.drain_pass_tail is False
+    assert sm.schedule_fingerprint is None
 
 
 @pytest.mark.parametrize("version", [1, 2])
