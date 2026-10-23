@@ -61,16 +61,42 @@ Vortex structs return dictionaries keyed by field name, including single-field s
 Files containing bare values, such as strings or numeric lists, return those values
 directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
 
-**Caching reads.** Zephon caches Vortex metadata and encoded file segments in memory to
-speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
-shard cache. You can adjust their sizes through the pipeline's `io_options`; these are
-the defaults:
+**Memory-mapped reads.** By default, Zephon maps local Vortex shards into memory and
+reads segments as slices of the map. Reads then use no IO threads and no copies, and the
+operating system's page cache takes the place of a segment cache. A mapped shard must
+not change while it is open, because a truncated file can stop the process. To read
+shards through file IO and the segment cache instead, disable memory maps:
+
+```python
+pipeline.options(io_options={"vortex": {"memory_map": False}})
+```
+
+**Copies of mapped data.** A NumPy array that points into a mapped shard keeps the whole
+file on disk, also after the shard cache evicts it. The cache no longer counts that
+space, so the disk can fill. Thus, by default (`safe_mmap=True`), Zephon copies the
+arrays of mapped reads into memory that the sample owns. Fetch stages that run on the
+process or Ray runner skip this copy, because the runner copies each sample to send it.
+To keep zero-copy views on the thread or inline runner, for example when shards are
+not in the shard cache, disable the copy:
+
+```python
+pipeline.options(io_options={"vortex": {"safe_mmap": False}})
+```
+
+**Caching reads.** Zephon caches Vortex metadata in memory to speed up repeated reads.
+When memory maps are disabled, it also caches encoded file segments. Each fetch replica
+has its own caches, separate from the on-disk shard cache. You can adjust their sizes
+through the pipeline's `io_options`; these are the defaults:
 
 ```python
 pipeline.options(
     io_options={
         "metadata_cache_entries": 256,
-        "vortex": {"segment_cache_bytes": "64mb"},
+        "vortex": {
+            "memory_map": True,
+            "safe_mmap": True,
+            "segment_cache_bytes": "64mb",
+        },
     }
 )
 ```

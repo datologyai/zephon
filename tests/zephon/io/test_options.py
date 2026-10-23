@@ -127,11 +127,28 @@ def test_vortex_options_merge_disable_and_reset() -> None:
         {"segment_cache_bytes": 1.5},
         {"segment_cache_bytes": True},
         {"segment_cache_bytes": ""},
+        {"memory_map": 1},
+        {"memory_map": "true"},
+        {"safe_mmap": 0},
+        {"safe_mmap": "false"},
     ],
 )
 def test_vortex_options_reject_invalid_limits(options: dict) -> None:
     with pytest.raises(ValueError):
         StoreOptions.from_any({"vortex": options})
+
+
+def test_vortex_options_memory_map_defaults_on_and_merges() -> None:
+    assert VortexOptions().memory_map is True
+    assert VortexOptions().safe_mmap is True
+
+    base = StoreOptions.from_any({"vortex": {"memory_map": False}})
+    assert base.vortex.memory_map is False
+
+    # Other Vortex fields keep the earlier choice.
+    merged = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
+    assert merged.vortex.memory_map is False
+    assert merged.vortex.segment_cache_bytes == 0
 
 
 def test_shared_metadata_cache_option_merge_disable_and_reset() -> None:

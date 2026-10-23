@@ -6057,7 +6057,7 @@ wheels = [
 
 [[package]]
 name = "vortex-data"
-version = "0.88.0"
+version = "0.90.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyarrow", marker = "python_full_version >= '3.11'" },
@@ -6065,11 +6065,11 @@ dependencies = [
     { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/26/50/21c3ccf1be91cf32ed74836dd718a9099bdf7a245280a83194ac40d930a5/vortex_data-0.88.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:870735892015dd037ea9b0122db86d73dff587afe7dba90111d63f0fe6a1d6a4", size = 45725317, upload-time = "2026-10-08T15:52:02.208Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/86/ff23a7720b9d58637048e94f8111c6235462c273734de36f2a7970300cb8/vortex_data-0.88.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:1fad02e0d1d77d5b46a8d113540188001628af05183cac730896ea4e982b70e4", size = 44001355, upload-time = "2026-10-08T15:52:05.57Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/b3/23ff728daebdd05739d55fc9af99582fe296dabab48430a43067609d92f4/vortex_data-0.88.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a7dff9f636f11d2e2fc738c12edd4f827a8d98148d52d3438d11a3c7ce5d0a3e", size = 42263501, upload-time = "2026-10-08T15:52:09.336Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/39/45ecd24ad6489cf7ca27af9731dae995a36f6d45a200415ab59d1103aa6a/vortex_data-0.88.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e00b80d2365d6a97049cb77a8a8bb37bfe10bdb2f81aeb8e793573fec79b5994", size = 44263572, upload-time = "2026-10-08T15:52:12.812Z" },
-    { url = "https://files.pythonhosted.org/packages/a8/06/41ebf26a8705c4c67b096068008da2e31113198e6758fcff6e9743578f74/vortex_data-0.88.0-cp311-abi3-win_amd64.whl", hash = "sha256:2987ce188610b28d9b4f840c828e88faf55b67059e32dd1b0b8b6b424cfd9a63", size = 46834273, upload-time = "2026-10-08T15:52:16.293Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/ef/9317f22559ba2d181f192578fbcee7c63ca0dedbf3501b124971a18e7ced/vortex_data-0.90.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:2a6f5a49ac03b3c2c511585bd21179bd529dab37697ea0aa8b74df90c916a8c3", size = 46623098, upload-time = "2026-10-23T13:45:31.852Z" },
+    { url = "https://files.pythonhosted.org/packages/58/d4/018776d24bbcbc15839b33c33ea9a0c8f540b1c10c67d4f829e63b93c995/vortex_data-0.90.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:c3b10444a911dd6bcaa06ad3fec81650140cbf25b03f5f0011a2a32f5bfe3eec", size = 45046264, upload-time = "2026-10-23T13:45:35.361Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/68/5b5602b1d7f282060e9805c3ea3ef78f0c9c8c3f304448cd9baeb097f52c/vortex_data-0.90.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0638e5bb51fd339ea9abc5d99df2e1042b9f7584ae55d44cca26cf138e9120d5", size = 43420360, upload-time = "2026-10-23T13:45:38.475Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/ab/5be0ce1a509e3baad15a1dc23e40238de25377d2387113238e7b1b22a973/vortex_data-0.90.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:48adbedaa5b6c8be03d18a74ae9b5e0c40103394b6ca3243136bb296f18965de", size = 45154924, upload-time = "2026-10-23T13:45:41.618Z" },
+    { url = "https://files.pythonhosted.org/packages/55/f3/8ae7bcde90127eacb5011700404a642fdb939d4818f29aede2964d834b37/vortex_data-0.90.0-cp311-abi3-win_amd64.whl", hash = "sha256:4e32d53f3000a7110ec1170000c6b1b6865371ae8eec1247e41ac5a42c0e3712", size = 47747686, upload-time = "2026-10-23T13:45:44.974Z" },
 ]
 
 [[package]]
@@ -6600,7 +6600,7 @@ requires-dist = [
     { name = "sphinx-copybutton", marker = "extra == 'docs'", specifier = ">=0.5.0" },
     { name = "tenacity", specifier = ">=8.0.0" },
     { name = "urllib3", marker = "extra == 'hf'", specifier = ">=1.26.0" },
-    { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.88.0" },
+    { name = "vortex-data", marker = "python_full_version >= '3.11' and extra == 'vortex'", specifier = ">=0.90.0" },
     { name = "wrapt", specifier = ">=1.11.0" },
     { name = "zephon", extras = ["parquet"], marker = "extra == 'hf'" },
     { name = "zephon", extras = ["parquet"], marker = "extra == 'lance'" },
