@@ -19,6 +19,13 @@ class OpTraits:
     transforms, non-reordering filters) or ``False`` (reorders, shuffles,
     packs) call.
 
+    ``one_to_one_records`` — whether every input record leaves the operator as
+    exactly one record with the same identity, in batches or not. ``True``
+    also covers operators that raise, rather than drop, a record while a
+    ``StepMixturePlan`` is active. ``False`` means the operator
+    can drop, duplicate, split, or merge records; ``None`` (the default) means
+    the author has not said. Optimizer-step curricula accept only ``True``.
+
     ``calibration_replayable`` — set True if processing each fetched record
     independently produces the same output payloads and record counts as normal
     execution, including which records are dropped. Otherwise leave False
@@ -49,6 +56,7 @@ class OpTraits:
 
     indexable: bool = True
     preserves_cursor_order: bool
+    one_to_one_records: bool | None = None
     calibration_replayable: bool = False
     parallelism: int = 1
     batch_shape_sensitive: bool = False

@@ -77,6 +77,8 @@ class Plan:
     indexable: bool
     preserves_cursor_order: bool
     batch_size_hint: int | None = None
+    # Nodes that do not declare one_to_one_records=True.
+    record_count_blockers: tuple[str, ...] = ()
 
     # --- Deterministic identity helpers ---
     def _freeze(self, value: Any) -> Any:

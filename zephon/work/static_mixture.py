@@ -2591,6 +2591,7 @@ class StaticMixtureWorkSource(WorkSource):
         output_batch_size: int | None,
         preserves_cursor_order: bool,
         global_batch_size: int | None = None,
+        record_count_blockers: tuple[str, ...] = (),
     ) -> None:
         plan = self._step_mixture_plan
         if plan is None:
@@ -2605,6 +2606,14 @@ class StaticMixtureWorkSource(WorkSource):
                 "StepMixturePlan requires a cursor-order-preserving pipeline; "
                 "remove shuffle, ensure_mixture, pack_sequences, or other "
                 "reordering operators"
+            )
+        if record_count_blockers:
+            raise ValueError(
+                "StepMixturePlan requires one source record per training example, "
+                "but these operators may drop, add, split, or merge records: "
+                f"{list(record_count_blockers)}. Declare "
+                "OpTraits(one_to_one_records=True) on custom operators that keep "
+                "every record, or use a chunk-round MixtureSchedule."
             )
         if output_batch_size is None:
             raise ValueError("StepMixturePlan requires a pipeline that ends in batch()")
@@ -2681,6 +2690,9 @@ class StaticMixtureWorkSource(WorkSource):
                 "never stop. Keep a positive final weight, or use "
                 "exhausted_policy='repeat' and end training by step count."
             )
+
+    def _requires_one_to_one_records(self) -> bool:
+        return self._step_mixture_plan is not None
 
     def _has_schedule(self) -> bool:
         return self._schedule is not None or self._step_mixture_plan is not None

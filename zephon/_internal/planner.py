@@ -87,6 +87,7 @@ class Planner:
 
         indexable = True
         preserves_cursor_order = True
+        record_count_blockers: list[str] = []
         for stage in stages:
             for nd in stage.nodes:
                 traits = nd.op.traits()
@@ -94,6 +95,8 @@ class Planner:
                 preserves_cursor_order = (
                     preserves_cursor_order and traits.preserves_cursor_order
                 )
+                if traits.one_to_one_records is not True:
+                    record_count_blockers.append(nd.name)
 
         batch_size_hint = None
         for stage in stages:
@@ -113,6 +116,7 @@ class Planner:
             indexable=indexable,
             preserves_cursor_order=preserves_cursor_order,
             batch_size_hint=batch_size_hint,
+            record_count_blockers=tuple(record_count_blockers),
         )
 
     def _validate_map_batch_ordering(self, nodes: list[Node]) -> None:
