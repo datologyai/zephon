@@ -306,6 +306,12 @@ class Engine:
         # metadata copy.
         if datasets_by_id := self._ctx["datasets_by_id"]:
             finalize_dataset_catalogs(datasets_by_id, opts.io_options)
+        work._prepare_for_execution(
+            canonical_replicas=self._world.canonical_replicas,
+            output_batch_size=self._plan.batch_size_hint,
+            preserves_cursor_order=self._preserves_cursor_order,
+            global_batch_size=self._opts.global_batch_size,
+        )
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )
