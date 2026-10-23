@@ -741,6 +741,8 @@ class CacheManager(ShardResolver):
     def _prune_dead_owners(cls, owners: object) -> dict:
         """Drop owners whose process is gone or whose pid has been recycled.
 
+        Processes sharing a cache root must share a PID namespace.
+
         Defense-in-depth: each owner key is ``f"{pid}-{start_time_ns}"``
         (compound), AND the entry value carries ``process_start_ns``.
         Both encode the same identity; we cross-check them against the

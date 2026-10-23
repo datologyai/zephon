@@ -646,7 +646,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
 
       - owns a deep-copied :class:`~zephon.ops.BaseOp` instance,
       - receives :class:`_WorkerCommand` messages from ``task_queue``
-        (kinds: ``"batch"``, ``"stop"``),
+        (kinds: ``"batch"``, ``"stop"``, ``"stop_hard"``),
       - runs ``process_many`` on its local operator instance, and
       - pushes :class:`RunnerResult` objects onto the shared ``result_queue``.
 
@@ -1003,9 +1003,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
 
         Non-negative exitcodes are *clean* exits:
 
-        - ``exitcode == 0`` via the ``if command.kind == "stop": break``
-          path — worker received a stop command during shutdown and exited
-          normally.
+        - ``exitcode == 0`` after a ``"stop"`` or ``"stop_hard"`` command.
         - ``exitcode == 0`` via the ``except BaseException`` handler at
           the bottom of ``_process_worker_main`` — a Python-level
           exception was caught, ``WorkerErrorInfo`` was already pushed to
@@ -1055,9 +1053,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         + respawn.
 
         "Expected" = non-negative exitcode, which means one of:
-        - 0 via the ``if command.kind == "stop": break`` path in
-          ``_process_worker_main`` — worker received a stop command
-          during shutdown and exited normally.
+        - 0 after a ``"stop"`` or ``"stop_hard"`` command.
         - 0 via the ``except BaseException`` handler at the bottom of
           ``_process_worker_main`` — a Python exception was caught and
           ``WorkerErrorInfo`` was already pushed to ``result_queue``.

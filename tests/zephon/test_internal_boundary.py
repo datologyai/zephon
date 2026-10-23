@@ -132,6 +132,8 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
         {
             "zephon._internal.io.resolvers.cache.manager:CacheManager",
             "zephon._internal.io.resolvers.cache.shared_state:CacheSharedState",
+            # Probe cleanup without registering test handles with the tracker.
+            "zephon._internal.io.resolvers.cache.shared_state:_open_shared_memory",
             "zephon._internal.observability.collector:PipelineCollector",
             "zephon._internal.ops.fetch:FetchOp",
             "zephon._internal.ops.prefetch:PrefetchOp",
