@@ -327,7 +327,7 @@ class WorkChunkStateV3(WorkChunkStateV2):
 # Component: StaticMixtureWorkSource
 # ---------------------------------------------------------------------------
 
-STATIC_MIXTURE_VERSION = 5
+STATIC_MIXTURE_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -781,6 +781,18 @@ class StaticMixtureStateV5(StaticMixtureStateV4):
                 "StaticMixtureStateV5 invariants violated:\n  - "
                 + "\n  - ".join(errors)
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaticMixtureStateV6(StaticMixtureStateV5):
+    """StaticMixture checkpoint schema that records how repeats wrap.
+
+    ``drain_pass_tail`` is True when a repeating dataset finishes its pass
+    before wrapping; v5 checkpoints migrate with it off.
+    """
+
+    drain_pass_tail: bool
+    version: int = 6
 
 
 # ---------------------------------------------------------------------------

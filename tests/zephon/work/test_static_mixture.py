@@ -1,8 +1,11 @@
+import copy
+import json
 import math
 import pickle
 import random
 import warnings
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -2754,7 +2757,7 @@ def test_accumulator_raises_when_reset_cannot_fill_quota() -> None:
     for _ in range(_OVERSHOOT_CHUNK_INDEX):
         assert strategy.produce(cursors) is not None
     before = dict(strategy._accumulators)
-    with pytest.raises(RuntimeError, match="liveness bound was violated"):
+    with pytest.raises(RuntimeError, match="liveness bound"):
         strategy.produce(cursors)
     assert strategy._accumulators == before
 
@@ -4458,10 +4461,8 @@ def test_modulo_chunk_stream_matches_plain_modulo_routing() -> None:
         assert _drain_chunks(ws)  # routing actually yields this lane some chunks
 
 
-def test_state_dict_always_writes_v5_with_lane_assignment() -> None:
-    """The checkpoint always carries the current schema (v5) and the routing
-    tag, for both modes — there is no conditional legacy-shape write.
-    """
+def test_state_dict_writes_current_version_with_lane_assignment() -> None:
+    """Both modes write the current schema and routing tag; no legacy shape."""
     ds_a = make_dataset("alpha", 60)
     ds_b = make_dataset("beta", 40)
     for mode in ("modulo", "permute"):
@@ -4474,7 +4475,7 @@ def test_state_dict_always_writes_v5_with_lane_assignment() -> None:
         ).clone_for_lane(0, canonical_replicas=2)
         _drain_chunks(ws, limit=3)
         state = ws.state_dict()
-        assert state["version"] == 5
+        assert state["version"] == 6
         assert state["lane_assignment"] == mode
 
 
@@ -4626,7 +4627,7 @@ def test_permute_checkpoint_restore_matches_baseline(canonical_replicas: int) ->
         prefix = _drain_chunks(ws_save, limit=2)
         state = ws_save.state_dict()
         assert state["lane_assignment"] == "permute"
-        assert state["version"] == 5
+        assert state["version"] == 6
 
         ws_load = StaticMixtureWorkSource(**kwargs).clone_for_lane(
             lane, canonical_replicas=canonical_replicas
@@ -4751,10 +4752,13 @@ def test_token_ws_with_lambda_measure_survives_std_pickle() -> None:
     assert restored.requires_token_priming
 
 
-def test_token_mode_futile_chunk_raises_instead_of_hanging() -> None:
+def test_token_mode_futile_chunk_raises_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A chunk demanding more than a full pass of a repeat dataset must error."""
-    # 'small' passes the liveness guard (25 >= ceil(0.2*50*2)) yet holds fewer
-    # samples than one chunk's draws, so a dominant deficit must exhaust it.
+    # The liveness guard keeps valid configs within the wrap limit, so lower it:
+    # a chunk drawn entirely from 'small' (25 samples, chunk 50) must wrap.
+    monkeypatch.setattr(TokenAwareStrategy, "_MAX_CHUNK_RESETS", 0)
     small = make_token_dataset("small", 5, docs_per_shard=25, n_shards=1)
     big = make_token_dataset("big", 5, docs_per_shard=100, n_shards=1)
     ws = make_token_ws(
@@ -4767,10 +4771,10 @@ def test_token_mode_futile_chunk_raises_instead_of_hanging() -> None:
     strategy = ws._strategy
     assert isinstance(strategy, TokenAwareStrategy)
     # A monster document elsewhere left 'small' owed far more tokens than one
-    # of its passes repays: every reset-and-retry re-exhausts it identically.
+    # chunk repays.
     strategy._deficits["small"] = 1e6
     strategy._deficits["big"] = -1e6
-    with pytest.raises(RuntimeError, match="cannot converge"):
+    with pytest.raises(RuntimeError, match="wrapped"):
         strategy.produce(ws._cursors)
 
 
@@ -5150,7 +5154,7 @@ def test_token_mode_checkpoint_round_trip_is_bit_identical() -> None:
     for _ in range(7):
         lane.next_chunk()
     state = lane.state_dict()
-    assert state["version"] == 5
+    assert state["version"] == 6
     assert state["allocation_mode"] == "token_aware"
     assert set(state["token_deficits"]) == {"short", "long"}
     assert set(state["token_ratios"]) == {"short", "long"}
@@ -5207,7 +5211,7 @@ def test_sample_checkpoint_into_token_mode_errors() -> None:
     ds = make_token_dataset("a", 10)
     sample_ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
     state = sample_ws.clone_for_lane(0, canonical_replicas=1).state_dict()
-    assert state["version"] == 5
+    assert state["version"] == 6
 
     token_lane = make_token_ws([ds], {"a": 1.0}, chunk_size=16).clone_for_lane(
         0, canonical_replicas=1
@@ -5220,7 +5224,7 @@ def test_sample_mode_state_carries_inert_token_fields() -> None:
     ds = make_token_dataset("a", 10)
     ws = StaticMixtureWorkSource([ds], {"a": 1.0}, chunk_size=16)
     state = ws.clone_for_lane(0, canonical_replicas=1).state_dict()
-    assert state["version"] == 5
+    assert state["version"] == 6
     assert state["allocation_mode"] == "accumulator"
     assert state["token_deficits"] is None
     assert state["token_ratios"] is None
@@ -5391,3 +5395,174 @@ def test_component_ids_are_dataset_ids() -> None:
     )
     assert work.component_ids() == {"alpha": 0, "beta": 1}
     assert work.component_ids() == work.dataset_ids
+
+
+def _repeat_lane(
+    size: int, max_repeats: int | None, shuffle: bool
+) -> StaticMixtureWorkSource:
+    dataset = Dataset.from_dict("a", {0: InMemoryShard(list(range(size)))})
+    work = StaticMixtureWorkSource(
+        [dataset],
+        {"a": 1.0},
+        chunk_size=4,
+        seed=3,
+        shuffle_shards=shuffle,
+        shuffle_within_shard=shuffle,
+        exhausted_policy="repeat",
+        max_repeats=max_repeats,
+        reshuffle_on_repeat=shuffle,
+    )
+    return work.clone_for_lane(0, 1)
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_repeat_drains_pass_tail_before_wrapping(shuffle: bool) -> None:
+    # Six records drawn four at a time: the second chunk must take the last
+    # two records of the first pass before starting the next one.
+    work = _repeat_lane(6, None, shuffle)
+    first = work.next_chunk().components["a"]
+    crossing = work.next_chunk().components["a"]
+    assert sorted(first + crossing[:2]) == [(0, 0, i) for i in range(6)]
+
+    state = copy.deepcopy(work.state_dict())
+    expected = [work.next_chunk().components for _ in range(4)]
+    restored = _repeat_lane(6, None, shuffle)
+    restored.load_state_dict(state)
+    assert [restored.next_chunk().components for _ in range(4)] == expected
+
+
+def test_capped_repeat_drains_final_tail_and_stops_without_side_effects() -> None:
+    work = _repeat_lane(6, 1, False)
+    drawn = [sample for _ in range(3) for sample in work.next_chunk().components["a"]]
+    assert drawn == [(0, 0, i) for i in range(6)] * 2
+
+    state = copy.deepcopy(work.state_dict())
+    assert work.next_chunk() is None
+    assert work.state_dict() == state
+
+
+def test_repeat_exact_exhaustion_wraps_before_next_draw() -> None:
+    work = _repeat_lane(4, 1, False)
+    assert work.next_chunk().components == work.next_chunk().components
+    assert work.next_chunk() is None
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_token_mode_drains_pass_tail_before_wrapping(shuffle: bool) -> None:
+    small = make_token_dataset("small", 5, docs_per_shard=10, n_shards=1)
+    big = make_token_dataset("big", 5, docs_per_shard=600, n_shards=1)
+
+    def make_lane() -> StaticMixtureWorkSource:
+        return make_token_ws(
+            [small, big],
+            {"small": 0.5, "big": 0.5},
+            chunk_size=8,
+            exhausted_policy="repeat",
+            shuffle_shards=shuffle,
+            shuffle_within_shard=shuffle,
+            reshuffle_on_repeat=shuffle,
+        ).clone_for_lane(0, canonical_replicas=1)
+
+    lane = make_lane()
+    drawn = [
+        sample
+        for _ in range(10)
+        for sample in lane.next_chunk().components.get("small", [])
+    ]
+    passes = [drawn[start : start + 10] for start in range(0, 30, 10)]
+    assert all(sorted(p) == [(0, 0, i) for i in range(10)] for p in passes)
+
+    state = copy.deepcopy(lane.state_dict())
+    expected = [lane.next_chunk().components for _ in range(4)]
+    restored = make_lane()
+    restored.load_state_dict(state)
+    assert [restored.next_chunk().components for _ in range(4)] == expected
+
+
+def test_token_mode_stops_when_sparse_dataset_ends_on_chunk_boundary() -> None:
+    # "small" takes its last record in the fifth chunk and is not drawn in the
+    # sixth, so only the check before drawing sees the pass floor met.
+    datasets = [
+        Dataset.from_dict(name, {0: InMemoryShard([{"text": "x" * 40}] * size)})
+        for name, size in (("small", 3), ("big", 29))
+    ]
+    ws = StaticMixtureWorkSource(
+        datasets,
+        {"small": 0.05, "big": 0.95},
+        chunk_size=10,
+        seed=0,
+        stop_after_passes=1,
+        token_estimation=TokenEstimation(primer=0.25),
+    )
+    ws.prime()
+    lane = ws.clone_for_lane(0, canonical_replicas=1)
+    counts = []
+    while (chunk := lane.next_chunk()) is not None:
+        counts.append({name: len(ids) for name, ids in chunk.components.items()})
+    assert counts == [{"small": 1, "big": 9}, {"big": 10}] * 2 + [
+        {"small": 1, "big": 9}
+    ]
+
+
+def _golden_source(mode: str) -> StaticMixtureWorkSource:
+    def dataset(name: str, n: int) -> Dataset:
+        rows: list[Any] = (
+            [{"text": "x" * 40} for _ in range(n)]
+            if mode.startswith("token")
+            else list(range(n))
+        )
+        return Dataset.from_dict(name, {0: InMemoryShard(rows)})
+
+    if mode.endswith("redistribute"):
+        source = StaticMixtureWorkSource(
+            [dataset("a", 9), dataset("b", 30)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=8,
+            seed=3,
+            exhausted_policy={"a": "redistribute", "b": "repeat"},
+            token_estimation=(
+                TokenEstimation(primer=0.25) if mode.startswith("token") else None
+            ),
+        )
+        if mode.startswith("token"):
+            source.prime()
+        return source
+    if mode == "token_aware":
+        return StaticMixtureWorkSource(
+            [dataset("a", 10), dataset("b", 600)],
+            {"a": 0.5, "b": 0.5},
+            chunk_size=8,
+            seed=3,
+            exhausted_policy="repeat",
+            token_estimation=TokenEstimation(primer=0.25),
+        )
+    return StaticMixtureWorkSource(
+        [dataset("a", 7), dataset("b", 200)], {"a": 0.5, "b": 0.5}, chunk_size=8, seed=3
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "accumulator",
+        "token_aware",
+        "accumulator_redistribute",
+        "token_aware_redistribute",
+    ],
+)
+def test_pre_v6_checkpoint_resumes_onto_its_original_stream(mode: str) -> None:
+    # Recorded by v5 allocators; a repeating dataset wraps mid-chunk inside the
+    # window, and in the redistribute cases another dataset retires first.
+    golden = json.loads(
+        Path(__file__).with_name("golden_static_mixture_v5.json").read_text()
+    )[mode]
+    restored = _golden_source(mode).clone_for_lane(0, 1)
+    restored.load_state_dict(golden["state"])
+
+    resumed = [
+        {k: [list(s) for s in v] for k, v in sorted(chunk.components.items())}
+        for chunk in (restored.next_chunk() for _ in range(6))
+    ]
+
+    assert resumed == golden["next"]
+    assert restored.state_dict()["drain_pass_tail"] is False
