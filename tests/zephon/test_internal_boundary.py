@@ -175,6 +175,13 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
     "tests/integration/test_lance_integration.py": frozenset(
         {"zephon._internal.io.stores.multi:build_multi_dataset_store"}
     ),
+    # Count the format openers' opens behind the store's open-shard cache.
+    "tests/integration/test_open_shards_integration.py": frozenset(
+        {
+            "zephon._internal.io.stores.multi:build_multi_dataset_store",
+            "zephon._internal.io.stores.open_shards:OpenShardCache",
+        }
+    ),
     # Verify native cache sharing and deterministic eviction recovery across the store.
     "tests/integration/test_vortex_integration.py": frozenset(
         {

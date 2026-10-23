@@ -73,8 +73,9 @@ reason and the remedy in the message, so a run never fails halfway through:
 | A manifest setting a reader feature flag this Zephon does not know | Lance's own compatibility rule: an unknown flag may change how the data decodes | Upgrade Zephon |
 
 **Caching reads.** Zephon keeps each fragment's decoded column mapping and tombstones per
-fetch replica, up to `metadata_cache_entries` (zero disables this). Files are not kept
-open between reads.
+fetch replica, up to `metadata_cache_entries` (zero disables this). Fragment readers are
+not kept open between reads unless you enable
+{ref}`open shard readers <open-shard-readers>`.
 
 ```python
 pipeline.options(io_options={"metadata_cache_entries": 256})
