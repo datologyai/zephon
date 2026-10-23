@@ -73,7 +73,6 @@ from zephon._internal.runners.process import ProcessStageRunner
 from zephon._internal.runners.threads import ThreadStageRunner
 from zephon._internal.runtime_spec import RuntimeSpec
 from zephon._internal.stream import EngineSample, LanePtr, RunnerStageOut
-from zephon._internal.utils.cleanup import cleanup_budget
 from zephon._internal.utils.rank import rank_ctx
 from zephon._internal.world import World
 from zephon.observability import ExecutionTrackingMode
@@ -1729,16 +1728,17 @@ class Engine:
             return
         self._closed = True
         hard = self._opts.shutdown_mode == "hard"
-        with cleanup_budget(hard=hard):
-            for runner in self._runners:
-                try:
-                    runner.close(hard=hard)
-                except Exception:
-                    print(
-                        f"Error closing runner {runner!r}.",
-                        file=sys.stderr,
-                    )
-                    traceback.print_exc(file=sys.stderr)
+        # Each runner starts its cleanup budget at teardown; an engine-wide
+        # budget here would be consumed by thread/process joins first.
+        for runner in self._runners:
+            try:
+                runner.close(hard=hard)
+            except Exception:
+                print(
+                    f"Error closing runner {runner!r}.",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
         if self._metrics_reporter is not None and self._metrics_started:
             try:
                 self._metrics_reporter.stop()
