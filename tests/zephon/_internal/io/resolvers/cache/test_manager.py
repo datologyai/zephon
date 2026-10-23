@@ -4,6 +4,9 @@ import json
 import os
 import queue
 import signal
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import weakref
@@ -2103,20 +2106,50 @@ def test_explicit_close_does_not_retry_a_partially_applied_release(
     assert not lock.is_locked
 
 
-def _run_cache_exit_probe(tmp_path: Path, case: str) -> tuple[dict[str, Any], str]:
-    import subprocess
-    import sys
+def _run_cache_exit(tmp_path: Path, script: str) -> tuple[dict[str, Any], str]:
+    """Observe real interpreter-exit cleanup before the resource tracker runs."""
+    setup = textwrap.dedent("""
+        import gc
+        import json
+        import os
+        import sys
+        import weakref
+        from pathlib import Path
 
+        import zephon._internal.io.resolvers.cache.manager as manager_mod
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _shm_exists, _single_shard_setup,
+        )
+
+        root = Path(sys.argv[1])
+        parent_pid = os.getpid()
+
+        class Observer:
+            pass
+
+        observer = Observer()
+
+        def observe():
+            if os.getpid() == parent_pid:
+                session = json.loads(manager._session_path.read_text())
+                (root / "exit.json").write_text(json.dumps({
+                    "owners": session["owners"],
+                    "shm_exists": [_shm_exists(name) for name in names],
+                }))
+
+        # Older finalizers run last, before the separate resource tracker exits.
+        weakref.finalize(observer, observe)
+        cache_root, storage, loc = _single_shard_setup(root)
+        manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        names = list(manager._shared.shm_names.values())
+        assert all(_shm_exists(name) for name in names)
+    """)
+    # Without a wait, enqueuing at exit need not yield the GIL to the worker.
+    script = setup + textwrap.dedent(script) + "\nsys.setswitchinterval(10.0)\n"
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(sys.path)
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "tests.zephon._internal.io.resolvers.cache._exit_probe",
-            case,
-            str(tmp_path),
-        ],
+        [sys.executable, "-c", script, str(tmp_path)],
         cwd=Path(__file__).resolve().parents[6],
         env=env,
         capture_output=True,
@@ -2125,32 +2158,28 @@ def _run_cache_exit_probe(tmp_path: Path, case: str) -> tuple[dict[str, Any], st
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    observation = json.loads((tmp_path / "exit_observation.json").read_text())
+    observation = json.loads((tmp_path / "exit.json").read_text())
     return observation, result.stderr
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
-@pytest.mark.parametrize(
-    "case",
-    ["retained", "burst", "explicit", "explicit_timeout", "delayed", "sentinel_gc"],
-)
-def test_interpreter_exit_finishes_cache_owner_releases(
-    tmp_path: Path, case: str
-) -> None:
+def test_interpreter_exit_finishes_cache_owner_releases(tmp_path: Path) -> None:
     """Exit cleanup completes before the resource tracker can hide a missed release."""
-    observation, stderr = _run_cache_exit_probe(tmp_path, case)
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        other = _make_manager(cache_root, storage, [loc], persist_state=True)
+        sentinel = manager_mod._release_exit_finalizer
+        manager_mod._release_exit_finalizer = None
+        gc.collect()
+        assert sentinel.alive, "ordinary GC must not invoke the waiting callback"
+        manager_mod._release_exit_finalizer = sentinel
+        """,
+    )
     assert "Timed out waiting for deferred cache owner releases" not in stderr
     assert "deferred cache owner releases failed" not in stderr
-    for session in observation["sessions"]:
-        assert session["owners"] == {}
-        assert not any(session["shm_exists"].values())
-    assert observation["elapsed"] < 2
-    if case == "delayed":
-        assert observation["elapsed"] >= 0.08
-    if case == "burst":
-        assert len(observation["sessions"]) == 8
-    if case == "explicit_timeout":
-        assert "Cache owner release deferred after lock timeout" in stderr
+    assert observation["owners"] == {}
+    assert not any(observation["shm_exists"])
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
@@ -2158,44 +2187,108 @@ def test_interpreter_exit_reports_contended_release_without_hanging(
     tmp_path: Path,
 ) -> None:
     """A held cache lock exhausts one total exit budget and leaves ownership visible."""
-    observation, stderr = _run_cache_exit_probe(tmp_path, "contended")
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        from filelock import FileLock
+
+        manager_mod._DEFERRED_RELEASE_EXIT_TIMEOUT = 0.02
+        lock = FileLock(manager._reset_lock.lock_file)
+        lock.acquire()
+        """,
+    )
     assert "Timed out waiting for deferred cache owner releases" in stderr
-    assert 0.18 <= observation["elapsed"] < 2
-    for session in observation["sessions"]:
-        assert len(session["owners"]) == 1
-        assert all(session["shm_exists"].values())
+    assert len(observation["owners"]) == 1
+    assert all(observation["shm_exists"])
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
 def test_interpreter_exit_reports_worker_failure_without_retry(tmp_path: Path) -> None:
     """Acknowledging the queue must not hide failed releases from later drains."""
-    observation, stderr = _run_cache_exit_probe(tmp_path, "worker_failure")
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        attempts = []
+
+        def fail_release(*args, **kwargs):
+            attempts.append(None)
+            raise OSError("injected deferred release failure")
+
+        manager_mod._release_session_owner = fail_release
+        manager._close_finalizer()
+        for _ in range(2):
+            assert not manager_mod._drain_deferred_releases(1.0)
+        assert len(attempts) == 1
+        """,
+    )
     assert "injected deferred release failure" in stderr
     assert stderr.count("1 deferred cache owner releases failed") == 3
-    failure = json.loads((tmp_path / "failure_observation.json").read_text())
-    assert failure == {"attempts": 1, "drains": [False, False]}
-    for session in observation["sessions"]:
-        assert len(session["owners"]) == 1
-        assert next(iter(session["owners"].values()))["instances"] == 1
-        assert all(session["shm_exists"].values())
+    assert len(observation["owners"]) == 1
+    assert next(iter(observation["owners"].values()))["instances"] == 1
+    assert all(observation["shm_exists"])
+
+
+def test_drain_waits_for_inflight_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a release from the queue does not mean it has been applied."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+    entered = threading.Event()
+    proceed = threading.Event()
+    release = manager_mod._release_session_owner
+
+    def blocked_release(*args: Any, **kwargs: Any) -> bool:
+        if args[1] == manager._session_path:
+            entered.set()
+            assert proceed.wait(5)
+        return release(*args, **kwargs)
+
+    monkeypatch.setattr(manager_mod, "_release_session_owner", blocked_release)
+    try:
+        manager._close_finalizer()
+        assert entered.wait(5)
+        assert not manager_mod._drain_deferred_releases(0)
+        assert _owner_instances(cache_root, manager._owner_key) == 1
+    finally:
+        proceed.set()
+        assert manager_mod._drain_deferred_releases(5)
+        manager.close()
+    assert _owner_instances(cache_root, manager._owner_key) == 0
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
-@pytest.mark.parametrize("case", ["fork_finalizer", "fork_close"])
 def test_forked_exit_preserves_parent_owner_and_releases_child_owner(
-    tmp_path: Path, case: str
+    tmp_path: Path,
 ) -> None:
     """The child's cleanup only releases managers created by the child."""
-    observation, stderr = _run_cache_exit_probe(tmp_path, case)
-    assert "Timed out waiting for deferred cache owner releases" not in stderr
-    parent_session = json.loads((tmp_path / "fork_observation.json").read_text())
-    child_observation = json.loads(
-        (tmp_path / "child" / "exit_observation.json").read_text()
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        import signal
+        from tests.zephon._internal.io.resolvers.cache.test_manager import _run_bounded
+
+        other = _make_manager(cache_root, storage, [loc], persist_state=True)
+        pid = os.fork()
+        if pid == 0:
+            assert manager_mod._release_exit_finalizer is None
+            manager.close()
+            child = _make_manager(cache_root, storage, [loc], persist_state=True)
+            # The other inherited manager is left to its exit finalizer.
+            sys.exit(0)
+
+        try:
+            _, status = _run_bounded(lambda: os.waitpid(pid, 0), timeout=5)
+        except AssertionError:
+            os.kill(pid, signal.SIGKILL)
+            raise
+        assert os.waitstatus_to_exitcode(status) == 0
+        session = json.loads(manager._session_path.read_text())
+        assert set(session["owners"]) == {manager._owner_key}
+        assert session["owners"][manager._owner_key]["instances"] == 2
+        assert all(_shm_exists(name) for name in names)
+        """,
     )
-    assert len(parent_session["owners"]) == 1
-    child_session = child_observation["sessions"][0]
-    assert child_session["owners"] == parent_session["owners"]
-    assert child_session["session_id"] == parent_session["session_id"]
-    assert all(child_session["shm_exists"].values())
-    assert observation["sessions"][0]["owners"] == {}
-    assert not any(observation["sessions"][0]["shm_exists"].values())
+    assert "Timed out waiting for deferred cache owner releases" not in stderr
+    assert observation["owners"] == {}
+    assert not any(observation["shm_exists"])

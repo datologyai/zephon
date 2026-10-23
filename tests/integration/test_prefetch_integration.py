@@ -12,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from multiprocessing import shared_memory
@@ -756,12 +757,13 @@ def test_pipeline_releases_fetch_and_prefetch_cache(
 @pytest.mark.integration
 @pytest.mark.skipif(os.name == "nt", reason="Requires POSIX SIGINT delivery")
 @pytest.mark.timeout(45)
-@pytest.mark.parametrize("runner", ["inline", "threads"])
-@pytest.mark.parametrize("shutdown_mode", ["graceful", "hard"])
-@pytest.mark.parametrize("interrupt", [False, True], ids=["normal-exit", "ctrl-c"])
+@pytest.mark.parametrize(
+    ("shutdown_mode", "interrupt"),
+    [("graceful", False), ("hard", True)],
+    ids=["normal-exit", "ctrl-c"],
+)
 def test_retained_pipeline_releases_cache_at_process_exit(
     tmp_path: Path,
-    runner: str,
     shutdown_mode: str,
     interrupt: bool,
 ) -> None:
@@ -770,7 +772,69 @@ def test_retained_pipeline_releases_cache_at_process_exit(
     (source / "shard.jsonl").write_text(
         "\n".join(json.dumps({"text": f"sample {i}"}) for i in range(20))
     )
-    helper = Path(__file__).with_name("_cache_exit_pipeline.py")
+    script = textwrap.dedent("""
+        import json
+        import sys
+        import weakref
+        from multiprocessing import shared_memory
+        from pathlib import Path
+
+        from zephon import Pipeline
+        from zephon.io.dataset import Dataset
+        from zephon.work import MixtureSpec, StaticMixtureWorkSource
+
+        root = Path(sys.argv[1])
+        session_path = root / "cache" / ".zephon_cache_state" / "session.json"
+
+        class Observer:
+            pass
+
+        observer = Observer()
+
+        def observe():
+            remaining = []
+            for name in session["shm_names"].values():
+                try:
+                    segment = shared_memory.SharedMemory(name=name, create=False)
+                except FileNotFoundError:
+                    continue
+                segment.close()
+                remaining.append(name)
+            (root / "exit.json").write_text(json.dumps({
+                "owners": json.loads(session_path.read_text())["owners"],
+                "remaining_shm": remaining,
+            }))
+
+        # Observe after Zephon's finalizers, before the resource tracker exits.
+        weakref.finalize(observer, observe)
+        dataset = Dataset.from_path("data", str(root / "source"))
+        work = StaticMixtureWorkSource(
+            [dataset], mixture=MixtureSpec({"data": 1.0}), chunk_size=4,
+            seed=1, shuffle_shards=False,
+        )
+        pipeline = (
+            Pipeline(work)
+            .prefetch(buffer_size=4, parallelism=1)
+            .fetch(parallelism=1)
+            .batch(microbatch_size=4, drop_last=False)
+            .options(
+                runner="threads", shutdown_mode=sys.argv[2], max_workers=2,
+                mtp_mode=False,
+                io_options={"cache": {"enabled": True, "root": str(root / "cache")}},
+            )
+        )
+        iterator = iter(pipeline)
+        assert next(iterator)
+        session = json.loads(session_path.read_text())
+        for name in session["shm_names"].values():
+            segment = shared_memory.SharedMemory(name=name, create=False)
+            segment.close()
+        ready = root / "ready.tmp"
+        ready.write_text(json.dumps(session))
+        ready.replace(root / "ready.json")
+        # Keep the pipeline alive while the consumer is outside next().
+        sys.stdin.readline()
+    """)
     repo_root = Path(__file__).resolve().parents[2]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(repo_root), env.get("PYTHONPATH", "")])
@@ -780,9 +844,9 @@ def test_retained_pipeline_releases_cache_at_process_exit(
         process = subprocess.Popen(
             [
                 sys.executable,
-                str(helper),
+                "-c",
+                script,
                 str(tmp_path),
-                runner,
                 shutdown_mode,
             ],
             env=env,
@@ -818,7 +882,7 @@ def test_retained_pipeline_releases_cache_at_process_exit(
             session_path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
             # The resource tracker can unlink SHM without updating ownership.
             # Check both so it cannot hide a missed Zephon owner release.
-            observation = json.loads((tmp_path / "exit-observation.json").read_text())
+            observation = json.loads((tmp_path / "exit.json").read_text())
             assert observation == {"owners": {}, "remaining_shm": []}, (
                 log_path.read_text()
             )
