@@ -19,12 +19,14 @@ RecordIdentity = tuple[Any, ...]
 
 
 def record_identity(record: SampleRecord) -> RecordIdentity:
+    # The full replay cursor, lineage included: restore matches on it, so a
+    # record whose cursor changes is never found again after a checkpoint.
     meta = record.meta
-    return (meta.lane_id, meta.chunk_id, meta.chunk_offset, meta.sample_id)
+    return (meta.lane_id, meta.cursor.as_key())
 
 
 def one_to_one_violation(op: str, what: str, at: RecordIdentity) -> ValueError:
-    lane_id, chunk_id, chunk_offset, _ = at
+    lane_id, (chunk_id, chunk_offset, *_) = at
     return ValueError(
         f"StepMixturePlan requires one source record per training example, but "
         f"{op} {what} at lane {lane_id}, chunk {chunk_id}, offset {chunk_offset}. "
