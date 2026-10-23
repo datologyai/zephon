@@ -392,13 +392,17 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             state.inflight.increment()
             try:
                 future = self._executor.submit(work, batch)
-            except BaseException as exc:
+            except RuntimeError as exc:
+                # Other submit failures can occur after enqueueing. Keep their
+                # instance reserved, even if teardown remains pending.
+                if not self._closed or str(exc) != (
+                    "cannot schedule new futures after shutdown"
+                ):
+                    raise
                 state.release_instance(instance)
                 state.inflight.decrement()
                 self._teardown_if_idle()
-                if self._closed and isinstance(exc, RuntimeError):
-                    return  # Executor shutdown rejected this submission.
-                raise
+                return
             state.pump_timer.note("batches_submitted")
 
         def done_callback(

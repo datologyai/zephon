@@ -715,6 +715,53 @@ def test_shutdown_rejects_racing_submission_and_releases_resources(
     assert len(list(tmp_path.glob("*.closed"))) == 1
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_submit_failure_after_enqueue_keeps_instance_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+) -> None:
+    release, ran = threading.Event(), threading.Event()
+
+    class QueuedOp(_ResourceOp):
+        def process_many(self, elems: list[Any]) -> list[Any]:
+            result = super().process_many(elems)
+            ran.set()
+            return result
+
+    runner = ThreadStageRunner(
+        _resource_stage(QueuedOp(tmp_path)), _ctx_services(), max_workers=2
+    )
+    state = runner.ops[0]
+    first = runner._executor.submit(release.wait, 5)
+    error = error_type("thread start failed")
+
+    def fail_start(_thread: threading.Thread) -> None:
+        raise error
+
+    try:
+        # The executor enqueues the batch before attempting to start worker two.
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", fail_start)
+            with pytest.raises(error_type) as caught:
+                runner._schedule_batch(
+                    state, _mk_records([1]), wait_ns=0, context=runner._create_context()
+                )
+        assert caught.value is error
+        assert not state.inflight.is_zero()
+        assert state.try_acquire_instance() is None
+        release.set()
+        first.result(timeout=5)
+        runner._executor.shutdown(wait=True)
+        assert ran.is_set(), "an existing worker must still execute the queued batch"
+        runner.close(hard=True)
+        # No future was returned, so there is no completion callback to release it.
+        assert list(tmp_path.glob("*.live"))
+    finally:
+        release.set()
+        runner._executor.shutdown(wait=True)
+        runner.close(hard=True)
+        state.teardown()  # All executor work has stopped; the test can now clean up.
+
+
 def test_hard_shutdown_cleanup_does_not_wait_for_result_backpressure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
