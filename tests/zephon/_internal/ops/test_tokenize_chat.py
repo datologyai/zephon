@@ -31,6 +31,7 @@ from tests.helpers.chat import (
 )
 from zephon._internal.io.stores.multi import build_multi_dataset_store
 from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.ops._one_to_one import REQUIRE_ONE_TO_ONE_RECORDS
 from zephon._internal.ops.tokenize_chat import (
     TokenizeChat,
     _last_span_only,
@@ -39,6 +40,7 @@ from zephon._internal.ops.tokenize_chat import (
 from zephon._internal.token_counting import FatalCountError
 from zephon._internal.utils.chat_template import _verify_chat_template
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops.base import OpContext
 from zephon.ops.config import SpanSource
 from zephon.types import SampleMeta, SampleRecord
 from zephon.validation import ValidationError
@@ -753,6 +755,16 @@ def test_concurrent_masked_renders_share_no_tracker_state(fast_tokenizer: Any) -
         assert int(payload["loss_mask"].sum()) > 0
 
 
+def test_drop_raises_when_records_must_stay_one_to_one(fast_tokenizer: Any) -> None:
+    op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
+    op.setup(OpContext({REQUIRE_ONE_TO_ONE_RECORDS: True}))
+    tombstone = _rec({"messages": []})
+    tombstone.meta = tombstone.meta.with_tombstone()
+    assert op.process_many([tombstone]) == [tombstone]
+    with pytest.raises(ValueError, match="tokenize_chat dropped a degenerate sample"):
+        op.process_many([_rec({"messages": []})])
+
+
 def run(op: TokenizeChat, messages: list[dict[str, Any]]) -> SampleRecord:
     return op.process_one(
         SampleRecord(
@@ -907,6 +919,19 @@ def test_content_loss_drops_and_logs_sample_context(
     assert not run(op, CONVERSATION).meta.tombstone
     # Another matching input must not be treated as a verified structure.
     assert run(op, messages).meta.tombstone
+
+
+def test_content_loss_raises_when_records_must_stay_one_to_one(
+    fast_tokenizer: Any,
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=THINK_SPLIT_TEMPLATE, loss_scope="after_last_user"
+    )
+    op.setup(OpContext({REQUIRE_ONE_TO_ONE_RECORDS: True}))
+    messages = copy.deepcopy(CONVERSATION)
+    messages[-1]["content"] = "<think>how</think>yes</think>the answer"
+    with pytest.raises(ValueError, match="tokenize_chat dropped a content loss sample"):
+        run(op, messages)
 
 
 def test_content_loss_counts_zero_with_serialized_token_counter(

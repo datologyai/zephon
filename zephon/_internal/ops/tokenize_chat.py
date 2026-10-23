@@ -22,6 +22,11 @@ from typing import (
 
 import numpy as np
 
+from zephon._internal.ops._one_to_one import (
+    REQUIRE_ONE_TO_ONE_RECORDS,
+    one_to_one_violation,
+    record_identity,
+)
 from zephon._internal.ops.tokenize_base import _MISSING, TokenizeBase
 from zephon._internal.token_counting import (
     CountPlan,
@@ -36,6 +41,7 @@ from zephon._internal.utils.tokenizer import (
     selected_assistant_indices,
     thread_salted_template,
 )
+from zephon.ops.base import OpContext
 from zephon.ops.children import tombstones_for_record
 from zephon.ops.config import LossScope, SpanSource
 from zephon.ops.traits import OpTraits
@@ -303,6 +309,7 @@ class TokenizeChat(TokenizeBase):
         self._eos_str: str | None = None
         # Logging-only latch; outputs stay independent across process_many calls.
         self._warned_unsupervised_drop = False
+        self._require_one_to_one = False
         # Logging-only counts; sample delivery does not depend on their values.
         self._content_loss_checked = 0
         self._content_loss_dropped = 0
@@ -745,6 +752,12 @@ class TokenizeChat(TokenizeBase):
         result = self._tokenize_delivery(record.payload, source)
 
         if isinstance(result, str):
+            if self._require_one_to_one:
+                raise one_to_one_violation(
+                    "tokenize_chat",
+                    f"dropped a {result.replace('_', ' ')} sample",
+                    record_identity(record),
+                )
             if result == "content_loss":
                 return tombstones_for_record(record)
             if result == "degenerate":
@@ -788,11 +801,16 @@ class TokenizeChat(TokenizeBase):
 
     # Op plumbing
 
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        self._require_one_to_one = bool(ctx.get(REQUIRE_ONE_TO_ONE_RECORDS))
+
     def traits(self) -> OpTraits:
         return OpTraits(
             calibration_replayable=True,
             indexable=True,
             preserves_cursor_order=True,
+            one_to_one_records=True,
             parallelism=4,
         )
 
