@@ -41,6 +41,16 @@ split the input sample into any number of output records that will each be at mo
 :caption: examples/guide/pipelines/tokenize_max_length.py
 ```
 
+For large training runs, tokenization can become the slowest part of the data loader.
+Setting `backend="rust"` on `tokenize` loads the same tokenizer folder's
+`tokenizer.json` with `tokenizers` 1.x, whose engine is much faster. It produces the same
+token ids as the default `backend="hf"`, returned as int64 NumPy arrays. It needs
+`tokenizers>=1` and a `tokenizer_id` that points to a local folder or a cloud URI. The `rust` backend does not accept a pre-built `tokenizer`,
+`special_tokens="tokenizer_default"`, `use_fast=False`, or a folder whose
+`tokenizer_config.json` and `special_tokens_map.json` name different special tokens. If you
+request one of these, or the package is missing, `tokenize` raises an error. It never falls
+back to the `hf` backend.
+
 If the underlying data format you are reading from returns text as bytes instead of as a
 Python string, you can insert a `decode_text` operation in order to handle converting the
 raw bytes into a string prior to tokenization:

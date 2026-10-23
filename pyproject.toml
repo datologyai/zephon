@@ -119,6 +119,9 @@ test = [
     "attrs>=21.0.0",
     "transformers>=4.52.0",
 ]
+rust = [
+    "tokenizers>=1.0.0rc3",
+]
 
 [project.urls]
 Homepage = "https://github.com/datologyai/zephon"
@@ -249,6 +252,7 @@ markers = [
     "integration: marks tests as integration (use --run-integration to run)",
     "packaging: builds + installs the distributions (use --run-packaging to run)",
     "requires_ray: tests that spin up a Ray cluster (run on LargeGithubRunner only in CI)",
+    "rust: needs tokenizers 1.x (the rust dependency group, no transformers)",
 ]
 filterwarnings = [
     'ignore:ExtraArgumentWarning',
@@ -272,4 +276,12 @@ override-dependencies = [
     "transformers>=4.52.0",
     # Streaming 0.13.0's cap predates upstream's Paramiko 5 support (PR #982).
     "paramiko>=5.1.0,<6",
+]
+# The rust group's tokenizers 1.x cannot share an environment with transformers,
+# which the test group and mosaicml-streaming (streaming, mosaic, mds) require.
+conflicts = [
+    [{ group = "test" }, { group = "rust" }],
+    [{ extra = "streaming" }, { group = "rust" }],
+    [{ extra = "mosaic" }, { group = "rust" }],
+    [{ extra = "mds" }, { group = "rust" }],
 ]

@@ -71,6 +71,13 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.io.types:ShardLocator",
         }
     ),
+    # The one place HF's recorded outputs are reproduced, op and loader included.
+    "tests/helpers/tokenizer_reference.py": frozenset(
+        {
+            "zephon._internal.ops.tokenize_text:TokenizeText",
+            "zephon._internal.utils.tokenizer:TOKENIZER_LOADERS",
+        }
+    ),
     # Engine fixtures shared by engine unit tests and coordination integration.
     "tests/helpers/engine.py": frozenset(
         {
@@ -195,9 +202,13 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.ops.tokenize_text:TokenizeText",
         }
     ),
-    # max_buffer_size=None is visible only on the constructed op.
+    # max_buffer_size=None is visible only on the constructed op; loader
+    # failures are injected at the one backend-to-loader table.
     "tests/zephon/test_pipeline.py": frozenset(
-        {"zephon._internal.ops.ensure_mixture:EnsureMixture"}
+        {
+            "zephon._internal.ops.ensure_mixture:EnsureMixture",
+            "zephon._internal.utils.tokenizer:TOKENIZER_LOADERS",
+        }
     ),
     # Forwarded token IDs are visible only on the constructed op.
     "tests/zephon/test_pipeline_tokenize_decode.py": frozenset(
@@ -212,9 +223,13 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.token_counting:TextTokenCountingSpec",
         }
     ),
-    # Probe coverage requires enumerating internal tokenizer ops.
+    # Probe coverage requires enumerating internal tokenizer ops; loader
+    # failures are injected at the one backend-to-loader table.
     "tests/zephon/test_validation.py": frozenset(
-        {"zephon._internal.ops.tokenize_base:TokenizeBase"}
+        {
+            "zephon._internal.ops.tokenize_base:TokenizeBase",
+            "zephon._internal.utils.tokenizer:TOKENIZER_LOADERS",
+        }
     ),
     # from_path must discover the root the storage backend canonicalizes to.
     "tests/zephon/io/test_dataset.py": frozenset(

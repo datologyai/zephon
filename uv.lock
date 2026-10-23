@@ -2,15 +2,26 @@ version = 1
 revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version == '3.11.*'",
     "python_full_version < '3.11'",
 ]
+conflicts = [[
+    { package = "zephon", group = "rust" },
+    { package = "zephon", group = "test" },
+], [
+    { package = "zephon", extra = "streaming" },
+    { package = "zephon", group = "rust" },
+], [
+    { package = "zephon", extra = "mosaic" },
+    { package = "zephon", group = "rust" },
+], [
+    { package = "zephon", extra = "mds" },
+    { package = "zephon", group = "rust" },
+]]
 
 [manifest]
 overrides = [
@@ -46,12 +57,12 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohappyeyeballs" },
     { name = "aiosignal" },
-    { name = "async-timeout", marker = "python_full_version < '3.11'" },
+    { name = "async-timeout", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "attrs" },
     { name = "frozenlist" },
     { name = "multidict" },
     { name = "propcache" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "yarl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6c/4c/bdccd81e9ee225b69c60e7766c9a5b05364f118f4d383713b89a682d772d/aiohttp-3.14.5.tar.gz", hash = "sha256:5558a7f5a05af9ecf744af91e5baefc436f93c9333e656c27ec253f9a6bbe178", size = 8078052, upload-time = "2026-10-11T01:05:12.408Z" }
@@ -223,7 +234,7 @@ name = "aiohttp-cors"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp", marker = "python_full_version < '3.14'" },
+    { name = "aiohttp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/d89e846a5444b3d5eb8985a6ddb0daef3774928e1bfbce8e84ec97b0ffa7/aiohttp_cors-0.8.1.tar.gz", hash = "sha256:ccacf9cb84b64939ea15f859a146af1f662a6b1d68175754a07315e305fb1403", size = 38626, upload-time = "2025-03-31T14:16:20.048Z" }
 wheels = [
@@ -236,7 +247,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -275,9 +286,9 @@ name = "anyio"
 version = "4.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
-    { name = "idna", marker = "python_full_version < '3.15' or sys_platform != 'emscripten'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.15'" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "idna" },
+    { name = "typing-extensions", marker = "python_full_version < '3.15' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
@@ -664,7 +675,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -982,7 +993,7 @@ name = "colorful"
 version = "0.5.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "python_full_version < '3.14' and sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/31/109ef4bedeb32b4202e02ddb133162457adc4eb890a9ed9c05c9dd126ed0/colorful-0.5.8.tar.gz", hash = "sha256:bb16502b198be2f1c42ba3c52c703d5f651d826076817185f0294c1a549a7445", size = 209361, upload-time = "2025-10-29T11:53:21.663Z" }
 wheels = [
@@ -1079,9 +1090,7 @@ name = "contourpy"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
@@ -1292,7 +1301,7 @@ wheels = [
 
 [package.optional-dependencies]
 toml = [
-    { name = "tomli", marker = "python_full_version <= '3.11'" },
+    { name = "tomli", marker = "python_full_version <= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 
 [[package]]
@@ -1510,8 +1519,8 @@ name = "cryptography"
 version = "50.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9d/af/182eb91b0df3fe75c4d9f26fe70684569566745f6ba7e5c9c73a862c5252/cryptography-50.0.2.tar.gz", hash = "sha256:7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5", size = 880623, upload-time = "2026-09-30T15:30:04.884Z" }
 wheels = [
@@ -1580,21 +1589,32 @@ name = "cuda-bindings"
 version = "13.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "python_full_version < '3.15'" },
+    { name = "cuda-pathfinder", marker = "python_full_version < '3.15' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b9/20/5d30d72eef55150623a49a3d2e1dcc6066c0bd87f7377e41a371ee99977f/cuda_bindings-13.4.3-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bc51990309b416e0780a11a921ac597ef9c0e52e1bdf5ae0b8e8c4766b66442b", size = 6512104, upload-time = "2026-09-23T02:21:43.964Z" },
     { url = "https://files.pythonhosted.org/packages/79/a8/cda48f5f9c1ee27388b7e0645d301024f0e8f3e58d8000bd871bbc2c5dfe/cuda_bindings-13.4.3-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3d7a6506e625be59cdc119ef4423afa0fc3a4830b129dc010cbd51324b93d66d", size = 7160772, upload-time = "2026-09-23T02:21:46.4Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/31/13d2821d34d0e4d0f09918dc523ed990d718f9c07e76e39fcc7a4c692032/cuda_bindings-13.4.3-cp310-cp310-win_amd64.whl", hash = "sha256:e52f66340785a51b8b77f4487329de188f3cabbf37c62e68f410a8299e8677ae", size = 6078455, upload-time = "2026-09-23T02:21:48.358Z" },
     { url = "https://files.pythonhosted.org/packages/f1/3a/06569edfd5db020c1ff7c0361268a3eaa60ead0c0ccca460fef69d68022f/cuda_bindings-13.4.3-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:df8b3767facca8acde216460df684dfc3826d519096c13adfd3030a55870dc79", size = 6494098, upload-time = "2026-09-23T02:21:50.472Z" },
     { url = "https://files.pythonhosted.org/packages/ba/c7/ff34500e11229c5487bd7c35e03d0f91832ffde50bdb3f963f7aba485357/cuda_bindings-13.4.3-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a9ea13b9cfe711515ae83b5efc99101af4d3f8ad882f99724a839c8b5417fb7e", size = 7160766, upload-time = "2026-09-23T02:21:52.858Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/40/b8c9b06bd09052cec258e742b5fe06da6dd324c541fc045978fc28fee70f/cuda_bindings-13.4.3-cp311-cp311-win_amd64.whl", hash = "sha256:52d7f3f5f7f014dddddc66cd802ed0ddf65ae99ad42b5619fae7b82e5ddd6771", size = 6114258, upload-time = "2026-09-23T02:21:55.063Z" },
+    { url = "https://files.pythonhosted.org/packages/12/33/29aff6433cd714f0de643c762649a5ff3f903a4e2cd1782b8fac5d69a985/cuda_bindings-13.4.3-cp311-cp311-win_arm64.whl", hash = "sha256:b89d6e738494b7b95c38e3413f86d32c24682c8e714870531a5a2b193a2fc50a", size = 5390789, upload-time = "2026-09-23T02:21:57.7Z" },
     { url = "https://files.pythonhosted.org/packages/65/11/1293429c1c3a3e19b551275e65efddd122a905bbe7e368816a59f3ef2a41/cuda_bindings-13.4.3-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bfbd3f7d4ac04dd41dc49121b9e408c8283992f47124c2290ecb79bbbadcca8e", size = 6488226, upload-time = "2026-09-23T02:22:00.578Z" },
     { url = "https://files.pythonhosted.org/packages/b8/c3/efb6bbb7307bf5c83dc4acca650280b210c67ed1a1a60f898a90e7c82e38/cuda_bindings-13.4.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d5f72bcfcdf3be23e1da3c792f68f508586f48d037bca8b10f552c4cca5971f2", size = 7172185, upload-time = "2026-09-23T02:22:03.114Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/87/353cfe267b988b6d0a3565eb872845747bcd01cc2299f616cde72f1e95cc/cuda_bindings-13.4.3-cp312-cp312-win_amd64.whl", hash = "sha256:f8519603001c92bf83e7095df3b8211e3999a9c4ded096b57de0f3ff52b66368", size = 6332748, upload-time = "2026-09-23T02:22:05.344Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/ca/66449cfe64edb26586957f8d648cf56049b2914bc1720001fd7150a65eae/cuda_bindings-13.4.3-cp312-cp312-win_arm64.whl", hash = "sha256:130ff1daae550db2cef559ba477f3a63d040756bd135f5deba4b5bdc4e110252", size = 5548436, upload-time = "2026-09-23T02:22:07.348Z" },
     { url = "https://files.pythonhosted.org/packages/f8/a9/c83eb5aa055a4b0c3776d83f6f88b9e778a6fe0415210977c889c6a0bb8a/cuda_bindings-13.4.3-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d7c6c9f46fca7f3fc61959ef9a2398ac656172145b43f408e0a6492360cf1c0c", size = 6316533, upload-time = "2026-09-23T02:22:09.694Z" },
     { url = "https://files.pythonhosted.org/packages/8a/24/9c01edfd2210737ee9471b47db857a079e5a23f2677e5d9778c0ff23d099/cuda_bindings-13.4.3-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1fd7d8459b364aedc11f3e59703453ced823135f78a9111ca70feef8d56d4d21", size = 6929124, upload-time = "2026-09-23T02:22:11.765Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/e5/419504c3a930e7c4d326551133e01d22284eee22d44a0bc2e05351f0effb/cuda_bindings-13.4.3-cp313-cp313-win_amd64.whl", hash = "sha256:81eef62bbb95cb4a705fb423b2ad1c63d716edb352ee2af0c28bf8a29cc8258c", size = 6291733, upload-time = "2026-09-23T02:22:13.848Z" },
+    { url = "https://files.pythonhosted.org/packages/54/23/37d3edb8e5cf58ac9cc9992801c1b1ac0ff6ed8a3af75322e42350b88024/cuda_bindings-13.4.3-cp313-cp313-win_arm64.whl", hash = "sha256:c2af7e69d2557fdb4e5fc1169159fd08da7e861aa84fb83307a1a0396b6b0973", size = 5512368, upload-time = "2026-09-23T02:22:16.463Z" },
     { url = "https://files.pythonhosted.org/packages/ab/e6/3c094ef0eb00a7b0ff69a3915327e2c2d14e712ebe471a2217bf7f020f33/cuda_bindings-13.4.3-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4796864ce829bd95ef2ef0d23c6ba21bb64e08f7fab0a377302ed1affb6605c7", size = 6407948, upload-time = "2026-09-23T02:22:18.484Z" },
     { url = "https://files.pythonhosted.org/packages/a3/49/7a3769c43e432b0434dd46424058b47af4347167f0dfca1ecb27e2de92a1/cuda_bindings-13.4.3-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bbacde6f75665b197016b986164cfdaa33b17515e5e635a63ddb75926aaa71c3", size = 6978955, upload-time = "2026-09-23T02:22:20.535Z" },
+    { url = "https://files.pythonhosted.org/packages/05/99/4b8669be2274138131fcd1a828284901e718a862e8f65371a175f9e6995f/cuda_bindings-13.4.3-cp314-cp314-win_amd64.whl", hash = "sha256:0deff5b22462bb410859684299b1fc6a621780c43a4729342aa6ec28783485b4", size = 6437578, upload-time = "2026-09-23T02:22:22.623Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/a5/178165f9960178ec28d15a51b49cac1d7105b80e6f7633078b201e14f995/cuda_bindings-13.4.3-cp314-cp314-win_arm64.whl", hash = "sha256:145cc9b02dfb7bcc3288701b6f19c69c590e4451c62916ba0a8a3db9a64a91a8", size = 5622104, upload-time = "2026-09-23T02:22:24.927Z" },
     { url = "https://files.pythonhosted.org/packages/0a/ca/2c4419ca787278f65faf0f0155791a80fa141f39a628e97e4663e2ba09fa/cuda_bindings-13.4.3-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d6eb969920e28f66f8fc3b0b3afcb6e09381cc96bf8e8158d774e9488ae89980", size = 6314272, upload-time = "2026-09-23T02:22:26.785Z" },
     { url = "https://files.pythonhosted.org/packages/29/9c/f878de5de8e6d1a64d55096539b7b72821e6dc62682d5968e842b95d97df/cuda_bindings-13.4.3-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7e11cfe8fec4c85ce79feda18124971c52596f0cbd642a94f5dafc257124a4b3", size = 6865978, upload-time = "2026-09-23T02:22:29.041Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/7a/fb0995b1ecb0285949b5302692e8ca41796e479e5b27c088fcde2fbb12f7/cuda_bindings-13.4.3-cp314-cp314t-win_amd64.whl", hash = "sha256:6c6bb1a4c4f7520e062669c6f3605a7016b2e65ba51b8922f92edd91d5fadf8d", size = 7336746, upload-time = "2026-09-23T02:22:31.348Z" },
+    { url = "https://files.pythonhosted.org/packages/91/e4/83b1b086fbebe15b529993101c79922f5406e51e3e9cc8dc14e4184b45d1/cuda_bindings-13.4.3-cp314-cp314t-win_arm64.whl", hash = "sha256:044c03b056dcc5cecfad426a071187dd9e1e6817fbb363bc2f3a7520170b3e67", size = 5645612, upload-time = "2026-09-23T02:22:33.895Z" },
 ]
 
 [[package]]
@@ -1615,43 +1635,43 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-cuda-nvrtc", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cufft", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cufile", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cuda-cupti", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-curand", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cusolver = [
-    { name = "nvidia-cublas", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-cusolver", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-cusparse", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-cusolver", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "(python_full_version < '3.15' and platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-nvtx", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform == 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 
 [[package]]
@@ -1721,9 +1741,7 @@ name = "docutils"
 version = "0.22.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
@@ -1739,7 +1757,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -1963,9 +1981,9 @@ dependencies = [
     { name = "accessible-pygments" },
     { name = "beautifulsoup4" },
     { name = "pygments" },
-    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "sphinx-basic-ng" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ec/20/5f5ad4da6a5a27c80f2ed2ee9aee3f9e36c66e56e21c00fde467b2f8f88f/furo-2025.12.19.tar.gz", hash = "sha256:188d1f942037d8b37cd3985b955839fea62baa1730087dc29d157677c857e2a7", size = 1661473, upload-time = "2025-12-19T17:34:40.889Z" }
@@ -2100,7 +2118,7 @@ name = "grpcio"
 version = "1.84.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.14'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3f/4f/4435c0aae54657258d9cfcba78598f3d9e5fe4c82ff18d78558567b90faf/grpcio-1.84.0.tar.gz", hash = "sha256:19aaf172fc2edbefccce3f6e92c5150975dbe56c45744e9e87cf72ebdf85bfbe", size = 13493876, upload-time = "2026-09-14T06:59:33.291Z" }
 wheels = [
@@ -2204,8 +2222,8 @@ name = "httpcore2"
 version = "2.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version < '3.15' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version < '3.15' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/f3/1db7aa2bc2524062192bb0e0323969492d1883152a232fe36eea65f4e35c/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103", size = 68071, upload-time = "2026-09-23T07:47:22.372Z" }
 wheels = [
@@ -2217,12 +2235,12 @@ name = "httpx2"
 version = "2.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "sys_platform != 'emscripten'" },
-    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
-    { name = "httpx2-jsfetch", marker = "python_full_version >= '3.12' and sys_platform == 'emscripten'" },
+    { name = "anyio", marker = "sys_platform != 'emscripten' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "httpx2-jsfetch", marker = "(python_full_version >= '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.12' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'emscripten' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'emscripten' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'emscripten' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'emscripten' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "idna" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/44/474bef2a0e9d90f1715d32cb98b0738695ca17ba324095fb2497ed7fbd59/httpx2-2.13.1.tar.gz", hash = "sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa", size = 100405, upload-time = "2026-09-23T07:47:23.052Z" }
 wheels = [
@@ -2246,11 +2264,11 @@ dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "httpx2" },
     { name = "packaging" },
     { name = "pyyaml" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "tomli", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
@@ -2435,11 +2453,11 @@ name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs", marker = "python_full_version < '3.14'" },
-    { name = "jsonschema-specifications", marker = "python_full_version < '3.14'" },
-    { name = "referencing", marker = "python_full_version < '3.14'" },
-    { name = "rpds-py", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "rpds-py", version = "2026.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "attrs" },
+    { name = "jsonschema-specifications" },
+    { name = "referencing" },
+    { name = "rpds-py", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "rpds-py", version = "2026.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/fc/e067678238fa451312d4c62bf6e6cf5ec56375422aee02f9cb5f909b3047/jsonschema-4.26.0.tar.gz", hash = "sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326", size = 366583, upload-time = "2026-01-07T13:41:07.246Z" }
 wheels = [
@@ -2451,7 +2469,7 @@ name = "jsonschema-specifications"
 version = "2025.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "referencing", marker = "python_full_version < '3.14'" },
+    { name = "referencing" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
@@ -2654,13 +2672,13 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "boto3", marker = "python_full_version < '3.11'" },
-    { name = "filelock", marker = "python_full_version < '3.11'" },
-    { name = "lightning-utilities", marker = "python_full_version < '3.11'" },
-    { name = "numpy", marker = "python_full_version < '3.11'" },
-    { name = "requests", marker = "python_full_version < '3.11'" },
-    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "torch", marker = "python_full_version < '3.11'" },
+    { name = "boto3", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "filelock", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "lightning-utilities", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "numpy", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "requests", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "torch", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/28/37/79f941be1fe0a094a89235f40847ad0374514291281e4849cd5de45e1c95/litdata-0.2.44.tar.gz", hash = "sha256:0c2ad485d4692702d97a396bfe6017f9ac2af2832bb39fae99fd49c26e207a0e", size = 160604, upload-time = "2025-03-26T16:41:03.981Z" }
 wheels = [
@@ -2672,26 +2690,24 @@ name = "litdata"
 version = "0.2.76"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "boto3", marker = "python_full_version >= '3.11'" },
-    { name = "filelock", marker = "python_full_version >= '3.11'" },
-    { name = "lightning-utilities", marker = "python_full_version >= '3.11'" },
-    { name = "numpy", marker = "python_full_version >= '3.11'" },
-    { name = "obstore", marker = "python_full_version >= '3.11'" },
-    { name = "requests", marker = "python_full_version >= '3.11'" },
-    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "tifffile", version = "2026.9.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch", marker = "python_full_version >= '3.11'" },
-    { name = "torchvision", marker = "python_full_version >= '3.11'" },
-    { name = "urllib3", marker = "python_full_version >= '3.11'" },
+    { name = "boto3", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "filelock", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "lightning-utilities", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "numpy", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "obstore", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "requests", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tifffile", version = "2026.9.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "torch", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "torchvision", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "urllib3", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/11/1804808bc602244b7df78339fabb58e4be18f75bd803bb6f1732839e31e7/litdata-0.2.76.tar.gz", hash = "sha256:10b38e23421528ea69064836dacfe8e7ec93992d0aff392fdba716847e3a5012", size = 452469, upload-time = "2026-09-30T09:10:54.247Z" }
 wheels = [
@@ -2706,7 +2722,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "mdurl", marker = "python_full_version < '3.11'" },
+    { name = "mdurl", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/38/71/3b932df36c1a044d397a1f92d1cf91ee0a503d91e470cbd670aa66b07ed0/markdown-it-py-3.0.0.tar.gz", hash = "sha256:e3f60a94fa066dc52ec76661e37c851cb232d92f9886b15cb560aaada2df8feb", size = 74596, upload-time = "2023-06-03T06:41:14.443Z" }
 wheels = [
@@ -2718,16 +2734,14 @@ name = "markdown-it-py"
 version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "mdurl", marker = "python_full_version >= '3.11'" },
+    { name = "mdurl", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a76b9ee4bbaeae59370dc8bfd2f6c01f3630c35eb134/markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49", size = 82454, upload-time = "2026-05-07T12:08:28.36Z" }
 wheels = [
@@ -2824,8 +2838,8 @@ name = "matplotlib"
 version = "3.11.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "contourpy", version = "1.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-6-zephon-mds') or (python_full_version == '3.11.*' and extra == 'extra-6-zephon-mosaic') or (python_full_version == '3.11.*' and extra == 'extra-6-zephon-streaming') or (python_full_version == '3.11.*' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "contourpy", version = "1.4.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.12' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.12' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.12' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "cycler", marker = "python_full_version >= '3.11'" },
     { name = "fonttools", marker = "python_full_version >= '3.11'" },
     { name = "kiwisolver", marker = "python_full_version >= '3.11'" },
@@ -2896,8 +2910,8 @@ name = "mdit-py-plugins"
 version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/59/fc/f8d0863f8862f25602c0404d75568e89fb6b4109804645e5cdfb1be5cf56/mdit_py_plugins-0.6.1.tar.gz", hash = "sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0", size = 56114, upload-time = "2026-05-13T09:03:38.91Z" }
 wheels = [
@@ -2957,7 +2971,7 @@ version = "1.39.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography", marker = "python_full_version >= '3.11'" },
-    { name = "pyjwt", extra = ["crypto"], marker = "python_full_version >= '3.11'" },
+    { name = "pyjwt", extra = ["crypto"], marker = "(python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "requests", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bb/85/747d28986a44b715cc51cf57aa021c8fd94e9614064261ceec77320e8b0b/msal-1.39.0.tar.gz", hash = "sha256:6ab7de335e6d7f5717e2c7e1dbf86e4dda2f6acf3c56773b78dc53ebc6395b5f", size = 205360, upload-time = "2026-09-17T16:07:45.1Z" }
@@ -3080,7 +3094,7 @@ name = "multidict"
 version = "6.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d6/99/1d4d69c3512d0ddbfa3a1b69cfd9a151012ab2eb4eabbb096201b1f0b7d8/multidict-6.9.1.tar.gz", hash = "sha256:0f06e60fa190aa7abd0914c2a766736fdc8e9f34878c4346338534b73d1b20e2", size = 182404, upload-time = "2026-09-21T17:59:05.362Z" }
 wheels = [
@@ -3287,12 +3301,12 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "docutils", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "jinja2", marker = "python_full_version < '3.11'" },
-    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "mdit-py-plugins", marker = "python_full_version < '3.11'" },
-    { name = "pyyaml", marker = "python_full_version < '3.11'" },
-    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "docutils", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "jinja2", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "mdit-py-plugins", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pyyaml", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/a5/9626ba4f73555b3735ad86247a8077d4603aa8628537687c839ab08bfe44/myst_parser-4.0.1.tar.gz", hash = "sha256:5cfea715e4f3574138aecbf7d54132296bfd72bb614d31168f48c477a830a7c4", size = 93985, upload-time = "2025-02-12T10:53:03.833Z" }
 wheels = [
@@ -3304,22 +3318,20 @@ name = "myst-parser"
 version = "5.1.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "jinja2", marker = "python_full_version >= '3.11'" },
-    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "mdit-py-plugins", marker = "python_full_version >= '3.11'" },
-    { name = "pyyaml", marker = "python_full_version >= '3.11'" },
-    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "jinja2", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "mdit-py-plugins", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pyyaml", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/dc/603751677fff302f34396e206b610f556a59d7fe58b9a2145f54e96b48e8/myst_parser-5.1.0.tar.gz", hash = "sha256:ab69322dc6719dcc7f296479dbb70181b66df6ed315064f92dbc85c0e1bf2f02", size = 101182, upload-time = "2026-05-13T09:38:19.361Z" }
 wheels = [
@@ -3355,9 +3367,7 @@ name = "networkx"
 version = "3.7"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
@@ -3443,11 +3453,12 @@ name = "nvidia-cublas"
 version = "13.1.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cuda-nvrtc", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-cuda-nvrtc" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/a1/0bd24ee8c8d03adac032fd2909426a00c88f8c57961b1277ded97f91119f/nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:b7a210458267ac818974c53038fbec2e969d5c99f305ab15c72522fa9f001dd5", size = 542848918, upload-time = "2026-04-08T18:46:22.985Z" },
     { url = "https://files.pythonhosted.org/packages/3b/cd/154ca20c38269e05eff77c1464e6c1da89f50a6390b565e9d82e06bc11e1/nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:37936a16db8fe4ac1f065c2139360608a543a09275cb1a1af612e08cfa065436", size = 423138758, upload-time = "2026-04-08T18:46:58.655Z" },
+    { url = "https://files.pythonhosted.org/packages/45/9e/2f562daf80eb8f7a685fb7bea4fda71f6048e4f359d6fdd1b6e70206cb2f/nvidia_cublas-13.1.1.3-py3-none-win_amd64.whl", hash = "sha256:b6cdce694e47ff6aadf0a69df1cab6628d696f5ff56e8d16af50309d855fa20f", size = 404358158, upload-time = "2026-04-08T18:47:26.987Z" },
 ]
 
 [[package]]
@@ -3457,6 +3468,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/2a/80353b103fc20ce05ef51e928daed4b6015db4aaa9162ed0997090fe2250/nvidia_cuda_cupti-13.0.85-py3-none-manylinux_2_25_aarch64.whl", hash = "sha256:796bd679890ee55fb14a94629b698b6db54bcfd833d391d5e94017dd9d7d3151", size = 10310827, upload-time = "2025-09-04T08:26:42.012Z" },
     { url = "https://files.pythonhosted.org/packages/33/6d/737d164b4837a9bbd202f5ae3078975f0525a55730fe871d8ed4e3b952b0/nvidia_cuda_cupti-13.0.85-py3-none-manylinux_2_25_x86_64.whl", hash = "sha256:4eb01c08e859bf924d222250d2e8f8b8ff6d3db4721288cf35d14252a4d933c8", size = 10715597, upload-time = "2025-09-04T08:26:51.312Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/df/b74b10025c1205695c5676373f2edd3e87a7202cc62ead0dfbc373b0f6ea/nvidia_cuda_cupti-13.0.85-py3-none-win_amd64.whl", hash = "sha256:683f58d301548deeefcb8f6fac1b8d907691b9d8b18eccab417f51e362102f00", size = 7736776, upload-time = "2025-09-04T08:38:08.38Z" },
 ]
 
 [[package]]
@@ -3466,6 +3478,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/68/483a78f5e8f31b08fb1bb671559968c0ca3a065ac7acabfc7cee55214fd6/nvidia_cuda_nvrtc-13.0.88-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:ad9b6d2ead2435f11cbb6868809d2adeeee302e9bb94bcf0539c7a40d80e8575", size = 90215200, upload-time = "2025-09-04T08:28:44.204Z" },
     { url = "https://files.pythonhosted.org/packages/b7/dc/6bb80850e0b7edd6588d560758f17e0550893a1feaf436807d64d2da040f/nvidia_cuda_nvrtc-13.0.88-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d27f20a0ca67a4bb34268a5e951033496c5b74870b868bacd046b1b8e0c3267b", size = 43015449, upload-time = "2025-09-04T08:28:20.239Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/af/345fedb9f4c76c84ab4fa445b36bd4048a4d9db60e6bc76b4f913ff4b852/nvidia_cuda_nvrtc-13.0.88-py3-none-win_amd64.whl", hash = "sha256:6bcd4e7f8e205cbe644f5a98f2f799bef9556fefc89dd786e79a16312ce49872", size = 76807835, upload-time = "2025-09-04T08:39:15.274Z" },
 ]
 
 [[package]]
@@ -3475,6 +3488,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/4f/17d7b9b8e285199c58ce28e31b5c5bbaa4d8271af06a89b6405258245de2/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:ef9bcbe90493a2b9d810e43d249adb3d02e98dd30200d86607d8d02687c43f55", size = 2261060, upload-time = "2025-10-09T08:55:15.78Z" },
     { url = "https://files.pythonhosted.org/packages/2e/24/d1558f3b68b1d26e706813b1d10aa1d785e4698c425af8db8edc3dced472/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f82250d7782aa23b6cfe765ecc7db554bd3c2870c43f3d1821f1d18aebf0548", size = 2243632, upload-time = "2025-10-09T08:55:36.117Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/94/6b867483bec07da24ffa32736c79fabb94ef3a7af4d787a9d4a974868576/nvidia_cuda_runtime-13.0.96-py3-none-win_amd64.whl", hash = "sha256:f79298c8a098cec150a597c8eba58ecdab96e3bdc4b9bc4f9983635031740492", size = 2927037, upload-time = "2025-10-09T09:04:23.782Z" },
 ]
 
 [[package]]
@@ -3482,11 +3496,12 @@ name = "nvidia-cudnn-cu13"
 version = "9.24.0.43"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-cublas" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/30/7c257e3d5cb4fecb147b93895c66e29c93f8e76d74b45bb418ff0587c4ec/nvidia_cudnn_cu13-9.24.0.43-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:a6812a554a1ff0413e9c52b84c26c050380649ab9615f9c16bded368ce9f421f", size = 650976863, upload-time = "2026-07-02T16:23:39.248Z" },
     { url = "https://files.pythonhosted.org/packages/5c/ba/791cffd048fe5b044e620df55267e3e95c0e6e07d50b41e377c03dfc910f/nvidia_cudnn_cu13-9.24.0.43-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:71f181cd810e90f9b6023b01186fe82d13d65f0ec098581ee201d39fad769e4b", size = 553099438, upload-time = "2026-07-02T16:27:42.58Z" },
+    { url = "https://files.pythonhosted.org/packages/31/23/1dd3aa15cc4ab62c8fc88f8049ef137bc44c17892f5577bc80d994941f77/nvidia_cudnn_cu13-9.24.0.43-py3-none-win_amd64.whl", hash = "sha256:67a7273b5cf062f9446fd76cf464351a1c0f66501e6cd78f6675c0d604d8ac87", size = 412314771, upload-time = "2026-07-02T16:31:07.973Z" },
 ]
 
 [[package]]
@@ -3494,11 +3509,12 @@ name = "nvidia-cufft"
 version = "12.0.0.61"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/ae/f417a75c0259e85c1d2f83ca4e960289a5f814ed0cea74d18c353d3e989d/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2708c852ef8cd89d1d2068bdbece0aa188813a0c934db3779b9b1faa8442e5f5", size = 214053554, upload-time = "2025-09-04T08:31:38.196Z" },
     { url = "https://files.pythonhosted.org/packages/a8/2f/7b57e29836ea8714f81e9898409196f47d772d5ddedddf1592eadb8ab743/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:6c44f692dce8fd5ffd3e3df134b6cdb9c2f72d99cf40b62c32dde45eea9ddad3", size = 214085489, upload-time = "2025-09-04T08:31:56.044Z" },
+    { url = "https://files.pythonhosted.org/packages/85/b2/f8af21a2ed1beed337a6a02c5a28aeb85441f4d578ec3d529543c775ea4b/nvidia_cufft-12.0.0.61-py3-none-win_amd64.whl", hash = "sha256:2abce5b39d2f5ae12730fb7e5db6696533e36c26e2d3e8fd1750bdd2853364eb", size = 213342123, upload-time = "2025-09-04T08:40:51.145Z" },
 ]
 
 [[package]]
@@ -3517,6 +3533,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/72/7c2ae24fb6b63a32e6ae5d241cc65263ea18d08802aaae087d9f013335a2/nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:133df5a7509c3e292aaa2b477afd0194f06ce4ea24d714d616ff36439cee349a", size = 61962106, upload-time = "2025-08-04T10:21:41.128Z" },
     { url = "https://files.pythonhosted.org/packages/a5/9f/be0a41ca4a4917abf5cb9ae0daff1a6060cc5de950aec0396de9f3b52bc5/nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:1aee33a5da6e1db083fe2b90082def8915f30f3248d5896bcec36a579d941bfc", size = 59544258, upload-time = "2025-08-04T10:22:03.992Z" },
+    { url = "https://files.pythonhosted.org/packages/99/27/72103153b1ffc00e09fdc40ac970235343dcd1ea8bd762e84d2d73219ffa/nvidia_curand-10.4.0.35-py3-none-win_amd64.whl", hash = "sha256:65b1710aa6961d326b411e314b374290904c5ddf41dc3f766ebc3f1d7d4ca69f", size = 55242481, upload-time = "2025-08-04T10:30:41.831Z" },
 ]
 
 [[package]]
@@ -3524,13 +3541,14 @@ name = "nvidia-cusolver"
 version = "12.0.4.66"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
-    { name = "nvidia-cusparse", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-cublas" },
+    { name = "nvidia-cusparse" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/c3/b30c9e935fc01e3da443ec0116ed1b2a009bb867f5324d3f2d7e533e776b/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:02c2457eaa9e39de20f880f4bd8820e6a1cfb9f9a34f820eb12a155aa5bc92d2", size = 223467760, upload-time = "2025-09-04T08:33:04.222Z" },
     { url = "https://files.pythonhosted.org/packages/5f/67/cba3777620cdacb99102da4042883709c41c709f4b6323c10781a9c3aa34/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:0a759da5dea5c0ea10fd307de75cdeb59e7ea4fcb8add0924859b944babf1112", size = 200941980, upload-time = "2025-09-04T08:33:22.767Z" },
+    { url = "https://files.pythonhosted.org/packages/99/ef/332a0101260ca78a1daef046bf0b06199e8ed4dac1d2aa698289c358169c/nvidia_cusolver-12.0.4.66-py3-none-win_amd64.whl", hash = "sha256:16515bd33a8e76bb54d024cfa068fa68d30e80fc34b9e1090813ea9362e0cb65", size = 193551444, upload-time = "2025-09-04T08:41:46.813Z" },
 ]
 
 [[package]]
@@ -3538,11 +3556,12 @@ name = "nvidia-cusparse"
 version = "12.6.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "(python_full_version < '3.15' and sys_platform == 'emscripten') or (python_full_version < '3.15' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/94/5c26f33738ae35276672f12615a64bd008ed5be6d1ebcb23579285d960a9/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:80bcc4662f23f1054ee334a15c72b8940402975e0eab63178fc7e670aa59472c", size = 162155568, upload-time = "2025-09-04T08:33:42.864Z" },
     { url = "https://files.pythonhosted.org/packages/fa/18/623c77619c31d62efd55302939756966f3ecc8d724a14dab2b75f1508850/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:2b3c89c88d01ee0e477cb7f82ef60a11a4bcd57b6b87c33f789350b59759360b", size = 145942937, upload-time = "2025-09-04T08:33:58.029Z" },
+    { url = "https://files.pythonhosted.org/packages/02/b0/b043d6f3480f102f885cf87fc3ffd3edcb5e23b855025a50e2ef4d059185/nvidia_cusparse-12.6.3.3-py3-none-win_amd64.whl", hash = "sha256:cbcf42feb737bd7ec15b4c0a63e62351886bd3f975027b8815d7f720a2b5ea79", size = 143783033, upload-time = "2025-09-04T08:42:12.391Z" },
 ]
 
 [[package]]
@@ -3552,6 +3571,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/e1/cdc1797eadf82d3a9a575a19b33fdc871a97edbec42c00b5b5e914f4aff4/nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:4dca476c50bf4780d46cd0bfbd82e2bc10a08e4fef7950917ce8d7578d22a23f", size = 221051344, upload-time = "2025-09-05T18:49:51.289Z" },
     { url = "https://files.pythonhosted.org/packages/34/7d/2661f2fb3ac4302f3a246f5fc030213ac60c1fe0bce84f9783dbd831dbb7/nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_x86_64.whl", hash = "sha256:786ce87568c303fadb5afcc7102d454cd3040d75f6f8626f5db460d1871f4dd0", size = 170148586, upload-time = "2025-09-05T18:50:50.248Z" },
+    { url = "https://files.pythonhosted.org/packages/31/83/f3647ce26916c94a6ca4ff1810623e2c405cff2dea6e78d29516b2514df9/nvidia_cusparselt_cu13-0.8.1-py3-none-win_amd64.whl", hash = "sha256:dccbd362f91a7b9024d1f55ee9f548ac065027ff15d8c8b0db889ab3a8f31215", size = 156885108, upload-time = "2025-09-05T18:51:35.958Z" },
 ]
 
 [[package]]
@@ -3570,6 +3590,8 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1d/6b/eef7a9e32872b8f41e145bf10cddc9af26e153c338852811fe9a9baddf9e/nvidia_nvjitlink-13.4.92-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:e0391f24ed94ec879b84e3da4d4ec320c879aff681f2c7a638462f7199284323", size = 42452378, upload-time = "2026-09-16T20:45:29.042Z" },
     { url = "https://files.pythonhosted.org/packages/1f/a8/1cbd4014898af8b419e69b0d7dbc63da2121ee92d92b47d59f4fe9075349/nvidia_nvjitlink-13.4.92-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:25f74fad0d654271c921ac4dca614bd6258bc21791242fc7b2289dad7ae9c099", size = 40420120, upload-time = "2026-09-16T20:45:19.163Z" },
+    { url = "https://files.pythonhosted.org/packages/72/7c/c44bd7277afafed9de262a23baec4dc8dcf7ecbb1b9ecb228821442d1e9b/nvidia_nvjitlink-13.4.92-py3-none-win_amd64.whl", hash = "sha256:b286f3a4f227a9363efdec263c7b91788cef1478d2b8a5fa8bab7f3e82ff82fd", size = 39053950, upload-time = "2026-09-16T20:52:54.244Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/8e/afaa7687fac05a507d10765f6097937e99735f835c5b262276d1e2d2cad5/nvidia_nvjitlink-13.4.92-py3-none-win_arm64.whl", hash = "sha256:9e4a7ff4f0cafa8c624917055b863dc11f5c2912ead23c462889e166f3b0e57d", size = 35981621, upload-time = "2026-09-16T20:56:30.819Z" },
 ]
 
 [[package]]
@@ -3588,6 +3610,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/f3/d86c845465a2723ad7e1e5c36dcd75ddb82898b3f53be47ebd429fb2fa5d/nvidia_nvtx-13.0.85-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:4936d1d6780fbe68db454f5e72a42ff64d1fd6397df9f363ae786930fd5c1cd4", size = 148047, upload-time = "2025-09-04T08:29:01.761Z" },
     { url = "https://files.pythonhosted.org/packages/a8/64/3708a90d1ebe202ffdeb7185f878a3c84d15c2b2c31858da2ce0583e2def/nvidia_nvtx-13.0.85-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb7780edb6b14107373c835bf8b72e7a178bac7367e23da7acb108f973f157a6", size = 148878, upload-time = "2025-09-04T08:28:53.627Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/50/0e2220f8620a177de994211186ffc5bfa9f2ce1e1282797f8f90096f9f88/nvidia_nvtx-13.0.85-py3-none-win_amd64.whl", hash = "sha256:d66ea44254dd3c6eacc300047af6e1288d2269dd072b417e0adffbf479e18519", size = 137066, upload-time = "2025-09-04T08:39:25.649Z" },
 ]
 
 [[package]]
@@ -3595,7 +3618,7 @@ name = "obstore"
 version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a2/27/aa7549157a4a681157e315534ba5ab8f167f77662166e792a6e836938f46/obstore-0.11.1.tar.gz", hash = "sha256:a5afe8b99e3b20cdc9133be7a1b381259acf0d470029f6b2fc79c3f9947ad436", size = 130828, upload-time = "2026-08-21T23:57:27.837Z" }
 wheels = [
@@ -3679,9 +3702,9 @@ name = "opencensus"
 version = "0.11.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "google-api-core", marker = "python_full_version < '3.14'" },
-    { name = "opencensus-context", marker = "python_full_version < '3.14'" },
-    { name = "six", marker = "python_full_version < '3.14'" },
+    { name = "google-api-core" },
+    { name = "opencensus-context" },
+    { name = "six" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/15/a7/a46dcffa1b63084f9f17fe3c8cb20724c4c8f91009fd0b2cfdb27d5d2b35/opencensus-0.11.4.tar.gz", hash = "sha256:cbef87d8b8773064ab60e5c2a1ced58bbaa38a6d052c41aec224958ce544eff2", size = 64966, upload-time = "2024-01-03T18:04:07.085Z" }
 wheels = [
@@ -3714,9 +3737,9 @@ name = "opentelemetry-exporter-prometheus"
 version = "0.66b0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-api", marker = "python_full_version < '3.14'" },
-    { name = "opentelemetry-sdk", marker = "python_full_version < '3.14'" },
-    { name = "prometheus-client", marker = "python_full_version < '3.14'" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+    { name = "prometheus-client" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/01/bb73b339b89a33ed0b229e7e86330017430457c2c41d6254aa077b032ade/opentelemetry_exporter_prometheus-0.66b0.tar.gz", hash = "sha256:941434dd88e7c0fb8c1ec0d4e5c1b62c6206bb47b8b35f287cbac56fea82bd40", size = 16987, upload-time = "2026-09-25T12:32:36.19Z" }
 wheels = [
@@ -3728,7 +3751,7 @@ name = "opentelemetry-proto"
 version = "1.45.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf", marker = "python_full_version < '3.14'" },
+    { name = "protobuf" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/72/28/67c38cfb7e2bdfdd0cde7dcdd0424aed0291fbd64aa4ea3e7e913734711a/opentelemetry_proto-1.45.0.tar.gz", hash = "sha256:96ee414f24bc3f61ea8e17dc56b4348d4049d73db3eb17c6b3edf75b5b403300", size = 46489, upload-time = "2026-09-25T12:32:41.409Z" }
 wheels = [
@@ -3740,9 +3763,9 @@ name = "opentelemetry-sdk"
 version = "1.45.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-api", marker = "python_full_version < '3.14'" },
-    { name = "opentelemetry-semantic-conventions", marker = "python_full_version < '3.14'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.14'" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-semantic-conventions" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ac/ed/ad32d76cc86ebce601105d01d13f8a08d6abc1852eaf69d79cf199bc1ee7/opentelemetry_sdk-1.45.0.tar.gz", hash = "sha256:20caa5130505e386c67c3da1c76e446c842698ced54c76c6148679539aa97972", size = 218337, upload-time = "2026-09-25T12:32:43.591Z" }
 wheels = [
@@ -3754,8 +3777,8 @@ name = "opentelemetry-semantic-conventions"
 version = "0.66b0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-api", marker = "python_full_version < '3.14'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.14'" },
+    { name = "opentelemetry-api" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2e/21/910f085c0b83b80e45c341c7859baef37c877046b2c44c88d5ff2d5db948/opentelemetry_semantic_conventions-0.66b0.tar.gz", hash = "sha256:97a77dce484c54861e7eeff7651fd8a806dd3c30e501dc316730215ec36890e6", size = 150247, upload-time = "2026-09-25T12:32:44.827Z" }
 wheels = [
@@ -4648,13 +4671,13 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
     { name = "pygments" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "tomli", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
 wheels = [
@@ -4855,14 +4878,14 @@ name = "ray"
 version = "2.58.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.14'" },
-    { name = "filelock", marker = "python_full_version < '3.14'" },
-    { name = "jsonschema", marker = "python_full_version < '3.14'" },
-    { name = "msgpack", marker = "python_full_version < '3.14'" },
-    { name = "packaging", marker = "python_full_version < '3.14'" },
-    { name = "protobuf", marker = "python_full_version < '3.14'" },
-    { name = "pyyaml", marker = "python_full_version < '3.14'" },
-    { name = "requests", marker = "python_full_version < '3.14'" },
+    { name = "click" },
+    { name = "filelock" },
+    { name = "jsonschema" },
+    { name = "msgpack" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "pyyaml" },
+    { name = "requests" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2f/41/760f9a076085d043d9fbb8f840436e1d21e47682c976d3620efbf02a3b9e/ray-2.58.0-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:a2235a5a17e865be053e8aff6d9e9e36d1edb45ad8162f57f7cdfd0202a5a397", size = 67217855, upload-time = "2026-08-23T04:45:46.075Z" },
@@ -4889,20 +4912,20 @@ wheels = [
 
 [package.optional-dependencies]
 default = [
-    { name = "aiohttp", marker = "python_full_version < '3.14'" },
-    { name = "aiohttp-cors", marker = "python_full_version < '3.14'" },
-    { name = "colorful", marker = "python_full_version < '3.14'" },
-    { name = "grpcio", marker = "python_full_version < '3.14'" },
-    { name = "opencensus", marker = "python_full_version < '3.14'" },
-    { name = "opentelemetry-exporter-prometheus", marker = "python_full_version < '3.14'" },
-    { name = "opentelemetry-proto", marker = "python_full_version < '3.14'" },
-    { name = "opentelemetry-sdk", marker = "python_full_version < '3.14'" },
-    { name = "prometheus-client", marker = "python_full_version < '3.14'" },
-    { name = "py-spy", marker = "python_full_version < '3.14'" },
-    { name = "pydantic", marker = "python_full_version < '3.14'" },
-    { name = "requests", marker = "python_full_version < '3.14'" },
-    { name = "smart-open", marker = "python_full_version < '3.14'" },
-    { name = "virtualenv", marker = "python_full_version < '3.14'" },
+    { name = "aiohttp" },
+    { name = "aiohttp-cors" },
+    { name = "colorful" },
+    { name = "grpcio" },
+    { name = "opencensus" },
+    { name = "opentelemetry-exporter-prometheus" },
+    { name = "opentelemetry-proto" },
+    { name = "opentelemetry-sdk" },
+    { name = "prometheus-client" },
+    { name = "py-spy" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "smart-open" },
+    { name = "virtualenv" },
 ]
 
 [[package]]
@@ -4910,10 +4933,10 @@ name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs", marker = "python_full_version < '3.14'" },
-    { name = "rpds-py", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "rpds-py", version = "2026.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "attrs" },
+    { name = "rpds-py", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "rpds-py", version = "2026.6.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -5077,9 +5100,9 @@ name = "rich"
 version = "15.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pygments" },
+    { name = "markdown-it-py", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "markdown-it-py", version = "4.2.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pygments", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
@@ -5441,7 +5464,7 @@ name = "smart-open"
 version = "8.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "wrapt", marker = "python_full_version < '3.14'" },
+    { name = "wrapt" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6e/f1/f57ca3ddc7983173d4aa2df570393009d7572a91f7f54369de8d58675e9b/smart_open-8.0.2.tar.gz", hash = "sha256:d5b5c85d2d31a6657bb18b3725856125f3b5be0ae3020c0fafa4649f6c493122", size = 61790, upload-time = "2026-09-29T18:38:30.156Z" }
 wheels = [
@@ -5483,23 +5506,23 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "alabaster", marker = "python_full_version < '3.11'" },
-    { name = "babel", marker = "python_full_version < '3.11'" },
-    { name = "colorama", marker = "python_full_version < '3.11' and sys_platform == 'win32'" },
-    { name = "docutils", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "imagesize", marker = "python_full_version < '3.11'" },
-    { name = "jinja2", marker = "python_full_version < '3.11'" },
-    { name = "packaging", marker = "python_full_version < '3.11'" },
-    { name = "pygments", marker = "python_full_version < '3.11'" },
-    { name = "requests", marker = "python_full_version < '3.11'" },
-    { name = "snowballstemmer", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-applehelp", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-devhelp", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-jsmath", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-qthelp", marker = "python_full_version < '3.11'" },
-    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version < '3.11'" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "alabaster", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "babel", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "colorama", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.11' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "docutils", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "imagesize", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "jinja2", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "packaging", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pygments", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "requests", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "snowballstemmer", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tomli", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/be0b61178fe2cdcb67e2a92fc9ebb488e3c51c4f74a36a7824c0adf23425/sphinx-8.1.3.tar.gz", hash = "sha256:43c1911eecb0d3e161ad78611bc905d1ad0e523e4ddc202a58a821773dc4c927", size = 8184611, upload-time = "2024-10-13T20:27:13.93Z" }
 wheels = [
@@ -5514,23 +5537,23 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "alabaster", marker = "python_full_version == '3.11.*'" },
-    { name = "babel", marker = "python_full_version == '3.11.*'" },
-    { name = "colorama", marker = "python_full_version == '3.11.*' and sys_platform == 'win32'" },
-    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "imagesize", marker = "python_full_version == '3.11.*'" },
-    { name = "jinja2", marker = "python_full_version == '3.11.*'" },
-    { name = "packaging", marker = "python_full_version == '3.11.*'" },
-    { name = "pygments", marker = "python_full_version == '3.11.*'" },
-    { name = "requests", marker = "python_full_version == '3.11.*'" },
-    { name = "roman-numerals", marker = "python_full_version == '3.11.*'" },
-    { name = "snowballstemmer", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-applehelp", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-devhelp", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-jsmath", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-qthelp", marker = "python_full_version == '3.11.*'" },
-    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version == '3.11.*'" },
+    { name = "alabaster", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "babel", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "colorama", marker = "(python_full_version == '3.11.*' and sys_platform == 'win32') or (python_full_version != '3.11.*' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version != '3.11.*' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version != '3.11.*' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version != '3.11.*' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "imagesize", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "jinja2", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "packaging", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pygments", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "requests", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "roman-numerals", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "snowballstemmer", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/50/a8c6ccc36d5eacdfd7913ddccd15a9cee03ecafc5ee2bc40e1f168d85022/sphinx-9.0.4.tar.gz", hash = "sha256:594ef59d042972abbc581d8baa577404abe4e6c3b04ef61bd7fc2acbd51f3fa3", size = 8710502, upload-time = "2025-12-04T07:45:27.343Z" }
 wheels = [
@@ -5542,31 +5565,29 @@ name = "sphinx"
 version = "9.1.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
 ]
 dependencies = [
-    { name = "alabaster", marker = "python_full_version >= '3.12'" },
-    { name = "babel", marker = "python_full_version >= '3.12'" },
-    { name = "colorama", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
-    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "imagesize", marker = "python_full_version >= '3.12'" },
-    { name = "jinja2", marker = "python_full_version >= '3.12'" },
-    { name = "packaging", marker = "python_full_version >= '3.12'" },
-    { name = "pygments", marker = "python_full_version >= '3.12'" },
-    { name = "requests", marker = "python_full_version >= '3.12'" },
-    { name = "roman-numerals", marker = "python_full_version >= '3.12'" },
-    { name = "snowballstemmer", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-applehelp", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-devhelp", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-jsmath", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-qthelp", marker = "python_full_version >= '3.12'" },
-    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version >= '3.12'" },
+    { name = "alabaster", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "babel", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "colorama", marker = "(python_full_version >= '3.12' and sys_platform == 'win32') or (python_full_version < '3.12' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version < '3.12' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "docutils", version = "0.22.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "imagesize", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "jinja2", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "packaging", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pygments", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "requests", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "roman-numerals", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "snowballstemmer", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cd/bd/f08eb0f4eed5c83f1ba2a3bd18f7745a2b1525fad70660a1c00224ec468a/sphinx-9.1.0.tar.gz", hash = "sha256:7741722357dd75f8190766926071fed3bdc211c74dd2d7d4df5404da95930ddb", size = 8718324, upload-time = "2025-12-31T15:09:27.646Z" }
 wheels = [
@@ -5578,9 +5599,9 @@ name = "sphinx-basic-ng"
 version = "1.0.0b2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/98/0b/a866924ded68efec7a1759587a4e478aec7559d8165fac8b2ad1c0e774d6/sphinx_basic_ng-1.0.0b2.tar.gz", hash = "sha256:9ec55a47c90c8c002b5960c57492ec3021f5193cb26cebc2dc4ea226848651c9", size = 20736, upload-time = "2023-07-08T18:40:54.166Z" }
 wheels = [
@@ -5592,9 +5613,9 @@ name = "sphinx-copybutton"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fc/2b/a964715e7f5295f77509e59309959f4125122d648f86b4fe7d70ca1d882c/sphinx-copybutton-0.5.2.tar.gz", hash = "sha256:4cf17c82fb9646d1bc9ca92ac280813a3b605d8c421225fd9913154103ee1fbd", size = 23039, upload-time = "2023-04-14T08:10:22.998Z" }
 wheels = [
@@ -5660,7 +5681,7 @@ name = "substrait"
 version = "0.24.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf", marker = "python_full_version >= '3.11'" },
+    { name = "protobuf", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/99/48c601b6627609ffaea473f603006ff1ded88189ccd1260f58d9a340d88c/substrait-0.24.2.tar.gz", hash = "sha256:743cc352e96b0927b2cd37cd5a8fdac0a96a68df9600bd104fc36aebd222a836", size = 185019, upload-time = "2025-09-15T14:58:29.678Z" }
 wheels = [
@@ -5696,7 +5717,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version < '3.11'" },
+    { name = "numpy", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/44/d0/18fed0fc0916578a4463f775b0fbd9c5fed2392152d039df2fb533bfdd5d/tifffile-2025.5.10.tar.gz", hash = "sha256:018335d34283aa3fd8c263bae5c3c2b661ebc45548fde31504016fcae7bf1103", size = 365290, upload-time = "2025-05-10T19:22:34.386Z" }
 wheels = [
@@ -5711,7 +5732,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/cb/2f6d79c7576e22c116352a801f4c3c8ace5957e9aced862012430b62e14f/tifffile-2026.3.3.tar.gz", hash = "sha256:d9a1266bed6f2ee1dd0abde2018a38b4f8b2935cb843df381d70ac4eac5458b7", size = 388745, upload-time = "2026-03-03T19:14:38.134Z" }
 wheels = [
@@ -5723,15 +5744,13 @@ name = "tifffile"
 version = "2026.9.20"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.15'",
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.12'" },
+    { name = "numpy", marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/66/634db78ebad513038d753830dd8815eea26278b5463ba0f43198b0c24c4e/tifffile-2026.9.20.tar.gz", hash = "sha256:30e145a7042ce7143ae50a50fe8b7221b0070aae22adab8f9e79a264be6b5cdc", size = 449417, upload-time = "2026-09-21T03:59:40.055Z" }
 wheels = [
@@ -5742,8 +5761,16 @@ wheels = [
 name = "tokenizers"
 version = "0.23.3"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version == '3.14.*'",
+    "python_full_version == '3.13.*'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
+    "python_full_version < '3.11'",
+]
 dependencies = [
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e0/7c/2cabb2174e772636683008f2c5621949b645da7d303c596589e84516a184/tokenizers-0.23.3.tar.gz", hash = "sha256:cded33237c77caeef62944d32aa9a7ef42bdce2b3497e18d137e072a8c4be438", size = 385286, upload-time = "2026-10-09T10:16:55.759Z" }
 wheels = [
@@ -5770,6 +5797,49 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/1d/41a697d0c193a320b243fbd68b2057b6eb2f01ecf80899e1a16e646ff699/tokenizers-0.23.3-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:acd5c57b4bd3e56e246e2731a3a3a6825a7a7d89b7e3b761ba80bc521710f04b", size = 9945973, upload-time = "2026-10-09T10:16:49.326Z" },
     { url = "https://files.pythonhosted.org/packages/37/e9/b56e619fcd583000a2b1254bb46af8dc6a174d3ba3329f454ad5a95a2be2/tokenizers-0.23.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:82eb480f6f1c21cea3349dec32cf1a6384c6c1e775f00f83b0d51197bc013687", size = 10237491, upload-time = "2026-10-09T10:16:51.943Z" },
     { url = "https://files.pythonhosted.org/packages/6f/68/f58b3beb95f3b62816e91e5e768e684cd63e58f9cbece22036dae3b1c971/tokenizers-0.23.3-cp314-cp314t-win_amd64.whl", hash = "sha256:1554a6eed34d9d6a78d23360f4e06df8dffab1ae08c7e8488e0b3e3b36cc266f", size = 2847654, upload-time = "2026-10-09T10:16:54.166Z" },
+]
+
+[[package]]
+name = "tokenizers"
+version = "1.0.0rc3"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version == '3.14.*'",
+    "python_full_version == '3.13.*'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/5a/42947f99359de8ac229f97f8e43c738860d90f522868446ab4bc5cca4adf/tokenizers-1.0.0rc3.tar.gz", hash = "sha256:a0bb19c9b219f59e39933c3b7c5621187174f9ff000cc5bd851d2e0c86e7f4b2", size = 467941, upload-time = "2026-10-19T16:47:09.405Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/21/05d6bd86d3ae96aa869374a8585040d1b9c352fce34133e971287790655b/tokenizers-1.0.0rc3-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:5668cca210f58ae2fd07d51c48ec30f965c26e2d1c8d7f865acbcca0b18521a4", size = 1760791, upload-time = "2026-10-19T16:46:29.993Z" },
+    { url = "https://files.pythonhosted.org/packages/72/c0/35529945dba260898f19b96ae4f314e0502ee954c04225b640fcb700346e/tokenizers-1.0.0rc3-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:71f3da74b33d48da337dc2d86b994d884d9ef8b480cebb85e7a451f49d388a41", size = 1680163, upload-time = "2026-10-19T16:46:32.334Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/db/397cdb4bd5f6aa32b9e27d2df73e2f8b0699b8b77df2205399a86a6ea339/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_12_i686.manylinux2010_i686.whl", hash = "sha256:9d531c26ffeace3f4d0c6d541bf2080f6d5030b6e0ff90bbb64badffe0fc078f", size = 1871917, upload-time = "2026-10-19T16:46:33.941Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/f6/e4168f4b169cd10b7e9e8026098a2b5bbf5676bda7e3e0d2e1b6a810e51f/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:16835d0b8fadda45f82debb3b2c33896dd94bbf50c4b0854e1ff29780b8d3af3", size = 1776088, upload-time = "2026-10-19T16:46:35.555Z" },
+    { url = "https://files.pythonhosted.org/packages/98/05/7d81b74d58c8d1809faa619ee94267cbdfdd80b509cfd52b0b139b45e489/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:bdb49e437026ebf1f096afb64e7ef0c303905ecf9cd4cf748b147f511567b2a7", size = 1794287, upload-time = "2026-10-19T16:46:37.144Z" },
+    { url = "https://files.pythonhosted.org/packages/10/eb/9cb966278e3de9ff595ed4893f94250f3b203b5c2bf9c89e219eec3bfb51/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:bed8446a3a465f49c35195aa213aba1306362a3aae8e21439be46ce30cbcab0d", size = 1949292, upload-time = "2026-10-19T16:46:38.855Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/16/938f309afbe9079d81fef252345d0a80efc9a3e618e5eb52675a29158306/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:2071fc7dad1aca82dc6ba0f310ff02506b04a6f37e558b1735b9bdadac53237a", size = 1917951, upload-time = "2026-10-19T16:46:40.457Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/58/59280be5b2a2f1d5641561586afa0a56e520e6195882d4b90fbad27cfa88/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8b7aa195d351b39bf640626062aa807ca34cca647e3f433596788077c0736699", size = 1843526, upload-time = "2026-10-19T16:46:42.003Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/b7/77b62f339f53900206006dfc2dc7f29d59486c2300e11aa44b8a3ab6994b/tokenizers-1.0.0rc3-cp310-abi3-manylinux_2_31_riscv64.whl", hash = "sha256:a8f2a26bc0ae07347dcbec716c10aeb43dc21f237736f020ff00ae759c57d0a4", size = 1827286, upload-time = "2026-10-19T16:46:43.819Z" },
+    { url = "https://files.pythonhosted.org/packages/79/73/8c8304c4339b78038ac599a7d86ffa945387c48c2b6a0cad12f2ea13da20/tokenizers-1.0.0rc3-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:05d195d9a54fa9b3b59908aab6a12e16c32bce64fd652fd6d66f89572b37b329", size = 1953579, upload-time = "2026-10-19T16:46:45.462Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/6b/fa34bcd5f079b746b5d64df7b1db0c78f2be28b46fd8a2f0fa2066047aad/tokenizers-1.0.0rc3-cp310-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:f537d4636cb8d9224cf96a0e7643c72d713d22a33bef5084e94f9af31389a4bd", size = 2067147, upload-time = "2026-10-19T16:46:47.113Z" },
+    { url = "https://files.pythonhosted.org/packages/03/3e/1589864f764309f981b5020622a2bd1be1b361896eab391e563299576b1b/tokenizers-1.0.0rc3-cp310-abi3-musllinux_1_2_i686.whl", hash = "sha256:075054ff8093a48f8b41c41db823b094b6c2700ca41d58e0050c95e063dee936", size = 2045751, upload-time = "2026-10-19T16:46:48.732Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/c1/da933b09a497e398008be47e2f989af38abe42b69681eb73b2eadaea54ef/tokenizers-1.0.0rc3-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:4bda3135d47058f23a383960d14aecf02d28fa6ceaab69c2760c50d163642d7f", size = 2061650, upload-time = "2026-10-19T16:46:50.299Z" },
+    { url = "https://files.pythonhosted.org/packages/03/dc/69704acd3028f4eee4908d5709fd864e8a3c533153b680d50bbfc261f313/tokenizers-1.0.0rc3-cp310-abi3-win32.whl", hash = "sha256:bc8d40079c804f40a47fb6a63dc00dd0230ded00dd82e64cc346aa9ce5ed46ec", size = 1536753, upload-time = "2026-10-19T16:46:51.94Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/b7/87ba644e121ee57a5cbda7901d1bfe3e1fc697556f0399db6bfe50c90389/tokenizers-1.0.0rc3-cp310-abi3-win_amd64.whl", hash = "sha256:496d27d95c65c515c577b7e27e75119138b4e0ea6b6d4479f06a3715ad8185a2", size = 1702604, upload-time = "2026-10-19T16:46:53.716Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/1a/0e378ad8f01c7246228c25daa9824f5fd06fc7858345449062805ef2cfb6/tokenizers-1.0.0rc3-cp310-abi3-win_arm64.whl", hash = "sha256:1fca88f9713747cdf192496a676acc4410a312aaadc8e0357c9043a44a22ee60", size = 1577198, upload-time = "2026-10-19T16:46:55.399Z" },
+    { url = "https://files.pythonhosted.org/packages/98/68/0e930055bd8764995c479a7ad50ed622b5c82c9e2c2adc6ed63312473c01/tokenizers-1.0.0rc3-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:98464abb0168203b14cbf2e8c7bddd1800ef9d0e3c1e163c87ff38658ac03f02", size = 1759507, upload-time = "2026-10-19T16:46:56.99Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/9a/f83db3fd8e3cdd53ad447e7fc4602a328d0e3c59cf9f4e57219a6e946897/tokenizers-1.0.0rc3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:35305ef35542fc3a8f198b5ddf56a2dc14365224fe8300b6c6c73407e8685778", size = 1674005, upload-time = "2026-10-19T16:46:59.006Z" },
+    { url = "https://files.pythonhosted.org/packages/56/05/1cee5521d8a2ddbc6eafafc2756d5ae13c94c5fd327e8adc3aeab9f8e2f0/tokenizers-1.0.0rc3-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:5b6ae2527f3a84cb07d74f64917fd73ef1a2f61c8302a2aa6b08d8f4d3c917dc", size = 1769295, upload-time = "2026-10-19T16:47:00.835Z" },
+    { url = "https://files.pythonhosted.org/packages/07/a4/7b9fa1485921919b265fb72c22a90ec2a93e93f52e0c9a61d22f39895bd6/tokenizers-1.0.0rc3-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7d7d1ba12cc435d8b6ccd4b8000452248bb41edf674380f987e9f6280b6441c0", size = 1835227, upload-time = "2026-10-19T16:47:02.429Z" },
+    { url = "https://files.pythonhosted.org/packages/31/e1/a919dd4d440496cbdb721b185059612ad4f8001f1c7f1da006105db159e1/tokenizers-1.0.0rc3-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:0dfebe55a928b3fa2ed1bfc83ca35c054ee2f9451da5bd1feff47e5efcd09eda", size = 1943952, upload-time = "2026-10-19T16:47:04.279Z" },
+    { url = "https://files.pythonhosted.org/packages/67/f4/40e4f5a05a4a678668f9b0ac8d06b73cd328f691efa048063d6acd7fc616/tokenizers-1.0.0rc3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:f9469a6ba54b83efe1aba10a7c64230ad98fea3b192528cb989cb1e94055de94", size = 2056347, upload-time = "2026-10-19T16:47:05.761Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/bb/72cbd20cfc9e61865e6af18fb2109bff22a6eab6cdc9e40947a363ce06b1/tokenizers-1.0.0rc3-cp314-cp314t-win_amd64.whl", hash = "sha256:22deed3acf83ca477478646afc573747ac4f203891d8cf27886bbc4a0b325162", size = 1693124, upload-time = "2026-10-19T16:47:07.516Z" },
 ]
 
 [[package]]
@@ -5831,21 +5901,21 @@ name = "torch"
 version = "2.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-bindings", marker = "python_full_version < '3.15' and sys_platform == 'linux'" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "sys_platform == 'linux'" },
+    { name = "cuda-bindings", marker = "(python_full_version < '3.15' and sys_platform == 'linux') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "sys_platform == 'linux' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "networkx", version = "3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "nvidia-cudnn-cu13", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-cusparselt-cu13", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-nccl-cu13", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-nvshmem-cu13", marker = "sys_platform == 'linux'" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "networkx", version = "3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-cudnn-cu13", marker = "sys_platform == 'linux' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-cusparselt-cu13", marker = "sys_platform == 'linux' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-nccl-cu13", marker = "sys_platform == 'linux' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "nvidia-nvshmem-cu13", marker = "sys_platform == 'linux' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "setuptools" },
     { name = "sympy" },
-    { name = "triton", marker = "python_full_version < '3.15' and sys_platform == 'linux'" },
+    { name = "triton", marker = "(python_full_version < '3.15' and sys_platform == 'linux') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.15' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'linux' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "typing-extensions" },
 ]
 wheels = [
@@ -5893,9 +5963,9 @@ name = "torchvision"
 version = "0.29.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.11'" },
-    { name = "pillow", marker = "python_full_version >= '3.11'" },
-    { name = "torch", marker = "python_full_version >= '3.11'" },
+    { name = "numpy", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pillow", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "torch", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5e/cf/3d7e36c7a962692e919de99803005816b7bf45dc3e617198ec28cd7d8000/torchvision-0.29.1-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:9ef8de9b4a47b00dbe0a6a35bba22907f86f091adef57a76f1581502dbfc59f8", size = 1813850, upload-time = "2026-09-30T17:56:58.137Z" },
@@ -5929,7 +5999,7 @@ name = "tqdm"
 version = "4.70.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
@@ -5941,15 +6011,15 @@ name = "transformers"
 version = "5.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "regex" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
+    { name = "huggingface-hub", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "numpy", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "packaging", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "pyyaml", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "regex", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "safetensors", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tokenizers", version = "0.23.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "tqdm", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "typer", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/65/4c/70012ed0795235fb6bd7806fafd4a1842f03e49ebbfa3bb9580e451948ce/transformers-5.19.0.tar.gz", hash = "sha256:87f38dd25e4521151b97e94520ac457f44a0ae8a8358a5b112daff6c64a822d6", size = 10032022, upload-time = "2026-10-06T16:39:00.229Z" }
 wheels = [
@@ -5989,10 +6059,10 @@ name = "typer"
 version = "0.27.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "rich" },
-    { name = "shellingham" },
+    { name = "annotated-doc", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "colorama", marker = "(python_full_version >= '3.11' and sys_platform == 'win32' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and sys_platform == 'win32' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and sys_platform == 'win32' and extra != 'group-6-zephon-rust') or (python_full_version < '3.11' and sys_platform == 'win32' and extra != 'extra-6-zephon-mds' and extra != 'extra-6-zephon-mosaic' and extra != 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (python_full_version < '3.11' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (python_full_version < '3.11' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (python_full_version < '3.11' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (python_full_version >= '3.11' and extra != 'extra-6-zephon-mds' and extra != 'extra-6-zephon-mosaic' and extra != 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (sys_platform != 'win32' and extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mds' and extra != 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-mosaic' and extra != 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (sys_platform == 'win32' and extra == 'extra-6-zephon-streaming' and extra != 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "rich", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "shellingham", marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mds') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-mosaic') or (python_full_version >= '3.11' and extra == 'extra-6-zephon-streaming') or (python_full_version >= '3.11' and extra != 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/16/f7/57713ba479fd405eb76de31404b2c744c289e336b2d999511ebf51e496f7/typer-0.27.2.tar.gz", hash = "sha256:269b7eb9d3c202ca84b4bc9618cb04ebb43d3d4d1e567e4c768607232c05f945", size = 204045, upload-time = "2026-08-28T10:26:55.046Z" }
 wheels = [
@@ -6048,7 +6118,7 @@ dependencies = [
     { name = "packaging" },
     { name = "platformdirs" },
     { name = "python-discovery" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c9/2c/1a69b3346931e9a7db9cc00cc0fa847c843a85fa7cf52a598f57261c68df/virtualenv-21.14.12.tar.gz", hash = "sha256:bbcfb78e36c22ad70c6917c4aecb5e63477d3c138e9f88c946f320e31859c76a", size = 5562800, upload-time = "2026-10-21T01:58:51.724Z" }
 wheels = [
@@ -6060,9 +6130,9 @@ name = "vortex-data"
 version = "0.88.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyarrow", marker = "python_full_version >= '3.11'" },
-    { name = "substrait", marker = "python_full_version >= '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
+    { name = "pyarrow", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "substrait", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/26/50/21c3ccf1be91cf32ed74836dd718a9099bdf7a245280a83194ac40d930a5/vortex_data-0.88.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:870735892015dd037ea9b0122db86d73dff587afe7dba90111d63f0fe6a1d6a4", size = 45725317, upload-time = "2026-10-08T15:52:02.208Z" },
@@ -6480,7 +6550,7 @@ wheels = [
 name = "zephon"
 source = { editable = "." }
 dependencies = [
-    { name = "backports-zstd", marker = "python_full_version < '3.14'" },
+    { name = "backports-zstd", marker = "python_full_version < '3.14' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "cloudpickle" },
     { name = "filelock" },
     { name = "msgpack" },
@@ -6496,11 +6566,11 @@ cloud = [
 ]
 docs = [
     { name = "furo" },
-    { name = "myst-parser", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "myst-parser", version = "5.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "myst-parser", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "myst-parser", version = "5.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "sphinx-copybutton" },
 ]
 hf = [
@@ -6515,10 +6585,10 @@ lance = [
     { name = "pylance" },
 ]
 litdata = [
-    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "optree" },
-    { name = "pillow", marker = "python_full_version >= '3.11'" },
+    { name = "pillow", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
     { name = "zstd" },
 ]
 mds = [
@@ -6535,7 +6605,7 @@ parquet = [
     { name = "pyarrow" },
 ]
 ray = [
-    { name = "ray", extra = ["default"], marker = "python_full_version < '3.14'" },
+    { name = "ray", extra = ["default"], marker = "python_full_version < '3.14' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 streaming = [
     { name = "mosaicml-streaming", marker = "python_full_version >= '3.11'" },
@@ -6543,7 +6613,7 @@ streaming = [
     { name = "zstd" },
 ]
 vortex = [
-    { name = "vortex-data", marker = "python_full_version >= '3.11'" },
+    { name = "vortex-data", marker = "python_full_version >= '3.11' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
 ]
 
 [package.dev-dependencies]
@@ -6554,11 +6624,14 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+rust = [
+    { name = "tokenizers", version = "1.0.0rc3", source = { registry = "https://pypi.org/simple" } },
+]
 test = [
     { name = "attrs" },
     { name = "hypothesis" },
-    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "litdata", version = "0.2.44", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test')" },
+    { name = "litdata", version = "0.2.76", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'group-6-zephon-test') or (extra == 'group-6-zephon-rust' and extra == 'group-6-zephon-test') or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust')" },
     { name = "mosaicml-streaming", marker = "python_full_version >= '3.11'" },
     { name = "obstore" },
     { name = "optree" },
@@ -6569,7 +6642,7 @@ test = [
     { name = "pytest-timeout" },
     { name = "torchdata" },
     { name = "transformers" },
-    { name = "zephon", extra = ["ray"] },
+    { name = "zephon", extra = ["ray"], marker = "extra == 'group-6-zephon-test' or (extra == 'extra-6-zephon-mds' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-mosaic' and extra == 'group-6-zephon-rust') or (extra == 'extra-6-zephon-streaming' and extra == 'group-6-zephon-rust')" },
     { name = "zstd" },
 ]
 
@@ -6619,6 +6692,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=4,<8" },
     { name = "ruff", specifier = ">=0.1.0" },
 ]
+rust = [{ name = "tokenizers", specifier = ">=1.0.0rc3" }]
 test = [
     { name = "attrs", specifier = ">=21.0.0" },
     { name = "hypothesis", specifier = ">=6.100.0" },

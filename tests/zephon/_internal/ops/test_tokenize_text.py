@@ -6,7 +6,20 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.tokenizer_reference import (
+    BACKENDS,
+    DIRS,
+    OP_KWARGS,
+    as_json,
+    op_records,
+    reference,
+)
 from zephon._internal.ops.tokenize_text import TokenizeText
+from zephon._internal.utils.tokenizer import (
+    Refused,
+    RustTokenizer,
+    fallback_tokenizer,
+)
 from zephon._internal.utils.torch_compat import _should_use_tensor_lock
 from zephon.ops.base import OpContext, StageInfo
 from zephon.ops.config import SpecialTokensMode
@@ -2111,3 +2124,48 @@ def test_special_tokens_mode_values() -> None:
         "none",
         "tokenizer_default",
     }
+
+
+# ---------------------------------------------------------------------------
+# backend="rust"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("case", list(OP_KWARGS))
+def test_records_match_reference(backend: str, case: str) -> None:
+    assert as_json(op_records(backend, case)) == reference()["op_records"][case]
+
+
+@pytest.mark.rust
+def test_rust_backend_loads_rust_tokenizer() -> None:
+    op = TokenizeText(tokenizer_id=str(DIRS["deepseek"]), field="text", backend="rust")
+    op._setup_tokenizer()
+    assert isinstance(op.tok, RustTokenizer)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_none_text_raises(backend: str) -> None:
+    op = _setup(
+        TokenizeText(tokenizer_id=str(DIRS["deepseek"]), field="text", backend=backend)
+    )
+    with pytest.raises(TypeError):
+        op.process_many([_rec("fine"), _rec(None)])
+
+
+@pytest.mark.parametrize(
+    "kwargs,refused",
+    [
+        ({"special_tokens": "tokenizer_default"}, "special_tokens"),
+        ({"tokenizer": fallback_tokenizer()}, "tokenizer"),
+        ({"use_fast": False}, "use_fast=False"),
+        ({"tokenizer_id": None}, "tokenizer_id=None"),
+    ],
+    ids=["tokenizer_default", "prebuilt_tokenizer", "use_fast", "no_tokenizer_id"],
+)
+def test_rust_backend_refuses_at_construction(
+    kwargs: dict[str, Any], refused: str
+) -> None:
+    kwargs = {"tokenizer_id": "some/dir", **kwargs}
+    with pytest.raises(Refused, match=refused):
+        TokenizeText(field="text", backend="rust", **kwargs)

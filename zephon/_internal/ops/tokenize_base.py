@@ -10,7 +10,11 @@ import threading
 from typing import Any, Mapping, Optional
 
 from zephon._internal.token_counting import TokenCountingSpec
-from zephon._internal.utils.tokenizer import TokenizerLike, load_hf_tokenizer
+from zephon._internal.utils.tokenizer import (
+    TOKENIZER_LOADERS,
+    TokenizerBackend,
+    TokenizerLike,
+)
 from zephon._internal.utils.torch_compat import _gil_disabled
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
 from zephon.ops.base import BaseOp
@@ -42,6 +46,7 @@ class TokenizeBase(BaseOp):
         *,
         use_fast: bool | None,
         eos_token: str | None = None,
+        backend: TokenizerBackend = "hf",
         max_batch: int,
         max_latency_ms: Optional[int],
     ) -> None:
@@ -56,6 +61,7 @@ class TokenizeBase(BaseOp):
         self.tokenizer_id = tokenizer_id
         self.use_fast = use_fast
         self.eos_token = eos_token
+        self.backend: TokenizerBackend = backend
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
         self._tokenizer_instantiated = False
@@ -70,7 +76,7 @@ class TokenizeBase(BaseOp):
                 return
 
             if self.tok is None:
-                self.tok = load_hf_tokenizer(
+                self.tok = TOKENIZER_LOADERS[self.backend](
                     self.tokenizer_id,
                     use_fast=self.use_fast,
                     eos_token=self.eos_token,
