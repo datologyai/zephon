@@ -1,16 +1,25 @@
+import threading
+from pathlib import Path
 from typing import Iterable
 
+import pytest
+
 from tests.zephon._internal.runners._helpers import (
+    _assert_close_waits_for_operator_execution,
+    _BlockingOp,
     _ctx_services,
     _extract_values,
     _mk_record,
     _mk_records,
     _probe_stage,
+    _resource_stage,
+    _ResourceOp,
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.runners.inline import InlineStageRunner
+from zephon._internal.utils import cleanup
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.types import SampleMeta, SampleRecord
 
@@ -166,3 +175,112 @@ def test_inline_runner_collect_stats_flag_reaches_ops() -> None:
     finally:
         runner.close()
     assert out.payload["probe"] == (0, "probe_stage", 0, True)
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_releases_operator_resources(tmp_path: Path, hard: bool) -> None:
+    runner = InlineStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    instances = list(runner.ops[0].instances)
+    try:
+        assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
+    finally:
+        runner.close(hard=hard)
+    runner.close(hard=hard)
+
+    assert instances and all(op.resource is None for op in instances)
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1
+
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        runner.run_one(_mk_record(1))
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        list(runner.run(_mk_records([1])))
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_waits_for_operator_execution(hard: bool) -> None:
+    _assert_close_waits_for_operator_execution(InlineStageRunner, hard=hard)
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_from_active_operator_defers_teardown(tmp_path: Path, hard: bool) -> None:
+    class ClosingOp(_ResourceOp):
+        def process_many(self, elems):
+            runner.close(hard=hard)
+            assert self.resource is not None
+            return super().process_many(elems)
+
+    runner = InlineStageRunner(
+        _resource_stage(ClosingOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            assert list(runner.run(_mk_records([1]))) == _mk_records([1])
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=consume, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "close must not wait on its own active operator"
+    assert not errors
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1
+
+
+def test_graceful_close_defers_after_execution_wait_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cleanup, "_GRACEFUL_TIMEOUT", 0.02)
+    started, proceed, closed, finished = (threading.Event() for _ in range(4))
+    runner = InlineStageRunner(
+        _resource_stage(_BlockingOp()),
+        _ctx_services({"started": started, "proceed": proceed, "closed": closed}),
+        max_workers=1,
+        prefetch_capacity=1,
+    )
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            list(runner.run(_mk_records([1])))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def close() -> None:
+        try:
+            runner.close()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    closer = threading.Thread(target=close, daemon=True)
+    consumer.start()
+    try:
+        assert started.wait(5)
+        closer.start()
+        assert finished.wait(1), "graceful close exceeded its execution-wait budget"
+        assert not closed.is_set(), "teardown overlapped operator execution"
+    finally:
+        proceed.set()
+        consumer.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+        runner.close(hard=True)
+    assert not consumer.is_alive() and not closer.is_alive()
+    assert closed.wait(5)
+    assert not errors

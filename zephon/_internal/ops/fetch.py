@@ -52,6 +52,12 @@ class FetchOp(BaseOp):
         self._seen_shards.clear()
         self._timer = Stopwatch(ctx.stage_info.collect_stats)
 
+    def teardown(self) -> None:
+        """Close the shard store and its cache manager before the worker exits."""
+        store, self._store = self._store, None
+        if store is not None:
+            store.close()
+
     def traits(self) -> OpTraits:
         return OpTraits(indexable=True, preserves_cursor_order=True, parallelism=4)
 

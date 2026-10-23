@@ -4,6 +4,7 @@
 """Inline stage runner that executes operators synchronously."""
 
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 
@@ -19,9 +20,11 @@ from zephon._internal.stream import (
     RunnerStreamIn,
 )
 from zephon._internal.utils import buffered_iterable
+from zephon._internal.utils.cleanup import cleanup_budget, remaining_cleanup_timeout
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.base import BaseOp
+from zephon.types import StreamItem
 
 
 @dataclass
@@ -53,7 +56,11 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
         self._context_lock = threading.Lock()
+        self._execution_lock = threading.Lock()
+        self._execution_thread_id: int | None = None
+        self._hard_close = False
         self._active = False
+        self._stop_event: threading.Event | None = None
         super().__init__(
             stage,
             ctx_services,
@@ -202,9 +209,11 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         upstream_holder: dict[str, Iterator[RunnerStageIn] | None] = {"iter": None}
 
         with self._context_lock:
+            self._check_open()
             if self._active:
                 raise RuntimeError("Stage runner already in use")
             self._active = True
+            self._stop_event = stop_event
 
         def iterator() -> Iterator[RunnerStageOut]:
             upstream_iter = iter(upstream)
@@ -223,12 +232,16 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                     batch = self._coerce_to_batch(elem)
                     if not batch:
                         continue
-                    outputs = self._process_pipeline(batch, force=False)
+                    with self._executing_operators():
+                        if self._closed:
+                            break
+                        outputs = self._process_pipeline(batch, force=False)
                     if outputs:
                         yield from self._emit_stage_output(outputs)
 
-                with shutdown_flush(enabled=stop_event.is_set()):
-                    tail = self._finalize_pipeline()
+                with self._executing_operators():
+                    with shutdown_flush(enabled=stop_event.is_set()):
+                        tail = [] if self._closed else self._finalize_pipeline()
                 if tail:
                     yield from self._emit_stage_output(tail)
             finally:
@@ -237,6 +250,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
                 upstream_holder["iter"] = None
                 with self._context_lock:
                     self._active = False
+                    self._stop_event = None
 
         stream = iterator()
         if self._prefetch_capacity > 0:
@@ -252,6 +266,39 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
             )
         return stream
 
+    @contextmanager
+    def _executing_operators(self) -> Iterator[None]:
+        with self._execution_lock:
+            self._execution_thread_id = threading.get_ident()
+            try:
+                yield
+            finally:
+                try:
+                    if self._closed:
+                        self._teardown_operators(hard=self._hard_close)
+                finally:
+                    self._execution_thread_id = None
+
+    def run_one(self, elem: RunnerStreamIn) -> StreamItem:
+        with self._executing_operators():
+            return super().run_one(elem)
+
     def close(self, *, hard: bool = False) -> None:
         with self._context_lock:
-            self._active = False
+            self._closed = True
+            self._hard_close = hard
+            if self._stop_event is not None:
+                self._stop_event.set()
+        # Prefetch can execute inline operators on a background thread. After
+        # a bounded wait, an active call performs its own teardown on return.
+        if self._execution_thread_id == threading.get_ident():
+            return  # The active call performs teardown after processing returns.
+        with cleanup_budget(hard=hard):
+            timeout = 0.0 if hard else remaining_cleanup_timeout()
+            if self._execution_lock.acquire(timeout=timeout):
+                self._execution_thread_id = threading.get_ident()
+                try:
+                    self._teardown_operators(hard=hard)
+                finally:
+                    self._execution_thread_id = None
+                    self._execution_lock.release()

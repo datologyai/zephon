@@ -536,6 +536,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
 
     def close(self, *, hard: bool = False) -> None:
         """Tear down actor groups and join pump threads."""
+        self._closed = True
         with self._context_lock:
             ctx = self._active_context
 
@@ -546,5 +547,6 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
 
         for state in self.ops:
             if state.actor_group is not None:
-                state.actor_group.shutdown()
+                state.actor_group.shutdown(hard=hard)
                 state.actor_group = None
+        self._teardown_operators(hard=hard)

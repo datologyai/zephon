@@ -7,14 +7,48 @@ decisions — live in :class:`zephon._internal.io.resolvers.cache.manager.CacheM
 """
 
 import contextlib
+import os
+import sys
 import weakref
 from enum import IntEnum
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 from typing import Mapping
 
 import numpy as np
 
 _SHM_KEYS = ("states", "access", "sizes", "usage")
+
+
+def _open_shared_memory(
+    *, name: str, create: bool = False, size: int = 0
+) -> shared_memory.SharedMemory:
+    """Open session-managed SHM without retaining a Python tracker registration.
+
+    Independent processes have independent resource trackers, which can unlink
+    names while peers still use them. The session owner list governs unlinking.
+    """
+    # SharedMemory adds its own slash; accept names from older session records.
+    if os.name == "posix":
+        name = name.lstrip("/")
+    if sys.version_info >= (3, 13):
+        return shared_memory.SharedMemory(
+            name=name, create=create, size=size, track=False
+        )
+    shm = shared_memory.SharedMemory(name=name, create=create, size=size)
+    if os.name == "posix":
+        resource_tracker.unregister(shm._name, "shared_memory")  # type: ignore[attr-defined]
+    return shm
+
+
+def _unlink_shared_memory(shm: shared_memory.SharedMemory) -> None:
+    """Unlink a session-managed segment without unregistering it twice."""
+    if os.name == "posix" and sys.version_info < (3, 13):
+        from _posixshmem import shm_unlink
+
+        # Older SharedMemory.unlink() unconditionally unregisters the name.
+        shm_unlink(shm._name)  # type: ignore[attr-defined]
+    else:
+        shm.unlink()
 
 
 def _cleanup_shared_memory_regions(shms: list) -> None:
@@ -88,10 +122,14 @@ class CacheSharedState:
 
         if shm_names is None:
             self._names = self._generate_shm_names()
-            self._open(create=True)
         else:
             self._names = {key: str(shm_names[key]) for key in _SHM_KEYS}
-            self._open(create=False)
+        try:
+            self._open(create=shm_names is None)
+        except BaseException:
+            # Unpublished allocations have no session record to recover them.
+            self._close_partial(unlink=shm_names is None)
+            raise
 
     # ------------------------------------------------------------------
     # SHM name generation / lifecycle
@@ -109,6 +147,8 @@ class CacheSharedState:
         for key in _SHM_KEYS:
             while True:
                 candidate = str(make_filename())
+                if os.name == "posix":
+                    candidate = candidate.lstrip("/")
                 if candidate not in used:
                     names[key] = candidate
                     used.add(candidate)
@@ -121,40 +161,18 @@ class CacheSharedState:
         sizes_size = self._capacity * np.int64().nbytes
         usage_size = np.int64().nbytes
 
-        created_regions = False
-        if create:
-            try:
-                self._states_mem = shared_memory.SharedMemory(
-                    name=self._names["states"], create=True, size=state_size
-                )
-                self._access_mem = shared_memory.SharedMemory(
-                    name=self._names["access"], create=True, size=access_size
-                )
-                self._sizes_mem = shared_memory.SharedMemory(
-                    name=self._names["sizes"], create=True, size=sizes_size
-                )
-                self._usage_mem = shared_memory.SharedMemory(
-                    name=self._names["usage"], create=True, size=usage_size
-                )
-                created_regions = True
-            except FileExistsError:
-                # Name collision: close whatever we opened and attach instead.
-                self._close_partial()
-                create = False
-
-        if not create:
-            self._states_mem = shared_memory.SharedMemory(
-                name=self._names["states"], create=False
-            )
-            self._access_mem = shared_memory.SharedMemory(
-                name=self._names["access"], create=False
-            )
-            self._sizes_mem = shared_memory.SharedMemory(
-                name=self._names["sizes"], create=False
-            )
-            self._usage_mem = shared_memory.SharedMemory(
-                name=self._names["usage"], create=False
-            )
+        self._states_mem = _open_shared_memory(
+            name=self._names["states"], create=create, size=state_size
+        )
+        self._access_mem = _open_shared_memory(
+            name=self._names["access"], create=create, size=access_size
+        )
+        self._sizes_mem = _open_shared_memory(
+            name=self._names["sizes"], create=create, size=sizes_size
+        )
+        self._usage_mem = _open_shared_memory(
+            name=self._names["usage"], create=create, size=usage_size
+        )
 
         assert self._states_mem is not None
         assert self._access_mem is not None
@@ -177,7 +195,7 @@ class CacheSharedState:
             self._sizes_view[:] = 0
             self._usage_view[:] = 0
 
-        self._created_regions = created_regions
+        self._created_regions = create
         self._closed = False
         # Finalizer closes local handles only. Unlinking is the manager's
         # job when the session loses its last owner — see module docstring.
@@ -187,12 +205,19 @@ class CacheSharedState:
             [self._states_mem, self._access_mem, self._sizes_mem, self._usage_mem],
         )
 
-    def _close_partial(self) -> None:
-        """Close any handles already opened during a failed ``_open``."""
+    def _close_partial(self, *, unlink: bool) -> None:
+        """Close partial attachments, unlinking only segments this attempt created."""
+        self._states_view = None
+        self._access_view = None
+        self._sizes_view = None
+        self._usage_view = None
         for attr in ("_states_mem", "_access_mem", "_sizes_mem", "_usage_mem"):
             mem = getattr(self, attr, None)
             if mem is None:
                 continue
+            if unlink:
+                with contextlib.suppress(Exception):
+                    _unlink_shared_memory(mem)
             with contextlib.suppress(Exception):
                 mem.close()
             setattr(self, attr, None)
@@ -229,13 +254,13 @@ class CacheSharedState:
             if not isinstance(name, str) or not name:
                 continue
             try:
-                shm = shared_memory.SharedMemory(name=name, create=False)
+                shm = _open_shared_memory(name=name)
             except FileNotFoundError:
                 continue
             except Exception:
                 continue
             with contextlib.suppress(Exception):
-                shm.unlink()
+                _unlink_shared_memory(shm)
             with contextlib.suppress(Exception):
                 shm.close()
 

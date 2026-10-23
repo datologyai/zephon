@@ -7,14 +7,26 @@ These tests verify prefetch/cache interactions with full pipelines,
 including cache eviction, backpressure, and pathological access patterns.
 """
 
+import json
+import os
+import signal
+import subprocess
 import sys
+import textwrap
 import threading
+import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from zephon import Pipeline
+from zephon._internal.io.resolvers.cache.manager import CacheManager
+from zephon._internal.io.resolvers.cache.shared_state import (
+    CacheSharedState,
+    _open_shared_memory,
+)
 from zephon._internal.observability.collector import PipelineCollector
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.ops.prefetch import PrefetchOp
@@ -669,3 +681,221 @@ def test_backpressure_callback_simple(tmp_path):
     assert first_event.put_into_queue_backpressure_events == 1, (
         "Expected one backpressure event from _put_into_queue"
     )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
+@pytest.mark.parametrize(
+    ("shutdown_mode", "early_close"),
+    [("graceful", False), ("graceful", True), ("hard", False)],
+)
+def test_pipeline_releases_fetch_and_prefetch_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: str,
+    early_close: bool,
+    shutdown_mode: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "shard.jsonl").write_text(
+        "\n".join(json.dumps({"text": f"sample {i}"}) for i in range(20))
+    )
+    cache = tmp_path / "cache"
+    dataset = Dataset.from_path("data", str(source))
+    work = StaticMixtureWorkSource(
+        [dataset],
+        mixture=MixtureSpec({"data": 1.0}),
+        chunk_size=4,
+        seed=1,
+        shuffle_shards=False,
+    )
+    managers: list[CacheManager] = []
+    original_init = CacheManager.__init__
+
+    def retain_manager(self: CacheManager, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        managers.append(self)
+
+    monkeypatch.setattr(CacheManager, "__init__", retain_manager)
+    pipe = (
+        Pipeline(work)
+        .prefetch(buffer_size=4, parallelism=1)
+        .fetch(parallelism=1)
+        .batch(microbatch_size=4, drop_last=False)
+        .options(
+            runner=runner,
+            shutdown_mode=shutdown_mode,
+            max_workers=2,
+            mtp_mode=False,
+            io_options={"cache": {"enabled": True, "root": str(cache)}},
+        )
+    )
+    iterator = iter(pipe)
+    names: dict[str, str] = {}
+    try:
+        assert next(iterator)
+        path = cache / ".zephon_cache_state" / "session.json"
+        names = json.loads(path.read_text())["shm_names"]
+        if not early_close:
+            list(iterator)
+        iterator.close()
+
+        # Retaining the managers prevents GC from satisfying these assertions.
+        assert len(managers) == 2
+        assert all(not manager._close_finalizer.alive for manager in managers)
+        assert json.loads(path.read_text())["owners"] == {}
+        for name in names.values():
+            with pytest.raises(FileNotFoundError):
+                segment = _open_shared_memory(name=name)
+                segment.close()
+    finally:
+        iterator.close()
+        for manager in managers:
+            manager.close()
+        CacheSharedState.unlink_by_names(names)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX SIGINT delivery")
+@pytest.mark.timeout(45)
+@pytest.mark.parametrize(
+    ("shutdown_mode", "interrupt"),
+    [("graceful", False), ("hard", True)],
+    ids=["normal-exit", "ctrl-c"],
+)
+def test_retained_pipeline_releases_cache_at_process_exit(
+    tmp_path: Path,
+    shutdown_mode: str,
+    interrupt: bool,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "shard.jsonl").write_text(
+        "\n".join(json.dumps({"text": f"sample {i}"}) for i in range(20))
+    )
+    script = textwrap.dedent("""
+        import json
+        import sys
+        import weakref
+        from pathlib import Path
+
+        from zephon import Pipeline
+        from zephon._internal.io.resolvers.cache.shared_state import _open_shared_memory
+        from zephon.io.dataset import Dataset
+        from zephon.work import MixtureSpec, StaticMixtureWorkSource
+
+        root = Path(sys.argv[1])
+        session_path = root / "cache" / ".zephon_cache_state" / "session.json"
+
+        class Observer:
+            pass
+
+        observer = Observer()
+
+        def observe():
+            remaining = []
+            for name in session["shm_names"].values():
+                try:
+                    segment = _open_shared_memory(name=name)
+                except FileNotFoundError:
+                    continue
+                segment.close()
+                remaining.append(name)
+            (root / "exit.json").write_text(json.dumps({
+                "owners": json.loads(session_path.read_text())["owners"],
+                "remaining_shm": remaining,
+            }))
+
+        # Observe after Zephon's finalizers to check completed exit cleanup.
+        weakref.finalize(observer, observe)
+        dataset = Dataset.from_path("data", str(root / "source"))
+        work = StaticMixtureWorkSource(
+            [dataset], mixture=MixtureSpec({"data": 1.0}), chunk_size=4,
+            seed=1, shuffle_shards=False,
+        )
+        pipeline = (
+            Pipeline(work)
+            .prefetch(buffer_size=4, parallelism=1)
+            .fetch(parallelism=1)
+            .batch(microbatch_size=4, drop_last=False)
+            .options(
+                runner="threads", shutdown_mode=sys.argv[2], max_workers=2,
+                mtp_mode=False,
+                io_options={"cache": {"enabled": True, "root": str(root / "cache")}},
+            )
+        )
+        iterator = iter(pipeline)
+        assert next(iterator)
+        session = json.loads(session_path.read_text())
+        for name in session["shm_names"].values():
+            segment = _open_shared_memory(name=name)
+            segment.close()
+        ready = root / "ready.tmp"
+        ready.write_text(json.dumps(session))
+        ready.replace(root / "ready.json")
+        # Keep the pipeline alive while the consumer is outside next().
+        sys.stdin.readline()
+    """)
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), env.get("PYTHONPATH", "")])
+    log_path = tmp_path / "child.log"
+    names: dict[str, str] = {}
+    with log_path.open("w") as output:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(tmp_path),
+                shutdown_mode,
+            ],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            ready = tmp_path / "ready.json"
+            deadline = time.monotonic() + 20
+            while (
+                not ready.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            assert ready.exists(), log_path.read_text()
+            session = json.loads(ready.read_text())
+            names = session["shm_names"]
+            assert session["owners"]
+
+            if interrupt:
+                process.send_signal(signal.SIGINT)
+                process.communicate(timeout=15)
+                assert process.returncode in {-signal.SIGINT, 128 + signal.SIGINT}, (
+                    log_path.read_text()
+                )
+            else:
+                process.communicate("exit\n", timeout=15)
+                assert process.returncode == 0, log_path.read_text()
+
+            session_path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
+            # Check both the owner record and SHM names to verify complete cleanup.
+            observation = json.loads((tmp_path / "exit.json").read_text())
+            assert observation == {"owners": {}, "remaining_shm": []}, (
+                log_path.read_text()
+            )
+            assert json.loads(session_path.read_text())["owners"] == {}, (
+                log_path.read_text()
+            )
+            for name in names.values():
+                with pytest.raises(FileNotFoundError):
+                    segment = _open_shared_memory(name=name)
+                    segment.close()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+            CacheSharedState.unlink_by_names(names)

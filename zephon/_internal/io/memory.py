@@ -30,3 +30,6 @@ class InMemoryMultiDatasetStore(MultiDatasetShardStore):
 
     def for_dataset(self, dataset_id: int) -> DatasetShardView:
         return self._datasets[dataset_id]
+
+    def close(self) -> None:
+        """No-op: in-memory shards are owned by the caller."""

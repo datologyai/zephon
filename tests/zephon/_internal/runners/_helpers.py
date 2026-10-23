@@ -5,14 +5,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterable
+import os
+import threading
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable
 
-from zephon.ops.base import BaseOp
+from zephon._internal.graph import Node, Stage
+from zephon.ops.base import BaseOp, OpContext
 from zephon.ops.traits import OpTraits
 from zephon.types import SampleMeta, SampleRecord
 
 if TYPE_CHECKING:
-    from zephon._internal.graph import Node, Stage
+    from zephon._internal.runners.base import StageRunnerBase
 from zephon.observability.stats import NodeMetricsDelta
 
 
@@ -116,3 +121,108 @@ def _probe_stage(*keys: str) -> "Stage":
 
     nodes = [Node(name=key, op=_StageInfoProbe(key=key)) for key in keys]
     return Stage(name="probe_stage", nodes=nodes, placement="auto", break_reason="test")
+
+
+class _ResourceOp(BaseOp):
+    def __init__(self, root: Path, *, fail_setup: bool = False) -> None:
+        super().__init__()
+        self.root = root
+        self.fail_setup = fail_setup
+        self.resource: Path | None = None
+
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        self.resource = self.root / f"{os.getpid()}-{uuid.uuid4()}.live"
+        self.resource.touch()
+        if self.fail_setup:
+            raise ValueError("setup failed after acquiring a resource")
+
+    def teardown(self) -> None:
+        if self.resource is not None:
+            self.resource.rename(self.resource.with_suffix(".closed"))
+            self.resource = None
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        assert self.resource is not None and self.resource.exists()
+        return elems
+
+
+def _resource_stage(*ops: BaseOp) -> Stage:
+    return Stage(
+        name="resources",
+        nodes=[Node(name=f"op{i}", op=op) for i, op in enumerate(ops)],
+        placement="auto",
+        break_reason="test",
+    )
+
+
+class _BlockingOp(BaseOp):
+    def setup(self, ctx: OpContext) -> None:
+        super().setup(ctx)
+        self.started = ctx.get("started")
+        self.proceed = ctx.get("proceed")
+        self.closed = ctx.get("closed")
+
+    def traits(self) -> OpTraits:
+        return OpTraits(preserves_cursor_order=True)
+
+    def process_many(self, elems: list[Any]) -> list[Any]:
+        self.started.set()
+        assert self.proceed.wait(5)
+        assert not self.closed.is_set(), "teardown overlapped operator execution"
+        return elems
+
+    def teardown(self) -> None:
+        self.closed.set()
+
+
+def _assert_close_waits_for_operator_execution(
+    runner_type: type[StageRunnerBase[Any]],
+    *,
+    hard: bool = False,
+) -> None:
+    started, proceed, closed, finished = (threading.Event() for _ in range(4))
+    runner = runner_type(
+        _resource_stage(_BlockingOp()),
+        _ctx_services({"started": started, "proceed": proceed, "closed": closed}),
+        max_workers=1,
+        prefetch_capacity=1,
+    )
+    errors: list[BaseException] = []
+
+    def consume() -> None:
+        try:
+            list(runner.run(_mk_records([1])))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def close() -> None:
+        try:
+            runner.close(hard=hard)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    consumer = threading.Thread(target=consume, daemon=True)
+    closer = threading.Thread(target=close, daemon=True)
+    consumer.start()
+    try:
+        assert started.wait(5)
+        closer.start()
+        if hard:
+            assert finished.wait(2), "hard close waited for the running operator"
+        else:
+            assert not finished.wait(0.1)
+        assert not closed.is_set()
+    finally:
+        proceed.set()
+        consumer.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+    assert not consumer.is_alive() and not closer.is_alive()
+    assert finished.is_set() and closed.wait(5)
+    assert not errors

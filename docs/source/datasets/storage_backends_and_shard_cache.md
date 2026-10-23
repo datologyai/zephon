@@ -70,6 +70,10 @@ cache may repeatedly evict shards that are needed again soon, which can cause th
 and low effective throughput due to the cost of repeatedly downloading shards. While
 Zephon detects cache thrashing, we still recommend configuring your cache deliberately.
 
+Each rank releases its cache ownership when it closes; the last owner also frees the
+shared bookkeeping memory. Zephon checks for dead owners on close and startup, so if
+every rank is killed, recorded SHM can stick around until the next run uses that cache.
+
 ```{literalinclude} ../../../examples/guide/datasets/storage_configuration.py
 :language: python
 :caption: examples/guide/datasets/storage_configuration.py

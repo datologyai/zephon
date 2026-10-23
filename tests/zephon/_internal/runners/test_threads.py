@@ -2,16 +2,20 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.zephon._internal.runners._helpers import (
+    _assert_close_waits_for_operator_execution,
     _ctx_services,
     _extract_values,
     _mk_record,
     _mk_records,
     _probe_stage,
+    _resource_stage,
+    _ResourceOp,
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
@@ -629,3 +633,210 @@ def test_thread_runner_initial_and_grown_instances_share_stage_info() -> None:
         assert [inst.stage_info for inst in state.instances] == [expected, expected]
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_releases_operator_resources(tmp_path: Path, hard: bool) -> None:
+    runner = ThreadStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)),
+        _ctx_services(),
+        max_workers=1,
+        deterministic=True,
+        stage_output_mode="stream_items",
+    )
+    instances = list(runner.ops[0].instances)
+    try:
+        assert list(runner.run(_mk_records([1, 2]))) == _mk_records([1, 2])
+    finally:
+        runner.close(hard=hard)
+    runner.close(hard=hard)
+
+    assert instances and all(op.resource is None for op in instances)
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1
+
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        runner.run_one(_mk_record(1))
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        list(runner.run(_mk_records([1])))
+    with pytest.raises(RuntimeError, match="Stage runner is closed"):
+        runner.set_parallelism(0, 2)
+
+
+@pytest.mark.parametrize("hard", [False, True])
+def test_close_waits_for_operator_execution(hard: bool) -> None:
+    _assert_close_waits_for_operator_execution(ThreadStageRunner, hard=hard)
+
+
+@pytest.mark.parametrize("pause_at", ["increment", "submit"])
+@pytest.mark.parametrize("hard", [False, True])
+def test_shutdown_rejects_racing_submission_and_releases_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause_at: str, hard: bool
+) -> None:
+    runner = ThreadStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)), _ctx_services(), max_workers=1
+    )
+    state = runner.ops[0]
+    context = runner._create_context()
+    entered, proceed = threading.Event(), threading.Event()
+    target = state.inflight if pause_at == "increment" else runner._executor
+    original = getattr(target, pause_at)
+
+    def paused(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        assert proceed.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, pause_at, paused)
+    errors: list[BaseException] = []
+
+    def submit() -> None:
+        try:
+            runner._schedule_batch(state, _mk_records([1]), wait_ns=0, context=context)
+        except BaseException as exc:
+            errors.append(exc)
+
+    submitter = threading.Thread(target=submit, daemon=True)
+    submitter.start()
+    try:
+        assert entered.wait(5)
+        runner.close(hard=hard)
+        # Before registration, shutdown can clean up immediately. A registered
+        # submission must return its instance and decrement the count first.
+        assert bool(list(tmp_path.glob("*.live"))) is (pause_at == "submit")
+    finally:
+        proceed.set()
+        submitter.join(5)
+        runner.close(hard=hard)
+    assert not submitter.is_alive()
+    assert not errors
+    assert state.inflight.is_zero()
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("closing", [False, True])
+def test_submit_failure_after_enqueue_keeps_instance_reserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+    closing: bool,
+) -> None:
+    release, ran = threading.Event(), threading.Event()
+
+    class QueuedOp(_ResourceOp):
+        def process_many(self, elems: list[Any]) -> list[Any]:
+            result = super().process_many(elems)
+            ran.set()
+            return result
+
+    runner = ThreadStageRunner(
+        _resource_stage(QueuedOp(tmp_path)), _ctx_services(), max_workers=2
+    )
+    state = runner.ops[0]
+    first = runner._executor.submit(release.wait, 5)
+    error = error_type("thread start failed")
+
+    def fail_start(_thread: threading.Thread) -> None:
+        if closing:
+            # Shutdown may become visible before the submit exception is handled.
+            runner._closed = True
+            runner._executor._shutdown = True
+        raise error
+
+    try:
+        # The executor enqueues the batch before attempting to start worker two.
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", fail_start)
+            with pytest.raises(error_type) as caught:
+                runner._schedule_batch(
+                    state, _mk_records([1]), wait_ns=0, context=runner._create_context()
+                )
+        assert caught.value is error
+        assert not state.inflight.is_zero()
+        assert state.try_acquire_instance() is None
+        release.set()
+        first.result(timeout=5)
+        runner._executor.shutdown(wait=True)
+        assert ran.is_set(), "an existing worker must still execute the queued batch"
+        runner.close(hard=True)
+        # No future was returned, so there is no completion callback to release it.
+        assert list(tmp_path.glob("*.live"))
+    finally:
+        release.set()
+        runner._executor.shutdown(wait=True)
+        runner.close(hard=True)
+        state.teardown()  # All executor work has stopped; the test can now clean up.
+
+
+@pytest.mark.parametrize("interpreter", [False, True])
+def test_shutdown_submission_rejection_returns_worker_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter: bool
+) -> None:
+    from concurrent.futures import thread as futures_thread
+
+    runner = ThreadStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)), _ctx_services(), max_workers=1
+    )
+    state = runner.ops[0]
+    try:
+        with monkeypatch.context() as patch:
+            target = futures_thread if interpreter else runner._executor
+            patch.setattr(target, "_shutdown", True)
+            with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+                runner._schedule_batch(
+                    state, _mk_records([1]), wait_ns=0, context=runner._create_context()
+                )
+        assert state.inflight.is_zero()
+        instance = state.try_acquire_instance()
+        assert instance is not None
+        state.release_instance(instance)
+    finally:
+        runner.close()
+    assert not list(tmp_path.glob("*.live"))
+
+
+def test_hard_shutdown_cleanup_does_not_wait_for_result_backpressure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started, proceed, closed, delivering, deliver = (
+        threading.Event() for _ in range(5)
+    )
+
+    class BlockingOp(_ResourceOp):
+        def process_many(self, elems: list[Any]) -> list[Any]:
+            started.set()
+            assert proceed.wait(5)
+            return super().process_many(elems)
+
+        def teardown(self) -> None:
+            super().teardown()
+            closed.set()
+
+    runner = ThreadStageRunner(
+        _resource_stage(BlockingOp(tmp_path)), _ctx_services(), max_workers=1
+    )
+
+    def block_delivery(*args: Any) -> None:
+        delivering.set()
+        assert deliver.wait(5)
+
+    monkeypatch.setattr(runner, "_put_result", block_delivery)
+    try:
+        runner._schedule_batch(
+            runner.ops[0], _mk_records([1]), wait_ns=0, context=runner._create_context()
+        )
+        assert started.wait(5)
+        runner.close(hard=True)
+        assert not closed.is_set()
+        proceed.set()
+        assert delivering.wait(5)
+        assert closed.is_set(), "cleanup must precede potentially blocked delivery"
+    finally:
+        proceed.set()
+        deliver.set()
+        runner._executor.shutdown(wait=True)
+        runner.close()
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 1

@@ -14,5 +14,9 @@ class ShardResolver(Protocol):
 
     def touch(self, locator: ShardLocator) -> None: ...
 
+    def close(self) -> None:
+        """Release owned resources; repeated calls must be safe."""
+        ...
+
 
 __all__ = ["ShardResolver"]

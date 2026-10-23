@@ -56,6 +56,9 @@ class DirectResolver(ShardResolver):
     def touch(self, locator: ShardLocator) -> None:
         return None
 
+    def close(self) -> None:
+        """No cleanup is needed: direct resolution retains no open resources."""
+
     def _filepath(self, root: str, basename: str) -> Path:
         if os.path.isabs(basename):
             return Path(basename)

@@ -21,10 +21,30 @@ The three most important methods are:
 - `traits()` declares the `OpTraits` that guide compilation and scheduling, including the
   all-important `preserves_cursor_order`.
 
-Two additional methods complete the contract. `setup(ctx)` runs once before any data arrives and receives an
+Three additional methods complete the contract. `setup(ctx)` runs once before any data arrives and receives an
 `OpContext` with runtime services and plan metadata, while `process_one(elem)` handles a
 single element and by default just calls `process_many` with a one-element list. You only
-want to override that last one if you have a genuinely faster scalar path.
+want to override `process_one` if you have a faster scalar path. Finally, `teardown()`
+releases what `setup` acquired; its default is a no-op.
+
+**Teardown lifecycle.** Runners, not operators, decide when `teardown()` runs:
+
+- Every runner calls it on each operator instance when the runner closes, and on any
+  instance whose `setup` raised. Implementations must therefore tolerate partial setup
+  and repeated calls.
+- Closing is permanent. After `close()`, `run()` and `run_one()` raise `RuntimeError`.
+- The inline and thread runners never tear down an instance in the middle of a call.
+  On hard shutdown they tear down idle instances immediately and busy ones as soon as
+  their current call returns. Callers of `run_one()` must not overlap it with `close()`.
+  Inline graceful close also defers teardown if its execution wait exceeds the cleanup budget.
+- Process workers run `teardown()` in the worker as it exits, and Ray actors receive a
+  short teardown call before they are killed. A worker that is terminated outright skips
+  it, so `teardown()` is cleanup, not a place for work that must happen.
+- Cache release inside teardown waits on the cache's `.reset.lock` for at most 1 s
+  (100 ms on hard shutdown), counted from the start of that runner's teardown. If the
+  wait times out, the release is queued to a background thread. GC finalizers only ever
+  queue. On normal exit, both modes give the worker up to 1 s more to catch up, then
+  exit even if cleanup is still stuck.
 
 **The invariant is that `process_many` must be stateless across calls.** It must not
 depend on anything left over from a previous invocation, so every piece of

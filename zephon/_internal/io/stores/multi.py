@@ -304,8 +304,7 @@ def build_multi_dataset_store(
         storage = _default_storage(catalog_set, store_opts)
     resolver = build_resolver(catalog_set, options=store_opts, storage=storage)
     resources = ExitStack()
-    if isinstance(resolver, CacheManager):
-        resources.callback(resolver.close)
+    resources.callback(resolver.close)
     openers: dict[str, ShardOpener] = {}
     registry = DatasetStoreRegistry(
         on_close=resources.close,

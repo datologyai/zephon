@@ -56,6 +56,7 @@ from zephon._internal.utils import (
     collect_with_finalizers,
     dump_semaphore_registry,
 )
+from zephon._internal.utils.cleanup import cleanup_budget
 from zephon._internal.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
 from zephon._internal.utils.rank import rank_ctx
@@ -70,6 +71,7 @@ from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
 from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
     RunnerResult,
@@ -99,7 +101,7 @@ from zephon._internal.utils.shm_coalesce import (
     prepare_microbatch,
 )
 from zephon.observability.config import ExecutionTrackingMode
-from zephon.ops.base import OpContext, StageInfo
+from zephon.ops.base import BaseOp, OpContext, StageInfo
 
 Q = TypeVar("Q")
 
@@ -257,7 +259,7 @@ _WORKER_GC_INTERVAL_NS = 60_000_000_000  # 60 seconds
 
 @dataclass
 class _WorkerCommand:
-    kind: Literal["batch", "stop"]
+    kind: Literal["batch", "stop", "stop_hard"]
     seq: int
     batch: list[RunnerStreamIn]
     wait_ns: int
@@ -407,6 +409,8 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     startup_t0 = time.perf_counter_ns()
     rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
+    op_instance: BaseOp | None = None
+    hard_cleanup = True
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
@@ -450,7 +454,8 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         slots = config.worker_seq_slots
         while True:
             command = config.task_queue.get()
-            if command.kind == "stop":
+            if command.kind in {"stop", "stop_hard"}:
+                hard_cleanup = command.kind == "stop_hard"
                 _debug(f"worker[{config.worker_index}] received stop, exiting cleanly")
                 break
             if command.kind == "batch":
@@ -529,6 +534,12 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
                 error=info,
             )
         )
+    finally:
+        if op_instance is not None:
+            # Hard stops and failures use the short budget before the parent
+            # may terminate us. Graceful stops retain the normal cleanup budget.
+            with cleanup_budget(hard=hard_cleanup):
+                teardown_operator(op_instance)
 
 
 @dataclass
@@ -635,7 +646,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
 
       - owns a deep-copied :class:`~zephon.ops.BaseOp` instance,
       - receives :class:`_WorkerCommand` messages from ``task_queue``
-        (kinds: ``"batch"``, ``"stop"``),
+        (kinds: ``"batch"``, ``"stop"``, ``"stop_hard"``),
       - runs ``process_many`` on its local operator instance, and
       - pushes :class:`RunnerResult` objects onto the shared ``result_queue``.
 
@@ -992,9 +1003,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
 
         Non-negative exitcodes are *clean* exits:
 
-        - ``exitcode == 0`` via the ``if command.kind == "stop": break``
-          path — worker received a stop command during shutdown and exited
-          normally.
+        - ``exitcode == 0`` after a ``"stop"`` or ``"stop_hard"`` command.
         - ``exitcode == 0`` via the ``except BaseException`` handler at
           the bottom of ``_process_worker_main`` — a Python-level
           exception was caught, ``WorkerErrorInfo`` was already pushed to
@@ -1044,9 +1053,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         + respawn.
 
         "Expected" = non-negative exitcode, which means one of:
-        - 0 via the ``if command.kind == "stop": break`` path in
-          ``_process_worker_main`` — worker received a stop command
-          during shutdown and exited normally.
+        - 0 after a ``"stop"`` or ``"stop_hard"`` command.
         - 0 via the ``except BaseException`` handler at the bottom of
           ``_process_worker_main`` — a Python exception was caught and
           ``WorkerErrorInfo`` was already pushed to ``result_queue``.
@@ -1904,7 +1911,9 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             for worker_idx, _ in enumerate(state.workers):
                 self._send_command(
                     task_queue,
-                    _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
+                    _WorkerCommand(
+                        "stop_hard" if hard else "stop", -1, [], 0, 0, 0, -1, False
+                    ),
                     state=None,  # Don't drain during shutdown - already drained above
                     context=None,
                     block_on_exhaustion=False,
@@ -2331,6 +2340,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         raise NotImplementedError("ProcessStageRunner does not support live scaling")
 
     def close(self, *, hard: bool = False) -> None:
+        self._closed = True
         self._service_cancelled.value = 1
         _shutdown_debug("close() called")
         with ShutdownWatchdog(_SHUTDOWN_WATCHDOG_TIMEOUT, "close()"):
@@ -2352,4 +2362,5 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             if ctx is not None:
                 _shutdown_debug("close(): calling _join_threads")
                 self._join_threads(ctx, hard=hard)
+            self._teardown_operators(hard=hard)
             _shutdown_debug("close(): done")

@@ -1,7 +1,12 @@
+import contextlib
 import gc
 import json
 import os
+import queue
 import signal
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import weakref
@@ -20,7 +25,11 @@ from zephon._internal.io.resolvers.cache import (
     PermanentSourceMissing,
     ShardNotReady,
 )
-from zephon._internal.io.resolvers.cache.shared_state import _ShardState
+from zephon._internal.io.resolvers.cache.shared_state import (
+    CacheSharedState,
+    _open_shared_memory,
+    _ShardState,
+)
 from zephon._internal.io.storage.local import LocalFSBackend
 from zephon._internal.io.types import LocalShardRef, ShardFile, ShardLocator
 from zephon._internal.utils.compression import zstd
@@ -1618,10 +1627,18 @@ def _wait_for_instances(
 
 
 def _shm_exists(name: str) -> bool:
-    from multiprocessing.shared_memory import SharedMemory
+    if os.name == "posix":
+        from _posixshmem import shm_open
 
+        # Observe without registering with the tracker or changing its state.
+        try:
+            fd = shm_open("/" + name.lstrip("/"), os.O_RDONLY, mode=0o600)
+        except FileNotFoundError:
+            return False
+        os.close(fd)
+        return True
     try:
-        shm = SharedMemory(name=name, create=False)
+        shm = _open_shared_memory(name=name)
     except FileNotFoundError:
         return False
     shm.close()
@@ -1636,6 +1653,56 @@ def _single_shard_setup(tmp_path: Path) -> tuple[Path, LocalFSBackend, ShardLoca
         "demo", 400, str(remote), raw_name="overlap.bin", raw_bytes=len(data)
     )
     return tmp_path / "cache", LocalFSBackend(root=remote), loc
+
+
+def test_finalizer_does_not_leak_partial_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GC cleanup must leave lock acquisition entirely to the release worker.
+
+    If called on the finalizer thread, the patched acquire would take the OS
+    lock and then raise. Cleanup must enqueue the release without invoking that
+    path, and the worker must complete it with the lock available afterward.
+    """
+    from filelock import FileLock
+
+    session_path = tmp_path / manager_mod._STATE_DIR_NAME / "session.json"
+    session_path.parent.mkdir()
+    owner_key = str(os.getpid())
+    session_path.write_text(
+        json.dumps({"session_id": "session", "owners": {owner_key: {"instances": 1}}}),
+        encoding="utf-8",
+    )
+    lock = FileLock(str(tmp_path / manager_mod._RESET_LOCK_FILENAME))
+    acquire = lock.acquire
+    finalizer_thread = threading.get_ident()
+
+    def interrupted_acquire(*args: Any, **kwargs: Any) -> Any:
+        result = acquire(*args, **kwargs)
+        if threading.get_ident() == finalizer_thread:
+            raise RuntimeError("acquisition bookkeeping interrupted after OS lock")
+        return result
+
+    monkeypatch.setattr(lock, "acquire", interrupted_acquire)
+    manager_mod._ensure_deferred_release_thread()
+    try:
+        manager_mod._close_cache_manager_resources(
+            None, lock, session_path, owner_key, "session"
+        )
+        assert not lock.is_locked, (
+            "finalizer left the OS lock held after acquire raised"
+        )
+        _wait_for_instances(tmp_path, owner_key, 0)
+        with FileLock(lock.lock_file).acquire(timeout=1):
+            pass
+    finally:
+        # Prevent a failed assertion from leaving the shared release worker blocked.
+        if lock.is_locked:
+            lock.release(force=True)
+            # Recovery must not replace the assertion that exposed the regression.
+            with contextlib.suppress(AssertionError):
+                _wait_for_instances(tmp_path, owner_key, 0)
 
 
 def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
@@ -1768,9 +1835,9 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
 ) -> None:
     """GC firing a second finalizer mid-release must defer, not deadlock.
 
-    The outer finalizer holds ``.reset.lock`` while it rewrites
+    The release worker holds ``.reset.lock`` while it rewrites
     ``session.json``; an allocation there can collect another manager,
-    whose finalizer then finds the lock held by this same thread.
+    whose finalizer must enqueue another release without acquiring the lock.
     """
     cache_root, storage, loc = _single_shard_setup(tmp_path)
     survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
@@ -1795,9 +1862,9 @@ def test_finalizer_fired_from_inside_another_finalizers_cleanup_defers(
     )
     try:
         _run_bounded(outer._close_finalizer)
+        _wait_for_instances(cache_root, owner_key, 1)
         assert not outer._close_finalizer.alive
         assert not inner._close_finalizer.alive
-        _wait_for_instances(cache_root, owner_key, 1)
         assert survivor._shared is not None
         assert all(_shm_exists(n) for n in survivor._shared.shm_names.values())
     finally:
@@ -1885,30 +1952,38 @@ def test_old_manager_release_preserves_replacement_session(
     # Missing SHM triggers a new session even though this process is still alive.
     manager_mod.CacheSharedState.unlink_by_names(old_session["shm_names"])
     release_done = threading.Event()
-    if release_mode == "deferred":
-        original_init = CacheManager._run_session_state_machine
+    if release_mode != "close":
         original_release = manager_mod._release_session_owner
-
-        def init_with_pending_release(self: CacheManager) -> None:
-            # Initialization holds a different FileLock on the same path, so
-            # the finalizer queues its release before the session is replaced.
-            old._close_finalizer()
-            original_init(self)
 
         def release_and_signal(
             reset_lock: BaseFileLock,
             session_path: Path,
             key: str,
             session_id: str | None,
-        ) -> None:
-            original_release(reset_lock, session_path, key, session_id)
+            *,
+            timeout: float = -1,
+        ) -> bool:
+            released = original_release(
+                reset_lock, session_path, key, session_id, timeout=timeout
+            )
             if session_id == old_session["session_id"]:
                 release_done.set()
+            return released
+
+        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
+
+    if release_mode == "deferred":
+        original_init = CacheManager._run_session_state_machine
+
+        def init_with_pending_release(self: CacheManager) -> None:
+            # Initialization holds a different FileLock on the same path, so
+            # the queued release waits until the session has been replaced.
+            old._close_finalizer()
+            original_init(self)
 
         monkeypatch.setattr(
             CacheManager, "_run_session_state_machine", init_with_pending_release
         )
-        monkeypatch.setattr(manager_mod, "_release_session_owner", release_and_signal)
 
     new: CacheManager | None = None
     try:
@@ -1917,7 +1992,7 @@ def test_old_manager_release_preserves_replacement_session(
             old.close()
         elif release_mode == "finalizer":
             old._close_finalizer()
-        else:
+        if release_mode != "close":
             assert release_done.wait(5.0), "deferred release did not finish"
 
         assert not old._close_finalizer.alive
@@ -1946,3 +2021,492 @@ def test_old_manager_release_preserves_replacement_session(
 
     assert _owner_instances(cache_root, owner_key) == 0
     assert all(not _shm_exists(name) for name in current["shm_names"].values())
+
+
+def test_close_defers_only_after_lock_wait_budget_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from filelock import FileLock
+
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    first = _make_manager(cache_root, storage, [loc], persist_state=True)
+    survivor = _make_manager(cache_root, storage, [loc], persist_state=True)
+    held, release = threading.Event(), threading.Event()
+
+    def hold_lock() -> None:
+        with FileLock(first._reset_lock.lock_file):
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    try:
+        assert held.wait(5)
+        monkeypatch.setattr(manager_mod, "remaining_cleanup_timeout", lambda: 0.05)
+        started = time.monotonic()
+        _run_bounded(first.close)
+        assert time.monotonic() - started < 1
+        assert "deferred after lock timeout" in caplog.text
+        assert _owner_instances(cache_root, first._owner_key) == 2
+        assert not first._close_finalizer.alive
+        first.close()
+        release.set()
+        holder.join(5)
+        _wait_for_instances(cache_root, first._owner_key, 1)
+        assert survivor._shared is not None
+        assert all(_shm_exists(name) for name in survivor._shared.shm_names.values())
+    finally:
+        release.set()
+        holder.join(5)
+        survivor.close()
+    assert _owner_instances(cache_root, first._owner_key) == 0
+
+
+@pytest.mark.parametrize("timeout_error", [False, True])
+def test_explicit_close_releases_partial_acquisition_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_error: bool
+) -> None:
+    from filelock import FileLock, Timeout
+
+    pending = queue.SimpleQueue()
+    monkeypatch.setattr(manager_mod, "_deferred_releases", pending)
+    lock = FileLock(str(tmp_path / ".reset.lock"))
+    original_acquire = lock.acquire
+
+    def acquire_then_fail(*args: Any, **kwargs: Any) -> Any:
+        original_acquire(*args, **kwargs)
+        if timeout_error:
+            raise Timeout(lock.lock_file)
+        raise RuntimeError("failure after native acquisition")
+
+    monkeypatch.setattr(lock, "acquire", acquire_then_fail)
+    manager_mod._close_cache_manager_resources(
+        None,
+        lock,
+        tmp_path / "session.json",
+        str(os.getpid()),
+        "session",
+        blocking=True,
+    )
+    assert not lock.is_locked
+    assert pending.empty()
+    with FileLock(lock.lock_file).acquire(timeout=0):
+        pass
+
+
+def test_explicit_close_does_not_retry_a_partially_applied_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from filelock import FileLock, Timeout
+
+    pending = queue.SimpleQueue()
+    monkeypatch.setattr(manager_mod, "_deferred_releases", pending)
+    lock = FileLock(str(tmp_path / ".reset.lock"))
+    path = tmp_path / "session.json"
+    path.write_text(json.dumps({"instances": 2}))
+
+    def release_then_fail(*args: Any) -> None:
+        path.write_text(json.dumps({"instances": 1}))
+        raise Timeout(lock.lock_file)
+
+    monkeypatch.setattr(manager_mod, "_release_session_owner_locked", release_then_fail)
+    manager_mod._close_cache_manager_resources(
+        None, lock, path, str(os.getpid()), "session", blocking=True
+    )
+    assert json.loads(path.read_text())["instances"] == 1
+    assert pending.empty()
+    assert not lock.is_locked
+
+
+def _run_cache_exit(tmp_path: Path, script: str) -> tuple[dict[str, Any], str]:
+    """Observe owner entries and SHM names after real interpreter-exit cleanup."""
+    setup = textwrap.dedent("""
+        import gc
+        import json
+        import os
+        import sys
+        import weakref
+        from pathlib import Path
+
+        import zephon._internal.io.resolvers.cache.manager as manager_mod
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _shm_exists, _single_shard_setup,
+        )
+
+        root = Path(sys.argv[1])
+        parent_pid = os.getpid()
+
+        class Observer:
+            pass
+
+        observer = Observer()
+
+        def observe():
+            if os.getpid() == parent_pid:
+                session = json.loads(manager._session_path.read_text())
+                (root / "exit.json").write_text(json.dumps({
+                    "owners": session["owners"],
+                    "shm_exists": [_shm_exists(name) for name in names],
+                }))
+
+        # Older finalizers run last, so the observer sees completed exit cleanup.
+        weakref.finalize(observer, observe)
+        cache_root, storage, loc = _single_shard_setup(root)
+        manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        names = list(manager._shared.shm_names.values())
+        assert all(_shm_exists(name) for name in names)
+    """)
+    # Without a wait, enqueuing at exit need not yield the GIL to the worker.
+    script = setup + textwrap.dedent(script) + "\nsys.setswitchinterval(10.0)\n"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            cwd=Path(__file__).resolve().parents[6],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "resource_tracker" not in result.stderr, result.stderr
+        observation = json.loads((tmp_path / "exit.json").read_text())
+        return observation, result.stderr
+    finally:
+        # Failure scenarios deliberately leave SHM for a later owner to recover.
+        path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
+        if path.exists():
+            CacheSharedState.unlink_by_names(json.loads(path.read_text())["shm_names"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_interpreter_exit_finishes_cache_owner_releases(tmp_path: Path) -> None:
+    """Orderly exit finishes queued releases and unlinks the session's SHM."""
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        other = _make_manager(cache_root, storage, [loc], persist_state=True)
+        sentinel = manager_mod._release_exit_finalizer
+        manager_mod._release_exit_finalizer = None
+        gc.collect()
+        assert sentinel.alive, "ordinary GC must not invoke the waiting callback"
+        manager_mod._release_exit_finalizer = sentinel
+        """,
+    )
+    assert "Timed out waiting for deferred cache owner releases" not in stderr
+    assert "deferred cache owner releases failed" not in stderr
+    assert observation["owners"] == {}
+    assert not any(observation["shm_exists"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_interpreter_exit_reports_contended_release_without_hanging(
+    tmp_path: Path,
+) -> None:
+    """A held cache lock exhausts one total exit budget and leaves ownership visible."""
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        from filelock import FileLock
+
+        manager_mod._DEFERRED_RELEASE_EXIT_TIMEOUT = 0.02
+        lock = FileLock(manager._reset_lock.lock_file)
+        lock.acquire()
+        """,
+    )
+    assert "Timed out waiting for deferred cache owner releases" in stderr
+    assert len(observation["owners"]) == 1
+    assert all(observation["shm_exists"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_interpreter_exit_reports_worker_failure_without_retry(tmp_path: Path) -> None:
+    """Acknowledging the queue must not hide failed releases from later drains."""
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        attempts = []
+
+        def fail_release(*args, **kwargs):
+            attempts.append(None)
+            raise OSError("injected deferred release failure")
+
+        manager_mod._release_session_owner = fail_release
+        manager._close_finalizer()
+        for _ in range(2):
+            assert not manager_mod._drain_deferred_releases(1.0)
+        assert len(attempts) == 1
+        """,
+    )
+    assert "injected deferred release failure" in stderr
+    assert stderr.count("1 deferred cache owner releases failed") == 3
+    assert len(observation["owners"]) == 1
+    assert next(iter(observation["owners"].values()))["instances"] == 1
+    assert all(observation["shm_exists"])
+
+
+def test_drain_waits_for_inflight_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a release from the queue does not mean it has been applied."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+    entered = threading.Event()
+    proceed = threading.Event()
+    release = manager_mod._release_session_owner
+
+    def blocked_release(*args: Any, **kwargs: Any) -> bool:
+        if args[1] == manager._session_path:
+            entered.set()
+            assert proceed.wait(5)
+        return release(*args, **kwargs)
+
+    monkeypatch.setattr(manager_mod, "_release_session_owner", blocked_release)
+    try:
+        manager._close_finalizer()
+        assert entered.wait(5)
+        assert not manager_mod._drain_deferred_releases(0)
+        assert _owner_instances(cache_root, manager._owner_key) == 1
+    finally:
+        proceed.set()
+        assert manager_mod._drain_deferred_releases(5)
+        manager.close()
+    assert _owner_instances(cache_root, manager._owner_key) == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_exit_preserves_parent_owner_and_releases_child_owner(
+    tmp_path: Path,
+) -> None:
+    """The child's cleanup only releases managers created by the child."""
+    observation, stderr = _run_cache_exit(
+        tmp_path,
+        """
+        import signal
+        from tests.zephon._internal.io.resolvers.cache.test_manager import _run_bounded
+
+        other = _make_manager(cache_root, storage, [loc], persist_state=True)
+        pid = os.fork()
+        if pid == 0:
+            assert manager_mod._release_exit_finalizer is None
+            manager.close()
+            child = _make_manager(cache_root, storage, [loc], persist_state=True)
+            # The other inherited manager is left to its exit finalizer.
+            sys.exit(0)
+
+        try:
+            _, status = _run_bounded(lambda: os.waitpid(pid, 0), timeout=5)
+        except AssertionError:
+            os.kill(pid, signal.SIGKILL)
+            raise
+        assert os.waitstatus_to_exitcode(status) == 0
+        session = json.loads(manager._session_path.read_text())
+        assert set(session["owners"]) == {manager._owner_key}
+        assert session["owners"][manager._owner_key]["instances"] == 2
+        assert all(_shm_exists(name) for name in names)
+        """,
+    )
+    assert "Timed out waiting for deferred cache owner releases" not in stderr
+    assert observation["owners"] == {}
+    assert not any(observation["shm_exists"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+@pytest.mark.parametrize("child_creates", [True, False], ids=["creator", "joiner"])
+@pytest.mark.parametrize("exit_mode", ["close", "finalizer", "crash"])
+def test_independent_process_exit_preserves_live_cache(
+    tmp_path: Path, child_creates: bool, exit_mode: str
+) -> None:
+    """Either rank can exit first; the surviving rank owns the same SHM session."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = (
+        None
+        if child_creates
+        else _make_manager(cache_root, storage, [loc], persist_state=True)
+    )
+    script = textwrap.dedent("""
+        import json
+        import os
+        import sys
+        from pathlib import Path
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _single_shard_setup,
+        )
+
+        root, storage, loc = _single_shard_setup(Path(sys.argv[1]))
+        manager = _make_manager(root, storage, [loc], persist_state=True)
+        manager._shared.set_cache_usage(123)
+        print(manager._session_path.read_text(), flush=True)
+        sys.stdin.readline()
+        if sys.argv[2] == "crash":
+            os._exit(0)
+        if sys.argv[2] == "close":
+            manager.close()
+    """)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    names: dict[str, str] = {}
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path), exit_mode],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        original = json.loads(_run_bounded(process.stdout.readline))
+        names = original["shm_names"]
+        if manager is None:
+            manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert manager._shared is not None
+        assert manager._shared.shm_names == names
+        assert manager._shared.get_cache_usage() == 123
+
+        # communicate also waits for the child's tracker to close stderr.
+        stdout, stderr = process.communicate("exit\n", timeout=10)
+        assert process.returncode == 0, stdout + stderr
+        current = json.loads(manager._session_path.read_text())
+        assert current["session_id"] == original["session_id"]
+        assert all(_shm_exists(name) for name in names.values())
+        assert "resource_tracker" not in stderr, stderr
+        assert manager._shared.get_cache_usage() == 123
+        if exit_mode == "crash":
+            assert len(current["owners"]) == 2
+        else:
+            assert set(current["owners"]) == {manager._owner_key}
+            peer = _make_manager(cache_root, storage, [loc], persist_state=True)
+            try:
+                assert peer._shared is not None
+                assert peer._shared.shm_names == names
+                assert peer._session_id == original["session_id"]
+            finally:
+                peer.close()
+
+        # No intervening initialization prunes the crashed child's entry.
+        manager.close()
+        assert json.loads(manager._session_path.read_text())["owners"] == {}
+        assert not any(_shm_exists(name) for name in names.values())
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+        if manager is not None:
+            manager.close()
+        CacheSharedState.unlink_by_names(names)
+
+
+def test_failed_session_publication_unlinks_new_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    names: dict[str, str] = {}
+
+    def fail_publication(self: CacheManager) -> None:
+        assert self._shared is not None
+        names.update(self._shared.shm_names)
+        raise OSError("injected session write failure")
+
+    monkeypatch.setattr(
+        CacheManager, "_write_new_session_record_locked", fail_publication
+    )
+    try:
+        with pytest.raises(OSError, match="injected session write failure"):
+            _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert len(names) == 4
+        assert not any(_shm_exists(name) for name in names.values())
+    finally:
+        CacheSharedState.unlink_by_names(names)
+
+
+def test_failed_join_preserves_existing_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+    assert manager._shared is not None
+    names = manager._shared.shm_names
+
+    def fail_write(*args: Any) -> None:
+        raise OSError("injected session write failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_mod, "_atomic_write_json", fail_write)
+            with pytest.raises(OSError, match="injected session write failure"):
+                _make_manager(cache_root, storage, [loc], persist_state=True)
+        assert _owner_instances(cache_root, manager._owner_key) == 1
+        assert all(_shm_exists(name) for name in names.values())
+    finally:
+        manager.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_next_init_recovers_crashed_session(tmp_path: Path) -> None:
+    """An abandoned session's SHM is reclaimed while cached files can be reused."""
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    script = textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _make_manager, _single_shard_setup,
+        )
+
+        root, storage, loc = _single_shard_setup(Path(sys.argv[1]))
+        manager = _make_manager(root, storage, [loc], persist_state=True)
+        manager.resolve(loc)
+        os._exit(0)
+    """)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    path = cache_root / ".zephon_cache_state" / "session.json"
+    names: dict[str, str] = {}
+    manager = None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "resource_tracker" not in result.stderr, result.stderr
+        original = json.loads(path.read_text())
+        names = original["shm_names"]
+        assert original["owners"]
+        assert all(_shm_exists(name) for name in names.values())
+
+        manager = _make_manager(cache_root, storage, [loc], persist_state=True)
+        current = json.loads(path.read_text())
+        assert current["session_id"] != original["session_id"]
+        assert set(current["owners"]) == {manager._owner_key}
+        assert not any(_shm_exists(name) for name in names.values())
+        assert manager.resolve(loc).cache_hit
+    finally:
+        if manager is not None:
+            manager.close()
+        if path.exists():
+            CacheSharedState.unlink_by_names(json.loads(path.read_text())["shm_names"])
+        CacheSharedState.unlink_by_names(names)
+
+
+@pytest.mark.parametrize("invariant", ["owner_key", "exit_drain"])
+def test_initialization_checks_cleanup_invariants_before_allocating_shm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invariant: str
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    if invariant == "owner_key":
+        monkeypatch.setattr(manager_mod, "_make_owner_key", lambda *args: "malformed")
+        message = "Cache owner key must identify the creating process"
+    else:
+        monkeypatch.setattr(
+            manager_mod, "_ensure_deferred_release_thread", lambda: None
+        )
+        monkeypatch.setattr(manager_mod, "_release_exit_finalizer", None)
+        message = "Exit drain must be registered before manager finalizers"
+    with pytest.raises(AssertionError, match=message):
+        _make_manager(cache_root, storage, [loc], persist_state=True)
+    assert not (cache_root / ".zephon_cache_state" / "session.json").exists()

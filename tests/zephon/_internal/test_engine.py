@@ -1189,3 +1189,36 @@ class TestSourceExhaustion:
         assert sentinel.meta.chunk_id == 0
         assert sentinel.meta.chunk_offset == 0
         assert not should_notify(sentinel)
+
+
+@pytest.mark.parametrize("failure", ["runner", "coordinator"])
+@pytest.mark.parametrize("shutdown_mode", ["graceful", "hard"])
+def test_constructor_failure_closes_previously_created_runners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, shutdown_mode: str
+) -> None:
+    from tests.zephon._internal.runners._helpers import _ResourceOp
+    from zephon._internal import engine as engine_mod
+
+    graph = Graph()
+    graph.add("first", _ResourceOp(tmp_path), parallelism=1)
+    graph.add(
+        "second",
+        _ResourceOp(tmp_path, fail_setup=failure == "runner"),
+        *graph.nodes,
+        placement="local",
+        parallelism=1,
+    )
+    plan = Planner().make_plan(graph)
+    assert len(plan.stages) == 2
+    opts = RuntimeOptions(runner="inline", shutdown_mode=shutdown_mode)
+    spec = resolve_runtime_spec(plan, opts)
+    if failure == "coordinator":
+
+        def fail_coordinator(*args: Any, **kwargs: Any) -> Any:
+            raise ValueError("coordinator setup failed")
+
+        monkeypatch.setattr(engine_mod, "make_coordinator", fail_coordinator)
+    with pytest.raises(ValueError, match="setup failed"):
+        Engine(plan, opts, _DummyWorkSource(), spec)
+    assert not list(tmp_path.glob("*.live"))
+    assert len(list(tmp_path.glob("*.closed"))) == 2

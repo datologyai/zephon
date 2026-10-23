@@ -30,6 +30,7 @@ The engine also inserts a lane-merging distributor at the tail only when a rank 
 and batching is present, so 1:1 rank↔replica runs remain a clean, single-lane dataflow.
 """
 
+import contextlib
 import ctypes
 import dataclasses
 import multiprocessing as mp
@@ -431,33 +432,43 @@ class Engine:
         self._runners: list[
             ThreadStageRunner | InlineStageRunner | ProcessStageRunner
         ] = []
-        self._build_runners()
-
-        self._coordinator: CheckpointCoordinator = make_coordinator(
-            self._opts,
-            global_rank=self._world.global_rank,
-            world_size=self._world.world_size,
-            plan_id=self._plan.plan_id,
-            worker_info=get_torch_worker_info,
-        )
-        if self._takes_part_in_rounds():
-            self._coordinator.check_ready()
-
-        # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
-        # This calls close() to clean up runners/queues/semaphores, then
-        # _clean_merged() to release retained checkpoint coordinator resources.
         self._closed = False
+        try:
+            self._build_runners()
 
-        self._cleanup_finalizer = weakref.finalize(
-            self, _call_engine_cleanup, weakref.ref(self)
-        )
-
-        bs = self._plan.batch_size_hint
-        if bs is not None:
-            cs = self._work.chunk_size_hint()
-            assert cs is not None, (
-                "WorkSource must provide a chunk_size_hint when the pipeline batches"
+            self._coordinator: CheckpointCoordinator = make_coordinator(
+                self._opts,
+                global_rank=self._world.global_rank,
+                world_size=self._world.world_size,
+                plan_id=self._plan.plan_id,
+                worker_info=get_torch_worker_info,
             )
+            if self._takes_part_in_rounds():
+                self._coordinator.check_ready()
+
+            # Use a weakref finalizer so cleanup runs without pinning the engine until interpreter exit.
+            # This calls close() to clean up runners/queues/semaphores, then
+            # _clean_merged() to release retained checkpoint coordinator resources.
+
+            self._cleanup_finalizer = weakref.finalize(
+                self, _call_engine_cleanup, weakref.ref(self)
+            )
+
+            bs = self._plan.batch_size_hint
+            if bs is not None:
+                cs = self._work.chunk_size_hint()
+                assert cs is not None, (
+                    "WorkSource must provide a chunk_size_hint when the pipeline batches"
+                )
+        except BaseException:
+            # Constructor failures must release runners created by earlier stages,
+            # including when coordinator setup or validation fails afterward.
+            try:
+                self.close()
+            finally:
+                with contextlib.suppress(Exception):
+                    self._clean_merged()
+            raise
 
     @property
     def _last_round_id(self) -> str | None:
@@ -1717,6 +1728,8 @@ class Engine:
             return
         self._closed = True
         hard = self._opts.shutdown_mode == "hard"
+        # Each runner starts its cleanup budget at teardown; an engine-wide
+        # budget here would be consumed by thread/process joins first.
         for runner in self._runners:
             try:
                 runner.close(hard=hard)

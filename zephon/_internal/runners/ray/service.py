@@ -15,12 +15,14 @@ from typing import Any, ClassVar
 
 import cloudpickle
 import ray
-from ray.exceptions import RayError
+from ray.exceptions import GetTimeoutError, RayError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from zephon._internal.graph import Node
 from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import RunnerResult, WorkerErrorInfo
+from zephon._internal.utils.cleanup import cleanup_budget
 from zephon._internal.utils.thread_utils import suppress_library_threads
 from zephon.ops.base import BaseOp, OpContext, StageInfo
 
@@ -68,7 +70,16 @@ class RaySingleOpActor:
             op_index=op_index,
             collect_stats=collect_stats,
         )
-        self._op.setup(OpContext(dict(ctx_services), stage_info))
+        try:
+            self._op.setup(OpContext(dict(ctx_services), stage_info))
+        except BaseException:
+            teardown_operator(self._op)
+            raise
+
+    def teardown(self, *, hard: bool = False) -> None:
+        """Release operator resources before the actor is terminated."""
+        with cleanup_budget(hard=hard):
+            teardown_operator(self._op)
 
     def get_node_id(self) -> str:
         """Return the Ray node id this actor is running on.
@@ -139,6 +150,8 @@ class _RayActorGroup:
     """
 
     _PLACEMENT_TIMEOUT_S: ClassVar[float] = 60.0
+    _TEARDOWN_TIMEOUT_S: ClassVar[float] = 5.0
+    _HARD_TEARDOWN_TIMEOUT_S: ClassVar[float] = 0.1
 
     node: Node
     op_index: int
@@ -235,7 +248,7 @@ class _RayActorGroup:
             refs, num_returns=len(refs), timeout=self._PLACEMENT_TIMEOUT_S
         )
         if pending:
-            self.shutdown()
+            self.shutdown(hard=True, teardown=False)
             raise RuntimeError(
                 f"Actor placement timed out for op '{self.node.name}': "
                 f"{len(pending)}/{len(refs)} actors still pending after "
@@ -244,15 +257,32 @@ class _RayActorGroup:
         try:
             ray.get(refs)
         except RayError as exc:
-            self.shutdown()
+            self.shutdown(hard=True, teardown=False)
             raise RuntimeError(
                 f"Actor placement failed for op '{self.node.name}': Ray rejected "
                 f"the requested placement: {exc}. Requested node ids: {planned}."
             ) from exc
 
-    def shutdown(self) -> None:
-        """Kill all actors."""
+    def shutdown(self, *, hard: bool = False, teardown: bool = True) -> None:
+        """Attempt bounded teardown, then terminate actors; skip it if unscheduled."""
         _shutdown_debug(f"_RayActorGroup.shutdown: killing {len(self.actors)} actors")
+
+        if teardown and self.actors:
+            timeout = (
+                self._HARD_TEARDOWN_TIMEOUT_S if hard else self._TEARDOWN_TIMEOUT_S
+            )
+            try:
+                ray.get(
+                    [actor.teardown.remote(hard=hard) for actor in self.actors],
+                    timeout=timeout,
+                )
+            except GetTimeoutError:
+                log = logger.debug if hard else logger.warning
+                log("Actor teardown did not finish within %.1fs", timeout)
+            except Exception:
+                logger.warning(
+                    "Actor teardown did not finish before shutdown", exc_info=True
+                )
 
         for actor in self.actors:
             try:

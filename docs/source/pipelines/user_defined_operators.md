@@ -144,13 +144,25 @@ circumvented by subclassing `BaseOp` instead.
 
 Two methods are required for a `BaseOp` subclass. As seen before, `process_many` is the
 workhorse, but this time we need a `traits` that informs Zephon how the operator behaves.
-There is also the optional `accumulator` for special grouping, and `__init__` for
-configuration and `setup` for per-worker initialization.
+There is also the optional `accumulator` for special grouping, `__init__` for
+configuration, `setup` for per-worker initialization, and `teardown` to undo it.
 
-These last two can be the cause of some confusion, as they may feel quite similar.
+`__init__` and `setup` can be the cause of some confusion, as they may feel quite similar.
 `__init__` runs once in your process when the operator is built, and it should be solely
 used for configuration. `setup` runs once per worker, which is e.g. where we can load our
 model.
+
+`teardown` is the counterpart to `setup`: it runs once per worker when the pipeline
+shuts down, and it is where you release what `setup` acquired, such as open files,
+network connections, or a model holding GPU memory. The default does nothing. Zephon
+also calls `teardown` when `setup` fails partway through, and may call it more than
+once, so it must cope with resources that were never created and do nothing the second
+time. Resetting the attribute to `None`, as in the example above, is safe in both
+cases; for a resource with a `close()` method, check for `None` before closing it.
+
+Treat `teardown` as best-effort cleanup, not a guarantee. A worker that crashes, or is
+terminated during a hard shutdown, may never run it, so do not rely on it to save
+results or anything else that must happen.
 
 Once we have defined our subclass, we can pass it on by passing an instance:
 

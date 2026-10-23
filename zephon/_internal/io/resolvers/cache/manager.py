@@ -40,6 +40,7 @@ from zephon._internal.io.types import (
     ShardLocator,
 )
 from zephon._internal.utils.atomic import atomic_write_bytes
+from zephon._internal.utils.cleanup import remaining_cleanup_timeout
 from zephon._internal.utils.compression import decompress_file
 from zephon._internal.utils.disk import check_cache_disk_space
 
@@ -134,26 +135,87 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
         return -1, None
 
 
-# Owner releases that GC finalizers cannot apply immediately. GC can interrupt
-# an allocation while the same thread holds or is acquiring ``.reset.lock``
-# through another ``FileLock`` instance. Waiting for that lock would deadlock
-# the interrupted thread, so finalizers enqueue with reentrant ``SimpleQueue.put``.
-# One daemon thread applies queued releases under the lock. While their session
-# remains current, queued managers still count as owners and keep its SHM names alive.
-# Pending releases are not guaranteed to finish at interpreter exit. A later
-# manager initialization prunes ownership for processes that are no longer alive.
-_deferred_releases: "queue.SimpleQueue[tuple[BaseFileLock, Path, str, str | None]]" = (
-    queue.SimpleQueue()
-)
+# GC finalizers only enqueue owner releases with reentrant SimpleQueue.put.
+# It might seem reasonable to acquire with timeout=0, but acquire() can raise
+# after taking the native lock. Enqueueing another acquisition would
+# then make the worker wait on that unreleased hold. Keep file locking out of
+# GC callbacks; the worker acquires and releases the lock in normal execution.
+# Queued managers remain owners of their session until the release is applied.
+# Orderly interpreter exit gives the worker one bounded opportunity to drain
+# releases. A blocked lock or failed release can still leave ownership behind;
+# later release or initialization prunes dead owners. Explicit close
+# attempts release synchronously within its cleanup budget.
+_DEFERRED_RELEASE_EXIT_TIMEOUT = 1.0
+
+
+@dataclass
+class _ReleaseBarrier:
+    """Acknowledge preceding releases, including an entry already being applied."""
+
+    done: threading.Event
+    failures: int = 0
+
+
+class _ExitDrainAnchor:
+    """Lifetime anchor for the process's exit drain."""
+
+
+_deferred_releases: queue.SimpleQueue[
+    tuple[BaseFileLock, Path, str, str | None] | _ReleaseBarrier
+] = queue.SimpleQueue()
 _release_thread_lock = threading.Lock()
 _release_thread: threading.Thread | None = None
+_release_exit_finalizer: weakref.finalize | None = None
 
 
 def _run_deferred_releases() -> None:
+    failures = 0
     while True:
-        reset_lock, session_path, owner_key, session_id = _deferred_releases.get()
-        with contextlib.suppress(Exception):
+        entry = _deferred_releases.get()
+        if isinstance(entry, _ReleaseBarrier):
+            # Keep failures cumulative: a diagnostic drain must not hide an
+            # unapplied release from the eventual exit drain.
+            entry.failures = failures
+            entry.done.set()
+            continue
+        reset_lock, session_path, owner_key, session_id = entry
+        try:
             _release_session_owner(reset_lock, session_path, owner_key, session_id)
+        except Exception:
+            failures += 1
+            # Ownership may already have changed. Retrying arbitrary failures
+            # could decrement another live manager's instance count.
+            logger.exception("Deferred cache owner release failed: %s", session_path)
+
+
+def _drain_deferred_releases(timeout: float) -> bool:
+    """Wait for worker acknowledgement; report timeouts and raised release errors.
+
+    This waits in ordinary execution or the dedicated exit callback, never in
+    an ordinary GC callback. The marker covers only entries enqueued before it.
+    The deadline bounds this wait, not the worker's lock acquisition or
+    filesystem operations.
+    """
+    worker = _release_thread
+    if worker is None or not worker.is_alive():
+        logger.warning("Cannot drain deferred cache releases: worker is not running")
+        return False
+    barrier = _ReleaseBarrier(threading.Event())
+    _deferred_releases.put(barrier)
+    if not barrier.done.wait(timeout):
+        logger.warning("Timed out waiting for deferred cache owner releases")
+        return False
+    if barrier.failures:
+        logger.warning("%d deferred cache owner releases failed", barrier.failures)
+        return False
+    return True
+
+
+def _drain_deferred_releases_at_exit(anchor: _ExitDrainAnchor, pid: int) -> None:
+    """Give this process's queued releases a bounded opportunity to finish."""
+    if pid == os.getpid():
+        # weakref's exit pass disables cyclic GC; keep the wait short.
+        _drain_deferred_releases(_DEFERRED_RELEASE_EXIT_TIMEOUT)
 
 
 def _ensure_deferred_release_thread() -> None:
@@ -162,7 +224,7 @@ def _ensure_deferred_release_thread() -> None:
     Never call from finalizer context: acquiring ``_release_thread_lock`` or
     starting a thread can block on a lock held by the interrupted thread.
     """
-    global _release_thread
+    global _release_thread, _release_exit_finalizer
     with _release_thread_lock:
         if _release_thread is None or not _release_thread.is_alive():
             _release_thread = threading.Thread(
@@ -171,6 +233,16 @@ def _ensure_deferred_release_thread() -> None:
                 daemon=True,
             )
             _release_thread.start()
+        if _release_exit_finalizer is None:
+            anchor = _ExitDrainAnchor()
+            # Create this finalizer before every manager finalizer: Python runs
+            # remaining finalizers in reverse creation order at exit. Keeping
+            # the anchor in its own callback arguments deliberately prevents
+            # ordinary GC from invoking this waiting callback, even if the
+            # module drops its reference. Only the exit pass invokes it.
+            _release_exit_finalizer = weakref.finalize(
+                anchor, _drain_deferred_releases_at_exit, anchor, os.getpid()
+            )
 
 
 def _reset_deferred_releases_after_fork() -> None:
@@ -179,9 +251,13 @@ def _reset_deferred_releases_after_fork() -> None:
     # The child also needs a fresh mutex because the thread holding an inherited
     # lock may not survive the fork.
     global _deferred_releases, _release_thread_lock, _release_thread
+    global _release_exit_finalizer
     _deferred_releases = queue.SimpleQueue()
     _release_thread_lock = threading.Lock()
     _release_thread = None
+    # The inherited exit callback skips the child by PID. The child's first
+    # manager installs its own callback before registering its finalizer.
+    _release_exit_finalizer = None
 
 
 if hasattr(os, "register_at_fork"):
@@ -203,42 +279,39 @@ def _close_cache_manager_resources(
     resources directly so cleanup succeeds even when the
     ``CacheManager`` is already being garbage-collected.
 
-    GC cleanup (``blocking=False``) tries ``reset_lock`` once and queues the
-    release on contention: waiting could block the interrupted lock holder.
-    Explicit ``close()`` uses ``blocking=True`` to wait for the lock and attempt
-    the release synchronously. Local SHM handles close in either case.
+    GC cleanup only enqueues ownership release; see the note on
+    ``_deferred_releases``. Explicit close attempts the release synchronously,
+    deferring only if lock acquisition times out. Local SHM handles close in
+    either case. The last owner release unlinks the session's SHM names.
+    In a forked child, an inherited manager only closes local handles, including
+    on explicit close; the creating process keeps its session ownership.
     """
-    with contextlib.suppress(Exception):
-        if blocking:
-            _release_session_owner(reset_lock, session_path, owner_key, session_id)
-        else:
-            _release_session_owner_or_defer(
-                reset_lock, session_path, owner_key, session_id
+    try:
+        # Forked children inherit live managers, but do not own their parent's
+        # session entries. They may only close their local SHM mappings.
+        if _parse_owner_key(owner_key)[0] != os.getpid():
+            return
+        if not blocking:
+            _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
+        elif not _release_session_owner(
+            reset_lock,
+            session_path,
+            owner_key,
+            session_id,
+            timeout=remaining_cleanup_timeout(),
+        ):
+            _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
+            logger.warning(
+                "Cache owner release deferred after lock timeout: %s", session_path
             )
-    if shared is not None:
-        shared.close()
-
-
-def _release_session_owner_or_defer(
-    reset_lock: "BaseFileLock",
-    session_path: Path,
-    owner_key: str,
-    session_id: str | None,
-) -> None:
-    """Release session ownership from a finalizer without waiting for the lock.
-
-    If acquisition fails, enqueue with reentrant ``SimpleQueue.put``. This path
-    must not acquire ``_release_thread_lock`` or start the background worker.
-    """
-    try:
-        reset_lock.acquire(timeout=0)
     except Exception:
-        _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
-        return
-    try:
-        _release_session_owner_locked(session_path, owner_key, session_id)
+        # A release may already have changed ownership. Do not retry arbitrary
+        # failures: decrementing the instance count twice can remove a live owner.
+        if blocking:
+            logger.exception("Failed to release cache ownership: %s", session_path)
     finally:
-        reset_lock.release()
+        if shared is not None:
+            shared.close()
 
 
 def _release_session_owner(
@@ -246,9 +319,22 @@ def _release_session_owner(
     session_path: Path,
     owner_key: str,
     session_id: str | None,
-) -> None:
-    with reset_lock:
+    *,
+    timeout: float = -1,
+) -> bool:
+    """Release ownership, returning False only for a timeout before acquisition."""
+    try:
+        acquired = reset_lock.acquire(timeout=timeout)
+    except BaseException as exc:
+        held = reset_lock.is_locked
+        if held:
+            reset_lock.release(force=True)
+        if isinstance(exc, FileLockTimeout) and not held:
+            return False
+        raise
+    with acquired:
         _release_session_owner_locked(session_path, owner_key, session_id)
+    return True
 
 
 def _release_session_owner_locked(
@@ -292,6 +378,9 @@ def _release_session_owner_locked(
             _atomic_write_json(session_path, session)
             return
     owners.pop(owner_key, None)
+    # A crashed peer cannot release its entry. Let the last surviving owner
+    # clean up without waiting for another cache initialization.
+    owners = CacheManager._prune_dead_owners(owners)
     session["owners"] = owners
     if owners:
         _atomic_write_json(session_path, session)
@@ -441,6 +530,9 @@ class CacheManager(ShardResolver):
         # as live when a PID is recycled between a crash and the next init.
         self._start_time_ns = _process_start_time_ns(self._pid)
         self._owner_key = _make_owner_key(self._pid, self._start_time_ns)
+        assert _parse_owner_key(self._owner_key)[0] == self._pid, (
+            "Cache owner key must identify the creating process"
+        )
 
         # Slot/locator/fingerprint state is served lazily by the CatalogSet —
         # no resident per-shard locator dict.
@@ -457,9 +549,19 @@ class CacheManager(ShardResolver):
         self._shared: CacheSharedState | None = None
         self._session_id: str | None = None
         _ensure_deferred_release_thread()
+        assert _release_exit_finalizer is not None and _release_exit_finalizer.alive, (
+            "Exit drain must be registered before manager finalizers"
+        )
         with self._reset_lock:
             self._state_dir.mkdir(parents=True, exist_ok=True)
-            self._run_session_state_machine()
+            try:
+                self._run_session_state_machine()
+            except BaseException:
+                if self._shared is not None:
+                    if self._shared.created_regions:
+                        CacheSharedState.unlink_by_names(self._shared.shm_names)
+                    self._shared.close()
+                raise
 
         assert self._shared is not None
         logger.debug(
@@ -635,8 +737,11 @@ class CacheManager(ShardResolver):
         except Exception:
             return None
 
-    def _prune_dead_owners(self, owners: object) -> dict:
+    @classmethod
+    def _prune_dead_owners(cls, owners: object) -> dict:
         """Drop owners whose process is gone or whose pid has been recycled.
+
+        Processes sharing a cache root must share a PID namespace.
 
         Defense-in-depth: each owner key is ``f"{pid}-{start_time_ns}"``
         (compound), AND the entry value carries ``process_start_ns``.
@@ -655,7 +760,7 @@ class CacheManager(ShardResolver):
             if pid <= 0:
                 logger.info("Dropping malformed cache-session owner %r", key)
                 continue
-            if not self._pid_alive(pid):
+            if not cls._pid_alive(pid):
                 logger.info("Dropping dead cache-session owner pid=%d key=%r", pid, key)
                 continue
             actual_start = _process_start_time_ns(pid)
@@ -835,8 +940,8 @@ class CacheManager(ShardResolver):
 
     def close(self) -> None:
         # Detach the finalizer so repeated close() calls and later GC cannot
-        # release this manager twice. Explicit close waits for the session lock
-        # and attempts the owner release before returning.
+        # release this manager twice. Attempt release synchronously, deferring
+        # only if the session lock is unavailable within the cleanup budget.
         detached = self._close_finalizer.detach()
         if detached is not None:
             _, _, args, _ = detached

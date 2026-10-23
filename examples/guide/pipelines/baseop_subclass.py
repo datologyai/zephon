@@ -1,4 +1,7 @@
-"""Subclass BaseOp to load an expensive model once per worker in setup."""
+"""Subclass BaseOp to load an expensive model once per worker in setup.
+
+The model is released again in teardown when the pipeline shuts down.
+"""
 
 from typing import Any
 
@@ -23,6 +26,11 @@ class QualityScoreOp(BaseOp):
     def setup(self, ctx: OpContext) -> None:
         super().setup(ctx)
         self._model = load_classifier(self._model_name)
+
+    def teardown(self) -> None:
+        # Drop the model so its memory can be freed; safe to repeat or run
+        # after a setup that never got this far.
+        self._model = None
 
     def traits(self) -> OpTraits:
         return OpTraits(

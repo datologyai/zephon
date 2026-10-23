@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Sequence, TypeVar
@@ -25,6 +26,7 @@ from zephon._internal.stream import (
     RunnerStreamIn,
     resolve_lazy_payloads,
 )
+from zephon._internal.utils.cleanup import cleanup_budget
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import Accumulator, SourceExhaustion
@@ -32,6 +34,15 @@ from zephon.ops.base import BaseOp, OpContext, StageInfo
 from zephon.types import SampleBatch, SampleRecord, StreamItem
 
 _NO_EXHAUSTION = SourceExhaustion()
+logger = logging.getLogger(__name__)
+
+
+def teardown_operator(instance: BaseOp) -> None:
+    """Attempt cleanup without preventing other operators from being released."""
+    try:
+        instance.teardown()
+    except Exception:
+        logger.exception("Failed to tear down operator %s", type(instance).__name__)
 
 
 @dataclass
@@ -102,12 +113,22 @@ class BaseOperatorState:
             collect_stats=self.collect_stats,
         )
 
-        for _ in range(self.parallelism):
-            instance = copy.deepcopy(self.node.op)
-            instance.setup(OpContext(dict(base_ctx), stage_info))
-            self.instances.append(instance)
+        try:
+            for _ in range(self.parallelism):
+                instance = copy.deepcopy(self.node.op)
+                self.instances.append(instance)
+                instance.setup(OpContext(dict(base_ctx), stage_info))
 
-        self._create_accumulator()
+            self._create_accumulator()
+        except BaseException:
+            self.teardown()
+            raise
+
+    def teardown(self) -> None:
+        """Release local operator instances once their execution has stopped."""
+        instances, self.instances = self.instances, []
+        for instance in reversed(instances):
+            teardown_operator(instance)
 
     def _get_source_exhaustion(self, lane_id: int) -> SourceExhaustion:
         """Read this operator's EOD sentinel state without IPC or copying."""
@@ -396,6 +417,7 @@ class StageRunnerBase(Generic[StateT], ABC):
     ) -> None:
         if stage_output_mode not in {"microbatches", "stream_items"}:
             raise ValueError(f"Unsupported stage_output_mode '{stage_output_mode}'.")
+        self._closed = False
         self._stage = stage
         self._ctx_services = dict(ctx_services)
         self._max_workers = max(1, max_workers)
@@ -412,21 +434,25 @@ class StageRunnerBase(Generic[StateT], ABC):
 
         self.ops: list[StateT] = []
         collect_op_stats = self._tracking_mode.collects_nodes
-        for op_index, node in enumerate(stage.nodes):
-            state = self._make_operator_state(
-                node=node,
-                op_index=op_index,
-                deterministic=deterministic,
-                ctx_proto=self._ctx_services,
-                allow_latency_flush=allow_latency_flush_in_deterministic,
-                stage_index=stage_index,
-                stage_name=self._stage_name,
-                collect_op_stats=collect_op_stats,
-            )
-            self.ops.append(state)
-            self._metrics_meta.append(
-                (self._stage_index, self._stage_name, op_index, node.name)
-            )
+        try:
+            for op_index, node in enumerate(stage.nodes):
+                state = self._make_operator_state(
+                    node=node,
+                    op_index=op_index,
+                    deterministic=deterministic,
+                    ctx_proto=self._ctx_services,
+                    allow_latency_flush=allow_latency_flush_in_deterministic,
+                    stage_index=stage_index,
+                    stage_name=self._stage_name,
+                    collect_op_stats=collect_op_stats,
+                )
+                self.ops.append(state)
+                self._metrics_meta.append(
+                    (self._stage_index, self._stage_name, op_index, node.name)
+                )
+        except BaseException:
+            self._teardown_operators()
+            raise
 
     @abstractmethod
     def _make_operator_state(
@@ -483,13 +509,27 @@ class StageRunnerBase(Generic[StateT], ABC):
 
     @abstractmethod
     def close(self, *, hard: bool = False) -> None:
-        """Tear down all runner resources.
+        """Permanently close the runner and release resources after execution stops.
+
+        Choose the shutdown mode on the first call. Repeated calls need not
+        change that mode or wait for cleanup already in progress.
 
         Args:
-            hard: When True, use minimal join timeouts for fast exit.
+            hard: Use short waits and defer cleanup of operators still executing.
         """
 
+    def _teardown_operators(self, *, hard: bool = False) -> None:
+        with cleanup_budget(hard=hard):
+            for state in reversed(self.ops):
+                state.teardown()
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Stage runner is closed")
+
     def run_one(self, elem: RunnerStreamIn) -> StreamItem:
+        """Evaluate synchronously; callers must not overlap this with run or close."""
+        self._check_open()
         if not self.ops:
             if not isinstance(elem, (SampleRecord, SampleBatch)):
                 raise TypeError(
