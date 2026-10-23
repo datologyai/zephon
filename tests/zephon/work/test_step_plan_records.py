@@ -14,7 +14,7 @@ import pytest
 from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.ops import BaseOp, OpTraits, PassthroughAccumulator
-from zephon.types import SampleBatch
+from zephon.types import SampleBatch, SampleRecord
 from zephon.work import (
     MixturePhase,
     MixtureSchedule,
@@ -100,6 +100,15 @@ def _shrink_in_place(batch: SampleBatch) -> None:
     object.__setattr__(batch, "records", batch.records[:1])
 
 
+def _relineage(batch: SampleBatch) -> SampleBatch:
+    # Same count and sample ids, but a replay cursor that restore never matches.
+    return SampleBatch(
+        records=tuple(
+            SampleRecord(meta=r.meta.child(0), payload=r.payload) for r in batch.records
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "transform,drop_none,message",
     [
@@ -121,8 +130,17 @@ def _shrink_in_place(batch: SampleBatch) -> None:
         ),
         (lambda b: list(b.records), True, "into a non-batch"),
         (_shrink_in_place, False, "batch of 2 records into 1 different"),
+        (_relineage, True, "batch of 2 records into 2 different"),
     ],
-    ids=["drop", "shrink", "expand", "duplicate", "non-batch", "mutate-in-place"],
+    ids=[
+        "drop",
+        "shrink",
+        "expand",
+        "duplicate",
+        "non-batch",
+        "mutate-in-place",
+        "change-lineage",
+    ],
 )
 def test_map_batch_must_keep_every_record(
     transform: Callable[[SampleBatch], Any], drop_none: bool, message: str
