@@ -89,6 +89,11 @@ The `stop_after_passes` argument controls how many passes **every dataset** must
 before the work source stops. Datasets that reach this target sooner continue repeating to
 maintain the requested mixture while the remaining datasets catch up.
 
+A repeating dataset emits every record of each pass: a chunk that reaches the end of a pass
+takes the remaining records and continues into the next one. When the work source stops,
+its final incomplete chunk is dropped rather than filled from another pass. Checkpoints
+from older versions, which skipped the rest of a pass, keep that behavior on resume.
+
 You can instead control what happens when an individual dataset runs out of samples using
 `exhausted_policy`:
 

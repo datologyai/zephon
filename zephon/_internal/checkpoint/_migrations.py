@@ -113,6 +113,7 @@ from zephon._internal.checkpoint._schemas import (
     StaticMixtureStateV3,
     StaticMixtureStateV4,
     StaticMixtureStateV5,
+    StaticMixtureStateV6,
     WorkChunkStateV1,
     WorkChunkStateV2,
     WorkChunkStateV3,
@@ -172,6 +173,13 @@ def _static_mixture_v4_to_v5(v4: StaticMixtureStateV4) -> dict[str, Any]:
     d = v4.to_dict()
     d["token_deficits"] = None
     d["token_ratios"] = None
+    return d
+
+
+def _static_mixture_v5_to_v6(v5: StaticMixtureStateV5) -> dict[str, Any]:
+    """Keep skipping pass tails: pre-v6 streams were produced that way."""
+    d = v5.to_dict()
+    d["drain_pass_tail"] = False
     return d
 
 
@@ -266,6 +274,7 @@ _MIGRATIONS: dict[str, dict[int, MigrationFn]] = {
         2: _static_mixture_v2_to_v3,
         3: _static_mixture_v3_to_v4,
         4: _static_mixture_v4_to_v5,
+        5: _static_mixture_v5_to_v6,
     },
     "cursor": {},
 }
@@ -286,6 +295,7 @@ _SCHEMAS: dict[str, dict[int, type[CheckpointMixin]]] = {
         3: StaticMixtureStateV3,
         4: StaticMixtureStateV4,
         5: StaticMixtureStateV5,
+        6: StaticMixtureStateV6,
     },
     "cursor": {1: CursorStateV1},
 }
