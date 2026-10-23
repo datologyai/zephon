@@ -42,7 +42,8 @@ releases what `setup` acquired; its default is a no-op.
 - Cache release inside teardown waits on the cache's `.reset.lock` for at most 1 s
   (100 ms on hard shutdown), counted from the start of that runner's teardown. If the
   wait times out, the release is queued to a background thread. GC finalizers only ever
-  queue, and queued releases are not guaranteed to run before the interpreter exits.
+  queue. On normal exit, both modes give the worker up to 1 s more to catch up, then
+  exit even if cleanup is still stuck.
 
 **The invariant is that `process_many` must be stateless across calls.** It must not
 depend on anything left over from a previous invocation, so every piece of

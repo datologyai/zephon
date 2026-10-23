@@ -141,22 +141,80 @@ def _parse_owner_key(key: str) -> tuple[int, int | None]:
 # then make the worker wait on that unreleased hold. Keep file locking out of
 # GC callbacks; the worker acquires and releases the lock in normal execution.
 # Queued managers remain owners of their session until the release is applied.
-# The daemon worker is not joined at interpreter exit, so queued releases may
-# remain unapplied even when the lock is free. Explicit close attempts release
-# synchronously within its cleanup budget. Later initialization prunes owners
-# whose processes have exited.
-_deferred_releases: "queue.SimpleQueue[tuple[BaseFileLock, Path, str, str | None]]" = (
-    queue.SimpleQueue()
-)
+# Orderly interpreter exit gives the worker one bounded opportunity to drain
+# releases. A blocked lock or failed release can still leave ownership behind;
+# later initialization prunes owners whose processes have exited. Explicit close
+# attempts release synchronously within its cleanup budget.
+_DEFERRED_RELEASE_EXIT_TIMEOUT = 1.0
+
+
+@dataclass
+class _ReleaseBarrier:
+    """Acknowledge preceding releases, including an entry already being applied."""
+
+    done: threading.Event
+    failures: int = 0
+
+
+class _ExitDrainAnchor:
+    """Lifetime anchor for the process's exit drain."""
+
+
+_deferred_releases: queue.SimpleQueue[
+    tuple[BaseFileLock, Path, str, str | None] | _ReleaseBarrier
+] = queue.SimpleQueue()
 _release_thread_lock = threading.Lock()
 _release_thread: threading.Thread | None = None
+_release_exit_finalizer: weakref.finalize | None = None
 
 
 def _run_deferred_releases() -> None:
+    failures = 0
     while True:
-        reset_lock, session_path, owner_key, session_id = _deferred_releases.get()
-        with contextlib.suppress(Exception):
+        entry = _deferred_releases.get()
+        if isinstance(entry, _ReleaseBarrier):
+            # Keep failures cumulative: a diagnostic drain must not hide an
+            # unapplied release from the eventual exit drain.
+            entry.failures = failures
+            entry.done.set()
+            continue
+        reset_lock, session_path, owner_key, session_id = entry
+        try:
             _release_session_owner(reset_lock, session_path, owner_key, session_id)
+        except Exception:
+            failures += 1
+            # Ownership may already have changed. Retrying arbitrary failures
+            # could decrement another live manager's instance count.
+            logger.exception("Deferred cache owner release failed: %s", session_path)
+
+
+def _drain_deferred_releases(timeout: float) -> bool:
+    """Wait for worker acknowledgement; report timeouts and raised release errors.
+
+    This waits in ordinary execution or the dedicated exit callback, never in
+    an ordinary GC callback. The marker covers only entries enqueued before it.
+    The deadline bounds this wait, not the worker's lock acquisition or
+    filesystem operations.
+    """
+    worker = _release_thread
+    if worker is None or not worker.is_alive():
+        logger.warning("Cannot drain deferred cache releases: worker is not running")
+        return False
+    barrier = _ReleaseBarrier(threading.Event())
+    _deferred_releases.put(barrier)
+    if not barrier.done.wait(timeout):
+        logger.warning("Timed out waiting for deferred cache owner releases")
+        return False
+    if barrier.failures:
+        logger.warning("%d deferred cache owner releases failed", barrier.failures)
+        return False
+    return True
+
+
+def _drain_deferred_releases_at_exit(anchor: _ExitDrainAnchor, pid: int) -> None:
+    """Give this process's queued releases a bounded opportunity to finish."""
+    if pid == os.getpid():
+        _drain_deferred_releases(_DEFERRED_RELEASE_EXIT_TIMEOUT)
 
 
 def _ensure_deferred_release_thread() -> None:
@@ -165,7 +223,7 @@ def _ensure_deferred_release_thread() -> None:
     Never call from finalizer context: acquiring ``_release_thread_lock`` or
     starting a thread can block on a lock held by the interrupted thread.
     """
-    global _release_thread
+    global _release_thread, _release_exit_finalizer
     with _release_thread_lock:
         if _release_thread is None or not _release_thread.is_alive():
             _release_thread = threading.Thread(
@@ -174,6 +232,16 @@ def _ensure_deferred_release_thread() -> None:
                 daemon=True,
             )
             _release_thread.start()
+        if _release_exit_finalizer is None:
+            anchor = _ExitDrainAnchor()
+            # Create this finalizer before every manager finalizer: Python runs
+            # remaining finalizers in reverse creation order at exit. Keeping
+            # the anchor in its own callback arguments deliberately prevents
+            # ordinary GC from invoking this waiting callback, even if the
+            # module drops its reference. Only the exit pass invokes it.
+            _release_exit_finalizer = weakref.finalize(
+                anchor, _drain_deferred_releases_at_exit, anchor, os.getpid()
+            )
 
 
 def _reset_deferred_releases_after_fork() -> None:
@@ -182,9 +250,13 @@ def _reset_deferred_releases_after_fork() -> None:
     # The child also needs a fresh mutex because the thread holding an inherited
     # lock may not survive the fork.
     global _deferred_releases, _release_thread_lock, _release_thread
+    global _release_exit_finalizer
     _deferred_releases = queue.SimpleQueue()
     _release_thread_lock = threading.Lock()
     _release_thread = None
+    # The inherited exit callback skips the child by PID. The child's first
+    # manager installs its own callback before registering its finalizer.
+    _release_exit_finalizer = None
 
 
 if hasattr(os, "register_at_fork"):
@@ -212,6 +284,10 @@ def _close_cache_manager_resources(
     either case. The last owner release unlinks the session's SHM names.
     """
     try:
+        # Forked children inherit live managers, but do not own their parent's
+        # session entries. They may only close their local SHM mappings.
+        if _parse_owner_key(owner_key)[0] != os.getpid():
+            return
         if not blocking:
             _deferred_releases.put((reset_lock, session_path, owner_key, session_id))
         elif not _release_session_owner(

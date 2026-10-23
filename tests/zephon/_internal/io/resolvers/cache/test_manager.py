@@ -1654,8 +1654,9 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
 
     session_path = tmp_path / manager_mod._STATE_DIR_NAME / "session.json"
     session_path.parent.mkdir()
+    owner_key = str(os.getpid())
     session_path.write_text(
-        json.dumps({"session_id": "session", "owners": {"owner": {"instances": 1}}}),
+        json.dumps({"session_id": "session", "owners": {owner_key: {"instances": 1}}}),
         encoding="utf-8",
     )
     lock = FileLock(str(tmp_path / manager_mod._RESET_LOCK_FILENAME))
@@ -1672,12 +1673,12 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
     manager_mod._ensure_deferred_release_thread()
     try:
         manager_mod._close_cache_manager_resources(
-            None, lock, session_path, "owner", "session"
+            None, lock, session_path, owner_key, "session"
         )
         assert not lock.is_locked, (
             "finalizer left the OS lock held after acquire raised"
         )
-        _wait_for_instances(tmp_path, "owner", 0)
+        _wait_for_instances(tmp_path, owner_key, 0)
         with FileLock(lock.lock_file).acquire(timeout=1):
             pass
     finally:
@@ -1686,7 +1687,7 @@ def test_finalizer_does_not_leak_partial_lock_acquisition(
             lock.release(force=True)
             # Recovery must not replace the assertion that exposed the regression.
             with contextlib.suppress(AssertionError):
-                _wait_for_instances(tmp_path, "owner", 0)
+                _wait_for_instances(tmp_path, owner_key, 0)
 
 
 def test_finalizer_during_reset_lock_acquisition_does_not_deadlock(
@@ -2065,7 +2066,12 @@ def test_explicit_close_releases_partial_acquisition_without_retry(
 
     monkeypatch.setattr(lock, "acquire", acquire_then_fail)
     manager_mod._close_cache_manager_resources(
-        None, lock, tmp_path / "session.json", "owner", "session", blocking=True
+        None,
+        lock,
+        tmp_path / "session.json",
+        str(os.getpid()),
+        "session",
+        blocking=True,
     )
     assert not lock.is_locked
     assert pending.empty()
@@ -2090,8 +2096,106 @@ def test_explicit_close_does_not_retry_a_partially_applied_release(
 
     monkeypatch.setattr(manager_mod, "_release_session_owner_locked", release_then_fail)
     manager_mod._close_cache_manager_resources(
-        None, lock, path, "owner", "session", blocking=True
+        None, lock, path, str(os.getpid()), "session", blocking=True
     )
     assert json.loads(path.read_text())["instances"] == 1
     assert pending.empty()
     assert not lock.is_locked
+
+
+def _run_cache_exit_probe(tmp_path: Path, case: str) -> tuple[dict[str, Any], str]:
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.zephon._internal.io.resolvers.cache._exit_probe",
+            case,
+            str(tmp_path),
+        ],
+        cwd=Path(__file__).resolve().parents[6],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    observation = json.loads((tmp_path / "exit_observation.json").read_text())
+    return observation, result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+@pytest.mark.parametrize(
+    "case",
+    ["retained", "burst", "explicit", "explicit_timeout", "delayed", "sentinel_gc"],
+)
+def test_interpreter_exit_finishes_cache_owner_releases(
+    tmp_path: Path, case: str
+) -> None:
+    """Exit cleanup completes before the resource tracker can hide a missed release."""
+    observation, stderr = _run_cache_exit_probe(tmp_path, case)
+    assert "Timed out waiting for deferred cache owner releases" not in stderr
+    assert "deferred cache owner releases failed" not in stderr
+    for session in observation["sessions"]:
+        assert session["owners"] == {}
+        assert not any(session["shm_exists"].values())
+    assert observation["elapsed"] < 2
+    if case == "delayed":
+        assert observation["elapsed"] >= 0.08
+    if case == "burst":
+        assert len(observation["sessions"]) == 8
+    if case == "explicit_timeout":
+        assert "Cache owner release deferred after lock timeout" in stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_interpreter_exit_reports_contended_release_without_hanging(
+    tmp_path: Path,
+) -> None:
+    """A held cache lock exhausts one total exit budget and leaves ownership visible."""
+    observation, stderr = _run_cache_exit_probe(tmp_path, "contended")
+    assert "Timed out waiting for deferred cache owner releases" in stderr
+    assert 0.18 <= observation["elapsed"] < 2
+    for session in observation["sessions"]:
+        assert len(session["owners"]) == 1
+        assert all(session["shm_exists"].values())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shared memory")
+def test_interpreter_exit_reports_worker_failure_without_retry(tmp_path: Path) -> None:
+    """Acknowledging the queue must not hide failed releases from later drains."""
+    observation, stderr = _run_cache_exit_probe(tmp_path, "worker_failure")
+    assert "injected deferred release failure" in stderr
+    assert stderr.count("1 deferred cache owner releases failed") == 3
+    failure = json.loads((tmp_path / "failure_observation.json").read_text())
+    assert failure == {"attempts": 1, "drains": [False, False]}
+    for session in observation["sessions"]:
+        assert len(session["owners"]) == 1
+        assert next(iter(session["owners"].values()))["instances"] == 1
+        assert all(session["shm_exists"].values())
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+@pytest.mark.parametrize("case", ["fork_finalizer", "fork_close"])
+def test_forked_exit_preserves_parent_owner_and_releases_child_owner(
+    tmp_path: Path, case: str
+) -> None:
+    """The child's cleanup only releases managers created by the child."""
+    observation, stderr = _run_cache_exit_probe(tmp_path, case)
+    assert "Timed out waiting for deferred cache owner releases" not in stderr
+    parent_session = json.loads((tmp_path / "fork_observation.json").read_text())
+    child_observation = json.loads(
+        (tmp_path / "child" / "exit_observation.json").read_text()
+    )
+    assert len(parent_session["owners"]) == 1
+    child_session = child_observation["sessions"][0]
+    assert child_session["owners"] == parent_session["owners"]
+    assert child_session["session_id"] == parent_session["session_id"]
+    assert all(child_session["shm_exists"].values())
+    assert observation["sessions"][0]["owners"] == {}
+    assert not any(observation["sessions"][0]["shm_exists"].values())

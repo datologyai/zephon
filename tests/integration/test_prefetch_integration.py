@@ -8,8 +8,12 @@ including cache eviction, backpressure, and pathological access patterns.
 """
 
 import json
+import os
+import signal
+import subprocess
 import sys
 import threading
+import time
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
@@ -747,3 +751,86 @@ def test_pipeline_releases_fetch_and_prefetch_cache(
         for manager in managers:
             manager.close()
         CacheSharedState.unlink_by_names(names)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX SIGINT delivery")
+@pytest.mark.timeout(45)
+@pytest.mark.parametrize("runner", ["inline", "threads"])
+@pytest.mark.parametrize("shutdown_mode", ["graceful", "hard"])
+@pytest.mark.parametrize("interrupt", [False, True], ids=["normal-exit", "ctrl-c"])
+def test_retained_pipeline_releases_cache_at_process_exit(
+    tmp_path: Path,
+    runner: str,
+    shutdown_mode: str,
+    interrupt: bool,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "shard.jsonl").write_text(
+        "\n".join(json.dumps({"text": f"sample {i}"}) for i in range(20))
+    )
+    helper = Path(__file__).with_name("_cache_exit_pipeline.py")
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), env.get("PYTHONPATH", "")])
+    log_path = tmp_path / "child.log"
+    names: dict[str, str] = {}
+    with log_path.open("w") as output:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(helper),
+                str(tmp_path),
+                runner,
+                shutdown_mode,
+            ],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            ready = tmp_path / "ready.json"
+            deadline = time.monotonic() + 20
+            while (
+                not ready.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            assert ready.exists(), log_path.read_text()
+            session = json.loads(ready.read_text())
+            names = session["shm_names"]
+            assert session["owners"]
+
+            if interrupt:
+                process.send_signal(signal.SIGINT)
+                process.communicate(timeout=15)
+                assert process.returncode in {-signal.SIGINT, 128 + signal.SIGINT}, (
+                    log_path.read_text()
+                )
+            else:
+                process.communicate("exit\n", timeout=15)
+                assert process.returncode == 0, log_path.read_text()
+
+            session_path = tmp_path / "cache" / ".zephon_cache_state" / "session.json"
+            # The resource tracker can unlink SHM without updating ownership.
+            # Check both so it cannot hide a missed Zephon owner release.
+            observation = json.loads((tmp_path / "exit-observation.json").read_text())
+            assert observation == {"owners": {}, "remaining_shm": []}, (
+                log_path.read_text()
+            )
+            assert json.loads(session_path.read_text())["owners"] == {}, (
+                log_path.read_text()
+            )
+            for name in names.values():
+                with pytest.raises(FileNotFoundError):
+                    segment = shared_memory.SharedMemory(name=name, create=False)
+                    segment.close()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+            CacheSharedState.unlink_by_names(names)

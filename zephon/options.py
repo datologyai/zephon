@@ -110,7 +110,8 @@ class RuntimeOptions:
     # "graceful" (default) waits generously for threads/processes to finish.
     # "hard" uses short waits and cleans up stopped operators. Active local calls
     # defer cleanup until they return; terminated workers may skip teardown.
-    # GC cleanup is asynchronous and is not guaranteed to finish at interpreter exit.
+    # GC cache cleanup is asynchronous. Both modes allow up to 1 s more at orderly
+    # interpreter exit to drain queued cache releases; completion is not guaranteed.
     shutdown_mode: Literal["graceful", "hard"] = "graceful"
 
     # === Auto-validation ===
