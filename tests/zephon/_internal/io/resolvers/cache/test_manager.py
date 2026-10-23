@@ -2491,3 +2491,22 @@ def test_next_init_recovers_crashed_session(tmp_path: Path) -> None:
         if path.exists():
             CacheSharedState.unlink_by_names(json.loads(path.read_text())["shm_names"])
         CacheSharedState.unlink_by_names(names)
+
+
+@pytest.mark.parametrize("invariant", ["owner_key", "exit_drain"])
+def test_initialization_checks_cleanup_invariants_before_allocating_shm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invariant: str
+) -> None:
+    cache_root, storage, loc = _single_shard_setup(tmp_path)
+    if invariant == "owner_key":
+        monkeypatch.setattr(manager_mod, "_make_owner_key", lambda *args: "malformed")
+        message = "Cache owner key must identify the creating process"
+    else:
+        monkeypatch.setattr(
+            manager_mod, "_ensure_deferred_release_thread", lambda: None
+        )
+        monkeypatch.setattr(manager_mod, "_release_exit_finalizer", None)
+        message = "Exit drain must be registered before manager finalizers"
+    with pytest.raises(AssertionError, match=message):
+        _make_manager(cache_root, storage, [loc], persist_state=True)
+    assert not (cache_root / ".zephon_cache_state" / "session.json").exists()

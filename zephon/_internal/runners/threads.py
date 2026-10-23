@@ -393,15 +393,19 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
             try:
                 future = self._executor.submit(work, batch)
             except RuntimeError as exc:
-                # Other submit failures can occur after enqueueing. Keep their
-                # instance reserved, even if teardown remains pending.
-                if not self._closed or str(exc) != (
-                    "cannot schedule new futures after shutdown"
-                ):
+                # These executor rejections happen before enqueueing. Shutdown
+                # flags alone cannot establish that: they can change after an
+                # enqueue-then-fail submission releases the executor's lock.
+                if str(exc) not in {
+                    "cannot schedule new futures after shutdown",
+                    "cannot schedule new futures after interpreter shutdown",
+                }:
                     raise
                 state.release_instance(instance)
                 state.inflight.decrement()
                 self._teardown_if_idle()
+                if not self._closed:
+                    raise
                 return
             state.pump_timer.note("batches_submitted")
 
@@ -477,6 +481,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
         self._teardown_operators(hard=self._hard_close)
 
     def close(self, *, hard: bool = False) -> None:
+        """Start shutdown once; later calls keep its mode and do not wait for it."""
         with self._context_lock:
             if self._closed:
                 return

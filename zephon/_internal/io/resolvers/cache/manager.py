@@ -214,6 +214,7 @@ def _drain_deferred_releases(timeout: float) -> bool:
 def _drain_deferred_releases_at_exit(anchor: _ExitDrainAnchor, pid: int) -> None:
     """Give this process's queued releases a bounded opportunity to finish."""
     if pid == os.getpid():
+        # weakref's exit pass disables cyclic GC; keep the wait short.
         _drain_deferred_releases(_DEFERRED_RELEASE_EXIT_TIMEOUT)
 
 
@@ -282,6 +283,8 @@ def _close_cache_manager_resources(
     ``_deferred_releases``. Explicit close attempts the release synchronously,
     deferring only if lock acquisition times out. Local SHM handles close in
     either case. The last owner release unlinks the session's SHM names.
+    In a forked child, an inherited manager only closes local handles, including
+    on explicit close; the creating process keeps its session ownership.
     """
     try:
         # Forked children inherit live managers, but do not own their parent's
@@ -527,6 +530,9 @@ class CacheManager(ShardResolver):
         # as live when a PID is recycled between a crash and the next init.
         self._start_time_ns = _process_start_time_ns(self._pid)
         self._owner_key = _make_owner_key(self._pid, self._start_time_ns)
+        assert _parse_owner_key(self._owner_key)[0] == self._pid, (
+            "Cache owner key must identify the creating process"
+        )
 
         # Slot/locator/fingerprint state is served lazily by the CatalogSet —
         # no resident per-shard locator dict.
@@ -543,6 +549,9 @@ class CacheManager(ShardResolver):
         self._shared: CacheSharedState | None = None
         self._session_id: str | None = None
         _ensure_deferred_release_thread()
+        assert _release_exit_finalizer is not None and _release_exit_finalizer.alive, (
+            "Exit drain must be registered before manager finalizers"
+        )
         with self._reset_lock:
             self._state_dir.mkdir(parents=True, exist_ok=True)
             try:

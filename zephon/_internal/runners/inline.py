@@ -20,6 +20,7 @@ from zephon._internal.stream import (
     RunnerStreamIn,
 )
 from zephon._internal.utils import buffered_iterable
+from zephon._internal.utils.cleanup import cleanup_budget, remaining_cleanup_timeout
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.base import BaseOp
@@ -288,14 +289,16 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
             self._hard_close = hard
             if self._stop_event is not None:
                 self._stop_event.set()
-        # Prefetch can execute inline operators on a background thread. Hard
-        # close cleans up immediately when idle; an active call cleans up on return.
+        # Prefetch can execute inline operators on a background thread. After
+        # a bounded wait, an active call performs its own teardown on return.
         if self._execution_thread_id == threading.get_ident():
             return  # The active call performs teardown after processing returns.
-        if self._execution_lock.acquire(blocking=not hard):
-            self._execution_thread_id = threading.get_ident()
-            try:
-                self._teardown_operators(hard=hard)
-            finally:
-                self._execution_thread_id = None
-                self._execution_lock.release()
+        with cleanup_budget(hard=hard):
+            timeout = 0.0 if hard else remaining_cleanup_timeout()
+            if self._execution_lock.acquire(timeout=timeout):
+                self._execution_thread_id = threading.get_ident()
+                try:
+                    self._teardown_operators(hard=hard)
+                finally:
+                    self._execution_thread_id = None
+                    self._execution_lock.release()

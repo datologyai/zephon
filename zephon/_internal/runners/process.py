@@ -56,6 +56,7 @@ from zephon._internal.utils import (
     collect_with_finalizers,
     dump_semaphore_registry,
 )
+from zephon._internal.utils.cleanup import cleanup_budget
 from zephon._internal.utils.fault_handling import ShutdownWatchdog, setup_faulthandler
 from zephon._internal.utils.ipc import DEFAULT_IPC_BUFFER_BYTES, DEFAULT_IPC_TRANSPORT
 from zephon._internal.utils.rank import rank_ctx
@@ -258,7 +259,7 @@ _WORKER_GC_INTERVAL_NS = 60_000_000_000  # 60 seconds
 
 @dataclass
 class _WorkerCommand:
-    kind: Literal["batch", "stop"]
+    kind: Literal["batch", "stop", "stop_hard"]
     seq: int
     batch: list[RunnerStreamIn]
     wait_ns: int
@@ -409,6 +410,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
     rss_entry_mb = _get_rss_mb() if _STARTUP_DEBUG else 0.0
     _debug(f"worker[{config.worker_index}] starting")
     op_instance: BaseOp | None = None
+    hard_cleanup = True
     try:
         # Deserialize operator using cloudpickle to support lambdas/closures
         op_proto = cloudpickle.loads(config.op_proto_bytes)
@@ -452,7 +454,8 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         slots = config.worker_seq_slots
         while True:
             command = config.task_queue.get()
-            if command.kind == "stop":
+            if command.kind in {"stop", "stop_hard"}:
+                hard_cleanup = command.kind == "stop_hard"
                 _debug(f"worker[{config.worker_index}] received stop, exiting cleanly")
                 break
             if command.kind == "batch":
@@ -533,7 +536,10 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
         )
     finally:
         if op_instance is not None:
-            teardown_operator(op_instance)
+            # Hard stops and failures use the short budget before the parent
+            # may terminate us. Graceful stops retain the normal cleanup budget.
+            with cleanup_budget(hard=hard_cleanup):
+                teardown_operator(op_instance)
 
 
 @dataclass
@@ -1909,7 +1915,9 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             for worker_idx, _ in enumerate(state.workers):
                 self._send_command(
                     task_queue,
-                    _WorkerCommand("stop", -1, [], 0, 0, 0, -1, False),
+                    _WorkerCommand(
+                        "stop_hard" if hard else "stop", -1, [], 0, 0, 0, -1, False
+                    ),
                     state=None,  # Don't drain during shutdown - already drained above
                     context=None,
                     block_on_exhaustion=False,

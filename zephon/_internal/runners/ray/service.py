@@ -277,7 +277,8 @@ class _RayActorGroup:
                     timeout=timeout,
                 )
             except GetTimeoutError:
-                logger.warning("Actor teardown did not finish within %.1fs", timeout)
+                log = logger.debug if hard else logger.warning
+                log("Actor teardown did not finish within %.1fs", timeout)
             except Exception:
                 logger.warning(
                     "Actor teardown did not finish before shutdown", exc_info=True

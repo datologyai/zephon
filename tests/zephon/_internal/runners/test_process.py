@@ -14,6 +14,7 @@ from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import Any
 
+import cloudpickle
 import pytest
 
 # ``ZEPHON_WATCHDOG_POLL_S`` is tightened in
@@ -30,9 +31,10 @@ from tests.zephon._internal.runners._helpers import (
 )
 from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.delay import DelayById
+from zephon._internal.runners import process as process_mod
 from zephon._internal.runners.concurrent import WorkerCrashed
 from zephon._internal.runners.process import ProcessStageRunner, _WorkerCommand
-from zephon._internal.utils import shm_coalesce
+from zephon._internal.utils import cleanup, shm_coalesce
 from zephon.observability.config import ExecutionTrackingMode
 from zephon.observability.stats import NodeMetricsDelta
 from zephon.ops.accumulators import (
@@ -2136,3 +2138,49 @@ def test_close_releases_operator_resources(tmp_path: Path, hard: bool) -> None:
         runner.run_one(_mk_record(1))
     with pytest.raises(RuntimeError, match="Stage runner is closed"):
         list(runner.run(_mk_records([1])))
+
+
+@pytest.mark.parametrize(
+    "hard,fail_setup", [(False, False), (True, False), (False, True)]
+)
+def test_worker_teardown_uses_shutdown_budget(
+    monkeypatch: pytest.MonkeyPatch, hard: bool, fail_setup: bool
+) -> None:
+    class BudgetOp(_IdentityOp):
+        def setup(self, ctx: OpContext) -> None:
+            super().setup(ctx)
+            self.budgets = ctx.get("budgets")
+            if ctx.get("fail_setup"):
+                raise RuntimeError("setup failed")
+
+        def teardown(self) -> None:
+            self.budgets.append(cleanup.remaining_cleanup_timeout())
+
+    budgets: list[float] = []
+    commands, results = queue.Queue(), queue.Queue()
+    commands.put(
+        _WorkerCommand("stop_hard" if hard else "stop", -1, [], 0, 0, 0, -1, False)
+    )
+    monkeypatch.setattr(cleanup, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    monkeypatch.setattr(process_mod, "_set_worker_fds_close_on_exec", lambda: None)
+    config = process_mod._ProcessWorkerConfig(
+        worker_index=0,
+        worker_id=0,
+        op_proto_bytes=cloudpickle.dumps(BudgetOp()),
+        stage_index=0,
+        stage_name="test",
+        op_index=0,
+        collect_stats=False,
+        ctx_services={"budgets": budgets, "fail_setup": fail_setup},
+        task_queue=commands,
+        result_queue=results,
+        backpressure=Mock(),
+    )
+    process_mod._process_worker_main(config)
+    expected = (
+        cleanup._HARD_TIMEOUT if hard or fail_setup else cleanup._GRACEFUL_TIMEOUT
+    )
+    assert budgets == [pytest.approx(expected)]
+    if fail_setup:
+        assert results.get_nowait().error.message == "setup failed"
+    assert results.empty()

@@ -511,6 +511,9 @@ class StageRunnerBase(Generic[StateT], ABC):
     def close(self, *, hard: bool = False) -> None:
         """Permanently close the runner and release resources after execution stops.
 
+        Choose the shutdown mode on the first call. Repeated calls need not
+        change that mode or wait for cleanup already in progress.
+
         Args:
             hard: Use short waits and defer cleanup of operators still executing.
         """

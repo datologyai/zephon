@@ -36,6 +36,7 @@ releases what `setup` acquired; its default is a no-op.
 - The inline and thread runners never tear down an instance in the middle of a call.
   On hard shutdown they tear down idle instances immediately and busy ones as soon as
   their current call returns. Callers of `run_one()` must not overlap it with `close()`.
+  Inline graceful close also defers teardown if its execution wait exceeds the cleanup budget.
 - Process workers run `teardown()` in the worker as it exits, and Ray actors receive a
   short teardown call before they are killed. A worker that is terminated outright skips
   it, so `teardown()` is cleanup, not a place for work that must happen.

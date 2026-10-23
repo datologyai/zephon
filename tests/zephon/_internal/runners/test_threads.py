@@ -716,8 +716,12 @@ def test_shutdown_rejects_racing_submission_and_releases_resources(
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("closing", [False, True])
 def test_submit_failure_after_enqueue_keeps_instance_reserved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+    closing: bool,
 ) -> None:
     release, ran = threading.Event(), threading.Event()
 
@@ -735,6 +739,10 @@ def test_submit_failure_after_enqueue_keeps_instance_reserved(
     error = error_type("thread start failed")
 
     def fail_start(_thread: threading.Thread) -> None:
+        if closing:
+            # Shutdown may become visible before the submit exception is handled.
+            runner._closed = True
+            runner._executor._shutdown = True
         raise error
 
     try:
@@ -760,6 +768,33 @@ def test_submit_failure_after_enqueue_keeps_instance_reserved(
         runner._executor.shutdown(wait=True)
         runner.close(hard=True)
         state.teardown()  # All executor work has stopped; the test can now clean up.
+
+
+@pytest.mark.parametrize("interpreter", [False, True])
+def test_shutdown_submission_rejection_returns_worker_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter: bool
+) -> None:
+    from concurrent.futures import thread as futures_thread
+
+    runner = ThreadStageRunner(
+        _resource_stage(_ResourceOp(tmp_path)), _ctx_services(), max_workers=1
+    )
+    state = runner.ops[0]
+    try:
+        with monkeypatch.context() as patch:
+            target = futures_thread if interpreter else runner._executor
+            patch.setattr(target, "_shutdown", True)
+            with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+                runner._schedule_batch(
+                    state, _mk_records([1]), wait_ns=0, context=runner._create_context()
+                )
+        assert state.inflight.is_zero()
+        instance = state.try_acquire_instance()
+        assert instance is not None
+        state.release_instance(instance)
+    finally:
+        runner.close()
+    assert not list(tmp_path.glob("*.live"))
 
 
 def test_hard_shutdown_cleanup_does_not_wait_for_result_backpressure(

@@ -3,6 +3,7 @@
 
 """Tests for Ray actor resource cleanup."""
 
+import logging
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -77,19 +78,25 @@ def test_placement_failure_skips_teardown(
 
 
 @pytest.mark.parametrize("timed_out", [False, True])
+@pytest.mark.parametrize("hard", [False, True])
 def test_shutdown_logs_expected_timeouts_without_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     timed_out: bool,
+    hard: bool,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="zephon._internal.runners.ray.service")
     group, actor = _mock_group(tmp_path)
     error = ray.exceptions.GetTimeoutError() if timed_out else RuntimeError("failed")
     monkeypatch.setattr(ray, "get", Mock(side_effect=error))
     kill = Mock()
     monkeypatch.setattr(ray, "kill", kill)
-    group.shutdown()
-    actor.teardown.remote.assert_called_once_with(hard=False)
+    group.shutdown(hard=hard)
+    actor.teardown.remote.assert_called_once_with(hard=hard)
     kill.assert_called_once()
     assert len(caplog.records) == 1
     assert bool(caplog.records[0].exc_info) is not timed_out
+    assert caplog.records[0].levelno == (
+        logging.DEBUG if hard and timed_out else logging.WARNING
+    )
