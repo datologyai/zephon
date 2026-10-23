@@ -195,6 +195,24 @@ def test_metadata_cache_rejects_invalid_limits(limit: object) -> None:
         StoreOptions.from_any({"metadata_cache_entries": limit})
 
 
+def test_max_open_shards_option_merge_disable_and_reset() -> None:
+    assert StoreOptions().max_open_shards == 0
+
+    base = StoreOptions.from_any({"max_open_shards": 8})
+    assert base.merge(StoreOptions()).max_open_shards == 8
+    disabled = base.merge(StoreOptions.from_any({"max_open_shards": 0}))
+    assert disabled.max_open_shards == 0
+    reset = base.merge(StoreOptions.from_any({"max_open_shards": None}))
+    assert reset.max_open_shards == 0
+    assert base.merge(StoreOptions.from_any(None)).max_open_shards == 0
+
+
+@pytest.mark.parametrize("limit", [-1, 1.5, True, "64"])
+def test_max_open_shards_rejects_invalid_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="max_open_shards"):
+        StoreOptions.from_any({"max_open_shards": limit})
+
+
 def _configured_cache(
     tmp_path,
     *,

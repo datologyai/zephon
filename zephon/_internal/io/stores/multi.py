@@ -29,6 +29,7 @@ from zephon._internal.io.storage import (
     StorageBackend,
 )
 from zephon._internal.io.stores.file_backed import FileBackedDatasetShardView
+from zephon._internal.io.stores.open_shards import OpenShardCache
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
 from zephon._internal.io.types import ShardLocator
 from zephon._internal.utils.disk import check_cache_disk_space
@@ -327,9 +328,17 @@ def build_multi_dataset_store(
                         f"Dataset '{dataset.name}' missing or unsupported backend kind for multi-store"
                     ) from exc
                 if kind not in openers:
-                    openers[kind] = resources.enter_context(
+                    format_opener = resources.enter_context(
                         handler.create_opener(catalog_set, store_opts, storage)
                     )
+                    if store_opts.max_open_shards:
+                        # Exit order closes the open readers before their opener.
+                        open_shards = OpenShardCache(
+                            format_opener, store_opts.max_open_shards
+                        )
+                        resources.callback(open_shards.close)
+                        format_opener = open_shards
+                    openers[kind] = format_opener
                 opener = openers[kind]
                 catalog: ShardCatalog | None = None
                 if catalog_set is not None and dataset._catalog_handle is not None:

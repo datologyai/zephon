@@ -27,6 +27,7 @@ from zephon._internal.io.stores.multi import (
     has_cacheable_dataset,
     validate_store_cache_disk_space,
 )
+from zephon._internal.io.stores.open_shards import OpenShardCache
 from zephon._internal.io.stores.registry import DatasetStoreRegistry
 from zephon._internal.io.types import ShardFile, ShardLocator
 from zephon._internal.utils.disk import InsufficientCacheSpaceError
@@ -315,8 +316,11 @@ def opener_dependencies(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock, Mo
     return catalog_set, resolver, views
 
 
+@pytest.mark.parametrize("max_open_shards", [0, 2])
 def test_format_opener_shared_and_closed_once(
-    monkeypatch: pytest.MonkeyPatch, opener_dependencies: tuple[Mock, Mock, Mock]
+    monkeypatch: pytest.MonkeyPatch,
+    opener_dependencies: tuple[Mock, Mock, Mock],
+    max_open_shards: int,
 ) -> None:
     catalog_set, resolver, views = opener_dependencies
     datasets = {
@@ -343,16 +347,36 @@ def test_format_opener_shared_and_closed_once(
             events.append("close")
 
     monkeypatch.setattr(JsonlFormat, "create_opener", create_opener)
-    store = build_multi_dataset_store(datasets, storage=backend)
+    close_cache = OpenShardCache.close
+
+    def record_cache_close(self: OpenShardCache) -> None:
+        events.append("close open shards")
+        close_cache(self)
+
+    monkeypatch.setattr(OpenShardCache, "close", record_cache_close)
+    store = build_multi_dataset_store(
+        datasets,
+        storage=backend,
+        options=StoreOptions(max_open_shards=max_open_shards),
+    )
     try:
         assert events == ["open"]
         assert views.call_count == 2
-        assert all(call.kwargs["opener"] is opener for call in views.call_args_list)
+        view_openers = [call.kwargs["opener"] for call in views.call_args_list]
+        assert view_openers[0] is view_openers[1]
+        if max_open_shards:
+            assert isinstance(view_openers[0], OpenShardCache)
+            assert getattr(view_openers[0], "_opener") is opener
+        else:
+            assert view_openers[0] is opener
         assert all(call.kwargs["resolver"] is resolver for call in views.call_args_list)
     finally:
         store.close()
         store.close()
-    assert events == ["open", "close"]
+
+    # The open readers close before the opener that made them.
+    closed = ["close open shards"] if max_open_shards else []
+    assert events == ["open", *closed, "close"]
     resolver.close.assert_called_once_with()
 
 
