@@ -1259,8 +1259,11 @@ class Pipeline:
         (wrap/best_fit_wrap). Each list element remains a distinct segment;
         buffered algorithms may reorder segments, and best_fit_wrap may emit a
         suffix before its remaining prefix. ``pack_payloads`` merges that list
-        (default keeps it as-is). For flat, tensor-ready training records with
-        ``positions``, use :meth:`pack_flat` instead.
+        (default keeps it as-is). A custom callback returning a mapping of
+        unshifted token/media fields can be consumed by ``SampleBatch.to_training``
+        after batching; the mapping remains inside the envelope and contributors
+        remain unchanged. For built-in concatenation/padding of token-aligned
+        fields with ``positions``, use :meth:`pack_flat` instead.
 
         Args:
             max_length: Maximum length for packed bins.

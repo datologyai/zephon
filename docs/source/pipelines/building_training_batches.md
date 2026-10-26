@@ -208,3 +208,20 @@ separate from model-specific multi-axis positions.
 
 These field callbacks only assemble already prepared values. They do not select bins,
 shift input IDs/labels, drop records or select an attention policy.
+
+
+**Structured packs.** `pack_sequences` groups complete payloads with its existing
+`first_fit` or `best_fit` algorithm. A `pack_payloads` callback can assemble each
+selected pack into one mapping of **unshifted** `input_ids`, token-aligned `loss_mask`,
+scalar subdocument-reset `positions`, and ordered media/model-position fields.
+The result remains inside `{"packed_samples": mapping}`; Zephon retains the original
+record's contributor lineage. After batching, `to_training` reads that mapping
+directly and performs its ordinary shift, padding and field collation. No second
+collator or packing algorithm is needed. The default list-valued `packed_samples`
+is not accepted: the callback must explicitly define how the model's fields merge.
+
+Measure packing length after expanding image placeholders into the actual token
+slots. For `L` model input tokens use capacity `L + 1`, and charge each complete
+document its full expanded token count. The merge callback must preserve that
+unshifted length and media order. It must not silently remove a terminal media
+slot to manufacture the next-token shift.

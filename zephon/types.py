@@ -427,6 +427,15 @@ class SampleBatch:
             payload = record.payload
             if not isinstance(payload, dict):
                 raise TypeError(f"Expected dict payload, got: {type(payload).__name__}")
+            if set(payload) == {"packed_samples"}:
+                merged = payload["packed_samples"]
+                if not isinstance(merged, Mapping):
+                    raise ValueError(
+                        "to_training requires a mapping-valued 'packed_samples'; "
+                        + "use pack_sequences(pack_payloads=...) to assemble "
+                        + "unshifted token fields before conversion"
+                    )
+                payload = dict(merged)
             payloads.append(payload)
             texts.append(str(payload.get("text", "")))
 
@@ -543,6 +552,12 @@ class SampleBatch:
         | None = None,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
+
+        A ``{"packed_samples": mapping}`` envelope from ``pack_sequences`` is
+        read as the mapping returned by its ``pack_payloads`` callback. That
+        callback assembles unshifted token/media fields; conversion does not
+        choose bins or merge a list of documents. The record and its contributor
+        metadata are unchanged. The default list-valued envelope is rejected.
 
         A ``"loss_mask"`` payload field (a per-token supervised-vs-not mask,
         e.g. from chat-template tokenization) is recognized automatically, like
