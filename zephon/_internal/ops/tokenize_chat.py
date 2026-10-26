@@ -170,7 +170,9 @@ class TokenizeChat(TokenizeBase):
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
+        add_special_tokens: bool = False,
         span_source: SpanSource = "auto",
+        prefix_diff_include_header: bool = False,
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -212,11 +214,27 @@ class TokenizeChat(TokenizeBase):
             apply_chat_template: ``False`` selects the no-template path (see
                 class docstring); ``chat_template`` and a non-``"auto"``
                 ``span_source`` are then rejected.
+            add_special_tokens: Use the tokenizer's special-token postprocessor
+                without a chat template. Defaults to False; True is rejected
+                with a template, which already owns its special tokens. Inserted
+                prefix tokens stay unsupervised for assistant-scoped loss.
+                Inserted suffix tokens follow the selected span at the end of
+                retained content, including EOS
+                after an assistant response. Other inserted tokens stay masked.
+                Without any retained content tokens, assistant-scoped samples
+                are dropped. ``all_tokens`` instead supervises all but token zero.
+                This is independent of ``append_eos``: set that to False when
+                only the tokenizer should insert EOS; neither source is deduplicated.
             span_source: ``"auto"`` picks ``generation_tags`` when the
                 resolved template has ``{% generation %}`` tags, else
                 ``prefix_diff`` (with a setup-time warning). Pin explicitly
                 for reproducibility or testing. ``after_last_user`` requires
                 explicit ``prefix_diff`` when the template is untagged.
+            prefix_diff_include_header: Include the whole rendered assistant
+                message when inferring spans by prefix differencing. Defaults to
+                False, excluding the generation-prompt header. True also permits
+                templates that ignore ``add_generation_prompt``. Only affects
+                the prefix-diff fallback; generation tags remain authoritative.
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
                 ``after_last_user`` selects every assistant after the final user.
@@ -251,6 +269,11 @@ class TokenizeChat(TokenizeBase):
         if span_source not in _VALID_SPAN_SOURCES:
             raise ValueError(
                 f"span_source must be one of {_VALID_SPAN_SOURCES}, got {span_source!r}"
+            )
+        if add_special_tokens and apply_chat_template:
+            raise ValueError(
+                "add_special_tokens=True requires apply_chat_template=False; "
+                + "chat templates own their special tokens"
             )
         if not apply_chat_template:
             if span_source != "auto":
@@ -294,8 +317,10 @@ class TokenizeChat(TokenizeBase):
         self.max_length = max_length
         self.append_eos = append_eos
         self.apply_chat_template = apply_chat_template
+        self.add_special_tokens = add_special_tokens
         self.chat_template = self._read_template(chat_template)
         self.span_source: SpanSource = span_source
+        self.prefix_diff_include_header = prefix_diff_include_header
         self.loss_scope: LossScope = loss_scope
         self._template_verifier: TemplateVerifier | None = None
         self._template_setup_result: TemplateSetupResult | None = None
@@ -426,7 +451,10 @@ class TokenizeChat(TokenizeBase):
             self._template_setup_result = verifier.setup_result
             self._template_verifier = verifier
 
-        if self._resolved_span_source == "prefix_diff":
+        if (
+            self._resolved_span_source == "prefix_diff"
+            and not self.prefix_diff_include_header
+        ):
             # The generation prompt anchors assistant content, excluding role headers.
             probe = [{"role": "user", "content": ""}]
             renders = [
@@ -595,7 +623,7 @@ class TokenizeChat(TokenizeBase):
         for i, message in enumerate(messages):
             if message.get("role") != "assistant":
                 continue
-            prefix = render(messages[:i], True)
+            prefix = render(messages[:i], not self.prefix_diff_include_header)
             upto = render(messages[: i + 1], False)
             if not (full.startswith(upto) and upto.startswith(prefix)):
                 raise ValueError(
@@ -653,8 +681,30 @@ class TokenizeChat(TokenizeBase):
             text,
             max_length=self.max_length,
             return_offsets_mapping=True,
+            add_special_tokens=self.add_special_tokens,
+            return_special_tokens_mask=self.add_special_tokens,
         )
-        return enc["input_ids"], _mask_from_spans(enc["offset_mapping"], spans)
+        mask = _mask_from_spans(enc["offset_mapping"], spans)
+        if self.add_special_tokens:
+            # Tokenizer-inserted specials have zero-width offsets; payload
+            # special tokens are ordinary content according to this mask.
+            content = np.flatnonzero(np.asarray(enc["special_tokens_mask"]) == 0)
+            if content.size:
+                last = int(content[-1])
+                assert enc.encodings is not None  # Required fast-tokenizer output.
+                encoding = enc.encodings[0]
+                retains_end = (
+                    not encoding.overflowing
+                    or cast("PreTrainedTokenizerFast", self.tok).truncation_side
+                    == "left"
+                )
+                selected_end = (
+                    any(start <= len(text) <= end for start, end in spans)
+                    if retains_end
+                    else bool(mask[last])
+                )
+                mask[last + 1 :] = int(selected_end)
+        return enc["input_ids"], mask
 
     # Record processing
 
@@ -850,8 +900,10 @@ class ChatTokenCountingSpec(TokenCountingSpec):
     max_length: int | None = None
     chat_template: str | None = None
     apply_chat_template: bool = True
+    add_special_tokens: bool = False
     append_eos: bool = True
     span_source: SpanSource = "auto"
+    prefix_diff_include_header: bool = False
     loss_scope: LossScope = "all_assistant"
     chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
     tools_field: str = "tools"
@@ -868,8 +920,10 @@ class ChatTokenCountingSpec(TokenCountingSpec):
             max_length=op.max_length,
             chat_template=op.chat_template,
             apply_chat_template=op.apply_chat_template,
+            add_special_tokens=op.add_special_tokens,
             append_eos=op.append_eos,
             span_source=op.span_source,
+            prefix_diff_include_header=op.prefix_diff_include_header,
             loss_scope=op.loss_scope,
             chat_template_kwargs=tuple(sorted(op.chat_template_kwargs.items())),
             tools_field=op.tools_field,
@@ -887,8 +941,10 @@ class ChatTokenCountingSpec(TokenCountingSpec):
                 max_length=self.max_length,
                 chat_template=self.chat_template,
                 apply_chat_template=self.apply_chat_template,
+                add_special_tokens=self.add_special_tokens,
                 append_eos=self.append_eos,
                 span_source=self.span_source,
+                prefix_diff_include_header=self.prefix_diff_include_header,
                 loss_scope=self.loss_scope,
                 chat_template_kwargs=dict(self.chat_template_kwargs),
                 tools_field=self.tools_field,

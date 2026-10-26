@@ -81,6 +81,28 @@ Without a chat template, this option also disables EOS insertion after assistant
 messages. Both options are included in token-aware mixture calibration, so counts
 match the tokens that the configured encoder actually delivers.
 
+For plain prompt/completion data, normalize the prompt and answer to user and
+assistant messages, preserving any required whitespace. Use
+`apply_chat_template=False, add_special_tokens=True, append_eos=False` to let the
+tokenizer's postprocessor supply BOS/EOS. With assistant-scoped loss, inserted
+prefix specials stay masked and suffix specials follow supervision at the end of
+the retained content. This trains EOS after an answer, including an empty final
+answer whose boundary survived, but masks it if truncation stopped in the prompt.
+All inserted suffix tokens follow this rule when a postprocessor adds several;
+inserted interior specials stay masked. With no retained content tokens, these
+samples are dropped. `loss_scope="all_tokens"` instead supervises every token
+except token zero, including additional prefix specials. `append_eos=True` remains
+independent: its per-assistant EOS and tokenizer-added EOS are both retained.
+Token boundaries that overlap an assistant's text remain supervised, even when a
+token merges prompt-ending whitespace with the beginning of the answer.
+
+For untagged templates, `prefix_diff_include_header=True` includes each selected
+assistant's whole rendered message in the inferred spans, including its header.
+This also permits templates that ignore `add_generation_prompt`. The default
+continues to exclude the generation-prompt header. Automatic tag detection stays
+inside `tokenize_chat`; this option never changes generation-tag masks. Both new
+controls use the same tokenization path during preflight and mixture calibration.
+
 By default, both tokenization operators replace the original record payload with their
 tokenized output. If later operations in your pipeline need access to the original fields,
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized

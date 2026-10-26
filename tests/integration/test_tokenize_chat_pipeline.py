@@ -149,6 +149,72 @@ def test_all_token_chat_preflight_packing_and_checkpoint_in_process() -> None:
 
 SEQ = 32
 
+
+def test_plain_special_tokens_through_calibration_and_process_worker() -> None:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    tokenizer = make_fast_tokenizer()
+    tokenizer.add_special_tokens({"bos_token": "<|start|>"})
+    tokenizer.backend_tokenizer.post_processor = (
+        tokenizers.processors.TemplateProcessing(
+            single="<|start|> $A <|end|>",
+            special_tokens=[
+                ("<|start|>", tokenizer.bos_token_id),
+                ("<|end|>", tokenizer.eos_token_id),
+            ],
+        )
+    )
+    source = StaticMixtureWorkSource(
+        [
+            Dataset.from_dict(
+                "plain", {0: InMemoryShard([{"prompt": "hi ", "answer": "there"}] * 2)}
+            )
+        ],
+        {"plain": 1.0},
+        chunk_size=1,
+        token_estimation=TokenEstimation(
+            calibration_samples=2, calibration_shards_min=1, calibration_shards_max=1
+        ),
+    )
+    pipeline = (
+        Pipeline(source)
+        .map_transform(
+            lambda p: {
+                "messages": [
+                    {"role": "user", "content": p["prompt"]},
+                    {"role": "assistant", "content": p["answer"]},
+                ]
+            }
+        )
+        .tokenize_chat(
+            tokenizer,
+            apply_chat_template=False,
+            add_special_tokens=True,
+            append_eos=False,
+        )
+        .pack_flat(
+            5, algorithm="first_fit", num_bins=1, pad_token_id=tokenizer.pad_token_id
+        )
+        .batch(1)
+        .options(
+            runner="process", deterministic=True, max_workers=1, canonical_replicas=1
+        )
+    )
+    try:
+        assert pipeline.preflight_tokenizers().ok
+        batches = [
+            batch.to_training(dtype=None, return_labels=True) for batch in pipeline
+        ]
+        assert len(batches) == 2
+        ids = tokenizer.convert_tokens_to_ids(["<|start|>", "hi", "there", "<|end|>"])
+        assert all(batch["input_ids"] == [ids] for batch in batches)
+        assert all(
+            batch["labels"] == [[-100, ids[2], ids[3], -100]] for batch in batches
+        )
+    finally:
+        pipeline.close()
+
+
 _WORDS = "hello hi there how are you good morning the answer is what thanks yes no 1 2 4 + ? ! .".split()
 
 TAGGED_TEMPLATE = (

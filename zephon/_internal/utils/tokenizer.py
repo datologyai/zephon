@@ -75,13 +75,17 @@ def encode_rendered_text(
     *,
     max_length: int | None = None,
     return_offsets_mapping: bool = False,
+    add_special_tokens: bool = False,
+    return_special_tokens_mask: bool = False,
 ) -> BatchEncoding:
-    """Tokenize rendered text without adding specials; truncate at an explicit cap."""
-    kwargs: dict[str, Any] = {"add_special_tokens": False}
+    """Tokenize rendered text, optionally using the tokenizer's special tokens."""
+    kwargs: dict[str, Any] = {"add_special_tokens": add_special_tokens}
     if max_length is not None:
         kwargs.update(truncation=True, max_length=max_length)
     if return_offsets_mapping:
         kwargs["return_offsets_mapping"] = True
+    if return_special_tokens_mask:
+        kwargs["return_special_tokens_mask"] = True
     return tokenizer(text, **kwargs)
 
 

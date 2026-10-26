@@ -914,7 +914,9 @@ class Pipeline:
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
+        add_special_tokens: bool = False,
         span_source: SpanSource = "auto",
+        prefix_diff_include_header: bool = False,
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -945,6 +947,17 @@ class Pipeline:
         to assistant messages and selects targets from their roles.
         ``append_eos=False`` disables operator-added EOS tokens in both paths;
         EOS tokens already emitted by a template remain unchanged.
+        Without a template, ``add_special_tokens=True`` uses the tokenizer's
+        special-token postprocessor. For assistant-scoped loss, inserted prefix
+        tokens stay masked; suffix tokens, including EOS, follow supervision at
+        the retained content's end. ``all_tokens`` still supervises all but token
+        zero. Set ``append_eos=False`` when only the tokenizer should insert EOS;
+        the two insertion mechanisms are independent and do not deduplicate.
+        This option is rejected with a template, which owns its special tokens.
+        ``prefix_diff_include_header=True`` includes the entire assistant message
+        in inferred spans, including its header, and allows templates that ignore
+        generation prompts. It only affects prefix differencing; automatic tag
+        detection and generation-tag masks remain unchanged.
 
         ``loss_scope`` selects all assistant spans (``all_assistant``, default),
         the final contiguous supervised run (``last_span``), or all assistant
@@ -980,7 +993,9 @@ class Pipeline:
             max_length=max_length,
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
+            add_special_tokens=add_special_tokens,
             span_source=span_source,
+            prefix_diff_include_header=prefix_diff_include_header,
             loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,

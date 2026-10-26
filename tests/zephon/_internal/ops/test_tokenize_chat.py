@@ -418,6 +418,148 @@ def test_no_template_boundary_straddle_is_supervised(fast_tokenizer: Any) -> Non
     assert _mask(record) == [0, 1, 1]
 
 
+@pytest.fixture
+def plain_special_tokenizer() -> Any:
+    from tokenizers.processors import TemplateProcessing
+
+    tokenizer = make_fast_tokenizer()
+    tokenizer.add_special_tokens({"bos_token": "<|start|>"})
+    tokenizer.backend_tokenizer.post_processor = TemplateProcessing(
+        single="<|start|> $A <|end|>",
+        special_tokens=[
+            ("<|start|>", tokenizer.bos_token_id),
+            ("<|end|>", tokenizer.eos_token_id),
+        ],
+    )
+    return tokenizer
+
+
+def test_no_template_tokenizer_special_tokens(plain_special_tokenizer: Any) -> None:
+    tokenizer = plain_special_tokenizer
+    payload = {
+        "messages": _messages(("user", "hi there "), ("assistant", "good morning"))
+    }
+    op = TokenizeChat(
+        tokenizer, apply_chat_template=False, add_special_tokens=True, append_eos=False
+    )
+    record = _run_one(op, payload)
+    assert (
+        _tokens(tokenizer, record) == "<|start|> hi there good morning <|end|>".split()
+    )
+    assert _mask(record) == [0, 0, 0, 1, 1, 1]
+    spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    assert spec.add_special_tokens
+    assert spec.build_counter().plan([]).count(payload) == 6
+
+    default = TokenizeChat(tokenizer, apply_chat_template=False, append_eos=False)
+    assert (
+        _tokens(tokenizer, _run_one(default, payload))
+        == "hi there good morning".split()
+    )
+    both = TokenizeChat(tokenizer, apply_chat_template=False, add_special_tokens=True)
+    # Per-turn EOS insertion and tokenizer postprocessing are independent owners.
+    duplicated = _run_one(both, payload)
+    assert _tokens(tokenizer, duplicated)[-2:] == ["<|end|>", "<|end|>"]
+    assert _mask(duplicated)[-2:] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    ("answer", "max_length", "truncation_side", "expected_mask"),
+    [
+        ("good morning", 4, "right", None),  # Truncated before the assistant.
+        ("good morning", 5, "right", [0, 0, 0, 1, 1]),
+        ("good morning", 4, "left", [0, 1, 1, 1]),
+        ("", None, "right", [0, 0, 0, 1]),  # Empty answer's boundary is retained.
+        ("", 3, "right", None),
+    ],
+)
+def test_tokenizer_suffix_supervision_follows_retained_content(
+    plain_special_tokenizer: Any,
+    answer: str,
+    max_length: int | None,
+    truncation_side: str,
+    expected_mask: list[int] | None,
+) -> None:
+    plain_special_tokenizer.truncation_side = truncation_side
+    op = TokenizeChat(
+        plain_special_tokenizer,
+        apply_chat_template=False,
+        add_special_tokens=True,
+        append_eos=False,
+        max_length=max_length,
+    )
+    payload = {"messages": _messages(("user", "hi there "), ("assistant", answer))}
+    record = _run_one(op, payload)
+    assert record.meta.tombstone == (expected_mask is None)
+    if expected_mask is not None:
+        assert _mask(record) == expected_mask
+    expected_count = len(expected_mask) if expected_mask is not None else 0
+    assert (
+        op.token_counting_spec().build_counter().plan([]).count(payload)
+        == expected_count
+    )
+
+
+def test_multiple_tokenizer_specials_and_full_token_loss(
+    plain_special_tokenizer: Any,
+) -> None:
+    from tokenizers.processors import TemplateProcessing
+
+    tokenizer = plain_special_tokenizer
+    tokenizer.backend_tokenizer.post_processor = TemplateProcessing(
+        single="<|start|> <|sep|> $A <|end|> <|sep|>",
+        special_tokens=[
+            (token, tokenizer.convert_tokens_to_ids(token))
+            for token in ("<|start|>", "<|sep|>", "<|end|>")
+        ],
+    )
+    payload = {
+        "messages": _messages(("user", "hi there "), ("assistant", "good morning"))
+    }
+    assistant = TokenizeChat(
+        tokenizer, apply_chat_template=False, add_special_tokens=True, append_eos=False
+    )
+    assert _mask(_run_one(assistant, payload)) == [0, 0, 0, 0, 1, 1, 1, 1]
+    full = TokenizeChat(
+        tokenizer,
+        apply_chat_template=False,
+        add_special_tokens=True,
+        append_eos=False,
+        loss_scope="all_tokens",
+    )
+    assert _mask(_run_one(full, payload)) == [0, 1, 1, 1, 1, 1, 1, 1]
+    user_final = {
+        "messages": _messages(
+            ("user", "hi "), ("assistant", "good "), ("user", "morning")
+        )
+    }
+    assert _mask(_run_one(assistant, user_final))[-2:] == [0, 0]
+    empty = {"messages": _messages(("user", ""), ("assistant", ""))}
+    assert _run_one(assistant, empty).meta.tombstone
+
+
+def test_no_template_bpe_merge_retains_first_answer_target() -> None:
+    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+    from transformers import PreTrainedTokenizerFast
+
+    raw = Tokenizer(models.BPE(unk_token="[UNK]"))
+    raw.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    raw.train_from_iterator(
+        ["hello world"], trainers.BpeTrainer(vocab_size=50, special_tokens=["[UNK]"])
+    )
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw, unk_token="[UNK]")
+    assert (
+        len(tokenizer("hello ")["input_ids"])
+        == len(tokenizer("hello world")["input_ids"])
+        == 2
+    )
+    op = TokenizeChat(tokenizer, apply_chat_template=False, append_eos=False)
+    record = _run_one(
+        op, {"messages": _messages(("user", "hello "), ("assistant", "world"))}
+    )
+    assert _mask(record) == [0, 1]
+
+
 def test_no_template_multimodal_content_joins_text_parts(fast_tokenizer: Any) -> None:
     op = TokenizeChat(fast_tokenizer, apply_chat_template=False)
     messages = _messages(
@@ -556,6 +698,7 @@ def test_per_sample_tools_and_enable_thinking_shape_the_render(
     ("kwargs", "match"),
     [
         ({"span_source": cast(Any, "bogus")}, "span_source"),
+        ({"add_special_tokens": True}, "requires apply_chat_template=False"),
         (
             {"apply_chat_template": False, "span_source": "prefix_diff"},
             "span_source only applies",
@@ -622,6 +765,38 @@ def test_prefix_diff_requires_generation_prompt_support(fast_tokenizer: Any) -> 
     op = TokenizeChat(fast_tokenizer, chat_template=template, span_source="prefix_diff")
     with pytest.raises(ValueError, match="add_generation_prompt"):
         op.process_many([_rec({"messages": CONVERSATION})])
+
+
+def test_prefix_diff_can_include_header_without_changing_tagged_masks(
+    fast_tokenizer: Any,
+) -> None:
+    template = UNTAGGED_TEMPLATE.split("{% if add_generation_prompt %}")[0]
+    op = TokenizeChat(
+        fast_tokenizer, chat_template=template, prefix_diff_include_header=True
+    )
+    payload = {"messages": CONVERSATION[:2]}
+    record = _run_one(op, payload)
+    assert _tokens(fast_tokenizer, record) == GOLDEN_TOKENS[:8]
+    assert _mask(record) == [0, 0, 0, 0, 1, 1, 1, 1]
+    spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    assert spec.prefix_diff_include_header
+    assert spec.build_counter().plan([]).count(payload) == 8
+    tagged = TokenizeChat(
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, prefix_diff_include_header=True
+    )
+    assert _mask(_run_one(tagged, payload)) == GOLDEN_MASK[:8]
+
+
+def test_prefix_diff_header_policy_still_checks_position_dependence(
+    fast_tokenizer: Any,
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=POSITION_DEPENDENT_TEMPLATE,
+        prefix_diff_include_header=True,
+    )
+    with pytest.raises(ValueError, match="position-dependently"):
+        _run_one(op, {"messages": CONVERSATION})
 
 
 def test_no_template_requires_string_eos() -> None:
