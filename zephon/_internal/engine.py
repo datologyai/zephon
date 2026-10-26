@@ -1858,33 +1858,42 @@ class Engine:
             return state.to_dict()
 
     def state_dict(self) -> dict[str, Any]:
-        local = self._state_dict_local()
-        if not self._takes_part_in_rounds():
-            if self._owned_lanes:
-                # Single rank, single active worker: no merge, and this owner
-                # covers every lane, so check the window counts locally.
-                self._check_mid_window_counts(
-                    local.get("lane_emitted") or {},
-                    int(self._world.canonical_replicas),
-                )
-            return local
-
-        worker_id, _ = get_torch_worker_info()
-        # Round setup
-        is_leader = self._world.global_rank == 0 and worker_id == 0
-        return self._coordinator.aggregate(
-            AggregationRound(
-                local=local,
-                is_leader=is_leader,
-                expected_ranks=frozenset(range(int(self._world.world_size))),
-                expected_lanes=frozenset(range(int(self._world.canonical_replicas))),
-            ),
-            merge=self._merge_state_dicts,
+        return self._aggregate_state_dict(
+            self._state_dict_local(),
+            self._coordinator,
+            takes_part=self._takes_part_in_rounds(),
+            worker_id=get_torch_worker_info()[0],
         )
 
-    def _dedupe_dp_group_peers(
-        self, states: list[EngineStateV2]
-    ) -> list[EngineStateV2]:
+    @staticmethod
+    def _aggregate_state_dict(
+        local: dict[str, Any],
+        coordinator: CheckpointCoordinator,
+        *,
+        takes_part: bool,
+        worker_id: int,
+    ) -> dict[str, Any]:
+        """Apply the existing round protocol to live or locally captured progress."""
+        world = local["world"]
+        if not takes_part:
+            if local.get("progress"):
+                Engine._check_mid_window_counts(
+                    local.get("lane_emitted") or {},
+                    int(world["canonical_replicas"]),
+                )
+            return local
+        return coordinator.aggregate(
+            AggregationRound(
+                local=local,
+                is_leader=int(world["global_rank"]) == 0 and worker_id == 0,
+                expected_ranks=frozenset(range(int(world["world_size"]))),
+                expected_lanes=frozenset(range(int(world["canonical_replicas"]))),
+            ),
+            merge=Engine._merge_state_dicts,
+        )
+
+    @staticmethod
+    def _dedupe_dp_group_peers(states: list[EngineStateV2]) -> list[EngineStateV2]:
         """Keep one rank's shards per DP group, checking its MP peers agree.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
@@ -1955,7 +1964,8 @@ class Engine:
             chosen.extend(rep[1:])
         return chosen
 
-    def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
+    @staticmethod
+    def _merge_state_dicts(states: list[dict[str, Any]]) -> dict[str, Any]:
         assert states
         # Load + migrate every shard up front. Same-DP-group peer dedupe runs
         # AFTER the cross-shard global-invariant checks below; otherwise a
@@ -2006,7 +2016,7 @@ class Engine:
         merged_last_round_id = next(iter(last_round_ids))
         merged_reload_count = next(iter(checkpoint_reload_counts))
 
-        typed = self._dedupe_dp_group_peers(typed)
+        typed = Engine._dedupe_dp_group_peers(typed)
 
         inflight, progress, lane_next, lane_ws_state = {}, {}, {}, {}
         for idx, st in enumerate(typed):
@@ -2101,7 +2111,7 @@ class Engine:
                 + "\n  - ".join(errors)
             )
 
-        self._check_mid_window_counts(lane_emitted, C)
+        Engine._check_mid_window_counts(lane_emitted, C)
 
         merged = EngineStateV2(
             version=ENGINE_VERSION,

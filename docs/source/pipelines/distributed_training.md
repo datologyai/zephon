@@ -226,3 +226,13 @@ tuning pipelines](inspecting_and_tuning_pipelines.md) that you are scaling the
 per-`Pipeline` values down as the number of `Pipeline` instances on each node goes up,
 and double-check `Pipeline.explain()` to verify the total number of threads and
 processes that will be running on each node before you launch at scale.
+
+**MTP completion and checkpoints.** With MTP enabled, normal completion and
+iterator cleanup capture acknowledged progress locally. They do not start a
+cross-rank checkpoint round, so an exhausted rank can first coordinate end-of-data
+with ranks that still have batches. Call `pipeline.checkpoint()` on every rank at
+the agreed training boundary as usual. The explicit call aggregates the same
+checkpoint format whether each rank is still iterating or has already closed its
+pipeline. Local final snapshots do not acknowledge prefetched batches, and repeated
+explicit checkpoints preserve round ordering. A destination template obtained
+before MTP iteration cannot replace that iteration's final progress.

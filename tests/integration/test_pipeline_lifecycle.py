@@ -135,3 +135,16 @@ def test_close_active_mtp_iterator_releases_subprocess_and_restores() -> None:
         next(iterator)
     pipeline.restore(checkpoint)
     assert prefix + payloads(pipeline) == baseline
+
+
+def test_mtp_terminal_state_replaces_checkpoint_destination_engine() -> None:
+    pipeline = make_pipeline(mtp=True)
+    initial = pipeline.checkpoint()
+    assert len(payloads(pipeline)) == 8
+    pipeline.close()
+    terminal = pipeline.checkpoint()
+    assert terminal != initial
+    restored = make_pipeline(mtp=True)
+    restored.restore(terminal)
+    assert payloads(restored) == []
+    restored.close()
