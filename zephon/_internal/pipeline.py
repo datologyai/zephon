@@ -7,11 +7,13 @@ import functools
 import importlib.util as _importlib_util
 import os
 import warnings
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Generator,
     Iterator,
     Literal,
     Optional,
@@ -202,6 +204,8 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._iterating: bool = False
+        # Weak ownership preserves cleanup when a caller discards an iterator.
+        self._iterators: weakref.WeakSet[Generator[Any, None, None]] = weakref.WeakSet()
         self._validated: bool = False
         self._options = RuntimeOptions()
         self._fetch_node: Node[FetchOp] = self._graph.add(
@@ -1786,9 +1790,31 @@ class Pipeline:
         # after the first next().
         self._run_auto_validation()
         self._prime_worksource()
-        return self._iter_body()
+        iterator = self._iter_body()
+        self._iterators.add(iterator)
+        return iterator
 
-    def _iter_body(self) -> Iterator[Any]:
+    def close(self) -> None:
+        """Release this process's pipeline runtime, including checkpoint-only setup.
+
+        Close paused or unstarted iterators and any engine initialized by
+        checkpoint() before iteration. Repeated calls are safe; closing a fresh
+        pipeline does not initialize it. Explicit checkpoint and pending restore
+        data remain available. To resume a closed stream, restore its checkpoint
+        before iterating again, as with an explicitly closed iterator.
+
+        Call between next() calls, from the iterator's owning thread. This is
+        resource cleanup, not a checkpoint operation or a concurrent cancellation
+        API. Operator teardown retains its existing best-effort semantics.
+        """
+        try:
+            for iterator in list(self._iterators):
+                iterator.close()
+        finally:
+            if self._engine is not None:
+                self._engine.close()
+
+    def _iter_body(self) -> Generator[Any, None, None]:
         try:
             self._iterating = True
             if self._options.mtp_mode:
@@ -2098,6 +2124,7 @@ class Pipeline:
         d["_runtime_spec"] = None
         d["_sp"] = None
         d["_iterating"] = False
+        d.pop("_iterators", None)
         d["_last_state"] = None
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
@@ -2116,6 +2143,7 @@ class Pipeline:
           `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.
         """
         self.__dict__.update(state)
+        self._iterators = weakref.WeakSet()
         # _engine, _plan, _runtime_spec, _sp are already None in the
         # pickled state (set by __getstate__).  _pending_restore is kept.
 

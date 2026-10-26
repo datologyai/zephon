@@ -118,6 +118,10 @@ def inspect_timing(pipe: Pipeline) -> None:
         _ = success_rate
 
 
+def release_pipeline(pipe: Pipeline) -> None:
+    pipe.close()
+
+
 def report(pipe: Pipeline) -> ValidationReport:
     return pipe.validate()
 

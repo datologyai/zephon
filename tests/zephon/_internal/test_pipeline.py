@@ -1,7 +1,8 @@
 """Unit tests for pipeline options and output notification."""
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from unittest.mock import Mock
+from weakref import WeakSet
 
 import pytest
 
@@ -9,6 +10,45 @@ from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon._internal.graph import Plan
 from zephon._internal.pipeline import Pipeline
 from zephon.types import SampleMeta, SampleRecord
+
+
+def test_close_fresh_or_unstarted_pipeline_does_not_initialize_runtime() -> None:
+    pipe = object.__new__(Pipeline)
+    pipe._engine = None
+    pipe._iterators = WeakSet()
+
+    def unstarted() -> Generator[None, None, None]:
+        raise AssertionError("closing an unstarted iterator must not execute it")
+        yield
+
+    iterator = unstarted()
+    pipe._iterators.add(iterator)
+    pipe.close()
+    pipe.close()
+    assert pipe._engine is None
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+def test_close_releases_engine_even_if_iterator_cleanup_raises() -> None:
+    pipe = object.__new__(Pipeline)
+    engine = Mock()
+    pipe._engine = engine
+    pipe._iterators = WeakSet()
+
+    def paused() -> Generator[None, None, None]:
+        try:
+            yield
+        finally:
+            raise RuntimeError("iterator cleanup failed")
+
+    iterator = paused()
+    next(iterator)
+    pipe._iterators.add(iterator)
+    with pytest.raises(RuntimeError, match="iterator cleanup failed"):
+        pipe.close()
+    engine.close.assert_called_once_with()
+    pipe.close()
 
 
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
