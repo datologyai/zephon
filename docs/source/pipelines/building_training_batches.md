@@ -73,8 +73,13 @@ loss. There are three different types of labels that we do not want to predict o
 3. **Predictions across a document boundary.** The general idea here is that we do not
    want the tokens at the end of one document to be used to learn things about the
    beginning of the next, unrelated document in the sequence. Some training recipes exclude
-   this prediction, which you can enable by setting `eos_mask_loss=True` and the identity
-   of the tokenizer's EOS token to the `to_training` method.
+   this prediction. Set `mask_segment_starts=True` to mask targets at zero in the
+   original scalar `positions`, independently of token IDs. The first token of each
+   packed document is already outside the target slice, including wrap continuations.
+   This composes with existing supervision and padding masks and does not change
+   attention or model positions. Alternatively, `eos_mask_loss=True` with an explicit
+   EOS ID masks predictions **from EOS tokens**; if BOS and EOS share an ID, it also
+   masks predictions from BOS, so it is not an exact boundary policy.
 
 Different training frameworks want this masking information represented in different ways.
 Some frameworks read the ignored values directly from the labels, while others expect a
@@ -170,6 +175,68 @@ Note that the `to_training` method cannot convert the output of the `pack_sequen
 operator, since it keeps each packed record as a list of individual documents. Use
 `pack_flat` if you want `to_training` to do the conversion for you, and `pack_sequences`
 if you need to work with the individual documents yourself.
+
+
+**Padding unequal documents.** Use `pad_to_length=L + 1, pad_token_id=...` to
+right-pad unshifted documents before next-token conversion. Longer documents raise an
+error rather than being truncated. Existing padding metadata and newly added padding
+are combined; `return_padding_mask=True` identifies input padding by position, even
+when PAD and EOS use the same ID. Ordinary token-aligned extra fields and supervision
+masks are padded with zero. Scalar `positions` give the padding tail its own segment.
+Omitting `pad_to_length` preserves the existing stacking behavior.
+
+**Media and multi-axis positions.** `field_collators` registers a callable per named
+payload field; registration also includes that field in the output. The callable runs
+once for each batch with token-layout metadata passed by keyword:
+
+```python
+def collate_field(values, *, length, shifted):
+    ...
+```
+
+`values` contains the original unpadded values in document order. `length`
+is the resolved padded token length (or the common token length without padding).
+For example, a media callback concatenates image tensors along their media axis;
+a model-position callback pads each `[3, N]` value to `length`, removes
+its last position when `shifted=True`, and stacks to `[3, B, S]`. The callback
+must not mutate its inputs or retain per-call state. Its result is not automatically
+cast, sliced or flattened; output renaming and exclusion still apply. Empty batches
+invoke the callback with `values=()` and `length=pad_to_length` (or zero when
+padding is omitted). Return the correctly typed empty value or raise a clear
+`ValueError` if the callback does not support empty batches. All named
+fields must exist in every document, and reserved fields such as `input_ids`, `labels`,
+`positions` and `loss_mask` cannot be overridden. Keep scalar boundary positions
+separate from model-specific multi-axis positions.
+
+These field callbacks only assemble already prepared values. They do not select bins,
+shift input IDs/labels, drop records or select an attention policy.
+
+
+**Structured packs.** `pack_sequences` groups complete payloads with its existing
+`first_fit` or `best_fit` algorithm. A `pack_payloads` callback can assemble each
+selected pack into one mapping of **unshifted** `input_ids`, token-aligned `loss_mask`,
+scalar subdocument-reset `positions`, and ordered media/model-position fields.
+The result remains inside `{"packed_samples": mapping}`; Zephon retains the original
+record's contributor lineage. Explicitly unwrap it before batching:
+
+```python
+from operator import itemgetter
+
+pipeline.pack_sequences(..., pack_payloads=merge_documents)
+pipeline.map_transform(itemgetter("packed_samples"))
+pipeline.batch(batch_size)
+```
+
+`map_transform` changes only the payload; the record metadata and contributor
+lineage stay intact. `to_training` then performs its ordinary shift, padding and
+field collation on the resulting mapping. The converter does not inspect packing
+envelopes or select packing algorithms. The callback defines how the model fields merge.
+
+Measure packing length after expanding image placeholders into the actual token
+slots. For `L` model input tokens use capacity `L + 1`, and charge each complete
+document its full expanded token count. The merge callback must preserve that
+unshifted length and media order. It must not silently remove a terminal media
+slot to manufacture the next-token shift.
 
 
 **Closing a pipeline.** Call `pipeline.close()` in the loader's cleanup path when

@@ -8,6 +8,7 @@ different frameworks. Framework detection is automatic based on dtype,
 and optional dependencies are lazily imported.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -69,17 +70,63 @@ def resolve_dtype(dtype: Any) -> tuple[Any, str | None]:
     return dtype, None
 
 
-def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> Any:
+def stack_sequences(
+    sequences: list[Any],
+    dtype: Any,
+    framework: str | None,
+    *,
+    length: int | None = None,
+    pad_value: int = 0,
+    tails: Sequence[Any] | None = None,
+) -> Any:
     """Stack a list of sequences into a tensor or nested list.
 
     Args:
         sequences: List of sequences (lists, numpy arrays, or tensors).
         dtype: Target dtype (or None for lists).
         framework: "torch", "numpy", or None.
+        length: Optional padded scalar sequence width. Allocate the final batch
+            once and copy each sequence into its prefix; never truncate.
+        pad_value: Fill value for padding, validated against the output dtype.
+        tails: Optional explicit padding values per sequence, e.g. reset positions.
 
     Returns:
         Stacked tensor or list of lists.
     """
+    if length is not None:
+        result: Any
+        if any(len(seq) > length for seq in sequences):
+            raise ValueError(
+                f"sequence length exceeds pad_to_length={length}; truncation is not supported"
+            )
+        if framework == "torch":
+            import torch
+
+            device = (
+                sequences[0].device
+                if sequences and isinstance(sequences[0], torch.Tensor)
+                else None
+            )
+            result = torch.empty((len(sequences), length), dtype=dtype, device=device)
+        elif framework == "numpy":
+            import numpy as np
+
+            result = np.empty((len(sequences), length), dtype=dtype)
+        else:
+            result = [None] * len(sequences)
+        for i, seq in enumerate(sequences):
+            tail = tails[i] if tails is not None else None
+            padded = pad_field(
+                seq,
+                length - len(seq),
+                pad_value,
+                out=result[i] if framework is not None else None,
+                tail=tail,
+                scalar=True,
+            )
+            if framework is None:
+                result[i] = list(padded)
+        return result
     if framework == "torch":
         import torch
 
@@ -427,3 +474,116 @@ def mask_unsupervised_labels(
             )
             masked.append([lab if m else replacement for lab, m in zip(row, mask_row)])
         return masked
+
+
+def positions_from_segment_lengths(segment_lengths: Sequence[int]) -> Any:
+    """Return int32 positions resetting to zero at each positive-length segment."""
+    import numpy as np
+
+    parts = [np.arange(int(n), dtype=np.int32) for n in segment_lengths if n > 0]
+    return np.concatenate(parts) if parts else np.empty(0, dtype=np.int32)
+
+
+def pad_field(
+    seq: Any,
+    pad_len: int,
+    pad_value: int,
+    *,
+    out: Any = None,
+    tail: Any = None,
+    scalar: bool = False,
+) -> Any:
+    """Append padding, preserving the container or writing into an allocated row.
+
+    Explicit tail values override the constant fill. ``scalar`` validates the
+    token-aligned layout used by training conversion without a Python token scan.
+    """
+    import numpy as np
+
+    if out is None and pad_len <= 0 and not scalar:
+        return seq
+    torch_input = "torch" in type(seq).__module__
+    torch_output = "torch" in type(out).__module__
+    values = seq if torch_input else np.asarray(seq)
+    if scalar and (
+        values.ndim != 1 or (not torch_input and values.dtype.kind in "OUS")
+    ):
+        raise ValueError(
+            "expected a scalar token sequence; use field_collators for other layouts"
+        )
+    if out is None and isinstance(seq, (list, tuple)):
+        padding = [pad_value] * pad_len if tail is None else list(tail)
+        if isinstance(seq, tuple):
+            return seq + tuple(padding)
+        return seq + padding
+    if torch_input or torch_output:
+        import torch
+
+        if out is None:
+            out = seq.new_empty((len(seq) + pad_len, *seq.shape[1:]))
+        if torch_output or "torch" in type(out).__module__:
+            dtype = out.dtype
+            if (
+                not dtype.is_floating_point
+                and not dtype.is_complex
+                and dtype != torch.bool
+            ):
+                info = torch.iinfo(dtype)
+                if pad_len and not info.min <= pad_value <= info.max:
+                    raise ValueError(
+                        f"pad value {pad_value} is not representable in dtype {dtype}"
+                    )
+            out[: len(seq)] = torch.as_tensor(seq, dtype=dtype, device=out.device)
+            out[len(seq) :] = (
+                pad_value
+                if tail is None
+                else torch.as_tensor(tail, dtype=dtype, device=out.device)
+            )
+            return out
+        values = seq.numpy()
+    if not isinstance(values, np.ndarray):
+        raise TypeError(f"unsupported field type {type(seq).__name__} to pad")
+    if out is None:
+        out = np.empty((len(seq) + pad_len, *values.shape[1:]), dtype=values.dtype)
+    if pad_len and out.dtype.kind in "iu":
+        info = np.iinfo(out.dtype)
+        if not info.min <= pad_value <= info.max:
+            raise ValueError(
+                f"pad value {pad_value} is not representable in dtype {out.dtype}"
+            )
+    out[: len(seq)] = values
+    out[len(seq) :] = pad_value if tail is None else tail
+    return out
+
+
+def mask_segment_start_labels(
+    labels: Any, positions: Any, replacement: int, framework: str | None
+) -> Any:
+    """Mask targets at original segment starts, independently of model positions."""
+    if framework in ("torch", "numpy"):
+        if (
+            positions.ndim != 2
+            or positions.shape[:-1] != labels.shape[:-1]
+            or max(0, positions.shape[-1] - 1) != labels.shape[-1]
+        ):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if positions.shape[-1] and bool((positions[:, 0] != 0).any()):
+            raise ValueError("positions must start at zero in every nonempty document")
+        return mask_unsupervised_labels(
+            labels, positions[:, 1:] != 0, replacement, framework
+        )
+    for row, targets in zip(positions, labels):
+        if any(
+            isinstance(item, (list, tuple, dict, str, bytes))
+            or getattr(item, "ndim", 0) != 0
+            for item in row
+        ) or max(0, len(row) - 1) != len(targets):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if row and row[0] != 0:
+            raise ValueError("positions must start at zero in every nonempty document")
+    masks = [[value != 0 for value in row[1:]] for row in positions]
+    return mask_unsupervised_labels(labels, masks, replacement, framework)

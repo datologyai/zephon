@@ -14,7 +14,9 @@ from zephon._internal.utils.tensor_utils import (
     labels_to_loss_mask,
     mask_eos_labels,
     mask_padding_labels,
+    pad_field,
     padding_lengths_to_mask,
+    positions_from_segment_lengths,
     positions_to_cu_seqlens,
     sequence_positions,
     stack_sequences,
@@ -47,6 +49,28 @@ def test_stack_sequences_numpy_empty() -> None:
     out = stack_sequences([], np.int32, "numpy")
     assert out.shape == (0,)
     assert out.dtype == np.int32
+
+
+def test_shared_padding_preserves_tuple_and_checks_integer_range() -> None:
+    np = pytest.importorskip("numpy")
+    assert pad_field((1, 2), 2, 9) == (1, 2, 9, 9)
+    for dtype, value in ((np.uint16, 128001), (np.int32, 2**31)):
+        with pytest.raises(ValueError, match="not representable"):
+            pad_field(np.array([1, 2], dtype=dtype), 1, value)
+
+
+def test_padded_stack_uses_explicit_position_tails_without_mutating_inputs() -> None:
+    np = pytest.importorskip("numpy")
+    rows = [np.array([0, 1, 0], dtype=np.int32), np.array([0], dtype=np.int32)]
+    out = stack_sequences(
+        rows,
+        np.int32,
+        "numpy",
+        length=5,
+        tails=[positions_from_segment_lengths((5 - len(row),)) for row in rows],
+    )
+    assert out.tolist() == [[0, 1, 0, 0, 1], [0, 0, 1, 2, 3]]
+    assert [row.tolist() for row in rows] == [[0, 1, 0], [0]]
 
 
 def test_mask_padding_labels_list() -> None:
