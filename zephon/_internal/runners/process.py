@@ -993,7 +993,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         self._watchdog_thread = None
 
     def _watchdog_loop(self) -> None:
-        """Poll worker liveness; handle only UNEXPECTED deaths (negative exitcode).
+        """Poll worker liveness; act on deaths no other channel will report.
 
         A worker exit is "unexpected" when ``exitcode < 0``, i.e. the
         process was terminated by a signal (SIGSEGV=-11, SIGKILL=-9,
@@ -1001,7 +1001,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         actor needs to recover from, because the worker had no chance to
         deliver a ``WorkerErrorInfo`` via ``result_queue``.
 
-        Non-negative exitcodes are *clean* exits:
+        Zero exitcodes are *clean* exits:
 
         - ``exitcode == 0`` after a ``"stop"`` or ``"stop_hard"`` command.
         - ``exitcode == 0`` via the ``except BaseException`` handler at
@@ -1015,6 +1015,19 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         watchdog would try to ``task_queue.put()`` resubmits while
         ``_shutdown_workers`` held no drain, blocking forever while
         holding ``_shutdown_lock``.
+
+        Positive exitcodes are unreported exits: no ``WorkerErrorInfo`` was
+        delivered, so nothing else will surface them.
+
+        - Startup: the interpreter failed to boot, the operator failed to
+          unpickle, or ``setup()`` called ``os._exit(n)``.  A respawn
+          would fail the same way.
+        - Mid-run: user code called ``os._exit(n)`` (deliberate, not
+          transient), or the error handler itself raised (the transport
+          is suspect).
+
+        Either way the watchdog fails the run with ``WorkerExited`` and
+        never respawns, regardless of ``max_worker_retries``.
         """
         reported: set[int] = set()
         while not self._watchdog_stop.wait(timeout=_WATCHDOG_POLL_S):
@@ -1030,6 +1043,9 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                             continue
                         # Mark as seen regardless so we don't re-inspect.
                         reported.add(pid)
+                        if self._is_unreported_exit(proc):
+                            self._fail_unreported_exit(state, worker_index, proc)
+                            continue
                         if not self._is_unexpected_death(proc):
                             if _DEBUG:
                                 _debug(
@@ -1052,7 +1068,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         ``WorkerErrorInfo`` via ``result_queue`` and we need to resubmit
         + respawn.
 
-        "Expected" = non-negative exitcode, which means one of:
+        "Expected" = exitcode 0, which means one of:
         - 0 after a ``"stop"`` or ``"stop_hard"`` command.
         - 0 via the ``except BaseException`` handler at the bottom of
           ``_process_worker_main`` — a Python exception was caught and
@@ -1060,6 +1076,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         In both cases, normal error-propagation / shutdown paths handle
         cleanup; the watchdog must stay out of the way to avoid
         deadlocking ``_shutdown_workers`` on ``_shutdown_lock``.
+        Positive exitcodes are handled separately by
+        :meth:`_is_unreported_exit`.
 
         ``exitcode`` can be ``None`` transiently (after ``is_alive()``
         returned False but before the exit has been fully reaped).
@@ -1067,6 +1085,44 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         """
         code = proc.exitcode
         return code is not None and code < 0
+
+    @staticmethod
+    def _is_unreported_exit(proc: BaseProcess) -> bool:
+        """True iff a worker exited non-zero without reporting an error.
+
+        Every path through ``_process_worker_main`` that delivers a
+        ``WorkerErrorInfo`` returns normally (exitcode 0), so a positive
+        exitcode means the worker never reached, or fell out of, that
+        error-delivery path.
+        """
+        code = proc.exitcode
+        return code is not None and code > 0
+
+    def _fail_unreported_exit(
+        self,
+        state: "_ProcessOperatorState",
+        worker_index: int,
+        proc: BaseProcess,
+    ) -> None:
+        """Fail the active run with a ``WorkerCrashed`` for an unreported exit."""
+        context = self._active_context
+        if context is None:
+            return
+        info = WorkerErrorInfo(
+            exc_type="WorkerExited",
+            message=(
+                f"worker for op {state.node.name!r} in stage "
+                f"{state.stage_name!r} (worker_idx={worker_index}, "
+                f"pid={proc.pid}) exited with code {proc.exitcode} without "
+                "reporting an error. If it died during startup, check the "
+                "worker's stderr: a broken interpreter environment (e.g. a "
+                "stray PYTHONEXECUTABLE/PYTHONHOME, or a wrong "
+                "multiprocessing executable) or an operator that fails to "
+                f"unpickle are common causes. ({rank_ctx()})"
+            ),
+            formatted_traceback="",
+        )
+        self._record_error(context, WorkerCrashed(info))
 
     # Result-queue recovery after a worker crash lives in
     # :mod:`zephon._internal.runners.watchdog`.  The watchdog calls
@@ -1895,6 +1951,10 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                     pass
 
                 if not drained_any and state.inflight.is_zero():
+                    break
+                # Work dispatched to dead workers stays "in flight" forever;
+                # once none are left alive nothing more can arrive.
+                if not drained_any and not any(p.is_alive() for p in state.workers):
                     break
 
             _shutdown_debug(
