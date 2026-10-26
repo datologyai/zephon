@@ -120,6 +120,7 @@ class TestRaySingleOpActor:
                     info.stage_name,
                     info.op_index,
                     info.collect_stats,
+                    info.copies_mapped_arrays,
                 )
                 return [
                     SampleRecord(
@@ -134,7 +135,7 @@ class TestRaySingleOpActor:
             assert isinstance(result, RunnerResult)
             assert result.error is None
             (rec,) = result.payload
-            assert rec.payload["stage_info"] == (0, "test_stage", 0, False)
+            assert rec.payload["stage_info"] == (0, "test_stage", 0, False, True)
         finally:
             ray.kill(actor)
 

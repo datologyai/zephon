@@ -14,17 +14,22 @@ from zephon.types import SampleRecord
 
 @dataclass(frozen=True)
 class StageInfo:
-    """Plan metadata passed through :attr:`OpContext.stage_info`.
+    """Stage metadata passed through :attr:`OpContext.stage_info`.
 
     Default values indicate that setup has not run. ``stage_index`` and
     ``stage_name`` identify the stage, ``op_index`` identifies the operator
     within it, and ``collect_stats`` enables per-operator metrics.
+
+    ``copies_mapped_arrays`` indicates that the runner copies file-mapped NumPy
+    arrays into independent storage when sending outputs. Operators can then
+    skip copying those arrays themselves.
     """
 
     stage_index: int = -1
     stage_name: str = ""
     op_index: int = -1
     collect_stats: bool = False
+    copies_mapped_arrays: bool = False
 
 
 class OpContext:

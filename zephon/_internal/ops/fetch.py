@@ -44,9 +44,9 @@ class FetchOp(BaseOp):
                 "FetchOp requires 'datasets_by_id' in context (provided by WorkSource)"
             )
         store_options = StoreOptions.from_any(ctx.get("io_options"))
-        if ctx.get("stage_outputs_copied", False):
-            # The runner copies each sample to send it, so mapped reads can
-            # return views without retaining the shard after eviction.
+        if ctx.stage_info.copies_mapped_arrays:
+            # Sending outputs copies mapped arrays into independent storage,
+            # so Fetch need not make an extra copy to release the shard mapping.
             store_options = store_options.merge(
                 StoreOptions(vortex=VortexOptions(safe_mmap=False))
             )

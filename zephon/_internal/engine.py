@@ -683,12 +683,6 @@ class Engine:
         )
 
         for stage, spec in zip(self._plan.stages, self._runtime_spec.stages):
-            # Process and Ray stages copy their outputs to send them, so their
-            # operators need not copy views of their inputs, such as mapped files.
-            stage_ctx = {
-                **self._ctx,
-                "stage_outputs_copied": spec.runner_type in ("process", "remote"),
-            }
             common: dict[str, Any] = dict(
                 prefetch_capacity=spec.prefetch_capacity,
                 deterministic=self._opts.deterministic,
@@ -702,7 +696,7 @@ class Engine:
                 self._runners.append(
                     ThreadStageRunner(
                         stage,
-                        stage_ctx,
+                        self._ctx,
                         spec.worker_cap,
                         queue_capacity=spec.queue_capacity,
                         **common,
@@ -712,7 +706,7 @@ class Engine:
                 self._runners.append(
                     InlineStageRunner(
                         stage,
-                        stage_ctx,
+                        self._ctx,
                         spec.worker_cap,
                         **common,
                     )
@@ -721,7 +715,7 @@ class Engine:
                 self._runners.append(
                     ProcessStageRunner(
                         stage,
-                        stage_ctx,
+                        self._ctx,
                         spec.worker_cap,
                         queue_capacity=spec.queue_capacity,
                         mp_context=self._mp_context,
@@ -738,7 +732,7 @@ class Engine:
                 self._runners.append(
                     RemoteStageRunner(
                         stage,
-                        stage_ctx,
+                        self._ctx,
                         spec.worker_cap,
                         queue_capacity=spec.queue_capacity,
                         **common,

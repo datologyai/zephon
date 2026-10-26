@@ -62,26 +62,17 @@ Files containing bare values, such as strings or numeric lists, return those val
 directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
 
 **Memory-mapped reads.** By default, Zephon maps local Vortex shards into memory and
-reads segments as slices of the map. Reads then use no IO threads and no copies, and the
-operating system's page cache takes the place of a segment cache. A mapped shard must
-not change while it is open, because a truncated file can stop the process. To read
-shards through file IO and the segment cache instead, disable memory maps:
+reads segments as slices of the map, using the operating system's page cache instead
+of the segment cache. Decoding and output conversion can still allocate and copy.
+Mapped shards must not change while in use. Set `memory_map=False` to use file IO
+and the segment cache instead.
 
-```python
-pipeline.options(io_options={"vortex": {"memory_map": False}})
-```
-
-**Copies of mapped data.** A NumPy array that points into a mapped shard keeps the whole
-file on disk, also after the shard cache evicts it. The cache no longer counts that
-space, so the disk can fill. Thus, by default (`safe_mmap=True`), Zephon copies the
-arrays of mapped reads into memory that the sample owns. Fetch stages that run on the
-process or Ray runner skip this copy, because the runner copies each sample to send it.
-To keep zero-copy views on the thread or inline runner, for example when shards are
-not in the shard cache, disable the copy:
-
-```python
-pipeline.options(io_options={"vortex": {"safe_mmap": False}})
-```
+By default (`safe_mmap=True`), Zephon copies array views into owned memory so retained
+samples cannot keep evicted shard files on disk beyond the shard cache's budget.
+Process and Ray fetch stages skip this extra copy because sending outputs already
+copies mapped arrays into independent storage. Set `safe_mmap=False` to keep array
+views on the thread or inline runner, accepting that retained samples may keep shard
+files on disk after eviction.
 
 **Caching reads.** Zephon caches Vortex metadata in memory to speed up repeated reads.
 When memory maps are disabled, it also caches encoded file segments. Each fetch replica

@@ -18,7 +18,11 @@ def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
 
 
 def _setup_op(
-    op: FetchOp, ctx_data: dict[str, object], *, collect_stats: bool = False
+    op: FetchOp,
+    ctx_data: dict[str, object],
+    *,
+    collect_stats: bool = False,
+    copies_mapped_arrays: bool = False,
 ) -> FetchOp:
     ctx = {
         "record_node_metrics": _noop,
@@ -33,6 +37,7 @@ def _setup_op(
                 stage_name="stage0",
                 op_index=0,
                 collect_stats=collect_stats,
+                copies_mapped_arrays=copies_mapped_arrays,
             ),
         )
     )
@@ -153,20 +158,22 @@ def test_fetch_op_traits_and_accumulator() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ctx_data", "vortex_options", "safe_mmap"),
+    ("copies_mapped_arrays", "vortex_options", "safe_mmap"),
     [
-        ({}, {}, True),
-        ({"stage_outputs_copied": False}, {}, True),
-        ({"stage_outputs_copied": True}, {}, False),
-        ({}, {"safe_mmap": False}, False),
+        (False, {}, True),
+        (True, {}, False),
+        (False, {"safe_mmap": False}, False),
+        (True, {"safe_mmap": True}, False),
     ],
 )
+@pytest.mark.parametrize("memory_map", [False, True])
 def test_fetch_op_copies_mapped_arrays_unless_the_runner_copies(
     jsonl_dataset: Dataset,
     monkeypatch: pytest.MonkeyPatch,
-    ctx_data: dict[str, object],
+    copies_mapped_arrays: bool,
     vortex_options: dict[str, object],
     safe_mmap: bool,
+    memory_map: bool,
 ) -> None:
     options: list[StoreOptions] = []
 
@@ -179,11 +186,11 @@ def test_fetch_op_copies_mapped_arrays_unless_the_runner_copies(
         FetchOp(),
         {
             "datasets_by_id": {0: jsonl_dataset},
-            "io_options": {"vortex": {"memory_map": False, **vortex_options}},
-            **ctx_data,
+            "io_options": {"vortex": {"memory_map": memory_map, **vortex_options}},
         },
+        copies_mapped_arrays=copies_mapped_arrays,
     )
 
     assert options[0].vortex.safe_mmap is safe_mmap
     # The runner's copy changes only safe_mmap.
-    assert options[0].vortex.memory_map is False
+    assert options[0].vortex.memory_map is memory_map

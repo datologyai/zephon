@@ -295,14 +295,14 @@ class VortexOptions:
     """Vortex read-cache and process-wide worker-pool configuration.
 
     ``memory_map`` maps local shards into memory and reads segments as slices
-    of the map. Reads then use no IO threads and no copies, and the page cache
-    takes the place of the segment cache. A mapped shard must not change while
-    it is open. False reads shards through file IO and the segment cache.
-    ``safe_mmap`` copies the arrays of mapped reads into owned memory. Without
-    the copy, one retained sample keeps its whole shard on disk after the shard
-    cache evicts it, and the disk can fill. Process and Ray stages skip the
-    copy, because they copy their outputs to send them. False keeps the
-    zero-copy views.
+    of the map, using the OS page cache instead of the segment cache. Decoding
+    and output conversion can still allocate and copy. Mapped shards must not
+    change while in use. False reads shards through file IO and the segment cache.
+    ``safe_mmap`` copies array views from mapped reads into owned memory so
+    retained samples cannot keep evicted shard files on disk. Process and Ray
+    stages skip this extra copy because sending outputs already copies mapped
+    arrays into independent storage. False keeps array views on thread and
+    inline runners.
     ``segment_cache_bytes`` sets the encoded-segment cache's target size per
     fetch replica when ``memory_map`` is False. Zero disables it. The target is
     not a strict memory bound.

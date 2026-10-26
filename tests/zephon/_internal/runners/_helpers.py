@@ -109,7 +109,13 @@ class _StageInfoProbe(BaseOp):
 
     def process_many(self, elems: list[SampleRecord]) -> list[SampleRecord]:
         info = self.stage_info
-        stamp = (info.stage_index, info.stage_name, info.op_index, info.collect_stats)
+        stamp = (
+            info.stage_index,
+            info.stage_name,
+            info.op_index,
+            info.collect_stats,
+            info.copies_mapped_arrays,
+        )
         return [
             SampleRecord(meta=e.meta, payload={**e.payload, self._key: stamp})
             for e in elems

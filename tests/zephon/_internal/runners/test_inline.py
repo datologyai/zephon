@@ -157,8 +157,8 @@ def test_inline_runner_provides_stage_info_per_op() -> None:
         (out,) = list(runner.run(iter(_mk_records([7]))))
     finally:
         runner.close()
-    assert out.payload["first"] == (3, "probe_stage", 0, False)
-    assert out.payload["second"] == (3, "probe_stage", 1, False)
+    assert out.payload["first"] == (3, "probe_stage", 0, False, False)
+    assert out.payload["second"] == (3, "probe_stage", 1, False, False)
 
 
 def test_inline_runner_collect_stats_flag_reaches_ops() -> None:
@@ -174,7 +174,7 @@ def test_inline_runner_collect_stats_flag_reaches_ops() -> None:
         (out,) = list(runner.run(iter(_mk_records([7]))))
     finally:
         runner.close()
-    assert out.payload["probe"] == (0, "probe_stage", 0, True)
+    assert out.payload["probe"] == (0, "probe_stage", 0, True, False)
 
 
 @pytest.mark.parametrize("hard", [False, True])

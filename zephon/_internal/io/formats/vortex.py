@@ -247,10 +247,11 @@ class VortexShard(RandomAccessShard):
                 # guard for native arrays supplied by other readers or writers.
                 arrow_array = batch.to_arrow_array(arrow_type=self._export_type)
             else:
-                # One GIL release covers both the read and the export. Scattered
-                # rows come from many Vortex chunks, a few rows each, so one
-                # combined array costs less than an Arrow export per chunk.
-                # Contiguous rows keep their chunks, which avoids a copy.
+                # Unlike read_all().to_arrow_array(), this iterator method reads
+                # and exports under one GIL release.
+                #
+                # Combine scattered results to reduce per-chunk export overhead.
+                # Preserve contiguous results' chunks to avoid concatenation copies.
                 arrow_array = scan.to_arrow_array(
                     arrow_type=self._export_type, combine_chunks=not contiguous
                 )
