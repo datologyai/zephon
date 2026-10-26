@@ -427,3 +427,67 @@ def mask_unsupervised_labels(
             )
             masked.append([lab if m else replacement for lab, m in zip(row, mask_row)])
         return masked
+
+
+def pad_training_sequence(values: Any, length: int, value: Any, field: str) -> Any:
+    """Right-pad one scalar token sequence without changing its backing framework."""
+    ndim = getattr(values, "ndim", None)
+    if (ndim is not None and ndim != 1) or (
+        ndim is None
+        and any(
+            isinstance(item, (list, tuple, dict, str, bytes))
+            or getattr(item, "ndim", 0) != 0
+            for item in values
+        )
+    ):
+        raise ValueError(
+            f"'{field}' must be a scalar token sequence; use field_collators for other layouts"
+        )
+    remaining = length - len(values)
+    if remaining < 0:
+        raise ValueError(
+            f"'{field}' length {len(values)} exceeds pad_to_length={length}; truncation is not supported"
+        )
+    padding = list(range(remaining)) if field == "positions" else [value] * remaining
+    if "torch" in type(values).__module__:
+        import torch
+
+        return torch.cat((values, values.new_tensor(padding)))
+    if "numpy" in type(values).__module__:
+        import numpy as np
+
+        return np.concatenate((values, np.asarray(padding, dtype=values.dtype)))
+    return list(values) + padding
+
+
+def mask_segment_start_labels(
+    labels: Any, positions: Any, replacement: int, framework: str | None
+) -> Any:
+    """Mask targets at original segment starts, independently of model positions."""
+    if framework in ("torch", "numpy"):
+        if (
+            positions.ndim != 2
+            or positions.shape[:-1] != labels.shape[:-1]
+            or max(0, positions.shape[-1] - 1) != labels.shape[-1]
+        ):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if positions.shape[-1] and bool((positions[:, 0] != 0).any()):
+            raise ValueError("positions must start at zero in every nonempty document")
+        return mask_unsupervised_labels(
+            labels, positions[:, 1:] != 0, replacement, framework
+        )
+    for row, targets in zip(positions, labels):
+        if any(
+            isinstance(item, (list, tuple, dict, str, bytes))
+            or getattr(item, "ndim", 0) != 0
+            for item in row
+        ) or max(0, len(row) - 1) != len(targets):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if row and row[0] != 0:
+            raise ValueError("positions must start at zero in every nonempty document")
+    masks = [[value != 0 for value in row[1:]] for row in positions]
+    return mask_unsupervised_labels(labels, masks, replacement, framework)

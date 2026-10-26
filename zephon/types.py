@@ -11,6 +11,7 @@ from numbers import Integral
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Iterable,
     Literal,
     Mapping,
@@ -41,7 +42,13 @@ from zephon._internal.utils.tensor_utils import (
     mask_padding_labels as _mask_padding_labels,
 )
 from zephon._internal.utils.tensor_utils import (
+    mask_segment_start_labels as _mask_segment_start_labels,
+)
+from zephon._internal.utils.tensor_utils import (
     mask_unsupervised_labels as _mask_unsupervised_labels,
+)
+from zephon._internal.utils.tensor_utils import (
+    pad_training_sequence as _pad_training_sequence,
 )
 from zephon._internal.utils.tensor_utils import (
     padding_lengths_to_mask as _padding_lengths_to_mask,
@@ -529,6 +536,11 @@ class SampleBatch:
         eos_mask_loss: bool = False,
         eos_token_id: int | None = None,
         position_mode: Literal["preserve", "sequence"] = "preserve",
+        pad_to_length: int | None = None,
+        pad_token_id: int | None = None,
+        mask_segment_starts: bool = False,
+        field_collators: Mapping[str, Callable[[Sequence[Any], int, bool], Any]]
+        | None = None,
     ) -> dict[str, Any]:
         """Convert batch to training-ready format with optional LM label generation.
 
@@ -566,6 +578,31 @@ class SampleBatch:
                 ``"positions"`` field (emitted by ``pack_flat``) is surfaced
                 automatically and need not be listed here. Extra fields cannot
                 overwrite generated output fields, such as input_ids or labels.
+            pad_to_length: Optional fixed UNshifted token length. Right-pad shorter
+                documents before the existing next-token shift; never truncate.
+                Tokens use pad_token_id, ordinary token-aligned extra fields and
+                supervision use zero, and positions start a separate padding
+                segment. Existing meta.padding_length is included in the final
+                positional padding/loss masks. Omit to preserve legacy stacking.
+            pad_token_id: Nonnegative padding token ID required with pad_to_length.
+                May equal EOS: padding is identified by length, never token ID.
+            mask_segment_starts: If True, mask labels whose target has zero in
+                the original scalar payload positions. Requires return_labels and
+                aligned, zero-start positions. The first token of a document is
+                already outside the target slice. Independent of EOS IDs,
+                position_mode, model-specific positions and attention policy.
+            field_collators: Optional field-name to callable mapping. Each callable
+                receives (ordered_values, unshifted_length, return_labels), once
+                per nonempty batch. Values are the original unpadded field values;
+                unshifted_length is the padded length, or the common token length
+                when padding is omitted. Its result is emitted under that field's
+                name without dtype conversion, token slicing or flattening.
+                rename_fields/exclude_fields still apply. Fields are included
+                automatically and must exist in every payload. Callbacks own
+                media concatenation or model-position padding/slicing/stacking;
+                they must be deterministic, stateless and must not mutate inputs.
+                Generated/reserved fields cannot be overridden. Empty batches
+                emit [] for each registered field without invoking callbacks.
             ignore_index: Loss-ignore sentinel (default ``-100``). With
                 ``return_labels``, each record's trailing pad labels
                 (``meta.padding_length``) are set to this value.
@@ -590,7 +627,8 @@ class SampleBatch:
                 and exclude_fields like other sequence fields.
             return_padding_mask: Include a boolean input-aligned "padding_mask",
                 True only for trailing padding described by each record's
-                ``meta.padding_length`` (missing metadata means no padding).
+                ``meta.padding_length`` plus padding added by pad_to_length
+                (missing metadata means no pre-existing padding).
                 Uses bool tensors/arrays or Python bools for lists. With labels,
                 drops the last token like input_ids; then follows flatten,
                 rename_fields, and exclude_fields. Independent of loss_mask:
@@ -754,9 +792,49 @@ class SampleBatch:
                 + "return_loss_mask=True for the label-aligned mask, or "
                 + "return_labels=False for the raw mask."
             )
+        collators = dict(field_collators or {})
+        reserved_fields = {
+            "ids",
+            "texts",
+            "input_ids",
+            "labels",
+            "positions",
+            "loss_mask",
+            "padding_mask",
+            "cu_seqlens",
+            "max_seqlen",
+            "num_valid_tokens",
+        }
+        for name, collator in collators.items():
+            if not name or name in reserved_fields:
+                raise ValueError(
+                    f"field_collators cannot override reserved field {name!r}"
+                )
+            if not callable(collator):
+                raise TypeError(f"field_collators[{name!r}] must be callable")
+        if pad_to_length is not None:
+            if (
+                isinstance(pad_to_length, bool)
+                or not isinstance(pad_to_length, Integral)
+                or pad_to_length < 0
+            ):
+                raise ValueError("pad_to_length must be a nonnegative integer or None")
+            if pad_token_id is None:
+                raise ValueError("pad_to_length requires pad_token_id")
+        elif pad_token_id is not None:
+            raise ValueError("pad_token_id requires pad_to_length")
+        if pad_token_id is not None and (
+            isinstance(pad_token_id, bool)
+            or not isinstance(pad_token_id, Integral)
+            or pad_token_id < 0
+        ):
+            raise ValueError("pad_token_id must be a nonnegative integer or None")
+        if mask_segment_starts and not return_labels:
+            raise ValueError("mask_segment_starts requires return_labels=True")
         items = list(self.records)
         if not items:
             empty: dict[str, Any] = {"ids": [], "texts": []}
+            empty.update({name: [] for name in collators})
             if return_num_valid_tokens:
                 empty["num_valid_tokens"] = 0
             if return_loss_mask:
@@ -775,17 +853,17 @@ class SampleBatch:
         # Extract based on payload type
         if isinstance(items[0].payload, dict):
             token_lists, texts, extra_data, loss_mask_lists = self._extract_from_dicts(
-                items, tokens_field, extra_fields
+                items, tokens_field, tuple(dict.fromkeys((*extra_fields, *collators)))
             )
         else:
             token_lists, texts, extra_data, loss_mask_lists = self._extract_from_arrays(
                 items
             )
 
-        if return_cu_seqlens:
+        if return_cu_seqlens or mask_segment_starts:
             if "positions" not in extra_data:
                 raise ValueError(
-                    "return_cu_seqlens requires a 'positions' field in every payload; "
+                    "return_cu_seqlens/mask_segment_starts requires a 'positions' field in every payload; "
                     + "use pack_flat(emit_positions=True)"
                 )
             for i, (tokens_row, positions_row) in enumerate(
@@ -800,6 +878,49 @@ class SampleBatch:
                         f"'positions' must match the token sequence length at index {i}"
                     )
 
+        if collators and not isinstance(items[0].payload, dict):
+            raise ValueError(
+                "field_collators require mapping payloads with named fields"
+            )
+        custom_values = {name: extra_data.pop(name) for name in collators}
+        pad_lengths = [r.meta.padding_length or 0 for r in items]
+        if pad_to_length is not None:
+            lengths = [len(values) for values in token_lists]
+            if any(not 0 <= pad <= length for pad, length in zip(pad_lengths, lengths)):
+                raise ValueError(
+                    "padding_length must lie within its token document's length"
+                )
+            token_lists = [
+                _pad_training_sequence(values, pad_to_length, pad_token_id, "tokens")
+                for values in token_lists
+            ]
+            for name, values in extra_data.items():
+                if any(len(value) != length for value, length in zip(values, lengths)):
+                    raise ValueError(
+                        f"'{name}' must match tokens when padding; use field_collators for non-token fields"
+                    )
+                extra_data[name] = [
+                    _pad_training_sequence(value, pad_to_length, 0, name)
+                    for value in values
+                ]
+            if loss_mask_lists is not None:
+                loss_mask_lists = [
+                    _pad_training_sequence(value, pad_to_length, 0, "loss_mask")
+                    for value in loss_mask_lists
+                ]
+            pad_lengths = [
+                pad + pad_to_length - length
+                for pad, length in zip(pad_lengths, lengths)
+            ]
+        collator_length = 0
+        if collators:
+            lengths = [len(values) for values in token_lists]
+            if len(set(lengths)) != 1:
+                raise ValueError(
+                    "field_collators require equal token lengths; set pad_to_length for unequal documents"
+                )
+            collator_length = lengths[0]
+
         # Resolve dtype
         resolved_dtype, framework = _resolve_dtype(dtype)
 
@@ -812,11 +933,6 @@ class SampleBatch:
         # Stack tokens
         tokens = _stack_sequences(token_lists, resolved_dtype, framework)
 
-        pad_lengths = (
-            [r.meta.padding_length or 0 for r in items]
-            if return_labels or return_padding_mask
-            else []
-        )
         if return_padding_mask:
             result["padding_mask"] = _padding_lengths_to_mask(
                 tokens,
@@ -885,6 +1001,14 @@ class SampleBatch:
                 # extra_fields may have already emitted it explicitly.
                 result["loss_mask"] = masks
 
+        if mask_segment_starts:
+            boundary_positions = _stack_sequences(
+                extra_data["positions"], resolved_dtype, framework
+            )
+            result["labels"] = _mask_segment_start_labels(
+                result["labels"], boundary_positions, ignore_index, framework
+            )
+
         if eos_mask_loss:
             assert eos_token_id is not None  # Validated before extracting payloads.
             result["labels"] = _mask_eos_labels(
@@ -931,6 +1055,10 @@ class SampleBatch:
         if num_valid_tokens is not None:
             result["num_valid_tokens"] = num_valid_tokens
         result.update(sequence_metadata)
+        for name, collator in collators.items():
+            result[name] = collator(
+                tuple(custom_values[name]), collator_length, return_labels
+            )
 
         return _rename_and_exclude_fields(result, rename_fields, exclude_fields)
 
