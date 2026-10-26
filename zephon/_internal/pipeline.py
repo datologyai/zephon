@@ -909,6 +909,7 @@ class Pipeline:
         tokenizer_id: str | None = None,
         *,
         eos_token: str | None = None,
+        append_eos: bool = True,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
@@ -942,11 +943,16 @@ class Pipeline:
         assistant ranges by rendering successive conversation prefixes.
         ``apply_chat_template=False`` concatenates message content, appends EOS
         to assistant messages and selects targets from their roles.
+        ``append_eos=False`` disables operator-added EOS tokens in both paths;
+        EOS tokens already emitted by a template remain unchanged.
 
         ``loss_scope`` selects all assistant spans (``all_assistant``, default),
         the final contiguous supervised run (``last_span``), or all assistant
-        messages after the final user (``after_last_user``). Untagged templates
-        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
+        messages after the final user (``after_last_user``). ``all_tokens`` trains
+        every token except the conversation's first token, including user/system
+        text and template markers; it does not require assistant spans. Untagged
+        templates require explicit ``span_source="prefix_diff"`` with
+        ``after_last_user``.
 
         With generation tags, ``after_last_user`` verifies templates automatically.
         Each selected assistant's generation blocks must cover its reasoning,
@@ -969,6 +975,7 @@ class Pipeline:
             tokenizer,
             tokenizer_id,
             eos_token=eos_token,
+            append_eos=append_eos,
             field=field,
             max_length=max_length,
             chat_template=chat_template,

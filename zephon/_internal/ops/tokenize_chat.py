@@ -165,6 +165,7 @@ class TokenizeChat(TokenizeBase):
         tokenizer_id: str | None = None,
         *,
         eos_token: str | None = None,
+        append_eos: bool = True,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
@@ -194,6 +195,10 @@ class TokenizeChat(TokenizeBase):
                 string the no-template path appends and the id the EOS
                 finalizer checks. Only valid together with ``tokenizer_id``
                 — a pre-instantiated ``tokenizer`` already carries its EOS.
+            append_eos: Append a missing final EOS in the template path, or EOS
+                after each assistant message without a template. Defaults to True.
+                False disables only operator-added EOS tokens; tokens already
+                emitted by a template are retained.
             field: Dot-separated payload path of the messages list (each
                 message a mapping with ``role`` and ``content``).
             max_length: Cap on output length in tokens, applied to the full
@@ -215,6 +220,10 @@ class TokenizeChat(TokenizeBase):
             loss_scope: ``all_assistant`` selects every assistant span;
                 ``last_span`` selects the final contiguous supervised run;
                 ``after_last_user`` selects every assistant after the final user.
+                ``all_tokens`` selects every token except the conversation's
+                first token, preserving the packed-boundary loss convention.
+                This includes template markers and non-assistant content;
+                assistant-span reconstruction and ``span_source`` are unused.
                 Defaults to ``all_assistant``. With generation tags,
                 ``after_last_user`` verifies ownership and supervision automatically.
                 Verification adds rendering and tokenization at setup and for new
@@ -283,6 +292,7 @@ class TokenizeChat(TokenizeBase):
         self.field = field
         self._field_path: tuple[str, ...] = tuple(field.split("."))
         self.max_length = max_length
+        self.append_eos = append_eos
         self.apply_chat_template = apply_chat_template
         self.chat_template = self._read_template(chat_template)
         self.span_source: SpanSource = span_source
@@ -354,7 +364,7 @@ class TokenizeChat(TokenizeBase):
             )
 
         if not self.apply_chat_template:
-            if self._eos_str is None:
+            if self.append_eos and self._eos_str is None:
                 raise ValueError(
                     "apply_chat_template=False requires a tokenizer with a "
                     + "string eos_token: the no-template path appends it to "
@@ -372,6 +382,9 @@ class TokenizeChat(TokenizeBase):
                 + "or set apply_chat_template=False for raw-content SFT."
             )
         self._template_str = template
+
+        if self.loss_scope == "all_tokens":
+            return
 
         has_tags = _GENERATION_TAG_RE.search(template) is not None
         if self.span_source == "generation_tags" and not has_tags:
@@ -482,6 +495,22 @@ class TokenizeChat(TokenizeBase):
 
     # Span-source implementations return unshifted (ids, mask) pairs.
 
+    def _via_all_tokens(
+        self, messages: list[Mapping[str, Any]], render_kwargs: dict[str, Any]
+    ) -> tuple[list[int], "np.ndarray"]:
+        """Encode one full render without requiring assistant-span metadata."""
+        assert self._template_str is not None
+        tok = cast("PreTrainedTokenizerFast", self.tok)
+        text = tok.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            chat_template=thread_salted_template(self._template_str),
+            **render_kwargs,
+        )
+        ids = encode_rendered_text(tok, text, max_length=self.max_length)["input_ids"]
+        return ids, np.ones(len(ids), dtype=np.uint8)
+
     def _via_generation_tags(
         self, messages: list[Mapping[str, Any]], render_kwargs: dict[str, Any]
     ) -> tuple[list[int], "np.ndarray"]:
@@ -583,7 +612,7 @@ class TokenizeChat(TokenizeBase):
     def _via_no_template(
         self, messages: list[Mapping[str, Any]]
     ) -> tuple[list[int], "np.ndarray"]:
-        eos = self._eos_str
+        eos = self._eos_str if self.append_eos else ""
         assert eos is not None
         parts: list[str] = []
         spans: list[tuple[int, int]] = []
@@ -642,7 +671,9 @@ class TokenizeChat(TokenizeBase):
             ids, mask = self._via_no_template(messages)
         else:
             render_kwargs = self._render_kwargs(payload)
-            if self._resolved_span_source == "generation_tags":
+            if self.loss_scope == "all_tokens":
+                ids, mask = self._via_all_tokens(messages, render_kwargs)
+            elif self._resolved_span_source == "generation_tags":
                 if self._template_verifier is not None:
                     ids, mask = self._via_owned_generation_tags(
                         self._template_verifier, messages, render_kwargs, sample_id
@@ -652,7 +683,9 @@ class TokenizeChat(TokenizeBase):
             else:
                 ids, mask = self._via_prefix_diff(messages, render_kwargs)
 
-        if self.loss_scope == "last_span":
+        if self.loss_scope == "all_tokens":
+            mask = np.ones(len(ids), dtype=np.uint8)
+        elif self.loss_scope == "last_span":
             mask = _last_span_only(mask)
 
         # Templates may omit the final EOS. Copying the previous mask bit
@@ -660,6 +693,7 @@ class TokenizeChat(TokenizeBase):
         # preserves all-zero masks for the unsupervised-drop path.
         if (
             self.apply_chat_template
+            and self.append_eos
             and self._eos_id is not None
             and ids
             and ids[-1] != self._eos_id
@@ -712,6 +746,9 @@ class TokenizeChat(TokenizeBase):
             return "content_loss"
         if len(ids) < 2:
             return "degenerate"
+        if self.loss_scope == "all_tokens":
+            # The first token has no preceding context in its conversation.
+            mask[0] = 0
         if not mask.any():
             return "unsupervised"
         if mask[0] == 1:
@@ -813,6 +850,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
     max_length: int | None = None
     chat_template: str | None = None
     apply_chat_template: bool = True
+    append_eos: bool = True
     span_source: SpanSource = "auto"
     loss_scope: LossScope = "all_assistant"
     chat_template_kwargs: tuple[tuple[str, Any], ...] = ()
@@ -830,6 +868,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
             max_length=op.max_length,
             chat_template=op.chat_template,
             apply_chat_template=op.apply_chat_template,
+            append_eos=op.append_eos,
             span_source=op.span_source,
             loss_scope=op.loss_scope,
             chat_template_kwargs=tuple(sorted(op.chat_template_kwargs.items())),
@@ -848,6 +887,7 @@ class ChatTokenCountingSpec(TokenCountingSpec):
                 max_length=self.max_length,
                 chat_template=self.chat_template,
                 apply_chat_template=self.apply_chat_template,
+                append_eos=self.append_eos,
                 span_source=self.span_source,
                 loss_scope=self.loss_scope,
                 chat_template_kwargs=dict(self.chat_template_kwargs),

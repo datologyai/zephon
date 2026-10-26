@@ -23,6 +23,7 @@ from zephon._internal.ops.tokenize_chat import TokenizeChat
 from zephon.io import Dataset, InMemoryShard
 from zephon.types import SampleMeta, SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
+from zephon.work.token_estimation import TokenEstimation
 
 pytestmark = pytest.mark.integration
 
@@ -71,6 +72,79 @@ def test_process_worker_reuses_preflight_setup_checks(tmp_path: Path) -> None:
     assert sum(pid == parent and truncated == "True" for pid, truncated in probes) == 2
     workers = [truncated for pid, truncated in probes if pid != parent]
     assert workers == ["False"]
+
+
+def test_all_token_chat_preflight_packing_and_checkpoint_in_process() -> None:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    tokenizer = make_fast_tokenizer()
+    documents = [
+        {"messages": [{"role": role, "content": content}]}
+        for role, content in (
+            ("user", "hi there"),
+            ("assistant", "good morning"),
+            ("user", "the answer"),
+            ("assistant", "is 4"),
+        )
+    ]
+
+    def make_pipeline() -> Pipeline:
+        source = StaticMixtureWorkSource(
+            [Dataset.from_dict("chat", {0: InMemoryShard(documents)})],
+            {"chat": 1.0},
+            chunk_size=1,
+            shuffle_shards=False,
+            shuffle_within_shard=False,
+            token_estimation=TokenEstimation(
+                calibration_samples=4,
+                calibration_shards_min=1,
+                calibration_shards_max=1,
+            ),
+        )
+        return (
+            Pipeline(source)
+            .tokenize_chat(
+                tokenizer,
+                chat_template="{% for m in messages %}{{ m.content }} {% endfor %}",
+                loss_scope="all_tokens",
+                append_eos=False,
+            )
+            .pack_flat(
+                5,
+                algorithm="first_fit",
+                num_bins=1,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            .batch(1)
+            .options(
+                runner="process",
+                deterministic=True,
+                max_workers=1,
+                canonical_replicas=1,
+            )
+        )
+
+    pipeline = make_pipeline()
+    restored = make_pipeline()
+    try:
+        assert pipeline.preflight_tokenizers().ok
+        iterator = iter(pipeline)
+        first = next(iterator).to_training(dtype=None, return_labels=True)
+        ids = tokenizer.convert_tokens_to_ids(["hi", "there", "good", "morning"])
+        assert first["input_ids"] == [ids]
+        assert first["labels"] == [[ids[1], -100, ids[3], -100]]
+        checkpoint = pipeline.checkpoint()
+        remaining = [
+            batch.to_training(dtype=None, return_labels=True) for batch in iterator
+        ]
+        assert len(remaining) == 1
+        restored.restore(checkpoint)
+        assert [
+            batch.to_training(dtype=None, return_labels=True) for batch in restored
+        ] == remaining
+    finally:
+        pipeline.close()
+        restored.close()
 
 
 SEQ = 32

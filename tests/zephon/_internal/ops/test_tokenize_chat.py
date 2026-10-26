@@ -39,7 +39,7 @@ from zephon._internal.ops.tokenize_chat import (
 from zephon._internal.token_counting import FatalCountError
 from zephon._internal.utils.chat_template import _verify_chat_template
 from zephon.io import Dataset, InMemoryShard
-from zephon.ops.config import SpanSource
+from zephon.ops.config import LossScope, SpanSource
 from zephon.types import SampleMeta, SampleRecord
 from zephon.validation import ValidationError
 from zephon.work.token_estimation import (
@@ -198,6 +198,104 @@ def test_last_span_scope(fast_tokenizer: Any) -> None:
 
 
 # EOS finalizer
+
+
+@pytest.mark.parametrize("template", [TAGGED_TEMPLATE, TAGGED_TEMPLATE_NO_EOS])
+def test_append_eos_false_preserves_template_tokens(
+    fast_tokenizer: Any, template: str
+) -> None:
+    messages = CONVERSATION[:2]
+    op = TokenizeChat(fast_tokenizer, chat_template=template, append_eos=False)
+    record = _run_one(op, {"messages": messages})
+    expected = fast_tokenizer.apply_chat_template(
+        messages,
+        chat_template=template,
+        tokenize=True,
+        return_dict=True,
+        add_generation_prompt=False,
+    )["input_ids"]
+    assert _payload(record)["input_ids"].tolist() == expected
+    assert _mask(record) == [0, 0, 0, 0, 0] + [1] * (len(expected) - 5)
+
+
+@pytest.mark.parametrize(
+    ("template", "messages"),
+    [
+        (TAGGED_TEMPLATE_NO_EOS, CONVERSATION),
+        (UNTAGGED_TEMPLATE, _messages(("user", "hi there"))),
+        (POSITION_DEPENDENT_TEMPLATE, CONVERSATION),
+        (
+            "{% for m in messages %}{{ m.content }} {% endfor %}",
+            _messages(("assistant", "hi there")),
+        ),
+    ],
+    ids=["tagged", "user-only", "position-dependent", "no-spans-assistant-first"],
+)
+def test_all_tokens_needs_no_assistant_spans(
+    fast_tokenizer: Any, template: str, messages: list[dict[str, Any]]
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=template,
+        loss_scope="all_tokens",
+        append_eos=False,
+    )
+    record = _run_one(op, {"messages": messages})
+    expected = fast_tokenizer.apply_chat_template(
+        messages,
+        chat_template=template,
+        tokenize=True,
+        return_dict=True,
+        add_generation_prompt=False,
+    )["input_ids"]
+    assert not record.meta.tombstone
+    assert _payload(record)["input_ids"].tolist() == expected
+    assert _mask(record) == [0] + [1] * (len(expected) - 1)
+
+
+@pytest.mark.parametrize(
+    ("scope", "append_eos", "max_length"),
+    [
+        ("all_assistant", False, None),
+        ("all_tokens", True, None),
+        ("all_assistant", False, 3),
+        ("all_tokens", False, 3),
+        ("all_tokens", False, 7),
+    ],
+)
+def test_chat_controls_counting_matches_delivery_after_pickle(
+    fast_tokenizer: Any, scope: LossScope, append_eos: bool, max_length: int | None
+) -> None:
+    op = TokenizeChat(
+        fast_tokenizer,
+        chat_template=TAGGED_TEMPLATE_NO_EOS,
+        loss_scope=scope,
+        append_eos=append_eos,
+        max_length=max_length,
+    )
+    payload = {"messages": CONVERSATION[:2]}
+    record = _run_one(op, payload)
+    spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    assert spec.append_eos == append_eos
+    assert spec.loss_scope == scope
+    expected = 0 if record.meta.tombstone else len(_payload(record)["input_ids"])
+    assert spec.build_counter().plan([]).count(payload) == expected
+    if scope == "all_tokens":
+        assert expected > 0  # User-only truncation remains trainable.
+        assert _mask(record) == [0] + [1] * (expected - 1)
+
+
+def test_all_tokens_no_template_can_omit_eos(fast_tokenizer: Any) -> None:
+    tokenizer = copy.deepcopy(fast_tokenizer)
+    tokenizer.eos_token = None
+    op = TokenizeChat(
+        tokenizer, apply_chat_template=False, append_eos=False, loss_scope="all_tokens"
+    )
+    record = _run_one(op, {"messages": _messages(("assistant", "hi there"))})
+    assert _tokens(tokenizer, record) == ["hi", "there"]
+    assert _mask(record) == [0, 1]
+    assert _run_one(op, {"messages": _messages(("user", "hi"))}).meta.tombstone
+    assert _run_one(op, {"messages": []}).meta.tombstone
 
 
 def test_eos_finalizer_appends_when_render_lacks_eos(fast_tokenizer: Any) -> None:

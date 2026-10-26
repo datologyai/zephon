@@ -68,6 +68,19 @@ Non-object arguments use additional verification renders, cached by exact value.
 Templates that cannot render the verification probe or attribute the affected output
 fail verification. These are supervision checks; they do not validate JSON syntax.
 
+Use `loss_scope="all_tokens"` to supervise user/system content and template markers
+as well as assistant content. This mode renders the whole conversation without
+requiring assistant-generation tags or prefix reconstruction. It retains user-only
+conversations and conversations truncated before the assistant response. The first
+token's loss mask remains zero, preserving independent-conversation labels after
+packing; conversations with fewer than two tokens are still dropped.
+
+`append_eos=False` preserves the template's exact token sequence instead of adding
+a missing final EOS. EOS tokens already emitted by the template remain present.
+Without a chat template, this option also disables EOS insertion after assistant
+messages. Both options are included in token-aware mixture calibration, so counts
+match the tokens that the configured encoder actually delivers.
+
 By default, both tokenization operators replace the original record payload with their
 tokenized output. If later operations in your pipeline need access to the original fields,
 set `preserve_upstream_payload=True` to retain those fields along with the tokenized
