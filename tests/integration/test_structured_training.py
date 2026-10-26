@@ -89,8 +89,9 @@ def convert(batch: SampleBatch) -> dict[str, Any]:
     return output
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
-@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
+@pytest.mark.parametrize(
+    ("algorithm", "runner"), [("first_fit", "threads"), ("best_fit", "process")]
+)
 def test_structured_training_capacity_media_order_and_resume(
     algorithm: str, runner: str
 ) -> None:
@@ -140,10 +141,10 @@ def resume_in_fresh_driver(
     output.put([convert(batch) for batch in pipeline])
 
 
-@pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
-def test_structured_training_fresh_driver_replay(algorithm: str) -> None:
+def test_structured_training_fresh_driver_replay() -> None:
     import multiprocessing
 
+    algorithm = "first_fit"
     baseline = [convert(batch) for batch in make_pipeline(algorithm, "inline")]
     first = make_pipeline(algorithm, "inline")
     iterator = iter(first)

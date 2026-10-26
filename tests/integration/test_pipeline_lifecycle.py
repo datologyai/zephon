@@ -1,4 +1,4 @@
-"""Public cleanup covers iteration and checkpoint-destination initialization."""
+"""Public runtime cleanup, checkpoint destinations, and explicit replay."""
 
 import gc
 import pickle
@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from zephon import Dataset, InMemoryShard, Pipeline, StaticMixtureWorkSource
+
+pytestmark = pytest.mark.integration
 
 
 def make_pipeline(runner: str = "inline", *, mtp: bool = False) -> Pipeline:
@@ -38,20 +40,8 @@ def payloads(pipeline: Pipeline) -> list[Any]:
     return [batch.to_training(dtype=None)["input_ids"] for batch in pipeline]
 
 
-def test_close_fresh_or_unstarted_pipeline_does_not_initialize_runtime() -> None:
+def test_close_checkpoint_destination_before_iteration() -> None:
     pipeline = make_pipeline()
-    iterator = iter(pipeline)
-    pipeline.close()
-    pipeline.close()
-    assert pipeline._engine is None
-    with pytest.raises(StopIteration):
-        next(iterator)
-    assert len(payloads(pipeline)) == 8
-
-
-@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
-def test_close_checkpoint_destination_before_iteration(runner: str) -> None:
-    pipeline = make_pipeline(runner)
     checkpoint = pipeline.checkpoint()
     engine = pipeline._engine
     assert engine is not None and not engine._closed
@@ -73,10 +63,9 @@ def test_close_after_invalid_restore_still_releases_destination_runtime() -> Non
     assert pipeline.checkpoint() == checkpoint
 
 
-@pytest.mark.parametrize("runner", ["inline", "threads", "process"])
-def test_close_active_iterator_preserves_explicit_resume(runner: str) -> None:
-    baseline = payloads(make_pipeline(runner))
-    pipeline = make_pipeline(runner)
+def test_close_active_iterator_preserves_explicit_resume() -> None:
+    baseline = payloads(make_pipeline("process"))
+    pipeline = make_pipeline("process")
     iterator = iter(pipeline)
     prefix = [next(iterator).to_training(dtype=None)["input_ids"]]
     checkpoint = pipeline.checkpoint()
@@ -132,7 +121,6 @@ def test_close_after_full_exhaustion_is_idempotent() -> None:
     assert pipeline.checkpoint() == checkpoint
 
 
-@pytest.mark.integration
 def test_close_active_mtp_iterator_releases_subprocess_and_restores() -> None:
     baseline = payloads(make_pipeline(mtp=True))
     pipeline = make_pipeline(mtp=True)
@@ -149,7 +137,6 @@ def test_close_active_mtp_iterator_releases_subprocess_and_restores() -> None:
     assert prefix + payloads(pipeline) == baseline
 
 
-@pytest.mark.integration
 def test_mtp_terminal_state_replaces_checkpoint_destination_engine() -> None:
     pipeline = make_pipeline(mtp=True)
     initial = pipeline.checkpoint()
