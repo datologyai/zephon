@@ -234,3 +234,22 @@ def test_inline_releases_gc_freeze_when_engine_construction_fails(
         next(pipe._iter_inline())
     gc_freeze_guard.assert_called_once_with(True)
     gc_freeze_guard.return_value.close.assert_called_once_with()
+
+
+def test_completed_mtp_stream_supersedes_checkpoint_destination_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    destination_engine = pipe._engine = Mock()
+    terminal_state = {"terminal": True}
+    child = Mock(_closed=False)
+    child.__iter__ = Mock(return_value=iter(()))
+    child.checkpoint.return_value = terminal_state
+    monkeypatch.setattr("zephon._internal.mtp.MTPPipeline", Mock(return_value=child))
+
+    assert list(pipe._iter_mtp()) == []
+    destination_engine.close.assert_called_once_with()
+    child.checkpoint.assert_called_once_with(local=True)
+    child.close.assert_called_once_with()
+    assert pipe._engine is None and pipe._sp is None
+    assert pipe._last_local_state is terminal_state
