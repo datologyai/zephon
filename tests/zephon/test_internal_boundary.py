@@ -53,6 +53,16 @@ _ALLOWED_INTERNAL_TEST_IMPORTS: dict[str, frozenset[str]] = {
             "zephon._internal.runners.process:ProcessStageRunner",
         }
     ),
+    # Bootstrap failure injection must precede the runner's worker error transport.
+    "tests/integration/test_process_startup.py": frozenset(
+        {
+            "zephon._internal.graph:Node",
+            "zephon._internal.graph:Stage",
+            "zephon._internal.ops.delay:DelayById",
+            "zephon._internal.runners.process:ProcessStageRunner",
+            "zephon._internal.runners:process",
+        }
+    ),
     # Reset sticky catalog state and the mmap registry between tests.
     "tests/conftest.py": frozenset(
         {
