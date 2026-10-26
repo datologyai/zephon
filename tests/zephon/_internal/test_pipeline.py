@@ -1,9 +1,12 @@
 """Unit tests for pipeline options and output notification."""
 
+import gc
 import multiprocessing
-from collections.abc import Iterator
+import pickle
+from collections.abc import Generator, Iterator
 from typing import Any
 from unittest.mock import Mock, patch
+from weakref import WeakSet, ref
 
 import pytest
 
@@ -41,6 +44,60 @@ def test_invalid_checkpoint_bytes_do_not_start_a_runtime() -> None:
         decode.assert_called_once_with(b"invalid")
     assert pipe._engine is None
     assert pipe._pending_restore is None
+
+
+def test_close_unstarted_iterator_preserves_pending_restore() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    checkpoint = {"pending": "restore"}
+    pipe._pending_restore = checkpoint
+
+    def unstarted() -> Generator[None, None, None]:
+        raise AssertionError("closing an unstarted iterator must not execute it")
+        yield
+
+    iterator = unstarted()
+    pipe._iterators.add(iterator)
+    pipe.close()
+    pipe.close()
+    assert pipe._engine is None
+    assert pipe._pending_restore is checkpoint
+    with pytest.raises(StopIteration):
+        next(iterator)
+    restored = pickle.loads(pickle.dumps(pipe))
+    assert not restored._iterators
+    assert restored._pending_restore == checkpoint
+
+
+def test_iterator_tracking_does_not_keep_an_unstarted_iterator_alive() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    iterator = iter(pipe)
+    reference = ref(iterator)
+    assert len(pipe._iterators) == 1
+    del iterator
+    gc.collect()
+    assert reference() is None
+    assert not pipe._iterators
+
+
+def test_close_releases_engine_even_if_iterator_cleanup_raises() -> None:
+    pipe = object.__new__(Pipeline)
+    engine = Mock()
+    pipe._engine = engine
+    pipe._iterators = WeakSet()
+
+    def paused() -> Generator[None, None, None]:
+        try:
+            yield
+        finally:
+            raise RuntimeError("iterator cleanup failed")
+
+    iterator = paused()
+    next(iterator)
+    pipe._iterators.add(iterator)
+    with pytest.raises(RuntimeError, match="iterator cleanup failed"):
+        pipe.close()
+    engine.close.assert_called_once_with()
+    pipe.close()
 
 
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
