@@ -1016,13 +1016,18 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         ``_shutdown_workers`` held no drain, blocking forever while
         holding ``_shutdown_lock``.
 
-        Positive exitcodes are *unreported* exits: the worker died before
-        ``_process_worker_main`` could deliver a ``WorkerErrorInfo`` (the
-        interpreter failed to boot, the spawn payload failed to unpickle,
-        the error handler itself raised, or user code called
-        ``os._exit(n)``).  Nothing else will ever surface these, so the
-        watchdog fails the run instead of letting the pump wait forever.
-        They are not respawned: startup failures are deterministic.
+        Positive exitcodes are unreported exits: no ``WorkerErrorInfo`` was
+        delivered, so nothing else will surface them.
+
+        - Startup: the interpreter failed to boot, the operator failed to
+          unpickle, or ``setup()`` called ``os._exit(n)``.  A respawn
+          would fail the same way.
+        - Mid-run: user code called ``os._exit(n)`` (deliberate, not
+          transient), or the error handler itself raised (the transport
+          is suspect).
+
+        Either way the watchdog fails the run with ``WorkerExited`` and
+        never respawns, regardless of ``max_worker_retries``.
         """
         reported: set[int] = set()
         while not self._watchdog_stop.wait(timeout=_WATCHDOG_POLL_S):
