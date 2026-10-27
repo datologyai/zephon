@@ -24,8 +24,9 @@ arrays use read-only NumPy views where possible, avoiding Python objects for eac
 element. Views retain their backing buffers after reader closure; mutation needs
 an explicit copy. Boolean and validity unpacking, date32 widening, nullable
 scalar conversion and Python fallbacks allocate. Parquet's row gather copies
-selected values before conversion; Vortex supplies an indexed selection. Process
-transport may make a further SHM copy. Duplicate rows share read-only arrays but
+selected values before conversion; Vortex supplies an indexed selection, and
+``copy_array_views`` copies views of a mapped file. Process transport may make a
+further SHM copy. Duplicate rows share read-only arrays but
 own their mutable Python containers.
 
 Fixed-width buffers are read with ``np.frombuffer``, not ``Array.to_numpy``.
@@ -141,12 +142,46 @@ def _copy_repeated_containers(
 ) -> list[SamplePayload]:
     """Keep duplicate samples' mutable containers independent without copying arrays."""
     if not isinstance(positions, range):
-        seen: set[int] = set()
+        first: dict[int, SamplePayload] = {}
         for output, pos in enumerate(positions):
-            if pos in seen:
-                samples[output] = _copy_containers(samples[output])
-            seen.add(pos)
+            if pos in first:
+                # Fixed-size rows yield new NumPy view objects on each lookup.
+                # Reuse the first row's arrays so protective copies stay shared.
+                samples[output] = _copy_containers(first[pos])
+            else:
+                first[pos] = samples[output]
     return samples
+
+
+def copy_array_views(samples: list[SamplePayload]) -> list[SamplePayload]:
+    """Replace NumPy views in payloads with read-only copies that own their memory.
+
+    A view retains the whole Arrow buffer that it reads, which can be a mapped
+    file. Conversion puts arrays only at the column level, directly in a payload
+    or in a struct row's dictionary, so the copy does not search deeper.
+    Duplicate rows keep one shared copy, as they shared one view.
+    """
+    # The samples keep each view alive, so its id stays unique during the loop.
+    copies: dict[int, np.ndarray] = {}
+    for output, sample in enumerate(samples):
+        if isinstance(sample, dict):
+            for name, value in sample.items():
+                sample[name] = _owned_array(value, copies)
+        else:
+            samples[output] = _owned_array(sample, copies)
+    return samples
+
+
+def _owned_array(value: Any, copies: dict[int, np.ndarray]) -> Any:
+    if not isinstance(value, np.ndarray) or value.base is None:
+        return value
+
+    copy = copies.get(id(value))
+    if copy is None:
+        copy = value.copy()
+        copy.setflags(write=False)
+        copies[id(value)] = copy
+    return copy
 
 
 def _copy_containers(value: Any) -> Any:
@@ -414,6 +449,7 @@ def take_and_materialize(
 
 __all__ = [
     "arrow_table_to_samples",
+    "copy_array_views",
     "require_pyarrow",
     "samples_from_columns",
     "take_and_materialize",

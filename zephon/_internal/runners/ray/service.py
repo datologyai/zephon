@@ -69,6 +69,7 @@ class RaySingleOpActor:
             stage_name=stage_name,
             op_index=op_index,
             collect_stats=collect_stats,
+            copies_mapped_arrays=True,
         )
         try:
             self._op.setup(OpContext(dict(ctx_services), stage_info))

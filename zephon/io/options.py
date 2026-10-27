@@ -294,8 +294,18 @@ class ParquetOptions:
 class VortexOptions:
     """Vortex read-cache and process-wide worker-pool configuration.
 
+    ``memory_map`` defaults to False, using file IO and the segment cache.
+    True maps local shards and reads segments as slices of the map, using the
+    OS page cache instead. Decoding and output conversion can still allocate
+    and copy. Mapped shards must not change while in use.
+    ``safe_mmap`` copies array views from mapped reads into owned memory so
+    retained samples cannot keep evicted shard files on disk. Process and Ray
+    stages skip this extra copy because sending outputs already copies mapped
+    arrays into independent storage. False keeps array views on thread and
+    inline runners.
     ``segment_cache_bytes`` sets the encoded-segment cache's target size per
-    fetch replica. Zero disables it. The target is not a strict memory bound.
+    fetch replica when ``memory_map`` is False. Zero disables it. The target is
+    not a strict memory bound.
     ``worker_threads`` defaults to one background worker; calling fetch threads
     can also execute Vortex work. Zero disables background workers, and explicit
     None leaves the pool unchanged. An explicit count overrides VORTEX_MAX_THREADS;
@@ -305,6 +315,10 @@ class VortexOptions:
 
     segment_cache_bytes: int = _option(64 * 1024**2)
     worker_threads: int | None = _option(1, preserve_none=True)
+    # Mmap can help with large payloads such as images, but can slow down
+    # token and text reads. Measure your workload before enabling it.
+    memory_map: bool = _option(False)
+    safe_mmap: bool = _option(True)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
@@ -313,6 +327,11 @@ class VortexOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
+        if type(self.memory_map) is not bool:
+            raise ValueError("vortex.memory_map must be a boolean")
+        if type(self.safe_mmap) is not bool:
+            raise ValueError("vortex.safe_mmap must be a boolean")
+
         if self.worker_threads is not None:
             _validate_non_negative_int("vortex.worker_threads", self.worker_threads)
         _validate_non_negative_int(

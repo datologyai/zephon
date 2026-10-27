@@ -623,7 +623,11 @@ def test_thread_runner_initial_and_grown_instances_share_stage_info() -> None:
     )
     try:
         expected = StageInfo(
-            stage_index=5, stage_name="probe_stage", op_index=0, collect_stats=False
+            stage_index=5,
+            stage_name="probe_stage",
+            op_index=0,
+            collect_stats=False,
+            copies_mapped_arrays=False,
         )
         state = runner.ops[0]
         assert [inst.stage_info for inst in state.instances] == [expected]

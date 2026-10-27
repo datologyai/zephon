@@ -430,6 +430,7 @@ def _process_worker_main(config: _ProcessWorkerConfig) -> None:
             stage_name=config.stage_name,
             op_index=config.op_index,
             collect_stats=config.collect_stats,
+            copies_mapped_arrays=True,
         )
         op_instance.setup(OpContext(dict(config.ctx_services), stage_info))
         total_ns = time.perf_counter_ns() - startup_t0

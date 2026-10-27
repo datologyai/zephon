@@ -127,11 +127,49 @@ def test_vortex_options_merge_disable_and_reset() -> None:
         {"segment_cache_bytes": 1.5},
         {"segment_cache_bytes": True},
         {"segment_cache_bytes": ""},
+        {"memory_map": 1},
+        {"memory_map": "true"},
+        {"safe_mmap": 0},
+        {"safe_mmap": "false"},
     ],
 )
 def test_vortex_options_reject_invalid_limits(options: dict) -> None:
     with pytest.raises(ValueError):
         StoreOptions.from_any({"vortex": options})
+
+
+@pytest.mark.parametrize("worker_threads", [2, None])
+def test_vortex_options_preserve_positional_arguments(
+    worker_threads: int | None,
+) -> None:
+    options = VortexOptions(4096, worker_threads)
+    assert options.segment_cache_bytes == 4096
+    assert options.worker_threads is worker_threads
+    assert options.memory_map is False
+    assert options.safe_mmap is True
+    assert options._provided_fields == {"segment_cache_bytes", "worker_threads"}
+
+    assert VortexOptions(
+        4096, worker_threads, memory_map=True, safe_mmap=False
+    ) == VortexOptions(
+        segment_cache_bytes=4096,
+        worker_threads=worker_threads,
+        memory_map=True,
+        safe_mmap=False,
+    )
+
+
+def test_vortex_options_memory_map_defaults_off_and_merges() -> None:
+    assert VortexOptions().memory_map is False
+    assert VortexOptions().safe_mmap is True
+
+    base = StoreOptions.from_any({"vortex": {"memory_map": True}})
+    assert base.vortex.memory_map is True
+
+    # Other Vortex fields keep the earlier choice.
+    merged = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
+    assert merged.vortex.memory_map is True
+    assert merged.vortex.segment_cache_bytes == 0
 
 
 def test_shared_metadata_cache_option_merge_disable_and_reset() -> None:

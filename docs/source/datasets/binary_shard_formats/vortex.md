@@ -61,10 +61,31 @@ Vortex structs return dictionaries keyed by field name, including single-field s
 Files containing bare values, such as strings or numeric lists, return those values
 directly. Both use the [same conversion rules as Parquet](../parquet.md#sample-payloads).
 
-**Caching reads.** Zephon caches Vortex metadata and encoded file segments in memory to
-speed up repeated reads. Each fetch replica has its own caches, separate from the on-disk
-shard cache. You can adjust their sizes through the pipeline's `io_options`; these are
-the defaults:
+**Memory-mapped reads.** Zephon uses regular file IO and Vortex's segment cache by
+default. You can opt into memory-mapped reads with `memory_map=True`. This can help
+with large payloads such as images, but can slow down token and text reads, so measure
+your workload before enabling it:
+
+```python
+pipeline.options(io_options={"vortex": {"memory_map": True}})
+```
+
+Mmap reads segments as slices of the mapped file, using the operating system's page
+cache instead of the segment cache. Decoding and output conversion can still allocate
+and copy. Mapped shards must not change while in use.
+
+When mmap is enabled, the default `safe_mmap=True` setting copies array views into
+owned memory so retained samples cannot keep evicted shard files on disk beyond the
+shard cache's budget.
+Process and Ray fetch stages skip this extra copy because sending outputs already
+copies mapped arrays into independent storage. Set `safe_mmap=False` to keep array
+views on the thread or inline runner, accepting that retained samples may keep shard
+files on disk after eviction.
+
+**Caching reads.** Zephon caches Vortex metadata in memory to speed up repeated reads.
+When memory maps are disabled, it also caches encoded file segments. Each fetch replica
+has its own caches, separate from the on-disk shard cache. You can adjust their sizes
+through the pipeline's `io_options`; these are the defaults:
 
 ```python
 pipeline.options(

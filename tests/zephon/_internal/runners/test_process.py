@@ -1972,7 +1972,7 @@ def test_process_worker_receives_stage_info() -> None:
         stage_output_mode="stream_items",
     )
     (out,) = list(runner.run(iter(_mk_records([7]))))
-    assert out.payload["probe"] == (2, "probe_stage", 0, False)
+    assert out.payload["probe"] == (2, "probe_stage", 0, False, True)
 
 
 @pytest.mark.parametrize("failure", ["cancelled", "parent"])

@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from zephon._internal.ops import fetch as fetch_module
 from zephon._internal.ops.fetch import FetchOp
 from zephon._internal.stream import EngineSample
-from zephon.io import Dataset
+from zephon.io import Dataset, StoreOptions
 from zephon.ops.base import OpContext, StageInfo
 
 
@@ -17,7 +18,11 @@ def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
 
 
 def _setup_op(
-    op: FetchOp, ctx_data: dict[str, object], *, collect_stats: bool = False
+    op: FetchOp,
+    ctx_data: dict[str, object],
+    *,
+    collect_stats: bool = False,
+    copies_mapped_arrays: bool = False,
 ) -> FetchOp:
     ctx = {
         "record_node_metrics": _noop,
@@ -32,6 +37,7 @@ def _setup_op(
                 stage_name="stage0",
                 op_index=0,
                 collect_stats=collect_stats,
+                copies_mapped_arrays=copies_mapped_arrays,
             ),
         )
     )
@@ -149,3 +155,42 @@ def test_fetch_op_traits_and_accumulator() -> None:
     acc_nondet = op.accumulator(deterministic=False, ctx={})
     assert acc_nondet._max_batch == 32
     assert acc_nondet._max_latency_ms == 10
+
+
+@pytest.mark.parametrize(
+    ("copies_mapped_arrays", "vortex_options", "safe_mmap"),
+    [
+        (False, {}, True),
+        (True, {}, False),
+        (False, {"safe_mmap": False}, False),
+        (True, {"safe_mmap": True}, False),
+    ],
+)
+@pytest.mark.parametrize("memory_map", [False, True])
+def test_fetch_op_copies_mapped_arrays_unless_the_runner_copies(
+    jsonl_dataset: Dataset,
+    monkeypatch: pytest.MonkeyPatch,
+    copies_mapped_arrays: bool,
+    vortex_options: dict[str, object],
+    safe_mmap: bool,
+    memory_map: bool,
+) -> None:
+    options: list[StoreOptions] = []
+
+    def record_store(_datasets: object, **kwargs: StoreOptions) -> object:
+        options.append(kwargs["options"])
+        return object()
+
+    monkeypatch.setattr(fetch_module, "build_multi_dataset_store", record_store)
+    _setup_op(
+        FetchOp(),
+        {
+            "datasets_by_id": {0: jsonl_dataset},
+            "io_options": {"vortex": {"memory_map": memory_map, **vortex_options}},
+        },
+        copies_mapped_arrays=copies_mapped_arrays,
+    )
+
+    assert options[0].vortex.safe_mmap is safe_mmap
+    # The runner's copy changes only safe_mmap.
+    assert options[0].vortex.memory_map is memory_map

@@ -11,7 +11,7 @@ from zephon._internal.io.stores import build_multi_dataset_store
 from zephon._internal.io.stores.resilient import SampleLoadStats
 from zephon._internal.observability.stopwatch import Stopwatch
 from zephon._internal.stream import EngineSample
-from zephon.io.options import StoreOptions
+from zephon.io.options import StoreOptions, VortexOptions
 from zephon.observability.stats import FetchTimingDelta
 from zephon.ops.accumulators import Accumulator, CountingAccumulator
 from zephon.ops.base import BaseOp, OpContext
@@ -44,6 +44,13 @@ class FetchOp(BaseOp):
                 "FetchOp requires 'datasets_by_id' in context (provided by WorkSource)"
             )
         store_options = StoreOptions.from_any(ctx.get("io_options"))
+        if ctx.stage_info.copies_mapped_arrays:
+            # Sending outputs copies mapped arrays into independent storage,
+            # so Fetch need not make an extra copy to release the shard mapping.
+            store_options = store_options.merge(
+                StoreOptions(vortex=VortexOptions(safe_mmap=False))
+            )
+
         # Set the process-global catalog dir (the Engine sets it on the driver;
         # a spawned worker / Ray actor sets it here) before the store attaches it.
         set_catalog_dir(store_options)
