@@ -58,6 +58,7 @@ join non-daemon children — preventing the process from blocking exit.
 from __future__ import annotations
 
 import ctypes
+import gc
 import multiprocessing as mp
 import os
 import queue as _queue_mod
@@ -323,6 +324,10 @@ def _mtp_worker(
         # Pending notify args indexed by sequence number.  Only lightweight
         # NamedTuples of scalars/cursors — never retains the full item payload.
         pending: dict[int, NotifyArgs] = {}
+        # Built, and no data has flowed yet: what is alive now lives as long as the
+        # hub. Freezing it keeps every full collection from rescanning those objects.
+        gc.collect()
+        gc.freeze()
         seq = 0
 
         shutdown = False
