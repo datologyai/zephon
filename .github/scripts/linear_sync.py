@@ -31,10 +31,29 @@ TEAM_KEY = "ZEPH"
 TRIAGE_LABEL = "from-github-pr"
 
 ISSUE_ID_RE = re.compile(r"\b(ZEPH|PLAT)-(\d+)\b", re.IGNORECASE)
+# Linear's magic words; an ID after one of these is a link, not a mention.
+MAGIC_ID_RE = re.compile(
+    r"\b(?:close[sd]?|closing|fix(?:e[sd])?|fixing|resolve[sd]?|resolving"
+    r"|complete[sd]?|completing|refs?|references|part of|related to"
+    r"|contributes to|towards?)\s*:?\s+((?:ZEPH|PLAT)-\d+)\b",
+    re.IGNORECASE,
+)
 RELEASE_RE = re.compile(r"^v(\d+\.\d+)\b")
 # Only milestones this script could have set are ever replaced or cleared, so a
 # milestone a maintainer set by hand for another reason is left alone.
 MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+$")
+
+
+class _LinearError(RuntimeError):
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        super().__init__(f"Linear API error: {errors}")
+        self.errors = errors
+
+    @property
+    def not_found(self) -> bool:
+        return all(
+            e.get("message", "").startswith("Entity not found") for e in self.errors
+        )
 
 
 class _Client:
@@ -55,10 +74,18 @@ class _Client:
                 "Content-Type": "application/json",
             },
         )
-        with urllib.request.urlopen(request) as response:
-            payload = json.load(response)
+        try:
+            with urllib.request.urlopen(request) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            # Linear reports some GraphQL errors (rate limits, bad input) as 4xx
+            # with the usual error body.
+            try:
+                payload = json.load(error)
+            except ValueError:
+                raise error from None
         if payload.get("errors"):
-            raise RuntimeError(f"Linear API error: {payload['errors']}")
+            raise _LinearError(payload["errors"])
         return payload["data"]
 
     def github(self, method: str, path: str, data: dict[str, Any] | None = None) -> Any:
@@ -99,10 +126,17 @@ class _Client:
             if self.dry_run:
                 self._milestones[title] = -1
                 return -1
-            created = self.github(
-                "POST", f"/repos/{self.repo}/milestones", {"title": title}
-            )
-            self._milestones[title] = created["number"]
+            try:
+                created = self.github(
+                    "POST", f"/repos/{self.repo}/milestones", {"title": title}
+                )
+                self._milestones[title] = created["number"]
+            except urllib.error.HTTPError as error:
+                # A concurrent run for another PR created it first.
+                if error.code != 422:
+                    raise
+                self._milestones = None
+                return self.milestone_number(title)
         return self._milestones[title]
 
 
@@ -117,11 +151,14 @@ def _log(message: str) -> None:
 
 
 def _referenced_ids(pr: dict[str, Any]) -> list[str]:
-    text = "\n".join([pr["head"]["ref"], pr["title"], pr.get("body") or ""])
-    seen: dict[str, None] = {}
-    for team, number in ISSUE_ID_RE.findall(text):
-        seen[f"{team.upper()}-{number}"] = None
-    return list(seen)
+    # Branch and magic-word IDs win, so an ID merely mentioned in the
+    # description cannot override the issue the PR is actually linked to.
+    branch = [f"{t}-{n}" for t, n in ISSUE_ID_RE.findall(pr["head"]["ref"])]
+    text = "\n".join([pr["title"], pr.get("body") or ""])
+    linked = branch + MAGIC_ID_RE.findall(text)
+    if not linked:
+        linked = [f"{t}-{n}" for t, n in ISSUE_ID_RE.findall(text)]
+    return list(dict.fromkeys(i.upper() for i in linked))
 
 
 def _release_of(milestone: dict[str, Any] | None) -> str | None:
@@ -132,15 +169,25 @@ def _release_of(milestone: dict[str, Any] | None) -> str | None:
 
 
 def _fetch_issue(client: _Client, identifier: str) -> _LinkedIssue | None:
+    # Any error other than "not found" propagates: treating an outage as "no
+    # issue" would clear the milestone of every open PR.
     try:
         data = client.linear(
-            "query($id: String!) { issue(id: $id) { identifier projectMilestone { name } } }",
+            """query($id: String!) {
+              issue(id: $id) { identifier team { key } projectMilestone { name } }
+            }""",
             id=identifier,
         )
-    except RuntimeError as error:
-        _log(f"  {identifier}: not found ({error})")
+    except _LinearError as error:
+        if not error.not_found:
+            raise
+        _log(f"  {identifier}: not found")
         return None
     issue = data["issue"]
+    # An issue moved to another team still resolves by its old identifier.
+    if issue["team"]["key"] != TEAM_KEY:
+        _log(f"  {identifier}: now {issue['identifier']}, not a {TEAM_KEY} issue")
+        return None
     return _LinkedIssue(issue["identifier"], _release_of(issue["projectMilestone"]))
 
 
@@ -226,24 +273,29 @@ def _resolve(
     """Return the PR's ZEPH issue, and whether it references only PLAT issues."""
     ids = _referenced_ids(pr)
     zeph = [i for i in ids if i.startswith(f"{TEAM_KEY}-")]
+    fallback: _LinkedIssue | None = None
     for identifier in zeph:
         issue = _fetch_issue(client, identifier)
         if issue and issue.release:
             return issue, False
-    if zeph:
-        return _fetch_issue(client, zeph[0]), False
-    if ids:
-        return None, True
+        fallback = fallback or issue
+    if fallback:
+        return fallback, False
 
     issue = _attached_issue(client, pr["html_url"])
     if issue:
         return issue, False
+    if ids and not zeph:
+        return None, True
 
     # Stacked PRs inherit their parent's issue, so a stack without IDs yields one
     # triage issue (from the PR targeting the default branch), not one per PR.
+    # Only the issue is inherited: a parent's PLAT reference is reported on the
+    # parent's own run.
     parent = _stack_parent(client, pr, default_branch)
     if parent and depth < 20:
-        return _resolve(client, parent, default_branch, create, depth + 1)
+        issue, _ = _resolve(client, parent, default_branch, create, depth + 1)
+        return issue, False
 
     is_bot = pr["user"]["type"] == "Bot"
     if create and not is_bot and not pr["draft"] and depth == 0:
@@ -258,9 +310,9 @@ def _sync_milestone(
     wanted = issue.release if issue else None
     if wanted == current:
         return
+    if current is not None and not MANAGED_MILESTONE_RE.match(current):
+        return
     if wanted is None:
-        if current is None or not MANAGED_MILESTONE_RE.match(current):
-            return
         _log(f"  clear milestone {current}")
         number = None
     else:
@@ -313,7 +365,8 @@ def main() -> int:
     for pr in client.github_paged(f"/repos/{client.repo}/pulls?state=open"):
         try:
             _handle(client, pr, default_branch, create=False)
-        except (RuntimeError, urllib.error.HTTPError) as error:
+        # One PR's failure (network, unexpected payload) must not stop the pass.
+        except Exception as error:
             _log(f"::warning::#{pr['number']}: {error}")
     return 0
 

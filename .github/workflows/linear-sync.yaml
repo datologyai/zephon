@@ -33,8 +33,10 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
     - name: Sync
       env:
         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         GITHUB_TOKEN: ${{ github.token }}
-      run: python .github/scripts/linear_sync.py ${{ github.event_name == 'pull_request_target' && 'pr' || 'reconcile' }}
+      # --no-project: the script is stdlib-only, so skip building zephon.
+      run: uv run --no-project .github/scripts/linear_sync.py ${{ github.event_name == 'pull_request_target' && 'pr' || 'reconcile' }}
