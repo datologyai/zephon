@@ -903,6 +903,38 @@ def test_mapped_reads_copy_arrays_unless_disabled(
     assert all(not row["tokens"].flags.writeable for row in rows)
 
 
+@pytest.mark.parametrize("struct", [False, True], ids=["bare", "struct"])
+@pytest.mark.parametrize("nested", [False, True], ids=["vector", "matrix"])
+def test_mapped_fixed_size_duplicates_share_one_owned_array(
+    tmp_path: Path, vortex: Any, pa: Any, struct: bool, nested: bool
+) -> None:
+    """Repeating a 4 KiB fixed-size row must not allocate 64 separate copies."""
+    values = np.arange(2 * 1024, dtype=np.int32).reshape(2, 1024)
+    kind = pa.list_(pa.int32(), 1024)
+    if nested:
+        values = values.reshape(2, 32, 32)
+        kind = pa.list_(pa.list_(pa.int32(), 32), 32)
+    array = pa.array(values.tolist(), type=kind)
+    source = pa.table({"tokens": array}) if struct else vortex.array(array)
+    path = tmp_path / "fixed.vortex"
+    vortex.io.write(source, str(path))
+    shard = VortexShard(path)
+    try:
+        rows = shard.getsamples([1] * 64)
+    finally:
+        shard.close()
+
+    arrays = [row["tokens"] if struct else row for row in rows]
+    assert len(arrays) == 64
+    assert all(array is arrays[0] for array in arrays)
+    assert arrays[0].nbytes == 4096
+    assert arrays[0].base is None
+    assert not arrays[0].flags.writeable
+    np.testing.assert_array_equal(arrays[0], values[1])
+    if struct:
+        assert len({id(row) for row in rows}) == 64
+
+
 def test_opener_maps_files_and_copies_arrays_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pa: Any
 ) -> None:

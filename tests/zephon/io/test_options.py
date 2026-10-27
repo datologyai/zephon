@@ -138,6 +138,27 @@ def test_vortex_options_reject_invalid_limits(options: dict) -> None:
         StoreOptions.from_any({"vortex": options})
 
 
+@pytest.mark.parametrize("worker_threads", [2, None])
+def test_vortex_options_preserve_positional_arguments(
+    worker_threads: int | None,
+) -> None:
+    options = VortexOptions(4096, worker_threads)
+    assert options.segment_cache_bytes == 4096
+    assert options.worker_threads is worker_threads
+    assert options.memory_map is True
+    assert options.safe_mmap is True
+    assert options._provided_fields == {"segment_cache_bytes", "worker_threads"}
+
+    assert VortexOptions(
+        4096, worker_threads, memory_map=False, safe_mmap=False
+    ) == VortexOptions(
+        segment_cache_bytes=4096,
+        worker_threads=worker_threads,
+        memory_map=False,
+        safe_mmap=False,
+    )
+
+
 def test_vortex_options_memory_map_defaults_on_and_merges() -> None:
     assert VortexOptions().memory_map is True
     assert VortexOptions().safe_mmap is True

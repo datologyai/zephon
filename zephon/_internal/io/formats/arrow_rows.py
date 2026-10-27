@@ -142,11 +142,14 @@ def _copy_repeated_containers(
 ) -> list[SamplePayload]:
     """Keep duplicate samples' mutable containers independent without copying arrays."""
     if not isinstance(positions, range):
-        seen: set[int] = set()
+        first: dict[int, SamplePayload] = {}
         for output, pos in enumerate(positions):
-            if pos in seen:
-                samples[output] = _copy_containers(samples[output])
-            seen.add(pos)
+            if pos in first:
+                # Fixed-size rows yield new NumPy view objects on each lookup.
+                # Reuse the first row's arrays so protective copies stay shared.
+                samples[output] = _copy_containers(first[pos])
+            else:
+                first[pos] = samples[output]
     return samples
 
 

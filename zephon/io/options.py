@@ -313,10 +313,10 @@ class VortexOptions:
     share the pool, so the last applied count wins.
     """
 
-    memory_map: bool = _option(True)
-    safe_mmap: bool = _option(True)
     segment_cache_bytes: int = _option(64 * 1024**2)
     worker_threads: int | None = _option(1, preserve_none=True)
+    memory_map: bool = _option(True)
+    safe_mmap: bool = _option(True)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
