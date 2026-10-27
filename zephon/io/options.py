@@ -294,10 +294,10 @@ class ParquetOptions:
 class VortexOptions:
     """Vortex read-cache and process-wide worker-pool configuration.
 
-    ``memory_map`` maps local shards into memory and reads segments as slices
-    of the map, using the OS page cache instead of the segment cache. Decoding
-    and output conversion can still allocate and copy. Mapped shards must not
-    change while in use. False reads shards through file IO and the segment cache.
+    ``memory_map`` defaults to False, using file IO and the segment cache.
+    True maps local shards and reads segments as slices of the map, using the
+    OS page cache instead. Decoding and output conversion can still allocate
+    and copy. Mapped shards must not change while in use.
     ``safe_mmap`` copies array views from mapped reads into owned memory so
     retained samples cannot keep evicted shard files on disk. Process and Ray
     stages skip this extra copy because sending outputs already copies mapped
@@ -315,7 +315,9 @@ class VortexOptions:
 
     segment_cache_bytes: int = _option(64 * 1024**2)
     worker_threads: int | None = _option(1, preserve_none=True)
-    memory_map: bool = _option(True)
+    # Mmap can help with large payloads such as images, but can slow down
+    # token and text reads. Measure your workload before enabling it.
+    memory_map: bool = _option(False)
     safe_mmap: bool = _option(True)
     _provided_fields: frozenset[str] = field(
         init=False,

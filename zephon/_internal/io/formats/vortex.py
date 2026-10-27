@@ -110,7 +110,7 @@ def _open_vortex_file(
     metadata_cache: MetadataCache[str, _VortexMetadata],
     segment_cache: Any | None,
     *,
-    memory_map: bool = True,
+    memory_map: bool = False,
 ) -> tuple[Any, _VortexMetadata]:
     """Open a reader using the store's footer and segment caches."""
     vortex = _require_vortex()
@@ -172,7 +172,7 @@ class VortexShard(RandomAccessShard):
         length: int | None = None,
         metadata_cache: MetadataCache[str, _VortexMetadata] | None = None,
         segment_cache: Any | None = None,
-        memory_map: bool = True,
+        memory_map: bool = False,
         copy_mapped_arrays: bool = True,
     ) -> None:
         self._path = path

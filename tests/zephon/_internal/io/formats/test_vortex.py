@@ -918,7 +918,7 @@ def test_mapped_fixed_size_duplicates_share_one_owned_array(
     source = pa.table({"tokens": array}) if struct else vortex.array(array)
     path = tmp_path / "fixed.vortex"
     vortex.io.write(source, str(path))
-    shard = VortexShard(path)
+    shard = VortexShard(path, memory_map=True)
     try:
         rows = shard.getsamples([1] * 64)
     finally:
@@ -935,10 +935,23 @@ def test_mapped_fixed_size_duplicates_share_one_owned_array(
         assert len({id(row) for row in rows}) == 64
 
 
-def test_opener_maps_files_and_copies_arrays_by_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pa: Any
+@pytest.mark.parametrize(
+    ("options", "memory_map", "copy_arrays"),
+    [
+        ({}, False, False),
+        ({"memory_map": True}, True, True),
+        ({"memory_map": True, "safe_mmap": False}, True, False),
+    ],
+)
+def test_opener_uses_regular_reads_unless_mmap_is_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pa: Any,
+    options: dict[str, bool],
+    memory_map: bool,
+    copy_arrays: bool,
 ) -> None:
-    """Mapped reads, the default, use no segment cache and copy their arrays."""
+    """Regular reads cache segments; opt-in mmap copies array views by default."""
     to_arrow_type = mock.Mock(return_value=pa.struct([("value", pa.int64())]))
     native_open = mock.Mock(
         side_effect=lambda *_args, **_kwargs: SimpleNamespace(
@@ -964,22 +977,20 @@ def test_opener_maps_files_and_copies_arrays_by_default(
     )
     ref = LocalShardRef(raw=LocalShardFile(path=path, bytes=4), extra={"length": 1})
 
-    opener = VortexShardOpener(StoreOptions())
+    opener = VortexShardOpener(StoreOptions.from_any({"vortex": options}))
     try:
         shards = [opener.open_shard(locator, ref) for _ in range(2)]
-        assert all(shard._copy_arrays for shard in shards)
+        assert all(shard._copy_arrays is copy_arrays for shard in shards)
         assert [
-            call.kwargs.get("memory_map") for call in native_open.call_args_list
-        ] == [
-            True,
-            True,
-        ]
-        make_cache.assert_not_called()
-    finally:
-        opener.close()
-
-    opener = VortexShardOpener(StoreOptions(vortex=VortexOptions(safe_mmap=False)))
-    try:
-        assert not opener.open_shard(locator, ref)._copy_arrays
+            call.kwargs.get("memory_map", False) for call in native_open.call_args_list
+        ] == [memory_map] * 2
+        if memory_map:
+            make_cache.assert_not_called()
+        else:
+            make_cache.assert_called_once_with(64 * 1024**2)
+            assert all(
+                call.kwargs["segment_cache"] is make_cache.return_value
+                for call in native_open.call_args_list
+            )
     finally:
         opener.close()

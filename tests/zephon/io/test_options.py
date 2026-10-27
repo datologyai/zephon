@@ -145,30 +145,30 @@ def test_vortex_options_preserve_positional_arguments(
     options = VortexOptions(4096, worker_threads)
     assert options.segment_cache_bytes == 4096
     assert options.worker_threads is worker_threads
-    assert options.memory_map is True
+    assert options.memory_map is False
     assert options.safe_mmap is True
     assert options._provided_fields == {"segment_cache_bytes", "worker_threads"}
 
     assert VortexOptions(
-        4096, worker_threads, memory_map=False, safe_mmap=False
+        4096, worker_threads, memory_map=True, safe_mmap=False
     ) == VortexOptions(
         segment_cache_bytes=4096,
         worker_threads=worker_threads,
-        memory_map=False,
+        memory_map=True,
         safe_mmap=False,
     )
 
 
-def test_vortex_options_memory_map_defaults_on_and_merges() -> None:
-    assert VortexOptions().memory_map is True
+def test_vortex_options_memory_map_defaults_off_and_merges() -> None:
+    assert VortexOptions().memory_map is False
     assert VortexOptions().safe_mmap is True
 
-    base = StoreOptions.from_any({"vortex": {"memory_map": False}})
-    assert base.vortex.memory_map is False
+    base = StoreOptions.from_any({"vortex": {"memory_map": True}})
+    assert base.vortex.memory_map is True
 
     # Other Vortex fields keep the earlier choice.
     merged = base.merge(StoreOptions.from_any({"vortex": {"segment_cache_bytes": 0}}))
-    assert merged.vortex.memory_map is False
+    assert merged.vortex.memory_map is True
     assert merged.vortex.segment_cache_bytes == 0
 
 

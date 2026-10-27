@@ -162,7 +162,7 @@ def test_thread_fetch_copies_mapped_arrays_unless_disabled(
             max_workers=1,
             io_options={
                 "cache": {"enabled": False},
-                "vortex": {"safe_mmap": safe_mmap},
+                "vortex": {"memory_map": True, "safe_mmap": safe_mmap},
             },
         )
     )
