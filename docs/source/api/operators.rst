@@ -24,6 +24,12 @@ The string literals that operator-configuration arguments accept.
 
    Which special tokens ``tokenize`` adds around each sequence.
 
+.. py:data:: ChatSpecialTokensMode
+   :type: Literal['bos_eos', 'bos', 'eos', 'none', 'tokenizer_default', 'assistant_eos']
+
+   Which special tokens ``tokenize_chat`` adds. ``assistant_eos`` appends EOS after
+   each assistant message when no chat template is applied.
+
 .. py:data:: MissingFieldMode
    :type: Literal['error', 'empty']
 
@@ -35,10 +41,13 @@ The string literals that operator-configuration arguments accept.
    How ``tokenize_chat`` works out which tokens belong to the assistant.
 
 .. py:data:: LossScope
-   :type: Literal['all_assistant', 'last_span', 'after_last_user']
+   :type: Literal['all_assistant', 'last_span', 'after_last_user', 'all_tokens']
 
-   Which assistant spans ``tokenize_chat`` supervises. ``after_last_user``
-   automatically verifies generation ownership before producing output.
+   Which tokens ``tokenize_chat`` supervises. Assistant scopes select spans;
+   ``all_tokens`` selects the complete conversation except its first token.
+   Masking the first token prevents packing from turning a conversation boundary
+   into a supervised next-token prediction.
+   ``after_last_user`` automatically verifies generation ownership before output.
 
    With generation tags, samples whose selected source content disappears during
    rendering are dropped and logged at ERROR, counting zero delivered tokens

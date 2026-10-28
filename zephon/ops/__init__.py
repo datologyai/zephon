@@ -21,6 +21,7 @@ from zephon.ops.children import (
     tombstones_for_record,
 )
 from zephon.ops.config import (
+    ChatSpecialTokensMode,
     LossScope,
     MissingFieldMode,
     PackingAlgorithm,
@@ -33,6 +34,7 @@ from zephon.ops.traits import OpTraits
 __all__ = [
     "Accumulator",
     "BaseOp",
+    "ChatSpecialTokensMode",
     "CountingAccumulator",
     "DomainGroups",
     "LossScope",

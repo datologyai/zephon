@@ -60,6 +60,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    ChatSpecialTokensMode,
     LossScope,
     MissingFieldMode,
     PackingAlgorithm,
@@ -820,6 +821,7 @@ class Pipeline:
         tokenizer: Any | None = None,
         tokenizer_id: str | None = None,
         *,
+        eos_token: str | None = None,
         field: str,
         missing_field: MissingFieldMode = "error",
         add_attention_mask: bool = True,
@@ -839,6 +841,7 @@ class Pipeline:
         op = TokenizeText(
             tokenizer,
             tokenizer_id,
+            eos_token=eos_token,
             field=field,
             missing_field=missing_field,
             add_attention_mask=add_attention_mask,
@@ -903,11 +906,15 @@ class Pipeline:
         tokenizer_id: str | None = None,
         *,
         eos_token: str | None = None,
+        special_tokens: ChatSpecialTokensMode | None = None,
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
+        prefix_diff_include_header: bool = False,
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -922,8 +929,10 @@ class Pipeline:
 
         Reads role/content messages from ``field`` (default: ``messages``).
         Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.
-        ``chat_template`` overrides the tokenizer's template with Jinja text or
-        a file path. ``chat_template_kwargs`` supplies static template arguments;
+        Uses the tokenizer's own chat template unless ``chat_template`` supplies
+        a template name, Jinja text or a file path. Without an override, a
+        non-None value at ``tools_field`` selects ``tool_use`` when that template
+        exists, otherwise ``default``. ``chat_template_kwargs`` supplies static arguments;
         ``tools_field`` and ``enable_thinking_field`` select per-record values.
 
         Output replaces the payload with aligned, unshifted NumPy arrays:
@@ -933,14 +942,26 @@ class Pipeline:
         Samples with fewer than two tokens or no supervised tokens are dropped.
 
         Targets come from ``{% generation %}`` blocks. Untagged templates infer
-        assistant ranges by rendering successive conversation prefixes.
-        ``apply_chat_template=False`` concatenates message content, appends EOS
-        to assistant messages and selects targets from their roles.
-
+        assistant ranges by rendering successive conversation prefixes. Set
+        ``prefix_diff_include_header=True`` to include assistant headers in those ranges.
         ``loss_scope`` selects all assistant spans (``all_assistant``, default),
-        the final contiguous supervised run (``last_span``), or all assistant
-        messages after the final user (``after_last_user``). Untagged templates
-        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
+        the final contiguous supervised run (``last_span``), all assistant messages
+        after the final user (``after_last_user``), or every token except the first
+        (``all_tokens``). Untagged templates require explicit
+        ``span_source="prefix_diff"`` with ``after_last_user``.
+
+        ``special_tokens="bos"``, ``"eos"`` or ``"bos_eos"`` adds the requested
+        tokens around the complete conversation, reserving room under ``max_length``.
+        ``"none"`` adds no tokens beyond those in the input or template.
+        ``bos_token_id`` and ``eos_token_id`` choose IDs for explicit outer insertion.
+        ``eos_token`` overrides the EOS string when loading ``tokenizer_id``.
+
+        ``apply_chat_template=False`` concatenates message contents without role
+        headers. In this mode, ``special_tokens="tokenizer_default"`` uses the
+        tokenizer's configured special-token processing, and ``"assistant_eos"``
+        appends EOS after each assistant message. With ``special_tokens`` omitted,
+        plain conversations use per-assistant EOS; templated conversations get a
+        final EOS if missing and space remains.
 
         With generation tags, ``after_last_user`` verifies templates automatically.
         Each selected assistant's generation blocks must cover its reasoning,
@@ -963,11 +984,15 @@ class Pipeline:
             tokenizer,
             tokenizer_id,
             eos_token=eos_token,
+            special_tokens=special_tokens,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
             field=field,
             max_length=max_length,
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
+            prefix_diff_include_header=prefix_diff_include_header,
             loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,

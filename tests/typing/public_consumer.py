@@ -182,3 +182,16 @@ class IdentityOp(BaseOp):
 def scoped_chat(pipe: Pipeline) -> Pipeline:
     scope: LossScope = "after_last_user"
     return pipe.expand_chat().tokenize_chat(tokenizer_id="model", loss_scope=scope)
+
+
+def all_token_chat(pipe: Pipeline) -> Pipeline:
+    scope: LossScope = "all_tokens"
+    return pipe.tokenize_chat(
+        tokenizer_id="model", loss_scope=scope, special_tokens="none"
+    )
+
+
+def chat_document_tokens(pipe: Pipeline) -> Pipeline:
+    return pipe.tokenize_chat(
+        tokenizer_id="model", special_tokens="bos_eos", bos_token_id=1, eos_token_id=2
+    )

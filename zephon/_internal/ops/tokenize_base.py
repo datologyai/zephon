@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from zephon._internal.token_counting import TokenCountingSpec
 from zephon._internal.utils.tokenizer import TokenizerLike, load_hf_tokenizer
@@ -42,6 +42,8 @@ class TokenizeBase(BaseOp):
         *,
         use_fast: bool | None,
         eos_token: str | None = None,
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
         max_batch: int,
         max_latency_ms: Optional[int],
     ) -> None:
@@ -56,6 +58,9 @@ class TokenizeBase(BaseOp):
         self.tokenizer_id = tokenizer_id
         self.use_fast = use_fast
         self.eos_token = eos_token
+        self._bos_id_override = bos_token_id
+        self._eos_id_override = eos_token_id
+        self._eos_token: int | str | None = None
         self._max_batch = max_batch
         self._max_latency_ms = max_latency_ms
         self._tokenizer_instantiated = False
@@ -77,11 +82,27 @@ class TokenizeBase(BaseOp):
                 )
 
             try:
+                self._eos_token = getattr(self.tok, "eos_token", None)
                 self._finalize_setup()
             except Exception as exc:
                 self._setup_error = exc
                 raise
             self._tokenizer_instantiated = True
+
+    def _resolve_special_token_id(
+        self, name: Literal["bos", "eos"], *, required: bool = False
+    ) -> int | None:
+        """Use an explicit ID override, falling back to the loaded tokenizer."""
+        value = self._bos_id_override if name == "bos" else self._eos_id_override
+        if value is None:
+            value = getattr(self.tok, f"{name}_token_id", None)
+        if value is None and required:
+            article = "a" if name == "bos" else "an"
+            raise ValueError(
+                f"{type(self).__name__} requires {article} {name.upper()} token; "
+                + f"set {name}_token_id or configure the tokenizer"
+            )
+        return int(value) if value is not None else None
 
     def _finalize_setup(self) -> None:
         """Post-load, per-op configuration; failures are cached and re-raised."""
