@@ -1,8 +1,9 @@
 """Keep GitHub PR milestones in step with their ZEPH issues in Linear.
 
 Linear is the source of truth for release planning. A PR inherits the release of
-the ZEPH issue it references: a Linear milestone named ``vX.Y ...`` becomes the
-GitHub milestone ``vX.Y``. Only that version string is ever written to GitHub.
+the ZEPH issue it references: a Linear milestone named ``vX.Y ...`` or
+``vX.Y.Z ...`` becomes the GitHub milestone ``vX.Y`` or ``vX.Y.Z``. Only that
+version string is ever written to GitHub.
 
 Modes:
   pr         Handle the PR in ``$GITHUB_EVENT_PATH`` (pull_request_target).
@@ -39,10 +40,13 @@ MAGIC_ID_RE = re.compile(
     r"|contributes to|towards?)\s*:?\s+((?:ZEPH|PLAT)-\d+)\b",
     re.IGNORECASE,
 )
-RELEASE_RE = re.compile(r"^v(\d+\.\d+)\b")
+RELEASE_RE = re.compile(r"^v(\d+\.\d+(?:\.\d+)?)\b")
 # Only milestones this script could have set are ever replaced or cleared, so a
 # milestone a maintainer set by hand for another reason is left alone.
-MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+$")
+MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
+# Marks the PR comment recording a triage issue. The key may not see the issue
+# once triage moves it to another team, so GitHub keeps the record.
+TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
 
 
 class _LinearError(RuntimeError):
@@ -119,14 +123,17 @@ class _Client:
                 return items
             page += 1
 
+    def _load_milestones(self) -> dict[str, int]:
+        # state=all: a PR can still reference a release whose milestone was
+        # already closed, and reopening a duplicate title would fail.
+        return {
+            m["title"]: m["number"]
+            for m in self.github_paged(f"/repos/{self.repo}/milestones?state=all")
+        }
+
     def milestone_number(self, title: str) -> int:
         if self._milestones is None:
-            # state=all: a PR can still reference a release whose milestone was
-            # already closed, and reopening a duplicate title would fail.
-            self._milestones = {
-                m["title"]: m["number"]
-                for m in self.github_paged(f"/repos/{self.repo}/milestones?state=all")
-            }
+            self._milestones = self._load_milestones()
         if title not in self._milestones:
             _log(f"create milestone {title}")
             if self.dry_run:
@@ -138,11 +145,13 @@ class _Client:
                 )
                 self._milestones[title] = created["number"]
             except urllib.error.HTTPError as error:
-                # A concurrent run for another PR created it first.
                 if error.code != 422:
                     raise
-                self._milestones = None
-                return self.milestone_number(title)
+                # 422 is either a concurrent run creating it first, or a real
+                # validation error; only the former shows up on reload.
+                self._milestones = self._load_milestones()
+                if title not in self._milestones:
+                    raise
         return self._milestones[title]
 
 
@@ -192,27 +201,50 @@ def _fetch_issue(client: _Client, identifier: str) -> _LinkedIssue | None:
     issue = data["issue"]
     # An issue moved to another team still resolves by its old identifier.
     if issue["team"]["key"] != TEAM_KEY:
-        _log(f"  {identifier}: now {issue['identifier']}, not a {TEAM_KEY} issue")
+        _log(f"  {identifier}: moved out of {TEAM_KEY}")
         return None
     return _LinkedIssue(issue["identifier"], _release_of(issue["projectMilestone"]))
 
 
-def _attached_issue(client: _Client, pr_url: str) -> _LinkedIssue | None:
+def _attachments(client: _Client, pr_url: str) -> list[tuple[str, _LinkedIssue]]:
+    """Return ``(attachment id, issue)`` for each ZEPH issue the PR is attached to."""
     data = client.linear(
         """query($url: String!) {
           attachmentsForURL(url: $url) {
-            nodes { issue { identifier team { key } projectMilestone { name } } }
+            nodes { id issue { identifier team { key } projectMilestone { name } } }
           }
         }""",
         url=pr_url,
     )
-    for node in data["attachmentsForURL"]["nodes"]:
-        issue = node["issue"]
-        if issue["team"]["key"] == TEAM_KEY:
-            return _LinkedIssue(
-                issue["identifier"], _release_of(issue["projectMilestone"])
+    return [
+        (
+            node["id"],
+            _LinkedIssue(
+                node["issue"]["identifier"],
+                _release_of(node["issue"]["projectMilestone"]),
+            ),
+        )
+        for node in data["attachmentsForURL"]["nodes"]
+        if node["issue"]["team"]["key"] == TEAM_KEY
+    ]
+
+
+def _attach_inherited(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> None:
+    # Persisted so the child keeps the issue after its parent merges. Any other
+    # ZEPH attachment came from an earlier parent issue; the live parent wins.
+    attached = _attachments(client, pr["html_url"])
+    if any(a.identifier == issue.identifier for _, a in attached):
+        return
+    for attachment_id, stale in attached:
+        _log(f"  detach from {stale.identifier}")
+        if not client.dry_run:
+            client.linear(
+                "mutation($id: String!) { attachmentDelete(id: $id) { success } }",
+                id=attachment_id,
             )
-    return None
+    _log(f"  attach to inherited {issue.identifier}")
+    if not client.dry_run:
+        _link_pr(client, issue.identifier, pr["html_url"], "contributes")
 
 
 def _link_pr(client: _Client, issue_id: str, pr_url: str, kind: str) -> None:
@@ -244,7 +276,30 @@ def _triage_marker(pr: dict[str, Any]) -> str:
     return f"Opened from {pr['html_url']} by"
 
 
+def _has_triage_comment(client: _Client, pr: dict[str, Any]) -> bool:
+    comments = client.github_paged(
+        f"/repos/{client.repo}/issues/{pr['number']}/comments"
+    )
+    return any(TRIAGE_COMMENT_MARKER in (c.get("body") or "") for c in comments)
+
+
+def _record_triage(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> None:
+    if client.dry_run:
+        return
+    _link_pr(client, issue.identifier, pr["html_url"], "closes")
+    client.github(
+        "POST",
+        f"/repos/{client.repo}/issues/{pr['number']}/comments",
+        {"body": f"{TRIAGE_COMMENT_MARKER}\nTracked in Linear as {issue.identifier}."},
+    )
+
+
 def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | None:
+    # Reaching here with a recorded triage issue means triage moved it out of
+    # ZEPH (or detached it): the PR is handled, so don't open another.
+    if _has_triage_comment(client, pr):
+        _log("  triage issue already opened and no longer in ZEPH, skipped")
+        return None
     # Creating and attaching are separate mutations. If attaching failed on an
     # earlier run, the issue exists but no attachment points at it, so look it up
     # by its description before creating another.
@@ -263,8 +318,7 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
             existing[0]["identifier"], _release_of(existing[0]["projectMilestone"])
         )
         _log(f"  reuse triage issue {issue.identifier} for #{pr['number']}")
-        if not client.dry_run:
-            _link_pr(client, issue.identifier, pr["html_url"], "closes")
+        _record_triage(client, pr, issue)
         return issue
 
     _log(f"  create {TEAM_KEY} triage issue for #{pr['number']}")
@@ -296,9 +350,10 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
         "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { id identifier } } }",
         input=issue_input,
     )["issueCreate"]["issue"]
-    _link_pr(client, created["id"], pr["html_url"], "closes")
-    _log(f"  created {created['identifier']}")
-    return _LinkedIssue(created["identifier"], None)
+    issue = _LinkedIssue(created["identifier"], None)
+    _record_triage(client, pr, issue)
+    _log(f"  created {issue.identifier}")
+    return issue
 
 
 def _stack_parent(
@@ -340,28 +395,27 @@ def _resolve(
     if ids and not zeph:
         return None, True
 
-    issue = _attached_issue(client, pr["html_url"])
-    if issue:
-        return issue, False
-
     # Stacked PRs inherit their parent's issue, so a stack without IDs yields one
     # triage issue (from the PR targeting the default branch), not one per PR.
-    # Only the issue is inherited: a parent's PLAT reference is reported on the
-    # parent's own run.
+    # The live parent is checked before the PR's own attachment so a parent
+    # switching issues carries its children along. Only the issue is inherited:
+    # a parent's PLAT reference is reported on the parent's own run.
     parent = _stack_parent(client, pr, default_branch)
     if parent and depth < 20:
         issue, _ = _resolve(client, parent, default_branch, create, depth + 1)
-        if issue and depth == 0:
-            # Attach the child too: once the parent merges, the child is
-            # retargeted to the default branch and can no longer find it.
-            _log(f"  attach to inherited {issue.identifier}")
-            if not client.dry_run:
-                _link_pr(client, issue.identifier, pr["html_url"], "contributes")
-        return issue, False
+        if issue:
+            if depth == 0:
+                _attach_inherited(client, pr, issue)
+            return issue, False
+
+    attached = _attachments(client, pr["html_url"])
+    if attached:
+        return attached[0][1], False
 
     # An unresolvable ZEPH ID (typo, issue moved away) is a broken link, not a
-    # missing one, so it gets no triage issue.
-    if create and not ids and not _is_bot(pr) and depth == 0:
+    # missing one, so it gets no triage issue. Neither does a stacked child: its
+    # parent's own run opens the one for the stack.
+    if create and not ids and not parent and not _is_bot(pr) and depth == 0:
         return _create_triage_issue(client, pr), False
     return None, False
 

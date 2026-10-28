@@ -3,6 +3,7 @@ import re
 import sys
 import urllib.error
 import urllib.parse
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,9 @@ class FakeWorld:
         self.issues: dict[str, dict[str, Any]] = {}
         self.attachments: dict[str, str] = {}
         self.prs: dict[int, dict[str, Any]] = {}
+        self.comments: dict[int, list[str]] = {}
+        # Like the real key, which is scoped to ZEPH: other teams are invisible.
+        self.visible_teams = {"ZEPH"}
         self.fail_next_attach = False
         self.client = ls._Client(dry_run=False)
         monkeypatch.setattr(self.client, "linear", self._linear)
@@ -75,30 +79,46 @@ class FakeWorld:
     def handle(self, number: int, create: bool = True) -> bool:
         return ls._handle(self.client, self.prs[number], "main", create)
 
+    def move(self, identifier: str, team: str) -> None:
+        self.issues[identifier]["team"] = team
+
+    def _visible(self, identifier: str) -> bool:
+        return self.issues[identifier]["team"] in self.visible_teams
+
     def _issue_node(self, identifier: str) -> dict[str, Any]:
         issue = self.issues[identifier]
         milestone = issue["milestone"]
         return {
             "id": identifier,
-            "identifier": identifier,
+            "identifier": issue["identifier"],
             "team": {"key": issue["team"]},
             "projectMilestone": {"name": milestone} if milestone else None,
         }
 
     def _linear(self, query: str, **variables: Any) -> dict[str, Any]:
         if "issue(id:" in query:
-            if variables["id"] not in self.issues:
+            identifier = variables["id"]
+            if identifier not in self.issues or not self._visible(identifier):
                 raise ls._LinearError([{"message": "Entity not found: Issue"}])
-            return {"issue": self._issue_node(variables["id"])}
+            return {"issue": self._issue_node(identifier)}
         if "attachmentsForURL" in query:
             owner = self.attachments.get(variables["url"])
-            nodes = [{"issue": self._issue_node(owner)}] if owner else []
+            nodes = []
+            if owner and self._visible(owner):
+                nodes.append(
+                    {"id": f"att:{variables['url']}", "issue": self._issue_node(owner)}
+                )
             return {"attachmentsForURL": {"nodes": nodes}}
+        if "attachmentDelete" in query:
+            del self.attachments[variables["id"].removeprefix("att:")]
+            return {"attachmentDelete": {"success": True}}
         if "issues(" in query:
             nodes = [
-                self._issue_node(i["identifier"])
-                for i in self.issues.values()
-                if variables["marker"] in i["description"]
+                self._issue_node(key)
+                for key, i in self.issues.items()
+                if i["team"] == variables["key"]
+                and self._visible(key)
+                and variables["marker"] in i["description"]
             ]
             return {"issues": {"nodes": nodes[:1]}}
         if "teams(" in query:
@@ -131,6 +151,13 @@ class FakeWorld:
             assert "&" not in match[1], "head must be URL-encoded"
             base = urllib.parse.unquote(match[1])
             return [pr for pr in self.prs.values() if pr["head"]["ref"] == base]
+        if match := re.search(r"/issues/(\d+)/comments", path):
+            comments = self.comments.setdefault(int(match[1]), [])
+            if method == "POST":
+                assert data is not None
+                comments.append(data["body"])
+                return {}
+            return [{"body": body} for body in comments]
         if method == "PATCH" and (match := re.search(r"/issues/(\d+)$", path)):
             assert data is not None
             title = data["milestone"]
@@ -176,6 +203,7 @@ def test_plat_only_reference_fails(world: FakeWorld) -> None:
 
 
 def test_issue_moved_out_of_zeph_is_ignored(world: FakeWorld) -> None:
+    world.visible_teams.add("PLAT")
     world.add_issue("ZEPH-2", RELEASE, team="PLAT")
     world.add_pr(1, "feature", body="Fixes ZEPH-2", milestone="v0.3")
     assert world.handle(1, create=False)
@@ -253,3 +281,104 @@ def test_bot_pr_without_id_never_calls_linear(
 
     monkeypatch.setattr(world.client, "linear", no_credentials)
     assert world.handle(1)
+
+
+def test_moved_issue_log_hides_new_identifier(
+    world: FakeWorld, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.visible_teams.add("PLAT")
+    world.add_issue("ZEPH-2", RELEASE, team="PLAT")
+    world.issues["ZEPH-2"]["identifier"] = "PLAT-123"
+    world.add_pr(1, "feature", body="Fixes ZEPH-2")
+    assert world.handle(1)
+    assert "PLAT-123" not in capsys.readouterr().out
+
+
+def test_stack_child_follows_parent_switching_issue(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-2", RELEASE)
+    world.add_issue("ZEPH-3", "v0.4 Release: next")
+    world.add_pr(1, "parent", body="Contributes to ZEPH-2")
+    world.add_pr(2, "child", base="parent")
+    assert world.handle(2)
+    assert _milestone(world, 2) == "v0.3"
+
+    world.prs[1]["body"] = "Contributes to ZEPH-3"
+    assert world.handle(2, create=False)
+    assert _milestone(world, 2) == "v0.4"
+
+    del world.prs[1]
+    world.prs[2]["base"]["ref"] = "main"
+    assert world.handle(2, create=False)
+    assert _milestone(world, 2) == "v0.4"
+
+
+def test_triage_issue_moved_out_of_zeph_is_not_reopened(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    (identifier,) = world.issues
+    assert world.comments[1] == [
+        f"{ls.TRIAGE_COMMENT_MARKER}\nTracked in Linear as {identifier}."
+    ]
+
+    world.move(identifier, "PLAT")
+    assert world.handle(1)
+    assert set(world.issues) == {identifier}
+    assert len(world.comments[1]) == 1
+
+
+def test_stack_child_never_opens_its_own_triage_issue(world: FakeWorld) -> None:
+    world.add_bot_pr(1, "parent")
+    world.add_pr(2, "child", base="parent")
+    assert world.handle(2)
+    assert world.issues == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "release"),
+    [
+        ("v0.3 Release: curricula", "v0.3"),
+        ("v0.3.1 Hotfix", "v0.3.1"),
+        ("Backlog", None),
+    ],
+)
+def test_release_of_linear_milestone(name: str, release: str | None) -> None:
+    assert ls._release_of({"name": name}) == release
+
+
+def test_patch_release_replaces_minor_milestone(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-2", "v0.3.1 Hotfix")
+    world.add_pr(1, "feature", body="Fixes ZEPH-2", milestone="v0.3")
+    assert world.handle(1)
+    assert _milestone(world, 1) == "v0.3.1"
+
+
+def _milestone_client(monkeypatch: pytest.MonkeyPatch, created_by_race: bool) -> Any:
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("LINEAR_API_KEY", "test")
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
+    client = ls._Client(dry_run=False)
+    posts = 0
+
+    def github(method: str, path: str, data: Any = None) -> Any:
+        nonlocal posts
+        if method == "GET":
+            raced = created_by_race and posts > 0
+            return [{"title": "v0.3", "number": 7}] if raced else []
+        posts += 1
+        raise urllib.error.HTTPError(path, 422, "Unprocessable", Message(), None)
+
+    monkeypatch.setattr(client, "github", github)
+    return client
+
+
+def test_milestone_created_concurrently_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _milestone_client(monkeypatch, created_by_race=True)
+    assert client.milestone_number("v0.3") == 7
+
+
+def test_milestone_validation_error_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _milestone_client(monkeypatch, created_by_race=False)
+    with pytest.raises(urllib.error.HTTPError):
+        client.milestone_number("v0.3")
