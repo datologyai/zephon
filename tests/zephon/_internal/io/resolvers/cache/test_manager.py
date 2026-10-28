@@ -1,5 +1,7 @@
 import contextlib
 import gc
+import gzip
+import hashlib
 import json
 import os
 import queue
@@ -307,6 +309,67 @@ def test_validate_hash_mismatch_raises_and_removes_file(tmp_path: Path) -> None:
 
         expected_local = cache_root / "demo" / raw_name
         assert not expected_local.exists()
+    finally:
+        mgr.close()
+
+
+@pytest.mark.parametrize(
+    "compression,keep_zip", [(None, False), ("gzip", False), ("gzip", True)]
+)
+@pytest.mark.parametrize("valid", [False, True])
+def test_resolve_publishes_only_validated_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compression: str | None,
+    keep_zip: bool,
+    valid: bool,
+) -> None:
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"valid shard\n"
+    downloaded = data if valid else b"corrupt shard\n"
+    zip_name = "shard.bin.gz" if compression else None
+    source = _make_file(
+        remote / (zip_name or "shard.bin"),
+        gzip.compress(downloaded) if compression else downloaded,
+    )
+    loc = _locator(
+        "demo",
+        0,
+        str(remote),
+        raw_name="shard.bin",
+        raw_bytes=len(data),
+        zip_name=zip_name,
+        zip_bytes=source.stat().st_size if compression else 0,
+        compression=compression,
+        hashes={"sha256": hashlib.sha256(data).hexdigest()},
+    )
+    mgr = _make_manager(
+        cache_root,
+        LocalFSBackend(root=remote),
+        [loc],
+        keep_zip=keep_zip,
+        validate_hash="sha256",
+    )
+    cached = cache_root / "demo" / "shard.bin"
+    real_hash = manager_mod.compute_file_hash
+
+    def hash_before_publication(path: Path, algo: str) -> str:
+        # An optimistic reader may retain this path across eviction/re-download.
+        # It must not be able to read the replacement before validation finishes.
+        with pytest.raises(FileNotFoundError):
+            cached.read_bytes()
+        return real_hash(path, algo)
+
+    monkeypatch.setattr(manager_mod, "compute_file_hash", hash_before_publication)
+    try:
+        if valid:
+            assert mgr.resolve(loc).raw.path.read_bytes() == data
+        else:
+            with pytest.raises(ValueError, match="Checksum mismatch"):
+                mgr.resolve(loc)
+            assert not any(p.is_file() for p in cached.parent.iterdir())
+            assert mgr.stats().bytes_used == 0
     finally:
         mgr.close()
 

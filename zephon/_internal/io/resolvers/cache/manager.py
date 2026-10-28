@@ -1066,7 +1066,6 @@ class CacheManager(ShardResolver):
                 success = False
                 try:
                     self._prepare(locator, raw_path, zip_path)
-                    self._validate(raw_path, locator.raw)
                     success = True
                 finally:
                     with contextlib.suppress(Exception):
@@ -1172,9 +1171,10 @@ class CacheManager(ShardResolver):
             self._download_file(locator.root, locator.zip, zip_tmp)
             try:
                 self._decompress_stream(zip_tmp, raw_tmp, locator.compression)
+                self._validate(raw_tmp, locator.raw)
             except BaseException:
-                # Streaming decoders fail after writing output; neither temp
-                # file is accounted for, so a failed shard must leave nothing.
+                # Neither temp file is accounted for; failed decompression or
+                # validation must leave nothing behind.
                 raw_tmp.unlink(missing_ok=True)
                 zip_tmp.unlink(missing_ok=True)
                 raise
@@ -1187,6 +1187,7 @@ class CacheManager(ShardResolver):
         else:
             raw_tmp.parent.mkdir(parents=True, exist_ok=True)
             self._download_file(locator.root, locator.raw, raw_tmp)
+            self._validate(raw_tmp, locator.raw)
             raw_tmp.replace(raw_path)
 
     def _download_file(
