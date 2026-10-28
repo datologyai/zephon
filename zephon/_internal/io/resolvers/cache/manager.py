@@ -973,25 +973,39 @@ class CacheManager(ShardResolver):
             )
 
         dataset_root = self._root / locator.dataset
-        dataset_root.mkdir(parents=True, exist_ok=True)
-
         raw_path = dataset_root / locator.raw.basename
         zip_path = dataset_root / locator.zip.basename if locator.zip else None
-        required = self._required_bytes(locator)
-
-        shard_lock = self._shard_lock(dataset_root, locator.shard_id)
+        shard_lock: BaseFileLock | None = None
 
         while True:
-            with self._cache_lock:
-                state_value = _ShardState(self._shared.shard_states[index])
-                if state_value == _ShardState.LOCAL:
-                    if raw_path.is_file():
-                        self._shared.set_access_time(index, time.time_ns())
+            # A hit reads the shared state without the cache lock: an eviction can
+            # unlink the file after this returns whether or not the lock was held,
+            # and taking it would serialize every fetch worker on the node.
+            if _ShardState(self._shared.shard_states[index]) == _ShardState.LOCAL:
+                if raw_path.is_file():
+                    self._shared.set_access_time(index, time.time_ns())
+                    try:
                         return self._build_ref(
                             raw_path, zip_path, locator, cache_hit=True
                         )
-                    self._mark_remote_locked(index)
-                    continue
+                    except FileNotFoundError:
+                        pass  # Evicted since is_file(): fall through to the re-check.
+                # A peer may have re-downloaded it since: check both under the lock.
+                with self._cache_lock:
+                    if (
+                        _ShardState(self._shared.shard_states[index])
+                        == _ShardState.LOCAL
+                        and not raw_path.is_file()
+                    ):
+                        self._mark_remote_locked(index)
+                continue
+
+            # Only a miss needs the dataset dir and shard lock; building them on
+            # every hit cost more than the rest of the hit path.
+            if shard_lock is None:
+                dataset_root.mkdir(parents=True, exist_ok=True)
+                required = self._required_bytes(locator)
+                shard_lock = self._shard_lock(dataset_root, locator.shard_id)
 
             # Not LOCAL. Try to become the active preparer via non-
             # blocking flock. ``timeout=0`` → ``fcntl.flock(LOCK_NB)``:
