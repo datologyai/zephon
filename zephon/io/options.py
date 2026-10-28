@@ -113,6 +113,9 @@ class CacheOptions:
     # Deprecated alias migrated by StoreOptions to parquet.rg_cache.limit_bytes.
     rg_cache_bytes: int | None = _option(None)
     keep_zip: bool = _option(False)
+    # Keep shards for the next process to open this root after all users exit.
+    # Reused only if that process reads exactly the same shards; otherwise wiped.
+    persist_state: bool = _option(False)
     validate_hash: str | None = _option(None)
     download_retry: int = _option(12)
     download_timeout: float = _option(180.0)
@@ -129,6 +132,8 @@ class CacheOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
+        if type(self.persist_state) is not bool:
+            raise ValueError("cache.persist_state must be a boolean")
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":
