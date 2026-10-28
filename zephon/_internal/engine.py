@@ -67,6 +67,7 @@ from zephon._internal.notify import (
 )
 from zephon._internal.observability.collector import CollectorConfig, PipelineCollector
 from zephon._internal.observability.emitter import MetricsReporter
+from zephon._internal.ops._one_to_one import REQUIRE_ONE_TO_ONE_RECORDS
 from zephon._internal.replay import ReplayConfigService
 from zephon._internal.runners.inline import InlineStageRunner
 from zephon._internal.runners.process import ProcessStageRunner
@@ -281,6 +282,7 @@ class Engine:
         # Lets EnsureMixture reject a mixture_override, which would silently
         # replace the schedule.
         base_ctx["curriculum_active"] = work._has_schedule()
+        base_ctx[REQUIRE_ONE_TO_ONE_RECORDS] = work._requires_one_to_one_records()
         self._replay_config = ReplayConfigService()
         self._ctx = base_ctx
         self._ctx["replay_state_service"] = self._replay_config
@@ -316,6 +318,7 @@ class Engine:
             output_batch_size=self._plan.batch_size_hint,
             preserves_cursor_order=self._preserves_cursor_order,
             global_batch_size=global_batch_size,
+            record_count_blockers=self._plan.record_count_blockers,
         )
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict

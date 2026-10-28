@@ -255,6 +255,7 @@ token calibration:
 | Trait | Default | Meaning |
 |---|---|---|
 | `preserves_cursor_order` | Required, no default | Records leave in the same chunk/offset order they arrived. `False` for anything that shuffles, packs, or buffers across chunks. |
+| `one_to_one_records` | `None` | Every record leaves as exactly one record with the same identity: nothing dropped, duplicated, split, or merged. `None` means unknown. `StepMixturePlan` requires `True` on every operator. |
 | `calibration_replayable` | `False` | Whether token calibration may replay the operator before tokenization. See {class}`~zephon.ops.OpTraits`. |
 | `requires_serial_state` | `False` | The operator keeps state across invocations. In deterministic mode the runner raises unless its parallelism is 1. |
 | `batch_shape_sensitive` | `False` | Output depends on how inputs were grouped into micro-batches. Intended to disable time-based flushing in deterministic mode, but currently has no effect ([#49](https://github.com/datologyai/zephon/issues/49)). |

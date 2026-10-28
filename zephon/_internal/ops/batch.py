@@ -77,6 +77,7 @@ class Batch(BaseOp):
         return OpTraits(
             indexable=False,
             preserves_cursor_order=True,
+            one_to_one_records=True,
             batch_shape_sensitive=False,
             requires_serial_state=False,
             parallelism=self._parallelism,

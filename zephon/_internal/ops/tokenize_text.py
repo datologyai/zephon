@@ -390,6 +390,7 @@ class TokenizeText(TokenizeBase):
             ),
             indexable=True,
             preserves_cursor_order=True,
+            one_to_one_records=not self.split_long_samples,
             parallelism=4,
         )
 

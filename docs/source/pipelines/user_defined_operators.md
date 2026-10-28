@@ -191,6 +191,9 @@ Configuring `traits` is essential to get the operator to work the way you want i
 - `indexable` says whether the pipeline can be accessed by position (à la PyTorch
   map-style dataset).
 - `parallelism` notes the preference for how many workers should be given to the operator.
+- `one_to_one_records` says every record leaves your operator as exactly one record with
+  the same identity. `StepMixturePlan` refuses to start unless every operator sets it to
+  `True`; leave it unset if unsure.
 - `requires_serial_state` causes the operator to run with parallelism 1 in deterministic
   mode.
 - `batch_shape_sensitive` indicates your output depends on how records were grouped, which

@@ -2111,3 +2111,15 @@ def test_special_tokens_mode_values() -> None:
         "none",
         "tokenizer_default",
     }
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_only_splitting_breaks_one_to_one_records(split: bool) -> None:
+    op = TokenizeText(
+        tokenizer=None,
+        tokenizer_id="__fallback__",
+        field="text",
+        split_long_samples=split,
+        max_length=8,
+    )
+    assert op.traits().one_to_one_records is not split

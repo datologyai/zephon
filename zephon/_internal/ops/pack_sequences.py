@@ -1622,6 +1622,7 @@ class PackSequences(BaseOp):
             # Serial state lives in the accumulator, so the op needs none.
             requires_serial_state=False,
             preserves_cursor_order=False,
+            one_to_one_records=False,
         )
 
     def _make_serializer(self) -> _EnvelopeSerializer | _FlatSerializer:
