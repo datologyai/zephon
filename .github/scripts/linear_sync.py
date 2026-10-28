@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -307,10 +308,13 @@ def _stack_parent(
     if base == default_branch:
         return None
     owner = client.repo.split("/")[0]
-    parents = client.github(
-        "GET", f"/repos/{client.repo}/pulls?state=open&head={owner}:{base}"
-    )
+    head = urllib.parse.quote(f"{owner}:{base}", safe=":")
+    parents = client.github("GET", f"/repos/{client.repo}/pulls?state=open&head={head}")
     return parents[0] if parents else None
+
+
+def _is_bot(pr: dict[str, Any]) -> bool:
+    return pr["user"]["type"] == "Bot"
 
 
 def _resolve(
@@ -331,12 +335,14 @@ def _resolve(
         fallback = fallback or issue
     if fallback:
         return fallback, False
+    # Checked before attachments: a linked PLAT issue fails even if the PR is
+    # also attached to a ZEPH issue, since the reference itself is the leak.
+    if ids and not zeph:
+        return None, True
 
     issue = _attached_issue(client, pr["html_url"])
     if issue:
         return issue, False
-    if ids and not zeph:
-        return None, True
 
     # Stacked PRs inherit their parent's issue, so a stack without IDs yields one
     # triage issue (from the PR targeting the default branch), not one per PR.
@@ -353,8 +359,9 @@ def _resolve(
                 _link_pr(client, issue.identifier, pr["html_url"], "contributes")
         return issue, False
 
-    is_bot = pr["user"]["type"] == "Bot"
-    if create and not is_bot and depth == 0:
+    # An unresolvable ZEPH ID (typo, issue moved away) is a broken link, not a
+    # missing one, so it gets no triage issue.
+    if create and not ids and not _is_bot(pr) and depth == 0:
         return _create_triage_issue(client, pr), False
     return None, False
 
@@ -387,6 +394,11 @@ def _handle(
 ) -> bool:
     """Process one PR; return False if it references only PLAT issues."""
     _log(f"#{pr['number']} {pr['title']}")
+    # Dependabot runs get no Actions secrets, so an ID-free bot PR must not
+    # reach Linear at all.
+    if _is_bot(pr) and not _referenced_ids(pr):
+        _log("  bot PR without issue ID, skipped")
+        return True
     issue, plat_only = _resolve(client, pr, default_branch, create)
     if plat_only:
         _log(

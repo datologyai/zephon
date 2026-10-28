@@ -2,6 +2,7 @@ import importlib.util
 import re
 import sys
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,11 @@ class FakeWorld:
         }
         return self.prs[number]
 
+    def add_bot_pr(self, number: int, head: str) -> dict[str, Any]:
+        pr = self.add_pr(number, head)
+        pr["user"] = {"login": "dependabot[bot]", "type": "Bot"}
+        return pr
+
     def handle(self, number: int, create: bool = True) -> bool:
         return ls._handle(self.client, self.prs[number], "main", create)
 
@@ -122,7 +128,9 @@ class FakeWorld:
         self, method: str, path: str, data: dict[str, Any] | None = None
     ) -> Any:
         if method == "GET" and (match := re.search(r"head=[^:]+:(.+)$", path)):
-            return [pr for pr in self.prs.values() if pr["head"]["ref"] == match[1]]
+            assert "&" not in match[1], "head must be URL-encoded"
+            base = urllib.parse.unquote(match[1])
+            return [pr for pr in self.prs.values() if pr["head"]["ref"] == base]
         if method == "PATCH" and (match := re.search(r"/issues/(\d+)$", path)):
             assert data is not None
             title = data["milestone"]
@@ -212,3 +220,36 @@ def test_triage_retry_after_failed_attach_reuses_issue(world: FakeWorld) -> None
     assert len(world.issues) == 1
     (identifier,) = world.issues
     assert world.attachments[world.prs[1]["html_url"]] == identifier
+
+
+def test_stack_parent_with_special_chars_in_branch(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-2", RELEASE)
+    world.add_pr(1, "feature&cleanup", body="Contributes to ZEPH-2")
+    world.add_pr(2, "child", base="feature&cleanup")
+    assert world.handle(2)
+    assert _milestone(world, 2) == "v0.3"
+
+
+def test_plat_reference_fails_despite_zeph_attachment(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    world.prs[1]["body"] = "Fixes PLAT-42"
+    assert not world.handle(1)
+
+
+def test_unresolved_zeph_id_creates_no_triage_issue(world: FakeWorld) -> None:
+    world.add_pr(1, "feature", body="Fixes ZEPH-999")
+    assert world.handle(1)
+    assert world.issues == {}
+
+
+def test_bot_pr_without_id_never_calls_linear(
+    world: FakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.add_bot_pr(1, "dependabot/pip/foo")
+
+    def no_credentials(query: str, **variables: Any) -> dict[str, Any]:
+        raise AssertionError("bot PR reached Linear")
+
+    monkeypatch.setattr(world.client, "linear", no_credentials)
+    assert world.handle(1)
