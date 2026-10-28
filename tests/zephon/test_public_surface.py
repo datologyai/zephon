@@ -111,6 +111,7 @@ EXPECTED_ALL = {
         "ComponentId",
         "ContributorRef",
         "DatasetId",
+        "FieldCollator",
         "LaneId",
         "LineageIndex",
         "LineagePath",

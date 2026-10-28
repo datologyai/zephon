@@ -3,6 +3,8 @@
 
 """End-to-end sequence packing, batching, and training conversion."""
 
+from collections.abc import Sequence
+from contextlib import closing
 from itertools import groupby
 from typing import Any, get_args
 
@@ -444,3 +446,84 @@ def test_capped_training_microbatch_checkpoint_resume(
     assert prefix + suffix == baseline
     assert resumed._engine is not None
     assert not any(resumed._engine.inflight_chunks_per_lane.values())
+
+
+def test_pack_sequences_merge_callback_to_training_preserves_media_order() -> None:
+    """Merge complete documents, then pad/collate their tokens and image IDs."""
+    documents = [
+        {
+            "input_ids": [10 + i, 90, 90] + ([90] if i % 2 else []) + [2],
+            "image_ids": [i],
+        }
+        for i in range(6)
+    ]
+
+    def merge_documents(selected: list[Any]) -> dict[str, Any]:
+        return {
+            "input_ids": [token for doc in selected for token in doc["input_ids"]],
+            "loss_mask": [
+                flag
+                for doc in selected
+                for flag in [0] * (len(doc["input_ids"]) - 1) + [1]
+            ],
+            "positions": [i for doc in selected for i in range(len(doc["input_ids"]))],
+            "image_ids": [image for doc in selected for image in doc["image_ids"]],
+        }
+
+    def collate_image_ids(
+        values: Sequence[Any], *, length: int, shifted: bool
+    ) -> list[Any]:
+        return list(values)
+
+    source = StaticMixtureWorkSource(
+        [Dataset.from_dict("images", {0: InMemoryShard(documents)})],
+        {"images": 1.0},
+        chunk_size=3,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipeline = (
+        Pipeline(source)
+        .pack_sequences(
+            max_length=10,
+            algorithm="first_fit",
+            num_bins=2,
+            pack_payloads=merge_documents,
+        )
+        .batch(2, drop_last=False)
+        .options(
+            runner="process",
+            deterministic=True,
+            max_workers=1,
+            mtp_mode=False,
+            shm_enabled=False,
+        )
+    )
+    seen, supervised = [], 0
+    with closing(iter(pipeline)) as batches:
+        for batch in batches:
+            output = batch.to_training(
+                dtype=None,
+                return_labels=True,
+                return_document_ids=True,
+                return_num_valid_tokens=True,
+                pad_to_length=10,
+                pad_token_id=2,
+                field_collators={"image_ids": collate_image_ids},
+            )
+            for tokens, membership, images in zip(
+                output["input_ids"],
+                output["document_ids"],
+                output["image_ids"],
+            ):
+                expected = [
+                    token for image in images for token in documents[image]["input_ids"]
+                ]
+                assert len(tokens) == 9
+                assert [
+                    token for token, doc in zip(tokens, membership) if doc
+                ] == expected
+                seen.extend(images)
+            supervised += output["num_valid_tokens"]
+    assert sorted(seen) == list(range(6))
+    assert supervised == 6

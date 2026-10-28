@@ -3,11 +3,12 @@
 
 """Tensor/array utilities for multi-framework support (PyTorch, NumPy, lists).
 
-This module provides utilities for working with tensors and arrays across
-different frameworks. Framework detection is automatic based on dtype,
-and optional dependencies are lazily imported.
+Conversion helpers select the output framework from the requested dtype.
+Packing helpers preserve the input container, or fill an allocated output buffer.
+Optional dependencies are lazily imported.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -69,17 +70,66 @@ def resolve_dtype(dtype: Any) -> tuple[Any, str | None]:
     return dtype, None
 
 
-def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> Any:
-    """Stack a list of sequences into a tensor or nested list.
+def stack_sequences(
+    sequences: list[Any],
+    dtype: Any,
+    framework: str | None,
+    *,
+    length: int | None = None,
+    pad_value: int = 0,
+    tails: Sequence[Any] | None = None,
+) -> Any:
+    """Stack sequences, optionally padding them to a common length first.
+
+    ``length`` pads unequal merged documents; without it, stack them directly.
 
     Args:
         sequences: List of sequences (lists, numpy arrays, or tensors).
         dtype: Target dtype (or None for lists).
         framework: "torch", "numpy", or None.
+        length: Optional padded scalar sequence width. Allocate the final batch
+            once and copy each sequence into its prefix; never truncate.
+        pad_value: Fill value for padding, validated against the output dtype.
+        tails: Optional padding values per sequence instead of pad_value. Positions
+            use a new zero-based range so padding forms a separate segment.
 
     Returns:
         Stacked tensor or list of lists.
     """
+    if length is not None:
+        result: Any
+        if any(len(seq) > length for seq in sequences):
+            raise ValueError(
+                f"sequence length exceeds pad_to_length={length}; truncation is not supported"
+            )
+        if framework == "torch":
+            import torch
+
+            device = (
+                sequences[0].device
+                if sequences and isinstance(sequences[0], torch.Tensor)
+                else None
+            )
+            result = torch.empty((len(sequences), length), dtype=dtype, device=device)
+        elif framework == "numpy":
+            import numpy as np
+
+            result = np.empty((len(sequences), length), dtype=dtype)
+        else:
+            result = [None] * len(sequences)
+        for i, seq in enumerate(sequences):
+            tail = tails[i] if tails is not None else None
+            padded = pad_field(
+                seq,
+                length - len(seq),
+                pad_value,
+                out=result[i] if framework is not None else None,
+                tail=tail,
+                scalar=True,
+            )
+            if framework is None:
+                result[i] = list(padded)
+        return result
     if framework == "torch":
         import torch
 
@@ -252,6 +302,69 @@ def sequence_positions(input_ids: Any, framework: str | None) -> Any:
     ):
         raise ValueError("position_mode='sequence' requires 2-D input_ids")
     return [list(range(len(row))) for row in input_ids]
+
+
+def positions_to_document_ids(
+    positions: Any, padding_mask: Any, framework: str | None, *, flatten: bool
+) -> Any:
+    """Convert the packer's scalar position resets to per-token document IDs.
+
+    Positions [0, 1, 2, 0, 1] give IDs [1, 1, 1, 2, 2].
+    Inputs/output have shape [batch, sequence]; lists may be ragged. True padding
+    entries receive zero, independently of token values or supervision. Positive
+    IDs start at one per batch document, or run across the batch for flatten=True.
+    Requires positions that reset at subdocument starts; continuous positions
+    do not contain the boundaries needed for this conversion.
+    """
+    if framework in ("torch", "numpy"):
+        if positions.ndim != 2 or positions.shape != padding_mask.shape:
+            raise ValueError(
+                "return_document_ids requires scalar positions matching input_ids"
+            )
+        if positions.shape[1] and bool((positions[:, 0] != 0).any()):
+            raise ValueError("positions must start at zero in every nonempty document")
+        starts = positions == 0
+        if framework == "torch":
+            import torch
+
+            ids = (
+                starts.reshape(-1).cumsum(0, dtype=torch.int64).reshape(positions.shape)
+                if flatten
+                else starts.cumsum(-1, dtype=torch.int64)
+            )
+            return ids.masked_fill(padding_mask, 0)
+
+        import numpy as np
+
+        ids = np.cumsum(starts, axis=None if flatten else -1, dtype=np.int64)
+        ids = ids.reshape(positions.shape)
+        return np.where(padding_mask, 0, ids)
+
+    if len(positions) != len(padding_mask):
+        raise ValueError(
+            "return_document_ids requires scalar positions matching input_ids"
+        )
+    result = []
+    current = 0
+    for positions_document, padding_document in zip(positions, padding_mask):
+        if any(
+            isinstance(value, (list, tuple, dict, str, bytes))
+            or getattr(value, "ndim", 0) != 0
+            for value in positions_document
+        ) or len(positions_document) != len(padding_document):
+            raise ValueError(
+                "return_document_ids requires scalar positions matching input_ids"
+            )
+        if len(positions_document) and positions_document[0] != 0:
+            raise ValueError("positions must start at zero in every nonempty document")
+        if not flatten:
+            current = 0
+        document = []
+        for position, padding in zip(positions_document, padding_document):
+            current += int(position == 0)
+            document.append(0 if padding else current)
+        result.append(document)
+    return result
 
 
 def positions_to_cu_seqlens(
@@ -427,3 +540,163 @@ def mask_unsupervised_labels(
             )
             masked.append([lab if m else replacement for lab, m in zip(row, mask_row)])
         return masked
+
+
+def positions_from_segment_lengths(segment_lengths: Sequence[int]) -> Any:
+    """Build the packer's zero-based positions from its ordered segment lengths.
+
+    Lengths [3, 2] give NumPy int32 positions [0, 1, 2, 0, 1]. Flat serialization
+    uses this for subdocuments; conversion uses it for a separate padding segment.
+    Empty segments contribute nothing. Inputs are not modified.
+    """
+    import numpy as np
+
+    parts = [np.arange(int(n), dtype=np.int32) for n in segment_lengths if n > 0]
+    return np.concatenate(parts) if parts else np.empty(0, dtype=np.int32)
+
+
+def _is_torch_tensor(value: Any) -> bool:
+    """Check actual tensor identity without requiring optional Torch to be installed."""
+    if value is None:
+        return False
+    try:
+        import torch
+    except ImportError:
+        return False
+    return isinstance(value, torch.Tensor)
+
+
+def pad_field(
+    seq: Any,
+    pad_len: int,
+    pad_value: int,
+    *,
+    out: Any = None,
+    tail: Any = None,
+    scalar: bool = False,
+) -> Any:
+    """Right-pad a field for flat packing or fixed-length training conversion.
+
+    Packing preserves the input container/dtype. ``stack_sequences`` supplies
+    an allocated output row to avoid intermediate padded arrays.
+
+    Args:
+        seq: List, tuple, NumPy array or Torch tensor with sequence on axis 0.
+        pad_len: Number of positions to append.
+        pad_value: Constant padding value, checked against integer output ranges.
+        out: Optional owned destination [len(seq) + pad_len, ...]; determines
+            the output dtype/backend and is filled in place.
+        tail: Explicit padding values, e.g. zero-based padding-segment positions.
+        scalar: Require one scalar per token; other layouts need field collators.
+
+    Returns:
+        The output buffer or padded input container; separate inputs are unchanged.
+    """
+    import numpy as np
+
+    if out is None and pad_len <= 0 and not scalar:
+        return seq
+    if out is None and isinstance(seq, (list, tuple)):
+        if (
+            scalar
+            and seq
+            and (
+                isinstance(seq[0], (list, tuple, dict, str, bytes))
+                or getattr(seq[0], "ndim", 0) != 0
+            )
+        ):
+            raise ValueError(
+                "expected a scalar token sequence; use field_collators for other layouts"
+            )
+        padding = [pad_value] * pad_len if tail is None else list(tail)
+        if isinstance(seq, tuple):
+            return seq + tuple(padding)
+        return seq + padding
+    torch_input = _is_torch_tensor(seq)
+    torch_output = _is_torch_tensor(out)
+    values = seq if torch_input else np.asarray(seq)
+    if scalar and (
+        values.ndim != 1 or (not torch_input and values.dtype.kind in "OUS")
+    ):
+        raise ValueError(
+            "expected a scalar token sequence; use field_collators for other layouts"
+        )
+    if torch_input or torch_output:
+        import torch
+
+        if out is None:
+            out = seq.new_empty((len(seq) + pad_len, *seq.shape[1:]))
+        if torch_output or _is_torch_tensor(out):
+            dtype = out.dtype
+            if (
+                not dtype.is_floating_point
+                and not dtype.is_complex
+                and dtype != torch.bool
+            ):
+                info = torch.iinfo(dtype)
+                if pad_len and not info.min <= pad_value <= info.max:
+                    raise ValueError(
+                        f"pad value {pad_value} is not representable in dtype {dtype}"
+                    )
+            out[: len(seq)] = torch.as_tensor(seq, dtype=dtype, device=out.device)
+            out[len(seq) :] = (
+                pad_value
+                if tail is None
+                else torch.as_tensor(tail, dtype=dtype, device=out.device)
+            )
+            return out
+        values = seq.numpy()
+    if not isinstance(values, np.ndarray):
+        raise TypeError(f"unsupported field type {type(seq).__name__} to pad")
+    if out is None:
+        out = np.empty((len(seq) + pad_len, *values.shape[1:]), dtype=values.dtype)
+    if pad_len and out.dtype.kind in "iu":
+        info = np.iinfo(out.dtype)
+        if not info.min <= pad_value <= info.max:
+            raise ValueError(
+                f"pad value {pad_value} is not representable in dtype {out.dtype}"
+            )
+    out[: len(seq)] = values
+    out[len(seq) :] = pad_value if tail is None else tail
+    return out
+
+
+def mask_segment_start_labels(
+    labels: Any, positions: Any, replacement: int, framework: str | None
+) -> Any:
+    """Exclude predictions of the first token of a later packed subdocument.
+
+    This avoids training the last token of one unrelated subdocument to predict
+    the next one's first token. For positions [0, 1, 0, 1], labels [a2, b1, b2]
+    become [a2, replacement, b2]. ``labels`` has shape [batch, sequence - 1];
+    original scalar ``positions`` has shape [batch, sequence]. Lists may be ragged.
+    Returns new labels, retaining existing exclusions. The first input token is
+    already outside the target slice. Attention, positions and inputs are unchanged.
+    """
+    if framework in ("torch", "numpy"):
+        if (
+            positions.ndim != 2
+            or positions.shape[:-1] != labels.shape[:-1]
+            or max(0, positions.shape[-1] - 1) != labels.shape[-1]
+        ):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if positions.shape[-1] and bool((positions[:, 0] != 0).any()):
+            raise ValueError("positions must start at zero in every nonempty document")
+        return mask_unsupervised_labels(
+            labels, positions[:, 1:] != 0, replacement, framework
+        )
+    for row, targets in zip(positions, labels):
+        if any(
+            isinstance(item, (list, tuple, dict, str, bytes))
+            or getattr(item, "ndim", 0) != 0
+            for item in row
+        ) or max(0, len(row) - 1) != len(targets):
+            raise ValueError(
+                "mask_segment_starts requires scalar positions aligned with tokens"
+            )
+        if row and row[0] != 0:
+            raise ValueError("positions must start at zero in every nonempty document")
+    masks = [[value != 0 for value in row[1:]] for row in positions]
+    return mask_unsupervised_labels(labels, masks, replacement, framework)
