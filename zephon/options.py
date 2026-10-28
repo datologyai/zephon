@@ -169,7 +169,7 @@ class RuntimeOptions:
     mapping_strategy: Literal["contiguous", "interleaved"] | None = None
     # Records the trainer consumes per optimizer step across all data-parallel
     # ranks (its global batch size). When set, Zephon checks that every step
-    # takes whole batches from every lane.
+    # takes whole batches from every lane, and step-based curricula use it.
     global_batch_size: int | None = None
 
     # === IPC serialization ===

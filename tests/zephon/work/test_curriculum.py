@@ -635,6 +635,86 @@ def test_mixture_phase_rejects_malformed_payloads(
         MixturePhase.from_dict(phase)
 
 
+def test_step_mixture_plan_repeat_guard_accepts_dataset_at_scheduled_bound() -> None:
+    # alpha peaks at 0.8 of a 10-sample chunk; a varying weight can draw one more.
+    work = StaticMixtureWorkSource(
+        [_make_dataset("alpha", 9), _make_dataset("beta", 9)],
+        StepMixturePlan(
+            phases=[
+                MixturePhase(0, {"alpha": 0.8, "beta": 0.2}),
+                MixturePhase(1, {"alpha": 0.2, "beta": 0.8}),
+            ],
+            total_steps=2,
+        ),
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+    )
+
+    work._prepare_for_execution(
+        canonical_replicas=1,
+        output_batch_size=10,
+        preserves_cursor_order=True,
+        global_batch_size=10,
+    )
+
+
+def test_step_mixture_plan_rejects_reordering_pipeline() -> None:
+    work = StaticMixtureWorkSource(
+        [_make_dataset("alpha", 100), _make_dataset("beta", 100)],
+        _two_phase_plan(8_000, boundary="warn"),
+        chunk_size=128,
+        seed=0,
+        shuffle_shards=False,
+    )
+
+    with pytest.raises(ValueError, match="cursor-order-preserving pipeline"):
+        work._prepare_for_execution(
+            canonical_replicas=8,
+            output_batch_size=4,
+            preserves_cursor_order=False,
+            global_batch_size=32,
+        )
+
+
+def test_step_plan_switches_every_lane_at_the_same_step() -> None:
+    plan = StepMixturePlan.from_dict(
+        {
+            "type": "StepMixturePlan",
+            "version": 1,
+            "total_steps": 4,
+            "phases": [
+                {"step": 0, "proportions": {"a": 1.0, "b": 0.0}},
+                {"step": 2, "proportions": {"a": 0.0, "b": 1.0}},
+            ],
+        }
+    )
+    work = StaticMixtureWorkSource(
+        [_make_dataset("a", 128), _make_dataset("b", 128)],
+        plan,
+        chunk_size=4,
+        seed=0,
+        shuffle_shards=True,
+        shuffle_within_shard=True,
+        exhausted_policy="stop",
+    )
+    work._prepare_for_execution(
+        canonical_replicas=8,
+        output_batch_size=4,
+        preserves_cursor_order=True,
+        global_batch_size=32,
+    )
+    for lane_id in range(8):
+        lane = work.clone_for_lane(lane_id, 8)
+        assert [lane.next_chunk().components.keys() for _ in range(4)] == [
+            {"a"},
+            {"a"},
+            {"b"},
+            {"b"},
+        ]
+
+
 def _two_phase_plan(boundary_step: int, **kwargs: Any) -> StepMixturePlan:
     return StepMixturePlan(
         phases=[
@@ -706,6 +786,47 @@ def test_exact_boundary_mode_rejects_blended_breakpoints() -> None:
         _two_phase_plan(1_000)._compile(**layout)
 
 
+def _warning_for(plan: StepMixturePlan, caplog: pytest.LogCaptureFixture) -> str:
+    work = StaticMixtureWorkSource(
+        [_make_dataset("alpha", 100), _make_dataset("beta", 100)],
+        plan,
+        chunk_size=4,
+        seed=0,
+        exhausted_policy="repeat",
+    )
+    with caplog.at_level("WARNING", logger="zephon.work.static_mixture"):
+        work._prepare_for_execution(
+            canonical_replicas=2,
+            output_batch_size=2,
+            preserves_cursor_order=True,
+            global_batch_size=4,
+        )
+    return caplog.text
+
+
+def test_blended_boundaries_warn(caplog: pytest.LogCaptureFixture) -> None:
+    text = _warning_for(_two_phase_plan(3, boundary="warn"), caplog)
+    assert "averaged over steps 2-3" in text
+
+
+def test_blended_boundary_warning_is_truncated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    alternating = StepMixturePlan(
+        phases=[
+            MixturePhase(
+                step, {"alpha": 0.2 + 0.6 * (step % 2), "beta": 0.8 - 0.6 * (step % 2)}
+            )
+            for step in range(24)
+        ],
+        total_steps=24,
+        boundary="warn",
+    )
+    text = _warning_for(alternating, caplog)
+    assert text.count("averaged over steps") == 10
+    assert "... and 2 more" in text
+
+
 def test_unknown_boundary_mode_is_rejected() -> None:
     with pytest.raises(ValueError, match="boundary must be one of"):
         _two_phase_plan(8, boundary="average")
@@ -718,6 +839,57 @@ def test_step_plan_boundary_round_trips() -> None:
     assert StepMixturePlan.from_dict(payload).boundary == "warn"
     assert "boundary" not in _two_phase_plan(1_000).to_dict()
     assert _two_phase_plan(1_000).boundary == "exact"
+
+
+def _plan_work(**kwargs: Any) -> StaticMixtureWorkSource:
+    return StaticMixtureWorkSource(
+        [_make_dataset("alpha", 100), _make_dataset("beta", 100)],
+        _two_phase_plan(8),
+        chunk_size=4,
+        seed=0,
+        exhausted_policy="repeat",
+        **kwargs,
+    )
+
+
+def test_step_plan_compiles_against_global_batch_size() -> None:
+    work = _plan_work()
+    pipe = (
+        Pipeline(work)
+        .batch(2)
+        .options(canonical_replicas=2, global_batch_size=8, mtp_mode=False)
+    )
+    iterator = iter(pipe)
+    try:
+        next(iterator)
+    finally:
+        iterator.close()
+    assert work._prepared == (2, 8)
+
+
+def test_compiled_step_plan_rejects_a_different_layout() -> None:
+    work = _plan_work()
+    layout = {"output_batch_size": 2, "preserves_cursor_order": True}
+    work._prepare_for_execution(canonical_replicas=2, global_batch_size=8, **layout)
+    work._prepare_for_execution(canonical_replicas=2, global_batch_size=8, **layout)
+    with pytest.raises(RuntimeError, match="already compiled"):
+        work._prepare_for_execution(canonical_replicas=4, global_batch_size=8, **layout)
+    with pytest.raises(RuntimeError, match="already compiled"):
+        work._prepare_for_execution(
+            canonical_replicas=2, global_batch_size=16, **layout
+        )
+
+
+def test_reused_source_still_rejects_an_incompatible_pipeline() -> None:
+    work = _plan_work()
+    options = {"canonical_replicas": 2, "global_batch_size": 8, "mtp_mode": False}
+    iterator = iter(Pipeline(work).batch(2).options(**options))
+    try:
+        next(iterator)
+    finally:
+        iterator.close()
+    with pytest.raises(ValueError, match="cursor-order-preserving pipeline"):
+        next(iter(Pipeline(work).shuffle(16).batch(2).options(**options)))
 
 
 def test_equal_fingerprints_compile_to_identical_tables() -> None:
@@ -739,3 +911,10 @@ def test_equal_fingerprints_compile_to_identical_tables() -> None:
     first, second = forward._compile(**layout), reverse._compile(**layout)
     assert first._starts.tolist() == second._starts.tolist()
     assert first._rows.tolist() == second._rows.tolist()
+
+
+def test_step_plan_requires_global_batch_size() -> None:
+    with pytest.raises(ValueError, match=r"Pipeline.options\(global_batch_size"):
+        _plan_work()._prepare_for_execution(
+            canonical_replicas=2, output_batch_size=2, preserves_cursor_order=True
+        )

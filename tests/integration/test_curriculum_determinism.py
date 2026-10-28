@@ -26,10 +26,12 @@ from zephon import Pipeline
 from zephon.io import Dataset, InMemoryShard
 from zephon.types import SampleBatch, SampleRecord
 from zephon.work import (
+    MixturePhase,
     MixtureSchedule,
     PhaseConstantSchedule,
     PhaseLinearSchedule,
     StaticMixtureWorkSource,
+    StepMixturePlan,
     TokenEstimation,
 )
 
@@ -42,11 +44,14 @@ pytestmark = [
 CANONICAL_REPLICAS = 4
 CHUNK_SIZE = 8
 ROUND_SIZE = CANONICAL_REPLICAS * CHUNK_SIZE
+# batch(1) with 8 records per step is 2 batches per lane per step; a round is
+# 4 steps, so a phase at step 5 or 27 lands mid-round and one at 16 on a round.
+SAMPLES_PER_STEP = 8
 NAMES = ("alpha", "beta", "gamma")
 ROUNDS_TO_CONSUME = 13
 RECORDS_TO_CONSUME = ROUNDS_TO_CONSUME * ROUND_SIZE
 
-APIS = ["chunk_rounds"]
+APIS = ["chunk_rounds", "step_phases", "step_ramps"]
 
 INLINE: dict[str, Any] = {}
 THREADS_RACY: dict[str, Any] = {
@@ -112,6 +117,29 @@ def _chunk_round_schedule() -> MixtureSchedule:
     )
 
 
+def _step_plan(api: str) -> StepMixturePlan:
+    if api == "step_phases":
+        return StepMixturePlan(
+            [
+                MixturePhase(0, {"alpha": 0.8, "beta": 0.1, "gamma": 0.1}),
+                MixturePhase(5, {"alpha": 0.2, "beta": 0.7, "gamma": 0.1}),
+                MixturePhase(16, {"alpha": 0.1, "beta": 0.2, "gamma": 0.7}),
+                MixturePhase(27, {"alpha": 0.5, "beta": 0.25, "gamma": 0.25}),
+            ],
+            total_steps=200,
+            boundary="warn",
+        )
+    return StepMixturePlan(
+        schedules={
+            "alpha": PhaseLinearSchedule([(0, 0.8), (13, 0.1), (30, 0.5)]),
+            "beta": PhaseConstantSchedule([(0, 0.1), (7, 0.6), (21, 0.2)]),
+            "gamma": PhaseLinearSchedule([(0, 0.1), (25, 0.6)]),
+        },
+        total_steps=200,
+        boundary="warn",
+    )
+
+
 def _jitter(payload: Any) -> Any:
     # Heavy-tailed, unseeded sleeps make workers and lanes race.
     time.sleep(random.random() ** 3 * 0.002)
@@ -138,6 +166,7 @@ def _build(
     options: dict[str, Any] | None = None,
     ops: Callable[[Pipeline], Pipeline] = _racy_map,
     batch: int | None = 1,
+    samples_per_step: int = SAMPLES_PER_STEP,
     datasets: Callable[[], list[Dataset]] = _default_datasets,
     work_kwargs: dict[str, Any] | None = None,
 ) -> Pipeline:
@@ -147,10 +176,20 @@ def _build(
         "shuffle_within_shard": True,
         **(work_kwargs or {}),
     }
-    assert api == "chunk_rounds"
-    work_source = StaticMixtureWorkSource(
-        datasets(), _chunk_round_schedule(), chunk_size=CHUNK_SIZE, **work_kwargs
-    )
+    if api == "chunk_rounds":
+        work_source = StaticMixtureWorkSource(
+            datasets(),
+            _chunk_round_schedule(),
+            chunk_size=CHUNK_SIZE,
+            **work_kwargs,
+        )
+    else:
+        work_source = StaticMixtureWorkSource(
+            datasets(),
+            _step_plan(api),
+            chunk_size=CHUNK_SIZE,
+            **work_kwargs,
+        )
     pipe = ops(Pipeline(work_source))
     if batch is not None:
         pipe = pipe.batch(batch)
@@ -162,6 +201,9 @@ def _build(
             "prefetch_batches": 0,
             "max_workers": 1,
             "mtp_mode": False,
+            **(
+                {} if api == "chunk_rounds" else {"global_batch_size": samples_per_step}
+            ),
             **(options or {}),
         }
     )
@@ -387,10 +429,17 @@ def test_lane_streams_are_independent_of_dp_degree(
 
 
 def _cut_points(api: str) -> list[int]:
-    transitions = [5 * ROUND_SIZE, 9 * ROUND_SIZE]
+    if api == "chunk_rounds":
+        transitions = [5 * ROUND_SIZE, 9 * ROUND_SIZE]
+    else:
+        # Steps 5 and 27 start mid-round; step 16 starts on a round.
+        transitions = [5 * SAMPLES_PER_STEP, 27 * SAMPLES_PER_STEP]
     # At, just before, and mid-chunk and mid-round after each transition.
     offsets = (0, -1, CHUNK_SIZE + 1)
-    return sorted({t + d for t in transitions for d in offsets})
+    cuts = {t + d for t in transitions for d in offsets}
+    if api != "chunk_rounds":
+        cuts.add(16 * SAMPLES_PER_STEP)
+    return sorted(cuts)
 
 
 @pytest.mark.parametrize("api", APIS)
@@ -420,7 +469,8 @@ def test_resume_twice_across_runners(api: str) -> None:
     assert prefix + middle + suffix == reference
 
 
-@pytest.mark.parametrize("api", APIS)
+# Step plans also get an optimizer-step elastic chain below.
+@pytest.mark.parametrize("api", ["chunk_rounds", "step_ramps"])
 def test_elastic_resume_chain_keeps_lane_streams(api: str, tmp_path: Path) -> None:
     # (dp_degree, items per rank); budgets leave lanes at unequal frontiers.
     segments = [(1, 61), (2, 37), (4, 23), (1, 101)]
@@ -434,6 +484,75 @@ def test_elastic_resume_chain_keeps_lane_streams(api: str, tmp_path: Path) -> No
     # Every lane crossed several schedule transitions.
     assert min(len(records) for records in collected.values()) > 6 * CHUNK_SIZE
     _assert_lane_prefixes(dict(collected), _reference(api))
+
+
+# Microbatches of 3 against 8-record chunks: per-lane step windows cross
+# chunk boundaries, and a round is 4/3 steps.
+STEP_BATCH = 3
+STEP_RECORDS = 24
+STEPS_TO_CONSUME = 16
+
+
+def _steps(rank_streams: list[list[RecordKey]]) -> list[list[RecordKey]]:
+    # A trainer step takes the same number of records from every DP rank.
+    per_rank = STEP_RECORDS // len(rank_streams)
+    count = min(len(stream) for stream in rank_streams) // per_rank
+    return [
+        sorted(
+            record
+            for stream in rank_streams
+            for record in stream[step * per_rank : (step + 1) * per_rank]
+        )
+        for step in range(count)
+    ]
+
+
+def _step_build(api: str, options: dict[str, Any]) -> Pipeline:
+    return _build(api, batch=STEP_BATCH, samples_per_step=STEP_RECORDS, options=options)
+
+
+@functools.lru_cache(maxsize=None)
+def _step_reference(api: str) -> list[list[RecordKey]]:
+    batches = STEPS_TO_CONSUME * STEP_RECORDS // STEP_BATCH
+    records, _ = _consume(_step_build(api, INLINE), batches)
+    steps = _steps([records])
+    assert len(steps) == STEPS_TO_CONSUME
+    return steps
+
+
+@pytest.mark.parametrize("api", ["step_phases", "step_ramps"])
+@pytest.mark.parametrize("dp_degree", [2, 4])
+def test_optimizer_steps_hold_the_same_records_for_any_dp_degree(
+    api: str, dp_degree: int, tmp_path: Path
+) -> None:
+    def builder(rank: int) -> Callable[[], Pipeline]:
+        return lambda: _step_build(
+            api, {**THREADS_RACY, **_rank_options(dp_degree, rank, tmp_path)}
+        )
+
+    batches = STEPS_TO_CONSUME * STEP_RECORDS // STEP_BATCH // dp_degree
+    outputs = _consume_ranks([builder(rank) for rank in range(dp_degree)], batches)
+    assert _steps([records for records, _ in outputs]) == _step_reference(api)
+
+
+@pytest.mark.parametrize("api", ["step_phases", "step_ramps"])
+def test_optimizer_steps_survive_an_elastic_resume_chain(
+    api: str, tmp_path: Path
+) -> None:
+    # (dp_degree, optimizer steps); each segment checkpoints on a step boundary.
+    per_step = STEP_RECORDS // STEP_BATCH
+    segments = [
+        (dp_degree, step_count * per_step // dp_degree)
+        for dp_degree, step_count in [(1, 5), (2, 4), (4, 3), (1, 4)]
+    ]
+    steps = [
+        step
+        for rank_streams in _elastic_chain(
+            lambda options: _step_build(api, options), segments, tmp_path
+        )
+        for step in _steps(rank_streams)
+    ]
+    assert steps == _step_reference(api)
 
 
 # -- downstream operators ---------------------------------------------------
@@ -501,6 +620,26 @@ def _pack_flush_every(k: int) -> dict[str, Any]:
             {"work_kwargs": {"lane_assignment": "modulo"}},
             id="chunk-modulo",
         ),
+        pytest.param(
+            "step_ramps",
+            {"work_kwargs": {"lane_assignment": "modulo"}},
+            id="step-modulo",
+        ),
+        pytest.param(
+            "step_phases",
+            {"ops": lambda p: p.map_transform(_drop_every_fifth, parallelism=8)},
+            id="step-filter",
+        ),
+        *(
+            pytest.param(
+                api, {"batch": batch, "samples_per_step": step}, id=f"{api}-{name}"
+            )
+            for api in ("step_phases", "step_ramps")
+            for name, batch, step in (
+                ("batch2", 2, SAMPLES_PER_STEP),
+                ("batch3", 3, 12),
+            )
+        ),
     ],
 )
 def test_variants_are_execution_independent(api: str, variant: dict[str, Any]) -> None:
@@ -565,7 +704,20 @@ _TOKEN_ESTIMATION = {"token_estimation": TokenEstimation(primer=0.25)}
                 "token_estimation is not supported",
                 id=f"{api}-token-estimation",
             )
-            for api in APIS
+            for api in ("chunk_rounds", "step_ramps")
+        ),
+        *(
+            pytest.param(
+                "step_phases",
+                {"ops": ops},
+                "cursor-order-preserving",
+                id=f"step-{name}",
+            )
+            for name, ops in (
+                ("shuffle", lambda p: p.shuffle(8)),
+                ("ensure_mixture", lambda p: p.ensure_mixture(weight_by="samples")),
+                ("pack_sequences", _pack_sequences),
+            )
         ),
     ],
 )
@@ -686,7 +838,7 @@ def test_terminating_policies_end_mid_schedule_deterministically(
 # -- other knobs ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize("api", ["chunk_rounds", "step_phases"])
 def test_torch_dataloader_workers_keep_the_stream(api: str) -> None:
     torch_data = pytest.importorskip("torch.utils.data")
     limit = 8 * ROUND_SIZE
