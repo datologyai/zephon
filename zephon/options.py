@@ -223,6 +223,10 @@ class RuntimeOptions:
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
+    # Per-node produced/consumed payload bytes under NODES tracking. None lets
+    # each runner decide: on for runners that ship payloads across process or
+    # host boundaries (process, remote), off for in-process runners.
+    measure_bytes: bool | None = None
 
 
 __all__ = [

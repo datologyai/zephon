@@ -160,6 +160,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
     """
 
     _OperatorState = _RayOperatorState
+    SHIPS_PAYLOADS = True
 
     def __init__(
         self,
@@ -174,6 +175,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
+        measure_bytes: bool | None = None,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         runtime_env: dict[str, Any] | None = None,
         actor_env_vars: dict[str, str] | None = None,
@@ -220,6 +222,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
             allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
             stage_index=stage_index,
             tracking_mode=tracking_mode,
+            measure_bytes=measure_bytes,
             stage_output_mode=stage_output_mode,
         )
 
@@ -407,6 +410,7 @@ class RemoteStageRunner(ConcurrentStageRunner["_RayOperatorState"]):
                 stage_index=self._stage_index,
                 stage_name=self._stage_name,
                 collect_stats=self._tracking_mode.collects_nodes,
+                measure_bytes=self._measure_bytes,
                 ctx_services=actor_ctx,
             )
             group.init(

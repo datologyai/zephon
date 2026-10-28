@@ -70,3 +70,40 @@ def test_timing_snapshots_are_unavailable_without_an_inline_engine() -> None:
     pipe._sp = object()
     assert pipe.fetch_timing_snapshot() is None
     assert pipe.prefetch_timing_snapshot() is None
+
+
+@pytest.mark.parametrize(
+    ("measure_bytes", "expect_bytes"), [(None, False), (True, True), (False, False)]
+)
+def test_measure_bytes_controls_in_process_byte_metrics(
+    measure_bytes: bool | None, expect_bytes: bool
+) -> None:
+    rows = [{"text": f"row{i}"} for i in range(6)]
+    ws = FakeIndexableWorkSource(make_inmem_dataset("tiny", rows), chunk_size=3)
+    pipe = (
+        PublicPipeline(ws)
+        .decode_text()
+        .batch(microbatch_size=2, drop_last=False)
+        .enable_observability(
+            tracking=ExecutionTrackingMode.NODES, measure_bytes=measure_bytes
+        )
+        .options(
+            deterministic=True,
+            max_workers=1,
+            default_stage_prefetch=0,
+            prefetch_batches=0,
+            mtp_mode=False,
+        )
+    )
+    it = iter(pipe)
+    try:
+        list(it)
+    finally:
+        it.close()
+
+    summary = pipe.metrics_snapshot()
+    assert summary is not None
+    records = summary.to_records()
+    assert any(rec["produced_elements"] > 0 for rec in records)
+    measured = any(rec["produced_bytes"] or rec["consumed_bytes"] for rec in records)
+    assert measured is expect_bytes

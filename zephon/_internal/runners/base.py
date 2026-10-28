@@ -9,7 +9,7 @@ import copy
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Sequence, TypeVar
+from typing import Any, Callable, ClassVar, Generic, Sequence, TypeVar
 
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import (
@@ -402,6 +402,10 @@ StateT = TypeVar("StateT", bound=BaseOperatorState)
 class StageRunnerBase(Generic[StateT], ABC):
     """Skeleton for concrete stage runners."""
 
+    # Whether payloads cross a process/host boundary, which makes byte metrics
+    # worth their sizing cost by default.
+    SHIPS_PAYLOADS: ClassVar[bool] = False
+
     def __init__(
         self,
         stage: Stage,
@@ -413,6 +417,7 @@ class StageRunnerBase(Generic[StateT], ABC):
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
+        measure_bytes: bool | None = None,
         stage_output_mode: str = "microbatches",
     ) -> None:
         if stage_output_mode not in {"microbatches", "stream_items"}:
@@ -424,6 +429,9 @@ class StageRunnerBase(Generic[StateT], ABC):
         self._prefetch_capacity = max(0, prefetch_capacity)
         self._stage_index = stage_index
         self._tracking_mode = tracking_mode
+        if measure_bytes is None:
+            measure_bytes = self.SHIPS_PAYLOADS
+        self._measure_bytes = tracking_mode.collects_nodes and measure_bytes
         self._emit_microbatches = stage_output_mode == "microbatches"
         self._record_node_metrics: Callable[[NodeMetricsDelta], None] = (
             self._ctx_services["record_node_metrics"]

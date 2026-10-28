@@ -243,8 +243,15 @@ class MetricsReporter:
             if self._sink_config and self._sink_config.json_logs:
                 logger.info(json.dumps(log_payload))
             else:
+                # Bytes stay 0 when byte measurement is off for this stage.
+                produced_bytes = int(record["produced_bytes"])
+                bytes_part = (
+                    f" bytes={pretty_format_bytes(produced_bytes)}"
+                    if produced_bytes
+                    else ""
+                )
                 logger.info(
-                    "[zephon][metrics] plan=%s stage=%s/%s op=%s/%s avg=%s total=%s produced=%d bytes=%s wait=%s ratio=%s",
+                    "[zephon][metrics] plan=%s stage=%s/%s op=%s/%s avg=%s total=%s produced=%d%s wait=%s ratio=%s",
                     plan_id,
                     record["stage"],
                     record["stage_name"],
@@ -253,7 +260,7 @@ class MetricsReporter:
                     pretty_format_ns(int(record["avg_processing_ns"])),
                     pretty_format_ns(int(record["processed_ns"])),
                     int(record["produced_elements"]),
-                    pretty_format_bytes(int(record["produced_bytes"])),
+                    bytes_part,
                     pretty_format_ns(int(record["wait_ns"])),
                     pretty_format_ratio(float(record.get("wait_ratio", 0.0))),
                 )
