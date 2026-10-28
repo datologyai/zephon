@@ -58,6 +58,10 @@ class LazyPayload(ABC):
     @abstractmethod
     def resolve_payload(self) -> "SamplePayload": ...
 
+    @abstractmethod
+    def payload_nbytes(self) -> int:
+        """Content bytes of the resolved payload, computed without resolving it."""
+
 
 # Pipeline items and micro-batches travel between operators/stages.
 Microbatch = list[StreamItem]

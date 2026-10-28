@@ -269,6 +269,29 @@ class _LeafDescriptor(_PayloadDescriptor):
         """Restore this value using its shared buffers."""
         raise NotImplementedError
 
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        """Content bytes of the restored value, without restoring it."""
+        raise NotImplementedError
+
+
+def _numel(shape: tuple[int, ...]) -> int:
+    numel = 1
+    for size in shape:
+        numel *= size
+    return numel
+
+
+def _slots_nbytes(slots: list[Any], buffers: dict[str, Any]) -> int:
+    """Content bytes of flattened payload slots, matching ``content_bytes``."""
+    from zephon._internal.observability.size_estimator import content_bytes
+
+    return sum(
+        slot.nbytes(buffers)
+        if isinstance(slot, _LeafDescriptor)
+        else content_bytes(slot)
+        for slot in slots
+    )
+
 
 @dataclass(slots=True)
 class _TensorSlot(_LeafDescriptor):
@@ -291,6 +314,11 @@ class _TensorSlot(_LeafDescriptor):
             self.buffer_key,
             self.requires_grad,
         )
+
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        numel = _numel(self.shape)
+        buf = buffers.get(self.buffer_key or self.dtype_key)
+        return 0 if numel == 0 or buf is None else numel * buf.element_size()
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a tensor view, preserving the dtype of empty tensors too."""
@@ -337,6 +365,9 @@ class _NdarraySlot(_LeafDescriptor):
             self.buffer_key,
             self.writable,
         )
+
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return _numel(self.shape) * self.dtype.itemsize
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a NumPy view without intermediate torch tensor views."""
@@ -484,6 +515,10 @@ class _NumericListSlot(_LeafDescriptor):
     def __reduce__(self) -> tuple:
         return type(self), (self.dtype_key, self.offset, self.length, self.buffer_key)
 
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        # content_bytes counts each int/float element as 8 bytes.
+        return 8 * self.length
+
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore the original Python list contract."""
         buf = buffers.get(self.buffer_key or self.dtype_key)
@@ -505,6 +540,9 @@ class _BytesSlot(_LeafDescriptor):
 
     def __reduce__(self) -> tuple:
         return type(self), (self.offset, self.length, self.buffer_key)
+
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return self.length
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore a bytes view backed by the shared uint8 buffer."""
@@ -539,6 +577,9 @@ class _StructSlot(_LeafDescriptor):
 
     def __reduce__(self) -> tuple:
         return type(self), (self.cls, self.inner_skeleton)
+
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return _slots_nbytes(self.inner_skeleton.slots, buffers)
 
     def restore(self, buffers: dict[str, Any]) -> Any:
         """Restore named fields and reconstruct their enclosing object."""
@@ -841,6 +882,9 @@ class _InlineTensor(_LeafDescriptor):
     def restore(self, buffers: dict[str, Any]) -> Any:
         return self.tensor
 
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return int(self.tensor.element_size() * self.tensor.nelement())
+
     def __reduce_ex__(self, protocol: int) -> Any:
         tensor = self.tensor
         if tensor.requires_grad:
@@ -876,6 +920,9 @@ class _InlineTensorData(_LeafDescriptor):
     def __reduce__(self) -> tuple:
         return type(self), (self.data, self.dtype, self.shape, self.requires_grad)
 
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return memoryview(self.data).nbytes
+
     def restore(self, buffers: dict[str, Any]) -> Any:
         return _restore_inline_tensor(
             self.data, self.dtype, self.shape, self.requires_grad
@@ -898,6 +945,9 @@ class _InlineNumpy(_LeafDescriptor):
         if not self.writable:
             self.array.flags.writeable = False
         return self.array
+
+    def nbytes(self, buffers: dict[str, Any]) -> int:
+        return int(self.array.nbytes)
 
 
 @dataclass(slots=True)
@@ -1440,6 +1490,10 @@ class _ShmLeafPayload(LazyPayload):
         """Restore the leaf using its descriptor's existing type knowledge."""
         return cast(SamplePayload, self._descriptor.restore(self._buffers))
 
+    def payload_nbytes(self) -> int:
+        """Size the leaf from its descriptor without restoring it."""
+        return self._descriptor.nbytes(self._buffers)
+
     def __reduce__(self) -> tuple:
         """Forward the descriptor and buffers without resolving the value."""
         return (_ShmLeafPayload, (self._descriptor, self._buffers))
@@ -1466,6 +1520,10 @@ class ShmLazyPayload(LazyPayload):
         """Materialize the full payload from inline values and shared-buffer slots."""
         restored = _resolve_slots(self._slots, self._buffers)
         return cast(SamplePayload, optree.tree_unflatten(self._spec, restored))
+
+    def payload_nbytes(self) -> int:
+        """Size the payload from its slots without restoring it."""
+        return _slots_nbytes(self._slots, self._buffers)
 
     def __reduce__(self) -> tuple:
         """Pickle without resolving — forward (slots, spec, buffers) as-is."""

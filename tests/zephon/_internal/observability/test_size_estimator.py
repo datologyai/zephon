@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
-import pytest
 
-from zephon._internal.observability.size_estimator import content_bytes, estimate_bytes
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 
@@ -26,7 +24,6 @@ def test_content_bytes_counts_mapping_values_not_keys() -> None:
     # content_bytes excludes container overhead and mapping keys.
     obj = {"a_long_key": b"x" * 100}
     assert content_bytes(obj) == 100
-    assert estimate_bytes(obj) > content_bytes(obj)
 
 
 def test_content_bytes_has_no_container_overhead() -> None:
@@ -48,6 +45,8 @@ def test_content_bytes_scalars_and_unknown() -> None:
     assert content_bytes(1) == 8
     assert content_bytes(1.5) == 8
     assert content_bytes(True) == 8
+    assert content_bytes(None) == 0
+    assert content_bytes(np.float32(1.0)) == 4
     assert content_bytes(object()) == 0
 
 
@@ -56,43 +55,34 @@ def test_content_bytes_nested() -> None:
     assert content_bytes(obj) == 2 + 4 + 3
 
 
-def test_estimate_bytes_string_with_surrogate_does_not_raise() -> None:
-    assert estimate_bytes("a\ud800b") == 2
+def test_content_bytes_counts_record_and_batch_payloads_only() -> None:
+    payload = {"data": b"x" * 4096, "text": "abc"}
+    meta = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0, tags={"k": "v"})
+    record = SampleRecord(meta=meta, payload=payload)
+    batch = SampleBatch(records=(record, record))
+
+    assert content_bytes(record) == 4099
+    assert content_bytes(batch) == 2 * 4099
+    assert content_bytes([batch, record]) == 3 * 4099
 
 
-@pytest.mark.parametrize(
-    "value,minimum",
-    [
-        (None, 0),
-        (b"bytes", 5),
-        ("text", len("text".encode("utf-8"))),
-    ],
-)
-def test_estimate_bytes_handles_simple_types(value: Any, minimum: int) -> None:
-    size = estimate_bytes(value)
-    assert size >= minimum
+def test_content_bytes_homogeneous_and_mixed_sequences() -> None:
+    assert content_bytes([1] * 100) == 800
+    assert content_bytes([1, 2.0, True]) == 24
+    assert content_bytes([1, None, "ab"]) == 10
+    assert content_bytes(["ab", "cd"]) == 4
+    assert content_bytes(["é", "a"]) == 3
+    assert content_bytes([b"ab", b"c"]) == 3
+    assert content_bytes([np.zeros(2, dtype=np.int8)] * 3) == 6
 
 
-def test_estimate_bytes_handles_nested_containers() -> None:
-    nested = {"a": [1, 2, 3], "b": {"inner": b"payload"}}
-    size = estimate_bytes(nested)
-    assert size >= len(b"payload")
+def test_content_bytes_subclasses_and_views() -> None:
+    class Text(str):
+        pass
 
+    class Blob(bytes):
+        pass
 
-def test_estimate_bytes_counts_sample_record_payloads() -> None:
-    payload = b"x" * 4096
-    meta = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
-    record = SampleRecord(meta=meta, payload={"data": payload})
-    batch = SampleBatch(records=(record,))
-
-    assert estimate_bytes(record) >= len(payload)
-    assert estimate_bytes(batch) >= len(payload)
-    assert estimate_bytes([batch]) >= len(payload)
-
-
-def test_estimate_bytes_does_not_double_count_shared_records() -> None:
-    payload = b"x" * 4096
-    meta = SampleMeta(sample_id=(0, 0, 1), lane_id=0, chunk_id=0)
-    record = SampleRecord(meta=meta, payload={"data": payload})
-
-    assert estimate_bytes([record, record]) < 2 * len(payload)
+    assert content_bytes(Text("hé")) == 3
+    assert content_bytes(Blob(b"abcd")) == 4
+    assert content_bytes(memoryview(np.zeros(4, dtype=np.int64))) == 32

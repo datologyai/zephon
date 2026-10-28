@@ -11,7 +11,7 @@ from multiprocessing import queues as mp_queues
 from typing import Any, Generic, Iterable, Iterator, Protocol, Sequence, TypeVar
 
 from zephon._internal.flush_context import shutdown_flush
-from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon._internal.runners.base import BaseOperatorState, StageRunnerBase
 from zephon._internal.runners.pump_timer import PumpTimer
 from zephon._internal.stream import (
@@ -505,7 +505,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         metrics_meta = self._metrics_meta[state.op_index]
         stage_index, stage_name, op_index, op_name = metrics_meta
         produced_elements = len(result.payload)
-        produced_bytes = estimate_bytes(result.payload)
+        produced_bytes = content_bytes(result.payload)
         delta = NodeMetricsDelta(
             stage_index=stage_index,
             op_index=op_index,

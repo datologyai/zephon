@@ -19,7 +19,7 @@ from ray.exceptions import GetTimeoutError, RayError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from zephon._internal.graph import Node
-from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.observability.size_estimator import content_bytes
 from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import RunnerResult, WorkerErrorInfo
 from zephon._internal.utils.cleanup import cleanup_budget
@@ -95,7 +95,7 @@ class RaySingleOpActor:
         """Process one input batch and return a RunnerResult."""
         try:
             consumed_elements = len(batch)
-            consumed_bytes = estimate_bytes(batch) if self._collect_stats else 0
+            consumed_bytes = content_bytes(batch) if self._collect_stats else 0
 
             start_ns = time.perf_counter_ns() if self._collect_stats else 0
 
