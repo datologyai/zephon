@@ -967,6 +967,8 @@ class EnsureMixture(BaseOp):
         mixture_override: Explicit mixture target {component_name: float}. If None,
             derived from chunk mixture via engine context. Names are converted to
             component IDs. EOD sentinel handling also applies to this override.
+            Cannot be combined with a curriculum schedule on the work source,
+            which it would silently replace.
         parallelism: Parallelism level for this operator.
     """
 
@@ -1055,6 +1057,14 @@ class EnsureMixture(BaseOp):
         the operator is pickled for worker processes (which creates a fresh
         config without mixture_override_by_id populated).
         """
+        if self._config.mixture_override and ctx.get("curriculum_active"):
+            raise ValueError(
+                "EnsureMixture(mixture_override=...) cannot be combined with a "
+                "curriculum schedule: the override would replace the scheduled "
+                "mixture. Drop mixture=; EnsureMixture follows each chunk's "
+                "scheduled mixture on its own."
+            )
+
         # Convert explicit mixture override from names to IDs (idempotent)
         if (
             self._config.mixture_override

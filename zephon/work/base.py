@@ -474,6 +474,10 @@ class WorkSource(ABC):
         """
         return None
 
+    def _has_schedule(self) -> bool:
+        """Whether a curriculum schedule drives this source's per-chunk mixture."""
+        return False
+
 
 __all__ = [
     "ComponentOrder",

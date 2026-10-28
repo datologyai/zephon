@@ -1,17 +1,47 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import math
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from zephon import Pipeline
+from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     ConstantSchedule,
     MixtureSchedule,
     PhaseConstantSchedule,
     PhaseLinearSchedule,
+    StaticMixtureWorkSource,
+    TokenEstimation,
 )
+from zephon.work.static_mixture import LegacyFixedStrategy, _AllocationConfig
+
+
+def _make_dataset(name: str, n: int) -> Dataset:
+    rows = [{"text": f"{name}-{idx}"} for idx in range(n)]
+    return Dataset.from_dict(name, {0: InMemoryShard(rows)})
+
+
+def _two_dataset_work(
+    samples: int,
+    chunk_size: int,
+    schedule: MixtureSchedule | None = None,
+    **kwargs: Any,
+) -> StaticMixtureWorkSource:
+    # Endless by default: the crossfades below leave alpha at weight 0, which
+    # a terminating source rejects.
+    kwargs.setdefault("exhausted_policy", "repeat")
+    return StaticMixtureWorkSource(
+        [_make_dataset("alpha", samples), _make_dataset("beta", samples)],
+        schedule if schedule is not None else {"alpha": 0.5, "beta": 0.5},
+        chunk_size=chunk_size,
+        seed=0,
+        shuffle_shards=False,
+        **kwargs,
+    )
 
 
 def _crossfade(total_rounds: int) -> MixtureSchedule:
@@ -21,6 +51,11 @@ def _crossfade(total_rounds: int) -> MixtureSchedule:
             "beta": PhaseLinearSchedule([(0, 0.0), (total_rounds, 1.0)]),
         }
     )
+
+
+def _make_curriculum_work() -> StaticMixtureWorkSource:
+    # A fast crossfade makes any cross-lane weight leak change sample ids.
+    return _two_dataset_work(4000, chunk_size=10, schedule=_crossfade(20))
 
 
 def test_phase_linear_schedule_interpolates_and_holds() -> None:
@@ -93,6 +128,315 @@ def test_mixture_schedule_max_weight_is_normalized_peak() -> None:
         {"alpha": PhaseLinearSchedule([(0, 0.0), (10, 1.0)]), "beta": 1.0}
     )
     assert ramp.max_weight("alpha") == pytest.approx(0.5)
+
+
+def test_single_lane_schedule_advances_per_chunk_round() -> None:
+    work = _two_dataset_work(200, chunk_size=10, schedule=_crossfade(10))
+    ws = work.clone_for_lane(0, canonical_replicas=1)
+
+    chunks = [ws.next_chunk() for _ in range(11)]
+    assert all(chunk is not None for chunk in chunks)
+    assert chunks[0].components.keys() == {"alpha"}
+    assert len(chunks[5].components["alpha"]) == 5
+    assert len(chunks[5].components["beta"]) == 5
+    assert chunks[10].components.keys() == {"beta"}
+
+
+def test_chunk_round_indexing_across_lanes_agrees() -> None:
+    # With canonical_replicas=2 the lanes split global chunks by parity but
+    # share each chunk round, so both must install that round's weights.
+    schedule = _crossfade(4)
+    work = _two_dataset_work(400, chunk_size=10, schedule=schedule)
+    lane0 = work.clone_for_lane(0, canonical_replicas=2)
+    lane1 = work.clone_for_lane(1, canonical_replicas=2)
+
+    for chunk_round in range(4):
+        assert lane0.next_chunk() is not None
+        assert lane1.next_chunk() is not None
+        expected = schedule.weights_at(chunk_round)
+        assert lane0._alloc_config.weights == expected
+        assert lane1._alloc_config.weights == expected
+
+
+def test_schedule_deterministic_under_out_of_lockstep_lanes() -> None:
+    ref_lane0 = _make_curriculum_work().clone_for_lane(0, canonical_replicas=2)
+    reference = [ref_lane0.next_chunk().components for _ in range(8)]
+
+    work = _make_curriculum_work()
+    lane0 = work.clone_for_lane(0, canonical_replicas=2)
+    lane1 = work.clone_for_lane(1, canonical_replicas=2)
+    # Lane 0's next internal draw is a round-0 discard that skips re-applying
+    # the schedule; lane 1 racing ahead must not change the weights it uses.
+    got = [lane0.next_chunk().components]
+    for _ in range(12):
+        assert lane1.next_chunk() is not None
+    got.extend(lane0.next_chunk().components for _ in range(7))
+
+    assert got == reference
+
+
+def test_schedule_deterministic_under_lanes_per_worker() -> None:
+    references = []
+    for lane_id in (0, 1):
+        lane = _make_curriculum_work().clone_for_lane(lane_id, canonical_replicas=2)
+        references.append([lane.next_chunk().components for _ in range(6)])
+
+    work = _make_curriculum_work()
+    lanes = [work.clone_for_lane(lane_id, canonical_replicas=2) for lane_id in (0, 1)]
+    got: list[list[Any]] = [[], []]
+    for lane_id in [0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0]:
+        got[lane_id].append(lanes[lane_id].next_chunk().components)
+
+    assert got == references
+
+
+@pytest.mark.parametrize(
+    "names", [("alpha", "gamma"), ("alpha",), ("alpha", "beta", "gamma")]
+)
+def test_schedule_rejects_mismatched_components(names: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="must match work source dataset names"):
+        _two_dataset_work(
+            20, chunk_size=5, schedule=MixtureSchedule(dict.fromkeys(names, 1.0))
+        )
+
+
+def test_schedule_rejects_token_aware_source() -> None:
+    with pytest.raises(ValueError, match="sample-denominated"):
+        _two_dataset_work(
+            20,
+            chunk_size=5,
+            schedule=_crossfade(4),
+            token_estimation=TokenEstimation(primer=0.25),
+        )
+
+
+def test_schedule_rejects_redistribution() -> None:
+    with pytest.raises(ValueError, match="redistribute"):
+        _two_dataset_work(
+            20,
+            chunk_size=5,
+            schedule=_crossfade(4),
+            exhausted_policy={"alpha": "redistribute", "beta": "repeat"},
+        )
+
+
+def test_schedule_rejects_never_active_components() -> None:
+    with pytest.raises(ValueError, match="never active"):
+        _two_dataset_work(
+            20, chunk_size=5, schedule=MixtureSchedule({"alpha": 1.0, "beta": 0.0})
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"exhausted_policy": {"alpha": "stop", "beta": "repeat"}},
+        {"exhausted_policy": "repeat", "max_repeats": {"alpha": 2, "beta": None}},
+    ],
+    ids=["stop-after-passes", "stop", "capped-repeat"],
+)
+def test_schedule_rejects_endless_terminating_source(
+    kwargs: dict[str, Any],
+) -> None:
+    # alpha alone can end the run, and the schedule leaves it at weight 0.
+    with pytest.raises(ValueError, match="would never stop"):
+        StaticMixtureWorkSource(
+            [_make_dataset("alpha", 100), _make_dataset("beta", 100)],
+            MixtureSchedule(
+                {"alpha": PhaseConstantSchedule([(0, 1.0), (5, 0.0)]), "beta": 1.0}
+            ),
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            **kwargs,
+        )
+
+
+def test_schedule_accepts_zero_weight_when_another_dataset_stops() -> None:
+    work = StaticMixtureWorkSource(
+        [_make_dataset("alpha", 100), _make_dataset("beta", 100)],
+        _crossfade(4),
+        chunk_size=10,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="stop",
+    )
+    lane = work.clone_for_lane(0, canonical_replicas=1)
+    chunks = 0
+    while lane.next_chunk() is not None:
+        chunks += 1
+    assert 0 < chunks < 20
+
+
+class _FeedbackSchedule:
+    # A mixture-level duck type, like a trainer-feedback controller.
+    component_names = ("alpha", "beta")
+
+    def max_weight(self, name: str) -> float:
+        return 1.0
+
+    def weights_at(self, chunk_round: int) -> dict[str, float]:
+        return {"alpha": 0.0, "beta": 1.0}
+
+
+def test_duck_typed_schedules_are_rejected() -> None:
+    with pytest.raises(TypeError, match="mixture must be"):
+        _two_dataset_work(
+            100, chunk_size=10, schedule=cast(MixtureSchedule, _FeedbackSchedule())
+        )
+
+
+def test_scheduled_source_has_no_length() -> None:
+    plain = _two_dataset_work(100, chunk_size=10, exhausted_policy="stop")
+    assert len(plain) == plain.total_samples == 200
+    work = _two_dataset_work(
+        100,
+        chunk_size=10,
+        schedule=MixtureSchedule({"alpha": 3.0, "beta": 1.0}),
+        exhausted_policy="stop",
+    )
+    with pytest.raises(TypeError, match="scheduled work source"):
+        len(work)
+    with pytest.raises(RuntimeError, match="scheduled work source"):
+        _ = work.total_samples
+
+
+def test_schedule_survives_checkpoint_resume() -> None:
+    work_save = _two_dataset_work(200, chunk_size=10, schedule=_crossfade(10))
+    ws_save = work_save.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(5):
+        assert ws_save.next_chunk() is not None
+    state = ws_save.state_dict()
+    assert "schedule" not in state
+
+    work_load = _two_dataset_work(200, chunk_size=10, schedule=_crossfade(10))
+    ws_load = work_load.clone_for_lane(0, canonical_replicas=1)
+    ws_load.load_state_dict(state)
+
+    for _ in range(3):
+        assert ws_load.next_chunk().components == ws_save.next_chunk().components
+
+
+def test_in_place_restore_reapplies_scheduled_round() -> None:
+    # Restoring into a lane that already cached a later round must not keep
+    # that round's weights for the restored round.
+    work = StaticMixtureWorkSource(
+        [_make_dataset("alpha", 40), _make_dataset("beta", 40)],
+        MixtureSchedule(
+            {
+                "alpha": PhaseConstantSchedule([(0, 1.0), (2, 0.0)]),
+                "beta": PhaseConstantSchedule([(0, 0.0), (2, 1.0)]),
+            }
+        ),
+        chunk_size=4,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="stop",
+    )
+    lane = work.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(2):
+        assert lane.next_chunk().components.keys() == {"alpha"}
+    state = copy.deepcopy(lane.state_dict())
+    expected = lane.next_chunk().components
+    assert expected.keys() == {"beta"}
+
+    lane.load_state_dict(state)
+
+    assert lane.next_chunk().components == expected
+
+
+def test_repeat_guard_uses_schedule_peak_weight() -> None:
+    # alpha peaks at 1.0, so one chunk can draw 10 alpha samples; it has 4.
+    with pytest.raises(ValueError, match="schedule peak weight"):
+        StaticMixtureWorkSource(
+            [_make_dataset("alpha", 4), _make_dataset("beta", 200)],
+            _crossfade(10),
+            chunk_size=10,
+            seed=0,
+            shuffle_shards=False,
+            exhausted_policy="repeat",
+        )
+
+
+def _jump_to_half(chunk_size: int, c_samples: int) -> StaticMixtureWorkSource:
+    return StaticMixtureWorkSource(
+        [
+            _make_dataset("a", 4 * chunk_size),
+            _make_dataset("b", 4 * chunk_size),
+            _make_dataset("c", c_samples),
+        ],
+        MixtureSchedule(
+            {"a": 3.0, "b": 1.0, "c": PhaseConstantSchedule([(0, 1.0), (3, 4.0)])}
+        ),
+        chunk_size=chunk_size,
+        seed=0,
+        shuffle_shards=False,
+        exhausted_policy="repeat",
+    )
+
+
+def test_repeat_guard_covers_integral_peak_share_after_weight_change() -> None:
+    # c jumps from 0.2 to exactly 0.5: the remainder carried from the 0.2
+    # rounds lets round 3 draw 513 of c, one more than its 512 share.
+    with pytest.raises(ValueError, match="schedule peak weight"):
+        _jump_to_half(1024, 512)
+    lane = _jump_to_half(1024, 513).clone_for_lane(0, canonical_replicas=1)
+    for _ in range(10):
+        assert lane.next_chunk() is not None
+
+
+def test_allocation_tracks_a_moving_schedule_cumulatively() -> None:
+    # The accumulator carries remainders across weight changes, so even a
+    # component below 1/chunk_size gets its scheduled share over time.
+    chunk_size = 16
+    schedule = MixtureSchedule(
+        {
+            "a": PhaseLinearSchedule([(0, 0.01), (200, 0.3), (400, 0.02)]),
+            "b": PhaseConstantSchedule([(0, 1.0), (150, 0.5), (300, 1.0)]),
+            "c": 0.05,
+        }
+    )
+    work = StaticMixtureWorkSource(
+        [_make_dataset(name, 20_000) for name in ("a", "b", "c")],
+        schedule,
+        chunk_size=chunk_size,
+        seed=0,
+        exhausted_policy="repeat",
+    )
+    lane = work.clone_for_lane(0, canonical_replicas=1)
+    target = dict.fromkeys("abc", 0.0)
+    drawn = dict.fromkeys("abc", 0)
+    for chunk_round in range(500):
+        for name, weight in schedule.weights_at(chunk_round).items():
+            target[name] += weight * chunk_size
+        for name, ids in lane.next_chunk().components.items():
+            drawn[name] += len(ids)
+        assert all(abs(drawn[n] - target[n]) <= 1.0 for n in "abc"), chunk_round
+
+
+def test_legacy_fixed_strategy_set_weights_raises() -> None:
+    cfg = _AllocationConfig(
+        component_order=("a", "b"),
+        weights={"a": 0.5, "b": 0.5},
+        chunk_size=10,
+        exhausted_policy={"a": "stop", "b": "stop"},
+        reshuffle_on_repeat={"a": False, "b": False},
+        max_repeats={"a": None, "b": None},
+    )
+    with pytest.raises(NotImplementedError, match="fixed quotas"):
+        LegacyFixedStrategy(config=cfg).set_weights({"a": 0.9, "b": 0.1})
+
+
+def test_pipeline_rejects_ensure_mixture_override_with_schedule() -> None:
+    work = _two_dataset_work(100, chunk_size=10, schedule=_crossfade(4))
+    pipe = (
+        Pipeline(work)
+        .ensure_mixture(weight_by="samples", mixture={"alpha": 0.5, "beta": 0.5})
+        .options(mtp_mode=False, max_workers=1)
+    )
+    with pytest.raises(ValueError, match="cannot be combined with a curriculum"):
+        next(iter(pipe))
 
 
 def test_schedule_to_dict_round_trip() -> None:
@@ -172,3 +516,41 @@ def test_mixture_schedule_from_dict_is_strict() -> None:
         MixtureSchedule.from_dict(
             {**payload, "schedules": {"alpha": {"type": "LinearSchedule"}}}
         )
+
+
+def _scheduled_lane_state(schedule: MixtureSchedule) -> dict[str, Any]:
+    work = _two_dataset_work(100, chunk_size=10, schedule=schedule)
+    lane = work.clone_for_lane(0, canonical_replicas=1)
+    for _ in range(3):
+        lane.next_chunk()
+    return lane.state_dict()
+
+
+def _restore_into(schedule: MixtureSchedule | None, state: dict[str, Any]) -> None:
+    work = _two_dataset_work(100, chunk_size=10, schedule=schedule)
+    work.clone_for_lane(0, canonical_replicas=1).load_state_dict(state)
+
+
+def test_checkpoint_records_the_attached_schedule() -> None:
+    state = _scheduled_lane_state(_crossfade(10))
+    assert state["schedule_fingerprint"] == _crossfade(10)._fingerprint()
+
+    _restore_into(_crossfade(10), state)
+    with pytest.raises(RuntimeError, match="with the same schedule"):
+        _restore_into(None, state)
+    with pytest.raises(RuntimeError, match="with the same schedule"):
+        _restore_into(_crossfade(20), state)
+
+
+@pytest.mark.parametrize("pre_v7", [False, True])
+def test_unscheduled_checkpoint_rejects_an_attached_schedule(pre_v7: bool) -> None:
+    lane = _two_dataset_work(100, chunk_size=10).clone_for_lane(0, canonical_replicas=1)
+    lane.next_chunk()
+    state = lane.state_dict()
+    assert state["schedule_fingerprint"] is None
+    if pre_v7:
+        del state["schedule_fingerprint"]
+        state["version"] = 6
+    _restore_into(None, state)
+    with pytest.raises(RuntimeError, match="written with no schedule"):
+        _restore_into(_crossfade(10), state)
