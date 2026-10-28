@@ -8,6 +8,7 @@ _CACHE_FIELDS = (
     "limit_bytes",
     "rg_cache_bytes",
     "keep_zip",
+    "persist_state",
     "validate_hash",
     "download_retry",
     "download_timeout",
@@ -36,6 +37,7 @@ def _configured_cache(
         limit_bytes=10,
         rg_cache_bytes=rg_cache_bytes,
         keep_zip=True,
+        persist_state=True,
         validate_hash="sha256",
         download_retry=3,
         download_timeout=4.0,
@@ -73,6 +75,11 @@ def test_cache_options_from_any_and_merge(tmp_path) -> None:
     merged = a.merge(b)
     assert merged.enabled is True
     assert str(merged.root) == str(tmp_path)
+
+    assert a.persist_state is False
+    assert CacheOptions.from_any({"persist_state": True}).persist_state is True
+    with pytest.raises(ValueError, match="cache.persist_state must be a boolean"):
+        _ = CacheOptions.from_any({"persist_state": "false"})
 
     with pytest.raises(TypeError):
         _ = CacheOptions.from_any(123)

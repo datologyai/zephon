@@ -248,6 +248,19 @@ for stage in fetch.iter_stages():
     print(f"  Hits: {totals.cache_hits}, misses: {totals.cache_misses}")
 ```
 
+### Keeping the Cache Between Runs
+
+By default, the first process to open the cache after every earlier process has exited
+wipes it. If you run jobs one after another on the same node over the same datasets, set
+`persist_state=True` in `CacheOptions` so the next job reuses the shards already on disk.
+Zephon stores a fingerprint of the datasets being read (their names, roots, and every
+shard's file names, sizes, and hashes) with the cache. The next job reuses the files only
+if its fingerprint is identical; any difference, such as an added dataset, wipes the cache
+as before. Reused shards count toward `limit_bytes` and are evicted like any other shard.
+This setting does not change how processes share a cache while they run together: they
+share it if their fingerprints match, and otherwise the new process fails with
+`CacheInUseError`.
+
 ## Complete Example
 
 See `examples/run_with_prefetch.py` in the repository for a complete working example demonstrating:

@@ -1,6 +1,9 @@
 import gc
 import json
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import weakref
@@ -695,6 +698,89 @@ def test_cold_reset_on_fingerprint_mismatch_persist_state_true(tmp_path: Path) -
         assert ref.raw.path.read_bytes() == data_v2
     finally:
         mgr2.close()
+
+
+def _resolve_first_shard_through_store(
+    tmp_path: Path, cache_options: Mapping[str, Any], shard_count: int
+) -> bool:
+    """Resolve shard 0 through the public cache options; return ``cache_hit``."""
+    from zephon._internal.io.stores.multi import build_resolver
+    from zephon.io.options import StoreOptions
+
+    remote = tmp_path / "remote"
+    locators = []
+    for shard_id in range(shard_count):
+        data = f"shard-{shard_id}".encode() * 64
+        _make_file(remote / f"s{shard_id}.bin", data)
+        locators.append(
+            _locator(
+                "demo",
+                shard_id,
+                str(remote),
+                raw_name=f"s{shard_id}.bin",
+                raw_bytes=len(data),
+            )
+        )
+    options = StoreOptions.from_any(
+        {"cache": {"enabled": True, "root": tmp_path / "cache", **cache_options}}
+    )
+    resolver = build_resolver(
+        catalog_set_from_locators(locators, tmp_path / "_catalogs"),
+        options,
+        LocalFSBackend(root=remote),
+    )
+    return resolver.resolve(locators[0]).cache_hit
+
+
+@pytest.mark.parametrize(
+    ("cache_options", "second_shard_count", "second_hit"),
+    [
+        ({}, 1, False),
+        ({"persist_state": True}, 1, True),
+        ({"persist_state": True}, 2, False),
+    ],
+    ids=["default-wipes", "persist-resumes", "persist-fingerprint-mismatch-wipes"],
+)
+def test_cache_options_persist_state_across_processes(
+    tmp_path: Path,
+    cache_options: dict[str, Any],
+    second_shard_count: int,
+    second_hit: bool,
+) -> None:
+    """Two processes in turn use one cache root, each exiting without close()."""
+    script = textwrap.dedent("""
+        import json
+        import sys
+        from pathlib import Path
+        from tests.zephon._internal.io.resolvers.cache.test_manager import (
+            _resolve_first_shard_through_store,
+        )
+
+        hit = _resolve_first_shard_through_store(
+            Path(sys.argv[1]), json.loads(sys.argv[2]), int(sys.argv[3])
+        )
+        print(json.dumps(hit))
+    """)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    hits = []
+    for shard_count in (1, second_shard_count):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(tmp_path),
+                json.dumps(cache_options),
+                str(shard_count),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        hits.append(json.loads(result.stdout))
+    assert hits == [False, second_hit]
 
 
 def test_hard_error_on_fingerprint_mismatch_with_live_owners(tmp_path: Path) -> None:

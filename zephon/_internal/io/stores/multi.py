@@ -227,6 +227,7 @@ def build_resolver(
             limit_bytes=store_opts.cache.limit_bytes,
             keep_zip=store_opts.cache.keep_zip,
             validate_hash=store_opts.cache.validate_hash,
+            persist_state=store_opts.cache.persist_state,
             download_retry=store_opts.cache.download_retry,
             download_timeout=store_opts.cache.download_timeout,
             min_slack_bytes=store_opts.cache.min_slack_bytes,
