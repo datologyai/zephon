@@ -513,6 +513,38 @@ def test_missing_file_stays_local_if_a_peer_restores_it(tmp_path: Path) -> None:
         mgr.close()
 
 
+def test_hit_evicted_before_its_ref_is_built_re_resolves(tmp_path: Path) -> None:
+    # A peer evicts the shard between the lock-free is_file() check and the
+    # stat() in _build_ref: resolve must re-download, not raise FileNotFoundError.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"e" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    index = mgr._index_for(loc)
+    assert index is not None
+    real_build_ref = mgr._build_ref
+    evicted: list[bool] = []
+
+    def evict_then_build(*args: Any, **kwargs: Any) -> LocalShardRef:
+        if kwargs.get("cache_hit") and not evicted:
+            evicted.append(True)
+            with mgr._cache_lock:
+                mgr._evict_index_locked(index)
+        return real_build_ref(*args, **kwargs)
+
+    try:
+        mgr.resolve(loc)
+        mgr._build_ref = evict_then_build  # type: ignore[method-assign]
+        ref = mgr.resolve(loc)
+        assert evicted
+        assert not ref.cache_hit and ref.raw.path.read_bytes() == data
+        assert mgr.stats().shards == 1
+    finally:
+        mgr.close()
+
+
 def test_limit_too_small_raises(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"

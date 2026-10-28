@@ -988,7 +988,12 @@ class CacheManager(ShardResolver):
             if _ShardState(self._shared.shard_states[index]) == _ShardState.LOCAL:
                 if raw_path.is_file():
                     self._shared.set_access_time(index, time.time_ns())
-                    return self._build_ref(raw_path, zip_path, locator, cache_hit=True)
+                    try:
+                        return self._build_ref(
+                            raw_path, zip_path, locator, cache_hit=True
+                        )
+                    except FileNotFoundError:
+                        pass  # Evicted since is_file(): fall through to the re-check.
                 # A peer may have re-downloaded it since: check both under the lock.
                 with self._cache_lock:
                     if (
