@@ -25,7 +25,7 @@ The string literals that operator-configuration arguments accept.
    Which special tokens ``tokenize`` adds around each sequence.
 
 .. py:data:: ChatSpecialTokensMode
-   :type: Literal['bos_eos', 'bos', 'eos', 'none', 'tokenizer_default', 'assistant_eos']
+   :type: Literal[SpecialTokensMode, 'assistant_eos']
 
    Which special tokens ``tokenize_chat`` adds. ``assistant_eos`` appends EOS after
    each assistant message when no chat template is applied.
