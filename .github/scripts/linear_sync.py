@@ -298,7 +298,7 @@ def _resolve(
         return issue, False
 
     is_bot = pr["user"]["type"] == "Bot"
-    if create and not is_bot and not pr["draft"] and depth == 0:
+    if create and not is_bot and depth == 0:
         return _create_triage_issue(client, pr), False
     return None, False
 
