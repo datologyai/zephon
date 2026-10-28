@@ -10,6 +10,7 @@ import pytest
 from zephon._internal.observability.size_estimator import (
     content_bytes,
     metric_bytes,
+    sampled_content_bytes,
 )
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
@@ -94,6 +95,34 @@ def test_content_bytes_subclasses_and_views() -> None:
     assert content_bytes(memoryview(np.zeros(4, dtype=np.int64))) == 32
 
 
+def _rec(i: int, payload: object) -> SampleRecord:
+    return SampleRecord(
+        meta=SampleMeta(sample_id=(0, 0, i), lane_id=0, chunk_id=0), payload=payload
+    )
+
+
+def test_sampled_content_bytes_is_exact_for_small_batches() -> None:
+    batch = [_rec(i, b"x" * (i + 1)) for i in range(7)]
+    assert sampled_content_bytes(batch) == content_bytes(batch)
+    assert sampled_content_bytes([]) == 0
+
+
+def test_sampled_content_bytes_is_exact_for_uniform_records() -> None:
+    batch = [_rec(i, {"ids": np.zeros(128, dtype=np.int32)}) for i in range(64)]
+    packed = [SampleBatch(records=tuple(batch[i : i + 16])) for i in range(0, 64, 16)]
+    for _ in range(4):  # every rotation of the sampling offset
+        assert sampled_content_bytes(batch) == 64 * 512
+        assert sampled_content_bytes(packed) == 64 * 512
+
+
+def test_sampled_content_bytes_rotation_is_unbiased_for_stride_patterns() -> None:
+    # Sizes repeat with the stride's period; a fixed offset would always see
+    # the same record size.
+    batch = [_rec(i, b"x" * (10 if i % 4 == 0 else 100)) for i in range(64)]
+    total = sum(sampled_content_bytes(batch) for _ in range(4))
+    assert total == 4 * content_bytes(batch)
+
+
 def test_content_bytes_uses_nbytes_attribute() -> None:
     class ArrayLike:
         nbytes = 123
@@ -132,8 +161,8 @@ def test_metric_bytes_never_raises(caplog: pytest.LogCaptureFixture) -> None:
     type(broken).nbytes = property(lambda self: 1 // 0)  # type: ignore[assignment]
 
     with caplog.at_level(logging.WARNING):
-        assert metric_bytes(cyclic) == 0
-        assert metric_bytes(broken) == 0
-        assert metric_bytes({"ok": b"abcd"}) == 4
+        assert metric_bytes([cyclic]) == 0
+        assert metric_bytes([broken]) == 0
+        assert metric_bytes([{"ok": b"abcd"}] * 16) == 64
     with pytest.raises(RecursionError):
         content_bytes(cyclic)

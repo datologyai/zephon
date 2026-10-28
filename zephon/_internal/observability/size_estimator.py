@@ -181,8 +181,8 @@ def content_bytes(obj: Any) -> int:
     """Content-only payload bytes, excluding object overhead and mapping keys.
 
     Records and batches count only their payloads. No cycle guard: payloads
-    are expected to be acyclic. Use :func:`metric_bytes` where a sizing
-    failure must not propagate.
+    are expected to be acyclic. Runner metrics use :func:`metric_bytes`, which
+    never raises.
     """
     cls = type(obj)
     handler = _HANDLERS.get(cls)
@@ -191,18 +191,53 @@ def content_bytes(obj: Any) -> int:
     return handler(obj)
 
 
+# Runner byte metrics size one in ``_SAMPLE_STRIDE`` records per batch and scale
+# up. Sampling inside every batch keeps the estimate unbiased when record sizes
+# drift over a run, and per-record variance averages out over the many batches
+# a metrics total covers. Batches under ``_SAMPLE_MIN_RECORDS`` are sized exactly.
+_SAMPLE_STRIDE = 4
+_SAMPLE_MIN_RECORDS = 2 * _SAMPLE_STRIDE
+# Rotate the first sampled index so size patterns aligned with the stride (e.g.
+# alternating short/long records) do not bias the estimate. Races between
+# threads only perturb the rotation, which is harmless.
+_sample_offset = 0
+
+
+def sampled_content_bytes(items: Sequence[Any]) -> int:
+    """Estimate :func:`content_bytes` of a runner microbatch by stride sampling.
+
+    ``SampleBatch`` items are flattened into their records so packed batches
+    sample at record granularity.
+    """
+    global _sample_offset
+    units: Sequence[Any] = items
+    if any(type(item) is SampleBatch for item in items):
+        units = [
+            rec
+            for item in items
+            for rec in (item.records if type(item) is SampleBatch else (item,))
+        ]
+    n = len(units)
+    if n < _SAMPLE_MIN_RECORDS:
+        return content_bytes(units)
+    offset = _sample_offset % _SAMPLE_STRIDE
+    _sample_offset = offset + 1
+    sample = units[offset::_SAMPLE_STRIDE]
+    return round(sum(map(content_bytes, sample)) * n / len(sample))
+
+
 _metric_failure_logged = False
 
 
-def metric_bytes(obj: Any) -> int:
-    """:func:`content_bytes` for observability metrics; never raises.
+def metric_bytes(items: Sequence[Any]) -> int:
+    """:func:`sampled_content_bytes` for runner byte metrics; never raises.
 
-    Byte metrics are best-effort, so a payload that cannot be sized (cyclic,
+    Byte metrics are best-effort, so a batch that cannot be sized (cyclic,
     too deeply nested, or a type whose size accessor fails) counts as 0
     instead of failing the batch. The first failure is logged.
     """
     try:
-        return content_bytes(obj)
+        return sampled_content_bytes(items)
     except Exception:
         global _metric_failure_logged
         if not _metric_failure_logged:
