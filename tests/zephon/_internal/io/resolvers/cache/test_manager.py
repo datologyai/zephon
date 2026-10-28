@@ -545,6 +545,31 @@ def test_hit_evicted_before_its_ref_is_built_re_resolves(tmp_path: Path) -> None
         mgr.close()
 
 
+def test_cache_hit_skips_shard_lock_setup(tmp_path: Path) -> None:
+    # The shard lock (and its mkdir) is only for preparing a miss.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"s" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    real_shard_lock = mgr._shard_lock
+    calls: list[int] = []
+
+    def counting_shard_lock(dataset_root: Path, shard_id: int) -> BaseFileLock:
+        calls.append(shard_id)
+        return real_shard_lock(dataset_root, shard_id)
+
+    mgr._shard_lock = counting_shard_lock  # type: ignore[method-assign]
+    try:
+        assert not mgr.resolve(loc).cache_hit
+        assert calls == [0]
+        assert mgr.resolve(loc).cache_hit
+        assert calls == [0]
+    finally:
+        mgr.close()
+
+
 def test_limit_too_small_raises(tmp_path: Path) -> None:
     remote = tmp_path / "remote"
     cache_root = tmp_path / "cache"

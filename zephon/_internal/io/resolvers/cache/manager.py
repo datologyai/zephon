@@ -973,13 +973,9 @@ class CacheManager(ShardResolver):
             )
 
         dataset_root = self._root / locator.dataset
-        dataset_root.mkdir(parents=True, exist_ok=True)
-
         raw_path = dataset_root / locator.raw.basename
         zip_path = dataset_root / locator.zip.basename if locator.zip else None
-        required = self._required_bytes(locator)
-
-        shard_lock = self._shard_lock(dataset_root, locator.shard_id)
+        shard_lock: BaseFileLock | None = None
 
         while True:
             # A hit reads the shared state without the cache lock: an eviction can
@@ -1003,6 +999,13 @@ class CacheManager(ShardResolver):
                     ):
                         self._mark_remote_locked(index)
                 continue
+
+            # Only a miss needs the dataset dir and shard lock; building them on
+            # every hit cost more than the rest of the hit path.
+            if shard_lock is None:
+                dataset_root.mkdir(parents=True, exist_ok=True)
+                required = self._required_bytes(locator)
+                shard_lock = self._shard_lock(dataset_root, locator.shard_id)
 
             # Not LOCAL. Try to become the active preparer via non-
             # blocking flock. ``timeout=0`` → ``fcntl.flock(LOCK_NB)``:
