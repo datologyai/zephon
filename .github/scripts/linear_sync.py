@@ -51,9 +51,14 @@ class _LinearError(RuntimeError):
 
     @property
     def not_found(self) -> bool:
-        return all(
-            e.get("message", "").startswith("Entity not found") for e in self.errors
-        )
+        return self._all_start_with("Entity not found")
+
+    @property
+    def duplicate_attachment(self) -> bool:
+        return self._all_start_with("Duplicate attachment")
+
+    def _all_start_with(self, prefix: str) -> bool:
+        return all(e.get("message", "").startswith(prefix) for e in self.errors)
 
 
 class _Client:
@@ -209,7 +214,58 @@ def _attached_issue(client: _Client, pr_url: str) -> _LinkedIssue | None:
     return None
 
 
+def _link_pr(client: _Client, issue_id: str, pr_url: str, kind: str) -> None:
+    # A GitHub PR attachment (not a plain link) so Linear's own PR automation
+    # tracks review and merge state from here on.
+    try:
+        data = client.linear(
+            """mutation($issueId: String!, $url: String!, $kind: GitLinkKind) {
+              attachmentLinkGitHubPR(issueId: $issueId, url: $url, linkKind: $kind) {
+                success
+              }
+            }""",
+            issueId=issue_id,
+            url=pr_url,
+            kind=kind,
+        )
+    except _LinearError as error:
+        # Re-linking is not idempotent: Linear rejects an already attached URL.
+        if not error.duplicate_attachment:
+            raise
+        _log(f"  {pr_url} already attached")
+        return
+    if not data["attachmentLinkGitHubPR"]["success"]:
+        raise RuntimeError(f"Linear did not attach {pr_url} to {issue_id}")
+
+
+def _triage_marker(pr: dict[str, Any]) -> str:
+    # The trailing " by" keeps pull/1 from matching pull/10.
+    return f"Opened from {pr['html_url']} by"
+
+
 def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | None:
+    # Creating and attaching are separate mutations. If attaching failed on an
+    # earlier run, the issue exists but no attachment points at it, so look it up
+    # by its description before creating another.
+    existing = client.linear(
+        """query($key: String!, $marker: String!) {
+          issues(
+            first: 1
+            filter: { team: { key: { eq: $key } }, description: { contains: $marker } }
+          ) { nodes { identifier projectMilestone { name } } }
+        }""",
+        key=TEAM_KEY,
+        marker=_triage_marker(pr),
+    )["issues"]["nodes"]
+    if existing:
+        issue = _LinkedIssue(
+            existing[0]["identifier"], _release_of(existing[0]["projectMilestone"])
+        )
+        _log(f"  reuse triage issue {issue.identifier} for #{pr['number']}")
+        if not client.dry_run:
+            _link_pr(client, issue.identifier, pr["html_url"], "closes")
+        return issue
+
     _log(f"  create {TEAM_KEY} triage issue for #{pr['number']}")
     if client.dry_run:
         return None
@@ -229,7 +285,7 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
     issue_input: dict[str, Any] = {
         "teamId": team["id"],
         "title": pr["title"],
-        "description": f"Opened from {pr['html_url']} by @{pr['user']['login']}.",
+        "description": f"{_triage_marker(pr)} @{pr['user']['login']}.",
     }
     if team["states"]["nodes"]:
         issue_input["stateId"] = team["states"]["nodes"][0]["id"]
@@ -239,13 +295,7 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
         "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { issue { id identifier } } }",
         input=issue_input,
     )["issueCreate"]["issue"]
-    # A GitHub PR attachment (not a plain link) so Linear's own PR automation
-    # tracks review and merge state from here on.
-    client.linear(
-        "mutation($issueId: String!, $url: String!) { attachmentLinkGitHubPR(issueId: $issueId, url: $url) { success } }",
-        issueId=created["id"],
-        url=pr["html_url"],
-    )
+    _link_pr(client, created["id"], pr["html_url"], "closes")
     _log(f"  created {created['identifier']}")
     return _LinkedIssue(created["identifier"], None)
 
@@ -295,6 +345,12 @@ def _resolve(
     parent = _stack_parent(client, pr, default_branch)
     if parent and depth < 20:
         issue, _ = _resolve(client, parent, default_branch, create, depth + 1)
+        if issue and depth == 0:
+            # Attach the child too: once the parent merges, the child is
+            # retargeted to the default branch and can no longer find it.
+            _log(f"  attach to inherited {issue.identifier}")
+            if not client.dry_run:
+                _link_pr(client, issue.identifier, pr["html_url"], "contributes")
         return issue, False
 
     is_bot = pr["user"]["type"] == "Bot"
