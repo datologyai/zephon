@@ -250,6 +250,27 @@ def test_named_templates_require_an_explicit_name_without_a_default() -> None:
         _run_one(op, {"messages": CONVERSATION})
 
 
+def test_named_template_failure_identifies_selection_and_explicit_default() -> None:
+    tokenizer = make_fast_tokenizer()
+    invalid = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    tokenizer.chat_template = {"default": TAGGED_TEMPLATE, "tool_use": invalid}
+    with pytest.raises(ValueError) as caught:
+        _run_one(TokenizeChat(tokenizer), {"messages": CONVERSATION})
+    assert "'tool_use' failed preparation" in str(caught.value)
+    assert "ignores add_generation_prompt" in str(caught.value)
+    assert 'chat_template="default"' in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert not _run_one(
+        TokenizeChat(tokenizer, chat_template="default"), {"messages": CONVERSATION}
+    ).meta.tombstone
+
+    tokenizer.chat_template = {"default": invalid}
+    with pytest.raises(ValueError) as caught:
+        _run_one(TokenizeChat(tokenizer), {"messages": CONVERSATION})
+    assert "'default' failed preparation" in str(caught.value)
+    assert 'chat_template="default"' not in str(caught.value)
+
+
 def test_position_dependent_template_hard_errors(fast_tokenizer: Any) -> None:
     op = TokenizeChat(
         fast_tokenizer,
@@ -672,7 +693,8 @@ def test_template_document_brackets_preserve_masks_and_budget(
         *_tokens(tokenizer, content),
         "<|end|>",
     ]
-    assert _mask(actual) == [0, *_mask(content), _mask(content)[-1]]
+    # The content ends inside an answer, so the outer EOS is not a target.
+    assert _mask(actual) == [0, *_mask(content), 0]
     assert op.token_counting_spec().build_counter().plan([]).count(payload) == 8
 
 
@@ -836,6 +858,56 @@ def test_tokenizer_suffix_supervision_follows_retained_content(
         op.token_counting_spec().build_counter().plan([]).count(payload)
         == expected_count
     )
+
+
+@pytest.mark.parametrize(
+    ("template", "loss_scope"),
+    [
+        (None, "all_assistant"),
+        (UNTAGGED_TEMPLATE, "all_assistant"),
+        (TAGGED_TEMPLATE, "all_assistant"),
+        (TAGGED_TEMPLATE, "last_span"),
+        (TAGGED_TEMPLATE, "after_last_user"),
+    ],
+)
+def test_outer_eos_supervision_requires_retaining_the_ending(
+    plain_special_tokenizer: Any, template: str | None, loss_scope: LossScope
+) -> None:
+    tokenizer = plain_special_tokenizer
+    payload = {
+        "messages": _messages(
+            ("user", "hi there what is 2 + 2 ? "),
+            ("assistant", "good morning the answer is 4"),
+        )
+    }
+
+    def encode(max_length: int | None = None) -> SampleRecord:
+        op = TokenizeChat(
+            tokenizer,
+            apply_chat_template=template is not None,
+            chat_template=template,
+            special_tokens="bos_eos",
+            loss_scope=loss_scope,
+            max_length=max_length,
+        )
+        record = _run_one(op, payload)
+        ids = _payload(record)["input_ids"].tolist()
+        assert ids[-1] == tokenizer.eos_token_id
+        assert op.token_counting_spec().build_counter().plan([]).count(payload) == len(
+            ids
+        )
+        return record
+
+    complete = encode()
+    assert _mask(complete)[-1] == 1
+    limit = len(_payload(complete)["input_ids"]) - 2
+    right = encode(limit)
+    assert len(_payload(right)["input_ids"]) == limit
+    assert _mask(right)[-2:] == [1, 0]
+    tokenizer.truncation_side = "left"
+    left = encode(limit)
+    assert len(_payload(left)["input_ids"]) == limit
+    assert _mask(left)[-1] == 1
 
 
 def test_multiple_tokenizer_specials_and_full_token_loss(
@@ -1044,12 +1116,16 @@ def test_per_sample_tools_and_enable_thinking_shape_the_render(
             "chat_template has no effect",
         ),
         (
-            {"apply_chat_template": False, "prefix_diff_include_header": True},
-            "prefix_diff_include_header only affects",
+            {"apply_chat_template": False, "supervise_assistant_header": True},
+            "supervise_assistant_header only affects",
         ),
         (
-            {"span_source": "generation_tags", "prefix_diff_include_header": True},
-            "prefix_diff_include_header only affects",
+            {"span_source": "generation_tags", "supervise_assistant_header": True},
+            "supervise_assistant_header only affects",
+        ),
+        (
+            {"loss_scope": "all_tokens", "supervise_assistant_header": True},
+            "supervise_assistant_header only affects",
         ),
         (
             {"loss_scope": "all_tokens", "span_source": "generation_tags"},
@@ -1124,17 +1200,17 @@ def test_prefix_diff_can_include_header_without_changing_tagged_masks(
 ) -> None:
     template = UNTAGGED_TEMPLATE.split("{% if add_generation_prompt %}")[0]
     op = TokenizeChat(
-        fast_tokenizer, chat_template=template, prefix_diff_include_header=True
+        fast_tokenizer, chat_template=template, supervise_assistant_header=True
     )
     payload = {"messages": CONVERSATION[:2]}
     record = _run_one(op, payload)
     assert _tokens(fast_tokenizer, record) == GOLDEN_TOKENS[:8]
     assert _mask(record) == [0, 0, 0, 0, 1, 1, 1, 1]
     spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
-    assert spec.prefix_diff_include_header
+    assert spec.supervise_assistant_header
     assert spec.build_counter().plan([]).count(payload) == 8
     tagged = TokenizeChat(
-        fast_tokenizer, chat_template=TAGGED_TEMPLATE, prefix_diff_include_header=True
+        fast_tokenizer, chat_template=TAGGED_TEMPLATE, supervise_assistant_header=True
     )
     assert _mask(_run_one(tagged, payload)) == GOLDEN_MASK[:8]
 
@@ -1145,7 +1221,7 @@ def test_prefix_diff_header_policy_still_checks_position_dependence(
     op = TokenizeChat(
         fast_tokenizer,
         chat_template=POSITION_DEPENDENT_TEMPLATE,
-        prefix_diff_include_header=True,
+        supervise_assistant_header=True,
     )
     with pytest.raises(ValueError, match="position-dependently"):
         _run_one(op, {"messages": CONVERSATION})

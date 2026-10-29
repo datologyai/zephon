@@ -914,7 +914,7 @@ class Pipeline:
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
-        prefix_diff_include_header: bool = False,
+        supervise_assistant_header: bool = False,
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -943,7 +943,7 @@ class Pipeline:
 
         Targets come from ``{% generation %}`` blocks. Untagged templates infer
         assistant ranges by rendering successive conversation prefixes. Set
-        ``prefix_diff_include_header=True`` to include assistant headers in those ranges.
+        ``supervise_assistant_header=True`` to include assistant headers in those ranges.
         ``loss_scope`` selects all assistant spans (``all_assistant``, default),
         the final contiguous supervised run (``last_span``), all assistant messages
         after the final user (``after_last_user``), or every token except the first
@@ -992,7 +992,7 @@ class Pipeline:
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
-            prefix_diff_include_header=prefix_diff_include_header,
+            supervise_assistant_header=supervise_assistant_header,
             loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,

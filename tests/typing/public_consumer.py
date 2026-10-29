@@ -193,5 +193,9 @@ def all_token_chat(pipe: Pipeline) -> Pipeline:
 
 def chat_document_tokens(pipe: Pipeline) -> Pipeline:
     return pipe.tokenize_chat(
-        tokenizer_id="model", special_tokens="bos_eos", bos_token_id=1, eos_token_id=2
+        tokenizer_id="model",
+        special_tokens="bos_eos",
+        bos_token_id=1,
+        eos_token_id=2,
+        supervise_assistant_header=True,
     )
