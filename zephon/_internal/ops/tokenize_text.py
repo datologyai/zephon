@@ -26,6 +26,7 @@ from zephon._internal.utils.tokenizer import (
     TokenBatch,
     TokenizerLike,
     TokenizerOutput,
+    installed_tokenizer_loader,
 )
 from zephon._internal.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
@@ -93,6 +94,9 @@ class TokenizeText(TokenizeBase):
                 ``tokenizer_id``.
             tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
                 ``"__fallback__"`` selects a small in-process stub for tests.
+                With ``tokenizers>=1`` installed, that faster engine loads it
+                instead, replicating transformers; a tokenizer whose transformers
+                class it does not replicate raises ``Refused``.
             eos_token: Override the EOS string when loading tokenizer_id.
                 With a tokenizer instance, configure its EOS before passing it in.
             field: Dot-separated payload path of the text to tokenize.
@@ -318,6 +322,12 @@ class TokenizeText(TokenizeBase):
                 self._cached_kwargs["return_tensors"] = "np"
             else:
                 self._cached_kwargs["return_tensors"] = self.return_tensors
+
+    def _load_tokenizer(self) -> TokenizerLike:
+        # Chosen where the tokenizer loads: that environment's tokenizers decides.
+        return installed_tokenizer_loader()(
+            self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
+        )
 
     def _finalize_setup(self) -> None:
         # _ensure_padding_token may set pad_token=eos_token (the HF pattern

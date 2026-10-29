@@ -241,7 +241,7 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
         calls.append((tokenizer_id, use_fast, eos_token))
         return fallback_tokenizer()
 
-    monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
+    monkeypatch.setattr("zephon._internal.utils.tokenizer.load_hf_tokenizer", fake_load)
     TextTokenCountingSpec(
         tokenizer_id="hf-model", use_fast=False, eos_token="<end>"
     ).build_counter()
