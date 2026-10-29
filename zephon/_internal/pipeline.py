@@ -1866,9 +1866,9 @@ class Pipeline:
         return engine, iterator, use_monotone
 
     def _iter_inline(self) -> Iterator[Any]:
-        """Original inline iteration path — Engine runs in this process."""
-        # Opt-in here is interpreter-wide, so the default is off even when
-        # mtp_mode=True fell back to inline execution inside a daemon worker.
+        """Run the engine in the current process."""
+        # GC freezing affects the whole interpreter, so inline mode defaults off.
+        # This also applies to daemon workers falling back from MTP.
         freezer = GCFreeze(resolve_gc_freeze(self._options.gc_freeze, mtp=False))
         try:
             ckpt = self._pending_restore

@@ -1,7 +1,7 @@
 # Copyright 2025 DatologyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Process-wide, lifetime-scoped ownership of Python's permanent GC generation."""
+"""GC freezing shared by overlapping pipeline iterations."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _owns_freeze = False
 
 
 def _after_fork() -> None:
-    """Inherited freezes belong to the parent, not to new child scopes."""
+    """Reset the child lock and freeze ownership without unfreezing objects."""
     global _lock, _users, _owns_freeze
     _lock = threading.RLock()
     _users = 0
@@ -27,19 +27,17 @@ if hasattr(os, "register_at_fork"):
 
 
 def resolve_gc_freeze(value: object, *, mtp: bool) -> bool:
-    """Default to freezing only when the engine actually runs in an MTP hub."""
+    """Resolve GC freezing, enabled by default only in MTP mode."""
     if value is not None and not isinstance(value, bool):
         raise ValueError(f"gc_freeze must be True, False, or None; got {value!r}")
     return mtp if value is None else value
 
 
 class GCFreeze:
-    """Keep a Zephon-owned freeze until the last overlapping scope closes.
+    """Share a GC freeze until the last active scope closes.
 
-    An existing permanent generation is left alone: Python cannot selectively
-    unfreeze only the objects Zephon added to it. A caller must not manually
-    freeze/unfreeze while a scope is active. This guard never changes automatic
-    GC's enabled state or thresholds, and unfreezing does not force collection.
+    Existing freezes are preserved. Callers must not call ``gc.freeze()`` or
+    ``gc.unfreeze()`` while a scope is active.
     """
 
     def __init__(self, enabled: bool) -> None:
@@ -57,7 +55,7 @@ class GCFreeze:
             self._active = True
 
     def close(self) -> None:
-        """Release this scope, unfreezing only a generation Zephon owns."""
+        """Unfreeze Zephon-owned objects when the last scope closes."""
         global _users, _owns_freeze
         with _lock:
             if not self._active:
@@ -71,8 +69,7 @@ class GCFreeze:
                 gc.unfreeze()
 
     def __del__(self) -> None:
-        # Normal execution closes explicitly. This also handles abandoned guards
-        # and partially initialized objects, including interpreter shutdown.
+        # Best-effort cleanup during destruction and interpreter shutdown.
         try:
             self.close()
         except Exception:

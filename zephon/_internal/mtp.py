@@ -310,8 +310,8 @@ def _mtp_worker(
     engine = None
     freezer = None
     try:
-        # Only the already-imported/bootstrap heap is present here. Do not
-        # freeze the mutable pipeline/engine or race final-prefetch production.
+        # Freeze before deserialization so the new engine and its buffers
+        # remain outside the frozen generation.
         freezer = GCFreeze(gc_freeze)
         pipeline = cloudpickle.loads(pipeline_bytes)
         # We cannot iterate the pipeline directly (``for item in pipeline``)

@@ -123,10 +123,10 @@ class RuntimeOptions:
     # "off" skips the validator entirely; reserved for last-resort overrides.
     auto_validation: Literal["strict", "warn", "off"] = "strict"
 
-    # Freeze existing GC-tracked objects for the engine's lifetime.
-    # None defaults on in MTP and off inline (including daemon fallback).
-    # True/False override either mode; inline affects the whole interpreter.
-    # Teardown unfreezes only Zephon-owned state.
+    # Freeze GC-tracked objects for the duration of iteration.
+    # None = enabled in MTP, disabled inline (including daemon fallback).
+    # True/False override the default; inline freezing affects the whole interpreter.
+    # Existing application freezes are preserved.
     gc_freeze: bool | None = None
 
     # === MTP Mode (GIL isolation) ===

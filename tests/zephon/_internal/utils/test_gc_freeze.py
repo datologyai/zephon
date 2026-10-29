@@ -100,5 +100,5 @@ def test_fork_does_not_adopt_parent_ownership(
     child = GCFreeze(True)
     parent.close()
     child.close()
-    # The inherited generation is not ours to unfreeze in the child.
+    # Child scopes preserve the inherited frozen generation.
     assert gc_calls == ["collect", "freeze"]
