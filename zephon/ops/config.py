@@ -9,15 +9,20 @@ SpecialTokensMode: TypeAlias = Literal[
     "bos_eos", "bos", "eos", "none", "tokenizer_default"
 ]
 
+ChatSpecialTokensMode: TypeAlias = Literal[SpecialTokensMode, "assistant_eos"]
+
 MissingFieldMode: TypeAlias = Literal["error", "empty"]
 
 SpanSource: TypeAlias = Literal["auto", "generation_tags", "prefix_diff"]
 
-LossScope: TypeAlias = Literal["all_assistant", "last_span", "after_last_user"]
+LossScope: TypeAlias = Literal[
+    "all_assistant", "last_span", "after_last_user", "all_tokens"
+]
 
 PackingAlgorithm: TypeAlias = Literal["first_fit", "best_fit", "wrap", "best_fit_wrap"]
 
 __all__ = [
+    "ChatSpecialTokensMode",
     "LossScope",
     "MissingFieldMode",
     "PackingAlgorithm",

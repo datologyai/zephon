@@ -17,6 +17,26 @@ def _noop(*args, **kwargs) -> None:  # pragma: no cover - trivial helper
     return None
 
 
+def test_eos_string_loading_and_numeric_insertion(tmp_path: Any) -> None:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    tokenizer = make_fast_tokenizer()
+    tokenizer.save_pretrained(tmp_path)
+    inserted_eos = tokenizer.convert_tokens_to_ids("<|assistant|>")
+    op = TokenizeText(
+        tokenizer_id=str(tmp_path),
+        eos_token="<|sep|>",
+        field="text",
+        special_tokens="eos",
+        eos_token_id=inserted_eos,
+    )
+    counter = op.token_counting_spec().build_counter().plan([])
+    result = _setup(op).process_one(_rec("hello <|sep|>"))[0]
+    assert op.tok.eos_token == "<|sep|>"
+    assert result.payload["input_ids"][-1] == inserted_eos
+    assert counter.count({"text": "hello <|sep|>"}) == len(result.payload["input_ids"])
+
+
 def _setup(
     op: TokenizeText,
     ctx_data: dict[str, object] | None = None,

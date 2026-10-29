@@ -229,6 +229,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
     split_long_samples: bool = False
     special_tokens: str = "bos_eos"
     use_fast: bool | None = True
+    eos_token: str | None = None
 
     @classmethod
     def from_op(cls, op: "TokenizeText") -> "TextTokenCountingSpec":
@@ -250,6 +251,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
             split_long_samples=op.split_long_samples,
             special_tokens=op.special_tokens,
             use_fast=op.use_fast,
+            eos_token=op.eos_token,
         )
 
     @property
@@ -280,7 +282,9 @@ class TextTokenCountingSpec(TokenCountingSpec):
     def build_counter(self) -> DeliveredTokenCounter:
         tokenizer = self.tokenizer
         if tokenizer is None:
-            tokenizer = load_hf_tokenizer(self.tokenizer_id, use_fast=self.use_fast)
+            tokenizer = load_hf_tokenizer(
+                self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
+            )
         return _TextCounter(tokenizer, self)
 
 
