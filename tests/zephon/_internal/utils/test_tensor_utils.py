@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import runpy
 import warnings
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -47,6 +51,122 @@ def test_stack_sequences_numpy_empty() -> None:
     out = stack_sequences([], np.int32, "numpy")
     assert out.shape == (0,)
     assert out.dtype == np.int32
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_stack_sequences_torch_to_numpy_casts_only_final_batch(
+    monkeypatch: pytest.MonkeyPatch, strided: bool
+) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [torch.tensor([0, 1, 0, 2], dtype=torch.int32) for _ in range(2)]
+    if strided:
+        rows = [row[::2] for row in rows]
+    originals = [row.clone() for row in rows]
+    views: list[Any] = []
+    asarray = np.asarray
+
+    def capture(row: Any, *args: Any, **kwargs: Any) -> Any:
+        result = asarray(row, *args, **kwargs)
+        views.append(result)
+        return result
+
+    monkeypatch.setattr(np, "asarray", capture)
+    out = stack_sequences(rows, np.int64, "numpy")
+    assert out.tolist() == ([[0, 0]] * 2 if strided else [[0, 1, 0, 2]] * 2)
+    assert out.dtype == np.int64
+    assert len(views) == len(rows)
+    for view, row in zip(views, rows):
+        assert view.dtype == np.int32
+        assert view.ctypes.data == row.data_ptr()
+        assert not np.shares_memory(out, view)
+    out[0, 0] = 99
+    for row, original in zip(rows, originals):
+        assert torch.equal(row, original)
+
+
+def test_stack_sequences_torch_to_numpy_empty_rows() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    out = stack_sequences([torch.empty(0, dtype=torch.int32)] * 2, np.int64, "numpy")
+    assert out.dtype == np.int64
+    assert out.shape == (2, 0)
+
+
+def test_stack_sequences_torch_to_numpy_mixed_and_ragged_rows() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [torch.tensor([0, 1]), np.array([2, 3]), [4, 5]]
+    out = stack_sequences(rows, np.int64, "numpy")
+    assert out.tolist() == [[0, 1], [2, 3], [4, 5]]
+    with pytest.raises(ValueError):
+        stack_sequences([torch.tensor([0, 1]), torch.tensor([2])], np.int64, "numpy")
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "values", "expected"),
+    [
+        ("int32", "int64", [-2, 0, 3], [-2, 0, 3]),
+        ("float64", "float32", [-2.75, 0, 3.5], [-2.75, 0, 3.5]),
+        ("float32", "int64", [-2.75, 0, 3.5], [-2, 0, 3]),
+        ("int64", "int32", [2**32 + 3, -2, 0], [3, -2, 0]),
+    ],
+)
+def test_stack_sequences_torch_to_numpy_numeric_casts(
+    source: str, target: str, values: list[Any], expected: list[Any]
+) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    row = torch.tensor(values, dtype=getattr(torch, source))
+    out = stack_sequences([row], getattr(np, target), "numpy")
+    assert out.tolist() == [expected]
+    assert out.dtype == np.dtype(target)
+    assert row.tolist() == values
+
+
+def test_standalone_benchmark_snapshots_match_production() -> None:
+    pytest.importorskip("torch")
+    from zephon._internal.ops.pack_sequences import _positions_from_segment_lengths
+
+    root = Path(__file__).resolve().parents[4]
+    benchmark = runpy.run_path(str(root / "scripts/benchmark_stack_sequences.py"))
+
+    def normalized(function: Any) -> str:
+        node = ast.parse(inspect.getsource(function)).body[0]
+        assert isinstance(node, ast.FunctionDef)
+        node.name = "function"
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            node.body.pop(0)
+        return ast.dump(node)
+
+    assert normalized(benchmark["_stack_post"]) == normalized(stack_sequences)
+    assert normalized(benchmark["_positions_base"]) == normalized(
+        _positions_from_segment_lengths
+    )
+
+
+@pytest.mark.parametrize("unsupported", ["grad", "bfloat16", "conjugate"])
+def test_stack_sequences_torch_to_numpy_preserves_conversion_errors(
+    unsupported: str,
+) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = {
+        "grad": lambda: torch.tensor([1.0], requires_grad=True),
+        "bfloat16": lambda: torch.tensor([1.0], dtype=torch.bfloat16),
+        "conjugate": lambda: torch.tensor([1 + 2j]).conj(),
+    }
+    row = rows[unsupported]()
+    with pytest.raises((TypeError, RuntimeError)) as original:
+        np.asarray(row, dtype=np.float64)
+    with pytest.raises(type(original.value)) as actual:
+        stack_sequences([row], np.float64, "numpy")
+    assert str(actual.value) == str(original.value)
 
 
 @pytest.mark.parametrize(
@@ -104,7 +224,9 @@ def test_stack_sequences_numpy_to_torch_bfloat16() -> None:
 
 
 @pytest.mark.parametrize("source_dtype", ["int32", "int64"])
-def test_stack_sequences_numpy_to_torch_preserves_lossy_casts(source_dtype: str) -> None:
+def test_stack_sequences_numpy_to_torch_preserves_lossy_casts(
+    source_dtype: str,
+) -> None:
     np = pytest.importorskip("numpy")
     torch = pytest.importorskip("torch")
     rows = [np.array([0, 1], dtype=source_dtype), np.array([1e30, -1e30])]

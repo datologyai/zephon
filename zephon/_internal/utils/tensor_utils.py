@@ -119,9 +119,7 @@ def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> 
         import numpy as np
 
         # Older NumPy cannot coerce a list of array-like objects (e.g. tensors).
-        return np.array(
-            [np.asarray(seq, dtype=dtype) for seq in sequences], dtype=dtype
-        )
+        return np.array([np.asarray(seq) for seq in sequences], dtype=dtype)
     else:
         # Return as list of lists
         return [list(seq) for seq in sequences]
