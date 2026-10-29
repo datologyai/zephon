@@ -91,6 +91,8 @@ def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> 
         if sequences and "numpy" in type(sequences[0]).__module__:
             import numpy as np
 
+            if dtype == torch.int64 and sequences[0].dtype == np.int64:
+                return torch.from_numpy(np.array(sequences)).to(dtype=dtype)
             numpy_dtype = {
                 torch.bool: np.bool_,
                 torch.uint8: np.uint8,

@@ -103,10 +103,11 @@ def test_stack_sequences_numpy_to_torch_bfloat16() -> None:
     assert out.dtype == torch.bfloat16
 
 
-def test_stack_sequences_numpy_to_torch_preserves_lossy_casts() -> None:
+@pytest.mark.parametrize("source_dtype", ["int32", "int64"])
+def test_stack_sequences_numpy_to_torch_preserves_lossy_casts(source_dtype: str) -> None:
     np = pytest.importorskip("numpy")
     torch = pytest.importorskip("torch")
-    rows = [np.array([0, 1], dtype=np.int32), np.array([1e30, -1e30])]
+    rows = [np.array([0, 1], dtype=source_dtype), np.array([1e30, -1e30])]
     expected = torch.from_numpy(np.array(rows)).to(dtype=torch.int64)
     out = stack_sequences(rows, torch.int64, "torch")
     assert torch.equal(out, expected)
