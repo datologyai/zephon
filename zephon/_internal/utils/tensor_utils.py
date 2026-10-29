@@ -91,6 +91,26 @@ def stack_sequences(sequences: list[Any], dtype: Any, framework: str | None) -> 
         if sequences and "numpy" in type(sequences[0]).__module__:
             import numpy as np
 
+            numpy_dtype = {
+                torch.bool: np.bool_,
+                torch.uint8: np.uint8,
+                torch.int8: np.int8,
+                torch.int16: np.int16,
+                torch.int32: np.int32,
+                torch.int64: np.int64,
+                torch.float16: np.float16,
+                torch.float32: np.float32,
+                torch.float64: np.float64,
+                torch.complex64: np.complex64,
+                torch.complex128: np.complex128,
+            }.get(dtype)
+            # NumPy-unsafe casts retain Torch's rounding and overflow behavior.
+            if numpy_dtype is not None and all(
+                isinstance(seq, np.ndarray)
+                and np.can_cast(seq.dtype, numpy_dtype, casting="safe")
+                for seq in sequences
+            ):
+                return torch.from_numpy(np.array(sequences, dtype=numpy_dtype))
             return torch.from_numpy(np.array(sequences)).to(dtype=dtype)
         return torch.tensor(sequences, dtype=dtype)
     elif framework == "numpy":

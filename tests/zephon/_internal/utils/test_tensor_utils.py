@@ -49,6 +49,87 @@ def test_stack_sequences_numpy_empty() -> None:
     assert out.dtype == np.int32
 
 
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    [
+        ("bool", "bool"),
+        ("uint8", "uint8"),
+        ("int8", "int8"),
+        ("int8", "int16"),
+        ("int16", "int32"),
+        ("int32", "int64"),
+        ("float16", "float16"),
+        ("float16", "float32"),
+        ("float32", "float64"),
+        ("complex64", "complex64"),
+        ("complex64", "complex128"),
+    ],
+)
+def test_stack_sequences_numpy_to_torch_shares_final_allocation(
+    monkeypatch: pytest.MonkeyPatch, source_dtype: str, target_dtype: str
+) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([0, 1, 1, 0, 0, 1], dtype=source_dtype)[::2] for _ in range(2)]
+    originals = [row.copy() for row in rows]
+    allocations: list[Any] = []
+    from_numpy = torch.from_numpy
+
+    def capture(array: Any) -> Any:
+        allocations.append(array)
+        return from_numpy(array)
+
+    monkeypatch.setattr(torch, "from_numpy", capture)
+    out = stack_sequences(rows, getattr(torch, target_dtype), "torch")
+    assert out.tolist() == [[0, 1, 0], [0, 1, 0]]
+    assert out.dtype == getattr(torch, target_dtype)
+    assert len(allocations) == 1
+    array = allocations[0]
+    assert array.dtype == np.dtype(target_dtype)
+    assert out.data_ptr() == array.ctypes.data
+    out[0, 0] = 1
+    assert array[0, 0] == 1
+    for row, original in zip(rows, originals):
+        np.testing.assert_array_equal(row, original)
+
+
+def test_stack_sequences_numpy_to_torch_bfloat16() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    out = stack_sequences(
+        [np.array([0.5, -2.0], dtype=np.float32)], torch.bfloat16, "torch"
+    )
+    assert out.tolist() == [[0.5, -2.0]]
+    assert out.dtype == torch.bfloat16
+
+
+def test_stack_sequences_numpy_to_torch_preserves_lossy_casts() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([0, 1], dtype=np.int32), np.array([1e30, -1e30])]
+    expected = torch.from_numpy(np.array(rows)).to(dtype=torch.int64)
+    out = stack_sequences(rows, torch.int64, "torch")
+    assert torch.equal(out, expected)
+    assert out.dtype == torch.int64
+
+
+def test_stack_sequences_numpy_to_torch_empty_rows() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    out = stack_sequences([np.empty(0, dtype=np.int32)] * 2, torch.long, "torch")
+    assert out.shape == (2, 0)
+    assert out.dtype == torch.long
+
+
+def test_stack_sequences_numpy_to_torch_mixed_rows() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([0, 1, 0], dtype=np.int32), [0, 1, 2]]
+    out = stack_sequences(rows, torch.long, "torch")
+    assert out.tolist() == [[0, 1, 0], [0, 1, 2]]
+    assert out.dtype == torch.long
+
+
 def test_mask_padding_labels_list() -> None:
     out = mask_padding_labels([[1, 2, 3], [4, 5, 6]], [1, 2], -100, None)
     assert out == [[1, 2, -100], [4, -100, -100]]
