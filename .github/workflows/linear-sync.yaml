@@ -1,0 +1,42 @@
+name: Linear Sync
+
+# Sets each PR's GitHub milestone (vX.Y) from the Linear milestone of the ZEPH
+# issue it references, opens a ZEPH triage issue for unlinked PRs, and fails
+# PRs that reference only internal PLAT issues.
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+on:
+  # pull_request_target so fork PRs can read LINEAR_API_KEY. Safe only because
+  # the job runs the base branch's script and never checks out PR code.
+  pull_request_target:
+    types: [opened, edited, reopened, ready_for_review]
+  schedule:
+  - cron: '17 3 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  # One run per PR at a time, so rapid edits can't create two triage issues.
+  group: linear-sync-${{ github.event.pull_request.number || 'reconcile' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        sparse-checkout: .github/scripts
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+    - name: Sync
+      env:
+        LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        GITHUB_TOKEN: ${{ github.token }}
+      # --no-project: the script is stdlib-only, so skip building zephon.
+      run: uv run --no-project .github/scripts/linear_sync.py ${{ github.event_name == 'pull_request_target' && 'pr' || 'reconcile' }}
