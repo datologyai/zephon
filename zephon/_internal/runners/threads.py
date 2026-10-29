@@ -11,7 +11,7 @@ from typing import Any, Literal, Sequence
 
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
-from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.observability.size_estimator import metric_bytes
 from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
@@ -374,7 +374,7 @@ class ThreadStageRunner(QueueDrainStageRunner[_ThreadOperatorState]):
 
             collect_stats = self._tracking_mode.collects_nodes
             consumed_elements = len(batch) if collect_stats else 0
-            consumed_bytes = content_bytes(batch) if collect_stats else 0
+            consumed_bytes = metric_bytes(batch) if collect_stats else 0
             queue_depth_snapshot = -1
             if collect_stats:
                 try:

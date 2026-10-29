@@ -11,7 +11,7 @@ from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
-from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.observability.size_estimator import metric_bytes
 from zephon._internal.runners.base import BaseOperatorState, StageRunnerBase
 from zephon._internal.stream import (
     Microbatch,
@@ -142,7 +142,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
 
         collect_stats = self._tracking_mode.collects_nodes
         consumed_elements = len(batch) if collect_stats else 0
-        consumed_bytes = content_bytes(batch) if collect_stats else 0
+        consumed_bytes = metric_bytes(batch) if collect_stats else 0
         metrics_meta = self._metrics_meta[state.op_index] if collect_stats else None
 
         start_ns = self._node_sw.start()
@@ -154,7 +154,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         if collect_stats and metrics_meta is not None:
             stage_index, stage_name, op_index, op_name = metrics_meta
             produced_elements = len(outputs)
-            produced_bytes = content_bytes(outputs)
+            produced_bytes = metric_bytes(outputs)
             delta = NodeMetricsDelta(
                 stage_index=stage_index,
                 op_index=op_index,

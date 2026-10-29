@@ -15,6 +15,8 @@ being materialized.
 from __future__ import annotations
 
 import dataclasses
+import functools
+import logging
 import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any
@@ -23,6 +25,8 @@ import numpy as np
 
 from zephon._internal.stream import LazyPayload
 from zephon.types import SampleBatch, SampleRecord
+
+logger = logging.getLogger(__name__)
 
 _SCALAR_BYTES = 8
 _SCALAR_TYPES = frozenset({int, float, bool})
@@ -139,19 +143,70 @@ def _resolve_handler(cls: type, obj: Any) -> _Handler:
         return _struct_handler(names)
     if issubclass(cls, (int, float)):
         return _scalar_bytes
+    pil_image = sys.modules.get("PIL.Image")
+    if pil_image is not None and issubclass(cls, pil_image.Image):
+        return _pil_image_bytes
+    if _has_int_nbytes(obj):
+        return lambda arr: int(arr.nbytes)  # pyarrow, cupy, jax, ... arrays
     if hasattr(obj, "__bytes__") and hasattr(obj, "__len__"):
         return len  # SHM-backed bytes views
     return _zero_bytes
+
+
+def _has_int_nbytes(obj: Any) -> bool:
+    try:
+        nbytes = obj.nbytes
+    except Exception:
+        return False
+    return isinstance(nbytes, int) and not isinstance(nbytes, bool)
+
+
+@functools.lru_cache(maxsize=None)
+def _pil_pixel_bytes(mode: str) -> int:
+    from PIL import ImageMode
+
+    desc = ImageMode.getmode(mode)
+    return np.dtype(desc.typestr).itemsize * len(desc.bands)
+
+
+def _pil_image_bytes(img: Any) -> int:
+    # Decoded pixel bytes, matching ``content_bytes(np.asarray(img))``.
+    width, height = img.size
+    return width * height * _pil_pixel_bytes(img.mode)
 
 
 def content_bytes(obj: Any) -> int:
     """Content-only payload bytes, excluding object overhead and mapping keys.
 
     Records and batches count only their payloads. No cycle guard: payloads
-    are expected to be acyclic.
+    are expected to be acyclic. Use :func:`metric_bytes` where a sizing
+    failure must not propagate.
     """
     cls = type(obj)
     handler = _HANDLERS.get(cls)
     if handler is None:
         handler = _HANDLERS[cls] = _resolve_handler(cls, obj)
     return handler(obj)
+
+
+_metric_failure_logged = False
+
+
+def metric_bytes(obj: Any) -> int:
+    """:func:`content_bytes` for observability metrics; never raises.
+
+    Byte metrics are best-effort, so a payload that cannot be sized (cyclic,
+    too deeply nested, or a type whose size accessor fails) counts as 0
+    instead of failing the batch. The first failure is logged.
+    """
+    try:
+        return content_bytes(obj)
+    except Exception:
+        global _metric_failure_logged
+        if not _metric_failure_logged:
+            _metric_failure_logged = True
+            logger.warning(
+                "Could not size a payload for byte metrics; counting it as 0 bytes",
+                exc_info=True,
+            )
+        return 0

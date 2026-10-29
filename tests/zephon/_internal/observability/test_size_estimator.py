@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
+import pytest
 
-from zephon._internal.observability.size_estimator import content_bytes
+from zephon._internal.observability.size_estimator import (
+    content_bytes,
+    metric_bytes,
+)
 from zephon.types import SampleBatch, SampleMeta, SampleRecord
 
 
@@ -86,3 +92,48 @@ def test_content_bytes_subclasses_and_views() -> None:
     assert content_bytes(Text("hé")) == 3
     assert content_bytes(Blob(b"abcd")) == 4
     assert content_bytes(memoryview(np.zeros(4, dtype=np.int64))) == 32
+
+
+def test_content_bytes_uses_nbytes_attribute() -> None:
+    class ArrayLike:
+        nbytes = 123
+
+    class BoolNbytes:
+        nbytes = True
+
+    assert content_bytes(ArrayLike()) == 123
+    assert content_bytes(BoolNbytes()) == 0
+
+
+def test_content_bytes_pyarrow_array() -> None:
+    pa = pytest.importorskip("pyarrow")
+    arr = pa.array(np.arange(100, dtype=np.int64))
+    assert content_bytes(arr) == arr.nbytes == 800
+
+
+@pytest.mark.parametrize("mode", ["1", "L", "P", "RGB", "RGBA", "I", "F", "I;16"])
+def test_content_bytes_pil_image_matches_decoded_array(mode: str) -> None:
+    image_mod = pytest.importorskip("PIL.Image")
+    img = image_mod.new(mode, (7, 5))
+    assert content_bytes(img) == content_bytes(np.asarray(img))
+
+
+def test_metric_bytes_never_raises(caplog: pytest.LogCaptureFixture) -> None:
+    cyclic: dict[str, Any] = {"x": b"abc"}
+    cyclic["self"] = cyclic
+
+    class BrokenNbytes:
+        @property
+        def nbytes(self) -> int:
+            return 1
+
+    broken = BrokenNbytes()
+    assert content_bytes(broken) == 1
+    type(broken).nbytes = property(lambda self: 1 // 0)  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING):
+        assert metric_bytes(cyclic) == 0
+        assert metric_bytes(broken) == 0
+        assert metric_bytes({"ok": b"abcd"}) == 4
+    with pytest.raises(RecursionError):
+        content_bytes(cyclic)
