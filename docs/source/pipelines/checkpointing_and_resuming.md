@@ -56,10 +56,9 @@ still satisfy these rules. Equivalently, if the global batch contains `N` record
 lane contributes `N / L` records per step, and the microbatch size must divide that
 contribution evenly.
 
-You can check these conditions statically. For example, if you check out our
-[TorchTitan integration](../training_integrations.md), you can see how it checks the
-divisibility conditions during training initialization and rejects configurations that
-violate them before training begins.
+Set `Pipeline.options(global_batch_size=...)` and Zephon checks these conditions when the
+pipeline starts. Our [TorchTitan integration](../training_integrations.md) also checks them
+during training initialization and rejects configurations that violate them.
 
 **Restoring a training run.** To resume a training run, use the same `Dataset`,
 `WorkSource`, and `Pipeline` definitions that were used for the original training run,
