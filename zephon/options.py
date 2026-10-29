@@ -123,12 +123,10 @@ class RuntimeOptions:
     # "off" skips the validator entirely; reserved for last-resort overrides.
     auto_validation: Literal["strict", "warn", "off"] = "strict"
 
-    # === Garbage collection ===
-    # None = freeze in the MTP hub, but not in inline/daemon-fallback mode.
-    # True/False explicitly enables/disables freezing in the engine process.
-    # Freeze precedes pipeline reconstruction in MTP, engine construction inline.
-    # Inline opt-in affects the caller's whole interpreter. Zephon unfreezes its
-    # generation on teardown, preserving freezes established by the application.
+    # Freeze existing GC-tracked objects for the engine's lifetime.
+    # None defaults on in MTP and off inline (including daemon fallback).
+    # True/False override either mode; inline affects the whole interpreter.
+    # Teardown unfreezes only Zephon-owned state.
     gc_freeze: bool | None = None
 
     # === MTP Mode (GIL isolation) ===

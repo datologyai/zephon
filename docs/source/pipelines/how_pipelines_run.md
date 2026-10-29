@@ -128,29 +128,6 @@ instead, such that only finished training-ready batches are handed back to the m
 training process. Both of our [Training integrations](../training_integrations.md) enable
 this mode for their pipelines, and we generally recommend it for production runs.
 
-**Garbage collection.** `Pipeline.options(gc_freeze=None)` (the default) freezes
-Python's already-imported/bootstrap object graph in the MTP hub, before reconstructing
-the pipeline and building its engine. This avoids repeatedly scanning that graph during
-full cyclic-GC collections. `gc_freeze=False` disables it; `gc_freeze=True` explicitly
-enables it in either execution mode. When MTP falls back to inline execution inside a
-daemon worker, the automatic default is off.
-
-Inline opt-in freezes the caller's whole interpreter before building the engine. Only
-choose it when your application controls its process-wide GC policy. Existing tracked
-objects are frozen, including any caller globals or spawn/checkpoint arguments already
-present; modules loaded later are not automatically added. Normal reference counting
-and cyclic collection of new objects continue. An unreachable frozen cycle can retain
-later payloads, so freezing does not guarantee a fixed retained-byte cost.
-
-Zephon releases its freeze on iterator completion, explicit iterator close, and failure;
-a destructor provides a fallback for an abandoned freeze guard. Overlapping Zephon
-scopes share one freeze until the last scope closes. A permanent generation established
-by the application is left unchanged, rather than adding objects that Zephon cannot
-selectively unfreeze. Do not manually call `gc.freeze()` or `gc.unfreeze()` while a
-Zephon freeze scope is active. Automatic-GC enablement and thresholds are unchanged,
-and teardown unfreezes without forcing a full collection. Operator-worker GC policies
-are unaffected by this option.
-
 Finally, keep in mind that in a distributed training run, every rank that loads data will
 run its own `Pipeline` instance. The [Distributed training](distributed_training.md) page
 covers how these `Pipeline` instances can be configured to divide up the training

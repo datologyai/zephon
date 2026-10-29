@@ -9,6 +9,7 @@ import multiprocessing
 import queue
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 from unittest import mock
 
@@ -17,6 +18,7 @@ import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
 from zephon import Pipeline as PublicPipeline
+from zephon._internal import mtp
 from zephon._internal.mtp import (
     _ACK,
     _CHECKPOINT,
@@ -903,48 +905,81 @@ class TestRestoreValidation:
         assert called == [1]
 
 
-class _GCProbeTransform:
-    def __init__(self) -> None:
-        self.at_unpickle = _GCUnpickleProbe()
-
-    def __call__(self, record: Any) -> Any:
-        import gc
-
-        from zephon._internal.engine import Engine
-
-        return {
-            **record,
-            "frozen_at_unpickle": self.at_unpickle,
-            "frozen": gc.get_freeze_count() > 0,
-            "engine_visible": any(type(o) is Engine for o in gc.get_objects()),
-        }
-
-
-class _GCUnpickleProbe:
-    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
-        return _gc_at_unpickle, ()
-
-
-def _gc_at_unpickle() -> bool:
-    import gc
-
-    return gc.get_freeze_count() > 0
-
-
 @pytest.mark.parametrize("option", [None, False, True])
-@pytest.mark.parametrize("prefetch", [0, 2])
-def test_mtp_gc_policy_freezes_before_deserialization_without_freezing_engine(
-    option: bool | None, prefetch: int
+def test_mtp_passes_gc_freeze_policy_to_child(
+    monkeypatch: pytest.MonkeyPatch, option: bool | None
 ) -> None:
-    import gc
+    ctx = mock.Mock()
+    ctx.Pipe.return_value = (mock.Mock(), mock.Mock())
+    monkeypatch.setattr(mtp, "_resolve_mp_context", lambda _context: ctx)
+    monkeypatch.setattr(mtp, "NamedQueue", mock.Mock())
+    monkeypatch.setattr(mtp, "_Prefetcher", mock.Mock())
+    monkeypatch.setattr(mtp, "Finalize", mock.Mock())
+    monkeypatch.setattr(mtp.threading, "Thread", mock.Mock())
+    monkeypatch.setattr(cloudpickle, "dumps", lambda _pipeline: b"pipeline")
+    MTPPipeline(_mk_pipe(gc_freeze=option))
+    assert ctx.Process.call_args.kwargs["kwargs"] == {"gc_freeze": option is not False}
 
-    parent_frozen = gc.get_freeze_count()
-    pipe = _mk_pipe(n_rows=3, gc_freeze=option).map_transform(_GCProbeTransform())
-    pipe.options(runner="threads", prefetch_batches=prefetch, mtp_auto_checkpoint=False)
-    records = list(pipe)
-    expected = option is not False
-    assert len(records) == 3
-    assert all(r.payload["frozen_at_unpickle"] is expected for r in records)
-    assert all(r.payload["frozen"] is expected for r in records)
-    assert all(r.payload["engine_visible"] for r in records)
-    assert gc.get_freeze_count() == parent_frozen
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "failure", [None, "deserialize", "build", "iterate", "close", "signal"]
+)
+def test_mtp_gc_freeze_boundary_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool, failure: str | None
+) -> None:
+    events: list[str] = []
+    guard = mock.Mock(close=lambda: events.append("guard.close"))
+
+    def freeze(value: bool) -> mock.Mock:
+        assert value is enabled
+        events.append("guard")
+        return guard
+
+    monkeypatch.setattr(mtp, "GCFreeze", freeze)
+    monkeypatch.setattr(mtp.signal, "signal", mock.Mock())
+    monkeypatch.setattr(mtp, "setup_faulthandler", mock.Mock())
+    monkeypatch.setattr(mtp, "_wait_for_shutdown", mock.Mock())
+    engine = mock.Mock()
+
+    def close() -> None:
+        events.append("engine.close")
+        if failure == "close":
+            raise RuntimeError("close")
+
+    engine.close = close
+
+    def iterate() -> Iterator[Any]:
+        if failure == "iterate":
+            raise RuntimeError("iterate")
+        if failure == "signal":
+            raise SystemExit(0)
+        yield from ()
+
+    def build(**_kwargs: Any) -> tuple[Any, Any, bool]:
+        events.append("build")
+        if failure == "build":
+            raise RuntimeError("build")
+        return engine, iterate(), True
+
+    def deserialize(_data: bytes) -> mock.Mock:
+        events.append("deserialize")
+        if failure == "deserialize":
+            raise RuntimeError("deserialize")
+        return mock.Mock(_build_raw_iter=build)
+
+    monkeypatch.setattr(cloudpickle, "loads", deserialize)
+    output = mock.Mock()
+    if failure == "signal":
+        with pytest.raises(SystemExit):
+            mtp._mtp_worker(
+                b"pipeline", None, output, mock.Mock(), 2, gc_freeze=enabled
+            )
+    else:
+        mtp._mtp_worker(b"pipeline", None, output, mock.Mock(), 2, gc_freeze=enabled)
+    assert events[:2] == ["guard", "deserialize"]
+    assert events[-1] == "guard.close"
+    if failure not in ("deserialize", "build"):
+        assert events[-2] == "engine.close"
+    if failure in ("deserialize", "build", "iterate"):
+        assert isinstance(output.put.call_args.args[0], mtp._ErrorSentinel)

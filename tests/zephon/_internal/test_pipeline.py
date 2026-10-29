@@ -1,11 +1,14 @@
 """Unit tests for pipeline options and output notification."""
 
+import multiprocessing
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+from zephon._internal import pipeline as pipeline_module
 from zephon._internal.graph import Plan
 from zephon._internal.pipeline import Pipeline
 from zephon.types import SampleMeta, SampleRecord
@@ -149,3 +152,56 @@ def test_controls_do_not_notify_delivery_or_escape_the_tail(use_monotone: bool) 
     finally:
         # Leave end-of-stream cleanup to integration tests.
         iterator.close()
+
+
+@pytest.fixture
+def gc_freeze_guard(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    factory = Mock()
+    monkeypatch.setattr(pipeline_module, "GCFreeze", factory)
+    return factory
+
+
+@pytest.mark.parametrize("option", [None, False, True])
+@pytest.mark.parametrize("daemon_fallback", [False, True])
+def test_inline_gc_freeze_policy_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_freeze_guard: Mock,
+    option: bool | None,
+    daemon_fallback: bool,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(gc_freeze=option, mtp_mode=daemon_fallback)
+    engine = Mock()
+
+    def build(**_kwargs: Any) -> tuple[Any, Any, bool]:
+        gc_freeze_guard.assert_called_once_with(option is True)
+        gc_freeze_guard.return_value.close.assert_not_called()
+        return engine, iter([1, 2]), True
+
+    engine.close.side_effect = gc_freeze_guard.return_value.close.assert_not_called
+    monkeypatch.setattr(pipe, "_build_raw_iter", build)
+    monkeypatch.setattr(pipe, "_yield_while_notifying", lambda iterator: iterator)
+    if daemon_fallback:
+        monkeypatch.setattr(
+            multiprocessing, "current_process", lambda: Mock(daemon=True)
+        )
+        with pytest.warns(RuntimeWarning, match="Falling back"):
+            assert list(pipe._iter_body()) == [1, 2]
+    else:
+        assert list(pipe._iter_inline()) == [1, 2]
+    engine.close.assert_called_once_with()
+    gc_freeze_guard.return_value.close.assert_called_once_with()
+
+
+def test_inline_releases_gc_freeze_when_engine_construction_fails(
+    monkeypatch: pytest.MonkeyPatch, gc_freeze_guard: Mock
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(gc_freeze=True)
+    monkeypatch.setattr(
+        pipe, "_build_raw_iter", Mock(side_effect=RuntimeError("build"))
+    )
+    with pytest.raises(RuntimeError, match="build"):
+        next(pipe._iter_inline())
+    gc_freeze_guard.assert_called_once_with(True)
+    gc_freeze_guard.return_value.close.assert_called_once_with()
