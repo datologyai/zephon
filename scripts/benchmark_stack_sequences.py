@@ -305,6 +305,13 @@ _np = np
     code += """
 # Same historical proxy batch shape: 8 rows x 4096 positions.
 # Experiment decision: 18 samples; timeit calibrates its standard 0.2-second block.
+expected = np.array([list(range(2048)) * 2] * 8, dtype=np.int64)
+for measured in operations.values():
+    result = measured()
+    values = result.numpy() if isinstance(result, torch.Tensor) else result
+    np.testing.assert_array_equal(values, expected)
+    assert result.dtype == (torch.long if isinstance(result, torch.Tensor) else np.int64)
+
 for label, measured in operations.items():
     timer = timeit.Timer(measured)
     iterations = timer.autorange()[0]
@@ -315,7 +322,9 @@ for label, measured in operations.items():
         samples.append(timer.timeit(number=iterations) / iterations * 1e6)
     print(f"{label}: {statistics.mean(samples):.2f} +/- {statistics.stdev(samples):.2f} microseconds (mean +/- sample SD)")
 """
-    return code
+    # One input works even in REPLs that terminate a definition at a blank line.
+    assert "'''" not in code
+    return "exec(r'''\n" + code + "\n''')"
 
 
 def main() -> None:
