@@ -903,32 +903,48 @@ class TestRestoreValidation:
         assert called == [1]
 
 
-def _hub_freeze_count(record: dict) -> dict:
+class _GCProbeTransform:
+    def __init__(self) -> None:
+        self.at_unpickle = _GCUnpickleProbe()
+
+    def __call__(self, record: Any) -> Any:
+        import gc
+
+        from zephon._internal.engine import Engine
+
+        return {
+            **record,
+            "frozen_at_unpickle": self.at_unpickle,
+            "frozen": gc.get_freeze_count() > 0,
+            "engine_visible": any(type(o) is Engine for o in gc.get_objects()),
+        }
+
+
+class _GCUnpickleProbe:
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        return _gc_at_unpickle, ()
+
+
+def _gc_at_unpickle() -> bool:
     import gc
 
-    return {**record, "frozen": gc.get_freeze_count()}
+    return gc.get_freeze_count() > 0
 
 
-def test_hub_freezes_its_objects_before_any_item() -> None:
-    """Full GC passes in the hub skip what the built pipeline holds, frozen before any
-    data flows: the first item already sees a large frozen count (importing zephon alone
-    allocates tens of thousands of objects). Free-threaded builds count only frozen
-    objects still alive, so later items may see fewer."""
-    rows = [{"text": f"row-{i}"} for i in range(1024)]
-    ws = FakeIndexableWorkSource(make_inmem_dataset("test", rows), chunk_size=8)
-    pipe = (
-        PublicPipeline(ws)
-        .decode_text()
-        .map_transform(_hub_freeze_count)
-        .options(
-            deterministic=True,
-            runner="threads",
-            max_workers=1,
-            default_stage_prefetch=0,
-            prefetch_batches=0,
-            mtp_mode=True,
-            mtp_buffer=2,
-        )
-    )
-    frozen = [item.payload["frozen"] for item in pipe]
-    assert frozen[0] > 10_000
+@pytest.mark.parametrize("option", [None, False, True])
+@pytest.mark.parametrize("prefetch", [0, 2])
+def test_mtp_gc_policy_freezes_before_deserialization_without_freezing_engine(
+    option: bool | None, prefetch: int
+) -> None:
+    import gc
+
+    parent_frozen = gc.get_freeze_count()
+    pipe = _mk_pipe(n_rows=3, gc_freeze=option).map_transform(_GCProbeTransform())
+    pipe.options(runner="threads", prefetch_batches=prefetch, mtp_auto_checkpoint=False)
+    records = list(pipe)
+    expected = option is not False
+    assert len(records) == 3
+    assert all(r.payload["frozen_at_unpickle"] is expected for r in records)
+    assert all(r.payload["frozen"] is expected for r in records)
+    assert all(r.payload["engine_visible"] for r in records)
+    assert gc.get_freeze_count() == parent_frozen
