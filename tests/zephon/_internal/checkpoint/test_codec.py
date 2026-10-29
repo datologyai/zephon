@@ -5,7 +5,12 @@
 
 import pytest
 
-from zephon._internal.checkpoint import AggregationCodec
+from zephon._internal.checkpoint._codec import (
+    AggregationCodec,
+    decode_checkpoint,
+    encode_checkpoint,
+)
+from zephon._internal.utils.compression import require_zstd
 
 SAMPLE_STATE = {
     "version": 1,
@@ -27,6 +32,41 @@ SAMPLE_STATE = {
     "last_round_id": "12345",
     "checkpoint_reload_count": 0,
 }
+
+
+def test_persistent_blob_preserves_integer_keys_and_large_rng_state():
+    state = {**SAMPLE_STATE, "lane_ws_state": {0: {"rng_state": (1 << 128) - 1}}}
+    blob = encode_checkpoint(state)
+    assert blob.startswith(b"ZEPHON\x01")
+    assert decode_checkpoint(blob) == state
+
+
+def test_persistent_blob_preserves_tuple_keys():
+    state = {"custom": {("source", (0, 1 << 128)): [1, 2], (): "empty"}}
+    assert decode_checkpoint(encode_checkpoint(state)) == state
+
+
+def test_persistent_blob_reads_fixed_version_one_format():
+    # A saved zstd frame, independent of the current encoder, containing the
+    # MessagePack bigint extension (code 0). Keep old blobs readable.
+    blob = bytes.fromhex(
+        "5a4550484f4e0128b52ffd20198500005081a3726e67c71100010001001d4002"
+    )
+    assert decode_checkpoint(blob) == {"rng": 1 << 128}
+
+
+def test_persistent_blob_rejects_unsupported_or_malformed_payloads():
+    blob = encode_checkpoint({})
+    for invalid in (
+        b"",
+        b"not a Zephon checkpoint",
+        b"ZEPHON\x02",  # Unknown format version.
+        blob[:-1],  # Truncated zstd frame.
+        blob + b"invalid",  # Trailing data.
+        b"ZEPHON\x01" + require_zstd().compress(b"\x90"),  # An array, not a mapping.
+    ):
+        with pytest.raises(ValueError):
+            decode_checkpoint(invalid)
 
 
 @pytest.mark.parametrize(
@@ -76,6 +116,12 @@ def test_msgpack_preserves_int_keys():
     data = {0: "a", 1: "b"}
     decoded = codec.decode(codec.encode(data))
     assert decoded == {0: "a", 1: "b"}
+
+
+def test_msgpack_preserves_tuple_keys_and_list_values():
+    codec = AggregationCodec(serializer="msgpack", compressor="none")
+    data = {"nested": {("source", (0, 1 << 128)): [[1, 2]], (): []}}
+    assert codec.decode(codec.encode(data)) == data
 
 
 def test_decode_rejects_truncated_payload():
