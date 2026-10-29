@@ -591,6 +591,8 @@ def pad_field(
 
     Returns:
         The output buffer or padded input container; separate inputs are unchanged.
+        Lists and tuples preserve scalar types from seq and tail, including
+        NumPy scalars; only the container is converted when appending tail.
     """
     import numpy as np
 
@@ -613,8 +615,13 @@ def pad_field(
             return seq + tuple(padding)
         return seq + padding
     torch_input = _is_torch_tensor(seq)
+    if not torch_input and not isinstance(seq, (list, tuple, np.ndarray)):
+        raise TypeError(
+            f"unsupported field type {type(seq).__name__} to pad; "
+            + "expected list, tuple, numpy.ndarray, or torch.Tensor"
+        )
     torch_output = _is_torch_tensor(out)
-    values = seq if torch_input else np.asarray(seq)
+    values: Any = seq if torch_input else np.asarray(seq)
     if scalar and (
         values.ndim != 1 or (not torch_input and values.dtype.kind in "OUS")
     ):
@@ -625,7 +632,7 @@ def pad_field(
         import torch
 
         if out is None:
-            out = seq.new_empty((len(seq) + pad_len, *seq.shape[1:]))
+            out = values.new_empty((len(seq) + pad_len, *values.shape[1:]))
         if torch_output or _is_torch_tensor(out):
             dtype = out.dtype
             if (
@@ -645,9 +652,7 @@ def pad_field(
                 else torch.as_tensor(tail, dtype=dtype, device=out.device)
             )
             return out
-        values = seq.numpy()
-    if not isinstance(values, np.ndarray):
-        raise TypeError(f"unsupported field type {type(seq).__name__} to pad")
+        values = values.numpy()
     if out is None:
         out = np.empty((len(seq) + pad_len, *values.shape[1:]), dtype=values.dtype)
     if pad_len and out.dtype.kind in "iu":

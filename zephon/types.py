@@ -594,7 +594,9 @@ class SampleBatch:
                 (drop the last token), so they stay aligned with it.
             dtype: Tensor dtype for stacking. Use "auto" to detect (prefers
                 torch.long if available, else np.int64, else returns lists).
-                Use None to explicitly return lists instead of tensors.
+                Use None to explicitly return lists instead of tensors. This
+                preserves scalar types in input sequences and padding tails;
+                NumPy scalars are not recursively converted to Python scalars.
                 A requested loss mask always uses float32 (Python floats for
                 lists), independently of this dtype. Requested cumulative
                 sequence lengths and per-row maxima use int32 (Python ints for

@@ -91,6 +91,24 @@ def test_shared_padding_preserves_tuple_and_checks_integer_range() -> None:
             pad_field(np.array([1, 2], dtype=dtype), 1, value)
 
 
+def test_sequence_padding_preserves_numpy_scalars() -> None:
+    np = pytest.importorskip("numpy")
+    value = np.int32(7)
+    tail = np.array([0, 1], dtype=np.int32)
+    for seq in ([value], (value,)):
+        out = pad_field(seq, 2, 0, tail=tail)
+        assert type(out) is type(seq)
+        assert out[0] is value
+        assert list(out) == [7, 0, 1]
+        assert all(isinstance(item, np.int32) for item in out)
+
+
+def test_padding_rejects_unsupported_containers() -> None:
+    for seq in ({"tokens": [1, 2]}, "12", 12, object()):
+        with pytest.raises(TypeError, match="unsupported field type.*expected"):
+            pad_field(seq, 1, 0)
+
+
 def test_list_padding_does_not_convert_to_numpy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
