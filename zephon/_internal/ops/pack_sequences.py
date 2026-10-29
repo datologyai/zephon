@@ -66,6 +66,12 @@ from zephon._internal.utils.length_extraction import (
     extract_length,
 )
 from zephon._internal.utils.seeding import batch_seed
+from zephon._internal.utils.tensor_utils import (
+    pad_field as _pad_field,
+)
+from zephon._internal.utils.tensor_utils import (
+    positions_from_segment_lengths as _positions_from_segment_lengths,
+)
 from zephon._internal.utils.torch_compat import _tensor_lock_ctx
 from zephon.ops.accumulators import Accumulator, ReadyBatch
 from zephon.ops.base import BaseOp
@@ -135,62 +141,6 @@ def _component_domain(record: SampleRecord) -> ComponentId:
 # ----------------------------------------------------------------------
 # Shared serialization helpers (pure; operate on payload field values)
 # ----------------------------------------------------------------------
-
-
-def _positions_from_segment_lengths(segment_lengths: Sequence[int]) -> _np.ndarray:
-    """Build a 1D ``int32`` positions array that resets to 0 at each segment.
-
-    Given segment lengths ``[L0, L1, ..., Lk]`` returns a flat array of length
-    ``sum(Li)`` whose contents are
-    ``[0, 1, ..., L0-1, 0, 1, ..., L1-1, ..., 0, 1, ..., Lk-1]``.
-
-    Downstream consumers (e.g. torchtitan's positions-based document mask)
-    derive document IDs as ``cumsum(positions == 0) - 1``, so each ``0`` marks a
-    fresh document boundary inside the packed bin.
-    """
-    parts = [_np.arange(int(n), dtype=_np.int32) for n in segment_lengths if n > 0]
-    if not parts:
-        return _np.empty(0, dtype=_np.int32)
-    return _np.concatenate(parts)
-
-
-def _pad_value_oob_msg(pad_value: int, dtype: Any) -> str:
-    return (
-        f"pack_flat: pad value {pad_value} is not representable in token field dtype "
-        f"{dtype}; use a non-negative id within the dtype's range (or widen the dtype)."
-    )
-
-
-def _pad_field(seq: Any, pad_len: int, pad_value: int) -> Any:
-    """Append ``pad_len`` copies of ``pad_value`` to ``seq`` along axis 0.
-
-    Preserves the container type (list / tuple / numpy / torch).
-    """
-    if pad_len <= 0:
-        return seq
-    if isinstance(seq, list):
-        return seq + [pad_value] * pad_len
-    if isinstance(seq, tuple):
-        return seq + (pad_value,) * pad_len
-    if isinstance(seq, _np.ndarray):
-        # Check the dtype range explicitly: numpy < 2.0 silently wraps an
-        # out-of-range pad_value (e.g. -1 into uint*) instead of raising.
-        if seq.dtype.kind in "iu":
-            info = _np.iinfo(seq.dtype)
-            if not info.min <= pad_value <= info.max:
-                raise ValueError(_pad_value_oob_msg(pad_value, seq.dtype))
-        tail = _np.full(pad_len, pad_value, dtype=seq.dtype)
-        return _np.concatenate([seq, tail], axis=0)
-    if _torch is not None and isinstance(seq, _torch.Tensor):
-        try:
-            tail = _torch.full((pad_len,), pad_value, dtype=seq.dtype)
-        except (RuntimeError, OverflowError) as e:
-            raise ValueError(_pad_value_oob_msg(pad_value, seq.dtype)) from e
-        return _torch.cat([seq, tail], dim=0)
-    raise TypeError(
-        f"pack_flat: unsupported field type {type(seq).__name__} to pad; "
-        "expected list, tuple, numpy.ndarray, or torch.Tensor"
-    )
 
 
 def _concatenate_sequences(sub_arrays: list[Any]) -> Any:

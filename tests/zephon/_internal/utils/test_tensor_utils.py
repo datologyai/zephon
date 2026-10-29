@@ -14,11 +14,45 @@ from zephon._internal.utils.tensor_utils import (
     labels_to_loss_mask,
     mask_eos_labels,
     mask_padding_labels,
+    pad_field,
     padding_lengths_to_mask,
+    positions_from_segment_lengths,
     positions_to_cu_seqlens,
+    positions_to_document_ids,
     sequence_positions,
     stack_sequences,
 )
+
+
+@pytest.mark.parametrize("framework", [None, "numpy", "torch"])
+def test_document_membership_ignores_padding_and_keeps_inputs(
+    framework: str | None,
+) -> None:
+    positions = [[0, 1, 0, 0], [0, 0, 1, 2]]
+    padding = [[False, False, False, True], [False, False, False, False]]
+    if framework == "numpy":
+        np = pytest.importorskip("numpy")
+        positions, padding = np.array(positions), np.array(padding)
+    elif framework == "torch":
+        torch = pytest.importorskip("torch")
+        positions, padding = torch.tensor(positions), torch.tensor(padding)
+    result = positions_to_document_ids(positions, padding, framework, flatten=True)
+    values = result.tolist() if framework else result
+    assert values == [[1, 1, 2, 0], [4, 5, 5, 5]]
+    assert (positions.tolist() if framework else positions) == [
+        [0, 1, 0, 0],
+        [0, 0, 1, 2],
+    ]
+
+
+def test_document_membership_rejects_incompatible_list_shapes() -> None:
+    for positions, padding in (
+        ([[0]], []),
+        ([[0, 1]], [[False]]),
+        ([[[0]]], [[False]]),
+    ):
+        with pytest.raises(ValueError, match="scalar positions matching"):
+            positions_to_document_ids(positions, padding, None, flatten=False)
 
 
 @pytest.mark.parametrize("source", ["list", "numpy", "torch"])
@@ -47,6 +81,73 @@ def test_stack_sequences_numpy_empty() -> None:
     out = stack_sequences([], np.int32, "numpy")
     assert out.shape == (0,)
     assert out.dtype == np.int32
+
+
+def test_shared_padding_preserves_tuple_and_checks_integer_range() -> None:
+    np = pytest.importorskip("numpy")
+    assert pad_field((1, 2), 2, 9) == (1, 2, 9, 9)
+    for dtype, value in ((np.uint16, 128001), (np.int32, 2**31)):
+        with pytest.raises(ValueError, match="not representable"):
+            pad_field(np.array([1, 2], dtype=dtype), 1, value)
+
+
+def test_sequence_padding_preserves_numpy_scalars() -> None:
+    np = pytest.importorskip("numpy")
+    value = np.int32(7)
+    tail = np.array([0, 1], dtype=np.int32)
+    for seq in ([value], (value,)):
+        out = pad_field(seq, 2, 0, tail=tail)
+        assert type(out) is type(seq)
+        assert out[0] is value
+        assert list(out) == [7, 0, 1]
+        assert all(isinstance(item, np.int32) for item in out)
+
+
+def test_padding_rejects_unsupported_containers() -> None:
+    for seq in ({"tokens": [1, 2]}, "12", 12, object()):
+        with pytest.raises(TypeError, match="unsupported field type.*expected"):
+            pad_field(seq, 1, 0)
+
+
+def test_list_padding_does_not_convert_to_numpy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    np = pytest.importorskip("numpy")
+
+    def unexpected_array(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("list padding must not allocate a throwaway array")
+
+    monkeypatch.setattr(np, "asarray", unexpected_array)
+    assert pad_field([1, 2], 2, 9) == [1, 2, 9, 9]
+    assert pad_field((1, 2), 2, 9, scalar=True) == (1, 2, 9, 9)
+    with pytest.raises(ValueError, match="scalar token sequence"):
+        pad_field([[1, 2]], 1, 0, scalar=True)
+
+
+def test_padding_does_not_infer_torch_from_module_name() -> None:
+    np = pytest.importorskip("numpy")
+
+    class TorchNamedArray(np.ndarray):
+        __module__ = "not_a_torch_tensor"
+
+    seq = np.asarray([1, 2], dtype=np.int32).view(TorchNamedArray)
+    out = pad_field(seq, 1, 9, scalar=True)
+    assert out.tolist() == [1, 2, 9]
+    assert out.dtype == np.int32
+
+
+def test_padded_stack_uses_explicit_position_tails_without_mutating_inputs() -> None:
+    np = pytest.importorskip("numpy")
+    rows = [np.array([0, 1, 0], dtype=np.int32), np.array([0], dtype=np.int32)]
+    out = stack_sequences(
+        rows,
+        np.int32,
+        "numpy",
+        length=5,
+        tails=[positions_from_segment_lengths((5 - len(row),)) for row in rows],
+    )
+    assert out.tolist() == [[0, 1, 0, 0, 1], [0, 0, 1, 2, 3]]
+    assert [row.tolist() for row in rows] == [[0, 1, 0], [0]]
 
 
 def test_mask_padding_labels_list() -> None:
