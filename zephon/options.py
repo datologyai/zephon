@@ -123,6 +123,12 @@ class RuntimeOptions:
     # "off" skips the validator entirely; reserved for last-resort overrides.
     auto_validation: Literal["strict", "warn", "off"] = "strict"
 
+    # Freeze GC-tracked objects for the duration of iteration.
+    # None = enabled in MTP, disabled inline (including daemon fallback).
+    # True/False override the default; inline freezing affects the whole interpreter.
+    # Existing application freezes are preserved.
+    gc_freeze: bool | None = None
+
     # === MTP Mode (GIL isolation) ===
     # When True, the Engine runs in a non-daemon subprocess for GIL isolation.
     # The main process only dequeues finished batches via IPC.

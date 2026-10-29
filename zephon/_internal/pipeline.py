@@ -48,6 +48,7 @@ from zephon._internal.runtime_spec import (
 )
 from zephon._internal.stream import EngineSample
 from zephon._internal.utils import buffered_iterable
+from zephon._internal.utils.gc_freeze import GCFreeze, resolve_gc_freeze
 from zephon._internal.utils.torch_compat import detect_loader_kind
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
@@ -1865,14 +1866,20 @@ class Pipeline:
         return engine, iterator, use_monotone
 
     def _iter_inline(self) -> Iterator[Any]:
-        """Original inline iteration path — Engine runs in this process."""
-        ckpt = self._pending_restore
-        self._pending_restore = None
-        engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
+        """Run the engine in the current process."""
+        # GC freezing affects the whole interpreter, so inline mode defaults off.
+        # This also applies to daemon workers falling back from MTP.
+        freezer = GCFreeze(resolve_gc_freeze(self._options.gc_freeze, mtp=False))
         try:
-            yield from self._yield_while_notifying(iterator)
+            ckpt = self._pending_restore
+            self._pending_restore = None
+            engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
+            try:
+                yield from self._yield_while_notifying(iterator)
+            finally:
+                engine.close()
         finally:
-            engine.close()
+            freezer.close()
 
     def _iter_mtp(self) -> Iterator[Any]:
         """MTP iteration path — Engine runs in a child process."""
