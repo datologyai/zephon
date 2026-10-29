@@ -62,6 +62,16 @@ def _bigint_ext_hook(code: int, data: bytes) -> Any:
     return msgpack.ExtType(code, data)
 
 
+def _tuple_key(key: Any) -> Any:
+    """Restore nested tuple keys that MessagePack decoded as arrays."""
+    return tuple(_tuple_key(item) for item in key) if isinstance(key, list) else key
+
+
+def _msgpack_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    """Restore tuple keys before building a dict, leaving array values as lists."""
+    return {_tuple_key(key): value for key, value in pairs}
+
+
 class AggregationCodec:
     """Encode / decode checkpoint dicts for aggregation transfer.
 
@@ -126,6 +136,9 @@ class AggregationCodec:
                     raw=False,
                     strict_map_key=False,
                     ext_hook=_bigint_ext_hook,
+                    # use_list=False would also turn ordinary list values into
+                    # tuples. Only map keys need to become hashable here.
+                    object_pairs_hook=_msgpack_map,
                 ),
             )
         return cast(dict[str, Any], json.loads(data))

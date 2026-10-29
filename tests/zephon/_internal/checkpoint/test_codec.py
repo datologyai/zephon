@@ -41,6 +41,11 @@ def test_persistent_blob_preserves_integer_keys_and_large_rng_state():
     assert decode_checkpoint(blob) == state
 
 
+def test_persistent_blob_preserves_tuple_keys():
+    state = {"custom": {("source", (0, 1 << 128)): [1, 2], (): "empty"}}
+    assert decode_checkpoint(encode_checkpoint(state)) == state
+
+
 def test_persistent_blob_reads_fixed_version_one_format():
     # A saved zstd frame, independent of the current encoder, containing the
     # MessagePack bigint extension (code 0). Keep old blobs readable.
@@ -111,6 +116,12 @@ def test_msgpack_preserves_int_keys():
     data = {0: "a", 1: "b"}
     decoded = codec.decode(codec.encode(data))
     assert decoded == {0: "a", 1: "b"}
+
+
+def test_msgpack_preserves_tuple_keys_and_list_values():
+    codec = AggregationCodec(serializer="msgpack", compressor="none")
+    data = {"nested": {("source", (0, 1 << 128)): [[1, 2]], (): []}}
+    assert codec.decode(codec.encode(data)) == data
 
 
 def test_decode_rejects_truncated_payload():
