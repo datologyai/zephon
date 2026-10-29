@@ -2050,15 +2050,12 @@ class Pipeline:
     @overload
     def checkpoint(self, *, as_bytes: Literal[True]) -> bytes: ...
 
-    @overload
-    def checkpoint(self, *, as_bytes: bool) -> dict[str, Any] | bytes: ...
-
     def checkpoint(self, *, as_bytes: bool = False) -> dict[str, Any] | bytes:
         """Collect resumable pipeline progress, optionally as one encoded value.
 
         Args:
-            as_bytes: Return versioned MessagePack bytes instead of the default
-                dictionary. This lets template-driven checkpoint systems such as
+            as_bytes: Return versioned, zstd-compressed MessagePack bytes instead
+                of the default dictionary. This lets checkpoint systems such as
                 PyTorch DCP preserve dynamic replay entries as one value without
                 requiring integrations to pickle the state. All participating
                 ranks must still call checkpoint at the same training step.
@@ -2068,12 +2065,10 @@ class Pipeline:
             The complete checkpoint dictionary, or its encoded bytes. Encoding
             occurs after collection and any distributed aggregation.
         """
-        state = self._checkpoint_state()
-        if as_bytes:
-            from zephon._internal.checkpoint import encode_checkpoint
+        from zephon._internal.checkpoint import encode_checkpoint
 
-            return encode_checkpoint(state)
-        return state
+        state = self._checkpoint_state()
+        return encode_checkpoint(state) if as_bytes else state
 
     def _checkpoint_state(self) -> dict[str, Any]:
         # Live subprocess — ask it for a checkpoint.

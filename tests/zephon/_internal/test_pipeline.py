@@ -1,7 +1,7 @@
 """Unit tests for pipeline options and output notification."""
 
 from collections.abc import Iterator
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -12,20 +12,30 @@ from zephon.types import SampleMeta, SampleRecord
 
 
 def test_checkpoint_encoding_wraps_the_collected_state() -> None:
-    from zephon._internal.checkpoint import decode_checkpoint
-
     pipe = object.__new__(Pipeline)
     state = {"inflight": {0: {1: {"seed": 1 << 128}}}}
     pipe._checkpoint_state = Mock(return_value=state)
-    assert pipe.checkpoint() is state
-    assert decode_checkpoint(pipe.checkpoint(as_bytes=True)) == state
+    with patch(
+        "zephon._internal.checkpoint.encode_checkpoint", return_value=b"blob"
+    ) as encode:
+        assert pipe.checkpoint() is state
+        encode.assert_not_called()
+        assert pipe.checkpoint(as_bytes=True) == b"blob"
+        encode.assert_called_once_with(state)
     assert pipe._checkpoint_state.call_count == 2
 
 
 def test_invalid_checkpoint_bytes_do_not_start_a_runtime() -> None:
-    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
-    with pytest.raises(ValueError, match="checkpoint byte format"):
-        pipe.restore(b"invalid")
+    pipe = object.__new__(Pipeline)
+    pipe._engine = None
+    pipe._pending_restore = None
+    with patch(
+        "zephon._internal.checkpoint.decode_checkpoint",
+        side_effect=ValueError("invalid"),
+    ) as decode:
+        with pytest.raises(ValueError, match="invalid"):
+            pipe.restore(b"invalid")
+        decode.assert_called_once_with(b"invalid")
     assert pipe._engine is None
     assert pipe._pending_restore is None
 

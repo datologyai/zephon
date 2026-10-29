@@ -5,11 +5,12 @@
 
 import pytest
 
-from zephon._internal.checkpoint import (
+from zephon._internal.checkpoint._codec import (
     AggregationCodec,
     decode_checkpoint,
     encode_checkpoint,
 )
+from zephon._internal.utils.compression import require_zstd
 
 SAMPLE_STATE = {
     "version": 1,
@@ -41,9 +42,11 @@ def test_persistent_blob_preserves_integer_keys_and_large_rng_state():
 
 
 def test_persistent_blob_reads_fixed_version_one_format():
-    # Keep a saved-format fixture independent of the current encoder. The
-    # MessagePack mapping contains a 17-byte signed bigint extension (code 0).
-    blob = b"ZEPHON\x01\x81\xa3rng\xc7\x11\x00\x01" + b"\x00" * 16
+    # A saved zstd frame, independent of the current encoder, containing the
+    # MessagePack bigint extension (code 0). Keep old blobs readable.
+    blob = bytes.fromhex(
+        "5a4550484f4e0128b52ffd20198500005081a3726e67c71100010001001d4002"
+    )
     assert decode_checkpoint(blob) == {"rng": 1 << 128}
 
 
@@ -52,10 +55,10 @@ def test_persistent_blob_rejects_unsupported_or_malformed_payloads():
     for invalid in (
         b"",
         b"not a Zephon checkpoint",
-        b"ZEPHON\x02\x80",  # Unknown format version.
-        blob[:-1],  # Missing MessagePack payload.
-        blob + b"\x00",  # Trailing data.
-        blob[:-1] + b"\x90",  # An array rather than a checkpoint mapping.
+        b"ZEPHON\x02",  # Unknown format version.
+        blob[:-1],  # Truncated zstd frame.
+        blob + b"invalid",  # Trailing data.
+        b"ZEPHON\x01" + require_zstd().compress(b"\x90"),  # An array, not a mapping.
     ):
         with pytest.raises(ValueError):
             decode_checkpoint(invalid)

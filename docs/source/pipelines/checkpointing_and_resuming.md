@@ -26,26 +26,18 @@ into the model:
 :caption: examples/guide/pipelines/checkpoint_pipeline.py
 ```
 
-Use `pipeline.checkpoint(as_bytes=True)` when a checkpoint system needs one opaque
-value. For example, PyTorch DCP discovers nested dictionary keys from the fresh
-destination state, which does not yet contain the saved in-flight replay entries.
-Keeping Zephon's checkpoint as a single byte value preserves those entries:
+If you use a checkpoint manager like PyTorch DCP, you can ask Zephon to return a
+single blob of bytes. DCP can otherwise miss the saved information about work
+that was still in flight, since a fresh pipeline hasn't started that work yet:
 
 ```python
 state = {"zephon": pipeline.checkpoint(as_bytes=True)}
-# Persist state with the rest of the training checkpoint.
-# After loading it, before starting iteration:
+# Save and load state with the rest of your training checkpoint.
 pipeline.restore(state["zephon"])
 ```
 
-The bytes use versioned MessagePack encoding without pickle or compression;
-integer keys and large RNG integers are preserved. This encoding is independent
-of the temporary checkpoint-aggregation format. `restore()` accepts both bytes
-and ordinary checkpoint dictionaries. The default `checkpoint()` return type and
-the requirement for every participating rank to call it remain unchanged.
-Custom work-source checkpoints must contain data values supported by MessagePack,
-such as dictionaries, lists/tuples, strings, bytes, integers, floats, booleans, and
-`None`. Tuples decode as lists, as they do in checkpoint aggregation.
+`restore()` accepts the blob directly, so you don't need to serialize the state
+yourself.
 
 If the training loop accumulates gradients across several microbatches, save the
 checkpoint after a complete optimizer step, once all batches returned by the Pipeline have
