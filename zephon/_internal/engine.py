@@ -74,7 +74,7 @@ from zephon._internal.runners.threads import ThreadStageRunner
 from zephon._internal.runtime_spec import RuntimeSpec
 from zephon._internal.stream import EngineSample, LanePtr, RunnerStageOut
 from zephon._internal.utils.rank import rank_ctx
-from zephon._internal.world import World
+from zephon._internal.world import World, check_step_lane_windows
 from zephon.observability import ExecutionTrackingMode
 from zephon.observability.stats import (
     FetchTimingSummary,
@@ -291,6 +291,23 @@ class Engine:
         self._opts = opts
         self._mp_context = self._resolve_mp_context(self._opts.mp_context)
         self._world = self._build_world()
+        global_batch_size = self._opts.global_batch_size
+        if global_batch_size is not None:
+            if (
+                isinstance(global_batch_size, bool)
+                or not isinstance(global_batch_size, int)
+                or global_batch_size <= 0
+            ):
+                raise ValueError(
+                    "global_batch_size must be a positive integer, got "
+                    f"{global_batch_size!r}"
+                )
+            check_step_lane_windows(
+                global_batch_size,
+                self._plan.batch_size_hint or 1,
+                self._world.canonical_replicas,
+                self._world.dp_degree,
+            )
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )
