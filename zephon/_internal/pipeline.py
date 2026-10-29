@@ -1137,7 +1137,8 @@ class Pipeline:
                 If None (default), no warnings are emitted.
             mixture: Explicit mixture target {component_name: float}. If None, derived
                 from chunk mixture via engine context. EOD sentinel handling also applies
-                to this override.
+                to this override. Cannot be combined with a curriculum schedule on the
+                work source.
             placement: Placement hint for this operator.
             parallelism: Override default parallelism for this operator.
 

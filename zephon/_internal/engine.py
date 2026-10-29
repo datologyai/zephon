@@ -278,6 +278,9 @@ class Engine:
         base_ctx["get_chunk_mixture"] = self._get_chunk_mixture
         base_ctx["get_component_name"] = self._get_component_name
         base_ctx["get_component_id"] = self._get_component_id
+        # Lets EnsureMixture reject a mixture_override, which would silently
+        # replace the schedule.
+        base_ctx["curriculum_active"] = work._has_schedule()
         self._replay_config = ReplayConfigService()
         self._ctx = base_ctx
         self._ctx["replay_state_service"] = self._replay_config
