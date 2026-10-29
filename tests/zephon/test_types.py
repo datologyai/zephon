@@ -1,11 +1,108 @@
 import copy
 import dataclasses
 import warnings
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from zephon.types import SampleBatch, SampleCursor, SampleMeta, SampleRecord
+
+
+def test_document_ids_preserve_structure_with_continuous_positions(
+    conversion_dtype: Any,
+) -> None:
+    payload = {
+        "input_ids": [2, 7, 2, 2, 8, 2, 2],
+        "positions": [0, 1, 2, 0, 1, 0, 1],
+        "loss_mask": [0, 1, 1, 0, 1, 0, 0],
+    }
+    original = copy.deepcopy(payload)
+    batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, payload, padding_length=2),))
+    result = batch.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_document_ids=True,
+        position_mode="sequence",
+        return_padding_mask=True,
+        return_cu_seqlens=True,
+        pad_to_length=9,
+        pad_token_id=2,
+    )
+    assert _values(result["document_ids"]) == [[1, 1, 1, 2, 2, 0, 0, 0]]
+    assert _values(result["positions"]) == [list(range(8))]
+    assert _values(result["labels"]) == [[7, 2, -100, 8, -100, -100, -100, -100]]
+    assert _values(result["padding_mask"]) == [[False] * 5 + [True] * 3]
+    assert payload == original
+    ids = result["document_ids"]
+    if conversion_dtype is not None:
+        assert str(ids.dtype) in ("torch.int64", "int64")
+
+
+def test_document_ids_flatten_keeps_batch_documents_distinct(
+    conversion_dtype: Any,
+) -> None:
+    batch = SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 1, 0]})
+            for i in range(2)
+        )
+    )
+    result = batch.to_training(dtype=conversion_dtype, return_document_ids=True)
+    assert _values(result["document_ids"]) == [[1, 1, 2], [1, 1, 2]]
+    result = batch.to_training(
+        dtype=conversion_dtype,
+        return_document_ids=True,
+        flatten=True,
+        rename_fields={"document_ids": "membership"},
+        exclude_fields=("positions",),
+    )
+    assert _values(result["membership"]) == [1, 1, 2, 3, 3, 4]
+    assert "document_ids" not in result and "positions" not in result
+    assert "document_ids" not in batch.to_training(dtype=conversion_dtype)
+
+
+def test_document_ids_empty_all_padding_and_ragged_lists() -> None:
+    assert (
+        SampleBatch(records=()).to_training(return_document_ids=True)["document_ids"]
+        == []
+    )
+    batch = SampleBatch(
+        records=(
+            _rec((0, 0, 0), 0, 0, {"input_ids": [], "positions": []}),
+            _rec(
+                (0, 0, 1), 0, 0, {"input_ids": [1], "positions": [0]}, padding_length=1
+            ),
+            _rec((0, 0, 2), 0, 0, {"input_ids": [1, 2, 3], "positions": [0, 0, 1]}),
+        )
+    )
+    assert batch.to_training(dtype=None, return_document_ids=True)["document_ids"] == [
+        [],
+        [0],
+        [1, 2, 2],
+    ]
+    assert batch.to_training(dtype=None, return_document_ids=True, return_labels=True)[
+        "document_ids"
+    ] == [[], [], [1, 2]]
+
+
+def test_document_ids_require_boundary_positions_and_reject_collisions() -> None:
+    for positions in (None, [1, 2], [0], [[0], [1]]):
+        payload = {"input_ids": [1, 2]}
+        if positions is not None:
+            payload["positions"] = positions
+        batch = SampleBatch(records=(_rec((0, 0, 0), 0, 0, payload),))
+        with pytest.raises(ValueError, match="positions"):
+            batch.to_training(dtype=None, return_document_ids=True)
+    batch = SampleBatch(
+        records=(_rec((0, 0, 0), 0, 0, {"input_ids": [1], "positions": [0]}),)
+    )
+    with pytest.raises(ValueError, match="extra_fields"):
+        batch.to_training(return_document_ids=True, extra_fields=("document_ids",))
+    with pytest.raises(ValueError, match="reserved field"):
+        batch.to_training(
+            field_collators={"document_ids": lambda *args, **kwargs: None}
+        )
 
 
 def _rec(
@@ -2212,3 +2309,420 @@ def test_sequence_positions_only_stack_originals_for_attention_boundaries(
     assert _values(out["positions"]) == [[0, 1, 2, 3, 4]]
     if boundaries:
         assert _values(out["cu_seqlens"]) == [[0, 3, 5]]
+
+
+def _training_batch(*payloads: dict[str, Any], padding: int = 0) -> SampleBatch:
+    return SampleBatch(
+        records=tuple(
+            _rec((0, 0, i), 0, 0, payload, padding_length=padding)
+            for i, payload in enumerate(payloads)
+        )
+    )
+
+
+@pytest.mark.parametrize("shift", [False, True])
+def test_padding_is_positional_and_preserves_supervision(
+    conversion_dtype: Any, shift: bool
+) -> None:
+    payloads = [
+        {
+            "input_ids": [2, 7, 2, 2, 8],
+            "positions": [0, 1, 2, 0, 1],
+            "loss_mask": [0, 1, 1, 0, 1],
+        },
+        {"input_ids": [2, 9, 2], "positions": [0, 1, 2], "loss_mask": [0, 1, 1]},
+    ]
+    original = copy.deepcopy(payloads)
+    result = _training_batch(*payloads).to_training(
+        dtype=conversion_dtype,
+        return_labels=shift,
+        return_loss_mask=shift,
+        return_num_valid_tokens=shift,
+        pad_to_length=6,
+        pad_token_id=2,
+        return_padding_mask=True,
+        return_cu_seqlens=True,
+    )
+    assert _values(result["input_ids"]) == (
+        [[2, 7, 2, 2, 8], [2, 9, 2, 2, 2]]
+        if shift
+        else [[2, 7, 2, 2, 8, 2], [2, 9, 2, 2, 2, 2]]
+    )
+    assert _values(result["padding_mask"]) == (
+        [[False] * 5, [False] * 3 + [True] * 2]
+        if shift
+        else [[False] * 5 + [True], [False] * 3 + [True] * 3]
+    )
+    assert _values(result["cu_seqlens"]) == (
+        [[0, 3, 5], [0, 3, 5]] if shift else [[0, 3, 5, 6], [0, 3, 6, 6]]
+    )
+    if shift:
+        assert _values(result["labels"]) == [
+            [7, 2, -100, 8, -100],
+            [9, 2, -100, -100, -100],
+        ]
+        assert result["num_valid_tokens"] == 5
+    assert payloads == original
+
+
+def test_added_padding_combines_with_existing_padding_metadata(
+    conversion_dtype: Any,
+) -> None:
+    source = _training_batch({"input_ids": [2, 8, 2, 2]}, padding=1)
+    output = source.to_training(
+        dtype=conversion_dtype,
+        pad_to_length=6,
+        pad_token_id=2,
+        return_labels=True,
+        return_padding_mask=True,
+    )
+    assert _values(output["labels"]) == [[8, 2, -100, -100, -100]]
+    assert _values(output["padding_mask"]) == [[False, False, False, True, True]]
+    assert source.records[0].meta.padding_length == 1
+
+
+@pytest.mark.parametrize("tokens", [[], [2]])
+def test_padding_empty_or_all_padding_document(
+    conversion_dtype: Any, tokens: list[int]
+) -> None:
+    output = _training_batch({"input_ids": tokens}, padding=len(tokens)).to_training(
+        dtype=conversion_dtype,
+        pad_to_length=3,
+        pad_token_id=2,
+        return_labels=True,
+        return_padding_mask=True,
+        return_num_valid_tokens=True,
+    )
+    assert _values(output["labels"]) == [[-100, -100]]
+    assert _values(output["padding_mask"]) == [[True, True]]
+    assert output["num_valid_tokens"] == 0
+
+
+@pytest.mark.parametrize(("flatten", "mode"), [(False, "preserve"), (True, "sequence")])
+def test_segment_mask_uses_target_boundaries_not_bos_eos_or_model_positions(
+    conversion_dtype: Any, flatten: bool, mode: str
+) -> None:
+    source = _training_batch(
+        {
+            "input_ids": [2, 11, 2, 2, 12, 2],
+            "positions": [0, 1, 2, 0, 1, 2],
+            "loss_mask": [1, 1, 0, 1, 1, 1],
+        }
+    )
+    output = source.to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        mask_segment_starts=True,
+        return_loss_mask=True,
+        return_num_valid_tokens=True,
+        return_cu_seqlens=True,
+        position_mode=mode,
+        flatten=flatten,
+    )
+    expected = [11, -100, -100, 12, 2]
+    assert _values(output["labels"]) == (expected if flatten else [expected])
+    assert output["num_valid_tokens"] == 3
+    assert _values(output["loss_mask"]) == (
+        [1.0, 0.0, 0.0, 1.0, 1.0] if flatten else [[1.0, 0.0, 0.0, 1.0, 1.0]]
+    )
+    assert _values(output["cu_seqlens"]) == ([0, 3, 5] if flatten else [[0, 3, 5]])
+    baseline = source.to_training(dtype=conversion_dtype, return_labels=True)
+    assert _values(baseline["labels"]) == [[11, -100, 2, 12, 2]]
+
+
+def test_continuation_start_has_no_target_to_mask(conversion_dtype: Any) -> None:
+    # A wrap fragment starts a new packed document at zero. Its first token is
+    # absent from the target slice; the following content stays supervised.
+    output = _training_batch(
+        {"input_ids": [31, 32, 33, 41], "positions": [0, 1, 2, 0]}
+    ).to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        mask_segment_starts=True,
+    )
+    assert _values(output["labels"]) == [[32, 33, -100]]
+
+
+@pytest.mark.parametrize("positions", [[1, 2, 3], [[0, 1, 2]] * 3, [0, 1]])
+def test_segment_mask_rejects_invalid_original_positions(
+    conversion_dtype: Any, positions: Any
+) -> None:
+    with pytest.raises(ValueError, match="positions"):
+        _training_batch({"input_ids": [1, 2, 3], "positions": positions}).to_training(
+            dtype=conversion_dtype,
+            return_labels=True,
+            mask_segment_starts=True,
+        )
+
+
+def test_segment_mask_requires_boundaries() -> None:
+    with pytest.raises(ValueError, match="requires return_labels"):
+        _training_batch({"input_ids": [1, 2]}).to_training(mask_segment_starts=True)
+    with pytest.raises(ValueError, match="positions"):
+        _training_batch({"input_ids": [1, 2]}).to_training(
+            return_labels=True, mask_segment_starts=True
+        )
+
+
+@pytest.mark.parametrize(("shift", "flatten"), [(True, False), (False, True)])
+def test_field_collators_own_media_and_mrope_layout(shift: bool, flatten: bool) -> None:
+    torch = pytest.importorskip("torch")
+    payloads = [
+        {
+            "input_ids": [1, 2, 3],
+            "positions": [0, 1, 2],
+            "pixels": torch.ones((2, 3), dtype=torch.float32),
+            "model_positions": torch.tensor([[0, 1, 2], [0, 4, 4], [0, 5, 5]]),
+        },
+        {
+            "input_ids": [4, 5],
+            "positions": [0, 1],
+            "pixels": torch.ones((1, 3), dtype=torch.float32) * 2,
+            "model_positions": torch.tensor([[0, 1], [0, 6], [0, 7]]),
+        },
+    ]
+    snapshots = [(p["pixels"].clone(), p["model_positions"].clone()) for p in payloads]
+    contexts = []
+
+    def pixels(items: Sequence[Any], *, length: int, shifted: bool) -> Any:
+        contexts.append((length, shifted))
+        return torch.cat(tuple(items), dim=0)
+
+    def mrope(items: Sequence[Any], *, length: int, shifted: bool) -> Any:
+        contexts.append((length, shifted))
+        padded = [
+            torch.nn.functional.pad(item, (0, length - item.shape[-1]))
+            for item in items
+        ]
+        result = torch.stack(padded, dim=1)
+        return result[..., :-1] if shifted else result
+
+    result = _training_batch(*payloads).to_training(
+        dtype=torch.long,
+        return_labels=shift,
+        pad_to_length=5,
+        pad_token_id=0,
+        field_collators={"pixels": pixels, "model_positions": mrope},
+        rename_fields={"pixels": "pixel_values"},
+        flatten=flatten,
+        return_cu_seqlens=True,
+    )
+    assert contexts == [(5, shift), (5, shift)]
+    assert result["pixel_values"].shape == (3, 3)
+    assert result["pixel_values"].dtype == torch.float32
+    assert result["model_positions"].shape == (3, 2, 5 - int(shift))
+    assert result["model_positions"][2, 1, 1] == 7
+    for payload, (original_pixels, original_positions) in zip(payloads, snapshots):
+        assert torch.equal(payload["pixels"], original_pixels)
+        assert torch.equal(payload["model_positions"], original_positions)
+
+
+def test_callbacks_empty_exclusion_missing_field_and_reserved_names() -> None:
+    calls = []
+
+    def collect(items: Sequence[Any], *, length: int, shifted: bool) -> Any:
+        calls.append(items)
+        return list(items)
+
+    assert _training_batch().to_training(field_collators={"media": collect}) == {
+        "ids": [],
+        "texts": [],
+        "media": [],
+    }
+    assert calls == [()]
+    result = _training_batch({"input_ids": [1, 2], "media": "image"}).to_training(
+        dtype=None, field_collators={"media": collect}, exclude_fields=("media",)
+    )
+    assert "media" not in result
+    with pytest.raises(ValueError, match="media"):
+        _training_batch({"input_ids": [1, 2]}).to_training(
+            field_collators={"media": collect}
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        _training_batch().to_training(field_collators={"positions": collect})
+    with pytest.raises(TypeError, match="callable"):
+        _training_batch().to_training(field_collators={"media": 1})
+    with pytest.raises(ValueError, match="equal token lengths"):
+        _training_batch(
+            {"input_ids": [1], "media": []}, {"input_ids": [2, 3], "media": []}
+        ).to_training(dtype=None, field_collators={"media": collect})
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"pad_to_length": -1, "pad_token_id": 0},
+        {"pad_to_length": True, "pad_token_id": 0},
+        {"pad_to_length": 3},
+        {"pad_token_id": 0},
+        {"pad_to_length": 3, "pad_token_id": -1},
+        {"pad_to_length": 3, "pad_token_id": True},
+    ],
+)
+def test_invalid_padding_options(options: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="pad_"):
+        _training_batch().to_training(**options)
+
+
+def test_padding_rejects_truncation_and_non_token_extras() -> None:
+    with pytest.raises(ValueError, match="truncation"):
+        _training_batch({"input_ids": [1, 2, 3]}).to_training(
+            pad_to_length=2, pad_token_id=0
+        )
+    with pytest.raises(ValueError, match="field_collators"):
+        _training_batch({"input_ids": [1, 2], "pixels": [[1, 2], [3, 4]]}).to_training(
+            pad_to_length=3, pad_token_id=0, extra_fields=("pixels",)
+        )
+    with pytest.raises(ValueError, match="padding_length"):
+        _training_batch({"input_ids": [1, 2]}, padding=3).to_training(
+            pad_to_length=3, pad_token_id=0
+        )
+
+
+@pytest.mark.parametrize("framework", ["numpy", "torch"])
+def test_padding_preserves_array_inputs_without_mutation(framework: str) -> None:
+    module = pytest.importorskip(framework)
+    convert = module.asarray if framework == "numpy" else module.tensor
+    tokens = convert([2, 6, 2], dtype=module.int64)
+    positions = convert([0, 1, 2], dtype=module.int64)
+    masks = convert([0, 1, 1], dtype=module.int64)
+    output = _training_batch(
+        {"input_ids": tokens, "positions": positions, "loss_mask": masks}
+    ).to_training(
+        dtype=module.int64,
+        pad_to_length=5,
+        pad_token_id=2,
+        return_labels=True,
+        return_padding_mask=True,
+        return_cu_seqlens=True,
+    )
+    assert _values(output["labels"]) == [[6, 2, -100, -100]]
+    assert _values(output["padding_mask"]) == [[False, False, False, True]]
+    assert _values(tokens) == [2, 6, 2]
+    assert _values(positions) == [0, 1, 2]
+    assert _values(masks) == [0, 1, 1]
+    if framework == "torch":
+        assert output["input_ids"].device == tokens.device
+
+
+def test_training_consumes_merged_envelopes_without_mutating_records(
+    conversion_dtype: Any,
+) -> None:
+    payload = {
+        "packed_samples": {
+            "tokens": [11, 12, 21, 22, 0],
+            "positions": [0, 1, 0, 1, 0],
+            "loss_mask": [0, 1, 0, 1, 0],
+            "media": ["image"],
+        }
+    }
+    original = copy.deepcopy(payload)
+    record = _rec((0, 0, 7), 0, 0, payload, padding_length=1)
+    meta = record.meta
+    output = SampleBatch((record,)).to_training(
+        dtype=conversion_dtype,
+        return_labels=True,
+        return_document_ids=True,
+        pad_to_length=7,
+        pad_token_id=0,
+        position_mode="sequence",
+        field_collators={"media": lambda values, *, length, shifted: list(values)},
+    )
+    assert _values(output["input_ids"]) == [[11, 12, 21, 22, 0, 0]]
+    assert _values(output["labels"]) == [[12, -100, 22, -100, -100, -100]]
+    assert _values(output["document_ids"]) == [[1, 1, 2, 2, 0, 0]]
+    assert _values(output["positions"]) == [list(range(6))]
+    assert output["ids"] == [(0, 0, 7)] and output["media"] == [["image"]]
+    assert record.meta is meta and record.payload is payload and payload == original
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        ({"packed_samples": [{"input_ids": [1, 2]}]}, "pack_payloads"),
+        ({"packed_samples": None}, "merged token mapping"),
+        ({"packed_samples": {"input_ids": [1, 2]}, "input_ids": [3, 4]}, "Ambiguous"),
+        ({"packed_samples": {"input_ids": [1, 2]}, "positions": [0, 1]}, "Ambiguous"),
+    ],
+)
+def test_training_rejects_unmerged_or_ambiguous_envelopes(
+    payload: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _training_batch(payload).to_training(dtype=None)
+
+
+def test_wrapped_custom_tokens_and_collator_ownership() -> None:
+    batch = _training_batch({"packed_samples": {"tokens": [1, 2]}})
+    with pytest.raises(ValueError, match="reserved"):
+        batch.to_training(field_collators={"tokens": lambda *args, **kwargs: None})
+    custom = _training_batch({"packed_samples": {"encoded": [3, 4]}})
+    assert custom.to_training(dtype=None, tokens_field="encoded")["input_ids"] == [
+        [3, 4]
+    ]
+
+
+def test_boundary_and_eos_label_masks_compose_when_bos_equals_eos() -> None:
+    batch = _training_batch(
+        {"input_ids": [2, 11, 2, 2, 21, 2], "positions": [0, 1, 2, 0, 1, 2]}
+    )
+    boundary = batch.to_training(
+        dtype=None, return_labels=True, mask_segment_starts=True
+    )
+    eos = batch.to_training(
+        dtype=None, return_labels=True, eos_mask_loss=True, eos_token_id=2
+    )
+    both = batch.to_training(
+        dtype=None,
+        return_labels=True,
+        mask_segment_starts=True,
+        eos_mask_loss=True,
+        eos_token_id=2,
+    )
+    assert boundary["labels"] == [[11, 2, -100, 21, 2]]
+    assert eos["labels"] == both["labels"] == [[-100, 2, -100, -100, 2]]
+
+
+def test_collators_reject_extra_and_resolved_token_field_collisions() -> None:
+    def collect(values: Sequence[Any], *, length: int, shifted: bool) -> Any:
+        return values
+
+    batch = _training_batch({"tokens": [1, 2], "media": []})
+    with pytest.raises(ValueError, match="overlap"):
+        batch.to_training(extra_fields=("media",), field_collators={"media": collect})
+    for tokens_field in ("auto", "tokens"):
+        with pytest.raises(ValueError, match="reserved.*tokens"):
+            batch.to_training(
+                tokens_field=tokens_field, field_collators={"tokens": collect}
+            )
+
+
+def test_empty_batch_preserves_callback_result_type_and_layout() -> None:
+    import numpy as np
+
+    def collect(values: Sequence[Any], *, length: int, shifted: bool) -> Any:
+        assert values == ()
+        return np.empty((0, length - int(shifted)), dtype=np.float32)
+
+    output = _training_batch().to_training(
+        return_labels=True,
+        pad_to_length=5,
+        pad_token_id=0,
+        field_collators={"media": collect},
+    )
+    assert output["media"].shape == (0, 4)
+    assert output["media"].dtype == np.float32
+
+
+@pytest.mark.parametrize(
+    ("dtype_name", "pad_id"), [("uint16", 128001), ("int32", 2**31)]
+)
+def test_training_padding_rejects_out_of_range_output_id(
+    dtype_name: str, pad_id: int
+) -> None:
+    np = pytest.importorskip("numpy")
+    dtype = getattr(np, dtype_name)
+    with pytest.raises(ValueError, match="not representable"):
+        _training_batch({"tokens": np.asarray([1, 2], dtype=dtype)}).to_training(
+            dtype=dtype, pad_to_length=3, pad_token_id=pad_id
+        )

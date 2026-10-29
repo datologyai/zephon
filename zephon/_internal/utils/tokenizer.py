@@ -75,13 +75,21 @@ def encode_rendered_text(
     *,
     max_length: int | None = None,
     return_offsets_mapping: bool = False,
+    add_special_tokens: bool = False,
+    return_special_tokens_mask: bool = False,
 ) -> BatchEncoding:
-    """Tokenize rendered text without adding specials; truncate at an explicit cap."""
-    kwargs: dict[str, Any] = {"add_special_tokens": False}
+    """Encode text, optionally letting the tokenizer postprocessor insert tokens.
+
+    The optional special-token mask identifies tokens inserted by the tokenizer.
+    Special tokens already present in the text count as input content.
+    """
+    kwargs: dict[str, Any] = {"add_special_tokens": add_special_tokens}
     if max_length is not None:
         kwargs.update(truncation=True, max_length=max_length)
     if return_offsets_mapping:
         kwargs["return_offsets_mapping"] = True
+    if return_special_tokens_mask:
+        kwargs["return_special_tokens_mask"] = True
     return tokenizer(text, **kwargs)
 
 
@@ -271,8 +279,7 @@ def load_hf_tokenizer(
     are resolved to a local cache path before loading. Transient load failures
     are retried with backoff; ``use_fast`` is dropped and the load retried once
     if the tokenizer class rejects the kwarg. ``eos_token`` is forwarded to
-    ``from_pretrained`` and swaps which vocab token is EOS; HF tokenizers look
-    ``eos_token_id`` up from the ``eos_token`` string, so both follow.
+    ``from_pretrained``; HF derives ``eos_token_id`` from that string.
     """
     # Before importing hf tokenizers we tell it we handle the parallelism and
     # not hf tokenizers. This avoids unforeseen effects when running multiple

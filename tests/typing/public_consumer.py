@@ -9,6 +9,9 @@ public typing surface and is checked by its own invocation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 
 from zephon import (
@@ -70,10 +73,19 @@ def training_batch(batch: SampleBatch) -> None:
         eos_mask_loss=True,
         eos_token_id=2,
         position_mode="sequence",
+        pad_to_length=1025,
+        pad_token_id=0,
+        mask_segment_starts=True,
+        field_collators={"media": collate_media},
         rename_fields={"input_ids": "input"},
     )
     count: int = converted["num_valid_tokens"]
     _ = count
+
+
+def collate_media(values: Sequence[Any], *, length: int, shifted: bool) -> Any:
+    """Keep media ragged without token slicing or casting."""
+    return list(values)
 
 
 def inspect_dataset() -> None:
@@ -170,3 +182,20 @@ class IdentityOp(BaseOp):
 def scoped_chat(pipe: Pipeline) -> Pipeline:
     scope: LossScope = "after_last_user"
     return pipe.expand_chat().tokenize_chat(tokenizer_id="model", loss_scope=scope)
+
+
+def all_token_chat(pipe: Pipeline) -> Pipeline:
+    scope: LossScope = "all_tokens"
+    return pipe.tokenize_chat(
+        tokenizer_id="model", loss_scope=scope, special_tokens="none"
+    )
+
+
+def chat_document_tokens(pipe: Pipeline) -> Pipeline:
+    return pipe.tokenize_chat(
+        tokenizer_id="model",
+        special_tokens="bos_eos",
+        bos_token_id=1,
+        eos_token_id=2,
+        supervise_assistant_header=True,
+    )

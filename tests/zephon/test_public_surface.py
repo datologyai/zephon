@@ -67,6 +67,7 @@ EXPECTED_ALL = {
     "zephon.ops": [
         "Accumulator",
         "BaseOp",
+        "ChatSpecialTokensMode",
         "CountingAccumulator",
         "DomainGroups",
         "LossScope",
@@ -111,6 +112,7 @@ EXPECTED_ALL = {
         "ComponentId",
         "ContributorRef",
         "DatasetId",
+        "FieldCollator",
         "LaneId",
         "LineageIndex",
         "LineagePath",
@@ -243,6 +245,7 @@ EXPECTED_ALL = {
         "tombstones_for_record",
     ],
     "zephon.ops.config": [
+        "ChatSpecialTokensMode",
         "LossScope",
         "MissingFieldMode",
         "PackingAlgorithm",

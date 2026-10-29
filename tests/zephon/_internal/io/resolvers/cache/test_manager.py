@@ -1,5 +1,7 @@
 import contextlib
 import gc
+import gzip
+import hashlib
 import json
 import os
 import queue
@@ -15,7 +17,7 @@ from pathlib import Path
 from typing import IO, Any, Mapping
 
 import pytest
-from filelock import BaseFileLock
+from filelock import BaseFileLock, FileLock
 
 import zephon._internal.io.resolvers.cache.manager as manager_mod
 from tests._catalog_helpers import catalog_set_from_locators
@@ -311,6 +313,67 @@ def test_validate_hash_mismatch_raises_and_removes_file(tmp_path: Path) -> None:
         mgr.close()
 
 
+@pytest.mark.parametrize(
+    "compression,keep_zip", [(None, False), ("gzip", False), ("gzip", True)]
+)
+@pytest.mark.parametrize("valid", [False, True])
+def test_resolve_publishes_only_validated_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compression: str | None,
+    keep_zip: bool,
+    valid: bool,
+) -> None:
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"valid shard\n"
+    downloaded = data if valid else b"corrupt shard\n"
+    zip_name = "shard.bin.gz" if compression else None
+    source = _make_file(
+        remote / (zip_name or "shard.bin"),
+        gzip.compress(downloaded) if compression else downloaded,
+    )
+    loc = _locator(
+        "demo",
+        0,
+        str(remote),
+        raw_name="shard.bin",
+        raw_bytes=len(data),
+        zip_name=zip_name,
+        zip_bytes=source.stat().st_size if compression else 0,
+        compression=compression,
+        hashes={"sha256": hashlib.sha256(data).hexdigest()},
+    )
+    mgr = _make_manager(
+        cache_root,
+        LocalFSBackend(root=remote),
+        [loc],
+        keep_zip=keep_zip,
+        validate_hash="sha256",
+    )
+    cached = cache_root / "demo" / "shard.bin"
+    real_hash = manager_mod.compute_file_hash
+
+    def hash_before_publication(path: Path, algo: str) -> str:
+        # An optimistic reader may retain this path across eviction/re-download.
+        # It must not be able to read the replacement before validation finishes.
+        with pytest.raises(FileNotFoundError):
+            cached.read_bytes()
+        return real_hash(path, algo)
+
+    monkeypatch.setattr(manager_mod, "compute_file_hash", hash_before_publication)
+    try:
+        if valid:
+            assert mgr.resolve(loc).raw.path.read_bytes() == data
+        else:
+            with pytest.raises(ValueError, match="Checksum mismatch"):
+                mgr.resolve(loc)
+            assert not any(p.is_file() for p in cached.parent.iterdir())
+            assert mgr.stats().bytes_used == 0
+    finally:
+        mgr.close()
+
+
 def test_cache_manager_cleanup_runs_on_gc(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -447,6 +510,100 @@ def test_re_resolve_recovers_if_local_file_missing(tmp_path: Path) -> None:
         stats2 = mgr.stats()
         assert stats2.shards == 1
         assert stats2.bytes_used == stats1.bytes_used
+    finally:
+        mgr.close()
+
+
+def test_cache_hit_does_not_wait_for_the_cache_lock(tmp_path: Path) -> None:
+    # Every fetch worker on a node resolves through one cache lock; a hit that
+    # took it would wait whenever any peer held it.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"h" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    peer = FileLock(str(cache_root / manager_mod._CACHE_LOCK_FILENAME))
+    try:
+        mgr.resolve(loc)
+        refs: list[LocalShardRef] = []
+        with peer:
+            hit = threading.Thread(target=lambda: refs.append(mgr.resolve(loc)))
+            hit.start()
+            hit.join(timeout=2.0)
+            assert not hit.is_alive(), "a cache hit waited for the cache lock"
+        hit.join()
+        assert (
+            refs[0].cache_hit and refs[0].raw.path == cache_root / "demo" / "shard0.bin"
+        )
+    finally:
+        mgr.close()
+
+
+def test_missing_file_stays_local_if_a_peer_restores_it(tmp_path: Path) -> None:
+    # The file is gone at the lock-free check, but a peer re-downloads it before
+    # this resolve takes the cache lock: the shard must stay LOCAL, a hit.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"r" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    cached = cache_root / "demo" / "shard0.bin"
+
+    class _PeerRestoresFirst:
+        def __init__(self, lock: Any) -> None:
+            self._lock = lock
+
+        def __enter__(self) -> Any:
+            cached.write_bytes(data)
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc: Any) -> Any:
+            return self._lock.__exit__(*exc)
+
+    try:
+        mgr.resolve(loc)
+        cached.unlink()
+        lock = mgr._cache_lock
+        mgr._cache_lock = _PeerRestoresFirst(lock)  # type: ignore[assignment]
+        try:
+            ref = mgr.resolve(loc)
+        finally:
+            mgr._cache_lock = lock
+        assert ref.cache_hit and ref.raw.path == cached
+    finally:
+        mgr.close()
+
+
+def test_hit_evicted_before_its_ref_is_built_re_resolves(tmp_path: Path) -> None:
+    # A peer evicts the shard between the lock-free is_file() check and the
+    # stat() in _build_ref: resolve must re-download, not raise FileNotFoundError.
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    data = b"e" * 4096
+    _make_file(remote / "shard0.bin", data)
+    loc = _locator("demo", 0, str(remote), raw_name="shard0.bin", raw_bytes=len(data))
+    mgr = _make_manager(cache_root, LocalFSBackend(root=remote), [loc])
+    index = mgr._index_for(loc)
+    assert index is not None
+    real_build_ref = mgr._build_ref
+    evicted: list[bool] = []
+
+    def evict_then_build(*args: Any, **kwargs: Any) -> LocalShardRef:
+        if kwargs.get("cache_hit") and not evicted:
+            evicted.append(True)
+            with mgr._cache_lock:
+                mgr._evict_index_locked(index)
+        return real_build_ref(*args, **kwargs)
+
+    try:
+        mgr.resolve(loc)
+        mgr._build_ref = evict_then_build  # type: ignore[method-assign]
+        ref = mgr.resolve(loc)
+        assert evicted
+        assert not ref.cache_hit and ref.raw.path.read_bytes() == data
+        assert mgr.stats().shards == 1
     finally:
         mgr.close()
 
