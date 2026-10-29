@@ -11,10 +11,12 @@ from typing import Any
 
 import pytest
 
+from zephon.io import Dataset, InMemoryShard
 from zephon.work import (
     MixturePhase,
     PhaseConstantSchedule,
     PhaseLinearSchedule,
+    StaticMixtureWorkSource,
     StepMixturePlan,
 )
 from zephon.work.curriculum import _RoundTable
@@ -138,6 +140,34 @@ def test_normalized_peaks_cover_both_sides_of_constant_jump() -> None:
     assert plan.peak_proportions == pytest.approx({"a": 1.4 / 2.4, "b": 100 / 101.5})
 
 
+def test_repeat_guard_uses_normalized_not_raw_peaks() -> None:
+    plan = StepMixturePlan(
+        schedules={
+            "a": PhaseLinearSchedule([(0, 0.001), (4, 0.002)]),
+            "b": PhaseConstantSchedule([(0, 0.001)]),
+        },
+        total_steps=8,
+        boundary="warn",
+    )
+    assert plan.peak_proportions["a"] == pytest.approx(2 / 3)
+    datasets = [
+        Dataset.from_dict(
+            name, {0: InMemoryShard([{"text": str(i)} for i in range(size)])}
+        )
+        for name, size in (("a", 6), ("b", 20))
+    ]
+    work = StaticMixtureWorkSource(
+        datasets, plan, chunk_size=8, exhausted_policy="repeat"
+    )
+    with pytest.raises(ValueError, match="schedule peak weight"):
+        work._prepare_for_execution(
+            canonical_replicas=1,
+            output_batch_size=1,
+            preserves_cursor_order=True,
+            global_batch_size=2,
+        )
+
+
 @pytest.mark.parametrize("seed", range(200))
 def test_matches_independent_sample_oracle(seed: int) -> None:
     rng = random.Random(seed)
@@ -176,3 +206,46 @@ def test_matches_independent_sample_oracle(seed: int) -> None:
         assert all(
             actual[name] <= plan.peak_proportions[name] + 1e-12 for name in schedules
         )
+
+
+def test_chunk_size_changes_order_but_not_per_round_totals() -> None:
+    # Rounds are chunk_size * canonical_replicas records, so a horizon that is
+    # whole rounds for every chunk size compares like with like.
+    plan = StepMixturePlan(
+        phases=[
+            MixturePhase(0, {"a": 0.75, "b": 0.25}),
+            MixturePhase(16, {"a": 0.25, "b": 0.75}),
+        ],
+        total_steps=64,
+        boundary="warn",
+    )
+    totals, orders = [], []
+    for chunk_size in (4, 8, 16):
+        work = StaticMixtureWorkSource(
+            [
+                Dataset.from_dict(name, {0: InMemoryShard(list(range(1_000)))})
+                for name in ("a", "b")
+            ],
+            plan,
+            chunk_size=chunk_size,
+            seed=0,
+            exhausted_policy="repeat",
+        )
+        work._prepare_for_execution(
+            canonical_replicas=2,
+            output_batch_size=2,
+            preserves_cursor_order=True,
+            global_batch_size=8,
+        )
+        lanes = [work.clone_for_lane(lane, 2) for lane in (0, 1)]
+        drawn: list[str] = []
+        while len(drawn) < 256:
+            for lane in lanes:
+                chunk = lane.next_chunk()
+                drawn.extend(
+                    name for name, ids in chunk.components.items() for _ in ids
+                )
+        totals.append({name: drawn[:256].count(name) for name in ("a", "b")})
+        orders.append(drawn[:256])
+    assert totals[0] == totals[1] == totals[2] == {"a": 128, "b": 128}
+    assert orders[0] != orders[2]

@@ -311,6 +311,12 @@ class Engine:
                 self._world.canonical_replicas,
                 self._world.dp_degree,
             )
+        work._prepare_for_execution(
+            canonical_replicas=self._world.canonical_replicas,
+            output_batch_size=self._plan.batch_size_hint,
+            preserves_cursor_order=self._preserves_cursor_order,
+            global_batch_size=global_batch_size,
+        )
         self.inflight_chunks_per_lane: dict[LaneId, dict[ChunkId, Any]] = defaultdict(
             dict
         )

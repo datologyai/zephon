@@ -3,6 +3,7 @@
 
 """Mixture-aware work source with shard-respecting traversal."""
 
+import logging
 import math
 import random
 import warnings
@@ -24,7 +25,12 @@ from zephon._internal.token_counting import TokenCountingSpec as _TokenCountingS
 from zephon.io.dataset import Dataset
 from zephon.types import SampleId
 from zephon.work.base import WorkChunk, WorkSource
-from zephon.work.curriculum import MixtureSchedule
+from zephon.work.curriculum import (
+    MixtureSchedule,
+    StepMixturePlan,
+    _list_blended,
+    _RoundTable,
+)
 from zephon.work.mixture import MixtureSpec
 from zephon.work.token_estimation import (
     PerShardTokenCost,
@@ -34,6 +40,9 @@ from zephon.work.token_estimation import (
     _UnreplayableOp,
     prime_token_ratios,
 )
+
+_logger = logging.getLogger(__name__)
+
 
 _GOLDEN_RATIO_64 = 0x9E3779B97F4A7C15  # Used to decorrelate derived seeds.
 
@@ -2245,7 +2254,7 @@ class StaticMixtureWorkSource(WorkSource):
     def __init__(
         self,
         datasets: list[Dataset],
-        mixture: MixtureSpec | Mapping[str, float] | MixtureSchedule,
+        mixture: MixtureSpec | Mapping[str, float] | MixtureSchedule | StepMixturePlan,
         chunk_size: int = 16384,
         seed: int = 0,
         shuffle_shards: bool = True,
@@ -2296,7 +2305,14 @@ class StaticMixtureWorkSource(WorkSource):
         component_order = tuple(ds.name for ds in self._datasets)
 
         schedule = mixture if isinstance(mixture, MixtureSchedule) else None
-        if schedule is not None:
+        step_mixture_plan: StepMixturePlan | None = None
+        if isinstance(mixture, StepMixturePlan):
+            step_mixture_plan = mixture
+            mixture.validate_for(component_order)
+            # Placeholder weights: the compiled plan replaces them from the
+            # first chunk and is checked for liveness when it is compiled.
+            mixture_spec = MixtureSpec(mixture.peak_proportions)
+        elif schedule is not None:
             if set(schedule.component_names) != set(component_order):
                 raise ValueError(
                     "MixtureSchedule components must match work source dataset "
@@ -2502,10 +2518,13 @@ class StaticMixtureWorkSource(WorkSource):
         # checks immediately; an unprimed token strategy no-ops until prime()
         # supplies the ratios and re-runs it. A schedule is checked exactly
         # against its peaks below instead.
-        if schedule is None:
+        if schedule is None and step_mixture_plan is None:
             self._strategy.validate_liveness(self._cursors)
 
-        self._schedule: MixtureSchedule | None = None
+        self._schedule: MixtureSchedule | _RoundTable | None = None
+        self._step_mixture_plan: StepMixturePlan | None = step_mixture_plan
+        # (canonical_replicas, global_batch_size) once compiled.
+        self._prepared: tuple[int, int] | None = None
         self._schedule_digest: str | None = None
         self._last_scheduled_round: int = -1
         if schedule is not None:
@@ -2565,7 +2584,63 @@ class StaticMixtureWorkSource(WorkSource):
 
     # -- curriculum schedules ----------------------------------------------
 
-    def _validate_schedule(self, schedule: MixtureSchedule) -> None:
+    def _prepare_for_execution(
+        self,
+        *,
+        canonical_replicas: int,
+        output_batch_size: int | None,
+        preserves_cursor_order: bool,
+        global_batch_size: int | None = None,
+    ) -> None:
+        plan = self._step_mixture_plan
+        if plan is None:
+            return
+        if global_batch_size is None:
+            raise ValueError(
+                "A StepMixturePlan needs the trainer's global batch size: set "
+                "Pipeline.options(global_batch_size=...)"
+            )
+        if not preserves_cursor_order:
+            raise ValueError(
+                "StepMixturePlan requires a cursor-order-preserving pipeline; "
+                "remove shuffle, ensure_mixture, pack_sequences, or other "
+                "reordering operators"
+            )
+        if output_batch_size is None:
+            raise ValueError("StepMixturePlan requires a pipeline that ends in batch()")
+        # Every pipeline is checked above; only the compiled plan is reused.
+        prepared = (canonical_replicas, global_batch_size)
+        if self._prepared is not None:
+            if self._prepared != prepared:
+                raise RuntimeError(
+                    "StepMixturePlan was already compiled for (canonical_replicas, "
+                    f"global_batch_size)={self._prepared}; cannot reuse this work "
+                    f"source with {prepared}"
+                )
+            return
+
+        layout = {
+            "samples_per_step": global_batch_size,
+            "chunk_size": self._alloc_config.chunk_size,
+            "canonical_replicas": canonical_replicas,
+        }
+        table = plan._compile(**layout)
+        self._validate_schedule(table)
+        if plan.boundary == "warn":
+            blended = plan._blended_boundaries(**layout)
+            if blended:
+                _logger.warning(
+                    "StepMixturePlan breakpoints fall inside a chunk round and are "
+                    "averaged over it (StepMixturePlan.describe() lists every "
+                    "breakpoint):%s",
+                    _list_blended(blended),
+                )
+        self._schedule = table
+        self._schedule_digest = plan._fingerprint(**layout)
+        self._last_scheduled_round = -1
+        self._prepared = prepared
+
+    def _validate_schedule(self, schedule: MixtureSchedule | _RoundTable) -> None:
         cfg = self._alloc_config
         if self._strategy.mixture_unit != "samples":
             raise ValueError(
@@ -2608,7 +2683,7 @@ class StaticMixtureWorkSource(WorkSource):
             )
 
     def _has_schedule(self) -> bool:
-        return self._schedule is not None
+        return self._schedule is not None or self._step_mixture_plan is not None
 
     def _apply_schedule_for_round(self, chunk_round: int) -> None:
         if self._schedule is None or chunk_round == self._last_scheduled_round:
@@ -2627,6 +2702,10 @@ class StaticMixtureWorkSource(WorkSource):
         if self._cloned:
             raise RuntimeError(
                 "State Error: clone_for_lane should only be called on user-defined WorkSource instances."
+            )
+        if self._step_mixture_plan is not None and self._prepared is None:
+            raise RuntimeError(
+                "StepMixturePlan must be prepared by the engine before cloning lanes"
             )
 
         clone = object.__new__(type(self))
@@ -2660,6 +2739,8 @@ class StaticMixtureWorkSource(WorkSource):
         clone._total_samples = self._total_samples
 
         clone._schedule = self._schedule
+        clone._step_mixture_plan = self._step_mixture_plan
+        clone._prepared = self._prepared
         clone._schedule_digest = self._schedule_digest
         clone._last_scheduled_round = self._last_scheduled_round
 
