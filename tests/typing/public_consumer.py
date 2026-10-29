@@ -61,6 +61,15 @@ def build_pipeline() -> Pipeline:
     return Pipeline(ws).options(max_workers=4, ipc_transport=transport)
 
 
+def checkpoint_formats(pipe: Pipeline, as_bytes: bool) -> None:
+    state: dict[str, Any] = pipe.checkpoint()
+    blob: bytes = pipe.checkpoint(as_bytes=True)
+    selected: dict[str, Any] | bytes = pipe.checkpoint(as_bytes=as_bytes)
+    pipe.restore(state)
+    pipe.restore(blob)
+    pipe.restore(selected)
+
+
 def training_batch(batch: SampleBatch) -> None:
     converted = batch.to_training(
         return_labels=True,

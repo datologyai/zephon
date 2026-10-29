@@ -428,7 +428,8 @@ def test_checkpoint_records_inflight_pruned(mtp_mode: bool) -> None:
 
 # ---- 2) Resume mid-chunk, no batch (explicitly cut off boundary)
 @pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
-def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["dict", "bytes"])
+def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool, as_bytes: bool) -> None:
     ds = make_dataset("alpha", 200)
     chunk_size = 8
 
@@ -464,8 +465,13 @@ def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
         else pytest.warns(RuntimeWarning, match="mid-window")
     )
     with warn_ctx:
-        prefix_flat, ckpt = consume_until(p1, flat_limit=cut)
-    assert ckpt is not None
+        iterator = iter(p1)
+        try:
+            prefix_flat = [_extract_texts(next(iterator))[0] for _ in range(cut)]
+            ckpt = p1.checkpoint(as_bytes=as_bytes)
+        finally:
+            iterator.close()
+    assert isinstance(ckpt, bytes if as_bytes else dict)
     assert prefix_flat == baseline_flat[:cut]
 
     p2 = _build_pipe_params(
@@ -477,6 +483,7 @@ def test_checkpoint_resume_mid_chunk_no_batch(mtp_mode: bool) -> None:
         **kw,
     )
     p2.restore(ckpt)
+    assert any(p2.checkpoint()["inflight"].values())
     suffix_flat, _ = consume_until(p2)
 
     assert prefix_flat + suffix_flat == baseline_flat
