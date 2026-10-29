@@ -47,6 +47,10 @@ MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
 # Marks the PR comment recording a triage issue. The key may not see the issue
 # once triage moves it to another team, so GitHub keeps the record.
 TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
+# Link kind of the attachments this script adds for inherited issues. Linear only
+# creates "contributes" links itself from a magic word, which needs an ID in the
+# PR, and attaching by hand in Linear creates "links".
+INHERITED_LINK_KIND = "contributes"
 
 
 class _LinearError(RuntimeError):
@@ -161,6 +165,17 @@ class _LinkedIssue:
     release: str | None
 
 
+@dataclass
+class _Attachment:
+    id: str
+    issue: _LinkedIssue
+    link_kind: str | None
+
+    @property
+    def inherited(self) -> bool:
+        return self.link_kind == INHERITED_LINK_KIND
+
+
 def _log(message: str) -> None:
     print(message, flush=True)
 
@@ -206,45 +221,54 @@ def _fetch_issue(client: _Client, identifier: str) -> _LinkedIssue | None:
     return _LinkedIssue(issue["identifier"], _release_of(issue["projectMilestone"]))
 
 
-def _attachments(client: _Client, pr_url: str) -> list[tuple[str, _LinkedIssue]]:
-    """Return ``(attachment id, issue)`` for each ZEPH issue the PR is attached to."""
+def _attachments(client: _Client, pr_url: str) -> list[_Attachment]:
     data = client.linear(
         """query($url: String!) {
           attachmentsForURL(url: $url) {
-            nodes { id issue { identifier team { key } projectMilestone { name } } }
+            nodes {
+              id
+              metadata
+              issue { identifier team { key } projectMilestone { name } }
+            }
           }
         }""",
         url=pr_url,
     )
     return [
-        (
+        _Attachment(
             node["id"],
             _LinkedIssue(
                 node["issue"]["identifier"],
                 _release_of(node["issue"]["projectMilestone"]),
             ),
+            (node["metadata"] or {}).get("linkKind"),
         )
         for node in data["attachmentsForURL"]["nodes"]
         if node["issue"]["team"]["key"] == TEAM_KEY
     ]
 
 
-def _attach_inherited(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> None:
-    # Persisted so the child keeps the issue after its parent merges. Any other
-    # ZEPH attachment came from an earlier parent issue; the live parent wins.
-    attached = _attachments(client, pr["html_url"])
-    if any(a.identifier == issue.identifier for _, a in attached):
+def _attach_inherited(
+    client: _Client,
+    pr: dict[str, Any],
+    issue: _LinkedIssue,
+    attached: list[_Attachment],
+) -> None:
+    # Persisted so the child keeps the issue after its parent merges. Only
+    # inherited attachments are ever on a child here (any other kind wins over
+    # the parent), so these came from an earlier parent issue.
+    if any(a.issue.identifier == issue.identifier for a in attached):
         return
-    for attachment_id, stale in attached:
-        _log(f"  detach from {stale.identifier}")
+    for stale in attached:
+        _log(f"  detach from {stale.issue.identifier}")
         if not client.dry_run:
             client.linear(
                 "mutation($id: String!) { attachmentDelete(id: $id) { success } }",
-                id=attachment_id,
+                id=stale.id,
             )
     _log(f"  attach to inherited {issue.identifier}")
     if not client.dry_run:
-        _link_pr(client, issue.identifier, pr["html_url"], "contributes")
+        _link_pr(client, issue.identifier, pr["html_url"], INHERITED_LINK_KIND)
 
 
 def _link_pr(client: _Client, issue_id: str, pr_url: str, kind: str) -> None:
@@ -395,9 +419,16 @@ def _resolve(
     if ids and not zeph:
         return None, True
 
+    # An attachment someone made (in Linear, or a triage issue) is as explicit
+    # as an ID in the PR and wins over the parent.
+    attached = _attachments(client, pr["html_url"])
+    own = [a for a in attached if not a.inherited]
+    if own:
+        return own[0].issue, False
+
     # Stacked PRs inherit their parent's issue, so a stack without IDs yields one
     # triage issue (from the PR targeting the default branch), not one per PR.
-    # The live parent is checked before the PR's own attachment so a parent
+    # The live parent is checked before inherited attachments so a parent
     # switching issues carries its children along. Only the issue is inherited:
     # a parent's PLAT reference is reported on the parent's own run.
     parent = _stack_parent(client, pr, default_branch)
@@ -405,12 +436,11 @@ def _resolve(
         issue, _ = _resolve(client, parent, default_branch, create, depth + 1)
         if issue:
             if depth == 0:
-                _attach_inherited(client, pr, issue)
+                _attach_inherited(client, pr, issue, attached)
             return issue, False
 
-    attached = _attachments(client, pr["html_url"])
     if attached:
-        return attached[0][1], False
+        return attached[0].issue, False
 
     # An unresolvable ZEPH ID (typo, issue moved away) is a broken link, not a
     # missing one, so it gets no triage issue. Neither does a stacked child: its

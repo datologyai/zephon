@@ -29,7 +29,8 @@ class FakeWorld:
         monkeypatch.setenv("LINEAR_API_KEY", "test")
         monkeypatch.setenv("GITHUB_TOKEN", "test")
         self.issues: dict[str, dict[str, Any]] = {}
-        self.attachments: dict[str, str] = {}
+        # PR URL -> (issue identifier, link kind)
+        self.attachments: dict[str, tuple[str, str]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
         self.comments: dict[int, list[str]] = {}
         # Like the real key, which is scoped to ZEPH: other teams are invisible.
@@ -102,11 +103,15 @@ class FakeWorld:
                 raise ls._LinearError([{"message": "Entity not found: Issue"}])
             return {"issue": self._issue_node(identifier)}
         if "attachmentsForURL" in query:
-            owner = self.attachments.get(variables["url"])
+            owner, kind = self.attachments.get(variables["url"], (None, None))
             nodes = []
             if owner and self._visible(owner):
                 nodes.append(
-                    {"id": f"att:{variables['url']}", "issue": self._issue_node(owner)}
+                    {
+                        "id": f"att:{variables['url']}",
+                        "metadata": {"linkKind": kind},
+                        "issue": self._issue_node(owner),
+                    }
                 )
             return {"attachmentsForURL": {"nodes": nodes}}
         if "attachmentDelete" in query:
@@ -140,7 +145,10 @@ class FakeWorld:
                 raise ls._LinearError(
                     [{"message": "Duplicate attachment for duplicate url"}]
                 )
-            self.attachments[variables["url"]] = variables["issueId"]
+            self.attachments[variables["url"]] = (
+                variables["issueId"],
+                variables["kind"],
+            )
             return {"attachmentLinkGitHubPR": {"success": True}}
         raise AssertionError(f"unexpected Linear query: {query}")
 
@@ -247,7 +255,7 @@ def test_triage_retry_after_failed_attach_reuses_issue(world: FakeWorld) -> None
     assert world.handle(1)
     assert len(world.issues) == 1
     (identifier,) = world.issues
-    assert world.attachments[world.prs[1]["html_url"]] == identifier
+    assert world.attachments[world.prs[1]["html_url"]] == (identifier, "closes")
 
 
 def test_stack_parent_with_special_chars_in_branch(world: FakeWorld) -> None:
@@ -382,3 +390,15 @@ def test_milestone_validation_error_is_raised(monkeypatch: pytest.MonkeyPatch) -
     client = _milestone_client(monkeypatch, created_by_race=False)
     with pytest.raises(urllib.error.HTTPError):
         client.milestone_number("v0.3")
+
+
+def test_hand_attached_stack_child_keeps_its_issue(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-2", RELEASE)
+    world.add_issue("ZEPH-5", "v0.4 Release: next")
+    world.add_pr(1, "parent", body="Contributes to ZEPH-2")
+    child = world.add_pr(2, "child", base="parent")
+    # Attaching by hand in Linear's UI creates a "links" attachment.
+    world.attachments[child["html_url"]] = ("ZEPH-5", "links")
+    assert world.handle(2)
+    assert world.attachments[child["html_url"]] == ("ZEPH-5", "links")
+    assert _milestone(world, 2) == "v0.4"
