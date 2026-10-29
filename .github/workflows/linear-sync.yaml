@@ -37,6 +37,8 @@ jobs:
     - name: Sync
       env:
         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        # Team for triage issues of unlinked PRs; must not be issue-synced.
+        LINEAR_TRIAGE_TEAM: ${{ vars.LINEAR_TRIAGE_TEAM }}
         GITHUB_TOKEN: ${{ github.token }}
       # --no-project: the script is stdlib-only, so skip building zephon.
       run: uv run --no-project .github/scripts/linear_sync.py ${{ github.event_name == 'pull_request_target' && 'pr' || 'reconcile' }}

@@ -19,6 +19,12 @@ _spec.loader.exec_module(ls)
 
 REPO = "datologyai/zephon"
 RELEASE = "v0.3 Release: curricula"
+INBOX = "INBOX"
+
+
+def _as_linear_stores(markdown: str) -> str:
+    # Linear rewrites a bare URL in a description to [url](<url>).
+    return re.sub(r"(?<![\[<])(https://[^\s\])>]+)", r"[\1](<\1>)", markdown)
 
 
 class FakeWorld:
@@ -28,13 +34,14 @@ class FakeWorld:
         monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
         monkeypatch.setenv("LINEAR_API_KEY", "test")
         monkeypatch.setenv("GITHUB_TOKEN", "test")
+        monkeypatch.setenv("LINEAR_TRIAGE_TEAM", INBOX)
         self.issues: dict[str, dict[str, Any]] = {}
-        # PR URL -> (issue identifier, link kind)
+        # PR or GitHub issue URL -> (issue identifier, link kind)
         self.attachments: dict[str, tuple[str, str]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
         self.comments: dict[int, list[str]] = {}
-        # Like the real key, which is scoped to ZEPH: other teams are invisible.
-        self.visible_teams = {"ZEPH"}
+        # Like the real key, scoped to ZEPH and the inbox: others are invisible.
+        self.visible_teams = {"ZEPH", INBOX}
         self.fail_next_attach = False
         self.client = ls._Client(dry_run=False)
         monkeypatch.setattr(self.client, "linear", self._linear)
@@ -121,19 +128,22 @@ class FakeWorld:
             nodes = [
                 self._issue_node(key)
                 for key, i in self.issues.items()
-                if i["team"] == variables["key"]
+                if i["team"] in variables["keys"]
                 and self._visible(key)
                 and variables["marker"] in i["description"]
             ]
             return {"issues": {"nodes": nodes[:1]}}
         if "teams(" in query:
             states = {"nodes": [{"id": "triage"}]}
-            team = {"id": "zeph", "states": states, "labels": {"nodes": []}}
+            team = {"id": variables["key"], "states": states, "labels": {"nodes": []}}
             return {"teams": {"nodes": [team]}}
         if "issueCreate" in query:
-            identifier = f"ZEPH-{100 + len(self.issues)}"
-            self.add_issue(identifier)
-            self.issues[identifier]["description"] = variables["input"]["description"]
+            team = variables["input"]["teamId"]
+            identifier = f"{team}-{100 + len(self.issues)}"
+            self.add_issue(identifier, team=team)
+            self.issues[identifier]["description"] = _as_linear_stores(
+                variables["input"]["description"]
+            )
             return {
                 "issueCreate": {"issue": {"id": identifier, "identifier": identifier}}
             }
@@ -325,7 +335,7 @@ def test_triage_issue_moved_out_of_zeph_is_not_reopened(world: FakeWorld) -> Non
     assert world.handle(1)
     (identifier,) = world.issues
     assert world.comments[1] == [
-        f"{ls.TRIAGE_COMMENT_MARKER}\nTracked in Linear as {identifier}."
+        f"{ls.TRIAGE_COMMENT_MARKER}\nTracked in Linear for triage."
     ]
 
     world.move(identifier, "PLAT")
@@ -402,3 +412,78 @@ def test_hand_attached_stack_child_keeps_its_issue(world: FakeWorld) -> None:
     assert world.handle(2)
     assert world.attachments[child["html_url"]] == ("ZEPH-5", "links")
     assert _milestone(world, 2) == "v0.4"
+
+
+def test_triage_issue_is_opened_in_the_inbox_team(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    (identifier,) = world.issues
+    assert world.issues[identifier]["team"] == INBOX
+    assert world.issues[identifier]["description"] == (
+        f"Opened from [{world.prs[1]['html_url']}](<{world.prs[1]['html_url']}>) "
+        "by @someone."
+    )
+    assert world.handle(1)
+    assert set(world.issues) == {identifier}
+
+
+def test_no_triage_issue_without_triage_team(
+    world: FakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(world.client, "triage_team", None)
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    assert world.issues == {}
+    assert 1 not in world.comments
+
+
+def test_accepted_triage_issue_keeps_its_pr(world: FakeWorld) -> None:
+    world.add_pr(1, "feature")
+    assert world.handle(1)
+    (identifier,) = world.issues
+    world.move(identifier, "ZEPH")
+    world.issues[identifier]["milestone"] = RELEASE
+    assert world.handle(1)
+    assert set(world.issues) == {identifier}
+    assert _milestone(world, 1) == "v0.3"
+
+
+def test_fixes_synced_github_issue_uses_its_zeph_issue(world: FakeWorld) -> None:
+    world.add_issue("ZEPH-20", RELEASE)
+    world.attachments[f"https://github.com/{REPO}/issues/86"] = ("ZEPH-20", "links")
+    world.add_pr(1, "feature", body="Fixes #86")
+    assert world.handle(1)
+    assert _milestone(world, 1) == "v0.3"
+    assert set(world.issues) == {"ZEPH-20"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Closes datologyai/zephon#86",
+        f"Resolves https://github.com/{REPO}/issues/86",
+        "fixes: #86",
+    ],
+)
+def test_github_issue_reference_forms(body: str) -> None:
+    pr = {"title": "t", "body": body}
+    assert ls._referenced_github_issues(pr, REPO) == [86]
+
+
+def test_plain_hash_mention_is_not_a_github_issue_link() -> None:
+    pr = {"title": "t", "body": "Follows up on #86 and other/repo#5."}
+    assert ls._referenced_github_issues(pr, REPO) == []
+
+
+def test_fixes_unsynced_github_issue_still_gets_triage(world: FakeWorld) -> None:
+    world.add_pr(1, "feature", body="Fixes #49")
+    assert world.handle(1)
+    (identifier,) = world.issues
+    assert world.issues[identifier]["team"] == INBOX
+
+
+def test_plat_reference_next_to_github_issue_is_not_plat_only(
+    world: FakeWorld,
+) -> None:
+    world.add_pr(1, "feature", body="Fixes #49\n\nRelated to PLAT-4")
+    assert world.handle(1, create=False)
