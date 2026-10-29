@@ -2044,7 +2044,38 @@ class Pipeline:
             return self._engine.prefetch_timing_snapshot()
         return None
 
-    def checkpoint(self) -> dict[str, Any]:
+    @overload
+    def checkpoint(self, *, as_bytes: Literal[False] = False) -> dict[str, Any]: ...
+
+    @overload
+    def checkpoint(self, *, as_bytes: Literal[True]) -> bytes: ...
+
+    @overload
+    def checkpoint(self, *, as_bytes: bool) -> dict[str, Any] | bytes: ...
+
+    def checkpoint(self, *, as_bytes: bool = False) -> dict[str, Any] | bytes:
+        """Collect resumable pipeline progress, optionally as one encoded value.
+
+        Args:
+            as_bytes: Return versioned MessagePack bytes instead of the default
+                dictionary. This lets template-driven checkpoint systems such as
+                PyTorch DCP preserve dynamic replay entries as one value without
+                requiring integrations to pickle the state. All participating
+                ranks must still call checkpoint at the same training step.
+                Custom work-source state must use MessagePack-compatible values.
+
+        Returns:
+            The complete checkpoint dictionary, or its encoded bytes. Encoding
+            occurs after collection and any distributed aggregation.
+        """
+        state = self._checkpoint_state()
+        if as_bytes:
+            from zephon._internal.checkpoint import encode_checkpoint
+
+            return encode_checkpoint(state)
+        return state
+
+    def _checkpoint_state(self) -> dict[str, Any]:
         # Live subprocess — ask it for a checkpoint.
         if self._sp is not None:
             return self._sp.checkpoint()
@@ -2067,9 +2098,18 @@ class Pipeline:
         assert self._engine is not None
         return self._engine.state_dict()
 
-    def restore(self, ckpt: dict[str, Any]) -> None:
-        from zephon._internal.checkpoint import EngineStateV2
+    def restore(self, ckpt: dict[str, Any] | bytes) -> None:
+        """Validate saved progress and restore it lazily when iteration starts.
 
+        Accepts a checkpoint dictionary or bytes from ``checkpoint(as_bytes=True)``.
+        Byte decoding precedes the same schema validation and migration used for
+        dictionaries. Malformed or unsupported byte formats raise ValueError
+        before a runtime is constructed.
+        """
+        from zephon._internal.checkpoint import EngineStateV2, decode_checkpoint
+
+        if isinstance(ckpt, bytes):
+            ckpt = decode_checkpoint(ckpt)
         # Fail-fast: construct the schema purely for its validation side
         # effects. The Engine reloads it later when iteration starts.
         EngineStateV2.load(ckpt)

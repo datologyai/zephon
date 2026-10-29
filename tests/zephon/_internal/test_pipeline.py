@@ -11,6 +11,25 @@ from zephon._internal.pipeline import Pipeline
 from zephon.types import SampleMeta, SampleRecord
 
 
+def test_checkpoint_encoding_wraps_the_collected_state() -> None:
+    from zephon._internal.checkpoint import decode_checkpoint
+
+    pipe = object.__new__(Pipeline)
+    state = {"inflight": {0: {1: {"seed": 1 << 128}}}}
+    pipe._checkpoint_state = Mock(return_value=state)
+    assert pipe.checkpoint() is state
+    assert decode_checkpoint(pipe.checkpoint(as_bytes=True)) == state
+    assert pipe._checkpoint_state.call_count == 2
+
+
+def test_invalid_checkpoint_bytes_do_not_start_a_runtime() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    with pytest.raises(ValueError, match="checkpoint byte format"):
+        pipe.restore(b"invalid")
+    assert pipe._engine is None
+    assert pipe._pending_restore is None
+
+
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
     pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
     pipe.options(shm_min_item_bytes=456, shm_coalesce=True)
