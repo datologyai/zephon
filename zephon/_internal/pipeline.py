@@ -1827,6 +1827,8 @@ class Pipeline:
         """Close iterators and runtimes without checkpointing; safe to repeat.
 
         Call between iteration steps from the owning thread.
+        MTP shutdown skips automatic checkpoint capture.
+        Save checkpoints explicitly before closing and restore one before resuming.
         """
         error: BaseException | None = None
         # Stop MTP before unwinding iterators to skip automatic checkpoint capture.
