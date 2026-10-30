@@ -30,17 +30,17 @@ def _token_content(value: Any) -> Any:
     return value.get("content") if isinstance(value, dict) else value
 
 
-def _load_pipeline(source: Path | str) -> Any:
+def _load_engine(source: Path | str) -> Any:
+    """Load a tokenizer from a file path or serialized JSON text."""
     from tokenizers import Tokenizer
 
     if isinstance(source, str):
+        # rc3 exposes from_file, but no public constructor from JSON text.
         with tempfile.TemporaryDirectory(prefix="zephon-tokenizer-") as tmp:
             path = Path(tmp) / "tokenizer.json"
             path.write_text(source, encoding="utf-8")
-            return _load_pipeline(path)
-    native = Tokenizer.from_file(source)
-    compile_spec = getattr(native, "compile", None)
-    return compile_spec() if compile_spec is not None else native
+            return _load_engine(path)
+    return Tokenizer.from_file(source)
 
 
 class NativeTokenizer:
@@ -98,7 +98,7 @@ class NativeTokenizer:
             self._ids[eos_token] = token_id
             source = json.dumps(spec)
         self._source = source
-        self._engine = _load_pipeline(source)
+        self._engine = _load_engine(source)
 
         # rc3 can silently renumber added tokens (e.g. IDs with gaps). Verify
         # actual encoding, not decode spelling: Metaspace may change spelling.
@@ -190,7 +190,7 @@ class NativeTokenizer:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         vars(self).update(state)
-        self._engine = _load_pipeline(self._source)
+        self._engine = _load_engine(self._source)
 
     def __call__(
         self,
