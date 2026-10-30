@@ -226,10 +226,3 @@ tuning pipelines](inspecting_and_tuning_pipelines.md) that you are scaling the
 per-`Pipeline` values down as the number of `Pipeline` instances on each node goes up,
 and double-check `Pipeline.explain()` to verify the total number of threads and
 processes that will be running on each node before you launch at scale.
-
-**MTP completion and checkpoints.** Iterator completion and cleanup capture local
-progress without starting a cross-rank checkpoint round. Call
-`pipeline.checkpoint()` on every rank at the agreed training boundary, including
-ranks that have finished iterating. Each explicit call aggregates live and cached
-local progress in the same round. Prefetched batches remain unacknowledged until
-delivered to the caller.

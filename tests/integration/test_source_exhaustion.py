@@ -32,12 +32,19 @@ _CHUNK_SIZE = 16
 _LANE_SIZE = 8 * _CHUNK_SIZE
 
 
-@pytest.mark.parametrize("finished_rank", [0, 1])
+@pytest.mark.parametrize(
+    ("finished_rank", "dropped_id"),
+    [
+        pytest.param(0, 5, id="leader-finishes-first"),
+        pytest.param(1, 7, id="follower-finishes-first"),
+    ],
+)
 def test_mtp_exhaustion_allows_explicit_checkpoint_resume(
-    tmp_path: Path, finished_rank: int
+    tmp_path: Path, finished_rank: int, dropped_id: int
 ) -> None:
     ready = Barrier(2, timeout=30)
-    dropped_id = 5 if finished_rank == 0 else 7
+    # Rank 0 owns [0, 1, 4, 5]; rank 1 owns [2, 3, 6, 7]. Dropping the
+    # selected rank's last record leaves three batches versus its peer's four.
 
     def build(rank: int) -> Pipeline:
         dataset = Dataset.from_dict(
@@ -84,9 +91,12 @@ def test_mtp_exhaustion_allows_explicit_checkpoint_resume(
             ready.wait()
             for _ in range(2):
                 pipe.checkpoint()
+        except BaseException:
+            ready.abort()
+            raise
         finally:
             iterator.close()
-        # Both ranks are closed; the next explicit round must still agree.
+        # Each rank contributes cached progress after closing its iterator.
         checkpoint = pipe.checkpoint()
         restored = build(rank)
         restored.restore(checkpoint)
@@ -96,6 +106,8 @@ def test_mtp_exhaustion_allows_explicit_checkpoint_resume(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(run_rank, rank) for rank in range(2)]
+        # Report the exhausted rank's error before its peer's barrier error.
+        futures[finished_rank].result(timeout=60)
         results = [future.result(timeout=60) for future in futures]
     assert results == [
         [i for i in ids if i != dropped_id] for ids in ([0, 1, 4, 5], [2, 3, 6, 7])

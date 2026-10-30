@@ -1,6 +1,7 @@
-"""Unit tests for the pipeline wrapper."""
+"""Unit tests for pipeline options and output notification."""
 
 import multiprocessing
+import pickle
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import Mock, patch
@@ -291,17 +292,15 @@ def test_final_mtp_checkpoint_tolerates_cleanup_failure(
     monkeypatch.setattr(pipe, "_ensure_plan", Mock())
     coordinator = Mock()
     coordinator.cleanup.side_effect = OSError("cannot delete merged result")
-    monkeypatch.setattr(
-        "zephon._internal.pipeline.make_coordinator", Mock(return_value=coordinator)
-    )
+    make_coordinator = Mock(return_value=coordinator)
+    monkeypatch.setattr("zephon._internal.pipeline.make_coordinator", make_coordinator)
     merged = {"merged": True}
 
     def aggregate(*args: object, **kwargs: object) -> dict[str, bool]:
-        assert coordinator.last_round_id == "before"
         assert coordinator.reload_count == 2
         if aggregation_fails:
             raise RuntimeError("aggregation failed")
-        coordinator.last_round_id = "after"
+        coordinator.last_round_id += "-next"
         return merged
 
     coordinator.aggregate.side_effect = aggregate
@@ -311,6 +310,15 @@ def test_final_mtp_checkpoint_tolerates_cleanup_failure(
                 pipe._aggregate_final_mtp_state()
             assert pipe._last_local_state["last_round_id"] == "before"
         else:
-            assert pipe._aggregate_final_mtp_state() is merged
-            assert pipe._last_local_state["last_round_id"] == "after"
-    coordinator.cleanup.assert_called_once_with()
+            for _ in range(2):
+                assert pipe._aggregate_final_mtp_state() is merged
+            assert pipe._last_local_state["last_round_id"] == "before-next-next"
+    make_coordinator.assert_called_once()
+    assert coordinator.cleanup.call_count == (1 if aggregation_fails else 2)
+
+
+def test_pickling_discards_final_mtp_coordinator() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe._final_mtp_coordinator = Mock()
+    restored = pickle.loads(pickle.dumps(pipe))
+    assert restored._final_mtp_coordinator is None

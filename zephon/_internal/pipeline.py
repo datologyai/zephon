@@ -23,7 +23,11 @@ from typing import (
     overload,
 )
 
-from zephon._internal.coordination import make_coordinator
+from zephon._internal.coordination import (
+    AggregationRound,
+    CheckpointCoordinator,
+    make_coordinator,
+)
 from zephon._internal.engine import Engine, get_torch_worker_info
 from zephon._internal.functional_op import _FunctionalOp, _is_user_op
 from zephon._internal.graph import Graph, Node, Plan
@@ -205,6 +209,7 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._last_local_state: dict[str, Any] | None = None
+        self._final_mtp_coordinator: CheckpointCoordinator | None = None
         self._iterating: bool = False
         self._validated: bool = False
         self._options = RuntimeOptions()
@@ -1876,6 +1881,7 @@ class Pipeline:
             ckpt = self._pending_restore
             self._pending_restore = None
             self._last_local_state = None
+            self._final_mtp_coordinator = None
             engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
             try:
                 yield from self._yield_while_notifying(iterator)
@@ -1890,7 +1896,8 @@ class Pipeline:
 
         self._last_state = None
         self._last_local_state = None
-        # Discard checkpoint-only setup before the child owns stream progress.
+        self._final_mtp_coordinator = None
+        # The child owns stream progress; release any checkpoint-only parent engine.
         if self._engine is not None:
             self._engine.close()
             self._engine = None
@@ -1914,12 +1921,27 @@ class Pipeline:
             try:
                 if not sp._closed:
                     if _completed:
-                        # The exhausted child is waiting for control messages.
+                        # Normal completion: subprocess is in _wait_for_shutdown
+                        # and can always handle LOCAL_CHECKPOINT.
                         if self._options.mtp_auto_checkpoint:
                             self._last_local_state = sp.checkpoint(local=True)
                     else:
-                        # Drain without ACKs to unblock a child waiting on output.
-                        # A child in a slow operator may time out; keep its cache.
+                        # Early break: subprocess may be blocked on data_q.put()
+                        # or in next(iterator).  Best-effort capture by draining
+                        # data_q (without ACKs) to unblock the put-retry loop,
+                        # which calls _drain_ctrl and sees our LOCAL_CHECKPOINT.
+                        #
+                        # NOTE: This works when the subprocess is blocked on
+                        # data_q.put (the common case — queue is full because
+                        # main stopped consuming).  It does NOT work when the
+                        # subprocess is blocked inside next(iterator) doing slow
+                        # computation, because it can't reach _drain_ctrl until
+                        # the item is produced.  In that case capture_final_state
+                        # times out and _last_state retains whatever was cached
+                        # from any prior explicit checkpoint() call (or None).
+                        # TODO: To handle the stuck-in-next(iterator) case, we'd
+                        # need a background thread in the subprocess listening on
+                        # ctrl_conn, or a signal-based interrupt mechanism.
                         sp.capture_final_state(local=True)
                         if sp._last_state_is_local:
                             self._last_local_state = sp._last_state
@@ -2099,34 +2121,44 @@ class Pipeline:
         return self._engine.state_dict()
 
     def _aggregate_final_mtp_state(self) -> dict[str, Any]:
-        """Aggregate cached local progress at an explicit checkpoint."""
+        """Aggregate the finished child's cached progress."""
         assert self._last_local_state is not None
         local = self._last_local_state
         world = local["world"]
-        self._ensure_plan()
-        assert self._plan is not None
-        coordinator = make_coordinator(
-            self._options,
-            global_rank=int(world["global_rank"]),
-            world_size=int(world["world_size"]),
-            plan_id=self._plan.plan_id,
-            worker_info=get_torch_worker_info,
-        )
+        if not local.get("progress"):
+            return local
+        if int(world["world_size"]) == 1 and len(local["progress"]) == int(
+            world["canonical_replicas"]
+        ):
+            Engine._check_mid_window_counts(
+                local.get("lane_emitted") or {}, int(world["canonical_replicas"])
+            )
+            return local
+
+        if self._final_mtp_coordinator is None:
+            self._ensure_plan()
+            assert self._plan is not None
+            self._final_mtp_coordinator = make_coordinator(
+                self._options,
+                global_rank=int(world["global_rank"]),
+                world_size=int(world["world_size"]),
+                plan_id=self._plan.plan_id,
+                worker_info=get_torch_worker_info,
+            )
+        coordinator = self._final_mtp_coordinator
         coordinator.last_round_id = local.get("last_round_id")
         coordinator.reload_count = local.get("checkpoint_reload_count", 0)
-        # Skip idle workers and a sole worker that owns every lane.
-        takes_part = bool(local.get("progress")) and not (
-            int(world["world_size"]) == 1
-            and len(local["progress"]) == int(world["canonical_replicas"])
-        )
+        worker_id, _ = get_torch_worker_info()
         try:
-            if takes_part:
-                coordinator.check_ready()
-            result = Engine._aggregate_state_dict(
-                local,
-                coordinator,
-                takes_part=takes_part,
-                worker_id=get_torch_worker_info()[0],
+            coordinator.check_ready()
+            result = coordinator.aggregate(
+                AggregationRound(
+                    local=local,
+                    is_leader=int(world["global_rank"]) == 0 and worker_id == 0,
+                    expected_ranks=frozenset(range(int(world["world_size"]))),
+                    expected_lanes=frozenset(range(int(world["canonical_replicas"]))),
+                ),
+                merge=Engine._merge_state_dicts,
             )
             # Keep closed and live ranks on the same next checkpoint round.
             self._last_local_state = dict(
@@ -2212,6 +2244,7 @@ class Pipeline:
         d["_iterating"] = False
         d["_last_state"] = None
         d["_last_local_state"] = None
+        d["_final_mtp_coordinator"] = None
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
         # lose the stashed checkpoint.

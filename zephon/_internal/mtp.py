@@ -741,13 +741,18 @@ class MTPPipeline:
     def checkpoint(
         self, *, timeout: float = _CHECKPOINT_TIMEOUT_S, local: bool = False
     ) -> dict[str, Any]:
-        """Capture acknowledged progress from the child engine.
+        """Request a checkpoint from the subprocess Engine.
 
-        Aggregate across ranks unless ``local=True``. Cleanup uses local capture
-        so ranks can finish independently.
+        Returns ``engine.state_dict()`` by default. ``local=True`` returns this
+        rank's acknowledged progress from ``engine._state_dict_local()``.
 
-        ACKs and checkpoint requests share a FIFO control pipe, so the child
-        applies every preceding ACK before taking either kind of snapshot.
+        Correctness note: ``_CHECKPOINT`` and all prior ``_ACK`` messages
+        travel on the **same** ``mp.Pipe`` (FIFO).  The subprocess reads
+        them sequentially in ``_drain_ctrl``, so every ACK sent before
+        ``_CHECKPOINT`` is guaranteed to be applied to the engine before
+        ``state_dict()`` is called — there is no ACK–CHECKPOINT ordering
+        gap despite the asynchronous production loop. The same ordering applies
+        to ``_LOCAL_CHECKPOINT`` requests.
         """
         if self._closed:
             # Subprocess shut down — return cached state if available.
@@ -792,11 +797,21 @@ class MTPPipeline:
     def capture_final_state(
         self, timeout: float = _CHECKPOINT_TIMEOUT_S, *, local: bool = False
     ) -> None:
-        """Try to capture final progress, retaining cached state on failure.
+        """Best-effort capture of engine state for post-break checkpoint.
 
-        Drain through the prefetcher without ACKs so a child blocked on output
-        can service the request. Drained items remain unconsumed. A child inside
-        ``next(iterator)`` cannot respond until that call returns.
+        Sends CHECKPOINT (LOCAL_CHECKPOINT when ``local=True``), then drains
+        ``data_q`` through the prefetcher, its sole reader, **without ACKs** to
+        unblock the subprocess's put-retry loop (which calls ``_drain_ctrl``
+        every 50 ms). The subprocess responds with STATE_DICT.
+
+        The resulting state reflects only ACK'd items — items drained
+        from the queue here are discarded without ACKs, so the engine
+        doesn't count them as consumed.
+
+        If the subprocess is stuck in ``next(iterator)`` and can't
+        reach ``_drain_ctrl``, this times out and ``_last_state``
+        keeps its previous value (from any earlier explicit
+        ``checkpoint()`` call, or None).
         """
         if self._closed:
             return
