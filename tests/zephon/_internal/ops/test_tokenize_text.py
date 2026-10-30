@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import pickle
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -74,6 +77,97 @@ def _payload_dict(record: SampleRecord) -> dict[str, Any]:
     payload = record.payload
     assert isinstance(payload, dict)
     return payload
+
+
+@pytest.mark.parametrize(
+    "options,counts",
+    [
+        ({"special_tokens": "tokenizer_default", "truncation": True}, [3, 4]),
+        (
+            {
+                "special_tokens": "tokenizer_default",
+                "truncation": True,
+                "max_length": 1,
+            },
+            [None, None],
+        ),
+        (
+            {
+                "truncation": True,
+                "max_length": 4,
+                "padding": "max_length",
+                "return_tensors": "np",
+            },
+            [3, 4],
+        ),
+        ({"special_tokens": "none", "truncation": True, "max_length": 4}, [1, 4]),
+        (
+            {
+                "special_tokens": "eos",
+                "split_long_samples": True,
+                "max_length": 4,
+                "padding": "max_length",
+                "return_tensors": "np",
+            },
+            [2, 8],
+        ),
+        (
+            {
+                "special_tokens": "tokenizer_default",
+                "split_long_samples": True,
+                "max_length": 4,
+                "padding": "max_length",
+                "return_tensors": "np",
+            },
+            [3, 9],
+        ),
+        (
+            {
+                "special_tokens": "tokenizer_default",
+                "max_length": 4,
+                "padding": "max_length",
+            },
+            [3, 9],
+        ),
+    ],
+    ids=[
+        "implicit-limit",
+        "mandatory-specials",
+        "bracket-truncation",
+        "no-specials",
+        "split-eos",
+        "split-tokenizer-specials",
+        "padding-without-truncation",
+    ],
+)
+def test_counter_matches_unpadded_delivery(
+    tmp_path: Path, options: dict[str, Any], counts: list[int | None]
+) -> None:
+    from tests.helpers.tokenizers import write_wordlevel_tokenizer
+
+    tokenizers = pytest.importorskip("tokenizers")
+    if tokenizers.__version__.startswith("0."):
+        pytest.importorskip("transformers")
+
+    tokenizer_id = str(write_wordlevel_tokenizer(tmp_path, model_max_length=4))
+    op = TokenizeText(tokenizer_id=tokenizer_id, field="text", **options)
+    # Calibration serializes the settings before the execution worker sets up.
+    with pytest.warns(UserWarning, match="padding") if op.padding else nullcontext():
+        spec = pickle.loads(pickle.dumps(op.token_counting_spec()))
+    counter = spec.build_counter().plan([])
+    _setup(op)
+    texts = ["hello", "hello world data loader ! hello world"]
+    for text, expected in zip(texts, counts, strict=True):
+        outputs = op.process_one(_rec(text))
+        delivered = sum(
+            sum(_payload_dict(record)["attention_mask"]) for record in outputs
+        )
+        if expected is None:
+            # Mandatory tokenizer specials can exceed the requested limit.
+            assert delivered > 1
+        else:
+            assert delivered == expected
+        assert counter.count({"text": text}) == delivered
 
 
 def test_tokenize_fallback_process_one_and_many() -> None:

@@ -4732,7 +4732,7 @@ def make_token_ws(
     if primed:
         ws.prime(
             counting_spec=TextTokenCountingSpec(
-                tokenizer_id="__fallback__", field="text", special_tokens="none"
+                tokenizer_id="__fallback__", field="text", num_specials=0
             )
         )
     return ws
@@ -4802,7 +4802,7 @@ def test_token_mode_priming_lifecycle() -> None:
     assert ws.requires_token_priming
     ws.prime(
         counting_spec=TextTokenCountingSpec(
-            tokenizer_id="__fallback__", field="text", special_tokens="none"
+            tokenizer_id="__fallback__", field="text", num_specials=0
         )
     )
     assert not ws.requires_token_priming
@@ -5118,7 +5118,7 @@ def test_token_mode_liveness_guard_rejects_tiny_repeat_dataset() -> None:
     with pytest.raises(ValueError, match="repeat policy requires at least"):
         ws.prime(
             counting_spec=TextTokenCountingSpec(
-                tokenizer_id="__fallback__", field="text", special_tokens="none"
+                tokenizer_id="__fallback__", field="text", num_specials=0
             )
         )
 

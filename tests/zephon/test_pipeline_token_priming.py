@@ -82,11 +82,15 @@ def test_priming_passes_counting_spec_from_tokenize_op(
     )
     pipe._prime_worksource()
     spec = captured["counting_spec"]
+    assert isinstance(spec, TextTokenCountingSpec)
     assert spec.tokenizer_id == "__fallback__"
     assert spec.field == "text"
-    assert spec.special_tokens == "none"
-    assert spec.truncation
-    assert spec.max_length == 5
+    assert spec.tokenizer_kwargs == {
+        "add_special_tokens": False,
+        "truncation": True,
+        "max_length": 5,
+    }
+    assert spec.num_specials == 0
 
 
 def test_priming_passes_chat_counting_spec_from_chat_op(
