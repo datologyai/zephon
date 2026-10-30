@@ -12,6 +12,8 @@ holding the files of one split:
   across HF's ``train-part{k}`` conversion directories.
 - ``stat`` / ``read_range`` / ``download`` turn a frozen root plus a name
   straight into a ``resolve/<commit>/<path>`` URL; they need no listing.
+  The exception is ``download`` of a Xet-backed file, which looks the file up
+  in a directory listing and fetches it with ``hf_xet``.
 
 The backend is registered for the ``hf://`` scheme in
 :class:`zephon._internal.io.storage.router.RouterStorageBackend`, so the format
@@ -23,10 +25,13 @@ Auth: bearer token from ``huggingface_hub.get_token()`` (``HF_TOKEN``, then the
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import logging
 import os
 import posixpath
 import threading
+import time
 import urllib.parse
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any, Mapping
@@ -67,11 +72,56 @@ _sizes: dict[str, int] = {}
 # One lock per in-flight resolution or listing, so concurrent misses on the
 # same key wait for one result instead of repeating the Hub requests.
 _key_locks: dict[tuple[str, ...], threading.Lock] = {}
+# One HfFileSystem per token, so every thread reuses its directory listings.
+_hffs: dict[str | None, Any] = {}
+# Monotonic time until which a directory skips Xet lookups after one failed, so
+# a rate-limited listing doesn't make every queued download wait for its retries.
+_xet_lookup_retry_at: dict[str, float] = {}
+_XET_LOOKUP_RETRY_SECONDS = 60.0
 
 
 def _key_lock(key: tuple[str | bool | None, ...]) -> threading.Lock:
     with _memo_lock:
         return _key_locks.setdefault(tuple(str(part) for part in key), threading.Lock())
+
+
+def _skip_xet_lookups(directory: str, exc: Exception) -> None:
+    _xet_lookup_retry_at[directory] = time.monotonic() + _XET_LOOKUP_RETRY_SECONDS
+    logger.warning(
+        "hf:// Xet lookup or token request failed for %s; using http_get for this directory "
+        "for %.0f s: %s",
+        directory,
+        _XET_LOOKUP_RETRY_SECONDS,
+        exc,
+    )
+
+
+@functools.cache
+def _xet_downloads_supported() -> bool:
+    """Whether ``HfFileSystem.get_file`` downloads Xet files with ``hf_xet``.
+
+    huggingface_hub 2.1 added that path; before it, ``get_file`` calls
+    ``http_get`` without resume, so the older path here is better. 2.2 is
+    required because concurrent ``get_file`` calls on 2.1 can read ``hf_xet``
+    as not installed, and then use ``http_get``.
+    """
+    try:
+        import huggingface_hub
+        from huggingface_hub import constants
+
+        # packaging is a huggingface_hub dependency.
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        return False
+    try:
+        # Pre-releases such as 2.2.0rc1 sort before 2.2.0 and are excluded.
+        if Version(huggingface_hub.__version__) < Version("2.2.0"):
+            return False
+    except InvalidVersion:
+        return False
+    if constants.HF_HUB_DISABLE_XET:
+        return False
+    return importlib.util.find_spec("hf_xet") is not None
 
 
 # The Hub's paths-info endpoint accepts at most 100 paths per request.
@@ -499,6 +549,10 @@ class HFBackend(OpenViaDownloadMixin):
         del timeout
 
         parts, name, url = self._resolve_file(src)
+        xet_file = self._xet_file(parts, name)
+        if xet_file is not None and self._download_xet(*xet_file, src, dst):
+            return
+
         expected_size = self._size(parts, name, url)
         if expected_size is None:
             raise FileNotFoundError(f"No such hf:// file: {src}")
@@ -554,6 +608,90 @@ class HFBackend(OpenViaDownloadMixin):
             raise
 
         os.replace(incomplete, dst)
+
+    def _xet_file(self, parts: HFUriParts, name: str) -> tuple[str, int] | None:
+        """Return the ``HfFileSystem`` path and size of a Xet-backed file.
+
+        ``None`` means ``download`` uses ``http_get``: huggingface_hub < 2.2,
+        no ``hf_xet``, a file not stored on Xet, or a lookup error that the
+        ``http_get`` path reports properly.
+        """
+        if not _xet_downloads_supported():
+            return None
+        rpath = (
+            f"datasets/{parts.repo_id}@{parts.revision}/{urllib.parse.unquote(name)}"
+        )
+        directory = posixpath.dirname(rpath)
+        # The first lookup in a directory lists it; the lock makes concurrent
+        # first lookups wait for that listing instead of repeating it.
+        with _key_lock(("xet-info", directory)):
+            if time.monotonic() < _xet_lookup_retry_at.get(directory, 0.0):
+                return None
+            try:
+                info = self._get_hffs().info(rpath)
+            except FileNotFoundError:
+                return None
+            except Exception as exc:
+                _skip_xet_lookups(directory, exc)
+                return None
+        size = info.get("size")
+        if not info.get("xet_hash") or not isinstance(size, int):
+            return None
+        return rpath, size
+
+    def _get_hffs(self) -> Any:
+        """Return a process-wide ``HfFileSystem``, so threads share its listings."""
+        token = self._get_token()
+        with _memo_lock:
+            fs = _hffs.get(token)
+            if fs is None:
+                from huggingface_hub import HfFileSystem
+
+                fs = _hffs[token] = HfFileSystem(token=token)
+        return fs
+
+    def _download_xet(self, rpath: str, size: int, src: str, dst: str) -> bool:
+        """Download a Xet-backed file with ``hf_xet``.
+
+        Returns ``False`` if the Hub rate-limited the request or ``get_file``
+        refused the path, so that ``download`` falls back to ``http_get``.
+
+        An interrupted download restarts: a partial ``hf_xet`` file has no
+        hash to check it against. As with the ``http_get`` path, concurrent
+        calls for the same ``dst`` are not safe; the cache manager serialises
+        them with its per-shard lock.
+        """
+        from huggingface_hub.utils import HfHubHTTPError
+
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        incomplete = dst + _INCOMPLETE_SUFFIX
+        self._unlink_quiet(incomplete)
+        try:
+            self._get_hffs().get_file(rpath, incomplete)
+            got = os.path.getsize(incomplete)
+            if got != size:
+                raise OSError(
+                    f"hf:// download of {src} wrote {got} bytes, expected {size}"
+                )
+            os.replace(incomplete, dst)
+            return True
+        except ValueError:
+            # get_file rejects local-looking paths such as ``a:b.parquet``.
+            return False
+        except HfHubHTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429:
+                _skip_xet_lookups(posixpath.dirname(rpath), exc)
+                return False
+            if status == 404:
+                raise FileNotFoundError(f"No such hf:// file: {src}") from exc
+            if status in (401, 403):
+                raise PermissionError(
+                    f"hf:// access denied: {src}; set HF_TOKEN or run `hf auth login`."
+                ) from exc
+            raise
+        finally:
+            self._unlink_quiet(incomplete)
 
     @staticmethod
     def _unlink_quiet(path: str) -> None:
