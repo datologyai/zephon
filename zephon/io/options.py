@@ -113,9 +113,6 @@ class CacheOptions:
     # Deprecated alias migrated by StoreOptions to parquet.rg_cache.limit_bytes.
     rg_cache_bytes: int | None = _option(None)
     keep_zip: bool = _option(False)
-    # Keep shards for the next process to open this root after all users exit.
-    # Reused only if that process reads exactly the same shards; otherwise wiped.
-    persist_state: bool = _option(False)
     validate_hash: str | None = _option(None)
     download_retry: int = _option(12)
     download_timeout: float = _option(180.0)
@@ -124,6 +121,9 @@ class CacheOptions:
     open_retry_max_backoff: float = _option(2.0)
     min_slack_bytes: int = _option(512 * 1024)  # 512 KiB minimum slack
     max_slack_bytes: int = _option(64 * 1024 * 1024)  # 64 MiB maximum slack
+    # Keep shards for the next process to open this root after all users exit.
+    # Reused only if that process reads exactly the same shards; otherwise wiped.
+    persist_state: bool = _option(False)
     _provided_fields: frozenset[str] = field(
         init=False,
         repr=False,
