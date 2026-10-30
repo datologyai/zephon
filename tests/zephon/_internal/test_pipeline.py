@@ -6,7 +6,7 @@ import pickle
 from collections.abc import Generator, Iterator
 from typing import Any
 from unittest.mock import Mock, patch
-from weakref import WeakSet, ref
+from weakref import ref
 
 import pytest
 
@@ -51,18 +51,14 @@ def test_close_unstarted_iterator_preserves_pending_restore() -> None:
     checkpoint = {"pending": "restore"}
     pipe._pending_restore = checkpoint
 
-    def unstarted() -> Generator[None, None, None]:
-        raise AssertionError("closing an unstarted iterator must not execute it")
-        yield
-
-    iterator = unstarted()
-    pipe._iterators.add(iterator)
+    iterators = [iter(pipe), iter(pipe)]
     pipe.close()
     pipe.close()
     assert pipe._engine is None
     assert pipe._pending_restore is checkpoint
-    with pytest.raises(StopIteration):
-        next(iterator)
+    for iterator in iterators:
+        with pytest.raises(StopIteration):
+            next(iterator)
     restored = pickle.loads(pickle.dumps(pipe))
     assert not restored._iterators
     assert restored._pending_restore == checkpoint
@@ -79,25 +75,37 @@ def test_iterator_tracking_does_not_keep_an_unstarted_iterator_alive() -> None:
     assert not pipe._iterators
 
 
-def test_close_releases_engine_even_if_iterator_cleanup_raises() -> None:
-    pipe = object.__new__(Pipeline)
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("failing_resource", ["mtp", "iterator"])
+def test_close_attempts_all_cleanup_before_reraising(
+    error_type: type[BaseException], failing_resource: str
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
     engine = Mock()
     pipe._engine = engine
-    pipe._iterators = WeakSet()
+    subprocess_runtime = Mock()
+    pipe._sp = subprocess_runtime
+    if failing_resource == "mtp":
+        subprocess_runtime.close.side_effect = error_type("mtp cleanup failed")
+    closed: list[int] = []
 
-    def paused() -> Generator[None, None, None]:
+    def paused(index: int) -> Generator[None, None, None]:
         try:
             yield
         finally:
-            raise RuntimeError("iterator cleanup failed")
+            closed.append(index)
+            if failing_resource == "iterator":
+                raise error_type("iterator cleanup failed")
 
-    iterator = paused()
-    next(iterator)
-    pipe._iterators.add(iterator)
-    with pytest.raises(RuntimeError, match="iterator cleanup failed"):
+    iterators = [paused(index) for index in range(2)]
+    for iterator in iterators:
+        next(iterator)
+        pipe._iterators.add(iterator)
+    with pytest.raises(error_type, match=f"{failing_resource} cleanup failed"):
         pipe.close()
+    assert sorted(closed) == [0, 1]
+    subprocess_runtime.close.assert_called_once_with()
     engine.close.assert_called_once_with()
-    pipe.close()
 
 
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:

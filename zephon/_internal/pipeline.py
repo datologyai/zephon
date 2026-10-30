@@ -206,7 +206,7 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._iterating: bool = False
-        # Weak ownership preserves cleanup when a caller discards an iterator.
+        # Track iterator wrappers (including MTP) without keeping them alive.
         self._iterators: weakref.WeakSet[Generator[Any, None, None]] = weakref.WeakSet()
         self._validated: bool = False
         self._options = RuntimeOptions()
@@ -1824,24 +1824,21 @@ class Pipeline:
         return iterator
 
     def close(self) -> None:
-        """Release this process's pipeline runtime, including checkpoint-only setup.
+        """Close iterators and runtimes without checkpointing; safe to repeat.
 
-        Close paused or unstarted iterators and any engine initialized by
-        checkpoint() before iteration. Repeated calls are safe; closing a fresh
-        pipeline does not initialize it. Explicit checkpoint and pending restore
-        data remain available. To resume a closed stream, restore its checkpoint
-        before iterating again, as with an explicitly closed iterator.
-
-        Call between next() calls, from the iterator's owning thread. This is
-        resource cleanup, not a checkpoint operation or a concurrent cancellation
-        API. Operator teardown retains its existing best-effort semantics.
+        Call between iteration steps from the owning thread.
         """
-        try:
-            for iterator in list(self._iterators):
-                iterator.close()
-        finally:
-            if self._engine is not None:
-                self._engine.close()
+        error: BaseException | None = None
+        # Stop MTP before unwinding iterators to skip automatic checkpoint capture.
+        for resource in [self._sp, *self._iterators, self._engine]:
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+        if error is not None:
+            raise error
 
     def _iter_body(self) -> Generator[Any, None, None]:
         try:

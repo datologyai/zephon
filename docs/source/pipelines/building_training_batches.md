@@ -249,12 +249,3 @@ images and class labels directly from each `SampleBatch`:
 :language: python
 :caption: examples/guide/pipelines/non_token_batch.py
 ```
-
-**Closing a pipeline.** Call `pipeline.close()` in the loader's cleanup path when
-training stops early or initialization fails. It closes paused/unstarted iterators
-and any runtime created by `checkpoint()` before iteration (for example, while
-preparing a distributed-checkpoint destination). Closing a fresh pipeline does not
-initialize it, and repeated closes are safe. Call it between iteration steps from
-the owning thread; it is not a concurrent cancellation API. Save checkpoints using
-`checkpoint()` as usual, then use `restore()` before resuming a closed stream.
-`close()` does not create an implicit checkpoint or discard a pending restore.
