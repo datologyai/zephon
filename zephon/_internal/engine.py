@@ -689,6 +689,7 @@ class Engine:
                 allow_latency_flush_in_deterministic=spec.allow_latency_flush,
                 stage_index=spec.stage_index,
                 tracking_mode=runner_tracking_mode,
+                measure_bytes=self._opts.measure_bytes,
                 stage_output_mode=spec.output_mode,
             )
 

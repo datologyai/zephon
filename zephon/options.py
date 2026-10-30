@@ -123,6 +123,12 @@ class RuntimeOptions:
     # "off" skips the validator entirely; reserved for last-resort overrides.
     auto_validation: Literal["strict", "warn", "off"] = "strict"
 
+    # Freeze GC-tracked objects for the duration of iteration.
+    # None = enabled in MTP, disabled inline (including daemon fallback).
+    # True/False override the default; inline freezing affects the whole interpreter.
+    # Existing application freezes are preserved.
+    gc_freeze: bool | None = None
+
     # === MTP Mode (GIL isolation) ===
     # When True, the Engine runs in a non-daemon subprocess for GIL isolation.
     # The main process only dequeues finished batches via IPC.
@@ -217,6 +223,10 @@ class RuntimeOptions:
     # Observability controls.
     execution_tracking: ExecutionTrackingMode = ExecutionTrackingMode.OFF
     metrics_sink_config: MetricsSinkConfig | None = None
+    # Per-node produced/consumed payload bytes under NODES tracking. None lets
+    # each runner decide: on for runners that ship payloads across process or
+    # host boundaries (process, remote), off for in-process runners.
+    measure_bytes: bool | None = None
 
 
 __all__ = [

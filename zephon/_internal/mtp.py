@@ -83,6 +83,7 @@ from zephon._internal.notify import (
 )
 from zephon._internal.runners.queue import NamedQueue, QueueFeederError
 from zephon._internal.utils.fault_handling import setup_faulthandler
+from zephon._internal.utils.gc_freeze import GCFreeze, resolve_gc_freeze
 from zephon._internal.utils.ipc import DEFAULT_IPC_TRANSPORT, DEFAULT_MTP_BUFFER_BYTES
 from zephon._internal.utils.rank import rank_ctx
 from zephon.observability.mtp_stats import MTPQueueStats
@@ -282,6 +283,8 @@ def _mtp_worker(
     ctrl_conn: Connection,
     buffer_size: int,
     inflight_shm: ctypes.Array[ctypes.c_int] | None = None,
+    *,
+    gc_freeze: bool = True,
 ) -> None:
     """Entry point for the MTP worker subprocess.
 
@@ -305,7 +308,11 @@ def _mtp_worker(
     import cloudpickle
 
     engine = None
+    freezer = None
     try:
+        # Freeze before deserialization so the new engine and its buffers
+        # remain outside the frozen generation.
+        freezer = GCFreeze(gc_freeze)
         pipeline = cloudpickle.loads(pipeline_bytes)
         # We cannot iterate the pipeline directly (``for item in pipeline``)
         # because (a) with mtp_mode=True the pipeline's __iter__ would
@@ -383,11 +390,14 @@ def _mtp_worker(
         # Ignore further SIGTERM during cleanup so engine.close() isn't
         # interrupted by a second terminate() from the main process.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if engine is not None:
-            try:
+        try:
+            if engine is not None:
                 engine.close()
-            except Exception:
-                pass
+        except Exception:
+            pass
+        finally:
+            if freezer is not None:
+                freezer.close()
 
 
 def _handle_ctrl_msg(
@@ -544,6 +554,7 @@ class MTPPipeline:
         import cloudpickle
 
         self._buffer_size = buffer_size
+        gc_freeze = resolve_gc_freeze(pipeline._options.gc_freeze, mtp=True)
 
         # Use the engine's start method (RuntimeOptions.mp_context, default
         # "spawn"), never fork: the parent's live CUDA and obstore tokio runtime
@@ -585,6 +596,7 @@ class MTPPipeline:
                 buffer_size,
                 self._inflight_shm,
             ),
+            kwargs={"gc_freeze": gc_freeze},
             daemon=False,
             name="zephon-mtp-worker",
         )

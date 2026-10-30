@@ -1,6 +1,10 @@
 """Checkpoint versioning, schemas, migrations, and aggregation codec."""
 
-from zephon._internal.checkpoint._codec import AggregationCodec
+from zephon._internal.checkpoint._codec import (
+    AggregationCodec,
+    decode_checkpoint,
+    encode_checkpoint,
+)
 from zephon._internal.checkpoint._migrations import (
     CURRENT_VERSIONS,
     MigrationFn,
@@ -56,4 +60,6 @@ __all__ = [
     "MigrationFn",
     # Codec
     "AggregationCodec",
+    "encode_checkpoint",
+    "decode_checkpoint",
 ]

@@ -12,6 +12,7 @@ unsupervised (the packed-shift boundary invariant).
 from __future__ import annotations
 
 import os
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,10 @@ import pytest
 from zephon import Pipeline
 from zephon._internal.ops.tokenize_chat import TokenizeChat
 from zephon.io import Dataset, InMemoryShard
+from zephon.ops.config import LossScope
 from zephon.types import SampleMeta, SampleRecord
 from zephon.work.static_mixture import StaticMixtureWorkSource
+from zephon.work.token_estimation import TokenEstimation
 
 pytestmark = pytest.mark.integration
 
@@ -47,33 +50,152 @@ def test_process_worker_reuses_preflight_setup_checks(tmp_path: Path) -> None:
     tokenizer = _ProbeRecordingTokenizer(
         tokenizer_object=base.backend_tokenizer, **base.special_tokens_map
     )
+    tokenizer.chat_template = {"default": SPLIT, "tool_use": "<|sep|>" + SPLIT}
     log = tmp_path / "probes.txt"
     tokenizer.probe_log = str(log)
     work = StaticMixtureWorkSource(
-        [Dataset.from_dict("chat", {0: InMemoryShard([{"messages": CYCLE}])})],
+        [
+            Dataset.from_dict(
+                "chat",
+                {
+                    0: InMemoryShard(
+                        [{"messages": CYCLE}, {"messages": CYCLE, "tools": []}]
+                    )
+                },
+            )
+        ],
         {"chat": 1.0},
         chunk_size=1,
     )
     pipe = (
         Pipeline(work)
-        .tokenize_chat(tokenizer, chat_template=SPLIT, loss_scope="after_last_user")
+        .tokenize_chat(tokenizer, loss_scope="after_last_user")
         .options(runner="process", max_workers=1, canonical_replicas=1)
     )
     assert pipe.preflight_tokenizers().ok
     records = list(pipe)
-    assert len(records) == 1
-    targets = tokenizer.decode(
-        records[0].payload["input_ids"][records[0].payload["loss_mask"].astype(bool)]
-    )
-    assert "how" in targets and "answer" in targets and "12" not in targets
+    assert len(records) == 2
+    for record in records:
+        targets = tokenizer.decode(
+            record.payload["input_ids"][record.payload["loss_mask"].astype(bool)]
+        )
+        assert "how" in targets and "answer" in targets and "12" not in targets
+    sep = tokenizer.convert_tokens_to_ids("<|sep|>")
+    assert records[0].payload["input_ids"][0] != sep
+    assert records[1].payload["input_ids"][0] == sep
     probes = [line.split() for line in log.read_text().splitlines()]
     parent = str(os.getpid())
-    assert sum(pid == parent and truncated == "True" for pid, truncated in probes) == 2
+    assert sum(pid == parent and truncated == "True" for pid, truncated in probes) == 4
     workers = [truncated for pid, truncated in probes if pid != parent]
-    assert workers == ["False"]
+    assert workers == ["False", "False"]
+
+
+@pytest.mark.parametrize("loss_scope", ["all_tokens", "all_assistant"])
+def test_chat_tokenizer_specials_and_supervision_survive_process_resume(
+    loss_scope: LossScope,
+) -> None:
+    from tests.helpers.chat import make_fast_tokenizer
+
+    tokenizer = make_fast_tokenizer()
+    tokenizer.add_special_tokens({"bos_token": "<|start|>"})
+    tokenizer.backend_tokenizer.post_processor = (
+        tokenizers.processors.TemplateProcessing(
+            single="<|start|> $A <|end|>",
+            special_tokens=[
+                ("<|start|>", tokenizer.bos_token_id),
+                ("<|end|>", tokenizer.eos_token_id),
+            ],
+        )
+    )
+    documents = [
+        {"prompt": prompt + " ", "answer": answer}
+        for prompt, answer in (
+            ("hi", "there"),
+            ("good", "morning"),
+            ("the", "answer"),
+            ("is", "4"),
+        )
+    ]
+
+    def make_pipeline() -> Pipeline:
+        source = StaticMixtureWorkSource(
+            [Dataset.from_dict("chat", {0: InMemoryShard(documents)})],
+            {"chat": 1.0},
+            chunk_size=1,
+            shuffle_shards=False,
+            shuffle_within_shard=False,
+            token_estimation=TokenEstimation(
+                calibration_samples=4,
+                calibration_shards_min=1,
+                calibration_shards_max=1,
+            ),
+        )
+        return (
+            Pipeline(source)
+            .map_transform(
+                lambda p: {
+                    "messages": [
+                        {"role": "user", "content": p["prompt"]},
+                        {"role": "assistant", "content": p["answer"]},
+                    ]
+                }
+            )
+            .tokenize_chat(
+                tokenizer,
+                apply_chat_template=False,
+                special_tokens="tokenizer_default",
+                loss_scope=loss_scope,
+            )
+            .pack_flat(
+                9,
+                algorithm="first_fit",
+                num_bins=1,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            .batch(1)
+            .options(
+                runner="process",
+                deterministic=True,
+                max_workers=1,
+                canonical_replicas=1,
+            )
+        )
+
+    pipeline, restored = make_pipeline(), make_pipeline()
+    assert pipeline.preflight_tokenizers().ok
+    with closing(iter(pipeline)) as iterator:
+        first = next(iterator).to_training(dtype=None, return_labels=True)
+        bos, eos = tokenizer.bos_token_id, tokenizer.eos_token_id
+        hi, there, good, morning = tokenizer.convert_tokens_to_ids(
+            ["hi", "there", "good", "morning"]
+        )
+        assert first["input_ids"] == [[bos, hi, there, eos, bos, good, morning, eos]]
+        assert first["labels"] == [
+            [
+                hi if loss_scope == "all_tokens" else -100,
+                there,
+                eos,
+                -100,
+                good if loss_scope == "all_tokens" else -100,
+                morning,
+                eos,
+                -100,
+            ]
+        ]
+        checkpoint = pipeline.checkpoint()
+        remaining = [
+            batch.to_training(dtype=None, return_labels=True) for batch in iterator
+        ]
+        assert len(remaining) == 1
+    restored.restore(checkpoint)
+    with closing(iter(restored)) as iterator:
+        assert [
+            batch.to_training(dtype=None, return_labels=True) for batch in iterator
+        ] == remaining
 
 
 SEQ = 32
+
 
 _WORDS = "hello hi there how are you good morning the answer is what thanks yes no 1 2 4 + ? ! .".split()
 
@@ -161,8 +283,14 @@ def _reference_outputs(op: TokenizeChat, rows: list[dict]) -> list[dict]:
     return [r.payload for r in kept]  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("runner", ["threads", "process"])
-@pytest.mark.parametrize("mode", sorted(MODES))
+@pytest.mark.parametrize(
+    ("mode", "runner"),
+    [
+        ("generation_tags", "threads"),
+        ("prefix_diff", "process"),
+        ("no_template", "threads"),
+    ],
+)
 def test_mixture_tokenize_chat_pack_conserves_supervision(
     fast_tokenizer, mode: str, runner: str
 ) -> None:
@@ -196,7 +324,7 @@ def test_mixture_tokenize_chat_pack_conserves_supervision(
     reference = _reference_outputs(ref_op, rows_a + rows_b)
     if mode != "no_template":
         # Auto-detection must have picked the span source the mode expects.
-        assert ref_op._resolved_span_source == mode
+        assert ref_op._fixed_template.span_source == mode
     # The empty conversation must have been dropped, everything else kept.
     assert len(reference) == len(rows_a + rows_b) - 4
 

@@ -6,9 +6,8 @@ merged result back.  These intermediate files are **ephemeral** — written and
 deleted within a single ``state_dict()`` call — so no backward-compatibility
 envelope is needed.  Writer and reader are always the same code version.
 
-This module is orthogonal to the final checkpoint format: the DCP integration
-layer in torchtitan continues to ``pickle.dumps`` the checkpoint dict.  The
-codec only affects the wire format during aggregation.
+Persistent pipeline blobs reuse this codec with a version header and fixed
+MessagePack + zstd settings, independently of the aggregation settings.
 """
 
 from __future__ import annotations
@@ -61,6 +60,16 @@ def _bigint_ext_hook(code: int, data: bytes) -> Any:
     if code == _BIGINT_EXT_CODE:
         return int.from_bytes(data, "big", signed=True)
     return msgpack.ExtType(code, data)
+
+
+def _tuple_key(key: Any) -> Any:
+    """Restore nested tuple keys that MessagePack decoded as arrays."""
+    return tuple(_tuple_key(item) for item in key) if isinstance(key, list) else key
+
+
+def _msgpack_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    """Restore tuple keys before building a dict, leaving array values as lists."""
+    return {_tuple_key(key): value for key, value in pairs}
 
 
 class AggregationCodec:
@@ -127,6 +136,9 @@ class AggregationCodec:
                     raw=False,
                     strict_map_key=False,
                     ext_hook=_bigint_ext_hook,
+                    # use_list=False would also turn ordinary list values into
+                    # tuples. Only map keys need to become hashable here.
+                    object_pairs_hook=_msgpack_map,
                 ),
             )
         return cast(dict[str, Any], json.loads(data))
@@ -140,3 +152,29 @@ class AggregationCodec:
         if self._compressor == "zstd":
             return require_zstd().decompress(data)
         return data
+
+
+_CHECKPOINT_HEADER = b"ZEPHON\x01"
+
+
+def encode_checkpoint(state: dict[str, Any]) -> bytes:
+    """Encode persistent state with a version header, independently of aggregation."""
+    return _CHECKPOINT_HEADER + AggregationCodec(
+        serializer="msgpack", compressor="zstd"
+    ).encode(state)
+
+
+def decode_checkpoint(blob: bytes) -> dict[str, Any]:
+    """Decode persistent state; reject unsupported formats and malformed payloads."""
+    if not blob.startswith(_CHECKPOINT_HEADER):
+        raise ValueError("Unrecognized or unsupported Zephon checkpoint byte format")
+    zstd = require_zstd()
+    try:
+        state: Any = AggregationCodec(serializer="msgpack", compressor="zstd").decode(
+            blob[len(_CHECKPOINT_HEADER) :]
+        )
+    except (ValueError, TypeError, msgpack.UnpackException, zstd.ZstdError) as exc:
+        raise ValueError("Malformed Zephon checkpoint bytes") from exc
+    if not isinstance(state, dict):
+        raise ValueError("Zephon checkpoint bytes must contain a mapping")
+    return state

@@ -7,11 +7,13 @@ import functools
 import importlib.util as _importlib_util
 import os
 import warnings
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Generator,
     Iterator,
     Literal,
     Optional,
@@ -48,6 +50,7 @@ from zephon._internal.runtime_spec import (
 )
 from zephon._internal.stream import EngineSample
 from zephon._internal.utils import buffered_iterable
+from zephon._internal.utils.gc_freeze import GCFreeze, resolve_gc_freeze
 from zephon._internal.utils.torch_compat import detect_loader_kind
 from zephon.io.options import StoreOptions
 from zephon.observability import ExecutionTrackingMode, MetricsSinkConfig
@@ -60,6 +63,7 @@ from zephon.observability.stats import (
 from zephon.ops.accumulators import Accumulator, PassthroughAccumulator
 from zephon.ops.base import BaseOp
 from zephon.ops.config import (
+    ChatSpecialTokensMode,
     LossScope,
     MissingFieldMode,
     PackingAlgorithm,
@@ -202,6 +206,8 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._iterating: bool = False
+        # Track iterator wrappers (including MTP) without keeping them alive.
+        self._iterators: weakref.WeakSet[Generator[Any, None, None]] = weakref.WeakSet()
         self._validated: bool = False
         self._options = RuntimeOptions()
         self._fetch_node: Node[FetchOp] = self._graph.add(
@@ -820,6 +826,7 @@ class Pipeline:
         tokenizer: Any | None = None,
         tokenizer_id: str | None = None,
         *,
+        eos_token: str | None = None,
         field: str,
         missing_field: MissingFieldMode = "error",
         add_attention_mask: bool = True,
@@ -839,6 +846,7 @@ class Pipeline:
         op = TokenizeText(
             tokenizer,
             tokenizer_id,
+            eos_token=eos_token,
             field=field,
             missing_field=missing_field,
             add_attention_mask=add_attention_mask,
@@ -903,11 +911,15 @@ class Pipeline:
         tokenizer_id: str | None = None,
         *,
         eos_token: str | None = None,
+        special_tokens: ChatSpecialTokensMode | None = None,
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
         field: str = "messages",
         max_length: int | None = None,
         chat_template: str | os.PathLike[str] | None = None,
         apply_chat_template: bool = True,
         span_source: SpanSource = "auto",
+        supervise_assistant_header: bool = False,
         loss_scope: LossScope | None = None,
         loss_on_last_turn_only: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -922,8 +934,10 @@ class Pipeline:
 
         Reads role/content messages from ``field`` (default: ``messages``).
         Provide a fast Hugging Face ``tokenizer`` or ``tokenizer_id``.
-        ``chat_template`` overrides the tokenizer's template with Jinja text or
-        a file path. ``chat_template_kwargs`` supplies static template arguments;
+        Uses the tokenizer's own chat template unless ``chat_template`` supplies
+        a template name, Jinja text or a file path. Without an override, a
+        non-None value at ``tools_field`` selects ``tool_use`` when that template
+        exists, otherwise ``default``. ``chat_template_kwargs`` supplies static arguments;
         ``tools_field`` and ``enable_thinking_field`` select per-record values.
 
         Output replaces the payload with aligned, unshifted NumPy arrays:
@@ -933,14 +947,26 @@ class Pipeline:
         Samples with fewer than two tokens or no supervised tokens are dropped.
 
         Targets come from ``{% generation %}`` blocks. Untagged templates infer
-        assistant ranges by rendering successive conversation prefixes.
-        ``apply_chat_template=False`` concatenates message content, appends EOS
-        to assistant messages and selects targets from their roles.
-
+        assistant ranges by rendering successive conversation prefixes. Set
+        ``supervise_assistant_header=True`` to include assistant headers in those ranges.
         ``loss_scope`` selects all assistant spans (``all_assistant``, default),
-        the final contiguous supervised run (``last_span``), or all assistant
-        messages after the final user (``after_last_user``). Untagged templates
-        require explicit ``span_source="prefix_diff"`` with ``after_last_user``.
+        the final contiguous supervised run (``last_span``), all assistant messages
+        after the final user (``after_last_user``), or every token except the first
+        (``all_tokens``). Untagged templates require explicit
+        ``span_source="prefix_diff"`` with ``after_last_user``.
+
+        ``special_tokens="bos"``, ``"eos"`` or ``"bos_eos"`` adds the requested
+        tokens around the complete conversation, reserving room under ``max_length``.
+        ``"none"`` adds no tokens beyond those in the input or template.
+        ``bos_token_id`` and ``eos_token_id`` choose IDs for explicit outer insertion.
+        ``eos_token`` overrides the EOS string when loading ``tokenizer_id``.
+
+        ``apply_chat_template=False`` concatenates message contents without role
+        headers. In this mode, ``special_tokens="tokenizer_default"`` uses the
+        tokenizer's configured special-token processing, and ``"assistant_eos"``
+        appends EOS after each assistant message. With ``special_tokens`` omitted,
+        plain conversations use per-assistant EOS; templated conversations get a
+        final EOS if missing and space remains.
 
         With generation tags, ``after_last_user`` verifies templates automatically.
         Each selected assistant's generation blocks must cover its reasoning,
@@ -963,11 +989,15 @@ class Pipeline:
             tokenizer,
             tokenizer_id,
             eos_token=eos_token,
+            special_tokens=special_tokens,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
             field=field,
             max_length=max_length,
             chat_template=chat_template,
             apply_chat_template=apply_chat_template,
             span_source=span_source,
+            supervise_assistant_header=supervise_assistant_header,
             loss_scope=loss_scope,
             chat_template_kwargs=chat_template_kwargs,
             tools_field=tools_field,
@@ -1259,7 +1289,10 @@ class Pipeline:
         (wrap/best_fit_wrap). Each list element remains a distinct segment;
         buffered algorithms may reorder segments, and best_fit_wrap may emit a
         suffix before its remaining prefix. ``pack_payloads`` merges that list
-        (default keeps it as-is). For flat, tensor-ready training records with
+        (default keeps it as-is). When a callback returns a merged mapping of
+        unshifted token/media fields, use ``SampleBatch.to_training`` to convert
+        the batched packs into training tensors.
+        For built-in concatenation/padding of token-aligned fields with
         ``positions``, use :meth:`pack_flat` instead.
 
         Args:
@@ -1450,10 +1483,24 @@ class Pipeline:
         tracking: ExecutionTrackingMode | str = ExecutionTrackingMode.NODES,
         *,
         sink: MetricsSinkConfig | None = None,
+        measure_bytes: bool | None = None,
     ) -> "Pipeline":
-        """Enable runtime metrics collection for the compiled pipeline."""
+        """Enable runtime metrics collection for the compiled pipeline.
+
+        Args:
+            tracking: How much execution detail to collect.
+            sink: Where metrics are exported; defaults to logs.
+            measure_bytes: Size each node's consumed/produced payloads under
+                ``NODES`` tracking. ``True`` or ``False`` forces it for every
+                stage. ``None`` (default) keeps any value already set via
+                :meth:`options`; if none was set, only runners that ship
+                payloads between processes or hosts (process and remote
+                stages) measure.
+        """
         mode = ExecutionTrackingMode.from_value(tracking)
         self._options.execution_tracking = mode
+        if measure_bytes is not None:
+            self._options.measure_bytes = measure_bytes
         if sink is None:
             sink = MetricsSinkConfig()
         self._options.metrics_sink_config = sink
@@ -1786,9 +1833,30 @@ class Pipeline:
         # after the first next().
         self._run_auto_validation()
         self._prime_worksource()
-        return self._iter_body()
+        iterator = self._iter_body()
+        self._iterators.add(iterator)
+        return iterator
 
-    def _iter_body(self) -> Iterator[Any]:
+    def close(self) -> None:
+        """Close iterators and runtimes without checkpointing; safe to repeat.
+
+        Call between iteration steps from the owning thread.
+        MTP shutdown skips automatic checkpoint capture.
+        Save checkpoints explicitly before closing and restore one before resuming.
+        """
+        error: BaseException | None = None
+        # Stop MTP before unwinding iterators to skip automatic checkpoint capture.
+        for resource in [self._sp, *self._iterators, self._engine]:
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+        if error is not None:
+            raise error
+
+    def _iter_body(self) -> Generator[Any, None, None]:
         try:
             self._iterating = True
             if self._options.mtp_mode:
@@ -1837,14 +1905,20 @@ class Pipeline:
         return engine, iterator, use_monotone
 
     def _iter_inline(self) -> Iterator[Any]:
-        """Original inline iteration path — Engine runs in this process."""
-        ckpt = self._pending_restore
-        self._pending_restore = None
-        engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
+        """Run the engine in the current process."""
+        # GC freezing affects the whole interpreter, so inline mode defaults off.
+        # This also applies to daemon workers falling back from MTP.
+        freezer = GCFreeze(resolve_gc_freeze(self._options.gc_freeze, mtp=False))
         try:
-            yield from self._yield_while_notifying(iterator)
+            ckpt = self._pending_restore
+            self._pending_restore = None
+            engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
+            try:
+                yield from self._yield_while_notifying(iterator)
+            finally:
+                engine.close()
         finally:
-            engine.close()
+            freezer.close()
 
     def _iter_mtp(self) -> Iterator[Any]:
         """MTP iteration path — Engine runs in a child process."""
@@ -2016,7 +2090,33 @@ class Pipeline:
             return self._engine.prefetch_timing_snapshot()
         return None
 
-    def checkpoint(self) -> dict[str, Any]:
+    @overload
+    def checkpoint(self, *, as_bytes: Literal[False] = False) -> dict[str, Any]: ...
+
+    @overload
+    def checkpoint(self, *, as_bytes: Literal[True]) -> bytes: ...
+
+    def checkpoint(self, *, as_bytes: bool = False) -> dict[str, Any] | bytes:
+        """Collect resumable pipeline progress, optionally as one encoded value.
+
+        Args:
+            as_bytes: Return versioned, zstd-compressed MessagePack bytes instead
+                of the default dictionary. This lets checkpoint systems such as
+                PyTorch DCP preserve dynamic replay entries as one value without
+                requiring integrations to pickle the state. All participating
+                ranks must still call checkpoint at the same training step.
+                Custom work-source state must use MessagePack-compatible values.
+
+        Returns:
+            The complete checkpoint dictionary, or its encoded bytes. Encoding
+            occurs after collection and any distributed aggregation.
+        """
+        from zephon._internal.checkpoint import encode_checkpoint
+
+        state = self._checkpoint_state()
+        return encode_checkpoint(state) if as_bytes else state
+
+    def _checkpoint_state(self) -> dict[str, Any]:
         # Live subprocess — ask it for a checkpoint.
         if self._sp is not None:
             return self._sp.checkpoint()
@@ -2039,9 +2139,18 @@ class Pipeline:
         assert self._engine is not None
         return self._engine.state_dict()
 
-    def restore(self, ckpt: dict[str, Any]) -> None:
-        from zephon._internal.checkpoint import EngineStateV2
+    def restore(self, ckpt: dict[str, Any] | bytes) -> None:
+        """Validate saved progress and restore it lazily when iteration starts.
 
+        Accepts a checkpoint dictionary or bytes from ``checkpoint(as_bytes=True)``.
+        Byte decoding precedes the same schema validation and migration used for
+        dictionaries. Malformed or unsupported byte formats raise ValueError
+        before a runtime is constructed.
+        """
+        from zephon._internal.checkpoint import EngineStateV2, decode_checkpoint
+
+        if isinstance(ckpt, bytes):
+            ckpt = decode_checkpoint(ckpt)
         # Fail-fast: construct the schema purely for its validation side
         # effects. The Engine reloads it later when iteration starts.
         EngineStateV2.load(ckpt)
@@ -2098,6 +2207,7 @@ class Pipeline:
         d["_runtime_spec"] = None
         d["_sp"] = None
         d["_iterating"] = False
+        d.pop("_iterators", None)
         d["_last_state"] = None
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
@@ -2116,6 +2226,7 @@ class Pipeline:
           `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.
         """
         self.__dict__.update(state)
+        self._iterators = weakref.WeakSet()
         # _engine, _plan, _runtime_spec, _sp are already None in the
         # pickled state (set by __getstate__).  _pending_restore is kept.
 

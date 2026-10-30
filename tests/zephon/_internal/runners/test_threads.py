@@ -21,6 +21,7 @@ from zephon._internal.graph import Node, Stage
 from zephon._internal.ops.batch import Batch
 from zephon._internal.ops.delay import DelayById
 from zephon._internal.ops.pack_sequences import PackSequences
+from zephon._internal.runners.base import StageRunnerBase
 from zephon._internal.runners.concurrent import RunnerResult
 from zephon._internal.runners.threads import ThreadStageRunner
 from zephon.observability.config import ExecutionTrackingMode
@@ -844,3 +845,35 @@ def test_hard_shutdown_cleanup_does_not_wait_for_result_backpressure(
         runner.close()
     assert not list(tmp_path.glob("*.live"))
     assert len(list(tmp_path.glob("*.closed"))) == 1
+
+
+@pytest.mark.parametrize(
+    ("tracking", "measure_bytes", "runner_cls", "expected"),
+    [
+        (ExecutionTrackingMode.NODES, None, "threads", False),
+        (ExecutionTrackingMode.NODES, None, "process", True),
+        (ExecutionTrackingMode.NODES, True, "threads", True),
+        (ExecutionTrackingMode.NODES, False, "process", False),
+        (ExecutionTrackingMode.STAGES, True, "threads", False),
+    ],
+)
+def test_measure_bytes_resolution(
+    tracking: ExecutionTrackingMode,
+    measure_bytes: bool | None,
+    runner_cls: str,
+    expected: bool,
+) -> None:
+    from zephon._internal.runners.process import ProcessStageRunner
+
+    cls = {"threads": ThreadStageRunner, "process": ProcessStageRunner}[runner_cls]
+    assert cls.SHIPS_PAYLOADS is (runner_cls == "process")
+    runner = cls.__new__(cls)
+    StageRunnerBase.__init__(
+        runner,
+        Stage(name="s", nodes=[], placement="auto", break_reason="test"),
+        _ctx_services(),
+        1,
+        tracking_mode=tracking,
+        measure_bytes=measure_bytes,
+    )
+    assert runner._measure_bytes is expected

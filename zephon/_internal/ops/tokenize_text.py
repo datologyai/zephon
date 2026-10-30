@@ -69,6 +69,7 @@ class TokenizeText(TokenizeBase):
         tokenizer: TokenizerLike | None = None,
         tokenizer_id: str | None = None,
         *,
+        eos_token: str | None = None,
         field: str,
         missing_field: MissingFieldMode = "error",
         add_attention_mask: bool = True,
@@ -92,6 +93,8 @@ class TokenizeText(TokenizeBase):
                 ``tokenizer_id``.
             tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
                 ``"__fallback__"`` selects a small in-process stub for tests.
+            eos_token: Override the EOS string when loading tokenizer_id.
+                With a tokenizer instance, configure its EOS before passing it in.
             field: Dot-separated payload path of the text to tokenize.
             missing_field: How to handle mapping payloads where ``field`` cannot be
                 resolved. ``"error"`` (default) raises before tokenization;
@@ -137,21 +140,17 @@ class TokenizeText(TokenizeBase):
                 * ``"bos_eos"`` (default): the operator brackets each input
                   document as ``[BOS, ...tokens, EOS]`` explicitly. The HF
                   tokenizer is called with ``add_special_tokens=False`` so the
-                  template never contributes; BOS/EOS come from the tokenizer's
+                  postprocessor adds nothing; BOS/EOS come from the tokenizer's
                   ``bos_token_id`` / ``eos_token_id`` attributes (or the
-                  overrides below). Suitable for autoregressive pretraining
-                  where every document should be explicitly delimited and the
-                  output should not depend on the tokenizer family's template.
+                  overrides below). Input special tokens remain present and
+                  are not deduplicated.
                 * ``"bos"`` / ``"eos"``: as above but with only one side added.
                 * ``"none"``: emits raw content tokens. Useful when an upstream
                   step already added the desired specials.
                 * ``"tokenizer_default"``: the HF tokenizer is called with
-                  ``add_special_tokens=True`` and its ``build_inputs_with_
-                  special_tokens`` template decides what to add. The result is
-                  tokenizer-family-dependent (Llama: BOS only; T5: EOS only;
-                  GPT-2: nothing; chat templates: varies). Choose this when
-                  you specifically want the template's behavior — e.g. when
-                  feeding chat-formatted prompts into an instruct tokenizer.
+                  ``add_special_tokens=True``. The tokenizer's configured
+                  special-token processing decides what to add (the backend
+                  postprocessor for fast tokenizers). No chat template is rendered.
             bos_token_id: BOS id to splice in under the bracket modes that
                 add a BOS (``bos_eos`` / ``bos``), replacing whatever the
                 tokenizer exposes via its own ``bos_token_id`` attribute.
@@ -159,12 +158,12 @@ class TokenizeText(TokenizeBase):
                 has none. The tokenizer itself is never mutated — this only
                 affects what the operator splices into bracketed sequences.
                 Passing this under ``tokenizer_default`` (where the
-                tokenizer's template owns special-token placement) or
+                tokenizer's postprocessor owns special-token placement) or
                 ``none`` (where no specials are spliced) is a hard error at
                 ``__init__`` — silently dropping the override would risk
-                training under the wrong BOS assumption. To change which BOS
-                HF's template emits under ``tokenizer_default``, mutate the
-                tokenizer's ``bos_token`` before passing it in.
+                training under the wrong BOS assumption. For tokenizer_default,
+                configure the tokenizer's special-token processing; changing
+                bos_token alone need not change the IDs a postprocessor inserts.
             eos_token_id: EOS id to splice in under the bracket modes that
                 add an EOS (``bos_eos`` / ``eos``), replacing whatever the
                 tokenizer exposes via its own ``eos_token_id`` attribute.
@@ -205,7 +204,7 @@ class TokenizeText(TokenizeBase):
                 "truncation=True requires an explicit max_length when "
                 + f"special_tokens={special_tokens!r}; the operator needs it "
                 + "to reserve room for BOS/EOS. Set max_length, or use "
-                + "special_tokens='tokenizer_default' to let HF's template "
+                + "special_tokens='tokenizer_default' to let the tokenizer "
                 + "manage specials within its own truncation."
             )
 
@@ -230,9 +229,9 @@ class TokenizeText(TokenizeBase):
                 + f"special_tokens={special_tokens!r}; overrides apply only "
                 + "to bracket modes ('bos_eos' / 'bos' / 'eos'). To splice a "
                 + "specific BOS/EOS into the output, switch to a bracket "
-                + "mode; to change which BOS/EOS HF's template emits under "
-                + "'tokenizer_default', mutate the tokenizer's "
-                + "``bos_token`` / ``eos_token`` before passing it in."
+                + "mode. Under 'tokenizer_default', configure the tokenizer's "
+                + "special-token processing; changing BOS/EOS attributes alone "
+                + "does not rewrite a configured postprocessor."
             )
 
         TokenizeBase.__init__(
@@ -240,6 +239,9 @@ class TokenizeText(TokenizeBase):
             tokenizer,
             tokenizer_id,
             use_fast=use_fast,
+            eos_token=eos_token,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
             max_batch=max_batch,
             max_latency_ms=max_latency_ms,
         )
@@ -253,8 +255,6 @@ class TokenizeText(TokenizeBase):
         self.return_tensors = return_tensors
         self.split_long_samples = split_long_samples
         self.preserve_upstream_payload = preserve_upstream_payload
-        self._bos_id_override = bos_token_id
-        self._eos_id_override = eos_token_id
         self._bos_id_resolved: int | None = None
         self._eos_id_resolved: int | None = None
         # Cached after _setup_tokenizer so the padding hot path doesn't
@@ -327,42 +327,17 @@ class TokenizeText(TokenizeBase):
         self._pad_token_id_cached = self._compute_pad_token_id()
 
     def _resolve_special_token_ids(self) -> None:
-        """Bind the BOS/EOS ids we will splice in. No-op in tokenizer_default mode.
-
-        Raises on first batch (when _setup_tokenizer runs) if the configured
-        mode needs a token the tokenizer cannot provide and no override was
-        passed — better to fail loudly than silently emit unbracketed streams.
-        """
+        """Resolve IDs for the tokens requested by the insertion mode."""
         if not self._zephon_owns_brackets:
             return
         if self.tok is None:
             return
 
         if self._num_specials_to_prepend() > 0:
-            bid = self._bos_id_override
-            if bid is None:
-                bid = getattr(self.tok, "bos_token_id", None)
-            if bid is None:
-                raise ValueError(
-                    f"special_tokens={self.special_tokens!r} requires a BOS token, "
-                    + "but the tokenizer has no bos_token_id and no bos_token_id "
-                    + "override was provided. Pass bos_token_id=... or switch "
-                    + "special_tokens to 'eos'/'none'/'tokenizer_default'."
-                )
-            self._bos_id_resolved = int(bid)
+            self._bos_id_resolved = self._resolve_special_token_id("bos", required=True)
 
         if self._num_specials_to_append() > 0:
-            eid = self._eos_id_override
-            if eid is None:
-                eid = getattr(self.tok, "eos_token_id", None)
-            if eid is None:
-                raise ValueError(
-                    f"special_tokens={self.special_tokens!r} requires an EOS token, "
-                    + "but the tokenizer has no eos_token_id and no eos_token_id "
-                    + "override was provided. Pass eos_token_id=... or switch "
-                    + "special_tokens to 'bos'/'none'/'tokenizer_default'."
-                )
-            self._eos_id_resolved = int(eid)
+            self._eos_id_resolved = self._resolve_special_token_id("eos", required=True)
 
     def _num_specials_to_prepend(self) -> int:
         return 1 if self.special_tokens in ("bos_eos", "bos") else 0
@@ -810,7 +785,7 @@ class TokenizeText(TokenizeBase):
             return
         if getattr(tokenizer, "pad_token", None) is not None:
             return
-        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_token = self._eos_token
         if eos_token is None:
             return
         tokenizer.pad_token = eos_token

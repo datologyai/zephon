@@ -22,3 +22,10 @@ def test_shm_options_store_only_canonical_fields() -> None:
     removed = {"shm_min_size", "coalesce_tensors"}
     assert removed.isdisjoint(f.name for f in fields(options))
     assert removed.isdisjoint(signature(RuntimeOptions).parameters)
+
+
+@pytest.mark.parametrize("value", [None, False, True])
+def test_gc_freeze_is_a_runtime_option(value: bool | None) -> None:
+    options = RuntimeOptions(gc_freeze=value)
+    assert options.gc_freeze is value
+    assert replace(options).gc_freeze is value

@@ -70,7 +70,7 @@ setup_faulthandler()
 from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
-from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.observability.size_estimator import metric_bytes
 from zephon._internal.runners.base import teardown_operator
 from zephon._internal.runners.concurrent import (
     ConcurrentRunContext,
@@ -758,6 +758,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
     """
 
     _OperatorState = _ProcessOperatorState
+    SHIPS_PAYLOADS = True
 
     def __init__(
         self,
@@ -771,6 +772,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
+        measure_bytes: bool | None = None,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
         mp_context: BaseContext | None = None,
         memory_policy: PayloadMemoryPolicy | None = DEFAULT_PAYLOAD_MEMORY_POLICY,
@@ -843,6 +845,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
             allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
             stage_index=stage_index,
             tracking_mode=tracking_mode,
+            measure_bytes=measure_bytes,
             stage_output_mode=stage_output_mode,
         )
         self._log_debug_config()
@@ -2192,7 +2195,7 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         state.next_seq += 1
         collect_stats = self._tracking_mode.collects_nodes
         consumed_elements = len(batch) if collect_stats else 0
-        consumed_bytes = estimate_bytes(batch) if collect_stats else 0
+        consumed_bytes = metric_bytes(batch) if self._measure_bytes else 0
         queue_depth_snapshot = -1
         if collect_stats:
             try:

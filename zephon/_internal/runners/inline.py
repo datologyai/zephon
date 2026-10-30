@@ -11,7 +11,7 @@ from typing import Any, Iterable, Iterator, Literal, Sequence, cast
 from zephon._internal.flush_context import shutdown_flush
 from zephon._internal.graph import Node, Stage
 from zephon._internal.notify import is_sentinel
-from zephon._internal.observability.size_estimator import estimate_bytes
+from zephon._internal.observability.size_estimator import metric_bytes
 from zephon._internal.runners.base import BaseOperatorState, StageRunnerBase
 from zephon._internal.stream import (
     Microbatch,
@@ -53,6 +53,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         allow_latency_flush_in_deterministic: bool = True,
         stage_index: int = 0,
         tracking_mode: ExecutionTrackingMode = ExecutionTrackingMode.OFF,
+        measure_bytes: bool | None = None,
         stage_output_mode: Literal["microbatches", "stream_items"] = "microbatches",
     ) -> None:
         self._context_lock = threading.Lock()
@@ -70,6 +71,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
             allow_latency_flush_in_deterministic=allow_latency_flush_in_deterministic,
             stage_index=stage_index,
             tracking_mode=tracking_mode,
+            measure_bytes=measure_bytes,
             stage_output_mode=stage_output_mode,
         )
 
@@ -142,7 +144,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
 
         collect_stats = self._tracking_mode.collects_nodes
         consumed_elements = len(batch) if collect_stats else 0
-        consumed_bytes = estimate_bytes(batch) if collect_stats else 0
+        consumed_bytes = metric_bytes(batch) if self._measure_bytes else 0
         metrics_meta = self._metrics_meta[state.op_index] if collect_stats else None
 
         start_ns = self._node_sw.start()
@@ -154,7 +156,7 @@ class InlineStageRunner(StageRunnerBase[_InlineOperatorState]):
         if collect_stats and metrics_meta is not None:
             stage_index, stage_name, op_index, op_name = metrics_meta
             produced_elements = len(outputs)
-            produced_bytes = estimate_bytes(outputs)
+            produced_bytes = metric_bytes(outputs) if self._measure_bytes else 0
             delta = NodeMetricsDelta(
                 stage_index=stage_index,
                 op_index=op_index,

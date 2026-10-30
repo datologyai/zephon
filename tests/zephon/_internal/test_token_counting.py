@@ -235,15 +235,17 @@ def test_build_counter_falls_back_without_model(tokenizer_id):
 
 
 def test_build_counter_delegates_to_shared_loader(monkeypatch):
-    calls: list[tuple[str | None, bool | None]] = []
+    calls: list[tuple[str | None, bool | None, str | None]] = []
 
-    def fake_load(tokenizer_id, *, use_fast):
-        calls.append((tokenizer_id, use_fast))
+    def fake_load(tokenizer_id, *, use_fast, eos_token):
+        calls.append((tokenizer_id, use_fast, eos_token))
         return fallback_tokenizer()
 
     monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
-    TextTokenCountingSpec(tokenizer_id="hf-model", use_fast=False).build_counter()
-    assert calls == [("hf-model", False)]
+    TextTokenCountingSpec(
+        tokenizer_id="hf-model", use_fast=False, eos_token="<end>"
+    ).build_counter()
+    assert calls == [("hf-model", False, "<end>")]
 
 
 def test_count_raw_tokens_counts_whitespace_words():

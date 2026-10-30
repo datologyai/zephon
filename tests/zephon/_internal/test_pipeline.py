@@ -1,14 +1,111 @@
 """Unit tests for pipeline options and output notification."""
 
-from collections.abc import Iterator
-from unittest.mock import Mock
+import gc
+import multiprocessing
+import pickle
+from collections.abc import Generator, Iterator
+from typing import Any
+from unittest.mock import Mock, patch
+from weakref import ref
 
 import pytest
 
 from tests.helpers.work import FakeIndexableWorkSource, make_inmem_dataset
+from zephon._internal import pipeline as pipeline_module
 from zephon._internal.graph import Plan
 from zephon._internal.pipeline import Pipeline
 from zephon.types import SampleMeta, SampleRecord
+
+
+def test_checkpoint_encoding_wraps_the_collected_state() -> None:
+    pipe = object.__new__(Pipeline)
+    state = {"inflight": {0: {1: {"seed": 1 << 128}}}}
+    pipe._checkpoint_state = Mock(return_value=state)
+    with patch(
+        "zephon._internal.checkpoint.encode_checkpoint", return_value=b"blob"
+    ) as encode:
+        assert pipe.checkpoint() is state
+        encode.assert_not_called()
+        assert pipe.checkpoint(as_bytes=True) == b"blob"
+        encode.assert_called_once_with(state)
+    assert pipe._checkpoint_state.call_count == 2
+
+
+def test_invalid_checkpoint_bytes_do_not_start_a_runtime() -> None:
+    pipe = object.__new__(Pipeline)
+    pipe._engine = None
+    pipe._pending_restore = None
+    with patch(
+        "zephon._internal.checkpoint.decode_checkpoint",
+        side_effect=ValueError("invalid"),
+    ) as decode:
+        with pytest.raises(ValueError, match="invalid"):
+            pipe.restore(b"invalid")
+        decode.assert_called_once_with(b"invalid")
+    assert pipe._engine is None
+    assert pipe._pending_restore is None
+
+
+def test_close_unstarted_iterator_preserves_pending_restore() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    checkpoint = {"pending": "restore"}
+    pipe._pending_restore = checkpoint
+
+    iterators = [iter(pipe), iter(pipe)]
+    pipe.close()
+    pipe.close()
+    assert pipe._engine is None
+    assert pipe._pending_restore is checkpoint
+    for iterator in iterators:
+        with pytest.raises(StopIteration):
+            next(iterator)
+    restored = pickle.loads(pickle.dumps(pipe))
+    assert not restored._iterators
+    assert restored._pending_restore == checkpoint
+
+
+def test_iterator_tracking_does_not_keep_an_unstarted_iterator_alive() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    iterator = iter(pipe)
+    reference = ref(iterator)
+    assert len(pipe._iterators) == 1
+    del iterator
+    gc.collect()
+    assert reference() is None
+    assert not pipe._iterators
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("failing_resource", ["mtp", "iterator"])
+def test_close_attempts_all_cleanup_before_reraising(
+    error_type: type[BaseException], failing_resource: str
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    engine = Mock()
+    pipe._engine = engine
+    subprocess_runtime = Mock()
+    pipe._sp = subprocess_runtime
+    if failing_resource == "mtp":
+        subprocess_runtime.close.side_effect = error_type("mtp cleanup failed")
+    closed: list[int] = []
+
+    def paused(index: int) -> Generator[None, None, None]:
+        try:
+            yield
+        finally:
+            closed.append(index)
+            if failing_resource == "iterator":
+                raise error_type("iterator cleanup failed")
+
+    iterators = [paused(index) for index in range(2)]
+    for iterator in iterators:
+        next(iterator)
+        pipe._iterators.add(iterator)
+    with pytest.raises(error_type, match=f"{failing_resource} cleanup failed"):
+        pipe.close()
+    assert sorted(closed) == [0, 1]
+    subprocess_runtime.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
 
 
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
@@ -149,3 +246,56 @@ def test_controls_do_not_notify_delivery_or_escape_the_tail(use_monotone: bool) 
     finally:
         # Leave end-of-stream cleanup to integration tests.
         iterator.close()
+
+
+@pytest.fixture
+def gc_freeze_guard(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    factory = Mock()
+    monkeypatch.setattr(pipeline_module, "GCFreeze", factory)
+    return factory
+
+
+@pytest.mark.parametrize("option", [None, False, True])
+@pytest.mark.parametrize("daemon_fallback", [False, True])
+def test_inline_gc_freeze_policy_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_freeze_guard: Mock,
+    option: bool | None,
+    daemon_fallback: bool,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(gc_freeze=option, mtp_mode=daemon_fallback)
+    engine = Mock()
+
+    def build(**_kwargs: Any) -> tuple[Any, Any, bool]:
+        gc_freeze_guard.assert_called_once_with(option is True)
+        gc_freeze_guard.return_value.close.assert_not_called()
+        return engine, iter([1, 2]), True
+
+    engine.close.side_effect = gc_freeze_guard.return_value.close.assert_not_called
+    monkeypatch.setattr(pipe, "_build_raw_iter", build)
+    monkeypatch.setattr(pipe, "_yield_while_notifying", lambda iterator: iterator)
+    if daemon_fallback:
+        monkeypatch.setattr(
+            multiprocessing, "current_process", lambda: Mock(daemon=True)
+        )
+        with pytest.warns(RuntimeWarning, match="Falling back"):
+            assert list(pipe._iter_body()) == [1, 2]
+    else:
+        assert list(pipe._iter_inline()) == [1, 2]
+    engine.close.assert_called_once_with()
+    gc_freeze_guard.return_value.close.assert_called_once_with()
+
+
+def test_inline_releases_gc_freeze_when_engine_construction_fails(
+    monkeypatch: pytest.MonkeyPatch, gc_freeze_guard: Mock
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(gc_freeze=True)
+    monkeypatch.setattr(
+        pipe, "_build_raw_iter", Mock(side_effect=RuntimeError("build"))
+    )
+    with pytest.raises(RuntimeError, match="build"):
+        next(pipe._iter_inline())
+    gc_freeze_guard.assert_called_once_with(True)
+    gc_freeze_guard.return_value.close.assert_called_once_with()
