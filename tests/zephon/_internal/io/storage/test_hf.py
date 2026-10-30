@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,9 @@ from zephon._internal.io.storage._hf_resolve import Resolution
 from zephon._internal.io.storage._hf_uri import parse_hf_uri
 
 requests = pytest.importorskip("requests")
+
+# The autouse fixture stubs this out; keep the real check for its own test.
+_real_xet_downloads_supported = hf_mod._xet_downloads_supported
 
 # Some test environments (e.g. the free-threaded Python 3.14t CI job) don't
 # ship a huggingface_hub wheel; skip the download tests that patch its internals.
@@ -90,11 +95,25 @@ class _FakeHTTP:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_memos() -> Iterator[None]:
-    for memo in (hf_mod._frozen_roots, hf_mod._listings, hf_mod._sizes):
+def _fresh_memos(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # Downloads take the http_get path unless a test opts into hf_xet.
+    monkeypatch.setattr(hf_mod, "_xet_downloads_supported", lambda: False)
+    for memo in (
+        hf_mod._frozen_roots,
+        hf_mod._listings,
+        hf_mod._sizes,
+        hf_mod._hffs,
+        hf_mod._xet_lookup_retry_at,
+    ):
         memo.clear()
     yield
-    for memo in (hf_mod._frozen_roots, hf_mod._listings, hf_mod._sizes):
+    for memo in (
+        hf_mod._frozen_roots,
+        hf_mod._listings,
+        hf_mod._sizes,
+        hf_mod._hffs,
+        hf_mod._xet_lookup_retry_at,
+    ):
         memo.clear()
 
 
@@ -602,6 +621,400 @@ class TestDownload:
                     f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "o")
                 )
         assert http_get.call_count == 0
+
+
+class _FakeHfFileSystem:
+    def __init__(self, info: dict[str, Any], payload: bytes = b"hello world") -> None:
+        self._info = info
+        self._payload = payload
+        self.fetched: list[str] = []
+
+    def info(self, rpath: str) -> dict[str, Any]:
+        return self._info
+
+    def get_file(self, rpath: str, lpath: str) -> None:
+        self.fetched.append(rpath)
+        # Append, so leftover bytes in ``lpath`` would show up in the result.
+        with open(lpath, "ab") as fh:
+            fh.write(self._payload)
+
+
+@requires_hf_hub
+class TestXetDownload:
+    _NAME = "data%2Fa.parquet"
+    _RPATH = f"datasets/org/repo@{SOURCE}/data/a.parquet"
+
+    @pytest.fixture(autouse=True)
+    def _xet(self, http: _FakeHTTP, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(hf_mod, "_xet_downloads_supported", lambda: True)
+
+    def _use_fs(self, fs: Any) -> None:
+        hf_mod._hffs[None] = fs
+
+    def test_xet_file_uses_get_file_without_resolve(
+        self, http: _FakeHTTP, tmp_path: Path
+    ) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        self._use_fs(fs)
+        dst = tmp_path / "out.parquet"
+        http_get = MagicMock()
+        with patch("huggingface_hub.file_download.http_get", new=http_get):
+            HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+
+        assert dst.read_bytes() == b"hello world"
+        assert fs.fetched == [self._RPATH]
+        assert http.urls() == []  # no resolve/ HEAD
+        assert http_get.call_count == 0
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["out.parquet"]
+
+    def test_restarts_instead_of_resuming(self, tmp_path: Path) -> None:
+        dst = tmp_path / "out.parquet"
+        (tmp_path / "out.parquet.incomplete").write_bytes(b"stale")
+        (tmp_path / ".xet-old.incomplete").write_bytes(b"stale")
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        self._use_fs(fs)
+        HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert dst.read_bytes() == b"hello world"
+        assert fs.fetched == [self._RPATH]
+
+    def test_wrong_size_is_not_published(self, tmp_path: Path) -> None:
+        self._use_fs(_FakeHfFileSystem({"size": 11, "xet_hash": "abc"}, b"hello"))
+        dst = tmp_path / "out.parquet"
+        with pytest.raises(OSError, match="wrote 5 bytes, expected 11"):
+            HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert list(tmp_path.iterdir()) == []
+
+    def test_failed_download_removes_incomplete(self, tmp_path: Path) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+
+        def interrupted(rpath: str, lpath: str) -> None:
+            Path(lpath).write_bytes(b"part")
+            raise OSError("connection reset")
+
+        fs.get_file = interrupted  # type: ignore[method-assign]
+        self._use_fs(fs)
+        with pytest.raises(OSError, match="connection reset"):
+            HFBackend().download(
+                f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "out.parquet")
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_failed_rename_removes_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._use_fs(_FakeHfFileSystem({"size": 11, "xet_hash": "abc"}))
+
+        def failed_replace(src: str, dst: str) -> None:
+            raise PermissionError("destination is read-only")
+
+        monkeypatch.setattr(hf_mod.os, "replace", failed_replace)
+        with pytest.raises(PermissionError, match="read-only"):
+            HFBackend().download(
+                f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "out.parquet")
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_keyboard_interrupt_removes_incomplete(self, tmp_path: Path) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+
+        def interrupted(rpath: str, lpath: str) -> None:
+            Path(lpath).write_bytes(b"part")
+            raise KeyboardInterrupt
+
+        fs.get_file = interrupted  # type: ignore[method-assign]
+        self._use_fs(fs)
+        with pytest.raises(KeyboardInterrupt):
+            HFBackend().download(
+                f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "out.parquet")
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_creates_destination_directory(self, tmp_path: Path) -> None:
+        self._use_fs(_FakeHfFileSystem({"size": 11, "xet_hash": "abc"}))
+        dst = tmp_path / "new" / "dir" / "out.parquet"
+        HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert dst.read_bytes() == b"hello world"
+
+    @pytest.mark.parametrize(
+        ("status", "expected", "message"),
+        [
+            (404, FileNotFoundError, "No such hf:// file"),
+            (401, PermissionError, "hf auth login"),
+            (403, PermissionError, "hf auth login"),
+        ],
+    )
+    def test_hub_http_errors_are_mapped(
+        self, tmp_path: Path, status: int, expected: type[Exception], message: str
+    ) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        self._raise_hub_error(fs, status)
+        self._use_fs(fs)
+        with pytest.raises(expected, match=message):
+            HFBackend().download(
+                f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "out.parquet")
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_other_hub_http_errors_pass_through(self, tmp_path: Path) -> None:
+        from huggingface_hub.utils import HfHubHTTPError
+
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        self._raise_hub_error(fs, 500)
+        self._use_fs(fs)
+        with pytest.raises(HfHubHTTPError):
+            HFBackend().download(
+                f"{FROZEN_ORIGINAL}/{self._NAME}", str(tmp_path / "out.parquet")
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    @staticmethod
+    def _raise_hub_error(fs: _FakeHfFileSystem, status: int) -> None:
+        from huggingface_hub.utils import HfHubHTTPError
+
+        def failing(rpath: str, lpath: str) -> None:
+            Path(lpath).write_bytes(b"part")
+            raise HfHubHTTPError("failed", response=MagicMock(status_code=status))
+
+        fs.get_file = failing  # type: ignore[method-assign]
+
+    def test_missing_size_falls_back_to_http_get(
+        self, http: _FakeHTTP, tmp_path: Path
+    ) -> None:
+        fs = _FakeHfFileSystem({"size": None, "xet_hash": "abc"})
+        self._use_fs(fs)
+        self._allow_http_get(http)
+
+        dst = tmp_path / "out.parquet"
+        with patch(
+            "huggingface_hub.file_download.http_get", side_effect=self._fake_http_get
+        ):
+            HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert dst.read_bytes() == b"hello world"
+        assert fs.fetched == []
+
+    def test_concurrent_lookups_in_a_directory_are_serialised(self) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        active = 0
+        peak = 0
+        counter_lock = threading.Lock()
+
+        def slow_info(rpath: str) -> dict[str, Any]:
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with counter_lock:
+                active -= 1
+            return {"size": 11, "xet_hash": "abc"}
+
+        fs.info = slow_info  # type: ignore[method-assign]
+        self._use_fs(fs)
+        parts = parse_hf_uri(FROZEN_ORIGINAL)
+        threads = [
+            threading.Thread(
+                target=HFBackend()._xet_file, args=(parts, f"data%2F{i}.parquet")
+            )
+            for i in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert peak == 1
+
+    def test_lookups_in_different_directories_do_not_block_each_other(self) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": "abc"})
+        barrier = threading.Barrier(2, timeout=10)
+
+        def info(rpath: str) -> dict[str, Any]:
+            # Fails with BrokenBarrierError if one lock covers both directories.
+            barrier.wait()
+            return {"size": 11, "xet_hash": "abc"}
+
+        fs.info = info  # type: ignore[method-assign]
+        self._use_fs(fs)
+        parts = parse_hf_uri(FROZEN_ORIGINAL)
+        results: list[Any] = []
+
+        def lookup(name: str) -> None:
+            results.append(HFBackend()._xet_file(parts, name))
+
+        threads = [
+            threading.Thread(target=lookup, args=(name,))
+            for name in ("a%2Fx.parquet", "b%2Fy.parquet")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(15)
+        assert all(result is not None for result in results) and len(results) == 2
+
+    def test_failed_lookup_is_remembered_and_logged(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fs = _FakeHfFileSystem({})
+        lookups: list[str] = []
+
+        def rate_limited(rpath: str) -> dict[str, Any]:
+            lookups.append(rpath)
+            raise OSError("429")
+
+        fs.info = rate_limited  # type: ignore[method-assign]
+        self._use_fs(fs)
+        parts = parse_hf_uri(FROZEN_ORIGINAL)
+        now = 1000.0
+        monkeypatch.setattr(hf_mod.time, "monotonic", lambda: now)
+        backend = HFBackend()
+
+        with caplog.at_level(logging.WARNING, logger=hf_mod.__name__):
+            assert backend._xet_file(parts, "data%2Fa.parquet") is None
+            assert backend._xet_file(parts, "data%2Fb.parquet") is None
+        assert len(lookups) == 1
+        assert [r.levelno for r in caplog.records] == [logging.WARNING]
+        assert "Xet lookup failed" in caplog.text
+
+        # Another directory is unaffected, and this one recovers after the wait.
+        assert backend._xet_file(parts, "other%2Fa.parquet") is None
+        assert len(lookups) == 2
+        now += hf_mod._XET_LOOKUP_RETRY_SECONDS + 1
+        assert backend._xet_file(parts, "data%2Fa.parquet") is None
+        assert len(lookups) == 3
+
+    def test_missing_file_does_not_disable_lookups(self) -> None:
+        fs = _FakeHfFileSystem({})
+        lookups: list[str] = []
+
+        def missing(rpath: str) -> dict[str, Any]:
+            lookups.append(rpath)
+            raise FileNotFoundError(rpath)
+
+        fs.info = missing  # type: ignore[method-assign]
+        self._use_fs(fs)
+        parts = parse_hf_uri(FROZEN_ORIGINAL)
+        backend = HFBackend()
+        assert backend._xet_file(parts, "data%2Fa.parquet") is None
+        assert backend._xet_file(parts, "data%2Fb.parquet") is None
+        assert len(lookups) == 2
+
+    def test_filesystem_is_cached_per_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import huggingface_hub
+
+        created: list[str | None] = []
+
+        class _Recording:
+            def __init__(self, token: str | None) -> None:
+                created.append(token)
+
+        monkeypatch.setattr(huggingface_hub, "HfFileSystem", _Recording)
+        # The http fixture stubs the token; read the one set on each backend.
+        monkeypatch.setattr(HFBackend, "_get_token", lambda self: self._token)
+
+        def backend_with(token: str) -> HFBackend:
+            backend = HFBackend()
+            backend._token = token
+            return backend
+
+        first = backend_with("a")._get_hffs()
+        assert backend_with("a")._get_hffs() is first
+        assert backend_with("b")._get_hffs() is not first
+        assert created == ["a", "b"]
+
+    @staticmethod
+    def _allow_http_get(http: _FakeHTTP) -> None:
+        url = f"{_RESOLVE}/{SOURCE}/data/a.parquet"
+        http.on("HEAD", url, _Resp(302, headers={"X-Linked-Size": "11"}, redirect=True))
+
+    @staticmethod
+    def _fake_http_get(url: str, temp_file: Any, **kwargs: Any) -> None:
+        temp_file.write(b"hello world")
+
+    def test_non_xet_file_falls_back_to_http_get(
+        self, http: _FakeHTTP, tmp_path: Path
+    ) -> None:
+        fs = _FakeHfFileSystem({"size": 11, "xet_hash": None})
+        self._use_fs(fs)
+        url = f"{_RESOLVE}/{SOURCE}/data/a.parquet"
+        http.on("HEAD", url, _Resp(302, headers={"X-Linked-Size": "11"}, redirect=True))
+
+        def fake_http_get(url: str, temp_file: Any, **kwargs: Any) -> None:
+            temp_file.write(b"hello world")
+
+        dst = tmp_path / "out.parquet"
+        with patch("huggingface_hub.file_download.http_get", side_effect=fake_http_get):
+            HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert dst.read_bytes() == b"hello world"
+        assert fs.fetched == []
+
+    def test_info_error_falls_back_to_http_get(
+        self, http: _FakeHTTP, tmp_path: Path
+    ) -> None:
+        fs = _FakeHfFileSystem({})
+
+        def broken_info(rpath: str) -> dict[str, Any]:
+            raise OSError("listing failed")
+
+        fs.info = broken_info  # type: ignore[method-assign]
+        self._use_fs(fs)
+        url = f"{_RESOLVE}/{SOURCE}/data/a.parquet"
+        http.on("HEAD", url, _Resp(302, headers={"X-Linked-Size": "11"}, redirect=True))
+
+        def fake_http_get(url: str, temp_file: Any, **kwargs: Any) -> None:
+            temp_file.write(b"hello world")
+
+        dst = tmp_path / "out.parquet"
+        with patch("huggingface_hub.file_download.http_get", side_effect=fake_http_get):
+            HFBackend().download(f"{FROZEN_ORIGINAL}/{self._NAME}", str(dst))
+        assert dst.read_bytes() == b"hello world"
+        assert fs.fetched == []
+
+
+@requires_hf_hub
+@pytest.mark.parametrize(
+    ("version", "xet_disabled", "expected"),
+    [
+        ("0.36.0", False, False),
+        ("2.0.3", False, False),
+        ("2.1.1", False, False),
+        ("2.2.0.dev0", False, False),
+        ("2.2.0rc1", False, False),
+        ("2.2.0", False, True),
+        ("2.3.0.dev0", False, True),
+        ("not a version", False, False),
+        ("2.3.0", True, False),
+    ],
+)
+def test_xet_downloads_need_hub_2_2(
+    monkeypatch: pytest.MonkeyPatch, version: str, xet_disabled: bool, expected: bool
+) -> None:
+    import huggingface_hub
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(huggingface_hub, "__version__", version)
+    monkeypatch.setattr(constants, "HF_HUB_DISABLE_XET", xet_disabled)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object())
+    _real_xet_downloads_supported.cache_clear()
+    try:
+        assert _real_xet_downloads_supported() is expected
+    finally:
+        _real_xet_downloads_supported.cache_clear()
+
+
+@requires_hf_hub
+def test_xet_downloads_need_hf_xet_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import huggingface_hub
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(huggingface_hub, "__version__", "2.3.0")
+    monkeypatch.setattr(constants, "HF_HUB_DISABLE_XET", False)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None)
+    _real_xet_downloads_supported.cache_clear()
+    try:
+        assert _real_xet_downloads_supported() is False
+    finally:
+        _real_xet_downloads_supported.cache_clear()
 
 
 # ---------------------------------------------------------------------------

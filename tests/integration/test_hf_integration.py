@@ -27,6 +27,7 @@ pytest.importorskip("pyarrow")
 import requests  # noqa: E402
 
 from zephon._internal.io.storage import HFBackend  # noqa: E402
+from zephon._internal.io.storage import hf as hf_mod  # noqa: E402
 from zephon._internal.io.storage._hf_uri import parse_hf_uri  # noqa: E402
 from zephon._internal.io.storage.hf import _DATASETS_SERVER_PARQUET_URL  # noqa: E402
 
@@ -68,8 +69,8 @@ def test_dataset_from_path_pins_squad_uploads() -> None:
     assert ds.total() > 0
 
 
-def test_download_squad_shard_via_http_get(tmp_path: Path) -> None:
-    """``HFBackend.download`` streams a real shard to disk via ``http_get``."""
+def test_download_squad_shard(tmp_path: Path) -> None:
+    """``HFBackend.download`` writes a real shard to disk on either path."""
     backend = HFBackend()
     root = backend.canonical_root(_SQUAD_TRAIN_URI)
     names = backend.listdir(root)
@@ -81,6 +82,28 @@ def test_download_squad_shard_via_http_get(tmp_path: Path) -> None:
 
     assert dst.stat().st_size == backend.stat(src)["size"]
     assert not (tmp_path / "shard.parquet.incomplete").exists()
+
+
+def test_download_squad_shard_uses_xet_when_supported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a supported hub, ``download`` fetches a Xet-backed shard with ``hf_xet``."""
+    if not hf_mod._xet_downloads_supported():
+        pytest.skip("needs huggingface_hub >= 2.2 and hf_xet")
+    backend = HFBackend()
+    root = backend.canonical_root(_SQUAD_TRAIN_URI)
+    src = f"{root}/{backend.listdir(root)[0]}"
+
+    def no_http_get(*args: object, **kwargs: object) -> None:
+        raise AssertionError("http_get used for a Xet-backed file")
+
+    # download and get_file both reach http_get; either use fails the test.
+    monkeypatch.setattr("huggingface_hub.file_download.http_get", no_http_get)
+    monkeypatch.setattr("huggingface_hub.hf_file_system.http_get", no_http_get)
+    dst = tmp_path / "shard.parquet"
+    backend.download(src, str(dst))
+
+    assert dst.stat().st_size == backend.stat(src)["size"]
 
 
 def test_hf_actually_honors_range_reads() -> None:
