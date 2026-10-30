@@ -3,7 +3,14 @@
 Linear is the source of truth for release planning. A PR inherits the release of
 the ZEPH issue it references: a Linear milestone named ``vX.Y ...`` or
 ``vX.Y.Z ...`` becomes the GitHub milestone ``vX.Y`` or ``vX.Y.Z``. Only that
-version string is ever written to GitHub.
+version string is ever written to GitHub. A PR that references a GitHub issue
+synced to ZEPH (``Fixes #12``) uses that issue.
+
+An unlinked PR gets a triage issue in the team named by ``LINEAR_TRIAGE_TEAM``,
+which must not be issue-synced to GitHub: an issue created in a two-way synced
+team is copied to GitHub at once, duplicating the PR. Moving it into ZEPH once
+accepted creates no copy. Without ``LINEAR_TRIAGE_TEAM`` no triage issues are
+created.
 
 Modes:
   pr         Handle the PR in ``$GITHUB_EVENT_PATH`` (pull_request_target).
@@ -11,12 +18,15 @@ Modes:
              between releases or left triage.
 
 Pass ``--dry-run`` to log intended changes without writing anything.
-Requires ``LINEAR_API_KEY``, ``GITHUB_TOKEN`` and ``GITHUB_REPOSITORY``.
+Requires ``GITHUB_TOKEN``, ``GITHUB_REPOSITORY`` and Linear credentials: an
+OAuth app's ``LINEAR_CLIENT_ID`` and ``LINEAR_CLIENT_SECRET``, or else
+``LINEAR_API_KEY``.
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import re
@@ -28,24 +38,27 @@ from dataclasses import dataclass
 from typing import Any
 
 LINEAR_URL = "https://api.linear.app/graphql"
+LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 GITHUB_API = "https://api.github.com"
 TEAM_KEY = "ZEPH"
 TRIAGE_LABEL = "from-github-pr"
 
 ISSUE_ID_RE = re.compile(r"\b(ZEPH|PLAT)-(\d+)\b", re.IGNORECASE)
-# Linear's magic words; an ID after one of these is a link, not a mention.
-MAGIC_ID_RE = re.compile(
+# Linear's magic words (a superset of GitHub's closing keywords); an issue after
+# one of these is a link, not a mention.
+MAGIC_WORDS = (
     r"\b(?:close[sd]?|closing|fix(?:e[sd])?|fixing|resolve[sd]?|resolving"
     r"|complete[sd]?|completing|refs?|references|part of|related to"
-    r"|contributes to|towards?)\s*:?\s+((?:ZEPH|PLAT)-\d+)\b",
-    re.IGNORECASE,
+    r"|contributes to|towards?)\s*:?\s+"
 )
+MAGIC_ID_RE = re.compile(MAGIC_WORDS + r"((?:ZEPH|PLAT)-\d+)\b", re.IGNORECASE)
 RELEASE_RE = re.compile(r"^v(\d+\.\d+(?:\.\d+)?)\b")
 # Only milestones this script could have set are ever replaced or cleared, so a
 # milestone a maintainer set by hand for another reason is left alone.
 MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
-# Marks the PR comment recording a triage issue. The key may not see the issue
-# once triage moves it to another team, so GitHub keeps the record.
+# Marks the PR comment recording a triage issue. Lookups only cover ZEPH and the
+# triage team, so once triage moves the issue elsewhere GitHub keeps the record.
+# The comment names no issue: the identifier changes when the issue moves.
 TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
 # Link kind of the attachments this script adds for inherited issues. Linear only
 # creates "contributes" links itself from a magic word, which needs an ID in the
@@ -70,12 +83,31 @@ class _LinearError(RuntimeError):
         return all(e.get("message", "").startswith(prefix) for e in self.errors)
 
 
+def _linear_auth() -> str:
+    client_id = os.environ.get("LINEAR_CLIENT_ID")
+    if not client_id:
+        return os.environ["LINEAR_API_KEY"]
+    # A client-credentials token acts as the app itself, so issues the sync
+    # creates are not attributed to a person (nor synced to GitHub under one).
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": os.environ["LINEAR_CLIENT_SECRET"],
+            "scope": "read,write",
+        }
+    ).encode()
+    with urllib.request.urlopen(LINEAR_TOKEN_URL, data=body) as response:
+        return f"Bearer {json.load(response)['access_token']}"
+
+
 class _Client:
     def __init__(self, dry_run: bool) -> None:
         self.dry_run = dry_run
         self.repo = os.environ["GITHUB_REPOSITORY"]
-        self._linear_key = os.environ["LINEAR_API_KEY"]
+        self._linear_auth = _linear_auth()
         self._github_token = os.environ["GITHUB_TOKEN"]
+        self.triage_team = os.environ.get("LINEAR_TRIAGE_TEAM") or None
         self._milestones: dict[str, int] | None = None
 
     def linear(self, query: str, **variables: Any) -> dict[str, Any]:
@@ -84,7 +116,7 @@ class _Client:
             LINEAR_URL,
             data=body,
             headers={
-                "Authorization": self._linear_key,
+                "Authorization": self._linear_auth,
                 "Content-Type": "application/json",
             },
         )
@@ -191,6 +223,14 @@ def _referenced_ids(pr: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(i.upper() for i in linked))
 
 
+def _referenced_github_issues(pr: dict[str, Any], repo: str) -> list[int]:
+    # Only after a magic word: a bare "#12" may just as well be a PR.
+    target = rf"(?:https://github\.com/{re.escape(repo)}/issues/|{re.escape(repo)}#|#)"
+    pattern = re.compile(MAGIC_WORDS + target + r"(\d+)\b", re.IGNORECASE)
+    text = "\n".join([pr["title"], pr.get("body") or ""])
+    return list(dict.fromkeys(int(n) for n in pattern.findall(text)))
+
+
 def _release_of(milestone: dict[str, Any] | None) -> str | None:
     if not milestone:
         return None
@@ -244,8 +284,13 @@ def _attachments(client: _Client, pr_url: str) -> list[_Attachment]:
             (node["metadata"] or {}).get("linkKind"),
         )
         for node in data["attachmentsForURL"]["nodes"]
-        if node["issue"]["team"]["key"] == TEAM_KEY
+        if node["issue"]["team"]["key"] in _linked_teams(client)
     ]
+
+
+def _linked_teams(client: _Client) -> set[str]:
+    # An issue still in triage counts as linked: it just has no release yet.
+    return {TEAM_KEY} | ({client.triage_team} if client.triage_team else set())
 
 
 def _attach_inherited(
@@ -295,9 +340,16 @@ def _link_pr(client: _Client, issue_id: str, pr_url: str, kind: str) -> None:
         raise RuntimeError(f"Linear did not attach {pr_url} to {issue_id}")
 
 
+def _triage_description(pr: dict[str, Any]) -> str:
+    # Linear stores a bare URL as [url](<url>); written that way up front, the
+    # marker below matches what Linear keeps.
+    url = pr["html_url"]
+    return f"Opened from [{url}](<{url}>) by @{pr['user']['login']}."
+
+
 def _triage_marker(pr: dict[str, Any]) -> str:
-    # The trailing " by" keeps pull/1 from matching pull/10.
-    return f"Opened from {pr['html_url']} by"
+    # The trailing ">) by" keeps pull/1 from matching pull/10.
+    return f"(<{pr['html_url']}>) by"
 
 
 def _has_triage_comment(client: _Client, pr: dict[str, Any]) -> bool:
@@ -314,27 +366,30 @@ def _record_triage(client: _Client, pr: dict[str, Any], issue: _LinkedIssue) -> 
     client.github(
         "POST",
         f"/repos/{client.repo}/issues/{pr['number']}/comments",
-        {"body": f"{TRIAGE_COMMENT_MARKER}\nTracked in Linear as {issue.identifier}."},
+        {"body": f"{TRIAGE_COMMENT_MARKER}\nTracked in Linear for triage."},
     )
 
 
 def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | None:
+    if not client.triage_team:
+        _log("  no LINEAR_TRIAGE_TEAM, no triage issue")
+        return None
     # Reaching here with a recorded triage issue means triage moved it out of
-    # ZEPH (or detached it): the PR is handled, so don't open another.
+    # ZEPH and the triage team (or detached it): the PR is handled.
     if _has_triage_comment(client, pr):
-        _log("  triage issue already opened and no longer in ZEPH, skipped")
+        _log("  triage issue already opened elsewhere, skipped")
         return None
     # Creating and attaching are separate mutations. If attaching failed on an
     # earlier run, the issue exists but no attachment points at it, so look it up
     # by its description before creating another.
     existing = client.linear(
-        """query($key: String!, $marker: String!) {
+        """query($keys: [String!]!, $marker: String!) {
           issues(
             first: 1
-            filter: { team: { key: { eq: $key } }, description: { contains: $marker } }
+            filter: { team: { key: { in: $keys } }, description: { contains: $marker } }
           ) { nodes { identifier projectMilestone { name } } }
         }""",
-        key=TEAM_KEY,
+        keys=sorted(_linked_teams(client)),
         marker=_triage_marker(pr),
     )["issues"]["nodes"]
     if existing:
@@ -345,7 +400,7 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
         _record_triage(client, pr, issue)
         return issue
 
-    _log(f"  create {TEAM_KEY} triage issue for #{pr['number']}")
+    _log(f"  create {client.triage_team} triage issue for #{pr['number']}")
     if client.dry_run:
         return None
     team = client.linear(
@@ -359,12 +414,12 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
           }
         }"""
         % TRIAGE_LABEL,
-        key=TEAM_KEY,
+        key=client.triage_team,
     )["teams"]["nodes"][0]
     issue_input: dict[str, Any] = {
         "teamId": team["id"],
         "title": pr["title"],
-        "description": f"{_triage_marker(pr)} @{pr['user']['login']}.",
+        "description": _triage_description(pr),
     }
     if team["states"]["nodes"]:
         issue_input["stateId"] = team["states"]["nodes"][0]["id"]
@@ -378,6 +433,16 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
     _record_triage(client, pr, issue)
     _log(f"  created {issue.identifier}")
     return issue
+
+
+def _synced_issue(client: _Client, number: int) -> _LinkedIssue | None:
+    # Issue sync attaches the GitHub issue to its Linear twin.
+    url = f"https://github.com/{client.repo}/issues/{number}"
+    attached = _attachments(client, url)
+    if not attached:
+        _log(f"  #{number}: not synced to Linear")
+        return None
+    return attached[0].issue
 
 
 def _stack_parent(
@@ -406,9 +471,14 @@ def _resolve(
     """Return the PR's ZEPH issue, and whether it references only PLAT issues."""
     ids = _referenced_ids(pr)
     zeph = [i for i in ids if i.startswith(f"{TEAM_KEY}-")]
+    github_issues = _referenced_github_issues(pr, client.repo)
+    # Lazy, so lookups stop at the first issue with a release.
+    candidates = itertools.chain(
+        (_fetch_issue(client, i) for i in zeph),
+        (_synced_issue(client, n) for n in github_issues),
+    )
     fallback: _LinkedIssue | None = None
-    for identifier in zeph:
-        issue = _fetch_issue(client, identifier)
+    for issue in candidates:
         if issue and issue.release:
             return issue, False
         fallback = fallback or issue
