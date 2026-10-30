@@ -26,6 +26,7 @@ from zephon._internal.utils.tokenizer import (
     TokenBatch,
     TokenizerLike,
     TokenizerOutput,
+    load_text_tokenizer,
 )
 from zephon._internal.utils.torch_compat import (
     _TENSOR_ITER_LOCK,
@@ -91,7 +92,9 @@ class TokenizeText(TokenizeBase):
         Args:
             tokenizer: Pre-instantiated HF-compatible tokenizer; takes precedence over
                 ``tokenizer_id``.
-            tokenizer_id: HF model id passed to ``AutoTokenizer.from_pretrained``.
+            tokenizer_id: HF model id, local directory, or cloud URI. Uses
+                ``AutoTokenizer`` with tokenizers <1; v1 loads ``tokenizer.json``
+                directly and reads declared special-token metadata.
                 ``"__fallback__"`` selects a small in-process stub for tests.
             eos_token: Override the EOS string when loading tokenizer_id.
                 With a tokenizer instance, configure its EOS before passing it in.
@@ -132,7 +135,8 @@ class TokenizeText(TokenizeBase):
             return_tensors: ``"pt"`` / ``"np"`` / ``"tf"`` backend for emitted fields.
             split_long_samples: Slice each tokenized sequence into ``max_length``
                 chunks. BOS/EOS, if added, land only on the first/last chunk.
-            use_fast: Forwarded to ``AutoTokenizer.from_pretrained``.
+            use_fast: Forwarded to ``AutoTokenizer.from_pretrained`` on v0;
+                ``False`` is unsupported with tokenizers v1.
             preserve_upstream_payload: Keep all upstream payload keys; otherwise the
                 output dict contains only ``input_ids`` and ``attention_mask``.
             special_tokens: How BOS/EOS are added.
@@ -264,19 +268,15 @@ class TokenizeText(TokenizeBase):
         self._warned_preserve_non_mapping = False
         # Cache kwargs to avoid building dict per batch
         self._cached_kwargs: dict[str, Any] = {}
-        # On free-threaded Python + old PyTorch, we intercept return_tensors='pt'
-        # to avoid HF tokenizer creating tensors (which races with our code).
-        self._convert_np_to_pt = False
 
     def setup(self, ctx: OpContext) -> None:
         super().setup(ctx)
         # We do NOT set up the tokenizer here to avoid problems in multiprocessing:
         # hf tokenizers don't like if we fork after creating the object
 
-        # In bracket mode we ask HF for ragged lists (no specials, no padding,
-        # no return_tensors) and own bracketing/padding ourselves. Forwarding
-        # ``return_tensors`` here would force HF to stack a ragged batch and
-        # raise.
+        # Request lists and convert each output record ourselves so different
+        # sequence lengths never require stacking into a rectangular tensor.
+        # In bracket mode we also own special-token insertion and padding.
         add_specials = not self._zephon_owns_brackets
 
         # ``split_long_samples`` also owns padding (per-chunk, see
@@ -307,17 +307,10 @@ class TokenizeText(TokenizeBase):
         if hf_max_length is not None:
             self._cached_kwargs["max_length"] = hf_max_length
 
-        # On free-threaded Python + old PyTorch, HF tokenizer's tensor creation
-        # races with our code. Request numpy from HF and convert ourselves
-        # under lock.
-        # See: https://github.com/pytorch/pytorch/issues/171992
-        forward_return_tensors = add_specials and not self.split_long_samples
-        if forward_return_tensors and self.return_tensors is not None:
-            if self.return_tensors == "pt" and _should_use_tensor_lock():
-                self._convert_np_to_pt = True
-                self._cached_kwargs["return_tensors"] = "np"
-            else:
-                self._cached_kwargs["return_tensors"] = self.return_tensors
+    def _load_tokenizer(self) -> TokenizerLike:
+        return load_text_tokenizer(
+            self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
+        )
 
     def _finalize_setup(self) -> None:
         # _ensure_padding_token may set pad_token=eos_token (the HF pattern
@@ -349,19 +342,10 @@ class TokenizeText(TokenizeBase):
         return self._num_specials_to_prepend() + self._num_specials_to_append()
 
     def traits(self) -> OpTraits:
-        # HF batch tensors require equal lengths; Zephon converts each row separately.
-        batch_tensors = (
-            not self._zephon_owns_brackets and self.return_tensors is not None
-        )
-        fixed_length = self.padding == "max_length" and self.truncation
         return OpTraits(
             # Batch padding changes payloads; split mode pads each chunk separately.
             calibration_replayable=(
-                self.split_long_samples
-                or (
-                    self.padding in (False, "max_length")
-                    and (not batch_tensors or fixed_length)
-                )
+                self.split_long_samples or self.padding in (False, "max_length")
             ),
             indexable=True,
             preserves_cursor_order=True,
@@ -700,11 +684,6 @@ class TokenizeText(TokenizeBase):
 
         encoded = self._tokenize_texts(texts)
 
-        # On free-threaded Python + old PyTorch, we requested numpy from HF tokenizer
-        # and convert to torch ourselves under lock to avoid allocator race condition.
-        if self._convert_np_to_pt:
-            encoded = self._convert_batch_np_to_torch(encoded)
-
         # Use type ignores here as TokenBatch is complex;
         # _normalize_batch handles the runtime safety.
         raw_input_ids: TokenBatch = encoded.get("input_ids", [])  # type: ignore[assignment]
@@ -739,8 +718,13 @@ class TokenizeText(TokenizeBase):
                 input_ids, attention_mask
             )
 
-        # Bracket mode pulled lists from HF; lift to the user's backend now.
-        if self._zephon_owns_brackets and self.return_tensors is not None and input_ids:
+        # Convert each record independently; ragged batches need no padding.
+        # Splitting converts each output chunk after slicing instead.
+        if (
+            self.return_tensors is not None
+            and not self.split_long_samples
+            and input_ids
+        ):
             input_ids = [self._convert_tensor(seq) for seq in input_ids]
             if attention_mask is not None:
                 attention_mask = [self._convert_tensor(seq) for seq in attention_mask]
@@ -798,22 +782,6 @@ class TokenizeText(TokenizeBase):
         self._ensure_padding_token()
         return tokenizer(texts, **self._cached_kwargs)
 
-    def _convert_batch_np_to_torch(
-        self, encoded: TokenizerOutput
-    ) -> dict[str, TokenBatch]:
-        """Convert numpy arrays to torch tensors under the lock.
-
-        Used on free-threaded Python + old PyTorch to avoid allocator race
-        condition when HF tokenizer creates tensors internally.
-        """
-        import torch
-
-        with _tensor_lock_ctx():
-            return {
-                k: torch.from_numpy(v) if "numpy" in type(v).__module__ else v
-                for k, v in encoded.items()
-            }
-
     def _convert_tensor(self, value: TokenSeq) -> TokenSeq:
         backend = self.return_tensors
         if backend is None:
@@ -832,24 +800,24 @@ class TokenizeText(TokenizeBase):
                     return torch.from_numpy(value)
             if _should_use_tensor_lock():
                 np = self._lazy_import("numpy")
-                arr = np.asarray(value)
+                arr = np.asarray(value, dtype=np.int64)
                 with _tensor_lock_ctx():
                     return torch.from_numpy(arr)
             with _tensor_lock_ctx():
-                return torch.tensor(value)
+                return torch.tensor(value, dtype=torch.int64)
         if backend in ("np", "numpy"):
             np = self._lazy_import("numpy")
             return (
                 value
                 if hasattr(value, "shape") and "numpy" in src_mod
-                else np.asarray(value)
+                else np.asarray(value, dtype=np.int64)
             )
         if backend == "tf":
             tf = self._lazy_import("tensorflow")
             return (
                 value
                 if hasattr(value, "shape") and "tensorflow" in src_mod
-                else tf.convert_to_tensor(value)
+                else tf.convert_to_tensor(value, dtype=tf.int64)
             )
         raise ValueError(f"Unsupported return_tensors backend: {backend}")
 

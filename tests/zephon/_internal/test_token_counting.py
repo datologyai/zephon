@@ -58,6 +58,22 @@ def test_delivered_tokens_tokenizer_default_counts_template():
     assert truncating.delivered_tokens(100) == 64
 
 
+def test_tokenizer_default_counter_uses_implicit_hf_limit():
+    from tests.helpers.chat import make_fast_tokenizer
+
+    tok = make_fast_tokenizer()
+    tok.model_max_length = 3
+    spec = TextTokenCountingSpec(
+        tokenizer=tok, special_tokens="tokenizer_default", truncation=True
+    )
+    text = "hello hi there how are you"
+    actual = tok(text, truncation=True)["input_ids"]
+    assert len(actual) == 3
+    assert spec.build_counter().plan([{"text": text}]).count({"text": text}) == len(
+        actual
+    )
+
+
 @pytest.mark.parametrize(
     "mode,prepend,append",
     [("bos_eos", 1, 1), ("bos", 1, 0), ("eos", 0, 1), ("none", 0, 0)],
@@ -241,7 +257,9 @@ def test_build_counter_delegates_to_shared_loader(monkeypatch):
         calls.append((tokenizer_id, use_fast, eos_token))
         return fallback_tokenizer()
 
-    monkeypatch.setattr("zephon._internal.token_counting.load_hf_tokenizer", fake_load)
+    monkeypatch.setattr(
+        "zephon._internal.token_counting.load_text_tokenizer", fake_load
+    )
     TextTokenCountingSpec(
         tokenizer_id="hf-model", use_fast=False, eos_token="<end>"
     ).build_counter()

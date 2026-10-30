@@ -8,7 +8,8 @@ Hugging Face tokenizer), the batch/output type aliases,
 :func:`fallback_tokenizer` — a deterministic, dependency-free reference
 implementation used when no tokenizer is configured and throughout the tests —
 and :func:`load_hf_tokenizer`, the retrying HF loader shared by the tokenize
-ops.
+ops. :func:`load_text_tokenizer` selects the native saved-pipeline loader when
+tokenizers v1 is installed.
 
 Chat helpers select assistant messages, map generated ranges to token masks,
 and isolate HF's compiled-template caches between threads.
@@ -19,6 +20,7 @@ from __future__ import annotations
 import sys
 import threading
 import traceback
+from importlib.metadata import PackageNotFoundError, version
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -298,7 +300,15 @@ def load_hf_tokenizer(
     from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 
     with _IMPORT_LOCK:
-        from transformers import AutoTokenizer
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:
+            if _native_tokenizers_installed():
+                raise ValueError(
+                    "Chat tokenization requires Transformers with tokenizers <1; "
+                    + "tokenizers v1 currently supports text tokenization only"
+                ) from exc
+            raise
 
     # Resolve before the HF retry — nesting would re-list the bucket on every
     # HF retry attempt.
@@ -339,10 +349,34 @@ def load_hf_tokenizer(
         raise
 
 
+def _native_tokenizers_installed() -> bool:
+    try:
+        return int(version("tokenizers").split(".")[0]) >= 1
+    except PackageNotFoundError:
+        return False
+
+
+def load_text_tokenizer(
+    tokenizer_id: str | None,
+    *,
+    use_fast: bool | None = True,
+    eos_token: str | None = None,
+) -> TokenizerLike:
+    """Use the installed engine, preserving HF loading for tokenizers <1."""
+    if tokenizer_id not in (None, "__fallback__") and _native_tokenizers_installed():
+        from zephon._internal.utils.tokenizer_native import load_native_tokenizer
+
+        return load_native_tokenizer(
+            tokenizer_id, use_fast=use_fast, eos_token=eos_token
+        )
+    return load_hf_tokenizer(tokenizer_id, use_fast=use_fast, eos_token=eos_token)
+
+
 __all__ = [
     "TokenBatch",
     "TokenizerLike",
     "TokenizerOutput",
     "fallback_tokenizer",
     "load_hf_tokenizer",
+    "load_text_tokenizer",
 ]

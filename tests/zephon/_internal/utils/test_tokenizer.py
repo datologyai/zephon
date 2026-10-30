@@ -22,6 +22,65 @@ from zephon._internal.utils.tokenizer_cloud import (
 )
 
 
+@pytest.mark.parametrize("installed", ["0.22.2", "0.23.3", "1.0.0rc3", "1.0.0"])
+def test_text_loader_selects_installed_engine(
+    installed: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zephon._internal.utils import tokenizer as shared
+    from zephon._internal.utils import tokenizer_native as native
+
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def loader(engine: str) -> Any:
+        def load(source: str, **kwargs: Any) -> Any:
+            calls.append((engine, source, kwargs))
+            return fallback_tokenizer()
+
+        return load
+
+    monkeypatch.setattr(shared, "version", lambda package: installed)
+    monkeypatch.setattr(shared, "load_hf_tokenizer", loader("hf"))
+    monkeypatch.setattr(native, "load_native_tokenizer", loader("native"))
+    shared.load_text_tokenizer("model/name", eos_token="<end>")
+    expected = "native" if installed.startswith("1.") else "hf"
+    assert calls == [(expected, "model/name", {"use_fast": True, "eos_token": "<end>"})]
+
+
+def test_text_fallback_needs_no_installed_tokenizers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zephon._internal.utils import tokenizer as shared
+
+    def missing(package: str) -> str:
+        raise shared.PackageNotFoundError(package)
+
+    monkeypatch.setattr(shared, "version", missing)
+    assert not shared._native_tokenizers_installed()
+    assert shared.load_text_tokenizer(None).eos_token == 2
+    with pytest.raises(ValueError, match="fallback"):
+        shared.load_text_tokenizer("__fallback__", eos_token="<end>")
+
+
+def test_chat_loader_reports_incompatible_native_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    from zephon._internal.utils import tokenizer as shared
+
+    original_import = builtins.__import__
+
+    def incompatible(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "transformers":
+            raise ImportError("AddedToken is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(shared, "version", lambda package: "1.0.0rc3")
+    monkeypatch.setattr(builtins, "__import__", incompatible)
+    with pytest.raises(ValueError, match="Chat tokenization requires Transformers"):
+        shared.load_hf_tokenizer("model/name")
+
+
 def test_fallback_content_ids_avoid_reserved_range() -> None:
     """``abs(hash(word)) % 10000`` can be 0 or 1 → without an offset, content
     tokens collide with bos=1 / eos=2. The offset puts content at >= 10."""

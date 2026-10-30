@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import cloudpickle
 import numpy as np
 
-from zephon._internal.utils.tokenizer import load_hf_tokenizer
+from zephon._internal.utils.tokenizer import load_text_tokenizer
 from zephon.ops.config import MissingFieldMode
 
 if TYPE_CHECKING:
@@ -142,7 +142,13 @@ def _field_label(path: tuple[str, ...] | None) -> str:
 
 def _count_raw_tokens(tokenizer: Any, text: str, spec: "TextTokenCountingSpec") -> int:
     add_specials = spec.special_tokens == "tokenizer_default"
-    result = tokenizer(text, add_special_tokens=add_specials)
+    kwargs: dict[str, Any] = {"add_special_tokens": add_specials}
+    if add_specials and spec.truncation:
+        # Let the engine apply its own implicit model limit and postprocessor.
+        kwargs["truncation"] = True
+        if spec.max_length is not None:
+            kwargs["max_length"] = spec.max_length
+    result = tokenizer(text, **kwargs)
     input_ids = result["input_ids"] if isinstance(result, Mapping) else result.input_ids
     return len(input_ids)
 
@@ -282,7 +288,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
     def build_counter(self) -> DeliveredTokenCounter:
         tokenizer = self.tokenizer
         if tokenizer is None:
-            tokenizer = load_hf_tokenizer(
+            tokenizer = load_text_tokenizer(
                 self.tokenizer_id, use_fast=self.use_fast, eos_token=self.eos_token
             )
         return _TextCounter(tokenizer, self)
