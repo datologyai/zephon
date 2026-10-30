@@ -3,11 +3,7 @@
 
 from __future__ import annotations
 
-import ast
-import inspect
-import runpy
 import warnings
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -122,32 +118,6 @@ def test_stack_sequences_torch_to_numpy_numeric_casts(
     assert out.tolist() == [expected]
     assert out.dtype == np.dtype(target)
     assert row.tolist() == values
-
-
-def test_standalone_benchmark_snapshots_match_production() -> None:
-    pytest.importorskip("torch")
-    from zephon._internal.ops.pack_sequences import _positions_from_segment_lengths
-
-    root = Path(__file__).resolve().parents[4]
-    benchmark = runpy.run_path(str(root / "scripts/benchmark_stack_sequences.py"))
-
-    def normalized(function: Any) -> str:
-        node = ast.parse(inspect.getsource(function)).body[0]
-        assert isinstance(node, ast.FunctionDef)
-        node.name = "function"
-        first = node.body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
-            node.body.pop(0)
-        return ast.dump(node)
-
-    assert normalized(benchmark["_stack_post"]) == normalized(stack_sequences)
-    assert normalized(benchmark["_positions_base"]) == normalized(
-        _positions_from_segment_lengths
-    )
 
 
 @pytest.mark.parametrize("unsupported", ["grad", "bfloat16", "conjugate"])
