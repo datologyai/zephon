@@ -120,6 +120,13 @@ def test_sample_batch_to_training_legacy_behavior() -> None:
     assert "labels" not in out
 
 
+def test_sample_batch_to_training_numpy_preserves_python_integer_precision() -> None:
+    np = pytest.importorskip("numpy")
+    record = _rec((0, 0, 0), 0, 0, {"input_ids": [2**53 + 1, 0.0]})
+    out = SampleBatch(records=(record,)).to_training(dtype=np.int64)
+    assert out["input_ids"].tolist() == [[2**53 + 1, 0]]
+
+
 # ---------------------------------------------------------------------------
 # Tests for to_training with new parameters
 # ---------------------------------------------------------------------------

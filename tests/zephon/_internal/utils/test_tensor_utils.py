@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import builtins
 import warnings
 from typing import Any
 
@@ -49,6 +50,59 @@ def test_stack_sequences_numpy_empty() -> None:
     assert out.dtype == np.int32
 
 
+@pytest.mark.parametrize("row_type", [list, tuple])
+@pytest.mark.parametrize(
+    ("values", "dtype_name", "expected"),
+    [
+        ([2**53 + 1, 0.0], "int64", [2**53 + 1, 0]),
+        ([2**63 - 1, 0.0], "int64", [2**63 - 1, 0]),
+        ([False, ""], "bool", [False, False]),
+    ],
+)
+def test_stack_sequences_numpy_converts_python_values_directly(
+    row_type: Any, values: list[Any], dtype_name: str, expected: list[Any]
+) -> None:
+    np = pytest.importorskip("numpy")
+    out = stack_sequences([row_type(values)], getattr(np, dtype_name), "numpy")
+    assert out.tolist() == [expected]
+
+
+@pytest.mark.parametrize("values", [[2**63], [1e30, -1e30]])
+def test_stack_sequences_numpy_preserves_python_overflow_errors(
+    values: list[Any],
+) -> None:
+    np = pytest.importorskip("numpy")
+    with pytest.raises(OverflowError):
+        stack_sequences([values], np.int64, "numpy")
+
+
+def test_stack_sequences_numpy_preserves_array_protocol_dtype() -> None:
+    np = pytest.importorskip("numpy")
+
+    class ArrayLike:
+        def __array__(self, dtype: Any = None, copy: Any = None) -> Any:
+            assert dtype == np.dtype(np.int64)
+            return np.array([2**53 + 1, 0.0], dtype=dtype)
+
+    out = stack_sequences([ArrayLike()], np.int64, "numpy")
+    assert out.tolist() == [[2**53 + 1, 0]]
+
+
+def test_stack_sequences_numpy_does_not_import_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    np = pytest.importorskip("numpy")
+    original_import = builtins.__import__
+
+    def import_without_torch(name: str, *args: Any, **kwargs: Any) -> Any:
+        assert name != "torch"
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_torch)
+    out = stack_sequences([[1, 2], np.array([3, 4])], np.int64, "numpy")
+    assert out.tolist() == [[1, 2], [3, 4]]
+
+
 @pytest.mark.parametrize("strided", [False, True])
 def test_stack_sequences_torch_to_numpy_casts_only_final_batch(
     monkeypatch: pytest.MonkeyPatch, strided: bool
@@ -60,14 +114,13 @@ def test_stack_sequences_torch_to_numpy_casts_only_final_batch(
         rows = [row[::2] for row in rows]
     originals = [row.clone() for row in rows]
     views: list[Any] = []
-    asarray = np.asarray
+    array = np.array
 
-    def capture(row: Any, *args: Any, **kwargs: Any) -> Any:
-        result = asarray(row, *args, **kwargs)
-        views.append(result)
-        return result
+    def capture(rows: Any, *args: Any, **kwargs: Any) -> Any:
+        views.extend(rows)
+        return array(rows, *args, **kwargs)
 
-    monkeypatch.setattr(np, "asarray", capture)
+    monkeypatch.setattr(np, "array", capture)
     out = stack_sequences(rows, np.int64, "numpy")
     assert out.tolist() == ([[0, 0]] * 2 if strided else [[0, 1, 0, 2]] * 2)
     assert out.dtype == np.int64
@@ -143,16 +196,15 @@ def test_stack_sequences_torch_to_numpy_preserves_conversion_errors(
     ("source_dtype", "target_dtype"),
     [
         ("bool", "bool"),
+        ("bool", "int64"),
         ("uint8", "uint8"),
+        ("uint8", "int16"),
         ("int8", "int8"),
         ("int8", "int16"),
         ("int16", "int32"),
         ("int32", "int64"),
         ("float16", "float16"),
-        ("float16", "float32"),
-        ("float32", "float64"),
         ("complex64", "complex64"),
-        ("complex64", "complex128"),
     ],
 )
 def test_stack_sequences_numpy_to_torch_shares_final_allocation(
@@ -191,6 +243,55 @@ def test_stack_sequences_numpy_to_torch_bfloat16() -> None:
     )
     assert out.tolist() == [[0.5, -2.0]]
     assert out.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    ("source_dtype", "target_dtype"),
+    [
+        ("float16", "float32"),
+        ("float32", "float64"),
+        ("complex64", "complex128"),
+        ("float64", "float16"),
+        ("float32", "int64"),
+        ("int64", "int32"),
+    ],
+)
+def test_stack_sequences_numpy_to_torch_retains_torch_casts(
+    monkeypatch: pytest.MonkeyPatch, source_dtype: str, target_dtype: str
+) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([1 + 2**-11 + 2**-30, -2.75, 0], dtype=source_dtype)]
+    expected = torch.from_numpy(np.array(rows)).to(dtype=getattr(torch, target_dtype))
+    allocations: list[Any] = []
+    from_numpy = torch.from_numpy
+
+    def capture(array: Any) -> Any:
+        allocations.append(array)
+        return from_numpy(array)
+
+    monkeypatch.setattr(torch, "from_numpy", capture)
+    out = stack_sequences(rows, getattr(torch, target_dtype), "torch")
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    assert len(allocations) == 1
+    assert allocations[0].dtype == np.dtype(source_dtype)
+
+
+def test_stack_sequences_numpy_to_torch_mixed_integer_dtypes() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([-128, 127], dtype=np.int8), np.array([0, 255], dtype=np.uint8)]
+    out = stack_sequences(rows, torch.int64, "torch")
+    assert out.tolist() == [[-128, 127], [0, 255]]
+
+
+def test_stack_sequences_numpy_to_torch_preserves_signed_unsigned_promotion() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rows = [np.array([2**53 + 1], dtype=np.uint64), np.array([-1], dtype=np.int64)]
+    expected = torch.from_numpy(np.array(rows)).to(dtype=torch.int64)
+    out = stack_sequences(rows, torch.int64, "torch")
+    assert torch.equal(out, expected)
 
 
 @pytest.mark.parametrize("source_dtype", ["int32", "int64"])
