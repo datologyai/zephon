@@ -5,6 +5,9 @@
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import pytest
@@ -27,6 +30,88 @@ pytestmark = [
 
 _CHUNK_SIZE = 16
 _LANE_SIZE = 8 * _CHUNK_SIZE
+
+
+@pytest.mark.parametrize(
+    ("finished_rank", "dropped_id"),
+    [
+        pytest.param(0, 5, id="leader-finishes-first"),
+        pytest.param(1, 7, id="follower-finishes-first"),
+    ],
+)
+def test_mtp_exhaustion_allows_explicit_checkpoint_resume(
+    tmp_path: Path, finished_rank: int, dropped_id: int
+) -> None:
+    ready = Barrier(2, timeout=30)
+    # Rank 0 owns [0, 1, 4, 5]; rank 1 owns [2, 3, 6, 7]. Dropping the
+    # selected rank's last record leaves three batches versus its peer's four.
+
+    def build(rank: int) -> Pipeline:
+        dataset = Dataset.from_dict(
+            "tiny", {0: InMemoryShard([{"id": i} for i in range(8)])}
+        )
+        work = StaticMixtureWorkSource(
+            [dataset],
+            {"tiny": 1.0},
+            chunk_size=2,
+            shuffle_shards=False,
+            shuffle_within_shard=False,
+        )
+        return (
+            Pipeline(work)
+            .map_transform(lambda p: None if p["id"] == dropped_id else p)
+            .batch(1)
+            .options(
+                mtp_mode=True,
+                runner="inline",
+                deterministic=True,
+                shm_enabled=False,
+                canonical_replicas=2,
+                dp_degree=2,
+                dp_group_id=rank,
+                world_size=2,
+                global_rank=rank,
+                aggregate_dir=str(tmp_path),
+                aggregate_timeout_s=10,
+                run_id="finite-mtp",
+                max_workers=1,
+            )
+        )
+
+    def run_rank(rank: int) -> list[int]:
+        pipe = build(rank)
+        # DCP may request a destination template before MTP starts.
+        pipe.checkpoint()
+        iterator = iter(pipe)
+        try:
+            prefix = [next(iterator).records[0].payload["id"] for _ in range(3)]
+            if rank == finished_rank:
+                assert next(iterator, None) is None
+            # The finished rank must return before its peer checkpoints.
+            ready.wait()
+            for _ in range(2):
+                pipe.checkpoint()
+        except BaseException:
+            ready.abort()
+            raise
+        finally:
+            pipe.close()
+        # Each rank contributes cached progress after closing its iterator.
+        checkpoint = pipe.checkpoint()
+        restored = build(rank)
+        restored.restore(checkpoint)
+        suffix = [batch.records[0].payload["id"] for batch in restored]
+        assert len(suffix) == int(rank != finished_rank)
+        return prefix + suffix
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run_rank, rank) for rank in range(2)]
+        # Report the exhausted rank's error before its peer's barrier error.
+        futures[finished_rank].result(timeout=60)
+        results = [future.result(timeout=60) for future in futures]
+    assert results == [
+        [i for i in ids if i != dropped_id] for ids in ([0, 1, 4, 5], [2, 3, 6, 7])
+    ]
 
 
 class _ContinuingSource(StaticMixtureWorkSource):

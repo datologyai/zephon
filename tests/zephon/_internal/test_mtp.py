@@ -21,6 +21,8 @@ from zephon._internal.mtp import (
     _ACK,
     _CHECKPOINT,
     _CHECKPOINT_ERROR,
+    _LOCAL_CHECKPOINT,
+    _STATE_DICT,
     MTPPipeline,
     _handle_ctrl_msg,
     _lower_thread_priority,
@@ -31,6 +33,22 @@ from zephon._internal.mtp import (
 from zephon._internal.notify import _ContributorNotify, _MonotoneNotify
 from zephon._internal.runners.queue import NamedQueue, QueueFeederError
 from zephon.types import ContributorRef, SampleBatch, SampleCursor, SampleRecord
+
+
+@pytest.mark.parametrize("tag", [_LOCAL_CHECKPOINT, _CHECKPOINT])
+def test_checkpoint_control_aggregates_only_on_explicit_request(tag: int) -> None:
+    engine, connection = mock.Mock(), mock.Mock()
+    local = engine._state_dict_local.return_value = {"local": True}
+    merged = engine.state_dict.return_value = {"merged": True}
+    assert not _handle_ctrl_msg(tag, None, {}, engine, connection)
+    if tag == _LOCAL_CHECKPOINT:
+        engine._state_dict_local.assert_called_once_with()
+        engine.state_dict.assert_not_called()
+        connection.send.assert_called_once_with((_STATE_DICT, local))
+    else:
+        engine.state_dict.assert_called_once_with()
+        engine._state_dict_local.assert_not_called()
+        connection.send.assert_called_once_with((_STATE_DICT, merged))
 
 
 @pytest.mark.parametrize("use_monotone", [True, False])
@@ -225,6 +243,28 @@ class TestMTPQueueStats:
 
 class TestCaptureFinalStateErrors:
     """Final-state capture reports failures without raising during teardown."""
+
+    @pytest.mark.parametrize("drain_sentinel", [False, True])
+    @pytest.mark.parametrize("error", [EOFError, ConnectionResetError])
+    def test_disconnected_control_pipe_preserves_source_error(
+        self, drain_sentinel: bool, error: type[Exception]
+    ) -> None:
+        sp = object.__new__(MTPPipeline)
+        sp._closed = False
+        prior_state = sp._last_state = {"prior": True}
+        sp._process = mock.Mock(**{"is_alive.return_value": True})
+        sp._prefetch = mock.Mock(**{"get.return_value": _StopSentinel()})
+        sp._main_conn = mock.Mock()
+        sp._main_conn.poll.side_effect = [False, True] if drain_sentinel else [True]
+        sp._main_conn.recv.side_effect = error("child exited")
+
+        with pytest.raises(RuntimeError, match="intentional source failure"):
+            try:
+                raise RuntimeError("intentional source failure")
+            finally:
+                sp.capture_final_state(timeout=0.5, local=True)
+
+        assert sp._last_state is prior_state
 
     def test_feeder_error_warns_and_preserves_state(self) -> None:
         ctx = multiprocessing.get_context("spawn")
