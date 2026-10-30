@@ -1564,10 +1564,12 @@ def test_process_runner_reports_spawn_config_unpickle_failure(
         stage_output_mode="stream_items",
     )
     try:
-        with pytest.raises(RuntimeError, match="exited with code 1.*unpickle"):
+        with pytest.raises(WorkerCrashed) as excinfo:
             list(runner.run(_mk_records([1])))
     finally:
         runner.close(hard=True)
+    assert excinfo.value.info.exc_type == "WorkerExited"
+    assert "exited with code 1" in excinfo.value.info.message
 
 
 class TestResilientWorkers:
