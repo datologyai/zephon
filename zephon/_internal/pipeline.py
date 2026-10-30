@@ -7,11 +7,13 @@ import functools
 import importlib.util as _importlib_util
 import os
 import warnings
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Generator,
     Iterator,
     Literal,
     Optional,
@@ -203,6 +205,8 @@ class Pipeline:
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._iterating: bool = False
+        # Track iterator wrappers (including MTP) without keeping them alive.
+        self._iterators: weakref.WeakSet[Generator[Any, None, None]] = weakref.WeakSet()
         self._validated: bool = False
         self._options = RuntimeOptions()
         self._fetch_node: Node[FetchOp] = self._graph.add(
@@ -1814,9 +1818,30 @@ class Pipeline:
         # after the first next().
         self._run_auto_validation()
         self._prime_worksource()
-        return self._iter_body()
+        iterator = self._iter_body()
+        self._iterators.add(iterator)
+        return iterator
 
-    def _iter_body(self) -> Iterator[Any]:
+    def close(self) -> None:
+        """Close iterators and runtimes without checkpointing; safe to repeat.
+
+        Call between iteration steps from the owning thread.
+        MTP shutdown skips automatic checkpoint capture.
+        Save checkpoints explicitly before closing and restore one before resuming.
+        """
+        error: BaseException | None = None
+        # Stop MTP before unwinding iterators to skip automatic checkpoint capture.
+        for resource in [self._sp, *self._iterators, self._engine]:
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+        if error is not None:
+            raise error
+
+    def _iter_body(self) -> Generator[Any, None, None]:
         try:
             self._iterating = True
             if self._options.mtp_mode:
@@ -2161,6 +2186,7 @@ class Pipeline:
         d["_runtime_spec"] = None
         d["_sp"] = None
         d["_iterating"] = False
+        d.pop("_iterators", None)
         d["_last_state"] = None
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
@@ -2179,6 +2205,7 @@ class Pipeline:
           `pipeline.restore(...)` *inside the worker* (e.g., in `__iter__`), not here.
         """
         self.__dict__.update(state)
+        self._iterators = weakref.WeakSet()
         # _engine, _plan, _runtime_spec, _sp are already None in the
         # pickled state (set by __getstate__).  _pending_restore is kept.
 
