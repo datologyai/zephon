@@ -106,7 +106,9 @@ _HANDLERS: dict[type, _Handler] = {
 def _struct_field_names(cls: type) -> tuple[str, ...] | None:
     """Return field names for dataclass/pydantic/attrs classes, else ``None``."""
     if dataclasses.is_dataclass(cls):
-        return tuple(f.name for f in dataclasses.fields(cls))
+        # Match SHM transport (``shm_coalesce._struct_info``), which ships only
+        # init fields, so lazy and eager sizing agree.
+        return tuple(f.name for f in dataclasses.fields(cls) if f.init)
     if hasattr(cls, "model_fields") and hasattr(cls, "model_construct"):
         return tuple(cls.model_fields.keys())  # pydantic
     if hasattr(cls, "__attrs_attrs__"):

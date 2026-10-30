@@ -1317,6 +1317,20 @@ class TestShmLazyPayload:
         assert sizes == [content_bytes(r.payload) for r in restored]
         assert sizes[0] == 64 * 4 + 10 * 2 + 300 * 8 + 5000 + 6 + 8
 
+    def test_payload_nbytes_skips_init_false_dataclass_fields(self) -> None:
+        """init=False fields are not transported, so neither path counts them."""
+        from zephon._internal.observability.size_estimator import content_bytes
+
+        payloads = [
+            {"item": DCWithPostInit(torch.ones(4, dtype=torch.float32) + i, "ab")}
+            for i in range(2)
+        ]
+        expected = 4 * 4 + 2  # values + tag; description is init=False
+        assert content_bytes(payloads[0]) == expected
+        restored = _round_trip(_prepare(*payloads))
+        assert all(isinstance(r.payload, LazyPayload) for r in restored)
+        assert [r.payload.payload_nbytes() for r in restored] == [expected] * 2
+
     def test_unpickle_produces_lazy_payload(self) -> None:
         """Unpickled records have ShmLazyPayload on .payload, meta is accessible."""
         records = [
