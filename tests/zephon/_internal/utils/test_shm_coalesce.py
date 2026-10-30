@@ -9,6 +9,7 @@ from io import BytesIO
 from multiprocessing.reduction import ForkingPickler
 from typing import Any
 
+import numpy as np
 import pytest
 
 from zephon._internal.ops.decode_text import DecodeText
@@ -1288,6 +1289,48 @@ class TestRootLeafPayload:
 
 
 class TestShmLazyPayload:
+    @pytest.mark.parametrize("policy", [_policy(0), _policy(1 << 30)])
+    def test_payload_nbytes_matches_resolved_content_bytes(
+        self, policy: PayloadMemoryPolicy
+    ) -> None:
+        """Lazy sizing agrees with sizing the materialized payload."""
+        from zephon._internal.observability.size_estimator import content_bytes
+
+        payloads: list[Any] = [
+            {
+                "t": torch.arange(64, dtype=torch.float32),
+                "a": np.arange(10, dtype=np.int16).reshape(2, 5),
+                "ids": list(range(300)),
+                "blob": b"x" * 5000,
+                "text": "héllo",
+                "n": 3,
+                "none": None,
+            },
+            torch.ones(3, 3),
+            b"y" * 7000,
+            np.zeros(0, dtype=np.float64),
+        ]
+        restored = _round_trip(_prepare(*payloads, policy=policy))
+        assert isinstance(restored[0].payload, LazyPayload)
+        sizes = [content_bytes(r) for r in restored]
+        resolve_lazy_payloads(restored)
+        assert sizes == [content_bytes(r.payload) for r in restored]
+        assert sizes[0] == 64 * 4 + 10 * 2 + 300 * 8 + 5000 + 6 + 8
+
+    def test_payload_nbytes_skips_init_false_dataclass_fields(self) -> None:
+        """init=False fields are not transported, so neither path counts them."""
+        from zephon._internal.observability.size_estimator import content_bytes
+
+        payloads = [
+            {"item": DCWithPostInit(torch.ones(4, dtype=torch.float32) + i, "ab")}
+            for i in range(2)
+        ]
+        expected = 4 * 4 + 2  # values + tag; description is init=False
+        assert content_bytes(payloads[0]) == expected
+        restored = _round_trip(_prepare(*payloads))
+        assert all(isinstance(r.payload, LazyPayload) for r in restored)
+        assert [r.payload.payload_nbytes() for r in restored] == [expected] * 2
+
     def test_unpickle_produces_lazy_payload(self) -> None:
         """Unpickled records have ShmLazyPayload on .payload, meta is accessible."""
         records = [
