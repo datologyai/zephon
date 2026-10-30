@@ -7,8 +7,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from multiprocessing.connection import wait
 from multiprocessing.reduction import ForkingPickler
@@ -634,6 +637,35 @@ def test_process_runner_partial_iteration_shutdown_no_underflow() -> None:
 
     # Shutdown - should NOT raise "Inflight counter underflowed"
     runner.close()
+
+
+@pytest.mark.timeout(10)
+def test_close_waits_for_worker_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Close waits for worker cleanup already running on another thread."""
+    stage = Stage(name="s", nodes=[], placement="auto", break_reason="test")
+    runner = ProcessStageRunner(stage, _ctx_services(), max_workers=1)
+    cleanup_started = threading.Event()
+    resume_cleanup = threading.Event()
+    original_close = runner._close_ipc_queue
+
+    def close_queue(q: Any, *, hard: bool = False) -> None:
+        if q is runner._service_queue:
+            cleanup_started.set()
+            assert resume_cleanup.wait(5)
+        original_close(q, hard=hard)
+
+    monkeypatch.setattr(runner, "_close_ipc_queue", close_queue)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        shutdown = executor.submit(runner._shutdown_workers)
+        try:
+            assert cleanup_started.wait(5)
+            closing = executor.submit(runner.close)
+            with pytest.raises(FutureTimeoutError):
+                closing.result(timeout=0.1)
+        finally:
+            resume_cleanup.set()
+        shutdown.result(timeout=5)
+        closing.result(timeout=5)
 
 
 def test_process_runner_close_hard() -> None:
