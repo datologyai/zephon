@@ -142,7 +142,13 @@ def _field_label(path: tuple[str, ...] | None) -> str:
 
 def _count_raw_tokens(tokenizer: Any, text: str, spec: "TextTokenCountingSpec") -> int:
     add_specials = spec.special_tokens == "tokenizer_default"
-    result = tokenizer(text, add_special_tokens=add_specials)
+    kwargs: dict[str, Any] = {"add_special_tokens": add_specials}
+    if add_specials and spec.truncation:
+        # Let the engine apply its own implicit model limit and postprocessor.
+        kwargs["truncation"] = True
+        if spec.max_length is not None:
+            kwargs["max_length"] = spec.max_length
+    result = tokenizer(text, **kwargs)
     input_ids = result["input_ids"] if isinstance(result, Mapping) else result.input_ids
     return len(input_ids)
 
@@ -267,8 +273,7 @@ class TextTokenCountingSpec(TokenCountingSpec):
         tokenizer-added special tokens.
         """
         if self.special_tokens == "tokenizer_default":
-            if self.truncation and self.max_length is not None:
-                return min(raw_tokens, self.max_length)
+            # The engine already applied truncation and its postprocessor.
             return raw_tokens
 
         specials = self.num_specials
