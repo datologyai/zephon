@@ -88,7 +88,7 @@ def _key_lock(key: tuple[str | bool | None, ...]) -> threading.Lock:
 def _skip_xet_lookups(directory: str, exc: Exception) -> None:
     _xet_lookup_retry_at[directory] = time.monotonic() + _XET_LOOKUP_RETRY_SECONDS
     logger.warning(
-        "hf:// Xet download failed for %s; using http_get for this directory "
+        "hf:// Xet lookup or token request failed for %s; using http_get for this directory "
         "for %.0f s: %s",
         directory,
         _XET_LOOKUP_RETRY_SECONDS,
@@ -102,8 +102,8 @@ def _xet_downloads_supported() -> bool:
 
     huggingface_hub 2.1 added that path; before it, ``get_file`` calls
     ``http_get`` without resume, so the older path here is better. 2.2 is
-    required because concurrent ``get_file`` calls on 2.1 can still reach
-    ``http_get``.
+    required because concurrent ``get_file`` calls on 2.1 can read ``hf_xet``
+    as not installed, and then use ``http_get``.
     """
     try:
         import huggingface_hub
@@ -653,8 +653,8 @@ class HFBackend(OpenViaDownloadMixin):
     def _download_xet(self, rpath: str, size: int, src: str, dst: str) -> bool:
         """Download a Xet-backed file with ``hf_xet``.
 
-        Returns ``False`` if the Hub rate-limited the request, so that
-        ``download`` falls back to ``http_get``.
+        Returns ``False`` if the Hub rate-limited the request or ``get_file``
+        refused the path, so that ``download`` falls back to ``http_get``.
 
         An interrupted download restarts: a partial ``hf_xet`` file has no
         hash to check it against. As with the ``http_get`` path, concurrent
@@ -675,6 +675,9 @@ class HFBackend(OpenViaDownloadMixin):
                 )
             os.replace(incomplete, dst)
             return True
+        except ValueError:
+            # get_file rejects local-looking paths such as ``a:b.parquet``.
+            return False
         except HfHubHTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status == 429:

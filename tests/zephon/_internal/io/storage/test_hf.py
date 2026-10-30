@@ -786,6 +786,21 @@ class TestXetDownload:
             self._download(fs, tmp_path / "second.parquet")
         assert fs.fetched == [self._RPATH]
 
+    def test_path_refused_by_get_file_falls_back_to_http_get(
+        self, http: _FakeHTTP, tmp_path: Path
+    ) -> None:
+        url = f"{_RESOLVE}/{SOURCE}/data/a.parquet"
+        http.on("HEAD", url, _Resp(302, headers={"X-Linked-Size": "11"}, redirect=True))
+
+        def fake_http_get(url: str, temp_file: Any, **kwargs: Any) -> None:
+            temp_file.write(b"hello world")
+
+        fs = _FakeHfFileSystem(payload=b"", error=ValueError("unsafe path"))
+        dst = tmp_path / "out.parquet"
+        with patch("huggingface_hub.file_download.http_get", side_effect=fake_http_get):
+            self._download(fs, dst)
+        assert dst.read_bytes() == b"hello world"
+
     def test_failed_lookup_is_remembered_and_logged(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -801,7 +816,7 @@ class TestXetDownload:
             assert backend._xet_file(parts, "data%2Fb.parquet") is None
         assert info.call_count == 1
         assert [r.levelno for r in caplog.records] == [logging.WARNING]
-        assert "Xet download failed" in caplog.text
+        assert "Xet lookup or token request failed" in caplog.text
 
         # Another directory is unaffected, and this one recovers after the wait.
         assert backend._xet_file(parts, "other%2Fa.parquet") is None
