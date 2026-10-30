@@ -85,6 +85,17 @@ def _key_lock(key: tuple[str | bool | None, ...]) -> threading.Lock:
         return _key_locks.setdefault(tuple(str(part) for part in key), threading.Lock())
 
 
+def _skip_xet_lookups(directory: str, exc: Exception) -> None:
+    _xet_lookup_retry_at[directory] = time.monotonic() + _XET_LOOKUP_RETRY_SECONDS
+    logger.warning(
+        "hf:// Xet download failed for %s; using http_get for this directory "
+        "for %.0f s: %s",
+        directory,
+        _XET_LOOKUP_RETRY_SECONDS,
+        exc,
+    )
+
+
 @functools.cache
 def _xet_downloads_supported() -> bool:
     """Whether ``HfFileSystem.get_file`` downloads Xet files with ``hf_xet``.
@@ -539,8 +550,7 @@ class HFBackend(OpenViaDownloadMixin):
 
         parts, name, url = self._resolve_file(src)
         xet_file = self._xet_file(parts, name)
-        if xet_file is not None:
-            self._download_xet(*xet_file, src, dst)
+        if xet_file is not None and self._download_xet(*xet_file, src, dst):
             return
 
         expected_size = self._size(parts, name, url)
@@ -622,16 +632,7 @@ class HFBackend(OpenViaDownloadMixin):
             except FileNotFoundError:
                 return None
             except Exception as exc:
-                _xet_lookup_retry_at[directory] = (
-                    time.monotonic() + _XET_LOOKUP_RETRY_SECONDS
-                )
-                logger.warning(
-                    "hf:// Xet lookup failed for %s; using http_get for this "
-                    "directory for %.0f s: %s",
-                    directory,
-                    _XET_LOOKUP_RETRY_SECONDS,
-                    exc,
-                )
+                _skip_xet_lookups(directory, exc)
                 return None
         size = info.get("size")
         if not info.get("xet_hash") or not isinstance(size, int):
@@ -649,8 +650,11 @@ class HFBackend(OpenViaDownloadMixin):
                 fs = _hffs[token] = HfFileSystem(token=token)
         return fs
 
-    def _download_xet(self, rpath: str, size: int, src: str, dst: str) -> None:
+    def _download_xet(self, rpath: str, size: int, src: str, dst: str) -> bool:
         """Download a Xet-backed file with ``hf_xet``.
+
+        Returns ``False`` if the Hub rate-limited the request, so that
+        ``download`` falls back to ``http_get``.
 
         An interrupted download restarts: a partial ``hf_xet`` file has no
         hash to check it against. As with the ``http_get`` path, concurrent
@@ -670,8 +674,12 @@ class HFBackend(OpenViaDownloadMixin):
                     f"hf:// download of {src} wrote {got} bytes, expected {size}"
                 )
             os.replace(incomplete, dst)
+            return True
         except HfHubHTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429:
+                _skip_xet_lookups(posixpath.dirname(rpath), exc)
+                return False
             if status == 404:
                 raise FileNotFoundError(f"No such hf:// file: {src}") from exc
             if status in (401, 403):

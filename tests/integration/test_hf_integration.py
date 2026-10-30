@@ -14,6 +14,7 @@ both sources: its uploaded files by default and its conversion via ``~parquet``.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -71,8 +72,13 @@ def test_dataset_from_path_pins_squad_uploads() -> None:
     assert ds.total() > 0
 
 
-def test_download_squad_shard(tmp_path: Path) -> None:
-    """``HFBackend.download`` writes a real shard to disk on either path."""
+def test_download_squad_shard_via_http_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``HFBackend.download`` streams a real shard to disk via ``http_get``."""
+    monkeypatch.setattr(
+        "zephon._internal.io.storage.hf._xet_downloads_supported", lambda: False
+    )
     backend = HFBackend()
     root = backend.canonical_root(_SQUAD_TRAIN_URI)
     names = backend.listdir(root)
@@ -92,6 +98,8 @@ def test_download_squad_shard_uses_xet_when_supported(
     """On a supported hub, ``download`` fetches a Xet-backed shard with ``hf_xet``."""
     if not _xet_downloads_supported():
         pytest.skip("needs huggingface_hub >= 2.2 and hf_xet")
+    from huggingface_hub import hf_file_system
+
     backend = HFBackend()
     root = backend.canonical_root(_SQUAD_TRAIN_URI)
     src = f"{root}/{backend.listdir(root)[0]}"
@@ -103,8 +111,12 @@ def test_download_squad_shard_uses_xet_when_supported(
     monkeypatch.setattr("huggingface_hub.file_download.http_get", no_http_get)
     monkeypatch.setattr("huggingface_hub.hf_file_system.http_get", no_http_get)
     dst = tmp_path / "shard.parquet"
-    backend.download(src, str(dst))
+    with patch(
+        "huggingface_hub.hf_file_system.xet_get", wraps=hf_file_system.xet_get
+    ) as xet_get:
+        backend.download(src, str(dst))
 
+    assert xet_get.call_count == 1
     assert dst.stat().st_size == backend.stat(src)["size"]
 
 
