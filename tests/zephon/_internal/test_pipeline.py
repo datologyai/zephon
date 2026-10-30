@@ -1,10 +1,12 @@
 """Unit tests for pipeline options and output notification."""
 
+import gc
 import multiprocessing
 import pickle
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Any
 from unittest.mock import Mock, patch
+from weakref import ref
 
 import pytest
 
@@ -42,6 +44,68 @@ def test_invalid_checkpoint_bytes_do_not_start_a_runtime() -> None:
         decode.assert_called_once_with(b"invalid")
     assert pipe._engine is None
     assert pipe._pending_restore is None
+
+
+def test_close_unstarted_iterator_preserves_pending_restore() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    checkpoint = {"pending": "restore"}
+    pipe._pending_restore = checkpoint
+
+    iterators = [iter(pipe), iter(pipe)]
+    pipe.close()
+    pipe.close()
+    assert pipe._engine is None
+    assert pipe._pending_restore is checkpoint
+    for iterator in iterators:
+        with pytest.raises(StopIteration):
+            next(iterator)
+    restored = pickle.loads(pickle.dumps(pipe))
+    assert not restored._iterators
+    assert restored._pending_restore == checkpoint
+
+
+def test_iterator_tracking_does_not_keep_an_unstarted_iterator_alive() -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    iterator = iter(pipe)
+    reference = ref(iterator)
+    assert len(pipe._iterators) == 1
+    del iterator
+    gc.collect()
+    assert reference() is None
+    assert not pipe._iterators
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("failing_resource", ["mtp", "iterator"])
+def test_close_attempts_all_cleanup_before_reraising(
+    error_type: type[BaseException], failing_resource: str
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    engine = Mock()
+    pipe._engine = engine
+    subprocess_runtime = Mock()
+    pipe._sp = subprocess_runtime
+    if failing_resource == "mtp":
+        subprocess_runtime.close.side_effect = error_type("mtp cleanup failed")
+    closed: list[int] = []
+
+    def paused(index: int) -> Generator[None, None, None]:
+        try:
+            yield
+        finally:
+            closed.append(index)
+            if failing_resource == "iterator":
+                raise error_type("iterator cleanup failed")
+
+    iterators = [paused(index) for index in range(2)]
+    for iterator in iterators:
+        next(iterator)
+        pipe._iterators.add(iterator)
+    with pytest.raises(error_type, match=f"{failing_resource} cleanup failed"):
+        pipe.close()
+    assert sorted(closed) == [0, 1]
+    subprocess_runtime.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
 
 
 def test_removed_payload_memory_options_fail_before_updating_pipeline() -> None:
@@ -342,7 +406,28 @@ def test_mtp_without_final_snapshot_requires_checkpoint_before_exhaustion(
     assert pipe.checkpoint() == {"live": True}
     assert list(iterator) == []
     child.checkpoint.assert_called_once_with()
-    with pytest.raises(RuntimeError, match="checkpoint.*before exhaustion"):
+    with pytest.raises(RuntimeError, match="checkpoint.*before closing or exhausting"):
+        pipe.checkpoint()
+    assert pipe._engine is None
+
+
+def test_checkpoint_after_failed_mtp_capture_does_not_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(mtp_mode=True)
+    child = Mock(_closed=False, _last_state=None, _last_state_is_local=False)
+    child.__iter__ = Mock(return_value=iter([1, 2]))
+    monkeypatch.setattr("zephon._internal.mtp.MTPPipeline", Mock(return_value=child))
+    monkeypatch.setattr(
+        pipe, "_ensure", Mock(side_effect=AssertionError("fresh engine"))
+    )
+
+    iterator = iter(pipe)
+    assert next(iterator) == 1
+    pipe.close()
+    child.capture_final_state.assert_called_once_with(local=True)
+    with pytest.raises(RuntimeError, match="without a saved checkpoint"):
         pipe.checkpoint()
     assert pipe._engine is None
 
@@ -352,7 +437,7 @@ def test_inline_checkpoint_after_exhaustion_ignores_mtp_auto_checkpoint(
 ) -> None:
     pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
     pipe.options(mtp_auto_checkpoint=False)
-    pipe._mtp_completed = True
+    pipe._mtp_started = True
     engine = pipe._engine = Mock()
     engine.state_dict.return_value = {"final": True}
     monkeypatch.setattr(

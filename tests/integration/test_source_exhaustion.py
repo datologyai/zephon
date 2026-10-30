@@ -95,7 +95,7 @@ def test_mtp_exhaustion_allows_explicit_checkpoint_resume(
             ready.abort()
             raise
         finally:
-            iterator.close()
+            pipe.close()
         # Each rank contributes cached progress after closing its iterator.
         checkpoint = pipe.checkpoint()
         restored = build(rank)

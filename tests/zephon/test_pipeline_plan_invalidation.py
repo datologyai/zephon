@@ -133,6 +133,8 @@ def test_all_graph_mutating_methods_invalidate_plan() -> None:
             "preflight_tokenizers",
             "inflight_summary",
             "mtp_queue_stats",
+            # Runtime cleanup leaves the graph and compiled plan intact.
+            "close",
             # Adapters — return a wrapper object, do not mutate the graph
             "to_torch_dataset",
             "to_indexable_torch_dataset",
