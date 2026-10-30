@@ -322,3 +322,44 @@ def test_pickling_discards_final_mtp_coordinator() -> None:
     pipe._final_mtp_coordinator = Mock()
     restored = pickle.loads(pickle.dumps(pipe))
     assert restored._final_mtp_coordinator is None
+
+
+def test_mtp_without_final_snapshot_requires_checkpoint_before_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(mtp_auto_checkpoint=False)
+    child = Mock(_closed=False)
+    child.__iter__ = Mock(return_value=iter([1]))
+    child.checkpoint.return_value = {"live": True}
+    monkeypatch.setattr("zephon._internal.mtp.MTPPipeline", Mock(return_value=child))
+    monkeypatch.setattr(
+        pipe, "_ensure", Mock(side_effect=AssertionError("fresh engine"))
+    )
+
+    iterator = pipe._iter_mtp()
+    assert next(iterator) == 1
+    assert pipe.checkpoint() == {"live": True}
+    assert list(iterator) == []
+    child.checkpoint.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="checkpoint.*before exhaustion"):
+        pipe.checkpoint()
+    assert pipe._engine is None
+
+
+def test_inline_checkpoint_after_exhaustion_ignores_mtp_auto_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe.options(mtp_auto_checkpoint=False)
+    pipe._mtp_completed = True
+    engine = pipe._engine = Mock()
+    engine.state_dict.return_value = {"final": True}
+    monkeypatch.setattr(
+        pipe, "_build_raw_iter", Mock(return_value=(engine, iter(()), True))
+    )
+    monkeypatch.setattr(pipe, "_yield_while_notifying", Mock(return_value=iter([1])))
+
+    assert list(pipe._iter_inline()) == [1]
+    assert pipe.checkpoint() == {"final": True}
+    engine.close.assert_called_once_with()

@@ -210,6 +210,7 @@ class Pipeline:
         self._last_state: dict[str, Any] | None = None
         self._last_local_state: dict[str, Any] | None = None
         self._final_mtp_coordinator: CheckpointCoordinator | None = None
+        self._mtp_completed = False
         self._iterating: bool = False
         self._validated: bool = False
         self._options = RuntimeOptions()
@@ -1882,6 +1883,7 @@ class Pipeline:
             self._pending_restore = None
             self._last_local_state = None
             self._final_mtp_coordinator = None
+            self._mtp_completed = False
             engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
             try:
                 yield from self._yield_while_notifying(iterator)
@@ -1897,6 +1899,7 @@ class Pipeline:
         self._last_state = None
         self._last_local_state = None
         self._final_mtp_coordinator = None
+        self._mtp_completed = False
         # The child owns stream progress; release any checkpoint-only parent engine.
         if self._engine is not None:
             self._engine.close()
@@ -1911,16 +1914,15 @@ class Pipeline:
         )
         self._sp = sp
         self._pending_restore = None
-        _completed = False
         try:
             yield from sp
-            _completed = True
+            self._mtp_completed = True
         finally:
             # Inner try/finally ensures sp.close() always runs even if
             # the checkpoint attempt raises (timeout, dead child, etc.).
             try:
                 if not sp._closed:
-                    if _completed:
+                    if self._mtp_completed:
                         # Normal completion: subprocess is in _wait_for_shutdown
                         # and can always handle LOCAL_CHECKPOINT.
                         if self._options.mtp_auto_checkpoint:
@@ -2105,6 +2107,11 @@ class Pipeline:
             return dict(self._pending_restore)
         if self._last_local_state is not None:
             return self._aggregate_final_mtp_state()
+        if self._mtp_completed:
+            raise RuntimeError(
+                "MTP iteration completed without a final snapshot. "
+                + "Set mtp_auto_checkpoint=True or call checkpoint() before exhaustion."
+            )
         # Inline engine (live or closed) — state_dict() works either way.
         # Checked before _last_state so a subsequent inline iteration
         # takes precedence over a stale cached subprocess checkpoint.
@@ -2245,6 +2252,7 @@ class Pipeline:
         d["_last_state"] = None
         d["_last_local_state"] = None
         d["_final_mtp_coordinator"] = None
+        d["_mtp_completed"] = False
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
         # lose the stashed checkpoint.

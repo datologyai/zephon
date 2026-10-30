@@ -146,8 +146,8 @@ class RuntimeOptions:
     # prefetches from the MTP data queue, hiding IPC recv + unpickle from
     # next().  None = auto (max(4, mtp_buffer // 10)); 0 disables the thread.
     mtp_prefetch: int | None = None
-    # Cache this rank's acknowledged progress after normal MTP completion.
-    # False skips this final snapshot.
+    # Cache acknowledged progress after normal MTP exhaustion. With False,
+    # checkpoint() must run before exhaustion. Ignored outside MTP mode.
     mtp_auto_checkpoint: bool = True
 
     # === Global Coordination ===
