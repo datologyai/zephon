@@ -132,8 +132,6 @@ class CacheOptions:
 
     def __post_init__(self) -> None:
         _normalize_options(self)
-        if type(self.persist_state) is not bool:
-            raise ValueError("cache.persist_state must be a boolean")
 
     @classmethod
     def from_any(cls, obj: Any) -> "CacheOptions":

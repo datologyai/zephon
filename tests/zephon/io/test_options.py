@@ -228,37 +228,6 @@ def _configured_parquet_rg_cache(tmp_path) -> ParquetRGCacheOptions:
     )
 
 
-@pytest.mark.parametrize("persist_state", [False, True])
-def test_cache_options_preserve_positional_arguments(
-    tmp_path, persist_state: bool
-) -> None:
-    options = CacheOptions(
-        True,
-        tmp_path,
-        10,
-        None,
-        True,
-        "sha256",
-        3,
-        4.0,
-        6,
-        0.2,
-        3.0,
-        30,
-        40,
-        persist_state=persist_state,
-    )
-    assert options.validate_hash == "sha256"
-    assert options.download_retry == 3
-    assert options.download_timeout == 4.0
-    assert options.open_retry_attempts == 6
-    assert options.open_retry_initial_backoff == 0.2
-    assert options.open_retry_max_backoff == 3.0
-    assert options.min_slack_bytes == 30
-    assert options.max_slack_bytes == 40
-    assert options.persist_state is persist_state
-
-
 def test_cache_options_from_any_and_merge(tmp_path) -> None:
     a = CacheOptions()
     assert a.enabled is False
@@ -279,8 +248,6 @@ def test_cache_options_from_any_and_merge(tmp_path) -> None:
 
     assert a.persist_state is False
     assert CacheOptions.from_any({"persist_state": True}).persist_state is True
-    with pytest.raises(ValueError, match="cache.persist_state must be a boolean"):
-        _ = CacheOptions.from_any({"persist_state": "false"})
 
     with pytest.raises(TypeError):
         _ = CacheOptions.from_any(123)

@@ -910,6 +910,18 @@ class CacheManager(ShardResolver):
             if not has_raw:
                 continue
             size = raw_bytes.get(idx, 0)
+            locator = self._catalog_set.locator_at(idx)
+            if size != locator.raw.bytes or (
+                self._keep_zip
+                and zip_present.get(idx, False)
+                and locator.zip is not None
+                and zip_bytes[idx] != locator.zip.bytes
+            ):
+                dataset_root = self._root / locator.dataset
+                (dataset_root / locator.raw.basename).unlink(missing_ok=True)
+                if locator.zip is not None:
+                    (dataset_root / locator.zip.basename).unlink(missing_ok=True)
+                continue
             if zip_present.get(idx, False):
                 if self._keep_zip:
                     size += zip_bytes.get(idx, 0)

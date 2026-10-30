@@ -1005,6 +1005,49 @@ def test_reconciliation_ignores_tmp_part_and_lock_files(tmp_path: Path) -> None:
         mgr2.close()
 
 
+@pytest.mark.parametrize("damaged", ["raw", "zip"])
+def test_reconciliation_redownloads_truncated_shards(
+    tmp_path: Path, damaged: str
+) -> None:
+    import gzip
+
+    remote = tmp_path / "remote"
+    cache_root = tmp_path / "cache"
+    payload = b"recover this shard" * 16
+    compressed = gzip.compress(payload)
+    _make_file(remote / "data.gz", compressed)
+    locator = _locator(
+        "demo",
+        0,
+        str(remote),
+        raw_name="data",
+        raw_bytes=len(payload),
+        zip_name="data.gz",
+        zip_bytes=len(compressed),
+        compression="gzip",
+    )
+    storage = LocalFSBackend(root=remote)
+    first = _make_manager(
+        cache_root, storage, [locator], persist_state=True, keep_zip=True
+    )
+    first.resolve(locator)
+    first.close()
+    (cache_root / "demo" / ("data" if damaged == "raw" else "data.gz")).write_bytes(
+        b"bad"
+    )
+    resumed = _make_manager(
+        cache_root, storage, [locator], persist_state=True, keep_zip=True
+    )
+    try:
+        ref = resumed.resolve(locator)
+        assert ref.cache_hit is False
+        assert ref.raw.path.read_bytes() == payload
+        assert ref.zip is not None and ref.zip.path.read_bytes() == compressed
+        assert resumed.stats().bytes_used == len(payload) + len(compressed)
+    finally:
+        resumed.close()
+
+
 def test_reconciliation_zip_only_is_not_local(tmp_path: Path) -> None:
     """A dataset dir containing only the zip file for a shard stays REMOTE."""
     import gzip
