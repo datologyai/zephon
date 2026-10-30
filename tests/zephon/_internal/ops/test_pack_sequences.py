@@ -1251,6 +1251,25 @@ def test_flat_wrap_split_record_positions_reset_per_bin() -> None:
         )
 
 
+def test_flat_positions_stay_int32_until_training() -> None:
+    import numpy as np
+
+    torch = pytest.importorskip("torch")
+    acc = _flat(4, algorithm="wrap")
+    records = _records(
+        acc.push_many([_rec_tokens(0, list(range(6))), _rec_tokens(1, [7, 8])])
+    )
+    assert [record.payload["positions"].dtype for record in records] == [
+        np.int32,
+        np.int32,
+    ]
+    fields = SampleBatch(records=records).to_training(return_labels=True)
+    assert fields["positions"].dtype == torch.long
+    assert fields["positions"].tolist() == [[0, 1, 2], [0, 1, 0]]
+    assert fields["input_ids"].tolist() == [[0, 1, 2], [4, 5, 7]]
+    assert fields["labels"].tolist() == [[1, 2, 3], [5, 7, 8]]
+
+
 @pytest.mark.parametrize("algorithm", ["first_fit", "best_fit"])
 def test_flat_requires_pad_token_id(algorithm: str) -> None:
     with pytest.raises(ValueError, match="pad_token_id is required"):

@@ -8,8 +8,26 @@ Packing helpers preserve the input container, or fill an allocated output buffer
 Optional dependencies are lazily imported.
 """
 
+import sys
 from collections.abc import Sequence
+from functools import cache
 from typing import Any
+
+
+@cache
+def _torch_numpy_integer_dtypes() -> dict[Any, Any]:
+    """Cache integer dtype equivalents without eagerly importing either backend."""
+    import numpy as np
+    import torch
+
+    return {
+        torch.bool: np.bool_,
+        torch.uint8: np.uint8,
+        torch.int8: np.int8,
+        torch.int16: np.int16,
+        torch.int32: np.int32,
+        torch.int64: np.int64,
+    }
 
 
 def resolve_dtype(dtype: Any) -> tuple[Any, str | None]:
@@ -141,15 +159,38 @@ def stack_sequences(
         if sequences and "numpy" in type(sequences[0]).__module__:
             import numpy as np
 
+            numpy_dtype = _torch_numpy_integer_dtypes().get(dtype)
+            # Fuse integer widening into the batch allocation. Matching dtypes
+            # need no cast; floating-point casts can be slower in NumPy even
+            # when safe, so retain Torch's conversion for those.
+            if (
+                numpy_dtype is not None
+                and sequences[0].dtype != numpy_dtype
+                and all(type(seq) is np.ndarray for seq in sequences)
+                and np.can_cast(np.result_type(*sequences), numpy_dtype, casting="safe")
+            ):
+                return torch.from_numpy(np.array(sequences, dtype=numpy_dtype))
+            # Keep batch promotion and Torch's lossy-cast semantics, including
+            # when a later row has a different dtype from the first.
             return torch.from_numpy(np.array(sequences)).to(dtype=dtype)
         return torch.tensor(sequences, dtype=dtype)
     elif framework == "numpy":
         import numpy as np
 
-        # Older NumPy cannot coerce a list of array-like objects (e.g. tensors).
-        return np.array(
-            [np.asarray(seq, dtype=dtype) for seq in sequences], dtype=dtype
-        )
+        # Tensor inputs imply Torch is already loaded; NumPy-only callers must
+        # not import it. Older NumPy needs explicit views of tensor rows.
+        tensor_type = getattr(sys.modules.get("torch"), "Tensor", None)
+        rows = []
+        for seq in sequences:
+            if type(seq) is tensor_type:
+                rows.append(seq.numpy())
+            elif isinstance(seq, (list, tuple, np.ndarray)):
+                # Pass lists through so dtype inference cannot round large
+                # Python integers or stringify booleans before the final cast.
+                rows.append(seq)
+            else:
+                rows.append(np.asarray(seq, dtype=dtype))
+        return np.array(rows, dtype=dtype)
     else:
         # Return as list of lists
         return [list(seq) for seq in sequences]
