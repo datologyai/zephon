@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from zephon._internal.ops.tokenize_text import TokenizeText
-from zephon._internal.utils.torch_compat import _should_use_tensor_lock
 from zephon.ops.base import OpContext, StageInfo
 from zephon.ops.config import SpecialTokensMode
 from zephon.types import SampleMeta, SampleRecord
@@ -280,6 +279,8 @@ def test_tokenize_custom_tokenizer_and_resolved_id() -> None:
 
 
 def test_tokenize_passes_extra_hf_options() -> None:
+    torch = pytest.importorskip("torch")
+
     class CaptureTok:
         name_or_path = "cap-tokenizer"
 
@@ -314,13 +315,10 @@ def test_tokenize_passes_extra_hf_options() -> None:
     assert kwargs["padding"] is True
     assert kwargs["truncation"] is True
     assert kwargs["max_length"] == 4
-    # On free-threaded Python with PyTorch < 2.10, we request numpy from the HF
-    # tokenizer and convert to pytorch ourselves under a lock to avoid an allocator
-    # race condition. The user still gets pytorch tensors, but the kwargs passed
-    # to the tokenizer have return_tensors="np" internally.
-    # See: https://github.com/pytorch/pytorch/issues/171992
-    expected_return_tensors = "np" if _should_use_tensor_lock() else "pt"
-    assert kwargs["return_tensors"] == expected_return_tensors
+    # Zephon converts each output record independently rather than asking the
+    # tokenizer to stack the batch into a rectangular tensor.
+    assert "return_tensors" not in kwargs
+    assert isinstance(_payload_dict(out[0])["input_ids"], torch.Tensor)
 
 
 def test_fallback_respects_padding_and_truncation_options() -> None:
@@ -484,6 +482,42 @@ def test_convert_tensor_does_not_copy_torch_segments() -> None:
     assert second.storage().data_ptr() == ids.storage().data_ptr()
 
 
+@pytest.mark.parametrize("backend", ["np", "pt"])
+def test_tensor_conversion_preserves_custom_tensor_batch_rows(backend: str) -> None:
+    framework = pytest.importorskip("numpy" if backend == "np" else "torch")
+    ids = framework.arange(6, dtype=framework.int32).reshape(2, 3)
+    mask = framework.ones_like(ids)
+
+    class TensorTok:
+        name_or_path = "custom-tensor-batch"
+
+        def __call__(self, texts, **kwargs):
+            return {"input_ids": ids, "attention_mask": mask}
+
+    op = _setup(
+        TokenizeText(
+            tokenizer=TensorTok(),
+            field="text",
+            special_tokens="tokenizer_default",
+            return_tensors=backend,
+        )
+    )
+    out = op.process_many([_rec("first"), _rec("second")])
+    assert len(out) == 2
+    for row, record in enumerate(out):
+        for field, original in (("input_ids", ids), ("attention_mask", mask)):
+            value = _payload_dict(record)[field]
+            assert value.tolist() == original[row].tolist()
+            assert value.dtype == framework.int32
+            if backend == "np":
+                assert framework.shares_memory(value, original)
+            else:
+                assert (
+                    value.untyped_storage().data_ptr()
+                    == original.untyped_storage().data_ptr()
+                )
+
+
 def test_split_segments_torch_backend() -> None:
     torch = pytest.importorskip("torch")
     op = _setup(
@@ -630,14 +664,13 @@ def test_calibration_replay_matches_batch_independent_tokenization(
 
 
 @pytest.mark.parametrize(
-    ("padding", "truncation", "replayable"),
-    [(False, False, False), ("max_length", False, False), ("max_length", True, True)],
+    ("padding", "truncation"),
+    [(False, False), ("max_length", False), ("max_length", True)],
 )
-def test_calibration_replay_requires_fixed_length_hf_batch_tensors(
-    padding: bool | str, truncation: bool, replayable: bool
+def test_calibration_replay_allows_ragged_tensor_rows(
+    padding: bool | str, truncation: bool
 ) -> None:
     pytest.importorskip("torch")
-    # Older NumPy versions accept ragged batches as object arrays.
     op = TokenizeText(
         tokenizer_id="__fallback__",
         field="text",
@@ -650,18 +683,14 @@ def test_calibration_replay_requires_fixed_length_hf_batch_tensors(
     op.setup(OpContext({}))
     texts = ["one", "one two three four five six"]
     individual = [r for text in texts for r in op.process_many([_rec(text)])]
-    assert op.traits().calibration_replayable is replayable
-    if replayable:
-        batched = op.process_many([_rec(t) for t in texts])
-        for together, alone in zip(batched, individual, strict=True):
-            for field in ("input_ids", "attention_mask"):
-                assert (
-                    _payload_dict(together)[field].tolist()
-                    == _payload_dict(alone)[field].tolist()
-                )
-    else:
-        with pytest.raises(ValueError):
-            op.process_many([_rec(t) for t in texts])
+    assert op.traits().calibration_replayable is True
+    batched = op.process_many([_rec(t) for t in texts])
+    for together, alone in zip(batched, individual, strict=True):
+        for field in ("input_ids", "attention_mask"):
+            assert (
+                _payload_dict(together)[field].tolist()
+                == _payload_dict(alone)[field].tolist()
+            )
 
 
 def test_tokenizer_traits_and_default_accumulator() -> None:
@@ -1614,6 +1643,38 @@ def test_bracket_with_torch_return_tensors() -> None:
     assert ids[-1].item() == _EOS
 
 
+@pytest.mark.parametrize("backend", ["np", "pt"])
+@pytest.mark.parametrize("special_tokens", ["tokenizer_default", "none", "bos_eos"])
+def test_ragged_tensor_rows_include_empty_integer_sequences(
+    backend: str, special_tokens: SpecialTokensMode
+) -> None:
+    framework = pytest.importorskip("torch" if backend == "pt" else "numpy")
+    op = _setup(
+        TokenizeText(
+            tokenizer_id="__fallback__",
+            field="text",
+            special_tokens=special_tokens,
+            return_tensors=backend,
+        )
+    )
+    records = op.process_many([_rec(""), _rec("one"), _rec("one two three")])
+    bracketed = special_tokens == "bos_eos"
+    for record, length in zip(records, [0, 1, 3], strict=True):
+        payload = _payload_dict(record)
+        ids, mask = payload["input_ids"], payload["attention_mask"]
+        expected_length = length + (2 if bracketed else 0)
+        for value in (ids, mask):
+            assert isinstance(
+                value, framework.Tensor if backend == "pt" else framework.ndarray
+            )
+            assert value.shape == (expected_length,)
+            assert value.dtype == framework.int64
+        assert mask.tolist() == [1] * expected_length
+        if bracketed:
+            assert ids.tolist()[0] == _BOS
+            assert ids.tolist()[-1] == _EOS
+
+
 def test_bracket_one_std_no_existing_mask_creates_one() -> None:
     """Direct unit test on _bracket_std: when mask is None and
     add_attention_mask=True, a mask of 1s is created at the bracketed length."""
@@ -1693,10 +1754,13 @@ def test_bracket_mode_keeps_lists_when_return_tensors_is_none() -> None:
     assert isinstance(payload["input_ids"], list)
 
 
-def test_bracket_pt_with_free_threaded_race_uses_from_numpy_under_lock() -> None:
+@pytest.mark.parametrize("special_tokens", ["tokenizer_default", "bos_eos"])
+def test_pt_with_free_threaded_race_uses_from_numpy_under_lock(
+    special_tokens: SpecialTokensMode,
+) -> None:
     """When the free-threaded-Python + old-PyTorch combination is active and
-    the user requests ``return_tensors="pt"`` in bracket mode, the operator
-    must NOT call ``torch.tensor`` directly on the bracketed lists — that
+    the user requests ``return_tensors="pt"``, the operator must NOT call
+    ``torch.tensor`` directly on the lists — that
     path allocates a torch wrapper, which races on free-threaded + old
     PyTorch. The end-of-pipeline ``_convert_tensor`` therefore detours
     through numpy (``np.asarray`` then ``torch.from_numpy`` under
@@ -1711,22 +1775,34 @@ def test_bracket_pt_with_free_threaded_race_uses_from_numpy_under_lock() -> None
         "zephon._internal.ops.tokenize_text._should_use_tensor_lock", return_value=True
     ):
         op = _setup(
-            TokenizeText(tokenizer_id="__fallback__", field="text", return_tensors="pt")
+            TokenizeText(
+                tokenizer_id="__fallback__",
+                field="text",
+                return_tensors="pt",
+                special_tokens=special_tokens,
+            )
         )
-        # Bracket mode no longer forwards return_tensors to HF.
         assert "return_tensors" not in op._cached_kwargs
-        assert op._convert_np_to_pt is False
 
         real_from_numpy = torch.from_numpy
-        with patch.object(
-            torch, "from_numpy", side_effect=real_from_numpy
-        ) as mock_from_numpy:
+        with (
+            patch.object(
+                torch, "from_numpy", side_effect=real_from_numpy
+            ) as mock_from_numpy,
+            patch.object(
+                torch,
+                "tensor",
+                side_effect=AssertionError("must convert through NumPy"),
+            ),
+        ):
             out = op.process_one(_rec("hello world"))[0]
         payload = _payload_dict(out)
         assert isinstance(payload["input_ids"], torch.Tensor)
         # Per-row conversion lifts each list via from_numpy under the lock.
         assert mock_from_numpy.call_count >= 1
-        assert payload["input_ids"][0].item() == _BOS
+        assert payload["input_ids"].dtype == torch.int64
+        if special_tokens == "bos_eos":
+            assert payload["input_ids"][0].item() == _BOS
 
 
 def test_bracket_mode_does_not_forward_return_tensors_to_hf() -> None:
