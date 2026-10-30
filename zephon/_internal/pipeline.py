@@ -25,7 +25,12 @@ from typing import (
     overload,
 )
 
-from zephon._internal.engine import Engine
+from zephon._internal.checkpoint._aggregation import (
+    aggregate_checkpoint,
+    requires_aggregation,
+)
+from zephon._internal.coordination import CheckpointCoordinator, make_coordinator
+from zephon._internal.engine import Engine, get_torch_worker_info
 from zephon._internal.functional_op import _FunctionalOp, _is_user_op
 from zephon._internal.graph import Graph, Node, Plan
 from zephon._internal.ops.batch import Batch
@@ -205,6 +210,9 @@ class Pipeline:
         self._sp: Any = None  # MTPPipeline handle (lazy import)
         self._pending_restore: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
+        self._last_local_state: dict[str, Any] | None = None
+        self._final_mtp_coordinator: CheckpointCoordinator | None = None
+        self._mtp_started = False
         self._iterating: bool = False
         # Track iterator wrappers (including MTP) without keeping them alive.
         self._iterators: weakref.WeakSet[Generator[Any, None, None]] = weakref.WeakSet()
@@ -1838,15 +1846,15 @@ class Pipeline:
         return iterator
 
     def close(self) -> None:
-        """Close iterators and runtimes without checkpointing; safe to repeat.
+        """Close iterators and runtimes; safe to repeat.
 
         Call between iteration steps from the owning thread.
-        MTP shutdown skips automatic checkpoint capture.
-        Save checkpoints explicitly before closing and restore one before resuming.
+        MTP saves acknowledged progress locally for a later checkpoint.
+        Save and restore a checkpoint before resuming a closed stream.
         """
         error: BaseException | None = None
-        # Stop MTP before unwinding iterators to skip automatic checkpoint capture.
-        for resource in [self._sp, *self._iterators, self._engine]:
+        # Iterator cleanup captures MTP progress before the child shuts down.
+        for resource in [*self._iterators, self._sp, self._engine]:
             if resource is not None:
                 try:
                     resource.close()
@@ -1912,6 +1920,9 @@ class Pipeline:
         try:
             ckpt = self._pending_restore
             self._pending_restore = None
+            self._last_local_state = None
+            self._final_mtp_coordinator = None
+            self._mtp_started = False
             engine, iterator, _ = self._build_raw_iter(restore_ckpt=ckpt)
             try:
                 yield from self._yield_while_notifying(iterator)
@@ -1925,6 +1936,13 @@ class Pipeline:
         from zephon._internal.mtp import MTPPipeline
 
         self._last_state = None
+        self._last_local_state = None
+        self._final_mtp_coordinator = None
+        self._mtp_started = False
+        # The child owns stream progress; release any checkpoint-only parent engine.
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
         sp = MTPPipeline(
             self,
             buffer_size=resolve_mtp_buffer(self._options),
@@ -1934,26 +1952,27 @@ class Pipeline:
             restore_ckpt=self._pending_restore,
         )
         self._sp = sp
+        self._mtp_started = True
         self._pending_restore = None
-        _completed = False
+        completed = False
         try:
             yield from sp
-            _completed = True
+            completed = True
         finally:
             # Inner try/finally ensures sp.close() always runs even if
             # the checkpoint attempt raises (timeout, dead child, etc.).
             try:
                 if not sp._closed:
-                    if _completed:
+                    if completed:
                         # Normal completion: subprocess is in _wait_for_shutdown
-                        # and can always handle CHECKPOINT.
+                        # and can always handle LOCAL_CHECKPOINT.
                         if self._options.mtp_auto_checkpoint:
-                            self._last_state = sp.checkpoint()
+                            self._last_local_state = sp.checkpoint(local=True)
                     else:
                         # Early break: subprocess may be blocked on data_q.put()
                         # or in next(iterator).  Best-effort capture by draining
                         # data_q (without ACKs) to unblock the put-retry loop,
-                        # which calls _drain_ctrl and sees our CHECKPOINT.
+                        # which calls _drain_ctrl and sees our LOCAL_CHECKPOINT.
                         #
                         # NOTE: This works when the subprocess is blocked on
                         # data_q.put (the common case — queue is full because
@@ -1966,8 +1985,11 @@ class Pipeline:
                         # TODO: To handle the stuck-in-next(iterator) case, we'd
                         # need a background thread in the subprocess listening on
                         # ctrl_conn, or a signal-based interrupt mechanism.
-                        sp.capture_final_state()
-                        self._last_state = sp._last_state
+                        sp.capture_final_state(local=True)
+                        if sp._last_state_is_local:
+                            self._last_local_state = sp._last_state
+                        else:
+                            self._last_state = sp._last_state
             finally:
                 sp.close()
                 self._sp = None
@@ -2124,6 +2146,8 @@ class Pipeline:
         # the pending checkpoint supersedes any stale engine / _last_state.
         if self._pending_restore is not None:
             return dict(self._pending_restore)
+        if self._last_local_state is not None:
+            return self._aggregate_final_mtp_state()
         # Inline engine (live or closed) — state_dict() works either way.
         # Checked before _last_state so a subsequent inline iteration
         # takes precedence over a stale cached subprocess checkpoint.
@@ -2132,12 +2156,62 @@ class Pipeline:
         # Cached state from a completed subprocess iteration.
         if self._last_state is not None:
             return self._last_state
+        if self._mtp_started:
+            raise RuntimeError(
+                "MTP iteration ended without a saved checkpoint. "
+                + "Call checkpoint() before closing or exhausting the iterator, "
+                + "or set mtp_auto_checkpoint=True for normal exhaustion."
+            )
         # The only engine build that bypasses __iter__: prime first, or the
         # checkpoint serializes unprimed token lanes no restore can prime.
         self._prime_worksource()
         self._ensure()
         assert self._engine is not None
         return self._engine.state_dict()
+
+    def _aggregate_final_mtp_state(self) -> dict[str, Any]:
+        """Aggregate the finished child's cached progress."""
+        assert self._last_local_state is not None
+        local = self._last_local_state
+        world = local["world"]
+        if requires_aggregation(local) and self._final_mtp_coordinator is None:
+            self._ensure_plan()
+            assert self._plan is not None
+            self._final_mtp_coordinator = make_coordinator(
+                self._options,
+                global_rank=int(world["global_rank"]),
+                world_size=int(world["world_size"]),
+                plan_id=self._plan.plan_id,
+                worker_info=get_torch_worker_info,
+            )
+        coordinator = self._final_mtp_coordinator
+        worker_id, _ = get_torch_worker_info()
+        try:
+            if coordinator is not None:
+                coordinator.last_round_id = local.get("last_round_id")
+                coordinator.reload_count = local.get("checkpoint_reload_count", 0)
+                coordinator.check_ready()
+            result = aggregate_checkpoint(
+                local,
+                coordinator,
+                worker_id=worker_id,
+                merge=Engine._merge_state_dicts,
+            )
+            if coordinator is not None:
+                # Keep closed and live ranks on the same next checkpoint round.
+                self._last_local_state = dict(
+                    local, last_round_id=coordinator.last_round_id
+                )
+            return result
+        finally:
+            if coordinator is not None:
+                try:
+                    coordinator.cleanup()
+                except Exception as exc:
+                    warnings.warn(
+                        f"[zephon] Failed to clean up checkpoint aggregation: {exc}",
+                        stacklevel=2,
+                    )
 
     def restore(self, ckpt: dict[str, Any] | bytes) -> None:
         """Validate saved progress and restore it lazily when iteration starts.
@@ -2209,6 +2283,9 @@ class Pipeline:
         d["_iterating"] = False
         d.pop("_iterators", None)
         d["_last_state"] = None
+        d["_last_local_state"] = None
+        d["_final_mtp_coordinator"] = None
+        d["_mtp_started"] = False
         # Keep _pending_restore — it's a plain dict (JSON-serializable checkpoint
         # data) that should survive pickle so restore() + pickle doesn't silently
         # lose the stashed checkpoint.

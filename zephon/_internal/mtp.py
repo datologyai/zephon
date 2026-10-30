@@ -119,6 +119,7 @@ _CHECKPOINT = 1
 _SHUTDOWN = 2
 _STATE_DICT = 3
 _CHECKPOINT_ERROR = 4
+_LOCAL_CHECKPOINT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -412,9 +413,13 @@ def _handle_ctrl_msg(
         notify = pending.pop(val, None)
         if notify is not None:
             _apply_notify_args(engine, notify)
-    elif tag == _CHECKPOINT:
+    elif tag in (_CHECKPOINT, _LOCAL_CHECKPOINT):
         try:
-            state = engine.state_dict()
+            state = (
+                engine._state_dict_local()
+                if tag == _LOCAL_CHECKPOINT
+                else engine.state_dict()
+            )
             ctrl_conn.send((_STATE_DICT, state))
         except Exception:
             # The caller is blocked in checkpoint(), not consuming data_q, so
@@ -607,6 +612,7 @@ class MTPPipeline:
         self._closed = False
         self._exhausted = False
         self._last_state: dict[str, Any] | None = None
+        self._last_state_is_local = False
 
         # All data_q reads go through the prefetcher (single reader).  With
         # capacity 0 it is a plain passthrough; otherwise a low-priority
@@ -732,17 +738,21 @@ class MTPPipeline:
             if (count := self._inflight_shm[lane]) > 0
         }
 
-    def checkpoint(self, *, timeout: float = _CHECKPOINT_TIMEOUT_S) -> dict[str, Any]:
+    def checkpoint(
+        self, *, timeout: float = _CHECKPOINT_TIMEOUT_S, local: bool = False
+    ) -> dict[str, Any]:
         """Request a checkpoint from the subprocess Engine.
 
-        Returns the ``engine.state_dict()`` from the subprocess.
+        Returns ``engine.state_dict()`` by default. ``local=True`` returns this
+        rank's acknowledged progress from ``engine._state_dict_local()``.
 
         Correctness note: ``_CHECKPOINT`` and all prior ``_ACK`` messages
         travel on the **same** ``mp.Pipe`` (FIFO).  The subprocess reads
         them sequentially in ``_drain_ctrl``, so every ACK sent before
         ``_CHECKPOINT`` is guaranteed to be applied to the engine before
         ``state_dict()`` is called — there is no ACK–CHECKPOINT ordering
-        gap despite the asynchronous production loop.
+        gap despite the asynchronous production loop. The same ordering applies
+        to ``_LOCAL_CHECKPOINT`` requests.
         """
         if self._closed:
             # Subprocess shut down — return cached state if available.
@@ -755,7 +765,7 @@ class MTPPipeline:
                 "a checkpoint is available."
             )
         try:
-            self._main_conn.send((_CHECKPOINT, None))
+            self._main_conn.send((_LOCAL_CHECKPOINT if local else _CHECKPOINT, None))
         except (BrokenPipeError, EOFError, OSError) as exc:
             exitcode = self._process.exitcode
             self.close()
@@ -781,15 +791,18 @@ class MTPPipeline:
             self.close()
             raise RuntimeError(f"Expected _STATE_DICT response, got tag={tag}")
         self._last_state = val
+        self._last_state_is_local = local
         return val
 
-    def capture_final_state(self, timeout: float = _CHECKPOINT_TIMEOUT_S) -> None:
+    def capture_final_state(
+        self, timeout: float = _CHECKPOINT_TIMEOUT_S, *, local: bool = False
+    ) -> None:
         """Best-effort capture of engine state for post-break checkpoint.
 
-        Sends CHECKPOINT, then drains ``data_q`` (through the prefetcher,
-        its sole reader) **without ACKs** to unblock the subprocess's
-        put-retry loop (which calls ``_drain_ctrl`` every 50 ms).  When
-        the subprocess sees CHECKPOINT it responds with STATE_DICT.
+        Sends CHECKPOINT (LOCAL_CHECKPOINT when ``local=True``), then drains
+        ``data_q`` through the prefetcher, its sole reader, **without ACKs** to
+        unblock the subprocess's put-retry loop (which calls ``_drain_ctrl``
+        every 50 ms). The subprocess responds with STATE_DICT.
 
         The resulting state reflects only ACK'd items — items drained
         from the queue here are discarded without ACKs, so the engine
@@ -803,7 +816,7 @@ class MTPPipeline:
         if self._closed:
             return
         try:
-            self._main_conn.send((_CHECKPOINT, None))
+            self._main_conn.send((_LOCAL_CHECKPOINT if local else _CHECKPOINT, None))
         except (BrokenPipeError, OSError):
             return
 
@@ -817,10 +830,11 @@ class MTPPipeline:
             if self._main_conn.poll(0):
                 try:
                     tag, val = self._main_conn.recv()
-                except EOFError:
+                except (EOFError, OSError):
                     return
                 if tag == _STATE_DICT:
                     self._last_state = val
+                    self._last_state_is_local = local
                 elif tag == _CHECKPOINT_ERROR:
                     warnings.warn(
                         f"[zephon] MTP mode: checkpoint failed while capturing final state:\n{val}",
@@ -840,12 +854,13 @@ class MTPPipeline:
                             tag, val = self._main_conn.recv()
                             if tag == _STATE_DICT:
                                 self._last_state = val
+                                self._last_state_is_local = local
                             elif tag == _CHECKPOINT_ERROR:
                                 warnings.warn(
                                     f"[zephon] MTP mode: checkpoint failed while capturing final state:\n{val}",
                                     stacklevel=2,
                                 )
-                        except EOFError:
+                        except (EOFError, OSError):
                             pass
                     return
             except _queue_mod.Empty:
