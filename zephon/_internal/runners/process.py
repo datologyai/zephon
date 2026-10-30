@@ -828,7 +828,8 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
         self._service_pending: dict[int, _SharedFlag] = {}
         self._next_worker_id = 0
         self._single_op_direct_ipc = len(stage.nodes) == 1
-        self._shutdown_lock = threading.Lock()
+        # Cleanup can reenter shutdown through GC callbacks.
+        self._shutdown_lock = threading.RLock()
         self._workers_shutdown = False
         # Crash-detection watchdog.  Started in _before_run, stopped in
         # _after_run / close().  Default body is diagnostic (shout on
@@ -1900,6 +1901,10 @@ class ProcessStageRunner(QueueDrainStageRunner[_ProcessOperatorState]):
                 _shutdown_debug("_shutdown_workers: already complete, skipping")
                 return
             self._workers_shutdown = True
+            # Keep concurrent close() calls waiting until cleanup finishes.
+            self._shutdown_worker_resources(hard=hard)
+
+    def _shutdown_worker_resources(self, *, hard: bool) -> None:
         _shutdown_debug(f"_shutdown_workers: starting for {len(self.ops)} ops")
         for op_idx, state in enumerate(self.ops):
             task_queue = state.task_queue
