@@ -48,8 +48,12 @@ from zephon._internal.checkpoint import (
     ENGINE_VERSION,
     EngineStateV2,
 )
+from zephon._internal.checkpoint._aggregation import (
+    aggregate_checkpoint,
+    check_mid_window_counts,
+    complete_lane_counts,
+)
 from zephon._internal.coordination import (
-    AggregationRound,
     CheckpointCoordinator,
     make_coordinator,
 )
@@ -1108,9 +1112,9 @@ class Engine:
     def _takes_part_in_rounds(self) -> bool:
         """Whether this worker's checkpoints go through the coordinator.
 
-        The engine uses this both to check coordination storage at startup and
-        in ``state_dict``. A single active worker on a single rank has nothing
-        to exchange, and idle workers don't take part either.
+        The engine checks coordination storage at startup for active owners
+        that need to exchange state. A single active worker on a single rank
+        has nothing to exchange, and idle workers don't take part either.
         """
         if not self._owned_lanes:
             # Idle workers return their local state. Ideally they would also
@@ -1646,48 +1650,6 @@ class Engine:
             key, next_idx = self._rr_ack_next[lane_id]
             self._rr_next_idx[key] = next_idx
 
-    @staticmethod
-    def _complete_lane_counts(
-        lane_emitted: dict[int, int], canonical_replicas: int
-    ) -> list[int] | None:
-        """Counts for every canonical lane, or None if any lane is unknown."""
-        counts: list[int] = []
-        for lane in range(canonical_replicas):
-            count = lane_emitted.get(lane)
-            if count is None:
-                return None
-            counts.append(count)
-        return counts
-
-    @staticmethod
-    def _check_mid_window_counts(
-        lane_emitted: dict[int, int], canonical_replicas: int
-    ) -> None:
-        """Warn loudly when per-lane delivery counts indicate a mid-window cut.
-
-        Only fires when counts are known for EVERY canonical lane (partial
-        coverage means another shard holds the rest, or the counters are
-        unknown because the run was resumed from a pre-counter checkpoint).
-        """
-        counts = Engine._complete_lane_counts(lane_emitted, canonical_replicas)
-        if counts is None:
-            return
-        lo, hi = min(counts), max(counts)
-        if lo == hi:
-            return
-        warnings.warn(
-            f"[zephon] Checkpoint taken mid-window: emitted-batch counts per "
-            f"canonical lane are unequal (range [{lo}..{hi}] across "
-            f"{canonical_replicas} lanes). Resuming this checkpoint into a "
-            f"DIFFERENT topology will permute the remainder of the current "
-            f"global window (no samples are lost or duplicated). To avoid "
-            f"this, checkpoint at window boundaries: the number of global "
-            f"batches per pooled step must be a multiple of "
-            f"canonical_replicas ({canonical_replicas}).",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-
     def _topology_differs(self, ckpt_world: dict[str, Any]) -> bool:
         """Best-effort check for a lane-ownership topology change vs *ckpt_world*.
 
@@ -1859,33 +1821,16 @@ class Engine:
             return state.to_dict()
 
     def state_dict(self) -> dict[str, Any]:
-        local = self._state_dict_local()
-        if not self._takes_part_in_rounds():
-            if self._owned_lanes:
-                # Single rank, single active worker: no merge, and this owner
-                # covers every lane, so check the window counts locally.
-                self._check_mid_window_counts(
-                    local.get("lane_emitted") or {},
-                    int(self._world.canonical_replicas),
-                )
-            return local
-
         worker_id, _ = get_torch_worker_info()
-        # Round setup
-        is_leader = self._world.global_rank == 0 and worker_id == 0
-        return self._coordinator.aggregate(
-            AggregationRound(
-                local=local,
-                is_leader=is_leader,
-                expected_ranks=frozenset(range(int(self._world.world_size))),
-                expected_lanes=frozenset(range(int(self._world.canonical_replicas))),
-            ),
+        return aggregate_checkpoint(
+            self._state_dict_local(),
+            self._coordinator,
+            worker_id=worker_id,
             merge=self._merge_state_dicts,
         )
 
-    def _dedupe_dp_group_peers(
-        self, states: list[EngineStateV2]
-    ) -> list[EngineStateV2]:
+    @staticmethod
+    def _dedupe_dp_group_peers(states: list[EngineStateV2]) -> list[EngineStateV2]:
         """Keep one rank's shards per DP group, checking its MP peers agree.
 
         Under 3D parallelism (``world_size > dp_degree``) every rank in a DP
@@ -1956,7 +1901,8 @@ class Engine:
             chosen.extend(rep[1:])
         return chosen
 
-    def _merge_state_dicts(self, states: list[dict[str, Any]]) -> dict[str, Any]:
+    @staticmethod
+    def _merge_state_dicts(states: list[dict[str, Any]]) -> dict[str, Any]:
         assert states
         # Load + migrate every shard up front. Same-DP-group peer dedupe runs
         # AFTER the cross-shard global-invariant checks below; otherwise a
@@ -2007,7 +1953,7 @@ class Engine:
         merged_last_round_id = next(iter(last_round_ids))
         merged_reload_count = next(iter(checkpoint_reload_counts))
 
-        typed = self._dedupe_dp_group_peers(typed)
+        typed = Engine._dedupe_dp_group_peers(typed)
 
         inflight, progress, lane_next, lane_ws_state = {}, {}, {}, {}
         for idx, st in enumerate(typed):
@@ -2102,7 +2048,7 @@ class Engine:
                 + "\n  - ".join(errors)
             )
 
-        self._check_mid_window_counts(lane_emitted, C)
+        check_mid_window_counts(lane_emitted, C)
 
         merged = EngineStateV2(
             version=ENGINE_VERSION,
@@ -2257,7 +2203,7 @@ class Engine:
                 self._lane_emitted[lane] = restored_emitted[lane]
 
         C = int(self._world.canonical_replicas)
-        counts = self._complete_lane_counts(restored_emitted, C)
+        counts = complete_lane_counts(restored_emitted, C)
         if (
             counts is not None
             and min(counts) != max(counts)

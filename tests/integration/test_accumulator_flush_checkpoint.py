@@ -12,7 +12,6 @@ after eviction produces the same stream.
 """
 
 from typing import Any, Callable
-from unittest.mock import patch
 
 import pytest
 
@@ -325,8 +324,15 @@ def test_batch_stall_checkpoint_restore(
     )
 
 
-@pytest.mark.parametrize("mtp_mode", [False, True])
-def test_close_preserves_explicit_checkpoint_resume(mtp_mode: bool) -> None:
+@pytest.mark.parametrize("mtp_mode", [False, True], ids=["inline", "mtp"])
+@pytest.mark.parametrize(
+    "checkpoint_after_close",
+    [False, True],
+    ids=["checkpoint-before-close", "checkpoint-after-close"],
+)
+def test_close_preserves_explicit_checkpoint_resume(
+    mtp_mode: bool, checkpoint_after_close: bool
+) -> None:
     documents = [{"input_ids": [i, i + 1]} for i in range(8)]
     source = StaticMixtureWorkSource(
         [Dataset.from_dict("tiny", {0: InMemoryShard(documents)})],
@@ -356,13 +362,11 @@ def test_close_preserves_explicit_checkpoint_resume(mtp_mode: bool) -> None:
         pipe.restore(initial)
         iterator = iter(pipe)
         prefix = [next(iterator).to_training(dtype=None)["input_ids"]]
-        checkpoint = pipe.checkpoint()
+        checkpoint = None if checkpoint_after_close else pipe.checkpoint()
         if mtp_mode:
             subprocess_runtime = pipe._sp
             assert subprocess_runtime is not None
-            with patch.object(subprocess_runtime, "capture_final_state") as capture:
-                pipe.close()
-            capture.assert_not_called()
+            pipe.close()
             assert subprocess_runtime._closed
             assert not subprocess_runtime._process.is_alive()
             assert pipe._sp is None
@@ -372,6 +376,9 @@ def test_close_preserves_explicit_checkpoint_resume(mtp_mode: bool) -> None:
         assert not pipe._iterating
         with pytest.raises(StopIteration):
             next(iterator)
+        if checkpoint_after_close:
+            checkpoint = pipe.checkpoint()
+        assert checkpoint is not None
         pipe.restore(checkpoint)
         remaining = [batch.to_training(dtype=None)["input_ids"] for batch in pipe]
         assert prefix + remaining == [[document["input_ids"]] for document in documents]
