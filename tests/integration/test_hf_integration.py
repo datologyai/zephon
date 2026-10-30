@@ -27,9 +27,11 @@ pytest.importorskip("pyarrow")
 import requests  # noqa: E402
 
 from zephon._internal.io.storage import HFBackend  # noqa: E402
-from zephon._internal.io.storage import hf as hf_mod  # noqa: E402
 from zephon._internal.io.storage._hf_uri import parse_hf_uri  # noqa: E402
-from zephon._internal.io.storage.hf import _DATASETS_SERVER_PARQUET_URL  # noqa: E402
+from zephon._internal.io.storage.hf import (
+    _DATASETS_SERVER_PARQUET_URL,  # noqa: E402
+    _xet_downloads_supported,  # noqa: E402
+)
 
 _SQUAD_TRAIN_URI = "hf://rajpurkar/squad/plain_text/train"
 
@@ -88,7 +90,7 @@ def test_download_squad_shard_uses_xet_when_supported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """On a supported hub, ``download`` fetches a Xet-backed shard with ``hf_xet``."""
-    if not hf_mod._xet_downloads_supported():
+    if not _xet_downloads_supported():
         pytest.skip("needs huggingface_hub >= 2.2 and hf_xet")
     backend = HFBackend()
     root = backend.canonical_root(_SQUAD_TRAIN_URI)
