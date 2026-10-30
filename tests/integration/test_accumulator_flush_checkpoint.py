@@ -12,10 +12,12 @@ after eviction produces the same stream.
 """
 
 from typing import Any, Callable
+from unittest.mock import patch
 
 import pytest
 
 from tests._helpers import mk_dataset
+from zephon.io import InMemoryShard
 from zephon.io.dataset import Dataset
 from zephon.pipeline import Pipeline
 from zephon.types import SampleBatch, SampleRecord
@@ -321,3 +323,57 @@ def test_batch_stall_checkpoint_restore(
         f"  suffix ({len(suffix)}):   {suffix[:10]}...\n"
         f"  baseline ({len(baseline)}): {baseline[:10]}..."
     )
+
+
+@pytest.mark.parametrize("mtp_mode", [False, True])
+def test_close_preserves_explicit_checkpoint_resume(mtp_mode: bool) -> None:
+    documents = [{"input_ids": [i, i + 1]} for i in range(8)]
+    source = StaticMixtureWorkSource(
+        [Dataset.from_dict("tiny", {0: InMemoryShard(documents)})],
+        {"tiny": 1.0},
+        chunk_size=2,
+        shuffle_shards=False,
+        shuffle_within_shard=False,
+    )
+    pipe = (
+        Pipeline(source)
+        .batch(1)
+        .options(
+            runner="process",
+            mtp_mode=mtp_mode,
+            shm_enabled=False,
+            deterministic=True,
+            max_workers=1,
+            prefetch_batches=0,
+        )
+    )
+    try:
+        initial = pipe.checkpoint()
+        pipe.close()
+        pipe.close()
+        assert pipe._engine is not None and pipe._engine._closed
+        assert pipe.checkpoint() == initial
+        pipe.restore(initial)
+        iterator = iter(pipe)
+        prefix = [next(iterator).to_training(dtype=None)["input_ids"]]
+        checkpoint = pipe.checkpoint()
+        if mtp_mode:
+            subprocess_runtime = pipe._sp
+            assert subprocess_runtime is not None
+            with patch.object(subprocess_runtime, "capture_final_state") as capture:
+                pipe.close()
+            capture.assert_not_called()
+            assert subprocess_runtime._closed
+            assert not subprocess_runtime._process.is_alive()
+            assert pipe._sp is None
+        else:
+            pipe.close()
+        pipe.close()
+        assert not pipe._iterating
+        with pytest.raises(StopIteration):
+            next(iterator)
+        pipe.restore(checkpoint)
+        remaining = [batch.to_training(dtype=None)["input_ids"] for batch in pipe]
+        assert prefix + remaining == [[document["input_ids"]] for document in documents]
+    finally:
+        pipe.close()
