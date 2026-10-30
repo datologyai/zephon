@@ -14,13 +14,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-from tenacity import (
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
-
 _FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -37,16 +30,27 @@ def _token_content(value: Any) -> Any:
     return value.get("content") if isinstance(value, dict) else value
 
 
+def _load_pipeline(source: Path | str) -> Any:
+    from tokenizers import Tokenizer
+
+    if isinstance(source, str):
+        with tempfile.TemporaryDirectory(prefix="zephon-tokenizer-") as tmp:
+            path = Path(tmp) / "tokenizer.json"
+            path.write_text(source, encoding="utf-8")
+            return _load_pipeline(path)
+    native = Tokenizer.from_file(source)
+    compile_spec = getattr(native, "compile", None)
+    return compile_spec() if compile_spec is not None else native
+
+
 class NativeTokenizer:
     """Execute tokenizer.json and expose only the interface used by text ops."""
 
     name_or_path: str | None
 
     def __init__(self, folder: str, eos_token: str | None = None) -> None:
-        from tokenizers import Tokenizer
-
         root = Path(folder)
-        source = root / "tokenizer.json"
+        source = root.resolve() / "tokenizer.json"
         if not source.is_file():
             raise ValueError(
                 f"tokenizers v1 requires {source}; use a repository containing "
@@ -92,14 +96,9 @@ class NativeTokenizer:
                 )
             )
             self._ids[eos_token] = token_id
-            with tempfile.TemporaryDirectory(prefix="zephon-tokenizer-") as tmp:
-                modified = Path(tmp) / "tokenizer.json"
-                modified.write_text(json.dumps(spec), encoding="utf-8")
-                native = Tokenizer.from_file(modified)
-        else:
-            native = Tokenizer.from_file(source)
-        compile_spec = getattr(native, "compile", None)
-        self._engine = compile_spec() if compile_spec is not None else native
+            source = json.dumps(spec)
+        self._source = source
+        self._engine = _load_pipeline(source)
 
         # rc3 can silently renumber added tokens (e.g. IDs with gaps). Verify
         # actual encoding, not decode spelling: Metaspace may change spelling.
@@ -138,23 +137,21 @@ class NativeTokenizer:
         self.bos_token = role("bos")
         self.eos_token = eos_token if eos_token is not None else role("eos")
         self.pad_token = role("pad")
-        if self.pad_token is None and "pad_token" not in roles and native.padding:
+        saved_padding = spec.get("padding") or {}
+        saved_truncation = spec.get("truncation") or {}
+        if self.pad_token is None and "pad_token" not in roles and saved_padding:
             # A saved padding ID need not have a vocabulary entry for its string.
-            self.pad_token = native.padding.pad_id
+            self.pad_token = saved_padding["pad_id"]
         self._padding_side = config.get(
-            "padding_side", native.padding.direction if native.padding else "right"
+            "padding_side", saved_padding.get("direction", "right").lower()
         )
         self._truncation_side = config.get(
-            "truncation_side",
-            native.truncation.direction if native.truncation else "right",
+            "truncation_side", saved_truncation.get("direction", "right").lower()
         )
         self._max_length = config.get("model_max_length")
         if not isinstance(self._max_length, int) or self._max_length > 10**20:
             self._max_length = None
         self._split_special = config.get("split_special_tokens", False)
-        self._folder = str(root.resolve())
-        self._files: dict[str, bytes] | None = None
-        self._eos_override = eos_token
         self.name_or_path = folder
         # Do not retain a second copy of a potentially very large vocabulary.
         self._ids = {
@@ -183,23 +180,17 @@ class NativeTokenizer:
             return None
         return token if isinstance(token, int) else self._ids.get(token)
 
-    def __reduce__(self) -> Any:
-        # rc3's native pickle can renumber tokens. Carry the source files so
-        # live tokenizers also work on workers without this machine's cache.
-        files = (
-            self._files
-            if self._files is not None
-            else {
-                name: (Path(self._folder) / name).read_bytes()
-                for name in _FILES
-                if (Path(self._folder) / name).is_file()
-            }
-        )
-        return (
-            _restore_native_tokenizer,
-            (files, self._eos_override),
-            {"pad_token": self.pad_token, "name_or_path": self.name_or_path},
-        )
+    def __getstate__(self) -> dict[str, Any]:
+        # Native pickle can renumber tokens; preserve the effective JSON instead.
+        state = vars(self).copy()
+        state.pop("_engine")
+        if isinstance(self._source, Path):
+            state["_source"] = self._source.read_text(encoding="utf-8")
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        vars(self).update(state)
+        self._engine = _load_pipeline(self._source)
 
     def __call__(
         self,
@@ -253,44 +244,22 @@ class NativeTokenizer:
         return {key: rows[0] for key, rows in result.items()} if single else result
 
 
-def _restore_native_tokenizer(
-    files: dict[str, bytes], eos_token: str | None
-) -> NativeTokenizer:
-    with tempfile.TemporaryDirectory(prefix="zephon-tokenizer-") as tmp:
-        for name, data in files.items():
-            (Path(tmp) / name).write_bytes(data)
-        tokenizer = NativeTokenizer(tmp, eos_token)
-    tokenizer._files = files
-    return tokenizer
-
-
 def load_native_tokenizer(
     tokenizer_id: str,
     *,
     use_fast: bool | None = True,
     eos_token: str | None = None,
 ) -> NativeTokenizer:
-    """Resolve local/cloud/Hub files and load a native text tokenizer."""
-    from zephon._internal.utils.thread_utils import suppress_library_threads
-    from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
-
+    """Load resolved local files or download a Hub tokenizer's files."""
     if use_fast is False:
         raise ValueError(
             "tokenizers v1 does not support use_fast=False; install tokenizers <1 for slow tokenizers"
         )
-    suppress_library_threads()
-    folder = resolve_tokenizer_id_with_retry(tokenizer_id)
-    assert folder is not None
+    folder = tokenizer_id
     if not Path(folder).is_dir():
         from huggingface_hub import snapshot_download
 
-        download = retry(
-            wait=wait_random_exponential(multiplier=2, max=15),
-            stop=stop_after_attempt(5),
-            retry=retry_if_not_exception_type((TypeError, ValueError)),
-            reraise=True,
-        )(snapshot_download)
-        folder = download(
+        folder = snapshot_download(
             tokenizer_id,
             allow_patterns=list(_FILES),
         )

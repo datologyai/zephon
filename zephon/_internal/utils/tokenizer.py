@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Mapping,
     Protocol,
     Sequence,
@@ -274,6 +275,7 @@ def load_hf_tokenizer(
     *,
     use_fast: bool | None = True,
     eos_token: str | None = None,
+    _allow_native: bool = False,
 ) -> TokenizerLike:
     """Load an HF tokenizer by id, with cloud resolution and retries.
 
@@ -281,7 +283,9 @@ def load_hf_tokenizer(
     are resolved to a local cache path before loading. Transient load failures
     are retried with backoff; ``use_fast`` is dropped and the load retried once
     if the tokenizer class rejects the kwarg. ``eos_token`` is forwarded to
-    ``from_pretrained``; HF derives ``eos_token_id`` from that string.
+    ``from_pretrained``; HF derives ``eos_token_id`` from that string. Text
+    tokenization allows the native v1 factory through ``_allow_native``; both
+    factories share thread suppression, cloud resolution, and retries.
     """
     # Before importing hf tokenizers we tell it we handle the parallelism and
     # not hf tokenizers. This avoids unforeseen effects when running multiple
@@ -299,16 +303,23 @@ def load_hf_tokenizer(
     # Deferred: tokenizer_cloud pulls the io/storage stack into this otherwise light module.
     from zephon._internal.utils.tokenizer_cloud import resolve_tokenizer_id_with_retry
 
-    with _IMPORT_LOCK:
-        try:
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            if _native_tokenizers_installed():
-                raise ValueError(
-                    "Chat tokenization requires Transformers with tokenizers <1; "
-                    + "tokenizers v1 currently supports text tokenization only"
-                ) from exc
-            raise
+    factory: Callable[..., Any]
+    if _allow_native and _native_tokenizers_installed():
+        from zephon._internal.utils.tokenizer_native import load_native_tokenizer
+
+        factory = load_native_tokenizer
+    else:
+        with _IMPORT_LOCK:
+            try:
+                from transformers import AutoTokenizer
+            except ImportError as exc:
+                if _native_tokenizers_installed():
+                    raise ValueError(
+                        "Chat tokenization requires Transformers with tokenizers <1; "
+                        + "tokenizers v1 currently supports text tokenization only"
+                    ) from exc
+                raise
+        factory = AutoTokenizer.from_pretrained
 
     # Resolve before the HF retry — nesting would re-list the bucket on every
     # HF retry attempt.
@@ -322,7 +333,7 @@ def load_hf_tokenizer(
     )
     def _load_with_retry(model_id: str | None, **k: Any) -> Any:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(model_id, **k)
+            tokenizer = factory(model_id, **k)
         except Exception as e:
             print(
                 f"Error while instantiating tokenizer:\n\n{traceback.format_exc()}\n\n Will retry after some wait (unless this is the last iteration).",
@@ -363,13 +374,9 @@ def load_text_tokenizer(
     eos_token: str | None = None,
 ) -> TokenizerLike:
     """Use the installed engine, preserving HF loading for tokenizers <1."""
-    if tokenizer_id not in (None, "__fallback__") and _native_tokenizers_installed():
-        from zephon._internal.utils.tokenizer_native import load_native_tokenizer
-
-        return load_native_tokenizer(
-            tokenizer_id, use_fast=use_fast, eos_token=eos_token
-        )
-    return load_hf_tokenizer(tokenizer_id, use_fast=use_fast, eos_token=eos_token)
+    return load_hf_tokenizer(
+        tokenizer_id, use_fast=use_fast, eos_token=eos_token, _allow_native=True
+    )
 
 
 __all__ = [

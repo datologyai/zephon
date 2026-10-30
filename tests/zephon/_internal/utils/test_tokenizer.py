@@ -39,7 +39,7 @@ def test_text_loader_selects_installed_engine(
         return load
 
     monkeypatch.setattr(shared, "version", lambda package: installed)
-    monkeypatch.setattr(shared, "load_hf_tokenizer", loader("hf"))
+    _install_fake_transformers(monkeypatch, loader("hf"))
     monkeypatch.setattr(native, "load_native_tokenizer", loader("native"))
     shared.load_text_tokenizer("model/name", eos_token="<end>")
     expected = "native" if installed.startswith("1.") else "hf"
