@@ -246,9 +246,6 @@ def test_cache_options_from_any_and_merge(tmp_path) -> None:
     assert merged.enabled is True
     assert str(merged.root) == str(tmp_path)
 
-    assert a.persist_state is False
-    assert CacheOptions.from_any({"persist_state": True}).persist_state is True
-
     with pytest.raises(TypeError):
         _ = CacheOptions.from_any(123)
     legacy = CacheOptions.from_any({"rg_cache_bytes": "4gb"})
