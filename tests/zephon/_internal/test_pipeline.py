@@ -1,4 +1,4 @@
-"""Unit tests for pipeline options and output notification."""
+"""Unit tests for the pipeline wrapper."""
 
 import multiprocessing
 from collections.abc import Iterator
@@ -236,20 +236,81 @@ def test_inline_releases_gc_freeze_when_engine_construction_fails(
     gc_freeze_guard.return_value.close.assert_called_once_with()
 
 
-def test_completed_mtp_stream_supersedes_checkpoint_destination_engine(
+@pytest.mark.parametrize("termination", ["exhausted", "closed", "failed"])
+def test_mtp_cleanup_captures_local_progress(
+    termination: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
     destination_engine = pipe._engine = Mock()
     terminal_state = {"terminal": True}
-    child = Mock(_closed=False)
-    child.__iter__ = Mock(return_value=iter(()))
+
+    def source() -> Iterator[int]:
+        yield 1
+        if termination == "failed":
+            raise RuntimeError("source failed")
+
+    child = Mock(_closed=False, _last_state=terminal_state, _last_state_is_local=True)
+    child.__iter__ = Mock(side_effect=source)
     child.checkpoint.return_value = terminal_state
     monkeypatch.setattr("zephon._internal.mtp.MTPPipeline", Mock(return_value=child))
 
-    assert list(pipe._iter_mtp()) == []
+    iterator = pipe._iter_mtp()
+    assert next(iterator) == 1
+    if termination == "failed":
+        with pytest.raises(RuntimeError, match="source failed"):
+            next(iterator)
+    elif termination == "closed":
+        iterator.close()
+    else:
+        assert list(iterator) == []
     destination_engine.close.assert_called_once_with()
-    child.checkpoint.assert_called_once_with(local=True)
+    if termination == "exhausted":
+        child.checkpoint.assert_called_once_with(local=True)
+        child.capture_final_state.assert_not_called()
+    else:
+        child.capture_final_state.assert_called_once_with(local=True)
+        child.checkpoint.assert_not_called()
     child.close.assert_called_once_with()
     assert pipe._engine is None and pipe._sp is None
     assert pipe._last_local_state is terminal_state
+
+
+@pytest.mark.parametrize("aggregation_fails", [False, True])
+def test_final_mtp_checkpoint_tolerates_cleanup_failure(
+    aggregation_fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipe = Pipeline(FakeIndexableWorkSource(make_inmem_dataset("tiny", [{"x": 1}])))
+    pipe._last_local_state = {
+        "world": {"global_rank": 0, "world_size": 2, "canonical_replicas": 2},
+        "progress": {0: {}},
+        "last_round_id": "before",
+        "checkpoint_reload_count": 2,
+    }
+    pipe._plan = Mock(plan_id="plan")
+    monkeypatch.setattr(pipe, "_ensure_plan", Mock())
+    coordinator = Mock()
+    coordinator.cleanup.side_effect = OSError("cannot delete merged result")
+    monkeypatch.setattr(
+        "zephon._internal.pipeline.make_coordinator", Mock(return_value=coordinator)
+    )
+    merged = {"merged": True}
+
+    def aggregate(*args: object, **kwargs: object) -> dict[str, bool]:
+        assert coordinator.last_round_id == "before"
+        assert coordinator.reload_count == 2
+        if aggregation_fails:
+            raise RuntimeError("aggregation failed")
+        coordinator.last_round_id = "after"
+        return merged
+
+    coordinator.aggregate.side_effect = aggregate
+    with pytest.warns(UserWarning, match="cannot delete merged result"):
+        if aggregation_fails:
+            with pytest.raises(RuntimeError, match="aggregation failed"):
+                pipe._aggregate_final_mtp_state()
+            assert pipe._last_local_state["last_round_id"] == "before"
+        else:
+            assert pipe._aggregate_final_mtp_state() is merged
+            assert pipe._last_local_state["last_round_id"] == "after"
+    coordinator.cleanup.assert_called_once_with()

@@ -1873,7 +1873,7 @@ class Engine:
         takes_part: bool,
         worker_id: int,
     ) -> dict[str, Any]:
-        """Apply the existing round protocol to live or locally captured progress."""
+        """Aggregate a local snapshot when this worker participates."""
         world = local["world"]
         if not takes_part:
             if local.get("progress"):
