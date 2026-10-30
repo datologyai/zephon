@@ -1491,13 +1491,16 @@ class Pipeline:
             tracking: How much execution detail to collect.
             sink: Where metrics are exported; defaults to logs.
             measure_bytes: Size each node's consumed/produced payloads under
-                ``NODES`` tracking. ``None`` (default) measures only on runners
-                that ship payloads between processes or hosts (process and
-                remote stages); ``True`` or ``False`` forces it for every stage.
+                ``NODES`` tracking. ``True`` or ``False`` forces it for every
+                stage. ``None`` (default) keeps any value already set via
+                :meth:`options`; if none was set, only runners that ship
+                payloads between processes or hosts (process and remote
+                stages) measure.
         """
         mode = ExecutionTrackingMode.from_value(tracking)
         self._options.execution_tracking = mode
-        self._options.measure_bytes = measure_bytes
+        if measure_bytes is not None:
+            self._options.measure_bytes = measure_bytes
         if sink is None:
             sink = MetricsSinkConfig()
         self._options.metrics_sink_config = sink

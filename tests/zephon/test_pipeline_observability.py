@@ -107,3 +107,14 @@ def test_measure_bytes_controls_in_process_byte_metrics(
     assert any(rec["produced_elements"] > 0 for rec in records)
     measured = any(rec["produced_bytes"] or rec["consumed_bytes"] for rec in records)
     assert measured is expect_bytes
+
+
+def test_enable_observability_keeps_measure_bytes_set_via_options() -> None:
+    ds = make_inmem_dataset("tiny", [{"text": "row"}])
+    pipe = PublicPipeline(FakeIndexableWorkSource(ds, chunk_size=1))
+
+    pipe.options(measure_bytes=True).enable_observability()
+    assert pipe._options.measure_bytes is True
+
+    pipe.enable_observability(measure_bytes=False)
+    assert pipe._options.measure_bytes is False
