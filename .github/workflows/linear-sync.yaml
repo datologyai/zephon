@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 on:
-  # pull_request_target so fork PRs can read LINEAR_API_KEY. Safe only because
+  # pull_request_target so fork PRs can read the Linear secrets. Safe only because
   # the job runs the base branch's script and never checks out PR code.
   pull_request_target:
     types: [opened, edited, reopened, ready_for_review]
@@ -36,7 +36,8 @@ jobs:
     - uses: astral-sh/setup-uv@v6
     - name: Sync
       env:
-        LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
+        LINEAR_CLIENT_SECRET: ${{ secrets.LINEAR_CLIENT_SECRET }}
         # Team for triage issues of unlinked PRs; must not be issue-synced.
         LINEAR_TRIAGE_TEAM: ${{ vars.LINEAR_TRIAGE_TEAM }}
         GITHUB_TOKEN: ${{ github.token }}

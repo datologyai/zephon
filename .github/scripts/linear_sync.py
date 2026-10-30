@@ -18,7 +18,9 @@ Modes:
              between releases or left triage.
 
 Pass ``--dry-run`` to log intended changes without writing anything.
-Requires ``LINEAR_API_KEY``, ``GITHUB_TOKEN`` and ``GITHUB_REPOSITORY``.
+Requires ``GITHUB_TOKEN``, ``GITHUB_REPOSITORY`` and Linear credentials: an
+OAuth app's ``LINEAR_CLIENT_ID`` and ``LINEAR_CLIENT_SECRET``, or else
+``LINEAR_API_KEY``.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 LINEAR_URL = "https://api.linear.app/graphql"
+LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 GITHUB_API = "https://api.github.com"
 TEAM_KEY = "ZEPH"
 TRIAGE_LABEL = "from-github-pr"
@@ -80,11 +83,29 @@ class _LinearError(RuntimeError):
         return all(e.get("message", "").startswith(prefix) for e in self.errors)
 
 
+def _linear_auth() -> str:
+    client_id = os.environ.get("LINEAR_CLIENT_ID")
+    if not client_id:
+        return os.environ["LINEAR_API_KEY"]
+    # A client-credentials token acts as the app itself, so issues the sync
+    # creates are not attributed to a person (nor synced to GitHub under one).
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": os.environ["LINEAR_CLIENT_SECRET"],
+            "scope": "read,write",
+        }
+    ).encode()
+    with urllib.request.urlopen(LINEAR_TOKEN_URL, data=body) as response:
+        return f"Bearer {json.load(response)['access_token']}"
+
+
 class _Client:
     def __init__(self, dry_run: bool) -> None:
         self.dry_run = dry_run
         self.repo = os.environ["GITHUB_REPOSITORY"]
-        self._linear_key = os.environ["LINEAR_API_KEY"]
+        self._linear_auth = _linear_auth()
         self._github_token = os.environ["GITHUB_TOKEN"]
         self.triage_team = os.environ.get("LINEAR_TRIAGE_TEAM") or None
         self._milestones: dict[str, int] | None = None
@@ -95,7 +116,7 @@ class _Client:
             LINEAR_URL,
             data=body,
             headers={
-                "Authorization": self._linear_key,
+                "Authorization": self._linear_auth,
                 "Content-Type": "application/json",
             },
         )

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import re
 import sys
 import urllib.error
@@ -33,6 +34,7 @@ class FakeWorld:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
         monkeypatch.setenv("LINEAR_API_KEY", "test")
+        monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
         monkeypatch.setenv("GITHUB_TOKEN", "test")
         monkeypatch.setenv("LINEAR_TRIAGE_TEAM", INBOX)
         self.issues: dict[str, dict[str, Any]] = {}
@@ -373,6 +375,7 @@ def test_patch_release_replaces_minor_milestone(world: FakeWorld) -> None:
 def _milestone_client(monkeypatch: pytest.MonkeyPatch, created_by_race: bool) -> Any:
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("LINEAR_API_KEY", "test")
+    monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
     monkeypatch.setenv("GITHUB_TOKEN", "test")
     client = ls._Client(dry_run=False)
     posts = 0
@@ -487,3 +490,29 @@ def test_plat_reference_next_to_github_issue_is_not_plat_only(
 ) -> None:
     world.add_pr(1, "feature", body="Fixes #49\n\nRelated to PLAT-4")
     assert world.handle(1, create=False)
+
+
+def test_oauth_app_credentials_are_exchanged_for_a_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_CLIENT_ID", "id")
+    monkeypatch.setenv("LINEAR_CLIENT_SECRET", "secret")
+    sent: dict[str, Any] = {}
+
+    def urlopen(url: str, data: bytes) -> Any:
+        sent.update(url=url, form=urllib.parse.parse_qs(data.decode()))
+        return io.BytesIO(b'{"access_token": "tok"}')
+
+    monkeypatch.setattr(ls.urllib.request, "urlopen", urlopen)
+    assert ls._linear_auth() == "Bearer tok"
+    assert sent["url"] == ls.LINEAR_TOKEN_URL
+    assert sent["form"]["grant_type"] == ["client_credentials"]
+    assert sent["form"]["client_secret"] == ["secret"]
+
+
+def test_personal_api_key_is_used_without_app_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
+    assert ls._linear_auth() == "lin_api_x"
