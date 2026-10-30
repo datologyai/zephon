@@ -56,9 +56,9 @@ RELEASE_RE = re.compile(r"^v(\d+\.\d+(?:\.\d+)?)\b")
 # Only milestones this script could have set are ever replaced or cleared, so a
 # milestone a maintainer set by hand for another reason is left alone.
 MANAGED_MILESTONE_RE = re.compile(r"^v\d+\.\d+(?:\.\d+)?$")
-# Marks the PR comment recording a triage issue. The key may not see the issue
-# once triage moves it to another team, so GitHub keeps the record. The comment
-# names no issue: the identifier changes when the issue moves to ZEPH.
+# Marks the PR comment recording a triage issue. Lookups only cover ZEPH and the
+# triage team, so once triage moves the issue elsewhere GitHub keeps the record.
+# The comment names no issue: the identifier changes when the issue moves.
 TRIAGE_COMMENT_MARKER = "<!-- linear-sync:triage -->"
 # Link kind of the attachments this script adds for inherited issues. Linear only
 # creates "contributes" links itself from a magic word, which needs an ID in the
@@ -374,10 +374,10 @@ def _create_triage_issue(client: _Client, pr: dict[str, Any]) -> _LinkedIssue | 
     if not client.triage_team:
         _log("  no LINEAR_TRIAGE_TEAM, no triage issue")
         return None
-    # Reaching here with a recorded triage issue means triage moved it to a team
-    # the key can't see (or detached it): the PR is handled, don't open another.
+    # Reaching here with a recorded triage issue means triage moved it out of
+    # ZEPH and the triage team (or detached it): the PR is handled.
     if _has_triage_comment(client, pr):
-        _log("  triage issue already opened and no longer visible, skipped")
+        _log("  triage issue already opened elsewhere, skipped")
         return None
     # Creating and attaching are separate mutations. If attaching failed on an
     # earlier run, the issue exists but no attachment points at it, so look it up
@@ -486,7 +486,7 @@ def _resolve(
         return fallback, False
     # Checked before attachments: a linked PLAT issue fails even if the PR is
     # also attached to a ZEPH issue, since the reference itself is the leak.
-    if ids and not zeph and not github_issues:
+    if ids and not zeph:
         return None, True
 
     # An attachment someone made (in Linear, or a triage issue) is as explicit

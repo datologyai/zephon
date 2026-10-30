@@ -42,7 +42,7 @@ class FakeWorld:
         self.attachments: dict[str, tuple[str, str]] = {}
         self.prs: dict[int, dict[str, Any]] = {}
         self.comments: dict[int, list[str]] = {}
-        # Like the real key, scoped to ZEPH and the inbox: others are invisible.
+        # Teams the credentials can read; issues in other teams are not found.
         self.visible_teams = {"ZEPH", INBOX}
         self.fail_next_attach = False
         self.client = ls._Client(dry_run=False)
@@ -485,10 +485,19 @@ def test_fixes_unsynced_github_issue_still_gets_triage(world: FakeWorld) -> None
     assert world.issues[identifier]["team"] == INBOX
 
 
-def test_plat_reference_next_to_github_issue_is_not_plat_only(
+def test_plat_reference_next_to_unsynced_github_issue_fails(
     world: FakeWorld,
 ) -> None:
     world.add_pr(1, "feature", body="Fixes #49\n\nRelated to PLAT-4")
+    assert not world.handle(1, create=False)
+
+
+def test_plat_reference_next_to_synced_github_issue_passes(
+    world: FakeWorld,
+) -> None:
+    world.add_issue("ZEPH-20")
+    world.attachments[f"https://github.com/{REPO}/issues/86"] = ("ZEPH-20", "links")
+    world.add_pr(1, "feature", body="Fixes #86\n\nRelated to PLAT-4")
     assert world.handle(1, create=False)
 
 
