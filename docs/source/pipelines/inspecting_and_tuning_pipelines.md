@@ -46,6 +46,12 @@ provides similar metrics about the prefetch operations. Keep in mind that tracki
 metrics introduces a fair amount of overhead (especially when using the `process` runner),
 so leave observability off for production runs.
 
+Per-node metrics can also include the payload bytes each operator consumes and produces.
+Sizing payloads costs extra time on every batch, so by default it only happens for
+`process` and `remote` stages, where payloads cross process or host boundaries. Pass
+`measure_bytes=True` to `enable_observability()` to size payloads on every stage, or
+`measure_bytes=False` to turn it off everywhere.
+
 The purpose of these measurements is to identify which part of the `Pipeline` run is
 limiting the throughput. High fetch times suggest that we need to look at the time spent
 downloading shards, opening files, and reading records, while large amounts of time spent

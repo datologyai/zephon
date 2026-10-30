@@ -505,7 +505,7 @@ class ConcurrentStageRunner(StageRunnerBase[S], Generic[S]):
         metrics_meta = self._metrics_meta[state.op_index]
         stage_index, stage_name, op_index, op_name = metrics_meta
         produced_elements = len(result.payload)
-        produced_bytes = metric_bytes(result.payload)
+        produced_bytes = metric_bytes(result.payload) if self._measure_bytes else 0
         delta = NodeMetricsDelta(
             stage_index=stage_index,
             op_index=op_index,

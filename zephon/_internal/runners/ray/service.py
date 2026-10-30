@@ -55,6 +55,7 @@ class RaySingleOpActor:
         op_index: int,
         op_name: str,
         collect_stats: bool,
+        measure_bytes: bool = False,
     ) -> None:
         """Initialize the actor with a single operator instance."""
         suppress_library_threads()
@@ -63,6 +64,7 @@ class RaySingleOpActor:
         self._op_index = op_index
         self._op_name = op_name
         self._collect_stats = collect_stats
+        self._measure_bytes = measure_bytes
 
         stage_info = StageInfo(
             stage_index=stage_index,
@@ -95,7 +97,7 @@ class RaySingleOpActor:
         """Process one input batch and return a RunnerResult."""
         try:
             consumed_elements = len(batch)
-            consumed_bytes = metric_bytes(batch) if self._collect_stats else 0
+            consumed_bytes = metric_bytes(batch) if self._measure_bytes else 0
 
             start_ns = time.perf_counter_ns() if self._collect_stats else 0
 
@@ -161,6 +163,7 @@ class _RayActorGroup:
     stage_name: str
     collect_stats: bool
     ctx_services: dict[str, Any]
+    measure_bytes: bool = False
 
     actors: list[ray.actor.ActorHandle] = field(default_factory=list)
 
@@ -221,6 +224,7 @@ class _RayActorGroup:
                 self.op_index,
                 self.node.name,
                 self.collect_stats,
+                self.measure_bytes,
             )
             self.actors.append(actor)
 
